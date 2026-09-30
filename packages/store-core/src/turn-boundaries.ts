@@ -37,26 +37,55 @@
  * "the last message in `messages` when `result` was processed" reconstructs
  * IDENTICALLY on replay: the same frames arrive in the same order, so the
  * same message ends up last at the same relative position, live or not.
+ *
+ * CORRECTION (review round 2): "the last message" is not quite right either.
+ * The queued follow-up's `user_input` row lands at enqueue time (see above),
+ * which for the CURRENTLY RUNNING turn can be at, or after, that turn's own
+ * last real output — so when `result` fires, the trailing run of the array
+ * can be one or more of the user's OWN `user_input` rows, enqueued mid-turn,
+ * that have nothing to do with the turn that just ended. Stamping literally
+ * the last message would land the mark on the user's OWN next message, and
+ * the summary card would then render AFTER it — reading as commentary on
+ * what the user just said rather than on the turn that dropped the tool.
+ * `markTurnBoundary` now walks back past any TRAILING `user_input` rows and
+ * marks the last REAL content message instead — the true end of the turn
+ * that is actually closing.
  */
 import type { ChatMessage } from './types'
 
 /**
- * Stamp `turnBoundary: true` on the LAST message in `messages` — call this
- * from wherever a `result` (turn-end) event is processed, live or replayed.
+ * Stamp `turnBoundary: true` on the last NON-`user_input` message in
+ * `messages` — call this from wherever a `result` (turn-end) event is
+ * processed, live or replayed.
+ *
+ * Walks backward past any trailing `user_input` rows before marking: a
+ * mid-turn queued follow-up is recorded (and lands in `messages`) as soon as
+ * the server admits it, well before this turn's own `result` — so one or
+ * more sitting at the tail when `result` arrives belong to the turn that is
+ * ABOUT to start, not the one that just ended (see this module's doc).
+ *
+ * Edge case: if EVERY message is `user_input` (a turn that produced zero
+ * output before `result` — e.g. an immediate error with no visible content),
+ * there is nothing eligible to mark. Returns `messages` unchanged rather than
+ * stamping a `user_input` row anyway: the previous boundary (if any) stands,
+ * and a turn with no content to mark also has nothing an expired-permission
+ * summary could ever attribute to it.
  *
  * Idempotent and referentially stable when there is nothing new to mark: an
- * empty array is returned unchanged, and re-marking an already-marked last
- * message (a turn that produced no new content, or a duplicate/retried
- * `result`) returns the SAME array reference rather than allocating —
- * matching this codebase's "referential no-op skips the write" convention
- * (e.g. `reconcileQueueLength`).
+ * empty array is returned unchanged, and re-marking an already-marked target
+ * (a turn that produced no NEW content since the last mark, or a
+ * duplicate/retried `result`) returns the SAME array reference rather than
+ * allocating — matching this codebase's "referential no-op skips the write"
+ * convention (e.g. `reconcileQueueLength`).
  */
 export function markTurnBoundary(messages: ChatMessage[]): ChatMessage[] {
   if (messages.length === 0) return messages
-  const lastIdx = messages.length - 1
-  const last = messages[lastIdx]!
-  if (last.turnBoundary === true) return messages
+  let idx = messages.length - 1
+  while (idx >= 0 && messages[idx]!.type === 'user_input') idx--
+  if (idx < 0) return messages
+  const target = messages[idx]!
+  if (target.turnBoundary === true) return messages
   const next = messages.slice()
-  next[lastIdx] = { ...last, turnBoundary: true }
+  next[idx] = { ...target, turnBoundary: true }
   return next
 }

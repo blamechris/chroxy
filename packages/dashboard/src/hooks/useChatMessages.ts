@@ -32,6 +32,7 @@ import {
   type ChatMessage,
   type ChatViewMessage as StoreChatViewMessage,
   type ExpiredPermissionTurnSummary,
+  type TurnBoundarySource,
 } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import { insertPermissionExpiredSummaryRows } from '../utils/permissionExpiredSummaryRows'
@@ -70,6 +71,20 @@ export interface UseChatMessagesProps {
    * "still running" by definition.
    */
   isSessionIdle?: boolean
+  /**
+   * #7365 (review round 3, Critical #1) — which signal delimits a turn for
+   * the end-of-turn summary, chosen EXPLICITLY by the caller (never inferred
+   * from "no `turnBoundary` marks present" — a live session before its first
+   * `result` has none either, and must not be mistaken for the other
+   * source). Defaults to `'marker'`: the live chat path's `result`-stamped
+   * `turnBoundary` messages. `TranscriptViewer` passes `'user_input'`
+   * explicitly — its data source (the raw on-disk Claude Code JSONL
+   * transcript) never carries a `result` entry at all, so `'marker'` mode
+   * would find zero boundaries in it. See
+   * `@chroxy/store-core`'s `permission-turn-summary.ts` for the full
+   * rationale for each mode.
+   */
+  turnBoundarySource?: TurnBoundarySource
 }
 
 export interface UseChatMessagesResult {
@@ -102,7 +117,13 @@ export interface UseChatMessagesResult {
 export { toChatViewMessage }
 
 export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesResult {
-  const { storeMessages, streamingMessageId, hideToolAndThinking = false, isSessionIdle = true } = props
+  const {
+    storeMessages,
+    streamingMessageId,
+    hideToolAndThinking = false,
+    isSessionIdle = true,
+    turnBoundarySource = 'marker',
+  } = props
 
   const result = useMemo(
     () => buildChatViewMessages(storeMessages, streamingMessageId, { hideToolAndThinking }),
@@ -148,7 +169,7 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
   // to a synthetic summary row would silently collapse a trailing tool group
   // the moment its turn's permission expired.
   const { chatMessages, permissionExpiredSummaries } = useMemo(() => {
-    const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now(), isSessionIdle)
+    const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now(), isSessionIdle, turnBoundarySource)
     if (summaries.length === 0) {
       return { chatMessages: baseChatMessages, permissionExpiredSummaries: new Map<string, ExpiredPermissionTurnSummary>() }
     }
@@ -159,7 +180,7 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
       chatToolGroupPayloads,
     )
     return { chatMessages: rows, permissionExpiredSummaries: payloads }
-  }, [storeMessages, baseChatMessages, chatToolGroupPayloads, isSessionIdle])
+  }, [storeMessages, baseChatMessages, chatToolGroupPayloads, isSessionIdle, turnBoundarySource])
 
   return {
     chatMessages,

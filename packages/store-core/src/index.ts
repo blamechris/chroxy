@@ -1071,7 +1071,7 @@ export { markTurnBoundary } from './turn-boundaries'
 // lives here because it is built directly on `isExpiredUnansweredPermissionPrompt`
 // above and following the shared single-source-of-truth pattern this file
 // already establishes for permission-prompt predicates.
-export type { ExpiredPermissionTurnSummary } from './permission-turn-summary'
+export type { ExpiredPermissionTurnSummary, TurnBoundarySource } from './permission-turn-summary'
 export { getExpiredPermissionTurnSummaries } from './permission-turn-summary'
 
 // #6542 (IDE P3.1): client-side line hunk diff + per-hunk apply — the shared

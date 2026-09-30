@@ -129,6 +129,14 @@ export function TranscriptViewer({ conversationId, status, messages, error, onCl
   const { chatMessages, chatToolGroupPayloads, chatTailMessageId, storeMsgMap, permissionExpiredSummaries } = useChatMessages({
     storeMessages: messages,
     streamingMessageId: null,
+    // #7365 (review round 3, Critical #1) — this data source is the raw
+    // on-disk Claude Code JSONL transcript (jsonl-reader.js), which never
+    // carries a `result` entry, so the default 'marker' mode would find zero
+    // turnBoundary marks and collapse the whole conversation into one
+    // summary. 'user_input' position is sound here specifically because
+    // this is Claude Code's own log of what the CLI/SDK actually did, not
+    // chroxy's queue bookkeeping — see permission-turn-summary.ts's doc.
+    turnBoundarySource: 'user_input',
   })
 
   const renderMessage = useCallback(

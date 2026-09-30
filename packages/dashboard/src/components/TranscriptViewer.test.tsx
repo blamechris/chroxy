@@ -249,5 +249,39 @@ describe('TranscriptViewer (#6863)', () => {
       )
       expect(screen.queryByTestId('permission-expired-summary')).not.toBeInTheDocument()
     })
+
+    // #7365 review round 3 (Critical #1) — a closed conversation has no
+    // `result` entry to mark a `turnBoundary` on at all (the JSONL transcript
+    // this component's data comes from never carries one), so it must use
+    // `user_input` position instead — verified end-to-end here rather than
+    // just at the pure-aggregator level, since the bug was "the whole
+    // conversation collapses into one card".
+    it('a closed conversation with an expired permission in EACH of 2 turns renders 2 separate cards', () => {
+      const past = Date.now() - 1000
+      render(
+        <TranscriptViewer
+          conversationId="conv-1"
+          status="ready"
+          messages={[
+            makeMessage({ id: 'u1', type: 'user_input', content: 'first thing' }),
+            makeMessage({ id: 'p1', type: 'prompt', content: 'Bash: ls', requestId: 'req-1', tool: 'Bash', expiresAt: past }),
+            makeMessage({ id: 'r1', type: 'response', content: 'done with the first thing' }),
+            makeMessage({ id: 'u2', type: 'user_input', content: 'second thing' }),
+            makeMessage({ id: 'p2', type: 'prompt', content: 'Write: out.txt', requestId: 'req-2', tool: 'Write', expiresAt: past }),
+            makeMessage({ id: 'r2', type: 'response', content: 'done with the second thing' }),
+          ]}
+          error={null}
+          onClose={vi.fn()}
+          onRetry={vi.fn()}
+        />,
+      )
+      const summaryEls = screen.getAllByTestId('permission-expired-summary')
+      expect(summaryEls).toHaveLength(2)
+      expect(summaryEls[0]).toHaveTextContent('1 permission expired without a response')
+      expect(summaryEls[1]).toHaveTextContent('1 permission expired without a response')
+      const links = screen.getAllByTestId('permission-expired-summary-jump')
+      expect(links[0]).toHaveAttribute('href', '#perm-desc-req-1')
+      expect(links[1]).toHaveAttribute('href', '#perm-desc-req-2')
+    })
   })
 })

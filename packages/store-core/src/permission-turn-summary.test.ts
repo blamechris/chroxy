@@ -148,8 +148,12 @@ describe('getExpiredPermissionTurnSummaries — send-while-busy realistic end-to
 
   it('(b) a permission raised in turn 2 AFTER it actually starts is counted in turn 2, not turn 1', () => {
     let messages: ChatMessage[] = [userInput('u1'), prompt('p1', { requestId: 'req-1' })]
-    messages = markTurnBoundary([...messages, userInput('u2')]) // turn 1 ends right at u2 in this minimal repro
-    const turn1EndId = messages[messages.length - 1]!.id
+    // u2 is a queued follow-up trailing at result time — markTurnBoundary
+    // (Critical #2 fix) walks back past it and marks p1, the turn's real
+    // last content, not u2 itself.
+    messages = markTurnBoundary([...messages, userInput('u2')])
+    const turn1EndId = messages.find((m) => m.turnBoundary === true)!.id
+    expect(turn1EndId).toBe('p1')
     // Turn 2 actually starts and raises its OWN permission.
     messages = withResult(messages, prompt('p2', { requestId: 'req-2' }))
     const turn2EndId = messages[messages.length - 1]!.id
@@ -219,5 +223,78 @@ describe('getExpiredPermissionTurnSummaries — turn-completion gating (#7365 re
     const messages = [userInput('u1'), response('r1')]
     expect(getExpiredPermissionTurnSummaries(messages, NOW, false)).toEqual([])
     expect(getExpiredPermissionTurnSummaries(messages, NOW, true)).toEqual([])
+  })
+})
+
+describe('getExpiredPermissionTurnSummaries — turnBoundarySource (#7365 review round 3, Critical #1)', () => {
+  // TranscriptViewer's data source (the raw on-disk Claude Code JSONL
+  // transcript, via jsonl-reader.js) structurally never emits a `result`
+  // entry, so 'marker' mode finds zero boundaries in it — collapsing an
+  // entire multi-turn closed conversation into ONE summary. This is exactly
+  // the bug the review reproduced. 'user_input' mode is sound for this
+  // SPECIFIC source because the underlying CLI/SDK process never even sees
+  // a chroxy-queued follow-up until `result` (`dequeueNextOutgoing`), so the
+  // CLI's own JSONL log positions a 'user' entry at the moment a turn
+  // ACTUALLY started, not chroxy's earlier enqueue-admission time — see
+  // this module's doc for the full trace.
+  it('a closed transcript with an expired permission in EACH of 2 turns produces 2 summaries ("user_input" mode)', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { requestId: 'req-1' }),
+      response('r1'),
+      userInput('u2'),
+      prompt('p2', { requestId: 'req-2' }),
+      response('r2'),
+    ]
+    // No turnBoundary marks anywhere — exactly what a closed-transcript fetch delivers.
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, true, 'user_input')
+    expect(summaries).toHaveLength(2)
+    expect(summaries[0]).toMatchObject({ turnEndMessageId: 'r1', requestIds: ['req-1'] })
+    expect(summaries[1]).toMatchObject({ turnEndMessageId: 'r2', requestIds: ['req-2'] })
+  })
+
+  it('the SAME messages under the default "marker" mode collapse into ONE summary — proves the bug the explicit parameter fixes', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { requestId: 'req-1' }),
+      response('r1'),
+      userInput('u2'),
+      prompt('p2', { requestId: 'req-2' }),
+      response('r2'),
+    ]
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, true) // default 'marker'
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]!.requestIds).toEqual(['req-1', 'req-2'])
+  })
+
+  it('LIVE-PATH CONTROL: a live session before its first result must not start splitting on user_input', () => {
+    // Default mode ('marker'), no turnBoundary marks yet (the session hasn't
+    // produced a `result` at all) — must NOT be mistaken for "no markers
+    // present, fall back to user_input". A session mid-way through its very
+    // first turn has exactly this shape.
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { requestId: 'req-1' }),
+      userInput('u2'), // queued follow-up, no result yet
+      prompt('p2', { requestId: 'req-2' }),
+    ]
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, false) // still running
+    expect(summaries).toEqual([]) // suppressed — trailing turn, not yet ended
+    const summariesIdle = getExpiredPermissionTurnSummaries(messages, NOW, true)
+    expect(summariesIdle).toHaveLength(1) // ONE segment, not split at u1/u2
+    expect(summariesIdle[0]!.requestIds).toEqual(['req-1', 'req-2'])
+  })
+
+  it('"user_input" mode: a turn where every permission was answered produces no summary for it', () => {
+    const messages = [
+      userInput('u1'),
+      prompt('p1', { requestId: 'req-1', answered: 'allow' }),
+      response('r1'),
+      userInput('u2'),
+      prompt('p2', { requestId: 'req-2' }),
+    ]
+    const summaries = getExpiredPermissionTurnSummaries(messages, NOW, true, 'user_input')
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]!.requestIds).toEqual(['req-2'])
   })
 })
