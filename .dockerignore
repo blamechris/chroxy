@@ -14,6 +14,19 @@
 !packages/protocol/dist/
 !packages/store-core/package.json
 !packages/store-core/dist/
+# #8151 — the dashboard-builder stage additionally needs store-core's raw TS
+# source: its "." export (unlike "./crypto") resolves to src/index.ts, which
+# Vite transforms directly rather than importing a build.
+!packages/store-core/src/
+
+# #8151 — the dashboard-builder stage. Whitelisted whole (minus its own
+# dev-time node_modules/dist below) rather than file-by-file: unlike the
+# server, this is Vite/TypeScript source that changes shape often, and the
+# `docker` path filter in ci.yml already re-runs the smoke test on any change
+# under these two directories, so a missed file here fails loudly in CI
+# rather than silently shipping a stale dashboard.
+!packages/dashboard/
+!packages/design-tokens/
 
 # Entrypoint script
 !scripts/docker-entrypoint.sh
@@ -28,3 +41,10 @@ packages/server/coverage
 # (inert, but pointless). fix-node-pty-helper.js is the one the build needs.
 packages/server/scripts/lint-*
 packages/server/scripts/lib
+
+# Exclude dashboard dev-time artifacts that slipped through (a local build or
+# `npm install` on the host would otherwise leak its own node_modules/dist
+# into the build context ahead of the dashboard-builder stage's own ci/build).
+packages/dashboard/node_modules
+packages/dashboard/dist
+packages/dashboard/coverage

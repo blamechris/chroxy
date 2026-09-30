@@ -29,6 +29,50 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 The server prints a QR code. Scan it with the Chroxy app to connect.
 
+## Docker
+
+The root `Dockerfile` builds a self-contained image of the chroxy daemon. It
+supports exactly two things (an owner decision, #8151):
+
+- the **headless `claude-sdk` provider** (needs `ANTHROPIC_API_KEY`);
+- the **web dashboard**, served at `/dashboard`.
+
+It does **not** support the embedded user-shell terminal or the `claude-tui`
+provider. Both need [`node-pty`](https://github.com/microsoft/node-pty), and
+this image has no linux prebuild for it — the build deliberately skips native
+compilation (`npm ci --ignore-scripts`, no `build-essential`/`python3`) to
+keep the image small and avoid a compiler toolchain in a container that runs
+as an unprivileged user. `claude-tui` additionally assumes an interactive
+login shell, which a container doesn't have one of. Selecting either fails
+with a clear "node-pty unavailable ... not supported in this environment"
+message — never a crash or an opaque native-module error — and names
+`claude-sdk` as the working alternative.
+
+```bash
+docker build -t chroxy .
+
+docker run -d --name chroxy \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e CHROXY_TUNNEL=none \
+  -p 8765:8765 \
+  -v chroxy-data:/home/chroxy/.chroxy \
+  -v "$(pwd)":/workspace \
+  chroxy start
+```
+
+Then open `http://localhost:8765/dashboard?token=<the token from the logs>`
+(the entrypoint auto-generates and logs an `API_TOKEN` prefix on first start;
+the full token is written to `~/.chroxy/config.json` inside the `chroxy-data`
+volume, or pass your own with `-e API_TOKEN=...`).
+
+The image sets `CHROXY_PROVIDER=claude-sdk` by default — without it, the
+daemon's own default provider (`claude-tui`, unsupported here — see above)
+would apply, and sessions would fail the moment they started. Config
+precedence is CLI flag > env var > config file > default, so `-e
+CHROXY_PROVIDER=...` still overrides this if you ever need to (see
+[docs/providers.md](providers.md) for the full provider list); every provider
+other than `claude-sdk` is untested/unsupported in this image.
+
 ## Production Setup (Named Tunnel)
 
 For a stable URL that survives restarts, use a Named Tunnel with supervisor mode.

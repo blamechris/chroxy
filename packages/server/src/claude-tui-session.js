@@ -41,6 +41,7 @@ import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
+import { describeNodePtyUnavailable } from './utils/node-pty-support.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -2729,7 +2730,7 @@ export class ClaudeTuiSession extends BaseSession {
       try {
         ptyMod = await import('node-pty')
       } catch (err) {
-        this.emit('error', { message: `node-pty unavailable: ${err.message}` })
+        this.emit('error', { message: describeNodePtyUnavailable(err) })
         return
       }
     }

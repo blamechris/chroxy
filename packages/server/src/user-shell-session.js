@@ -20,6 +20,7 @@ import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
 import { isWindows, defaultShell, killProcessTree } from './platform.js'
 import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
+import { describeNodePtyUnavailable } from './utils/node-pty-support.js'
 
 const log = createLogger('user-shell-session')
 
@@ -183,7 +184,7 @@ export class UserShellSession extends BaseSession {
     try {
       ptyMod = await import('node-pty')
     } catch (err) {
-      throw new Error(`node-pty unavailable: ${err.message}`)
+      throw new Error(describeNodePtyUnavailable(err))
     }
 
     // Resolved in the constructor (see _shellPath) so the create-audit can read

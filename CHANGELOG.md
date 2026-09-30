@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The root Docker image serves the dashboard and defaults to the headless
+  `claude-sdk` provider (#8151).** An owner decision scoped the image to
+  exactly two things: the headless `claude-sdk` provider, and the web
+  dashboard — the embedded user-shell terminal and the `claude-tui` provider
+  are not supported (`node-pty` has no linux prebuild in this image, and
+  `claude-tui` assumes an interactive login shell). A new `dashboard-builder`
+  stage builds `@chroxy/dashboard` (Vite) from just its own dependency graph
+  (`@chroxy/design-tokens`, `@chroxy/protocol`, `@chroxy/store-core` —
+  installed via `npm ci --workspace=@chroxy/dashboard`, never the whole
+  monorepo) and the final image copies in only the built `dist/`, so
+  `GET /dashboard` now serves the real app instead of 404ing. `ENV
+  CHROXY_PROVIDER=claude-sdk` overrides the daemon's own default (`claude-tui`)
+  so a plain `docker run` no longer starts sessions doomed to fail; `-e
+  CHROXY_PROVIDER=...` still overrides it per the normal CLI > env > config >
+  default precedence. Selecting the terminal or `claude-tui` anyway now fails
+  with a clear "node-pty unavailable ... use claude-sdk instead" message
+  (`describeNodePtyUnavailable`, shared by both call sites) rather than a raw
+  native-module error. `scripts/docker-image-smoke.sh` gained two checks:
+  `GET /dashboard` returns 200 and serves the dashboard's own `<title>`
+  marker, and every dependency in `packages/server/package.json` (not just
+  `@chroxy/*`) resolves inside the image — with an explicit, bidirectionally-
+  checked exemption list for `node-pty` and the handful of dependencies that
+  are real but only ever used via a subpath or as a static asset. `docs/self-
+  hosting-guide.md` documents the supported/unsupported split and the env
+  override. `.dockerignore` and `ci.yml`'s `docker` path filter are kept in
+  sync for the two newly-whitelisted packages.
+
 - **The root Docker image ships a pinned, signature-verified `claude` CLI, so
   `start` now passes preflight without `--skip-checks` (#8145).** The image
   never installed a `claude` binary at all: since #7986/#8035, SDK mode
