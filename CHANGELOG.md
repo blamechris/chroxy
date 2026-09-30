@@ -23,25 +23,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The server now reports `plan` permission mode as unsupported for
-  `claude-tui` (and any other provider with `capabilities.planMode: false`),
-  so the mobile app's chip row disables it instead of offering a mode the
-  provider cannot honour (#8090).** `getPermissionModes()`
+- **The server now reports `plan` permission mode as unsupported for every
+  provider that declares `capabilities.planMode: false` — claude-tui, codex
+  (app-server and legacy exec), claude-byok, gemini, and sdk-session — not
+  just claude-tui, so the mobile app's chip row disables it exactly where the
+  dashboard already hides it (#8090).** `getPermissionModes()`
   (`handler-utils.js`) only special-cased `auto`/`autoPermissionMode`, so
-  `available_permission_modes` advertised `plan` as fully supported for
-  claude-tui even though its PreToolUse hook skips Chroxy's protected-path
-  floor entirely in that mode (unlike approve/acceptEdits/auto, which all
-  route through it) — the raw PTY's own prompt, invisible to the structured
-  chat UI, was the only thing left standing between a tool call and
-  execution. The mobile `SettingsBar` chip row already disables purely from
-  the server-sent `supported: false` flag, so no app change was needed
+  `available_permission_modes` advertised `plan` as fully supported for every
+  one of those providers even though claude-tui's PreToolUse hook (and its
+  siblings) skip Chroxy's protected-path floor entirely in that mode (unlike
+  approve/acceptEdits/auto, which all route through it) — the raw PTY's own
+  prompt, invisible to the structured chat UI, was the only thing left
+  standing between a tool call and execution. The check follows
+  `capabilities.planMode` directly, the same capability-only rule the
+  dashboard has applied since #8087/#8084 (`showPlanMode: caps?.planMode !==
+  false`), so mobile and dashboard now agree for every provider instead of
+  only claude-tui. The mobile `SettingsBar` chip row already disables purely
+  from the server-sent `supported: false` flag, so no app change was needed
   beyond a regression test. The fix is scoped to the advertised list only —
   `assertProviderPermissionModeSupported`/`BaseSession.setPermissionMode()`
-  still accept `plan` on every provider (including claude-tui itself, and
-  codex app-server's identical `planMode: false` declaration, which stays
-  advertised as a deliberate, harmless alias for Approve) — so an
-  already-persisted claude-tui session in `plan` mode restores exactly as
-  before instead of failing.
+  still accept `plan` on every provider regardless of `planMode` — so an
+  already-persisted `plan`-mode session on any of these providers restores
+  exactly as before instead of failing.
 - **The mobile app now shows the provider badge for every session, the default
   provider included (#8130).** `SessionPicker`'s badge gate
   (`session.provider !== DEFAULT_PROVIDER`) suppressed the badge whenever a

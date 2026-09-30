@@ -8,6 +8,8 @@ import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexSession } from '../src/codex-session.js'
 import { JsonlSubprocessSession } from '../src/jsonl-subprocess-session.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { GeminiSession } from '../src/gemini-session.js'
+import { CliSession } from '../src/cli-session.js'
 import { SessionManager } from '../src/session-manager.js'
 import { getPermissionModes } from '../src/handler-utils.js'
 import { getProviderPermissionModeSupport } from '../src/permission-mode-support.js'
@@ -119,7 +121,22 @@ describe('permission-mode adapter support (#7825)', () => {
       )
       assert.match(auto?.label || '', /unavailable/i)
       assert.match(auto?.description || '', /cannot intercept.*before execution/i)
-      for (const id of ['approve', 'acceptEdits', 'plan']) {
+      // #8090: `plan` moved out of this "stays supported" loop, alongside
+      // `auto` — codex-app-server ALSO declares `capabilities.planMode:
+      // false`, and the advertised list now follows that capability
+      // directly for every provider (parity with the dashboard's #8087/
+      // #8084 client-side gate: `showPlanMode: caps?.planMode !== false`),
+      // rather than special-casing claude-tui by name. The "keeps Approve,
+      // Accept Edits, and Plan available" test above proves `plan` still
+      // stays constructible/settable at the hard-gate layer on this same
+      // provider — only the advertised flag changed.
+      const plan = modes.find((mode) => mode.id === 'plan')
+      assert.deepEqual(
+        { supported: plan?.supported, enforcement: plan?.enforcement },
+        { supported: false, enforcement: 'unsupported' },
+      )
+      assert.match(plan?.label || '', /unavailable/i)
+      for (const id of ['approve', 'acceptEdits']) {
         const mode = modes.find((candidate) => candidate.id === id)
         assert.deepEqual(
           { supported: mode?.supported, enforcement: mode?.enforcement },
@@ -145,42 +162,50 @@ describe('permission-mode adapter support (#7825)', () => {
   })
 })
 
-// #8090: claude-tui declares `capabilities.planMode: false` (claude-tui-session.js)
-// but getProviderPermissionModeSupport() never checked it, so the advertised
-// `available_permission_modes` list (and therefore the mobile SettingsBar chip
-// row + any other client that trusts the server flag) reported `plan` as fully
-// supported on a provider whose PreToolUse hook does NOT route plan-mode tool
-// calls through Chroxy's protected-path floor the way approve/acceptEdits/auto
-// all do (see hooks/permission-hook.sh's PERM_MODE branches: plan returns
-// `{"permissionDecision":"ask"}` unconditionally, with no floor_forces_prompt
-// check at all — the raw claude TUI process's own PTY-embedded prompt is the
-// only thing left standing between a tool call and execution).
+// #8090: any provider that declares `capabilities.planMode: false`
+// (claude-tui, codex app-server/-exec, byok, sdk-session, gemini, ...) had
+// its PreToolUse-hook-level reality (plan mode gives no genuine, chroxy-
+// guaranteed read-only restriction — see claude-tui's hooks/permission-hook.sh:
+// unlike approve/acceptEdits/auto, its `PERM_MODE=plan` branch skips the
+// floor_forces_prompt check entirely and just returns
+// `{"permissionDecision":"ask"}`, leaving the raw claude TUI process's own
+// PTY-embedded prompt — invisible to the structured chat UI — as the only
+// thing standing between a tool call and execution) disagree with what
+// getProviderPermissionModeSupport() advertised: `plan` came back fully
+// `supported: true` regardless of the capability.
 //
-// The fix is scoped to the ADVERTISED list only (getPermissionModes /
-// handler-utils.js), not to `getProviderPermissionModeSupport()` itself, which
-// still feeds `assertProviderPermissionModeSupported` (session-manager.js's
-// create/restore chokepoint, BaseSession's constructor) and
-// `BaseSession.setPermissionMode()`. Those three call sites must keep
-// accepting `plan` on EVERY provider, including claude-tui itself: see the
-// "keeps Approve, Accept Edits, and Plan available" test above (codex
-// app-server also declares `planMode: false` yet must stay constructible with
-// `permissionMode: 'plan'`) and claude-tui-session.test.js's "setPermissionMode
-// no-ops cleanly when sidecar path is null" test (asserts a direct
-// `setPermissionMode('plan')` call still updates state on claude-tui). A
-// blanket `capabilities.planMode === false` branch in the shared function
-// would throw on THOSE, and would also throw during boot restore of any
-// already-persisted claude-tui session that happens to be in `plan` mode
-// today (nothing has ever gated `plan` at create/restore time) — turning a
-// live, resumable PTY session into a "needs attention" failed-restore
+// The dashboard has applied the correct, capability-only rule since
+// #8087/#8084 (`packages/dashboard/src/App.tsx`'s
+// `showPlanMode: caps?.planMode !== false`, `CreateSessionModal.tsx`): ANY
+// provider with `planMode: false` has "Plan" hidden, not just claude-tui. So
+// the server-side fix here follows the exact same capability-only rule —
+// `modeId === 'plan' && ProviderClass?.capabilities?.planMode === false` —
+// with no provider-name special-casing, so every client that trusts the
+// server flag (mobile, dashboard, any future client) agrees with the
+// dashboard instead of disagreeing per provider. A provider-name-keyed
+// version of this check would also be the "hardcoded list beside a growing
+// set" shape docs/false-safety-guards.md catalogues as a recurring defect
+// class — the set of `planMode: false` providers already has six members
+// today and is not enumerable up front.
+//
+// This is intentionally NOT folded into `getProviderPermissionModeSupport()`
+// itself, which also feeds `assertProviderPermissionModeSupported`
+// (session-manager.js's create/restore chokepoint, BaseSession's
+// constructor) and `BaseSession.setPermissionMode()`. Those three
+// deliberately keep accepting `plan` on every provider regardless of
+// `planMode` — see "keeps Approve, Accept Edits, and Plan available" above
+// (codex app-server stays constructible with `permissionMode: 'plan'`) and
+// claude-tui-session.test.js's "setPermissionMode no-ops cleanly when
+// sidecar path is null" (asserts a direct `setPermissionMode('plan')` call
+// still updates state on claude-tui) — so a blanket capability check in the
+// shared function would throw on THOSE, and would also throw during boot
+// restore of any already-persisted `plan`-mode session on any of these
+// providers (nothing has ever gated `plan` at create/restore time), turning
+// a live, resumable session into a "needs attention" failed-restore
 // placeholder over what is really just an advertising correction. So
 // `getProviderPermissionModeSupport` is left completely unchanged (see the
-// "hard-gate call sites stay unaffected" tests below), and the override lives
-// only in `getPermissionModes`, scoped to `provider === 'claude-tui'` — codex
-// (MODE_DESCRIPTIONS.codex.plan: "Not a distinct codex mode — behaves like
-// Approve") already documents the identical `planMode: false` situation as a
-// deliberate, harmless alias and is intentionally left advertised as
-// supported (see the existing "advertises Auto as unsupported..." test
-// above), so this fix does not touch it.
+// "hard-gate call sites stay unaffected" tests below), and the capability
+// check lives only in `getPermissionModes()`.
 describe('plan permission mode advertising (#8090)', () => {
   it('reports plan unsupported for claude-tui, mirroring the auto/autoPermissionMode shape', () => {
     const modes = getPermissionModes('claude-tui', ClaudeTuiSession)
@@ -197,21 +222,38 @@ describe('plan permission mode advertising (#8090)', () => {
     }
   })
 
-  it('still reports plan supported for a provider that does not declare planMode (absence is not unsupported)', () => {
-    // Deliberately provider === 'claude-tui' with a stub class that has NO
-    // capabilities getter at all — proves the check keys off the actual
-    // declared capability, not just the provider name, and that a missing
-    // declaration is treated as supported (same convention `auto` already
-    // uses for autoPermissionMode absence).
-    const modes = getPermissionModes('claude-tui', class {})
+  it('reports plan unsupported for a NON-claude-tui provider that declares planMode: false (gemini)', () => {
+    // The check is capability-only, not keyed on the provider name — gemini
+    // declares `capabilities.planMode: false` (gemini-session.js) just like
+    // claude-tui does, and must get the identical treatment.
+    const modes = getPermissionModes('gemini', GeminiSession)
+    const plan = modes.find((mode) => mode.id === 'plan')
+    assert.deepEqual(
+      { supported: plan?.supported, enforcement: plan?.enforcement },
+      { supported: false, enforcement: 'unsupported' },
+    )
+    assert.match(plan?.label || '', /unavailable/i)
+  })
+
+  it('reports plan unsupported for codex too — the check no longer exempts it by name', () => {
+    const modes = getPermissionModes('codex', CodexAppServerSession)
+    const plan = modes.find((mode) => mode.id === 'plan')
+    assert.equal(plan?.supported, false, 'codex declares capabilities.planMode: false and gets the same capability-only treatment as every other provider')
+  })
+
+  it('still reports plan supported for a provider that does not declare planMode at all (absence is not unsupported)', () => {
+    // A bare stub class with NO capabilities getter — proves a missing
+    // declaration is treated as supported, same convention `auto` already
+    // uses for autoPermissionMode absence.
+    const modes = getPermissionModes('future-provider', class {})
     const plan = modes.find((mode) => mode.id === 'plan')
     assert.equal(plan?.supported, true)
   })
 
-  it('leaves codex advertised as plan-supported (documented alias for Approve, unrelated to this gap)', () => {
-    const modes = getPermissionModes('codex', CodexAppServerSession)
+  it('reports plan supported for cli-session, the one provider that declares planMode: true', () => {
+    const modes = getPermissionModes('cli', CliSession)
     const plan = modes.find((mode) => mode.id === 'plan')
-    assert.equal(plan?.supported, true, 'codex plan mode is a deliberate, pre-existing exception — see MODE_DESCRIPTIONS.codex.plan')
+    assert.equal(plan?.supported, true)
   })
 
   describe('hard-gate call sites stay unaffected (restore/construct/setPermissionMode)', () => {
