@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both clients so the two sweeps can't drift apart on it again, and the app's
   `onclose` now sweeps every session the same way it already does for
   `inactivityWarning`/`sessionRole`/`primaryClientId`.
+- **The mobile app now shows the provider badge for every session, the default
+  provider included (#8130).** `SessionPicker`'s badge gate
+  (`session.provider !== DEFAULT_PROVIDER`) suppressed the badge whenever a
+  session ran the default provider, so a `claude-tui` pill sat unbadged next to
+  a `claude-cli` pill's `CLI` badge — indistinguishable from a session whose
+  provider was simply unknown. The badge and the long-press alert title suffix
+  now both render unconditionally whenever `session.provider` is present,
+  routed through the same shared `getProviderInfo` helper the dashboard already
+  uses (PR #8129) so the two surfaces cannot disagree again.
 - **`claude-opus-4-8` pricing corrected to $5/$25 with no long-context premium
   (#7434).** Was incorrectly priced at $15/$75 with a 2× premium above 200K
   input tokens. Opus 4.8 has 1M context at standard API pricing with no
