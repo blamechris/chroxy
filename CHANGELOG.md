@@ -40,6 +40,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `forget()`) — and a write-through additionally requires the committing
   survey's lineage to match the current record's, so a straggler from a
   forgotten incarnation can never land in one that reused its key.
+- **BYOK tool calls no longer stream unredacted secrets over `tool_input_delta`
+  (#8137).** `byok-session.js`'s `content_block_delta` handling forwarded the
+  Anthropic SDK's raw `input_json_delta` partial-JSON chunks verbatim as
+  `tool_input_delta { partialJson: t.partial }` — never run through
+  `sanitizeToolInput` (`redaction.js`, the #6029 secret-redaction floor).
+  Unlike the latent gap #8135/#8136 fixed on cli/sdk, this one was live on
+  every BYOK tool call that carried input, whether or not the call ever
+  triggered a permission prompt: a secret embedded in a benign-keyed value —
+  `{ command: 'export TOKEN=sk-ant-api03-...' }`, `{ url:
+  'https://discord.com/api/webhooks/...' }` — streamed to every subscribed
+  client, unredacted, on the live wire. Raw partial JSON can't be safely
+  redacted (a secret can straddle chunk boundaries; mid-stream partial JSON
+  generally isn't parseable), so `byok-session.js` no longer forwards
+  `input_json_delta` chunks at all. It now delivers the SANITIZED full input
+  as a single `tool_input_delta` once `stream.finalMessage()` resolves and
+  the tool_use block's complete input is known — through `_recordToolInput`
+  (`base-session.js`), the same choke point cli/sdk's finalized-input capture
+  already runs through, so there is still exactly one sanitizer in the
+  codebase. This also fixes the stale "BYOK streams raw partials" claim in
+  cli-session.js's `customEvents` comment and in the #7346 changelog entry
+  above, both written when BYOK was still the odd one out.
 - **`lint-argv-sinks`'s catalogue now matches an argv expression exactly, not
   by substring (#8112).** `AUDITED_SINKS` entries like `match: 'this._image'`
   were compared against a finding with `.includes()`, so any WIDER expression
@@ -130,11 +151,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both.
 
   BYOK is unaffected here — it never populates `_inFlightToolStarts`, so
-  the new capture/backfill is a no-op for it — but BYOK's own
-  `tool_input_delta` streams the same raw, unredacted partial JSON it
-  always has; that pre-existing exposure needs its own fix (its
-  raw-partial-streaming design differs from cli/sdk's) and is filed
-  separately as #8137.
+  the capture/backfill above is a no-op for it. At the time this entry was
+  written, BYOK's own `tool_input_delta` still streamed the same raw,
+  unredacted partial JSON it always had; that pre-existing exposure was
+  filed separately as #8137 and is now fixed — see the #8137 entry above.
 - **A winning `'migrate'` compare-and-swap on the path-hash trust ledger no
   longer reverts itself when its first persist fails (#8098).**
   `PathHashTrustLedger._mergeLoaded()` deleted a winning migrate's
