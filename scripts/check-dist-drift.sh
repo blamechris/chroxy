@@ -33,17 +33,24 @@
 # script.
 #
 # This script checks THREE drift shapes, all against a clean rebuild:
-#   1. A tracked dist file whose content no longer matches HEAD — `git diff`
-#      reports these as `M` (modified).
+#   1. A tracked dist file whose content no longer matches the INDEX — `git
+#      diff` (working tree vs. the index; the same thing as HEAD in CI, where
+#      nothing is ever staged, but not necessarily identical to HEAD on a
+#      local checkout with staged-but-uncommitted dist changes) reports these
+#      as `M` (modified).
 #   2. A tracked dist file the clean rebuild did NOT reproduce at all — the
 #      #8163 orphan case. Deleting the dist dir before rebuilding turns this
 #      into an ordinary working-tree deletion of a tracked path, which
 #      `git diff --name-status` reports as `D` — no separate enumeration of
-#      "expected files" needed.
-#   3. A new untracked file sitting under the dist dir — the #8152 blind spot.
-#      Because dist/ is gitignored, a file the build just emitted is BOTH
-#      untracked and ignored, so `git diff` (tracked paths only) never sees
-#      it: `git ls-files --others --ignored --exclude-standard`.
+#      "expected files" needed. `D` means only that the clean rebuild did not
+#      produce this file; a deleted source is the common cause, but a hand-
+#      committed file the build never emitted, or a build-config change (e.g.
+#      dropping `--declaration`), reads identically here.
+#   3. An untracked file sitting under the dist dir, WHETHER OR NOT it is
+#      gitignored — the #8152 blind spot, widened by a real false-green a
+#      review found in this PR (see the `git ls-files` invocation below):
+#      `git diff` (tracked paths only) never sees an untracked path, ignored
+#      or not.
 #
 # Usage (run from the repo root):
 #   scripts/check-dist-drift.sh <dist-dir> <build-cmd> [build-cmd-arg ...]
@@ -59,20 +66,40 @@
 # this is exactly why the caller supplies the build command instead of this
 # script inventing its own tsc invocation).
 #
+# <dist-dir> IS VALIDATED BEFORE ANYTHING IS MOVED OR DELETED. This script
+# wipes <dist-dir> and later restores it from a backup on most failure paths
+# (see below), which makes an unvalidated caller-supplied path a real data-
+# loss risk, not a hypothetical one: an unvalidated `../../outer` or `/` moved
+# the repository's enclosing directory, `.git` included, out of the way and
+# then failed to move it back. See `validate_dist_dir()` for the exact rules;
+# a path failing any of them is a usage error (exit 2), refused before the
+# first `mv`.
+#
 # This script OWNS the build now, so it must leave the working tree no worse
 # off than it found it when it can't complete the check: the pre-existing
-# <dist-dir> is backed up before the wipe and restored if the build command
-# fails or emits nothing, so a broken build never strands a developer's tree
-# with a half-built or empty dist/.
+# <dist-dir> is backed up (as a SIBLING directory next to it, so the restore
+# is a same-filesystem, atomic `mv` rather than a cross-device copy) before
+# the wipe, and restored on every exit path except the two that reach a real
+# verdict (clean, or drift found) — a failed build, a zero-emit build, an
+# aborting git failure, a usage error caught after the backup already exists,
+# or a signal (INT/TERM/HUP) all restore rather than strand the tree wiped or
+# half-built. The backup is deleted only once it is confirmed no longer
+# needed: after a verdict is reached, or after a verified successful restore.
+# If a restore itself fails, the backup is kept on disk and its path is
+# printed loudly — never silently discarded — so nothing is lost twice.
 #
 # Exits:
 #   0 — a clean rebuild of <dist-dir> matches its committed state exactly (no
-#       modified, no orphaned, no new untracked/ignored files).
+#       modified, no orphaned, no new untracked files).
 #   1 — drift detected (modified, orphaned, or new/untracked), OR the build
-#       command failed, OR it emitted zero files, OR git failed. "Cannot
-#       check" must never read as "nothing to check" — see
-#       docs/false-safety-guards.md.
-#   2 — usage error (fewer than 2 arguments, or an empty <dist-dir>).
+#       command failed, OR it emitted zero files, OR git failed (git's own
+#       exit code propagates unchanged via `set -e`; it is not remapped to 1,
+#       though in practice this is commonly 128). "Cannot check" must never
+#       read as "nothing to check" — see docs/false-safety-guards.md.
+#   2 — usage error: fewer than 2 arguments, an empty <dist-dir>, or
+#       <dist-dir> fails validation (see `validate_dist_dir()`).
+#   130/143/129 — interrupted by SIGINT/SIGTERM/SIGHUP respectively, after the
+#       EXIT trap has attempted to restore any pre-existing <dist-dir>.
 #
 # set -euo pipefail: a git failure anywhere below must abort the script with a
 # nonzero exit rather than let a later check paper over it as "no drift found".
@@ -89,7 +116,7 @@ if [ "$#" -lt 2 ] || [ -z "${1:-}" ]; then
   exit 2
 fi
 
-DIST_DIR="$1"
+DIST_DIR_RAW="$1"
 shift
 BUILD_CMD=("$@")
 
@@ -100,6 +127,11 @@ BUILD_CMD=("$@")
 # --literal-pathspecs shuts that off; strip any inherited pathspec-mode env var
 # first, since git refuses to start if two global pathspec modes are selected
 # at once (GIT_GLOB_PATHSPECS / GIT_ICASE_PATHSPECS / GIT_NOGLOB_PATHSPECS).
+# (A directory name that itself contains pathspec magic, e.g. `:(glob)dist`,
+# never reaches this flag in practice: `validate_dist_dir()` below requires
+# the LAST path component to be spelled exactly `dist`, which a magic prefix
+# is not — so that shape is now a usage error, not a case this flag alone
+# defends.)
 unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS 2>/dev/null || true
 
 # Resolve the repo root so this is independent of the caller's exact cwd within
@@ -110,33 +142,173 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 git_() { git --literal-pathspecs -C "$REPO_ROOT" "$@"; }
 
+fail_validation() {
+  echo "::error::$(basename "$0"): $1" >&2
+  exit 2
+}
+
+# Sets the global DIST_DIR on success; calls fail_validation (exit 2, before
+# anything has been moved or deleted) otherwise. Deliberately NOT invoked via
+# command substitution ($(...)) — that would run it in a subshell, where
+# fail_validation's `exit 2` would only end the subshell, leaving the parent
+# script to continue with an empty captured value instead of actually
+# stopping. Writing the result to a global is what lets `exit` here mean
+# "stop the whole script".
+#
+# A review of this script's first version reproduced PERMANENT DATA LOSS from
+# an unvalidated path: `../../outer` (the directory containing the repo) was
+# `mv`'d out of the way along with the repo itself, the subsequent `cd
+# "$REPO_ROOT"` then failed, the restore's own `mv` failed with ENOENT, and
+# the EXIT trap deleted the only backup — the repo, `.git` included, its
+# siblings and a canary file were all gone. `/`, `../sibling` (with a build
+# that wrote into it) and a symlinked dist dir each destroyed something
+# outside the repo by a different route. Every rule below closes one of those
+# routes; none is redundant with the others (a magic-free but merely-outside-
+# the-repo path, for instance, passes every string check and is only caught by
+# the final physical-containment comparison).
+validate_dist_dir() {
+  local raw="$1" d seg
+  local -a segs
+
+  case "$raw" in
+    /*) fail_validation "<dist-dir> must be a path relative to the repo root, not absolute: $raw" ;;
+  esac
+
+  # Strip exactly one trailing slash, so "pkg/dist" and "pkg/dist/" validate
+  # identically.
+  d="${raw%/}"
+  [ -n "$d" ] || fail_validation "<dist-dir> may not be empty or all slashes: $raw"
+
+  # No empty, '.' or '..' path component. `read -ra` (not an unquoted `set --
+  # $d`) splits on IFS without ever subjecting the fields to pathname
+  # expansion, so a component containing a glob metacharacter is split on '/'
+  # literally rather than expanded against whatever happens to be in the
+  # CURRENT directory — the kind of shell-prediction hazard this repo's own
+  # review culture flags.
+  IFS='/' read -ra segs <<< "$d"
+  for seg in "${segs[@]}"; do
+    case "$seg" in
+      ''|.|..)
+        fail_validation "<dist-dir> may not contain an empty, '.' or '..' path component: $raw"
+        ;;
+    esac
+  done
+
+  # The LAST component must be spelled exactly "dist" — this script's blast
+  # radius (a caller-supplied path it will `mv` and `rm -rf`) is scoped to
+  # directories named for exactly the thing it is meant to touch, not to
+  # "whatever path happens to validate otherwise".
+  case "$d" in
+    dist|*/dist) : ;;
+    *) fail_validation "<dist-dir> must be a path ending in a component named exactly 'dist', got: $raw" ;;
+  esac
+
+  DIST_DIR="$d"
+}
+
+validate_dist_dir "$DIST_DIR_RAW"
+
 ABS_DIST_DIR="$REPO_ROOT/$DIST_DIR"
 
-# --- Back up any pre-existing dist dir, so a build failure or a zero-emit
-# build restores the tree instead of stranding it wiped or half-built.
+# Must already exist as a real directory — this script wipes and rebuilds an
+# EXISTING dist dir; it does not invent one from nothing, and requiring
+# existence up front is also what makes the physical-containment check below
+# meaningful (a path that does not yet exist cannot be resolved to a real,
+# symlink-free location via `cd ... && pwd -P`).
+if [ ! -e "$ABS_DIST_DIR" ]; then
+  fail_validation "<dist-dir> does not exist: $DIST_DIR"
+fi
+# A symlinked dist dir is refused outright: `mv`/`rm -rf` on a symlink acts on
+# the link itself in some shapes and on its target in others depending on a
+# trailing slash and the exact tool, which is precisely the kind of ambiguity
+# this script cannot afford given what it does to the path. It is also the
+# simplest way to point ABS_DIST_DIR somewhere the containment check below
+# cannot see: the symlink's own path component passes every string check
+# above while its target resolves anywhere at all.
+if [ -L "$ABS_DIST_DIR" ]; then
+  fail_validation "<dist-dir> must not be a symlink: $DIST_DIR"
+fi
+if [ ! -d "$ABS_DIST_DIR" ]; then
+  fail_validation "<dist-dir> exists but is not a directory: $DIST_DIR"
+fi
+
+# Physical containment: resolve both sides with symlinks removed (`pwd -P`,
+# the portable `cd`+`pwd` idiom — no `realpath` binary assumed) and require
+# the dist dir to sit STRICTLY inside the repo root, and not inside `.git`.
+# This is the backstop behind the string checks above, not a restatement of
+# them: `packages/protocol/../../..` contains a `..` component and is already
+# rejected above, but a path reaching outside the repo through a symlinked
+# INTERMEDIATE directory (not the dist dir itself, already refused above)
+# would pass every string-level rule and is only caught here.
+REPO_REAL="$(cd "$REPO_ROOT" && pwd -P)"
+DIST_REAL="$(cd "$ABS_DIST_DIR" && pwd -P)"
+case "$DIST_REAL" in
+  "$REPO_REAL")
+    fail_validation "<dist-dir> resolves to the repo root itself: $DIST_DIR"
+    ;;
+  "$REPO_REAL/.git" | "$REPO_REAL/.git/"*)
+    fail_validation "<dist-dir> resolves inside .git: $DIST_DIR -> $DIST_REAL"
+    ;;
+  "$REPO_REAL"/*)
+    : # strictly inside the repo — the required shape
+    ;;
+  *)
+    fail_validation "<dist-dir> resolves outside the repo root ($REPO_REAL): $DIST_DIR -> $DIST_REAL"
+    ;;
+esac
+
+# --- Back up the pre-existing dist dir. Nothing above this line has moved or
+# deleted anything; validation runs to completion (or exits 2) before this.
+#
+# DONE tracks whether a real verdict was reached (clean, or drift found) — the
+# only two outcomes that should leave the freshly-rebuilt <dist-dir> in place.
+# Every OTHER exit path (a failed build, a zero-emit build, a signal) leaves
+# DONE at 0, and the EXIT trap restores the backup rather than stranding the
+# tree wiped or half-built. The backup is deleted only once it is confirmed no
+# longer needed: DONE=1 (a verdict was reached and the backup is moot), or a
+# VERIFIED successful restore. A restore that itself fails keeps the backup on
+# disk and prints its path — never `rm -rf`s the only remaining copy of what
+# was there before this script ran.
+DONE=0
 BACKUP_PARENT=""
 BACKUP=""
-restore_backup() {
-  if [ -n "$BACKUP" ] && [ -e "$BACKUP" ]; then
-    rm -rf "$ABS_DIST_DIR"
-    mv "$BACKUP" "$ABS_DIST_DIR"
-  fi
-}
+
 cleanup() {
-  if [ -n "$BACKUP_PARENT" ] && [ -d "$BACKUP_PARENT" ]; then
-    rm -rf "$BACKUP_PARENT"
+  if [ "$DONE" -eq 1 ]; then
+    [ -n "$BACKUP_PARENT" ] && [ -d "$BACKUP_PARENT" ] && rm -rf "$BACKUP_PARENT"
+    return
+  fi
+  if [ -n "$BACKUP" ] && [ -e "$BACKUP" ]; then
+    if rm -rf "$ABS_DIST_DIR" 2> /dev/null && mv "$BACKUP" "$ABS_DIST_DIR" 2> /dev/null; then
+      rm -rf "$BACKUP_PARENT"
+    else
+      echo "::error::$(basename "$0"): could not restore $DIST_DIR after an incomplete run. Its pre-existing contents are kept at: $BACKUP" >&2
+    fi
   fi
 }
 trap cleanup EXIT
+# A signal during the build previously left dist/ wiped with no recovery: the
+# only trap was on EXIT, and a build killed by SIGINT/SIGTERM never reached
+# it. `exit N` from within each handler is itself an exit, which runs the EXIT
+# trap above before the process actually terminates — bash waits for the
+# foreground child (the build command) to finish before running a trap, so
+# this fires once the build itself has been signalled and stopped.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-if [ -e "$ABS_DIST_DIR" ]; then
-  BACKUP_PARENT="$(mktemp -d)" || {
-    echo "::error::$(basename "$0"): mktemp failed; cannot safely back up $DIST_DIR before rebuilding it" >&2
-    exit 1
-  }
-  BACKUP="$BACKUP_PARENT/dist-backup"
-  mv "$ABS_DIST_DIR" "$BACKUP"
-fi
+# A SIBLING of the dist dir, not the system temp dir: `mktemp -d` alone ignores
+# TMPDIR on macOS (it uses /var/folders/...), which can put the backup on a
+# different filesystem — turning the restore `mv` into a slow copy, and
+# leaking the backup entirely if the process is killed with a signal `mktemp`
+# itself cannot catch (SIGKILL). A same-directory sibling guarantees the
+# restore is a single atomic rename.
+BACKUP_PARENT="$(mktemp -d "$(dirname "$ABS_DIST_DIR")/.check-dist-drift-backup.XXXXXX")" || {
+  echo "::error::$(basename "$0"): mktemp failed; cannot safely back up $DIST_DIR before rebuilding it" >&2
+  exit 1
+}
+BACKUP="$BACKUP_PARENT/dist-backup"
+mv "$ABS_DIST_DIR" "$BACKUP"
 
 # --- Clean build: run the caller's build command from the repo root against
 # an ABSENT dist dir, so a source file that no longer exists in the program
@@ -146,22 +318,23 @@ BUILD_OK=1
 ( cd "$REPO_ROOT" && "${BUILD_CMD[@]}" ) || BUILD_OK=0
 
 if [ "$BUILD_OK" -ne 1 ]; then
-  restore_backup
   echo "::error::build command failed: ${BUILD_CMD[*]}" >&2
-  echo "$DIST_DIR was left as it was before this check ran (nothing to compare against a failed build)." >&2
+  echo "$DIST_DIR is being restored to what it was before this check ran." >&2
   exit 1
 fi
 
 # "Cannot check" must never read as "nothing to check" (docs/false-safety-
 # guards.md). A build that reports success but produces no directory, or an
-# empty one, is a broken build configuration, not a clean pass.
+# empty one, is a broken build configuration, not a clean pass — and without
+# this floor, a dist dir with no tracked files at all would read as clean by
+# the diff checks below finding nothing to report either way.
 FILE_COUNT=0
 if [ -d "$ABS_DIST_DIR" ]; then
   FILE_COUNT="$(find "$ABS_DIST_DIR" -type f | wc -l | tr -d '[:space:]')"
 fi
 if [ "$FILE_COUNT" -eq 0 ]; then
-  restore_backup
   echo "::error::build command '${BUILD_CMD[*]}' reported success but $DIST_DIR contains zero files afterward — treating this as a broken build, not a clean pass." >&2
+  echo "$DIST_DIR is being restored to what it was before this check ran." >&2
   exit 1
 fi
 
@@ -169,20 +342,24 @@ REPORT=""
 FAILED=0
 
 # 1 & 2. Tracked-file drift, read off the SAME clean-rebuild diff: `M` is
-# content that no longer matches HEAD (the #8152-era check); `D` is a tracked
-# file the clean rebuild did not reproduce at all — the #8163 orphan case,
-# only visible because <dist-dir> was wiped before the rebuild above. Plain
-# `git diff` (no --exit-code) always exits 0 regardless of whether differences
-# are found, so it plays nicely with `set -e`; we check the parsed output
-# instead.
+# content that no longer matches the index (the #8152-era check); `D` is a
+# tracked file the clean rebuild did not reproduce at all — the #8163 orphan
+# case, only visible because <dist-dir> was wiped before the rebuild above.
+# Plain `git diff` (no --exit-code) always exits 0 on success regardless of
+# whether differences are found, so it plays nicely with `set -e`; we check
+# the parsed output instead. A genuine git failure (not "no differences", an
+# actual error) still aborts the script here via `set -e`, since this
+# assignment is not guarded by `||` or an `if`.
 MODIFIED=""
 ORPHANED=""
-# --no-renames: without it, a deleted file that happens to resemble another
-# new/changed one in the same diff can be paired up as "R100 old new" (three
-# tab-separated fields) instead of a plain two-field "D old" line, which would
-# hide the #8163 orphan case behind rename heuristics instead of a deletion.
-# Forcing this off makes every line exactly `<status>\t<path>`, independent of
-# the invoking environment's diff.renames config.
+# --no-renames: a worktree-vs-index diff can only ever pair a deletion with an
+# INTENT-TO-ADD index entry (`git add -N`), which nothing in this script's own
+# flow creates — so in practice this flag changes nothing observable here.
+# It is kept anyway as a documented assumption rather than an implicit one:
+# should a future caller ever stage an intent-to-add entry under <dist-dir>
+# before invoking this script, forcing `--no-renames` is what keeps a
+# deletion reported as a plain two-field `D old` line instead of a three-field
+# `R100 old new` rename pair, which the parser below does not expect.
 DIFF_STATUS="$(git_ diff --no-renames --name-status -- "$DIST_DIR")"
 while IFS=$'\t' read -r status path; do
   [ -n "$status" ] || continue
@@ -207,30 +384,40 @@ $(printf '%s' "$MODIFIED" | sed 's/^/    /')
 fi
 
 if [ -n "$ORPHANED" ]; then
-  REPORT="${REPORT}Orphaned tracked file(s) under $DIST_DIR — a clean rebuild did NOT reproduce these, which means the source that used to produce them was removed without removing the compiled output (#8163):
+  REPORT="${REPORT}Orphaned tracked file(s) under $DIST_DIR — a clean rebuild did not produce these. The usual cause is a deleted source (#8163), but the same status also follows a hand-committed file the build never emits, or a build-config change (e.g. dropping a declaration-output flag):
 $(printf '%s' "$ORPHANED" | sed 's/^/    /')
 "
 fi
 
-# 3. New untracked file(s) sitting under the dist dir — the #8152 blind spot.
-# Because dist/ is gitignored, a file the build just emitted is BOTH untracked
-# and ignored, so `git diff` (tracked paths only) never sees it.
-UNTRACKED="$(git_ ls-files --others --ignored --exclude-standard -- "$DIST_DIR")"
+# 3. An untracked file sitting under the dist dir, whether or not it is
+# gitignored. The #8152 blind spot was ignored+untracked files specifically;
+# this PR's own review found a narrower false-green in that fix: `--ignored
+# --exclude-standard` lists ONLY ignored untracked files, so an untracked file
+# that matches a package's own `!dist/<file>` negation — meaning git does NOT
+# consider it ignored — was invisible to this check even though `git diff`
+# (tracked paths only) still cannot see it either. Reproduced on the real
+# store-core call site: removing the committed dist/crypto.d.ts from the
+# index (leaving the rebuilt file sitting untracked on disk) reported clean.
+# Dropping `--ignored --exclude-standard` entirely closes both shapes: any
+# untracked file under <dist-dir> at all is drift.
+UNTRACKED="$(git_ ls-files --others -- "$DIST_DIR")"
 if [ -n "$UNTRACKED" ]; then
   FAILED=1
-  REPORT="${REPORT}New untracked file(s) under $DIST_DIR the build produced but nothing ever committed (gitignored, so a plain 'git diff' cannot see these):
+  REPORT="${REPORT}Untracked file(s) under $DIST_DIR the build produced but nothing ever committed:
 $(printf '%s\n' "$UNTRACKED" | sed 's/^/    /')
 "
 fi
 
 if [ "$FAILED" -ne 0 ]; then
+  DONE=1
   echo "::error::$DIST_DIR drift detected (clean rebuild via: ${BUILD_CMD[*]})."
   printf '%s\n' "$REPORT"
   echo "Fix: commit the rebuilt result. A modified tracked file just needs a normal" >&2
-  echo "'git add'; an orphaned file (source deleted) needs 'git rm'; a NEW file needs" >&2
-  echo "'git add -f' since $DIST_DIR is gitignored (and, for a new package export," >&2
-  echo "remember its sibling .d.ts/barrel entry too)." >&2
+  echo "'git add'; an orphaned file needs 'git rm'; a NEW file needs 'git add -f' if" >&2
+  echo "$DIST_DIR is gitignored (and, for a new package export, remember its sibling" >&2
+  echo ".d.ts/barrel entry too)." >&2
   exit 1
 fi
 
-echo "OK -- $DIST_DIR matches a clean rebuild exactly (no modified, orphaned, or new/untracked files)."
+DONE=1
+echo "OK -- $DIST_DIR matches a clean rebuild exactly (no modified, orphaned, or untracked files)."

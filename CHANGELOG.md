@@ -55,15 +55,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly. Deriving "what's expected" from a real clean build (rather than
   a hardcoded file list) also means the check keeps working as each package's
   set of tracked dist files grows, instead of needing to be told about it.
-  The script fails closed if the build command itself fails, or reports
-  success but emits zero files, and restores the pre-existing `dist/` in
-  either case rather than stranding a developer's tree wiped or half-built.
   Both CI call sites (`ci.yml`'s `protocol-tests` and `store-core-tests` jobs)
   now pass their build command straight to the script instead of running it
-  as a separate prior step. `scripts/__tests__/check-dist-drift.test.sh` adds
-  the orphan case (proven red against the old one-argument contract on the
-  same fixture), the zero-emit floor, and the failed-build case, alongside
-  the existing clean/modified/untracked coverage from #8152.
+  as a separate prior step.
+
+  A review of the first version of this fix found three problems before
+  merge, all addressed here. **The script now VALIDATES `<dist-dir>` before
+  moving or deleting anything** — owning the build means owning `mv`/`rm -rf`
+  on a caller-supplied path, and an unvalidated one let a reviewer
+  permanently delete the directory containing the repo (`../../outer`) and a
+  sibling directory (`../sibling`) in reproducible sandboxes; `<dist-dir>`
+  must now be a relative path with no `.`/`..` component, ending in a
+  component named exactly `dist`, that resolves (symlinks included) strictly
+  inside the repo and outside `.git`, or the script refuses with a usage
+  error before touching anything. The backup used to restore a failed or
+  empty build is now a same-filesystem sibling of `<dist-dir>` (atomic
+  rename, no TMPDIR cross-device copy) and is deleted only once a verdict is
+  reached or a restore is verified to have succeeded — never on a failed
+  restore, which now keeps the backup on disk and prints its path instead of
+  discarding the only copy. SIGINT/SIGTERM/SIGHUP during the build now
+  restore the pre-existing `dist/` the same way a failed build does, instead
+  of leaving it wiped. **The untracked-file check was also widened**: it used
+  to list only *ignored* untracked files (`git ls-files --others --ignored
+  --exclude-standard`), which misses a file matching a package's own
+  `!dist/<file>` negation — store-core's real shape — so an emitted file
+  matching that negation but missing from the index passed as clean; it now
+  lists any untracked file under `<dist-dir>` at all.
+
+  `scripts/__tests__/check-dist-drift.test.sh` (48 cases) adds: the orphan
+  case (proven red against the old one-argument contract on the same
+  fixture); the untracked-but-not-ignored case (reproducing the real
+  store-core false-green and proving the fix closes it); the zero-emit floor
+  isolated against a dist dir with no tracked files at all; a build that
+  fails after emitting everything (the `tsc`-on-a-type-error shape the
+  zero-emit floor alone cannot catch); a git failure aborting non-zero; a
+  SIGTERM mid-build restoring `dist/`; and, for the path-validation fix,
+  every rejected shape (absolute, `..`-containing, repo root, `.git`,
+  wrong basename, symlink) proven against disposable sandboxes with a canary
+  checksummed before and after — alongside the existing clean/modified/
+  untracked coverage from #8152.
+
+  Passing the build command as a `check-dist-drift.sh <dist-dir> npm run
+  ...` argument also broke the `#7613`/`#7661` npm-resolve CI-budget guard
+  (`packages/server/tests/ci-npm-resolve-budget.test.js`): its reader had no
+  way to know that `npm` sitting behind this particular first-party wrapper
+  script is still in command position, since nothing there tries to guess
+  whether an arbitrary prefix like `sudo`/`xargs`/`timeout` runs its operand.
+  `workflow-reader.js` adds a narrow, explicit `COMMAND_WRAPPERS` roster
+  (currently just this one script) recording how many of a wrapper's own
+  arguments precede the command it execs, verified against the wrapper's own
+  source rather than guessed at — every entry is checked to both exist on
+  disk and be genuinely invoked by some real workflow job, and a mutation
+  test removes the entry to prove the real `ci.yml` call sites revert to
+  unclassified (the exact failure this fix closes) rather than merely
+  asserting the roster's presence.
 
 - **`release.yml` smokes the Docker image before pushing it (#8150).** The
   `docker` job built the root Dockerfile with `docker/build-push-action`,

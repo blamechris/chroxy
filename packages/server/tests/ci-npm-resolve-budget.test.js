@@ -1,6 +1,6 @@
 import { after, before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -14,6 +14,8 @@ import {
   stripShellComment,
   hasUnclosedQuoting,
   DEFAULT_JOB_TIMEOUT_MINUTES,
+  COMMAND_WRAPPERS,
+  invokes,
 } from './helpers/workflow-reader.js'
 
 /**
@@ -340,6 +342,117 @@ describe('every npm resolve is paid for in the job budget (#7613, #7660, #7661)'
         `budget to ${MINUTES_PER_NPM_RESOLVE} minutes per resolve, or drop a resolve — #7613 is ` +
         'what the second one costs on a cold cache.'
     )
+  })
+})
+
+const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url))
+
+describe('command wrappers: a first-party script whose argv IS a command (#8163)', () => {
+  let workflows
+
+  before(async () => {
+    workflows = await readWorkflows()
+  })
+
+  it('CONTROL: the roster is not empty', () => {
+    assert.ok(Object.keys(COMMAND_WRAPPERS).length > 0, 'COMMAND_WRAPPERS has no entries to check')
+  })
+
+  it('every roster entry is a tracked script that exists on disk', () => {
+    for (const scriptPath of Object.keys(COMMAND_WRAPPERS)) {
+      assert.ok(
+        existsSync(join(REPO_ROOT, scriptPath)),
+        `COMMAND_WRAPPERS names ${scriptPath}, which does not exist at ${REPO_ROOT} — a stale ` +
+          'entry, or the script moved'
+      )
+    }
+  })
+
+  it('every roster entry is actually INVOKED by some real workflow job, not just mentioned', () => {
+    // `invokes()` (the FILE shape: "is this file executed, not merely named")
+    // rather than a substring search — a comment referencing the script's
+    // path would satisfy a plain `includes()` without the roster actually
+    // protecting anything live.
+    for (const scriptPath of Object.keys(COMMAND_WRAPPERS)) {
+      const wired = workflows.some(w => w.jobs.some(j => runBodies(j).some(b => invokes(b, scriptPath))))
+      assert.ok(
+        wired,
+        `COMMAND_WRAPPERS names ${scriptPath}, but no workflow job actually invokes it — a stale ` +
+          'entry that should be removed, not carried forward'
+      )
+    }
+  })
+
+  it('the real ci.yml call sites classify their wrapped npm as an ordinary invocation', () => {
+    const ci = workflows.find(w => w.name === 'ci.yml')
+    const protocolTests = ci.jobs.find(j => j.id === 'protocol-tests')
+    const storeCoreTests = ci.jobs.find(j => j.id === 'store-core-tests')
+    assert.ok(protocolTests, 'protocol-tests job not found — has it been renamed?')
+    assert.ok(storeCoreTests, 'store-core-tests job not found — has it been renamed?')
+
+    // Each job ALSO has a real, unrelated `npm ci` (its own "Install
+    // dependencies" step), so the assertion here is on the ONE use whose
+    // arguments start with the wrapped build command — not on the job's
+    // total resolve count, which correctly still includes that `npm ci`.
+    for (const job of [protocolTests, storeCoreTests]) {
+      const wrapped = npmUses(job).find(u => u.kind === 'invocation' && u.args[0] === 'run')
+      assert.ok(
+        wrapped,
+        `${job.id}: expected an npm use behind check-dist-drift.sh classified as an invocation ` +
+          `with subcommand "run" — the wrapper roster stopped recognising this call site`
+      )
+      assert.ok(
+        NON_RESOLVING_NPM_SUBCOMMANDS.has(subcommandOf(wrapped)),
+        `${job.id}: "run" must be on the non-resolving list, or this control is checking nothing`
+      )
+    }
+  })
+
+  it('a wrapper name NOT in the roster still falls through to unclassified (negative control)', () => {
+    // Proves the roster is doing SELECTIVE work, not waving through anything
+    // that merely looks like a wrapper invocation — and by direct extension,
+    // that deleting or renaming the real entry reverts the live ci.yml lines
+    // above to unclassified, the same failure C2 fixed.
+    const unknownWrapper = 'scripts/check-dist-drift-typo.sh packages/protocol/dist npm run build'
+    const kinds = commandUses(`bash ${unknownWrapper}`, 'npm').map(u => u.kind)
+    assert.deepEqual(kinds, ['unclassified'])
+  })
+
+  it('the WRONG fixed-argument count for a real wrapper also falls through (negative control)', () => {
+    // check-dist-drift.sh's own entry is `1` (just <dist-dir>). Two leading
+    // arguments in front of npm is not this wrapper's real shape, and must
+    // not be waved through by name alone.
+    const wrongArgCount = 'bash scripts/check-dist-drift.sh packages/protocol/dist extra-arg npm run build'
+    const kinds = commandUses(wrongArgCount, 'npm').map(u => u.kind)
+    assert.deepEqual(kinds, ['unclassified'])
+  })
+
+  it('MUTANT: removing the roster entry re-reds the exact real ci.yml lines', () => {
+    // A real mutation, not a synthetic fixture: COMMAND_WRAPPERS is a plain
+    // exported object, so deleting its one key and re-running the classifier
+    // against the REAL ci.yml is the same observable check "every npm use in
+    // every workflow is CLASSIFIED" makes on every run. Restored in `finally`
+    // so no later test in this file (or this process) sees the roster empty.
+    const key = 'scripts/check-dist-drift.sh'
+    const saved = COMMAND_WRAPPERS[key]
+    assert.notEqual(saved, undefined, 'fixture sanity: the real roster key must exist before deleting it')
+    delete COMMAND_WRAPPERS[key]
+    try {
+      const ci = workflows.find(w => w.name === 'ci.yml')
+      const unclassified = ci.jobs.flatMap(j =>
+        npmUses(j)
+          .filter(u => u.kind === 'unclassified')
+          .map(u => `${j.id}: ${u.line.trim()}`)
+      )
+      assert.ok(
+        unclassified.length >= 2,
+        `expected the protocol-tests and store-core-tests check-dist-drift.sh lines to revert to ` +
+          `unclassified once the roster entry is removed; got ${unclassified.length}: ` +
+          JSON.stringify(unclassified)
+      )
+    } finally {
+      COMMAND_WRAPPERS[key] = saved
+    }
   })
 })
 
