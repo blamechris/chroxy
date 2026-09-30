@@ -52,11 +52,24 @@ describe('listProviders() marks claude-tui unavailable when node-pty cannot load
   it('mutant proof: deleting the name === "claude-tui" guard would also grey out claude-sdk — the guard is provider-specific, not blanket', () => {
     // Not a literal mutant harness (this file has no source copy to mutate) —
     // this assertion IS the thing that goes red if the guard's name check is
-    // ever dropped or widened: claude-sdk has no PTY dependency at all, so its
-    // `ready` must stay true regardless of nodePtyAvailable.
-    const providers = listProviders({ nodePtyAvailable: false })
-    const sdk = providers.find((p) => p.name === 'claude-sdk')
-    assert.equal(sdk.auth.ready, true)
+    // ever dropped or widened. ENVIRONMENT-INDEPENDENT on purpose (review
+    // catch, #8151 round 2): an earlier version asserted `sdk.auth.ready ===
+    // true`, which depends on whatever real claude-sdk credentials happen to
+    // be on the machine running the suite — true on a dev box with a `claude
+    // login` / ANTHROPIC_API_KEY, false on a clean CI runner with neither,
+    // which is exactly the false !== true failure CI caught. claude-sdk has
+    // no PTY dependency at all, so what this guard must prove is narrower and
+    // ambient-credential-free: the override never TOUCHES claude-sdk's auth
+    // (deep-equal against the nodePtyAvailable: true baseline — test 2 above
+    // proves the same property across all three comparison providers; this
+    // one additionally pins the specific, readable signal a reviewer would
+    // check first) and its hint never mentions node-pty.
+    const unavailable = listProviders({ nodePtyAvailable: false })
+    const available = listProviders({ nodePtyAvailable: true })
+    const sdkUnavailable = unavailable.find((p) => p.name === 'claude-sdk')
+    const sdkAvailable = available.find((p) => p.name === 'claude-sdk')
+    assert.deepEqual(sdkUnavailable.auth, sdkAvailable.auth)
+    assert.doesNotMatch(sdkUnavailable.auth.hint || '', /node-pty/)
   })
 })
 
