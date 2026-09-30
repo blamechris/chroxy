@@ -30,7 +30,7 @@ BUMP="$REPO_ROOT/scripts/bump-version.sh"
 # case executed" are the same observable outcome, the second recurring cause in
 # docs/false-safety-guards.md (#7653). Asserted EQUAL, not -ge, so removing a
 # case is as loud as skipping one.
-EXPECTED_CASES=32
+EXPECTED_CASES=33
 
 PASS=0
 FAIL=0
@@ -841,6 +841,193 @@ test_bumps_workspace_chroxy_dep_ranges() {
 }
 
 
+# --- lockfile workspace @chroxy/* dependency ranges (#8159) ------------------
+
+# bump-version.sh rewrites @chroxy/* ranges in every workspace package.json
+# (above) and bumps the `version` field of every lock.packages["packages/<name>"]
+# entry, but left THOSE SAME ENTRIES' own dependencies/devDependencies/
+# peerDependencies/optionalDependencies ranges untouched — so after a bump the
+# lockfile disagreed with the manifests, and the next `npm install
+# --package-lock-only` anywhere rewrote those lines as an unrelated diff (found
+# by hand for 0.11.1, #8157: exactly 9 stale range lines).
+#
+# The fixture below mirrors the SHAPE of the real package-lock.json's
+# workspace entries (see packages/app, packages/server, packages/store-core in
+# the real lockfile) rather than the minimal `{"packages":{"":{"version":...}}}`
+# build_fake_repo seeds by default — a realistic fixture needs entries that
+# actually carry `@chroxy/*` ranges in all four dependency fields, plus:
+#   - a third-party range (negative control: must survive untouched)
+#   - a lookalike key nested under node_modules/ that also happens to start
+#     with "packages/" (packages/dashboard/node_modules/@chroxy/protocol) —
+#     the existing version-bump loop already excludes keys containing
+#     "/node_modules/"; this proves the NEW range-rewrite honors the same
+#     exclusion rather than matching by dependency name alone.
+test_lockfile_bumps_workspace_chroxy_dep_ranges() {
+  local dir
+  dir=$(mktemp -d)
+  trap "rm -rf '$dir'" RETURN
+  build_fake_repo "$dir" "0.5.7"
+  install_bump_script "$dir"
+  write_changelog "$dir/CHANGELOG.md" "0.5.7" "### Fixed
+
+- A real fix (#42)"
+
+  cat > "$dir/package-lock.json" <<'EOF'
+{
+  "name": "chroxy",
+  "version": "0.5.7",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "chroxy",
+      "version": "0.5.7",
+      "license": "MIT",
+      "workspaces": [
+        "packages/*"
+      ]
+    },
+    "packages/app": {
+      "name": "@chroxy/app",
+      "version": "0.5.7",
+      "dependencies": {
+        "@chroxy/protocol": "^0.5.7",
+        "@chroxy/store-core": "^0.5.7",
+        "expo": "^54.0.0"
+      }
+    },
+    "packages/server": {
+      "name": "@chroxy/server",
+      "version": "0.5.7",
+      "dependencies": {
+        "@chroxy/protocol": "^0.5.7",
+        "@chroxy/store-core": "^0.5.7",
+        "commander": "^12.1.0"
+      },
+      "devDependencies": {
+        "@chroxy/design-tokens": "^0.5.7"
+      }
+    },
+    "packages/store-core": {
+      "name": "@chroxy/store-core",
+      "version": "0.5.7",
+      "dependencies": {
+        "@chroxy/protocol": "^0.5.7"
+      },
+      "peerDependencies": {
+        "@chroxy/dashboard": "^0.5.7"
+      },
+      "optionalDependencies": {
+        "@chroxy/claude-hooks": "^0.5.7"
+      }
+    },
+    "packages/protocol": {
+      "name": "@chroxy/protocol",
+      "version": "0.5.7"
+    },
+    "packages/dashboard/node_modules/@chroxy/protocol": {
+      "version": "0.5.7",
+      "dependencies": {
+        "@chroxy/protocol": "^0.5.7"
+      }
+    }
+  }
+}
+EOF
+
+  (cd "$dir" && PATH="$NOCARGO_PATH" ./scripts/bump-version.sh 0.6.0) > /dev/null 2>&1 || {
+    echo "    bump-version.sh exited non-zero" >&2
+    return 1
+  }
+
+  local lock="$dir/package-lock.json"
+
+  # Guard the guard: the fixture must actually carry @chroxy/* ranges inside
+  # lock.packages["packages/<name>"] entries — a fixture with none would let
+  # the "no stale range" assertion below pass vacuously (it would iterate zero
+  # times and find zero stale ranges either way).
+  local chroxy_range_count
+  chroxy_range_count=$(node -e '
+    const fs = require("fs");
+    const lock = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));
+    let n = 0;
+    for (const key of Object.keys(lock.packages || {})) {
+      if (!key.startsWith("packages/") || key.includes("/node_modules/")) continue;
+      const entry = lock.packages[key];
+      for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+        for (const dep of Object.keys(entry[field] || {})) {
+          if (dep.startsWith("@chroxy/")) n++;
+        }
+      }
+    }
+    console.log(n);
+  ' "$lock" 2>/dev/null)
+  if [ -z "$chroxy_range_count" ] || [ "$chroxy_range_count" -le 0 ] 2>/dev/null; then
+    echo "    fixture lockfile has zero @chroxy/* ranges in packages[\"packages/<name>\"] entries — this case would pass vacuously" >&2
+    return 1
+  fi
+
+  # No @chroxy/* range in any workspace entry may still name the OLD version.
+  local stale
+  stale=$(node -e '
+    const fs = require("fs");
+    const lock = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));
+    const hits = [];
+    for (const key of Object.keys(lock.packages || {})) {
+      if (!key.startsWith("packages/") || key.includes("/node_modules/")) continue;
+      const entry = lock.packages[key];
+      for (const field of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+        for (const dep of Object.keys(entry[field] || {})) {
+          if (dep.startsWith("@chroxy/") && entry[field][dep] === "^0.5.7") {
+            hits.push(key + " " + field + "." + dep + "=" + entry[field][dep]);
+          }
+        }
+      }
+    }
+    console.log(hits.join("\n"));
+  ' "$lock")
+  [ -z "$stale" ] || {
+    echo "    stale @chroxy/* range(s) in the lockfile still name the old version (0.5.7) after bumping to 0.6.0:" >&2
+    echo "$stale" >&2
+    return 1
+  }
+
+  # Exact new value in at least one entry.
+  grep -q '"@chroxy/protocol": "\^0.6.0"' "$lock" || {
+    echo "    expected \"@chroxy/protocol\": \"^0.6.0\" somewhere in the lockfile" >&2
+    return 1
+  }
+
+  # Third-party range inside a rewritten entry is left alone.
+  grep -q '"commander": "\^12.1.0"' "$lock" || {
+    echo "    unrelated third-party range (commander) was disturbed" >&2
+    return 1
+  }
+
+  # Negative control: the node_modules-nested lookalike key (starts with
+  # "packages/" but contains "/node_modules/") must be excluded from the
+  # rewrite entirely, exactly like the existing version-bump loop excludes it
+  # — proving the new range-rewrite is scoped by KEY, not by dependency name.
+  node -e '
+    const fs = require("fs");
+    const lock = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));
+    const nested = lock.packages["packages/dashboard/node_modules/@chroxy/protocol"];
+    if (!nested) {
+      console.error("nested node_modules lookalike entry is missing entirely");
+      process.exit(1);
+    }
+    if (nested.version !== "0.5.7") {
+      console.error("nested lookalike entry version was rewritten: " + nested.version);
+      process.exit(1);
+    }
+    if (nested.dependencies["@chroxy/protocol"] !== "^0.5.7") {
+      console.error("nested lookalike entry dependency range was rewritten: " + nested.dependencies["@chroxy/protocol"]);
+      process.exit(1);
+    }
+  ' "$lock" || return 1
+}
+
+
 # --- CLAUDE.md / AGENTS.md version references (#7183) ------------------------
 
 # These two lines are the first thing a session reads about "what version is
@@ -1396,6 +1583,8 @@ run_test "Cargo.lock sync uses cargo when on PATH (no awk fallthrough)" \
   test_lockfile_uses_cargo_when_on_path
 run_test "bumps workspace @chroxy/* dependency ranges with the version" \
   test_bumps_workspace_chroxy_dep_ranges
+run_test "bumps @chroxy/* dependency ranges inside package-lock.json workspace entries too (#8159)" \
+  test_lockfile_bumps_workspace_chroxy_dep_ranges
 run_test "bumps the version references in CLAUDE.md" \
   test_bumps_claude_md_version_references
 run_test "bump still succeeds when CLAUDE.md is absent" \

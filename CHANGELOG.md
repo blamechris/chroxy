@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`scripts/bump-version.sh` now rewrites `@chroxy/*` dependency ranges inside
+  `package-lock.json`'s workspace entries too, not just the manifests (#8159).**
+  The script already re-pointed every workspace `package.json`'s `@chroxy/*`
+  ranges at the new version and bumped the `version` field of every
+  `package-lock.json` workspace entry (`packages["packages/<name>"]`), but left
+  those same entries' own `dependencies`/`devDependencies`/`peerDependencies`/
+  `optionalDependencies` ranges untouched. After a bump the lockfile disagreed
+  with the manifests — `npm ci` didn't catch it, since the linked workspace
+  package satisfies either range, but the lockfile was no longer what
+  `npm install --package-lock-only` would generate, so the next install
+  anywhere rewrote those lines as an unrelated diff (found by hand for 0.11.1,
+  #8157 — exactly 9 stale range lines). The lockfile rewrite now mirrors the
+  manifest rewrite's range construction exactly, and
+  `scripts/__tests__/bump-version.test.sh` gained a case asserting no
+  `@chroxy/*` range in the lockfile still names the old version after a bump,
+  guarded against passing vacuously if its fixture carried none to check.
+
 - **`scripts/bump-version.sh` now passes every path and the version string to
   `node -e` through the environment instead of splicing them into JS program
   text (#7237).** Every `node -e "..."` block — reading the current version,
