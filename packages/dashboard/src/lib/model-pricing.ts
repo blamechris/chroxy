@@ -39,8 +39,9 @@ const CLAUDE_PRICING: Record<string, ModelPricing> = {
   // path — Claude is not in CLIENT_ESTIMATED_COST_PROVIDERS, so Claude cost
   // stays server-authoritative; broader single-source tracked under #5631. The `[1m]`
   // long-context variants are also absent: this flat
-  // USD/1k table can't represent the >200K premium tier the server models in
-  // its `oneM.longContext` block (#4087), and no model carries a [1m] row here.
+  // USD/1k table can't represent a >200K premium tier like the one the server
+  // can model in a `oneM.longContext` block (#4087; no current Claude row has
+  // one since #7434), and no model carries a [1m] row here.
   // The drift-warn in calculateCost surfaces any offered-but-unpriced model.)
   'claude-opus-4-8': { inputPer1k: 0.005, outputPer1k: 0.025, label: 'Claude Opus 4.8' },
   'claude-sonnet-4-6': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude Sonnet 4.6' },
