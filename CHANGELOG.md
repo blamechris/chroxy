@@ -23,6 +23,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The server now reports `plan` permission mode as unsupported for every
+  provider that declares `capabilities.planMode: false` — claude-tui, codex
+  (app-server and legacy exec), claude-byok, gemini, and sdk-session — not
+  just claude-tui, so the mobile app's chip row disables it exactly where the
+  dashboard already hides it (#8090).** `getPermissionModes()`
+  (`handler-utils.js`) only special-cased `auto`/`autoPermissionMode`, so
+  `available_permission_modes` advertised `plan` as fully supported for every
+  one of those providers even though claude-tui's PreToolUse hook (and its
+  siblings) skip Chroxy's protected-path floor entirely in that mode (unlike
+  approve/acceptEdits/auto, which all route through it) — the raw PTY's own
+  prompt, invisible to the structured chat UI, was the only thing left
+  standing between a tool call and execution. The check follows
+  `capabilities.planMode` directly, the same capability-only rule the
+  dashboard has applied since #8087/#8084 (`showPlanMode: caps?.planMode !==
+  false`), so mobile and dashboard now agree for every provider instead of
+  only claude-tui. The mobile `SettingsBar` chip row already disables purely
+  from the server-sent `supported: false` flag, so no app change was needed
+  beyond a regression test. The fix is scoped to the advertised list only —
+  `assertProviderPermissionModeSupported`/`BaseSession.setPermissionMode()`
+  still accept `plan` on every provider regardless of `planMode` — so an
+  already-persisted `plan`-mode session on any of these providers restores
+  exactly as before instead of failing.
 - **Both clients' user-initiated Disconnect now clears the same transient
   streaming/plan state their socket-close handler already swept (#8148).**
   PR #8144 (#7411) taught `onclose` to sweep `streamingMessageId`/

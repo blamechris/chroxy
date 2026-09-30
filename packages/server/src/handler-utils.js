@@ -53,6 +53,40 @@ export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default).map((mode)
   ...getProviderPermissionModeSupport(undefined, mode.id),
 }))
 
+// #8090 — the advertised list follows `capabilities.planMode` directly, for
+// EVERY provider that declares it `false` (claude-tui, codex app-server/-exec,
+// byok, sdk-session, gemini, ...), not just claude-tui. This is the same rule
+// the dashboard has applied since #8087/#8084 — `showPlanMode: caps?.planMode
+// !== false` in `packages/dashboard/src/App.tsx`, consumed by
+// `CreateSessionModal.tsx` — so every client that trusts the server flag
+// (mobile, dashboard, any future client) agrees with the dashboard instead of
+// disagreeing per provider. An earlier version of this check special-cased
+// `provider === 'claude-tui'`; that made mobile disagree with the dashboard
+// for codex/byok/gemini/sdk-session, and is exactly the "hardcoded list
+// beside a growing set" shape docs/false-safety-guards.md catalogues as a
+// recurring defect class, so it was replaced with the plain capability check
+// below.
+//
+// This is intentionally NOT folded into `getProviderPermissionModeSupport()`
+// itself, which also feeds `assertProviderPermissionModeSupported`
+// (session-manager.js's create/restore chokepoint, BaseSession's
+// constructor) and `BaseSession.setPermissionMode()`. Those three
+// deliberately keep accepting `plan` on every provider regardless of
+// `planMode` — see claude-tui-session.test.js's "setPermissionMode no-ops
+// cleanly when sidecar path is null" (asserts a direct
+// `setPermissionMode('plan')` call still updates state on claude-tui) and
+// this file's own "keeps Approve, Accept Edits, and Plan available" test
+// (codex app-server stays constructible with `permissionMode: 'plan'`) — so a
+// capability check in the shared function would throw there, and would also
+// turn boot restore of any already-persisted `plan`-mode session, on ANY of
+// these providers, into a failed "needs attention" restore over what is
+// really just an advertising correction (nothing has ever gated `plan` at
+// create/restore time). So a persisted or restored plan-mode session is
+// never broken by this fix, on claude-tui or any other provider.
+function isPlanModeUnsupported(ProviderClass, modeId) {
+  return modeId === 'plan' && ProviderClass?.capabilities?.planMode === false
+}
+
 /**
  * The permission-mode list with descriptions tuned to the given provider (#6638).
  * Codex gets codex-specific copy; everything else gets the default. The mode IDs
@@ -63,12 +97,16 @@ export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default).map((mode)
 export function getPermissionModes(provider, ProviderClass) {
   const modes = provider === 'codex' ? buildModes(MODE_DESCRIPTIONS.codex) : buildModes(MODE_DESCRIPTIONS.default)
   return modes.map((mode) => {
-    const support = getProviderPermissionModeSupport(ProviderClass, mode.id)
+    const support = isPlanModeUnsupported(ProviderClass, mode.id)
+      ? { supported: false, enforcement: 'unsupported' }
+      : getProviderPermissionModeSupport(ProviderClass, mode.id)
     if (!support.supported) {
       return {
         ...mode,
         label: `${mode.label} (unavailable)`,
-        description: 'Unavailable for this provider: its adapter cannot intercept protected-path or secret-read actions before execution.',
+        description: mode.id === 'plan'
+          ? 'Unavailable for this provider: it has no plan mode, so tool calls are not restricted to read-only.'
+          : 'Unavailable for this provider: its adapter cannot intercept protected-path or secret-read actions before execution.',
         ...support,
       }
     }
