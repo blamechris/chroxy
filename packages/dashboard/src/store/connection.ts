@@ -424,6 +424,54 @@ function clearAllSessionPendingTrustGrants(
   return cleaned;
 }
 
+/**
+ * #7411/#8148 — pure per-session patch shared by BOTH the socket-close
+ * handler (transport drop) and the user-initiated `disconnect()` path. A
+ * single function so the two sweeps can't drift apart on which fields count
+ * as "transient" the way the app/dashboard onclose sweeps already drifted
+ * once (#7411) — `disconnect()` nulls `socket.onclose` to suppress
+ * auto-reconnect, so onclose's sweep never runs on a user-initiated
+ * disconnect, and #8148 found `disconnect()` never got its own equivalent.
+ *
+ * Clears:
+ * - `streamingMessageId`/`isPlanPending`/`planAllowedPrompts` — single
+ *   sourced in `@chroxy/store-core` (`TRANSIENT_SESSION_SWEEP_FIELDS`),
+ *   shared with the app.
+ * - `pendingEvaluatorClarify` — dashboard-only (#3188); the server re-fires
+ *   `evaluator_clarify` on the next user_input cycle if the verdict is
+ *   still clarify.
+ * - `inactivityWarning` — the server does NOT replay `inactivity_warning`
+ *   on reconnect (#3899), so a stale chip would otherwise point at nothing.
+ * - `sessionRole`/`primaryClientId` — the server re-emits `session_role` on
+ *   reconnect/tab-switch (#5623), so a null role in the meantime reads as
+ *   "unclaimed" rather than a stale "Observing"/driver badge.
+ *
+ * Pure shape: returns `{}` when nothing needs clearing, so `updateSession`
+ * (the only caller, via `sweepTransientSessionState` below) can skip the
+ * store write for an already-clean session.
+ */
+function clearTransientSessionStatePatch(ss: SessionState): Partial<SessionState> {
+  const patch: Partial<SessionState> = clearSharedTransientStreamAndPlanState(ss);
+  if (ss.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
+  if (ss.inactivityWarning) patch.inactivityWarning = null;
+  if (ss.sessionRole !== null) patch.sessionRole = null;
+  if (ss.primaryClientId !== null) patch.primaryClientId = null;
+  return patch;
+}
+
+/**
+ * #7411/#8148 — sweep `clearTransientSessionStatePatch` across EVERY
+ * session in the store. Used by both `socket.onclose` (transport drop) and
+ * the user-initiated `disconnect()` — see `clearTransientSessionStatePatch`
+ * for what it clears and why a single shared sweep (not a duplicated loop)
+ * matters here.
+ */
+function sweepTransientSessionState(get: () => ConnectionState): void {
+  for (const sid of Object.keys(get().sessionStates)) {
+    updateSession(sid, clearTransientSessionStatePatch);
+  }
+}
+
 export const selectShowSession = (s: ConnectionState): boolean =>
   s.connectionPhase !== 'disconnected' || s.viewingCachedSession;
 
@@ -3022,51 +3070,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
-      // #5731 T4: clear transient state for EVERY session, not just the
-      // active one. A background tab mid-stream otherwise keeps its
+      // #5731 T4 / #8148: clear transient state for EVERY session, not just
+      // the active one. A background tab mid-stream otherwise keeps its
       // `streamingMessageId` (a phantom "thinking" bubble), pending plan,
       // inactivity chip, or clarify question across the drop —
       // `handleSessionSwitched` then surfaces that stale state when the
-      // user switches to the tab post-reconnect. `updateSession` syncs the
-      // active session's flat-state mirror for us, and is a no-op for any
-      // session that returns an empty patch.
-      const clearTransientSessionState = (
-        ss: SessionState,
-      ): Partial<SessionState> => {
-        // #7411: streamingMessageId/isPlanPending/planAllowedPrompts are
-        // now single-sourced in @chroxy/store-core so the app's onclose
-        // sweep can't drift from this one again — it previously only swept
-        // the active session for this trio.
-        const patch: Partial<SessionState> = clearSharedTransientStreamAndPlanState(ss);
-        // #3188: pendingEvaluatorClarify is explicitly transient — the
-        // server re-fires `evaluator_clarify` on the next user_input
-        // cycle if the verdict is still clarify. Clearing here keeps the
-        // contract: a reconnect drops any in-flight clarify question
-        // rather than leaving it on screen with stale state.
-        if (ss.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
-        // #3899: same contract for the inactivity check-in chip — the
-        // server does NOT replay `inactivity_warning` on reconnect, so
-        // a chip left over from before the drop would point at stale
-        // state. Clear it; if the agent is still quiet post-reconnect,
-        // the next soft-timeout firing will re-emit the warning.
-        if (ss.inactivityWarning) patch.inactivityWarning = null;
-        // #5623: clear the presence role on disconnect so a stale
-        // "Observing" / driver badge doesn't persist through the
-        // reconnect gap. #5737 added the server-side re-emit, but the
-        // client never reset its own copy — so the old role survived
-        // the drop (and `ObserverBanner`'s a11y alert re-announced a
-        // soon-to-be-cleared "Observing" on every reconnect). The
-        // server re-emits `session_role` on reconnect/tab-switch, so
-        // the correct role re-establishes once the socket is back; a
-        // null role in the meantime reads as "unclaimed" (neutral),
-        // not a false "you're observing".
-        if (ss.sessionRole !== null) patch.sessionRole = null;
-        if (ss.primaryClientId !== null) patch.primaryClientId = null;
-        return Object.keys(patch).length > 0 ? patch : {};
-      };
-      for (const sid of Object.keys(get().sessionStates)) {
-        updateSession(sid, clearTransientSessionState);
-      }
+      // user switches to the tab post-reconnect. Shared with the
+      // user-initiated `disconnect()` path below via
+      // `sweepTransientSessionState` (#8148) so the two sweeps can't drift
+      // apart again the way the app/dashboard onclose sweeps once did
+      // (#7411) — see `clearTransientSessionStatePatch` for what it clears.
+      sweepTransientSessionState(get);
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && !get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
@@ -3212,6 +3226,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setPendingKeyPair(null);
     // Clear message queue on explicit disconnect
     clearMessageQueue();
+    // #8148: same sweep as socket.onclose (see `sweepTransientSessionState`'s
+    // docstring). `disconnect()` nulls `socket.onclose` above to suppress
+    // auto-reconnect, so onclose's sweep never runs on a user-initiated
+    // disconnect — without this, a background session mid-stream (or with a
+    // pending plan / clarify question / stale role) would keep that state
+    // through the next connect. Must run BEFORE `cleanedSessionStates` below
+    // is computed so this sweep's per-session writes land in the same final
+    // `sessionStates` patch rather than being clobbered by it.
+    sweepTransientSessionState(get);
     // #3588: clear in-flight skill_trust_grant requests per session.
     // The WS request would be stale on reconnect anyway, and a stuck
     // entry would leave the SkillsPanel "Pending review" Trust button

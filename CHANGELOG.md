@@ -23,6 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Both clients' user-initiated Disconnect now clears the same transient
+  streaming/plan state their socket-close handler already swept (#8148).**
+  PR #8144 (#7411) taught `onclose` to sweep `streamingMessageId`/
+  `isPlanPending`/`planAllowedPrompts` across every session, but explicitly
+  left `disconnect()` alone on both clients — a real gap, not something
+  reconnect logic papers over, because `disconnect()` nulls `socket.onclose`
+  before closing the socket, so onclose's sweep never runs on a
+  user-initiated disconnect. A background session mid-stream (or with a
+  pending plan) kept its phantom "thinking" bubble / stale plan through the
+  next connect. The app's `disconnect()` now makes the same
+  `clearStreamingAndPlanStateAcrossSessions(get)` call `onclose` already
+  does; the dashboard's `onclose` sweep is now a shared
+  `sweepTransientSessionState` helper that `disconnect()` calls too, so it
+  additionally clears `pendingEvaluatorClarify` and the presence role
+  (`sessionRole`/`primaryClientId`) on disconnect, matching its own onclose
+  sweep exactly.
 - **The mobile app's socket-close handler no longer strands a phantom
   "thinking" bubble or a stale pending plan on a background session across a
   reconnect (#7411).** The dashboard has swept transient state
