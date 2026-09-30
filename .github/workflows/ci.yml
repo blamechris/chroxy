@@ -372,6 +372,7 @@ jobs:
     outputs:
       platform: ${{ steps.filter.outputs.platform }}
       renovate: ${{ steps.filter.outputs.renovate }}
+      docker: ${{ steps.filter.outputs.docker }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -399,6 +400,22 @@ jobs:
               # catching it before merge. That is exactly how it accumulated the
               # deprecated regexManagers/fileMatch spelling #7191 had to fix.
               - 'renovate.json'
+              - '.github/workflows/ci.yml'
+            docker:
+              # #8133 — everything the root Dockerfile's image is built from.
+              # The packages/* entries mirror .dockerignore's whitelist. A NEW
+              # workspace import still triggers the job, because it has to
+              # land in packages/server/src, and the smoke script derives the
+              # imports it checks from there rather than from a list.
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'scripts/docker-entrypoint.sh'
+              - 'scripts/docker-image-smoke.sh'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'packages/server/**'
+              - 'packages/protocol/**'
+              - 'packages/store-core/**'
               - '.github/workflows/ci.yml'
 
   server-tests-windows:
@@ -1543,6 +1560,36 @@ jobs:
         run: |
           npx --yes --package "renovate@${RENOVATE_VERSION}" -- \
             renovate-config-validator --strict renovate.json
+
+  docker-image:
+    name: Docker Image
+    # #8133 — build the root Dockerfile and smoke-start the image. The image
+    # shipped for months unable to start (the server's @chroxy/* workspace
+    # imports resolved to nothing inside it) because nothing ever built it.
+    # scripts/docker-image-smoke.sh checks that every @chroxy/* specifier the
+    # server imports resolves in the image, then that the entrypoint's `start`
+    # passes the image's own HEALTHCHECK. It runs the same way locally.
+    #
+    # PR-only, like Renovate Config: `changes` runs on pull_request events
+    # only, so a push to main skips this job.
+    #
+    # Always GitHub-hosted: `docker build` needs a Docker daemon. GitHub's
+    # ubuntu-24.04 image ships one; the self-hosted pool's members are
+    # themselves Docker containers, and nothing here establishes that they
+    # expose a daemon. ubuntu-24.04 is a standard label (free for this public
+    # repo, see LONG JOBS ON GITHUB-HOSTED RUNNERS in the header).
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-24.04  # always GitHub-hosted — needs a Docker daemon (see above)
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build image
+        run: docker build -t chroxy:ci .
+
+      - name: Smoke-start image
+        run: bash scripts/docker-image-smoke.sh chroxy:ci
 
   scripts-tests:
     name: Scripts Tests

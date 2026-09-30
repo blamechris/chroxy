@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Docker image can load the server again (#8133).** The root
+  `Dockerfile` copied only `packages/server/` into the image, and
+  `.dockerignore` whitelisted nothing else. But the server imports two sibling
+  workspace packages at runtime, `@chroxy/protocol` and
+  `@chroxy/store-core/crypto`, and `npm ci` links
+  `node_modules/@chroxy/<name>` to `packages/<name>`. Those links pointed at
+  nothing, so every `start` died on `ERR_MODULE_NOT_FOUND` right after the
+  entrypoint wrote its config. The image now copies each package's
+  `package.json` (its exports map) and its committed `dist/`. They are copied
+  after `npm ci`, because a workspace manifest present at install time makes
+  npm run its `prepare` (`tsc`) script even under `--ignore-scripts`. The stub
+  `packages/app/package.json` also loses its stale hardcoded version. Nothing
+  ever built the image, which is how this went unnoticed. A new path-filtered
+  `Docker Image` CI job now builds it and runs `scripts/docker-image-smoke.sh`:
+  every `@chroxy/*` import the server makes (read from its source, not from a
+  list) must resolve inside the image, and the entrypoint's `start` must pass
+  the image's own HEALTHCHECK. The smoke run passes `--skip-checks` until the
+  image ships a `claude` CLI (#8145).
 - **A straggling survey from a pruned session can no longer write its stale
   reading into a reused session id's new record (#8094).** The shared
   per-session survey throttle (`survey-throttle.js`) orders a write-through

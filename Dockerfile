@@ -24,14 +24,28 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/server/package.json packages/server/
 
-# Stub app package.json so npm workspace resolution succeeds
-RUN mkdir -p packages/app && echo '{"name":"@chroxy/app","version":"0.2.0","private":true}' > packages/app/package.json
+# Stub app package.json so npm workspace resolution succeeds. No version field:
+# npm ci does not compare it, and a hardcoded one only goes stale.
+RUN mkdir -p packages/app && echo '{"name":"@chroxy/app","private":true}' > packages/app/package.json
 
 # Install server dependencies only (skip native compilation for optional deps)
 RUN npm ci --workspace=@chroxy/server --omit=dev --ignore-scripts
 
 # Copy server source
 COPY packages/server/ packages/server/
+
+# #8133 — the server imports two sibling workspace packages at runtime
+# (@chroxy/protocol, @chroxy/store-core/crypto). `npm ci` links
+# node_modules/@chroxy/<name> -> packages/<name>, so both directories must exist
+# in the image or the links dangle and `start` dies with ERR_MODULE_NOT_FOUND.
+# Each needs only its package.json (the exports map) and its committed dist/.
+# They are copied AFTER npm ci on purpose: with a workspace's package.json
+# present, npm ci runs its `prepare` script (`tsc`) even under
+# --ignore-scripts, and the image has no TypeScript toolchain.
+COPY packages/protocol/package.json packages/protocol/
+COPY packages/protocol/dist/ packages/protocol/dist/
+COPY packages/store-core/package.json packages/store-core/
+COPY packages/store-core/dist/ packages/store-core/dist/
 
 # Copy and prepare entrypoint
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
