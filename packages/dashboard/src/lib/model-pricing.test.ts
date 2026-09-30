@@ -202,8 +202,8 @@ describe('MODEL_PRICING table integrity', () => {
     }
     // Rates mirror the server's authoritative table (USD/Mtok → USD/1k).
     // #6233: Opus head is opus-4-8 since the registry bump (#6219).
-    expect(MODEL_PRICING['claude-opus-4-8']!.inputPer1k).toBe(0.015)
-    expect(MODEL_PRICING['claude-opus-4-8']!.outputPer1k).toBe(0.075)
+    expect(MODEL_PRICING['claude-opus-4-8']!.inputPer1k).toBe(0.005)
+    expect(MODEL_PRICING['claude-opus-4-8']!.outputPer1k).toBe(0.025)
     expect(MODEL_PRICING['claude-sonnet-4-6']!.inputPer1k).toBe(0.003)
     expect(MODEL_PRICING['claude-sonnet-4-6']!.outputPer1k).toBe(0.015)
     expect(MODEL_PRICING['claude-haiku-4-5']!.inputPer1k).toBe(0.001)

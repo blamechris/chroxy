@@ -33,13 +33,13 @@ describe('claude-model-catalog (#6201 OCP characterization)', () => {
       input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75,
     })
     assert.deepEqual(CLAUDE_PRICING_USD_PER_MTOK['claude-opus-4-8'], {
-      input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
+      input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25,
     })
     assert.deepEqual(CLAUDE_PRICING_USD_PER_MTOK['claude-opus-4-8[1m]'], {
-      input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
+      input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25,
       longContext: {
         thresholdInputTokens: 200_000,
-        input: 30.00, output: 150.00, cacheRead: 3.00, cacheWrite: 37.50,
+        input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25,
       },
     })
     assert.deepEqual(CLAUDE_PRICING_USD_PER_MTOK['claude-haiku-4-5'], {
@@ -154,22 +154,22 @@ describe('claude-model-catalog (#6201 OCP characterization)', () => {
 
   describe('end-to-end cost through computePromptCostUsd (relocation is pure)', () => {
     it('bills a sub-threshold opus turn at base rates', () => {
-      // 1M input + 1M output at base opus → 1*15.00 + 1*75.00 = 90.00.
+      // 1M input + 1M output at base opus → 1*5.00 + 1*25.00 = 30.00.
       const cost = computePromptCostUsd(
         { input_tokens: 1_000_000, output_tokens: 1_000_000 },
         CLAUDE_PRICING_USD_PER_MTOK['claude-opus-4-8'],
       )
-      assert.ok(Math.abs(cost - 90.00) < 1e-6, `got ${cost}`)
+      assert.ok(Math.abs(cost - 30.00) < 1e-6, `got ${cost}`)
     })
 
-    it('bills an over-threshold opus[1m] turn at the 2× longContext premium (#4087)', () => {
-      // 300K input (>200K threshold) + 100K output at the premium tier →
-      // 0.3*30.00 + 0.1*150.00 = 9.00 + 15.00 = 24.00.
+    it('bills an over-threshold opus[1m] turn at flat rates (no >200K premium)', () => {
+      // 300K input (>200K threshold) + 100K output at flat rate (Opus 4.8 has no
+      // long-context premium) → 0.3*5.00 + 0.1*25.00 = 1.50 + 2.50 = 4.00.
       const cost = computePromptCostUsd(
         { input_tokens: 300_000, output_tokens: 100_000 },
         CLAUDE_PRICING_USD_PER_MTOK['claude-opus-4-8[1m]'],
       )
-      assert.ok(Math.abs(cost - 24.00) < 1e-6, `got ${cost}`)
+      assert.ok(Math.abs(cost - 4.00) < 1e-6, `got ${cost}`)
     })
   })
 

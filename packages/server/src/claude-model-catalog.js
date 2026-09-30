@@ -124,17 +124,18 @@ const MODEL_METADATA = Object.freeze([
   }),
   Object.freeze({
     shortId: 'opus', label: 'Opus', fullId: 'claude-opus-4-8',
-    pricing: { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
-    // #4087 — long-context (>200K input) premium tier. Below the 200K
-    // threshold the rates match the base entry; above it the published premium
-    // is a uniform 2× across all four rates. Today only Opus 4.x has a 1M
-    // variant in chroxy's set (resolveClaudeContextWindow). Verify against the
-    // Anthropic pricing page on the next periodic check.
+    pricing: { input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25 },
+    // Opus 4.8 bills FLAT — no >200K premium. 1M context window at standard
+    // API pricing (no long-context premium). Like Fable, this is a 1M model
+    // so updateModels synthesizes a `claude-opus-4-8[1m]` chip; ship an explicit
+    // `oneM` block whose `longContext` equals the base rates to keep [1m] cost
+    // correct AND carry the `longContext` key the #4106 drift guard requires.
+    // Source: https://platform.claude.com/docs/en/about-claude/pricing (2026-09-29)
     oneM: {
-      input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
+      input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25,
       longContext: {
         thresholdInputTokens: 200_000,
-        input: 30.00, output: 150.00, cacheRead: 3.00, cacheWrite: 37.50,
+        input: 5.00, output: 25.00, cacheRead: 0.50, cacheWrite: 6.25,
       },
     },
   }),
@@ -142,8 +143,8 @@ const MODEL_METADATA = Object.freeze([
   // banned it as a preview). 1M context (set explicitly; the fullId does not
   // match the opus-version heuristic, which would wrongly default it to 200k).
   // Rates: Anthropic API reference ($10/$50 in/out); cache at the standard
-  // 0.1x read / 1.25x write. Fable bills FLAT — no >200K premium (unlike Opus
-  // 4.x) — but it IS a 1M model, so updateModels synthesizes a `claude-fable-5[1m]`
+  // 0.1x read / 1.25x write. Fable bills FLAT — no >200K premium (Opus 4.8 is
+  // flat too since #7434) — but it IS a 1M model, so updateModels synthesizes a `claude-fable-5[1m]`
   // chip. Ship an explicit `oneM` block whose `longContext` equals the base rates:
   // it keeps [1m] cost correct AND carries the `longContext` key the #4106 drift
   // guard (models.js) requires, so the guard does not falsely warn "bills may lie"
