@@ -101,6 +101,7 @@ import { ViewSwitcher } from './components/ViewSwitcher'
 import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER, thinkingLevelOptions } from '@chroxy/protocol'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, persistTurnCompleteNotification, loadPersistedTurnCompleteNotification, persistCompactChatFilter, loadPersistedCompactChatFilter, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
+import { repoDisplayName } from './utils/repoLabel'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
@@ -174,6 +175,13 @@ export function App() {
   // then to undefined.
   const activeSessionCwd = useConnectionStore(s =>
     s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.cwd ?? null,
+  )
+  // #8123: the active session's original repo dir (worktree-isolated
+  // sessions only), so the FooterBar cwd breadcrumb can show the repo name
+  // instead of the opaque `~/.chroxy/worktrees/<hex>` basename — same field
+  // #7328 already threads into the SessionBar tab badge.
+  const activeSessionRepoCwd = useConnectionStore(s =>
+    s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.repoCwd ?? null,
   )
   // #4603: active session's provider name (e.g. `'claude-sdk'`,
   // `'claude-cli'`) so the StreamStallChip can prefix its headline
@@ -1676,14 +1684,24 @@ export function App() {
   const sidebarRepos: RepoNode[] = useMemo(() => {
     const repoMap = new Map<string, RepoNode>()
 
-    // Group active sessions by cwd (skip sessions without a cwd)
+    // Group active sessions by repo (skip sessions without a cwd).
+    // #8123: the group KEY is `repoCwd` when the session is worktree-isolated,
+    // falling back to `cwd` otherwise — not raw `cwd` unconditionally. Before
+    // this, every worktree session's opaque `~/.chroxy/worktrees/<hex>` cwd
+    // formed its OWN group, so a repo's normal and worktree sessions never
+    // appeared together and the grouping's whole purpose was lost. `repo.path`
+    // (this key) also feeds "new session in this repo" (Sidebar's `+` button)
+    // and drag/collapse state, so a worktree-grouped repo's new-session action
+    // now targets the real repo dir instead of a worktree path — the more
+    // useful behaviour, not just a side effect.
     for (const s of sessions) {
       if (!s.cwd) continue
-      let repo = repoMap.get(s.cwd)
+      const groupKey = s.repoCwd || s.cwd
+      let repo = repoMap.get(groupKey)
       if (!repo) {
-        const name = s.cwd.split('/').pop() || s.cwd
-        repo = { path: s.cwd, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
-        repoMap.set(s.cwd, repo)
+        const name = repoDisplayName(s.cwd, s.repoCwd)
+        repo = { path: groupKey, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
+        repoMap.set(groupKey, repo)
       }
       repo.activeSessions.push({
         sessionId: s.sessionId,
@@ -1716,6 +1734,17 @@ export function App() {
     // tail). Sessions within each repo are reordered by the per-repo
     // saved order. `applyOrderById` keeps unsaved sessions / repos at
     // the end so newly-created entries don't shuffle the existing list.
+    //
+    // #8123 migration note: `sidebarRepoOrder` / `sidebarSessionOrder[path]`
+    // entries saved before this change are keyed by the OLD group key (a
+    // worktree session's raw hex cwd). Since that key can no longer appear
+    // as a `repo.path` (the group key is now `repoCwd || cwd`), those old
+    // entries just never match anything — `applyOrderById` already silently
+    // drops unmatched saved ids and appends the real (now-merged) group at
+    // its natural position. No explicit migration step is needed; the old
+    // per-worktree order entry is simply dead weight that ages out the next
+    // time the user drags that repo group (which re-persists under the new
+    // key).
     const ordered = applyOrderById([...repoMap.values()], sidebarRepoOrder, r => r.path)
     return ordered.map(repo => {
       const savedSessionOrder = sidebarSessionOrder[repo.path]
@@ -3159,6 +3188,9 @@ export function App() {
         tunnelProgress={tunnelProgress}
         serverVersion={serverVersion}
         cwd={activeSessionCwd ?? sessionCwd ?? undefined}
+        // #8123: only meaningful for the active-session cwd above (no
+        // equivalent field on the auth_ok-time `sessionCwd` fallback).
+        repoCwd={activeSessionCwd != null ? activeSessionRepoCwd : undefined}
         model={activeModel || undefined}
         cost={sessionCost ?? undefined}
         context={formatContext(contextOccupancy)}

@@ -40,6 +40,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dashboard: worktree sessions show and group by their repo on the
+  sidebar, footer, and file tree — not the opaque worktree-hex basename
+  (#8123, follow-up to #7328).** #7328 fixed the SessionBar tab-cwd badge so
+  a worktree-isolated session (whose `cwd` is `~/.chroxy/worktrees/<32-char
+  hex>`) shows the repo name via `repoCwd` (already threaded on every
+  `session_list` entry); its thread flagged three more sites leaking the
+  same hex. `packages/dashboard/src/utils/repoLabel.ts`'s `repoDisplayName`
+  is now the ONE shared derivation all four surfaces call:
+  - **Sidebar repo group (`App.tsx`'s `sidebarRepos`).** The worst of the
+    four — sessions were grouped BY `cwd`, so every worktree session formed
+    its own hex-named group instead of joining its repo's other sessions,
+    defeating the grouping's purpose. The group key is now `repoCwd || cwd`;
+    a repo's normal and worktree sessions now appear under one group named
+    after the repo. `repo.path` (the group key) also feeds "new session in
+    this repo" and the per-repo drag-order/collapse state — a worktree
+    group's new-session action now targets the real repo directory instead
+    of a worktree path, and stale per-worktree order entries saved under the
+    old (pre-fix) key simply age out (`applyOrderById` already drops
+    unmatched saved ids and appends the merged group at its natural
+    position) rather than needing an explicit migration.
+  - **Footer cwd breadcrumb (`FooterBar.tsx`).** Its own, differently-shaped
+    `abbreviateCwd` (last 2 path segments, not SessionBar's 1) predates
+    `repoLabel.ts` and is intentionally different, so `repoDisplayName`
+    gained an optional `fallback` parameter — the footer passes its own
+    last-2-segments function, sharing only the worktree-repo-name part while
+    a plain session's display is byte-identical to before.
+  - **File-tree root label (`fileTreeLogic.ts`'s `buildBreadcrumbs`).** A
+    new optional `rootLabel` parameter overrides the root crumb's LABEL
+    only; its `path` always stays derived from `rootPath`, so a worktree
+    session's file tree shows the repo name at the root while breadcrumb
+    navigation still targets the real worktree directory.
+  `packages/app` was checked for the same leak and does not share this fix —
+  see the follow-up note below.
+
 - **`release.yml` smokes the Docker image before pushing it (#8150).** The
   `docker` job built the root Dockerfile with `docker/build-push-action`,
   `push: true`, and pushed straight to GHCR — nothing in the job ever

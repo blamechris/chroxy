@@ -41,3 +41,26 @@ describe('repoDisplayName (#7328)', () => {
     expect(repoDisplayName(undefined, null)).toBe('')
   })
 })
+
+// #8123 — the sidebar repo group, footer cwd, and file-tree root label all
+// reuse this same function instead of growing their own copy. The footer's
+// pre-existing (and intentionally different) fallback shape — last 2 path
+// segments, not 1 — is threaded through as an optional `fallback`, so the
+// worktree-repo-name PART is shared while each surface's own non-worktree
+// display rule is preserved.
+describe('repoDisplayName with a custom fallback (#8123)', () => {
+  const lastTwoSegments = (cwd: string) => cwd.split('/').slice(-2).join('/')
+
+  it('uses the custom fallback instead of the default single-segment one when repoCwd is absent', () => {
+    expect(repoDisplayName('/Users/me/Projects/chroxy', null, lastTwoSegments)).toBe('Projects/chroxy')
+  })
+
+  it('still prefers the repo name over the custom fallback when repoCwd is present', () => {
+    const cwd = '/Users/me/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e'
+    expect(repoDisplayName(cwd, '/Users/me/Projects/chroxy', lastTwoSegments)).toBe('chroxy')
+  })
+
+  it('defaults to the single-segment fallback when no fallback is passed (unchanged pre-#8123 signature)', () => {
+    expect(repoDisplayName('/Users/me/Projects/chroxy', null)).toBe('chroxy')
+  })
+})
