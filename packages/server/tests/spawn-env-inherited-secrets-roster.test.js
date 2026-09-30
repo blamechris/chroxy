@@ -85,6 +85,7 @@ import { withEnv } from './test-helpers.js'
 import { buildSpawnEnv } from '../src/utils/spawn-env.js'
 import { defaultBuildEnv } from '../src/statusline.js'
 import { buildSafeBashEnv } from '../src/byok-tool-executor.js'
+import { stripComments } from '../scripts/lib/strip-comments.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SRC_DIR = join(__dirname, '..', 'src')
@@ -173,16 +174,27 @@ const COPY_PATTERNS = [
   ['direct env: process.env reference (no copy)', DIRECT_ENV_REF_RE],
 ]
 
-function stripComments(source) {
-  // Block comments (incl. JSDoc) first, then line comments. Good enough for
-  // this repo's own source (not a general-purpose parser) — the false
-  // positive this exists to avoid is a JSDoc line that quotes a pattern in
-  // prose (byok-mcp-trust.js references byok-mcp-client.js's shape in its
-  // header comment without containing the code itself).
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
-}
+// #8142: this file used to hand-roll its own stripComments as a two-pass
+// regex (`/\*[\s\S]*?\*\//g` then `//[^\n]*`). The block-comment pass had no
+// concept of a string, a template literal, or a regex literal — it just
+// scanned raw text for the next `/*`...`*/` pair anywhere. byok-tool-executor.js
+// quotes glob patterns in backtick-quoted prose (`` `node_modules/**` ``,
+// `` `**/*.ts` ``), which contain the literal substring `/**`; the regex read
+// that as a block-comment OPEN and hunted forward (non-greedy) for the next
+// `*/` — often another glob's own `**/` much later in the file — deleting
+// ~76% of the file's real text, including a `try {` whose paired `finally {`
+// survived (a real parser rejects the result outright: `'try' expected`).
+// `stripComments` (from `scripts/lib/strip-comments.mjs`, already used by
+// every lint in this package) replaces both regex passes with a real
+// `ts.createSourceFile` parse: it blanks only genuine comment trivia to
+// spaces (preserving length and line numbers), leaving every string,
+// template literal, and regex literal exactly as written — there is no
+// "next `/*`-like substring" for it to misread, because it is never looking
+// for one; it walks the parser's own comment ranges instead.
+//
+// (The static check below it, `stripAppliedToItsOwnReturnValue`, was already
+// switched from a hand-rolled brace scanner to `ts.createSourceFile` in
+// #8140/#8141 — this file has no remaining hand-rolled scanner.)
 
 /** Does this (comment-stripped) source text contain ANY known copy-spelling? */
 function matchesFullEnvCopy(code) {
@@ -204,7 +216,7 @@ function discoverFullEnvCopiers() {
   for (const absPath of listJsFiles(SRC_DIR)) {
     const relPath = relative(SRC_DIR, absPath).split('\\').join('/') // POSIX-normalize for Windows
     const raw = readFileSync(absPath, 'utf8')
-    const code = stripComments(raw)
+    const code = stripComments(raw, absPath)
     if (matchesFullEnvCopy(code)) {
       found.push({ relPath, code })
     }
@@ -510,6 +522,200 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
       'these EXEMPT entries no longer match any discovered full-env copier ' +
       '(the file was fixed, renamed, or no longer copies the full env) — ' +
       'remove the stale exemption instead of leaving it describing nothing',
+    )
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// Oracle: stripComments must be a faithful, token-preserving pass over every
+// file the roster actually scans (#8142)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// discoverFullEnvCopiers() (and, downstream, stripAppliedToItsOwnReturnValue)
+// only ever sees a file through stripComments' eyes. #8142 is what happens
+// when that lens itself is broken: discovery and the static check both kept
+// landing on the right answer for byok-tool-executor.js today only because
+// the one real strip call in that file sits before the corruption started —
+// three-quarters of the file's actual text was never seen by either check,
+// invisible in exactly the "checked a corrupted representation of the
+// artifact instead of the real one" shape docs/false-safety-guards.md
+// catalogues. A checker this load-bearing needs its OWN proof, independent of
+// stripComments' own implementation, or a future regression here is silently
+// invisible again.
+//
+// The independent proof is the real parser's own AST, built twice per file —
+// once over the RAW source, once over stripComments' output — and compared
+// two ways:
+//   1. the stripped source must still PARSE, with zero syntax diagnostics
+//      (`sourceFile.parseDiagnostics`) — a corrupted strip does not merely
+//      risk a wrong verdict, it can produce text a real parser rejects
+//      outright (byok-tool-executor.js's `'try' expected` under the old
+//      regex).
+//   2. every non-trivia LEAF token in the raw AST — comments are trivia and
+//      never appear as nodes at all, so this is "the original, minus
+//      comments" without stripComments ever being asked to produce it — must
+//      appear, in the same order, in the stripped AST's leaf tokens. JSDoc
+//      pseudo-nodes (SyntaxKind 310-352) are excluded from both sides: they
+//      are prose TypeScript happens to parse into real tree nodes for plain
+//      `.js` files, not code, and would otherwise make a comment-only file
+//      "disappear" out from under this check by counting its own doc
+//      comments as tokens on the raw side alone. `EndOfFileToken` is likewise
+//      excluded on both sides — it is a sentinel, not a token, and how many
+//      of them a parse produces is an internal trivia-bookkeeping detail
+//      (measured: 1 vs 2 for a comment-only file) with no code-content
+//      meaning either check cares about.
+//
+// This is deliberately NOT a comparison against stripComments' own internal
+// comment-range machinery — that would just be the module checking its
+// agreement with itself. The real parser's AST is asked twice, independently,
+// once per input; a stripComments defect that deletes or leaks real code
+// shows up as a genuine divergence between the two asks, not as a tautology.
+describe('oracle: stripComments is a faithful, token-preserving pass over every file the roster scans (#8142)', () => {
+  const scannedFiles = listJsFiles(SRC_DIR)
+
+  it('floor: the walk actually found files to check (a zero-file scan would make every check below vacuously pass)', () => {
+    assert.ok(
+      scannedFiles.length > 0,
+      `listJsFiles(SRC_DIR) found no files under ${SRC_DIR} — the walk is broken, and an empty set would satisfy both oracle checks below for the wrong reason`,
+    )
+  })
+
+  it('every scanned file still parses with zero syntax diagnostics after stripComments', () => {
+    const broken = []
+    for (const absPath of scannedFiles) {
+      const relPath = relative(SRC_DIR, absPath).split('\\').join('/')
+      const raw = readFileSync(absPath, 'utf8')
+      const stripped = stripComments(raw, absPath)
+      const sourceFile = ts.createSourceFile(absPath, stripped, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+      const diags = sourceFile.parseDiagnostics ?? []
+      if (diags.length > 0) {
+        const { line } = sourceFile.getLineAndCharacterOfPosition(diags[0].start ?? 0)
+        broken.push(`${relPath}:${line + 1}: ${ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')}`)
+      }
+    }
+    assert.deepEqual(
+      broken,
+      [],
+      'stripComments produced text a real parser rejects for at least one file — every entry names the file, ' +
+      'the first diagnostic\'s line, and its message',
+    )
+  })
+
+  it('every scanned file keeps its exact non-comment token stream after stripComments', () => {
+    const diverged = []
+    for (const absPath of scannedFiles) {
+      const relPath = relative(SRC_DIR, absPath).split('\\').join('/')
+      const raw = readFileSync(absPath, 'utf8')
+      const stripped = stripComments(raw, absPath)
+      const rawTokens = leafTokenTexts(ts.createSourceFile(absPath, raw, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS))
+      const strippedTokens = leafTokenTexts(ts.createSourceFile(absPath, stripped, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS))
+      const same =
+        rawTokens.length === strippedTokens.length &&
+        rawTokens.every((t, i) => t === strippedTokens[i])
+      if (!same) diverged.push(relPath)
+    }
+    assert.deepEqual(
+      diverged,
+      [],
+      'stripComments changed the non-comment token stream for at least one file — a comment must blank to ' +
+      'nothing a parser can see, never eat or leak a real token',
+    )
+  })
+})
+
+/**
+ * Every LEAF token's exact text, in source order, from a real parse.
+ * JSDoc pseudo-nodes and the terminal EndOfFileToken are excluded on purpose
+ * (see the oracle describe block above) — everything else is a genuine
+ * grammar token, comments already excluded because they are trivia and never
+ * become nodes at all.
+ */
+function leafTokenTexts(sourceFile) {
+  const out = []
+  function visit(node) {
+    if (node.kind >= ts.SyntaxKind.FirstJSDocNode && node.kind <= ts.SyntaxKind.LastJSDocNode) return
+    if (node.kind === ts.SyntaxKind.EndOfFileToken) return
+    const children = node.getChildren(sourceFile)
+    if (children.length === 0) {
+      out.push(node.getText(sourceFile))
+      return
+    }
+    for (const child of children) visit(child)
+  }
+  visit(sourceFile)
+  return out
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// stripComments regression fixtures (#8142)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The oracle above proves stripComments is correct on every file that exists
+// TODAY. This section pins the specific adversarial shape #8142 was filed
+// over, so a future rewrite of stripComments (or a future roster that
+// forgets to use the shared module) has a fast, targeted, inline reproduction
+// — not just "run the oracle over the whole tree and see what broke".
+describe('stripComments regression fixture — glob-in-comment plus every literal kind (#8142)', () => {
+  // All four hazards in one fixture: a `/*`-look-alike inside a string, a
+  // template literal, and a regex literal (none of which is a comment and
+  // must survive byte-for-byte), plus the ACTUAL #8142 shape — TWO
+  // backtick-quoted glob patterns inside separate line comments. The first
+  // one's `` `node_modules/**` `` reads as a block-comment OPEN to the old
+  // regex (literal substring `/*` right before the closing backtick); it
+  // then hunts forward (non-greedy) for the next `*/`, which is the second
+  // comment's own `` `**/*.ts` `` glob — deleting every real statement in
+  // between, including a function declaration, exactly like
+  // byok-tool-executor.js's `try { ... } finally { ... }`.
+  const FIXTURE = [
+    "const s = 'contains /* a fake block comment start */ inside a string'",
+    'const t = `template literal with /* also fake */ inside`',
+    'const r = /\\/\\*fake-block-comment-open\\*\\//',
+    '// excludes `node_modules/**` from the walk (glob note 1)',
+    "const REAL_CODE_MARKER = 'survives'",
+    'function realFunction() { return REAL_CODE_MARKER }',
+    '// also matches `**/*.ts` from the walk (glob note 2)',
+    "const AFTER_MARKER = 'also survives'",
+    '',
+  ].join('\n')
+
+  it('the shared stripComments leaves every real statement intact', () => {
+    const out = stripComments(FIXTURE, 'fixture.js')
+    assert.ok(out.includes('REAL_CODE_MARKER'), 'the marker constant between the two glob comments must survive')
+    assert.ok(out.includes('function realFunction()'), 'the function declaration between the two glob comments must survive')
+    assert.ok(out.includes('AFTER_MARKER'), 'real code after the second glob comment must survive')
+    assert.ok(out.includes("'contains /* a fake block comment start */ inside a string'"),
+      'string content containing a /* look-alike must be preserved verbatim, not blanked')
+    assert.ok(out.includes('`template literal with /* also fake */ inside`'),
+      'template literal content containing a /* look-alike must be preserved verbatim, not blanked')
+    assert.ok(out.includes('/\\/\\*fake-block-comment-open\\*\\//'),
+      'regex literal content containing a /* look-alike must be preserved verbatim, not blanked')
+  })
+
+  it('the shared stripComments still parses the fixture with zero syntax diagnostics', () => {
+    const out = stripComments(FIXTURE, 'fixture.js')
+    const sourceFile = ts.createSourceFile('fixture.js', out, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+    assert.deepEqual(sourceFile.parseDiagnostics ?? [], [])
+  })
+
+  // This is the RED half of "every guard must be proven to fail": the OLD
+  // regex this file used to run (`/\/\*[\s\S]*?\*\//g` then a line-comment
+  // pass) is reproduced here, inline, ONLY to prove this exact fixture is a
+  // real reproduction of #8142 and not a fixture that happens to pass either
+  // way. It is not wired into discoverFullEnvCopiers and never will be —
+  // proving it fails HERE is the standing regression pin; proving the real
+  // roster file goes red when actually reverted to this shape is the
+  // separate, manual mutation-testing step recorded in the PR body.
+  it('RED (evidence, not a standing guard): the OLD hand-rolled regex corrupts this exact fixture', () => {
+    function oldStripComments(source) {
+      return source
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    }
+    const out = oldStripComments(FIXTURE)
+    assert.ok(
+      !out.includes('REAL_CODE_MARKER') || !out.includes('function realFunction()'),
+      'the old regex must corrupt this fixture (eating the marker or the function) — otherwise this fixture ' +
+      'does not actually exercise the #8142 defect and proves nothing about the new implementation',
     )
   })
 })

@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The spawn-env inherited-secrets roster strips comments with a real
+  tokenizer, not a regex, so it can no longer misread a glob quoted in a
+  comment as a block-comment delimiter (#8142).** The roster test's
+  `stripComments()` used a naive `/\*[\s\S]*?\*\//g` block-comment regex with
+  no awareness of strings, template literals, or regex literals: it just
+  scanned raw text for the next `/*`...`*/` pair anywhere. `src/byok-tool-executor.js`'s
+  prose quotes glob patterns in backticks like `` `node_modules/**` `` and
+  `` `**/*.ts` ``, whose literal `/**` substring the regex read as a
+  block-comment open, then deleted everything up to the next glob's own `**/`
+  much later in the file — ~76% of that file's real text (39,658 of 165,633
+  chars survived), including a `try {` whose paired `finally {` survived
+  alone (a real parser rejects the result outright: `'try' expected`). The
+  fix replaces it with the already-existing, `ts.createSourceFile`-backed
+  `stripComments` (`packages/server/scripts/lib/strip-comments.mjs`, already
+  used by every lint in this package): it blanks only genuine comment trivia
+  from a real parse, so there is no "next `/*`/`*/`-like substring" for it to
+  misread. `packages/server/tests/providers.test.js`'s own local
+  `stripComments` had the same defect class one level down (its block-comment
+  open is restricted to the start of a line, but a line-start JSDoc block
+  whose prose contains a literal `*/` — the same glob shape — still closes
+  early) and is fixed the same way. A new oracle
+  (`spawn-env-inherited-secrets-roster.test.js`) parses every file the roster
+  scans — 342 files today — twice, once over the raw source and once over
+  the stripped output, and asserts both that the stripped text still parses
+  with zero syntax diagnostics and that its non-comment token stream is
+  byte-for-byte identical to the raw file's (JSDoc pseudo-nodes and the
+  terminal `EndOfFileToken` excluded from both sides, since TypeScript parses
+  JSDoc prose into real tree nodes for plain `.js` files). A companion
+  hand-rolled comment scanner in `scripts/lint-write-only-ctx-fields.mjs` has
+  a narrower version of the same defect (filed as #8172 rather than folded
+  into this fix, given its size and dedicated test suite).
+
 - **The root Docker image ships a pinned, signature-verified `claude` CLI, so
   `start` now passes preflight without `--skip-checks` (#8145).** The image
   never installed a `claude` binary at all: since #7986/#8035, SDK mode
