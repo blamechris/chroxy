@@ -11,6 +11,7 @@ import { CodexSession } from '../src/codex-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { GeminiSession } from '../src/gemini-session.js'
 import { CLAUDE_BINARY_CANDIDATES } from '../src/utils/claude-binary.js'
+import { stripComments } from '../scripts/lib/strip-comments.mjs'
 
 // #7052 — the sandbox config dir this process started with. Tests below
 // relocate it alongside HOME and restore it here on teardown.
@@ -227,25 +228,24 @@ describe('Provider Registry', () => {
   it('thinkingKeywords: true is declared by exactly the modules that import detect-thinking-keyword.js', () => {
     const srcRoot = fileURLToPath(new URL('../src/', import.meta.url))
 
-    // Strip comments so neither regex can be satisfied by prose. ORDER IS
-    // LOAD-BEARING and was wrong in the first cut of this fix: it removed block
-    // comments FIRST with `/\/\*[\s\S]*?\*\//g`, so a `/*` appearing inside a
-    // LINE comment or a STRING — every glob in the tree (`fs/*`, `**/*.ts`,
-    // `/api/shell/*`) — opened a fake block that ran to the next `*/` anywhere
-    // in the file. That blacked out 12 src files, 5-147 lines each, including
-    // `acp-session.js:205` — the `thinkingKeywords: false` this PR adds — so
-    // flipping it to `true` was invisible to the declarer regex and the
-    // mutation that had been red went green.
-    //
-    // So: line comments first, and a block comment may only OPEN at the start
-    // of a line (after indentation) or be closed on the same line it opened.
-    // A `/*` that appears mid-line inside code or a string can no longer start
-    // a run-on. The `//` run-on is removed only when it is NOT the `//` of a
-    // URL scheme, so `'https://…'` in a string survives intact.
-    const stripComments = (text) => text
-      .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
-      .replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, ' ')
-      .replace(/\/\*[^\n]*?\*\//g, ' ')
+    // Strip comments so neither regex can be satisfied by prose. This used to
+    // be a hand-rolled two-pass regex, tightened once already (line comments
+    // first, then a block comment restricted to opening at the start of a
+    // line or closing on the same line it opened) after removing block
+    // comments FIRST with `/\/\*[\s\S]*?\*\//g` let a `/*` inside a LINE
+    // comment or a STRING — every glob in the tree (`fs/*`, `**/*.ts`,
+    // `/api/shell/*`) — open a fake block that ran to the next `*/` anywhere
+    // in the file, blacking out 12 src files and hiding acp-session.js:205's
+    // `thinkingKeywords: false`. That tightened regex (line-start-only block
+    // opens) still has the SAME class of bug one level down: a glob quoted in
+    // a real, line-start JSDoc block comment (e.g. `` `**/*.ts` ``, which
+    // contains a literal `*/`) closes that comment early and leaks the rest
+    // of its prose as "code" — the exact #8142 shape, just narrower. #8142
+    // replaces it with the shared, parser-backed `stripComments`
+    // (`scripts/lib/strip-comments.mjs`, already used by every lint in this
+    // package): it blanks only genuine comment trivia from a real
+    // `ts.createSourceFile` parse, so there is no "next `/*`/`*/`-like
+    // substring" for it to misread in the first place.
 
     const walk = (dir, prefix = '') => {
       const out = []
