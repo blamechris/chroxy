@@ -93,8 +93,7 @@ prepare_config() {
     const fs = require('fs');
     const config = {
       apiToken: process.env.API_TOKEN,
-      port: parseInt(process.env.PORT || '8765', 10),
-      shell: '/bin/bash'
+      port: parseInt(process.env.PORT || '8765', 10)
     };
     fs.writeFileSync(process.argv[1], JSON.stringify(config, null, 2));
   " "$CONFIG_FILE"

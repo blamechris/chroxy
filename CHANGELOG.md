@@ -23,6 +23,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Docker image can load the server again (#8133).** The published GHCR
+  images, including `0.11.0`, could not start: every `start` died on
+  `ERR_MODULE_NOT_FOUND` right after the entrypoint wrote its config. The root
+  `Dockerfile` copied only `packages/server/` into the image, and
+  `.dockerignore` whitelisted nothing else. But the server imports two sibling
+  workspace packages at runtime, `@chroxy/protocol` and
+  `@chroxy/store-core/crypto`, and `npm ci` links
+  `node_modules/@chroxy/<name>` to `packages/<name>`. Those links pointed at
+  nothing. The image now copies each package's `package.json` (its exports map)
+  and its committed `dist/`. They are copied after `npm ci`, because a workspace
+  manifest present at install time makes npm run its `prepare` (`tsc`) script
+  even under `--ignore-scripts`. The image's `npm ci` also skips the audit and
+  fund calls (#7616). The entrypoint stops writing a `shell` config key the
+  server no longer reads (it logged an "Unknown config key" warning on every
+  start). The stub `packages/app/package.json` loses its stale hardcoded
+  version. The release workflow built and pushed the image on every release,
+  but nothing ever ran it, which is how this went unnoticed. A new
+  path-filtered `Docker Image Smoke` CI job now builds it and runs
+  `scripts/docker-image-smoke.sh`. Every `@chroxy/*` import in the image's own
+  server source must resolve inside the image, and an import in a form the
+  script can't check fails rather than being skipped. The entrypoint's `start`
+  must then pass the image's own HEALTHCHECK. The smoke run passes
+  `--skip-checks` until the image ships a `claude` CLI (#8145). Gating the
+  release push on the same smoke is #8150.
 - **The server now reports `plan` permission mode as unsupported for every
   provider that declares `capabilities.planMode: false` — claude-tui, codex
   (app-server and legacy exec), claude-byok, gemini, and sdk-session — not

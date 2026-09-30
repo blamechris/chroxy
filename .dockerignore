@@ -8,6 +8,13 @@
 # Server package
 !packages/server/
 
+# Workspace packages the server imports at runtime (#8133). Only the exports
+# map and the committed build are needed, not their src/ or tests/.
+!packages/protocol/package.json
+!packages/protocol/dist/
+!packages/store-core/package.json
+!packages/store-core/dist/
+
 # Entrypoint script
 !scripts/docker-entrypoint.sh
 
