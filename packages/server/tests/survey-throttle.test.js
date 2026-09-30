@@ -447,15 +447,18 @@ describe('S3 — the write-through recency guard\'s tie-break is pinned', () => 
     // The review's own mutant (`>=` -> `>`) survived the full targeted suite
     // (191/191) because every existing test compares clearly-ordered
     // timestamps. Constructing an exact tie legitimately (via the public API)
-    // needs two DIFFERENT admissions that share one admission timestamp —
-    // `forget()` (a session_destroyed prune) resets the key so a second
-    // admission can reuse the same tick a first one used.
+    // needs two DIFFERENT admissions of the SAME incarnation that share one
+    // admission timestamp — a zero-width window admits a second survey on
+    // the very tick the first one used. (This test used to build the tie with
+    // `forget()` + reuse; since #8094 that path is rejected earlier by the
+    // lineage check and never reaches the tie-break, so the `>` mutant would
+    // have survived it.)
     const throttle = createSurveyThrottle()
     const owner = {}
 
-    const A = throttle.open(owner, 'sess-1', 5_000, 5_000)
-    throttle.forget(owner, 'sess-1')
-    const B = throttle.open(owner, 'sess-1', 5_000, 5_000) // same tick as A, on a fresh key
+    const A = throttle.open(owner, 'sess-1', 5_000, 0)
+    const B = throttle.open(owner, 'sess-1', 5_000, 0) // same tick, same incarnation, supersedes A
+    assert.equal(B.admitted, true, 'sanity: a zero-width window admits a second survey on the same tick')
 
     B.commit({ id: 'B (current)' }, { replayable: true }) // snapshotAt becomes exactly 5000
 
