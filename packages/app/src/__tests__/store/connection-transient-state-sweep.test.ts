@@ -237,6 +237,13 @@ describe('onclose clears transient streaming/plan state on all sessions (#7411)'
     socket.onclose?.({ code: 1006 });
     await flushPromises();
 
+    // A field added to the shared list without a dirty/clean pair above must
+    // fail at runtime too, and each dirty value must differ from its clean one.
+    expect(Object.keys(DIRTY_VALUES).sort()).toEqual([...TRANSIENT_SESSION_SWEEP_FIELDS].sort());
+    for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) {
+      expect(DIRTY_VALUES[field]).not.toEqual(CLEAN_VALUES[field]);
+    }
+
     const st = useConnectionStore.getState();
     for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) {
       expect(st.sessionStates.b).toHaveProperty(field, CLEAN_VALUES[field]);

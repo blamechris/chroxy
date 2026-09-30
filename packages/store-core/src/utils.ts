@@ -168,11 +168,12 @@ export function clearTransientSessionState(
 /**
  * #7411 — canonical list of `BaseSessionState` fields that MUST be reset to
  * their "no transient state" value on EVERY session (not just the active
- * one) when the socket closes. Both clients' onclose sweeps are tested
- * against this ONE list rather than each hand-maintaining its own — a field
- * added to one client's sweep without the other is exactly how #7411
- * happened, and a shared enumeration turns that into a failing test instead
- * of a silent gap.
+ * one) when the socket closes. Each client's onclose sweep has a parity test
+ * that iterates this list (app: connection-transient-state-sweep.test.ts;
+ * dashboard: connection-reconnect-backoff.test.ts), so a field added HERE that
+ * either client fails to clear goes red. The check runs in that direction
+ * only: a field one client sweeps without it being listed here is not caught
+ * — which is the shape #7411 itself had (#8147 tracks closing that).
  *
  * `pendingEvaluatorClarify` is deliberately excluded: it lives only on the
  * dashboard's `SessionState` (no evaluator-clarify feature exists on the
