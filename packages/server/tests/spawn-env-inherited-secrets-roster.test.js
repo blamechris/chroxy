@@ -51,7 +51,14 @@
  *      is rejected regardless of spread order — object spread only
  *      overwrites keys the later source actually HAS, so a source missing
  *      a deleted key can never un-leak it back out. Both directions of the
- *      EXEMPT map are still checked, as before.
+ *      EXEMPT map are still checked, as before. The enclosing-function
+ *      boundary is found with a real parse (`ts.createSourceFile`, the
+ *      TypeScript compiler API already a `packages/server` devDependency —
+ *      #8141), not a hand-rolled brace scanner: a regex literal containing
+ *      `{` or an unterminated template literal used to desync a
+ *      brace-nesting stack and fall back to "search the rest of the file",
+ *      reproducing the exact pre-#8114 bug from the inside of its own fix.
+ *      A real parser has no such desync class.
  *   3. A BEHAVIORAL check directly calls the three builders that are plain,
  *      side-effect-free functions (`buildSpawnEnv`, `defaultBuildEnv`,
  *      `buildSafeBashEnv`) with ambient secrets set, and asserts on their
@@ -73,6 +80,7 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 import { withEnv } from './test-helpers.js'
 import { buildSpawnEnv } from '../src/utils/spawn-env.js'
 import { defaultBuildEnv } from '../src/statusline.js'
@@ -213,215 +221,120 @@ function discoverFullEnvCopiers() {
  * is what the #8113 review defeated: `stripInheritedChroxySecrets({})` reads
  * as "the helper was called" while doing nothing to the real env object.
  * #8113 tightened the call-site match to require a plain identifier
- * argument — `(\w+)` — which already rejects a literal `{}`/`{ }` argument
- * outright (curly braces are not word characters, so the capture group
- * simply fails to match at that call site).
+ * argument, and #8114 scoped the "identifier reappears" search to the strip
+ * call's ENCLOSING FUNCTION (not the rest of the file) plus a re-merge check
+ * — both against a hand-rolled brace scanner (`findBraceScopes`) that walked
+ * the source char-by-char, skipping quoted strings and template literals by
+ * its own ad hoc rules.
  *
- * #8114: the REMAINING check — that same identifier reappearing in a later
- * `return` — was scoped to "later in the FILE", not "later in the enclosing
- * FUNCTION". Two decoys passed as a result, reproduced verbatim from the
- * issue:
- *   (a) `const env = { ...process.env }; stripInheritedChroxySecrets(env);
- *       return { ...process.env, ...env }` — re-merges the untouched
- *       original over the stripped copy. The identifier DOES reappear in a
- *       `return` in the same function, so scoping alone does not catch
- *       this one — it needs its own check (below).
- *   (b) strip one copy, `return` a DIFFERENT, unstripped variable — caught
- *       only because some unrelated LATER function in the file happened to
- *       `return` a same-named variable, which a file-wide match can't tell
- *       apart from the real one.
+ * #8141: that scanner has no concept of a regex literal, and no recovery
+ * once an `inTemplateText` flag goes true with no closing backtick found —
+ * either one desyncs its brace-nesting stack, so the REAL enclosing
+ * function's closing brace is never recorded and the search silently falls
+ * back to "search the rest of the file", reproducing the exact pre-#8114 bug
+ * from inside the fix meant to close it. The fix is to stop hand-rolling a
+ * tokenizer: `ts.createSourceFile(name, code, ts.ScriptTarget.Latest, true,
+ * ts.ScriptKind.JS)` (the TypeScript compiler API, already a
+ * `packages/server` devDependency — no new dependency) parses plain JS into
+ * a real AST with real node boundaries, so a regex literal or a malformed
+ * template literal is either a single well-understood node or a parse error
+ * — never a silent brace-count desync.
  *
- * Two independent tightenings fix these, both still heuristic rather than a
- * real parser (see `findBraceScopes` for what that heuristic does and does
- * not handle):
+ * The check itself is unchanged in what it decides, only in how it finds
+ * the boundary to decide within:
  *
- *   (b) SCOPE the "identifier reappears" search to the strip call's
- *       ENCLOSING FUNCTION, not the rest of the file. `findBraceScopes`
- *       walks the (comment-stripped) source once, skipping over
- *       single/double-quoted strings and backtick template literals
- *       (including nested `${ … }` interpolation) so braces inside them
- *       never perturb the brace count, and classifies every matched
- *       `{ … }` pair as a function body or not (arrow functions, function
- *       declarations/expressions, methods, getters/setters, constructors —
- *       as opposed to `if`/`for`/`while`/`switch`/`catch`/`do`/`else`
- *       blocks, a bare block, an object literal, or a class body).
- *       `enclosingFunctionEnd` then finds the nearest enclosing
- *       function-body scope for the strip call and bounds the search to
- *       its closing brace, so a same-named `return` in some OTHER function
- *       — however far below — can no longer be mistaken for this one's.
- *   (a) Within that bounded region, a candidate consuming statement is
- *       rejected if it ALSO contains a fresh, raw copy of `process.env`
- *       (any of the same `COPY_PATTERNS` discovery already recognizes) —
- *       `reintroducesRawEnvCopy` — regardless of where in the statement it
- *       sits: object spread only overwrites keys the LATER source actually
- *       has, so a stripped copy (missing the deleted keys entirely) spread
- *       either before OR after the raw original can never remove what the
- *       raw original still has. `{ ...process.env, ...env }` and
- *       `{ ...env, ...process.env }` are both rejected for this reason.
- *
- * "Consumed" is checked for three spellings, per #8114's own review
- * discussion — every real builder in this file uses only the first, the
- * other two are forward-looking for a builder shape that does not exist
- * here yet:
- *   - `return IDENT` / `return { ...IDENT, … }` (every current builder)
- *   - `SOMETHING.env = IDENT` / `SOMETHING.env = { ...IDENT, … }`
- *   - `env: IDENT` / `env: { ...IDENT, … }` as an object property (e.g. an
- *     inline `spawn(cmd, args, { env: IDENT })` options argument)
- * A bare shorthand `{ env }` (property name equal to the identifier, no
- * colon) is deliberately NOT recognized — that would require distinguishing
- * "an object literal that happens to mention the identifier" from "an
- * object literal that names it as a property" without a real parser, and
- * no builder here needs it. Under-recognizing a hypothetical safe shape is
- * the conservative failure mode; over-recognizing an unsafe one is not.
+ *   1. Find every `CallExpression` whose callee is the identifier
+ *      `stripInheritedChroxySecrets` with exactly one argument that is
+ *      itself a plain `Identifier` (an object-literal argument, e.g.
+ *      `stripInheritedChroxySecrets({})`, simply isn't a match — no regex
+ *      capture-group trick needed). The helper's own DECLARATION
+ *      (`function stripInheritedChroxySecrets(env) { … }`, or a method of
+ *      that name) is a `FunctionDeclaration`/`MethodDeclaration` node, not a
+ *      `CallExpression` — it is never a candidate at all, so nothing needs
+ *      the old regex's separate "is this text preceded by `function`, or
+ *      followed by `{`" exclusion.
+ *   2. Walk `node.parent` up from the call to the nearest enclosing
+ *      function-like node — `FunctionDeclaration`, `FunctionExpression`,
+ *      `ArrowFunction`, `MethodDeclaration`, `GetAccessor`, `SetAccessor`,
+ *      or `Constructor`. This bounds the "identifier reappears" search to
+ *      that function's own body, exactly as #8114 intended, using the
+ *      parser's real node boundaries instead of a counted brace.
+ *   3. Within that function body, "consumed" is still the same three
+ *      spellings from #8114 (every real builder in this file uses only the
+ *      first; the other two are forward-looking for a builder shape that
+ *      does not exist here yet):
+ *        - `return IDENT` / `return { ...IDENT, … }`
+ *        - `SOMETHING.env = IDENT` / `SOMETHING.env = { ...IDENT, … }`
+ *        - `env: IDENT` / `env: { ...IDENT, … }` as an object property
+ *      A bare shorthand `{ env }` (property name equal to the identifier, no
+ *      colon) is still deliberately NOT recognized, for the same reason as
+ *      before: under-recognizing a hypothetical safe shape is the
+ *      conservative failure mode, over-recognizing an unsafe one is not.
+ *   4. A candidate consuming node is rejected if its own source text (via
+ *      `node.getText(sourceFile)`) contains a fresh, raw copy of
+ *      `process.env` — `reintroducesRawEnvCopy`, reusing the same
+ *      `COPY_PATTERNS` discovery already recognizes — regardless of spread
+ *      order, for the same reason as #8114: object spread only overwrites
+ *      keys the LATER source actually has, so a stripped copy (missing the
+ *      deleted keys entirely) can never remove what a raw `process.env`
+ *      spread elsewhere in the same statement still has.
  */
 
-// Keywords whose `KEYWORD (…) {` is a control-flow block, not a function
-// body — the token immediately before the `(` that pairs with a `{`'s
-// preceding `)` is checked against this set. `for await (…) {` is
-// special-cased separately (the token right before its `(` is `await`, not
-// `for`).
-const CONTROL_FLOW_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch'])
+function isFunctionLikeNode(node) {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isGetAccessor(node) ||
+    ts.isSetAccessor(node) ||
+    ts.isConstructorDeclaration(node)
+  )
+}
 
-/**
- * Advance past a single/double-quoted string literal starting at `code[i]`
- * (a quote character), honoring backslash escapes. A real JS string of
- * either kind can't contain a raw newline, so hitting one first means the
- * literal is malformed — bail out at the newline rather than scanning
- * unboundedly.
- */
-function skipQuotedString(code, i) {
-  const quote = code[i]
-  let j = i + 1
-  while (j < code.length) {
-    const c = code[j]
-    if (c === '\\') { j += 2; continue }
-    if (c === quote) return j + 1
-    if (c === '\n') return j + 1
-    j += 1
+/** Walk `node.parent` up to the nearest enclosing function-like node, or `null` at the top of the file. */
+function findEnclosingFunctionLike(node) {
+  let cur = node.parent
+  while (cur) {
+    if (isFunctionLikeNode(cur)) return cur
+    cur = cur.parent
   }
-  return j
+  return null
 }
 
 /**
- * Walk backward from `closeIdx` (the index of a `)`) to find its matching
- * `(`. A plain depth counter — it does NOT skip over quoted strings or
- * template literals encountered along the way, so a parameter default or
- * condition containing a literal unbalanced paren inside a string (e.g.
- * `foo(x = ')') {`) would defeat it. Not observed in this codebase's
- * builder signatures/conditions, and not worth a backward string-scanner
- * for a heuristic this scoped.
+ * Is `node` a `stripInheritedChroxySecrets(ident)` CALL site — as opposed to
+ * the helper's own declaration, which is a different node kind entirely and
+ * is never a `CallExpression`?
  */
-function findMatchingOpenParen(code, closeIdx) {
-  let depth = 0
-  for (let idx = closeIdx; idx >= 0; idx -= 1) {
-    const c = code[idx]
-    if (c === ')') depth += 1
-    else if (c === '(') {
-      depth -= 1
-      if (depth === 0) return idx
-    }
-  }
-  return -1
+function isStripCallSite(node) {
+  return (
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'stripInheritedChroxySecrets' &&
+    node.arguments.length === 1 &&
+    ts.isIdentifier(node.arguments[0])
+  )
 }
 
-/** The `[A-Za-z_$][\w$]*` token ending at (exclusive of) `end`, scanning backward. */
-function wordEndingAt(code, end) {
-  let start = end
-  while (start > 0 && /[\w$]/.test(code[start - 1])) start -= 1
-  return code.slice(start, end)
+function isIdentifierNamed(node, name) {
+  return !!node && ts.isIdentifier(node) && node.text === name
 }
 
-/**
- * Is the `{` at `code[i]` a function-body opener? See the big doc comment
- * above for the classification this implements.
- */
-function isFunctionBodyOpener(code, i) {
-  let j = i - 1
-  while (j >= 0 && /\s/.test(code[j])) j -= 1
-  if (j < 0) return false
-  if (code[j] === '>' && code[j - 1] === '=') return true // arrow function: `=> {`
-  if (code[j] !== ')') return false // bare block / class body / object literal / etc.
-  const openParen = findMatchingOpenParen(code, j)
-  if (openParen < 0) return false
-  let k = openParen - 1
-  while (k >= 0 && /\s/.test(code[k])) k -= 1
-  if (k < 0) return false
-  const token = wordEndingAt(code, k + 1)
-  if (CONTROL_FLOW_KEYWORDS.has(token)) return false
-  if (token === 'await') {
-    // `for await (…) {` — the token right before '(' is 'await'; check one
-    // token further back for the 'for' that actually makes it a loop.
-    let k2 = k - token.length
-    while (k2 >= 0 && /\s/.test(code[k2])) k2 -= 1
-    if (k2 >= 0 && wordEndingAt(code, k2 + 1) === 'for') return false
-  }
-  return true
+/** Does `node` (an object literal) spread `ident` as one of its properties (`{ ...ident, … }`)? */
+function objectLiteralSpreadsIdent(node, ident) {
+  return (
+    ts.isObjectLiteralExpression(node) &&
+    node.properties.some((p) => ts.isSpreadAssignment(p) && isIdentifierNamed(p.expression, ident))
+  )
 }
 
-/**
- * Scan `code` (already comment-stripped by the caller) once, returning
- * every matched `{ … }` pair as `{ start, end, isFunctionBody }` (`start`/
- * `end` are the indices of the `{` and its matching `}`). Braces inside
- * single/double-quoted strings and backtick template literals — including
- * nested `${ … }` interpolation, to arbitrary depth — are skipped so they
- * never perturb the count.
- */
-function findBraceScopes(code) {
-  const scopes = []
-  const stack = []
-  let inTemplateText = false
-  let i = 0
-  while (i < code.length) {
-    if (inTemplateText) {
-      const c = code[i]
-      if (c === '\\') { i += 2; continue }
-      if (c === '`') { inTemplateText = false; i += 1; continue }
-      if (c === '$' && code[i + 1] === '{') {
-        stack.push({ kind: 'templateInterp' })
-        inTemplateText = false
-        i += 2
-        continue
-      }
-      i += 1
-      continue
-    }
-    const ch = code[i]
-    if (ch === '\'' || ch === '"') { i = skipQuotedString(code, i); continue }
-    if (ch === '`') { inTemplateText = true; i += 1; continue }
-    if (ch === '{') {
-      stack.push({ kind: 'brace', open: i, isFunctionBody: isFunctionBodyOpener(code, i) })
-      i += 1
-      continue
-    }
-    if (ch === '}') {
-      const top = stack.pop()
-      if (!top) { i += 1; continue } // unbalanced; defensive, keep scanning
-      if (top.kind === 'templateInterp') {
-        inTemplateText = true // interpolation closed — back to raw template text
-      } else {
-        scopes.push({ start: top.open, end: i, isFunctionBody: top.isFunctionBody })
-      }
-      i += 1
-      continue
-    }
-    i += 1
-  }
-  return scopes
-}
-
-/**
- * The nearest enclosing function-body scope's end index for `pos`, or
- * `code.length` if `pos` is not inside any recognized function body (a
- * fallback that reproduces the pre-#8114 "search the rest of the file"
- * behavior rather than throwing, for a call site this heuristic can't
- * place — not expected for any real file in this roster).
- */
-function enclosingFunctionEnd(scopes, pos, codeLength) {
-  const containing = scopes
-    .filter((s) => s.start < pos && pos < s.end)
-    .sort((a, b) => (a.end - a.start) - (b.end - b.start))
-  const fn = containing.find((s) => s.isFunctionBody)
-  return fn ? fn.end : codeLength
+/** Is `exprNode` the bare identifier `ident`, or an object literal spreading it? */
+function consumesIdent(exprNode, ident) {
+  if (!exprNode) return false
+  if (isIdentifierNamed(exprNode, ident)) return true
+  if (objectLiteralSpreadsIdent(exprNode, ident)) return true
+  return false
 }
 
 /** Does `statementText` contain a fresh, raw copy of `process.env`? */
@@ -430,46 +343,72 @@ function reintroducesRawEnvCopy(statementText) {
 }
 
 /**
- * Is `ident` consumed — returned, assigned to a `.env` property, or handed
- * to an `env:` option — somewhere in `region` (the strip call's enclosing
- * function, from just after the call to the function's closing brace),
- * WITHOUT that same statement also re-copying the raw `process.env`?
+ * Every candidate "consuming" node for `ident` inside `root` (the strip
+ * call's enclosing function body — a `Block`, or a bare expression for an
+ * arrow function's implicit-return form): a `ReturnStatement` whose
+ * expression consumes `ident`, an assignment to a `.env` property whose RHS
+ * consumes `ident`, or an `env:` object-literal property whose initializer
+ * consumes `ident`.
  */
-function identSafelyConsumed(ident, region) {
-  const patterns = [
-    new RegExp(`return\\b[^\\n;]*\\b${ident}\\b[^\\n;]*`, 'g'),
-    new RegExp(`[^\\n;]*\\.env\\s*=[^\\n;]*\\b${ident}\\b[^\\n;]*`, 'g'),
-    new RegExp(`[^\\n;]*\\benv\\s*:[^\\n;]*\\b${ident}\\b[^\\n;]*`, 'g'),
-  ]
-  for (const re of patterns) {
-    let m
-    while ((m = re.exec(region))) {
-      if (!reintroducesRawEnvCopy(m[0])) return true
+function findConsumingSites(root, ident) {
+  const sites = []
+
+  function visit(node) {
+    if (ts.isReturnStatement(node) && consumesIdent(node.expression, ident)) {
+      sites.push(node)
+    } else if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      node.left.name.text === 'env' &&
+      consumesIdent(node.right, ident)
+    ) {
+      sites.push(node)
+    } else if (
+      ts.isPropertyAssignment(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === 'env' &&
+      consumesIdent(node.initializer, ident)
+    ) {
+      sites.push(node)
     }
+    ts.forEachChild(node, visit)
   }
-  return false
+
+  if (ts.isBlock(root)) {
+    visit(root)
+  } else {
+    // Arrow function implicit-return expression body: the body IS the
+    // returned value, so it is itself a candidate "return" site.
+    if (consumesIdent(root, ident)) sites.push(root)
+    visit(root)
+  }
+  return sites
 }
 
 function stripAppliedToItsOwnReturnValue(code) {
-  const scopes = findBraceScopes(code)
-  const callRe = /stripInheritedChroxySecrets\s*\(\s*([A-Za-z_$][\w$]*)\s*\)/g
-  let m
-  while ((m = callRe.exec(code))) {
-    // Skip the helper's own DEFINITION (`function stripInheritedChroxySecrets(env) {`,
-    // or a method of that name): its body ends in `return env`, which would
-    // otherwise satisfy the check for the whole file before the real call
-    // site is ever looked at (review on #8140).
-    let before = m.index
-    while (before > 0 && /\s/.test(code[before - 1])) before -= 1
-    let after = callRe.lastIndex
-    while (after < code.length && /\s/.test(code[after])) after += 1
-    if (wordEndingAt(code, before) === 'function' || code[after] === '{') continue
-    const ident = m[1]
-    const fnEnd = enclosingFunctionEnd(scopes, m.index, code.length)
-    const region = code.slice(callRe.lastIndex, fnEnd)
-    if (identSafelyConsumed(ident, region)) return true
+  const sourceFile = ts.createSourceFile('roster-check.js', code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  let found = false
+
+  function visit(node) {
+    if (found) return
+    if (isStripCallSite(node)) {
+      const ident = node.arguments[0].text
+      const fn = findEnclosingFunctionLike(node)
+      if (fn && fn.body) {
+        for (const site of findConsumingSites(fn.body, ident)) {
+          if (!reintroducesRawEnvCopy(site.getText(sourceFile))) {
+            found = true
+            break
+          }
+        }
+      }
+    }
+    if (!found) ts.forEachChild(node, visit)
   }
-  return false
+
+  visit(sourceFile)
+  return found
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -576,19 +515,25 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// Fixture pins for the static check's OWN logic (#8114)
+// Fixture pins for the static check's OWN logic (#8114 / #8141)
 // ───────────────────────────────────────────────────────────────────────────
 //
-// `stripAppliedToItsOwnReturnValue` is a hand-rolled heuristic, not a real
-// parser — the two decoys below are exactly what defeated its PREVIOUS
-// (file-wide) version, reproduced as inline fixtures so the checker's own
-// scoping/re-merge logic is pinned directly, without needing to mutate a
+// `stripAppliedToItsOwnReturnValue` pins its own scoping/re-merge behavior
+// directly, reproduced as inline fixtures rather than needing to mutate a
 // real production file (which the RED-evidence steps below do separately,
-// once, as a mutation-testing proof rather than a standing test). A checker
-// this size is itself a plausible false-safety-guard candidate
+// once, as a mutation-testing proof rather than a standing test) — a
+// checker this size is itself a plausible false-safety-guard candidate
 // (docs/false-safety-guards.md) if its own behavior is never independently
-// exercised.
-describe('direction 1 static check — scoping + re-merge fixtures (#8114)', () => {
+// exercised. The two decoys below the #8113/#8114 set are #8141's own
+// adversarial repro: a regex literal or an unterminated template literal
+// that desynced the PREVIOUS hand-rolled brace scanner into treating an
+// unrelated function's `return` as the real call site's own consumption —
+// the exact pre-#8114 bug, reproduced from inside the fix meant to close
+// it. The `ts.createSourceFile` walk that replaced the scanner has no such
+// desync class: a regex literal and a malformed template literal are each
+// either a single well-formed node or a parse-error node, never a silent
+// brace-count drift.
+describe('direction 1 static check — scoping + re-merge fixtures (#8114 / #8141)', () => {
   it('accepts the shape every real builder in this file uses: strip then bare return', () => {
     const src = `
 function buildEnv() {
@@ -736,6 +681,50 @@ function unrelatedHelperFarBelow() {
 }
 `
     assert.ok(!stripAppliedToItsOwnReturnValue(src), 'distance does not matter to a scoped check — only the enclosing braces do')
+  })
+
+  // #8141: the hand-rolled brace scanner this check used to run on has no
+  // concept of a regex literal and no recovery from an unterminated template
+  // literal. Either one desyncs its brace-nesting stack, so the REAL
+  // enclosing function's closing brace is never recorded and the search
+  // falls back to end-of-file — reproducing decoy (b) (strip one variable,
+  // return a different unstripped one) "caught" only by an unrelated later
+  // function's coincidental same-named `return`, exactly like the pre-#8114
+  // bug. These two are the adversarial repro from #8141 itself.
+  it('rejects decoy (b) hidden behind a regex literal containing a stray `{` (#8141)', () => {
+    const src = `
+function buildEnv() {
+  const env = { ...process.env }
+  stripInheritedChroxySecrets(env)
+  const re = /{not a real brace/
+  const raw = { ...process.env }
+  return raw
+}
+
+function unrelatedHelper() {
+  const env = 'not-the-same-thing-at-all'
+  return env
+}
+`
+    assert.ok(!stripAppliedToItsOwnReturnValue(src), 'a regex literal containing a stray { must not desync scoping into treating an unrelated function\'s return as this call\'s own')
+  })
+
+  it('rejects decoy (b) hidden behind an unterminated template literal (#8141)', () => {
+    const src = `
+function buildEnv() {
+  const env = { ...process.env }
+  stripInheritedChroxySecrets(env)
+  const s = \`unterminated template literal starts here and never closes
+  const raw = { ...process.env }
+  return raw
+}
+
+function unrelatedHelper() {
+  const env = 'not-the-same-thing-at-all'
+  return env
+}
+`
+    assert.ok(!stripAppliedToItsOwnReturnValue(src), 'an unterminated template literal must not desync scoping into treating an unrelated function\'s return as this call\'s own')
   })
 })
 
