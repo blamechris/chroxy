@@ -222,7 +222,7 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
 })
 
 describe('real-binary tripwire: guarded names past the first shell token, and the win-spawn cmd.exe wrapper (#8102)', () => {
-  // These four throw synchronously, before child_process's own launcher ever
+  // The throwing cases below (through the win-spawn cmd.exe wrapper) throw synchronously, before child_process's own launcher ever
   // runs — same safety property the file's header note already establishes
   // for every other "throws" assertion in this file.
 
