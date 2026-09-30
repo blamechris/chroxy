@@ -7,22 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.1] - 2026-09-30
-
-### Added
-
-- **Tab now completes the highlighted slash command or `@`-file into the
-  composer without sending it (#7370).** The picker already highlighted a
-  selected item on Up/Down navigation, but there was no way to accept it
-  without also sending — Enter both selects and can dispatch, so the only
-  way to complete a command by hand was to type the rest of it. Tab is now
-  the explicit two-step affordance: it inserts the highlighted command (or
-  file) via the same insertion path Enter/click already use, closes the
-  picker, and leaves focus in the composer — the user still presses Enter to
-  send. Tab falls through to default browser focus behaviour whenever no
-  picker is open, and Shift+Tab never completes, so keyboard/screen-reader
-  users can still Tab out of the composer normally.
-
 ### Fixed
 
 - **`scripts/bump-version.sh` now passes every path and the version string to
@@ -41,7 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads its inputs via `process.env.*`. `scripts/__tests__/bump-version.test.sh`
   gained a case that runs a full bump against a fixture path containing both
   a space and a single quote, and a static guard that fails if any `node -e`
-  invocation in `bump-version.sh` is not single-quoted.
+  invocation in `bump-version.sh` is not single-quoted (and that refuses to
+  pass when it finds no invocation at all). The Cargo.toml `[package]` version
+  rewrite and its verification had the same shape in `sed` and `grep`: both
+  now use `awk` with the versions read from `ENVIRON`.
+
+## [0.11.1] - 2026-09-30
+
+### Added
+
+- **Tab now completes the highlighted slash command or `@`-file into the
+  composer without sending it (#7370).** The picker already highlighted a
+  selected item on Up/Down navigation, but there was no way to accept it
+  without also sending — Enter both selects and can dispatch, so the only
+  way to complete a command by hand was to type the rest of it. Tab is now
+  the explicit two-step affordance: it inserts the highlighted command (or
+  file) via the same insertion path Enter/click already use, closes the
+  picker, and leaves focus in the composer — the user still presses Enter to
+  send. Tab falls through to default browser focus behaviour whenever no
+  picker is open, and Shift+Tab never completes, so keyboard/screen-reader
+  users can still Tab out of the composer normally.
+
+### Fixed
+
 - **The Docker image can load the server again (#8133).** The published GHCR
   images, including `0.11.0`, could not start: every `start` died on
   `ERR_MODULE_NOT_FOUND` right after the entrypoint wrote its config. The root
