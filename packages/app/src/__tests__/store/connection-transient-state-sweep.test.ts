@@ -252,3 +252,97 @@ describe('onclose clears transient streaming/plan state on all sessions (#7411)'
     ws.restore();
   });
 });
+
+/**
+ * #8148 — disconnect() never got the onclose sweep #7411 added.
+ * disconnect() nulls `socket.onclose` (to suppress auto-reconnect) before
+ * closing the socket, so the onclose sweep above never runs on a
+ * user-initiated disconnect — a background session mid-stream (or with a
+ * pending plan) kept its phantom "thinking" bubble / stale plan through the
+ * next connect. The fix reuses the exact same
+ * `clearStreamingAndPlanStateAcrossSessions(get)` call disconnect() already
+ * makes for `clearInactivityWarningsAcrossSessions`/
+ * `clearSessionRolesAcrossSessions`, so these tests mirror the onclose ones
+ * above 1:1, calling `disconnect()` instead of `socket.onclose?.()`.
+ */
+describe('disconnect() clears transient streaming/plan state on all sessions (#8148)', () => {
+  it('nulls streamingMessageId, isPlanPending and planAllowedPrompts on a BACKGROUND session', async () => {
+    const { ws } = await openConnectedSocket();
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: createEmptySessionState(),
+        b: {
+          ...createEmptySessionState(),
+          streamingMessageId: 'msg-b',
+          isPlanPending: true,
+          planAllowedPrompts: [{ tool: 'Bash', prompt: 'echo hi' }],
+        },
+      },
+    });
+
+    useConnectionStore.getState().disconnect();
+
+    const st = useConnectionStore.getState();
+    // Background session "b" is the one the bug left dirty.
+    expect(st.sessionStates.b!.streamingMessageId).toBeNull();
+    expect(st.sessionStates.b!.isPlanPending).toBe(false);
+    expect(st.sessionStates.b!.planAllowedPrompts).toEqual([]);
+
+    ws.restore();
+  });
+
+  it("re-derives a background session's activityState, so no phantom 'thinking' survives disconnect", async () => {
+    // Same "one writer, one derivation" concern as the onclose test above:
+    // updateSession re-derives activityState from
+    // isIdle/streamingMessageId/isPlanPending, so a sweep that skipped it
+    // would leave activityState at 'thinking' after disconnect() too.
+    const { ws } = await openConnectedSocket();
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: createEmptySessionState(),
+        b: {
+          ...createEmptySessionState(),
+          isIdle: true,
+          streamingMessageId: 'msg-b',
+          activityState: { state: 'thinking', startedAt: 1 },
+        },
+      },
+    });
+
+    useConnectionStore.getState().disconnect();
+
+    const st = useConnectionStore.getState();
+    expect(st.sessionStates.b!.streamingMessageId).toBeNull();
+    expect(st.sessionStates.b!.activityState?.state).toBe('idle');
+
+    ws.restore();
+  });
+
+  it('parity guard: clears every TRANSIENT_SESSION_SWEEP_FIELDS field on a background session', async () => {
+    // disconnect() already sweeps inactivityWarning/sessionRole/
+    // primaryClientId across all sessions (#3899/#5623); this guard fails
+    // if the streaming/plan trio isn't swept the same way.
+    const { ws } = await openConnectedSocket();
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: createEmptySessionState(),
+        b: dirtySessionState(),
+      },
+    });
+
+    useConnectionStore.getState().disconnect();
+
+    const st = useConnectionStore.getState();
+    for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) {
+      expect(st.sessionStates.b).toHaveProperty(field, CLEAN_VALUES[field]);
+    }
+
+    ws.restore();
+  });
+});
