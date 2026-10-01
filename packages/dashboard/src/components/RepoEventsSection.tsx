@@ -30,6 +30,7 @@ import { useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { RepoEvent, ServerRepoEventsSnapshotMessage } from '@chroxy/protocol'
 import type { SessionInfo } from '@chroxy/store-core'
+import { sessionGroupKey } from '../utils/repoLabel'
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { GithubWebhookConfig } from './GithubWebhookConfig'
 
@@ -68,14 +69,20 @@ export function repoBasename(fullName: string | null | undefined): string | null
 }
 
 /**
- * The set of repo basenames the live sessions are working in, derived from each
- * session's cwd basename. Best-effort: a worktree dir may not match the repo
- * name exactly — that's what the "Show all repos" toggle is for.
+ * The set of repo basenames the live sessions are working in, derived from
+ * each session's repo (#8123 review follow-up: `repoCwd` for a
+ * worktree-isolated session, via the shared `sessionGroupKey` helper — else
+ * `cwd`). Before this, a worktree session's opaque
+ * `~/.chroxy/worktrees/<hex>` cwd never matched its real repo's basename, so
+ * the "active repos" scope silently failed to include it (review, PR #8180
+ * Suggestion #1). Still best-effort beyond that: a plain session's cwd may
+ * not match its repo name exactly either — that's what the "Show all
+ * repos" toggle is for.
  */
-export function activeRepoBasenames(sessions: readonly Pick<SessionInfo, 'cwd'>[]): Set<string> {
+export function activeRepoBasenames(sessions: readonly Pick<SessionInfo, 'cwd' | 'repoCwd'>[]): Set<string> {
   const set = new Set<string>()
   for (const s of sessions) {
-    const base = repoBasename(s?.cwd)
+    const base = repoBasename(sessionGroupKey(s))
     if (base) set.add(base)
   }
   return set

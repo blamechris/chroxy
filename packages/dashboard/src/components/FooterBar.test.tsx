@@ -60,6 +60,41 @@ describe('FooterBar', () => {
     expect(screen.getByTitle('/Users/me/Projects/chroxy')).toBeInTheDocument()
   })
 
+  // #8123 — the footer cwd breadcrumb leaked the opaque worktree-hex
+  // basename (same bug class as the SessionBar tab badge fixed in #7328).
+  // `repoCwd` (already on `SessionInfo` since #7328) lets the footer show
+  // the repo name for a worktree session, while keeping its own
+  // intentionally-different last-2-segments fallback for everything else.
+  describe('#8123 — worktree-aware footer cwd', () => {
+    const worktreeCwd = '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e'
+    const repoCwd = '/Users/blamechris/Projects/chroxy'
+
+    it('shows the repo name for a worktree session instead of the opaque hex', () => {
+      render(<FooterBar {...baseProps} cwd={worktreeCwd} repoCwd={repoCwd} />)
+      expect(screen.getByText('chroxy')).toBeInTheDocument()
+      expect(screen.queryByText(/34914672f8578ecdf71accf8f8aec47e/)).not.toBeInTheDocument()
+    })
+
+    it('still shows the full worktree path in the title attribute for hover disclosure', () => {
+      render(<FooterBar {...baseProps} cwd={worktreeCwd} repoCwd={repoCwd} />)
+      expect(screen.getByTitle(worktreeCwd)).toBeInTheDocument()
+    })
+
+    // Positive control: a plain (non-worktree) session keeps the footer's
+    // existing last-2-segments abbreviation — repoCwd is absent, so this
+    // must render byte-identically to the pre-#8123 'shows abbreviated cwd'
+    // case above, not the 1-segment repo-name shape.
+    it('keeps the existing last-2-segments abbreviation when repoCwd is absent (positive control)', () => {
+      render(<FooterBar {...baseProps} cwd="/Users/me/Projects/chroxy" />)
+      expect(screen.getByText('Projects/chroxy')).toBeInTheDocument()
+    })
+
+    it('falls back to last-2-segments when repoCwd is explicitly null', () => {
+      render(<FooterBar {...baseProps} cwd="/Users/me/Projects/chroxy" repoCwd={null} />)
+      expect(screen.getByText('Projects/chroxy')).toBeInTheDocument()
+    })
+  })
+
   it('shows model name', () => {
     render(<FooterBar {...baseProps} model="claude-sonnet-4-5" />)
     expect(screen.getByText('claude-sonnet-4-5')).toBeInTheDocument()

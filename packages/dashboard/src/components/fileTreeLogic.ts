@@ -129,11 +129,18 @@ export interface Breadcrumb {
  * nothing is selected — or the selection is an absolute path outside the
  * workspace — a single root crumb. Directory crumbs carry the dir path (clickable
  * to reveal in the tree); the file crumb is the leaf.
+ *
+ * `rootLabel` (#8123) optionally overrides the root crumb's LABEL only — its
+ * `path` is always derived from `rootPath`, so a worktree session's root
+ * crumb can show the repo name (the caller, `FileBrowserPanel.tsx`, has
+ * `repoCwd` in scope) while breadcrumb navigation still targets the real
+ * worktree directory. Omitted, empty, or falsy: falls back to the basename
+ * of `rootPath` (unchanged pre-#8123 behaviour).
  */
-export function buildBreadcrumbs(selectedFile: string | null, rootPath: string): Breadcrumb[] {
+export function buildBreadcrumbs(selectedFile: string | null, rootPath: string, rootLabel?: string): Breadcrumb[] {
   if (!rootPath) return []
   const root = rootPath.replace(/\\/g, '/').replace(/\/$/, '')
-  const rootName = root.split('/').pop() || root
+  const rootName = rootLabel || root.split('/').pop() || root
   if (!selectedFile) return [{ label: rootName, path: root, isLeaf: true }]
   const norm = selectedFile.replace(/\\/g, '/')
   let rel: string
