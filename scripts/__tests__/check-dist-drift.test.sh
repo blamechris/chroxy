@@ -55,14 +55,26 @@
 
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# CDPATH= cd --: a bare `cd "$(dirname "$0")/../.."` is CDPATH-sensitive — a
+# review found that with CDPATH set to the worktree's own path, `cd` prints
+# the match it found instead of changing silently, which corrupts this
+# command substitution into a two-line string and fails every case closed
+# (every `run_check` call then resolves $CHECK to a nonexistent path and
+# exits 127, which happens to still not equal most expected exit codes, so
+# the harness fails loud rather than passing for the wrong reason — but loud
+# in the wrong way, not the intended one). `CDPATH=` scopes the reset to this
+# one command; `--` stops `cd` from re-parsing a leading `-` in the path as an
+# option.
+# shellcheck disable=SC1007 # deliberate: CDPATH= resets it to empty for this
+# one command, the standard idiom — not a mistaken "forgot a value" typo.
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 CHECK="$REPO_ROOT/scripts/check-dist-drift.sh"
 
 # Every case below must run. Without this, a harness whose cases stop executing
 # prints "PASS — all 0 cases" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome, the second recurring cause in
 # docs/false-safety-guards.md (#7653).
-EXPECTED_CASES=48
+EXPECTED_CASES=86
 
 PASS=0
 FAIL=0
@@ -405,24 +417,38 @@ echo "canary" > "$SANDBOX/canary.txt"
   git add -A
   git commit -qm init
 )
+# check_path_rejected <desc> <dist-dir> [expected-message-substring]
+#
+# The optional third argument pins WHICH validation layer fired, not just
+# that SOME layer did — a round-2 review found that every original case here
+# is caught by two or more overlapping layers (the target doesn't exist, the
+# basename is wrong, a segment is empty, ...), so deleting any ONE layer left
+# this harness green. Asserting the message is what turns "some check still
+# rejects this" into "THIS specific check does".
 check_path_rejected() {
-  local desc="$1" distdir="$2"
-  local before after ec
+  local desc="$1" distdir="$2" expect_msg="${3:-}"
+  local before after ec out
   before="$(checksum_tree "$SANDBOX")"
-  ( cd "$SANDBOX/repo" && bash "$CHECK" "$distdir" true ) > /dev/null 2>&1
+  out="$( cd "$SANDBOX/repo" && bash "$CHECK" "$distdir" true 2>&1 )"
   ec=$?
   after="$(checksum_tree "$SANDBOX")"
   check "C1: $desc -> exit 2" 2 "$ec"
   check "C1: $desc -> sandbox byte-identical after" "$before" "$after"
+  if [ -n "$expect_msg" ]; then
+    case "$out" in
+      *"$expect_msg"*) check "C1: $desc -> message names the right layer" 0 0 ;;
+      *) check "C1: $desc -> message names the right layer" "0 (wanted: $expect_msg)" "1 (got: $out)" ;;
+    esac
+  fi
 }
 
-check_path_rejected "absolute path" "/pkg/dist"
-check_path_rejected "../../outer (contains the repo)" "../../outer"
-check_path_rejected "../sibling" "../sibling"
-check_path_rejected "root (/)" "/"
-check_path_rejected "single dot (.)" "."
-check_path_rejected "double dot (..)" ".."
-check_path_rejected "wrong basename" "pkg/distx"
+check_path_rejected "absolute path" "/pkg/dist" "not absolute"
+check_path_rejected "../../outer (contains the repo)" "../../outer" "'..' path component"
+check_path_rejected "../sibling" "../sibling" "'..' path component"
+check_path_rejected "root (/)" "/" "not absolute"
+check_path_rejected "single dot (.)" "." "'..' path component"
+check_path_rejected "double dot (..)" ".." "'..' path component"
+check_path_rejected "wrong basename" "pkg/distx" "named exactly 'dist'"
 
 # A symlinked dist dir pointing outside the repo, named exactly "dist" (so
 # only the symlink check — not the basename check — can reject it).
@@ -430,71 +456,331 @@ mkdir -p "$SANDBOX/outside-target"
 echo "secret" > "$SANDBOX/outside-target/keep.txt"
 mkdir -p "$SANDBOX/repo/pkg2"
 ln -s "$SANDBOX/outside-target" "$SANDBOX/repo/pkg2/dist"
-check_path_rejected "symlinked dist dir named exactly 'dist'" "pkg2/dist"
+check_path_rejected "symlinked dist dir named exactly 'dist'" "pkg2/dist" "must not be a symlink"
 
-# A directory literally named with git pathspec magic — used to demonstrate
-# the (now moot) `--literal-pathspecs` scenario a review found untested: the
-# basename validation rejects it outright before that flag ever matters.
-mkdir -p "$SANDBOX/repo/pkg3/:(glob)dist"
-check_path_rejected "pathspec-magic directory name" "pkg3/:(glob)dist"
+# A `<dist-dir>` containing a literal control character (a newline here).
+# Round 2: `IFS='/' read -ra` only reads the FIRST LINE of its input, so a
+# `..` sitting after an embedded newline was never segment-checked — a real
+# on-disk directory literally named "a<newline>", containing a symlink out of
+# the repo, reached the physical-containment check with that embedded `..`
+# never rejected by the string-level scan. Rejected up front now, before any
+# segment scan even runs.
+check_path_rejected "embedded newline" "$(printf 'a\n/link/../dist')" "control characters"
+
+# ═══ H1 (round-2 S1): a symlinked INTERMEDIATE component pointing OUTSIDE the
+# repo, with the dist dir's OWN basename spelled correctly ("dist"). This is
+# the one shape physical containment — not any string-level rule — must
+# catch; round 1's harness had no case that isolated it (every symlink case
+# used a symlinked dist dir ITSELF, caught by the separate `-L` check before
+# containment is even reached).
+mkdir -p "$SANDBOX/h1-external/dist"
+echo "h1-victim" > "$SANDBOX/h1-external/dist/victim.js"
+mkdir -p "$SANDBOX/repo/pkgh1"
+ln -s "$SANDBOX/h1-external" "$SANDBOX/repo/pkgh1/outlink"
+check_path_rejected "H1: symlinked intermediate resolves outside the repo" "pkgh1/outlink/dist" "outside the repo root"
+
+# ═══ H6 (round-2 S1): `.git/dist` exists and is targeted DIRECTLY (no case
+# trick needed — this isolates the `.git` RULE itself, so a mutant that
+# removes it is caught regardless of whether this filesystem's case
+# sensitivity can reproduce the APFS-specific variant too).
+mkdir -p "$SANDBOX/repo/.git/dist"
+check_path_rejected "H6: .git/dist is refused" ".git/dist" "inside .git"
+
+# A directory literally named with git pathspec magic, moved to the FIRST
+# path component (round-2 S3): magic is a prefix of the WHOLE pathspec
+# string, not of the last component, so `:(glob)pkg3/dist` has an ordinary
+# basename and passes validation while still being magic to git — this is
+# the shape that actually exercises `--literal-pathspecs`, unlike round 1's
+# `pkg3/:(glob)dist` (magic on the LAST component, caught by the basename
+# rule alone and never reaching git). This one is accepted by validation and
+# verified for real orphan detection in its own case below, not rejected
+# here.
 
 # ═══════════════════════════════════════════════════════════════════════
-# Case 9 — S1: a signal during the build restores the pre-existing dist/
-# rather than leaving it wiped. SIGTERM to the check script's own process
-# (bash waits for the foreground build child before running the trap).
+# Case 8b — THE ROUND-2 FALSE GREEN. An IN-REPO symlinked component (the
+# shape of a real npm-workspace link, e.g.
+# `node_modules/@chroxy/protocol/dist` -> `../../packages/protocol/dist`)
+# physically resolves to somewhere legitimately inside the repo — round 1's
+# prefix-only containment check accepted it — while git's pathspecs cannot
+# see through the symlink at all, so a REAL orphan sitting behind it is
+# invisible to both `git diff` and `git ls-files`, and the clean rebuild
+# silently deletes it from the working tree while reporting "OK". The
+# round-2 exact-match fix closes this: the symlink's physical target differs
+# from the literal argument string, so it is refused before the build (and
+# the deletion) ever runs.
 # ═══════════════════════════════════════════════════════════════════════
-SIGREPO="$TMP/sig-repo"
-mkdir -p "$SIGREPO/pkg/dist"
 (
-  cd "$SIGREPO" || exit 1
+  cd "$REPO" || exit 1
+  mkdir -p real-pkg/dist
+  echo "fg" > src/fg.txt
+  echo "fg" > real-pkg/dist/fg.js
+  echo "fg-orphan" > real-pkg/dist/fg-orphan.js
+  git add -f real-pkg/dist/fg.js real-pkg/dist/fg-orphan.js
+  git commit -qm 'add real-pkg with an about-to-be-orphaned file'
+  ln -s real-pkg/dist linked-dist
+  cat > fg-build.sh <<'SH'
+#!/usr/bin/env bash
+set -e
+mkdir -p real-pkg/dist
+echo "fg" > real-pkg/dist/fg.js
+# fg-orphan.js deliberately not recreated
+SH
+  chmod +x fg-build.sh
+)
+fg_result="$(run_check_capture linked-dist ./fg-build.sh)"
+fg_exit="${fg_result%%$'\n'*}"
+check "H-symlink: an in-repo symlinked dist dir is refused, not silently resolved" 2 "$fg_exit"
+check "...and the real orphan was NEVER touched (still on disk, untouched by any rebuild)" "fg-orphan" "$(cd "$REPO" && cat real-pkg/dist/fg-orphan.js 2>/dev/null | tr -d '\n')"
+# Prove the ROUND-1 (prefix-only) logic specifically would have accepted
+# this and let the rebuild silently delete the orphan — reproduced inline,
+# not sourced from git history, the same way the #8163/#8152 RED proofs are.
+(
+  cd "$REPO" || exit 1
+  REPO_REAL_R1="$(cd "$PWD" && pwd -P)"
+  ABS_R1="$PWD/linked-dist"
+  DIST_REAL_R1="$(cd "$ABS_R1" && pwd -P)"
+  case "$DIST_REAL_R1" in
+    "$REPO_REAL_R1"/*) echo accepted ;;
+    *) echo rejected ;;
+  esac
+) | { read -r r1_verdict; check "RED PROOF: round-1's prefix-only containment accepts the same symlink" "accepted" "$r1_verdict"; }
+
+# ═══════════════════════════════════════════════════════════════════════
+# Case 8c — S3: `--literal-pathspecs` is the ONLY thing defending a
+# `<dist-dir>` whose pathspec magic sits on its FIRST component (magic is a
+# prefix of the WHOLE pathspec, not of the last path component, so the
+# basename rule has nothing to say about it). With a real orphan present:
+# the flag intact must report it; the flag removed (a mutant) must not.
+# ═══════════════════════════════════════════════════════════════════════
+(
+  cd "$REPO" || exit 1
+  mkdir -p ':(glob)magicpkg/dist'
+  echo "mg" > src/mg.txt
+  echo "mg-orphan" > ':(glob)magicpkg/dist/mg-orphan.js'
+  echo "mg" > ':(glob)magicpkg/dist/mg.js'
+  # --literal-pathspecs on the SETUP add too: without it, git's default
+  # pathspec parsing interprets the leading ":(glob)" as magic for this `git
+  # add` invocation itself ("did not match any files") before the fixture is
+  # even built — the identical reason the script under test needs the flag.
+  git --literal-pathspecs add -f ':(glob)magicpkg/dist/mg-orphan.js' ':(glob)magicpkg/dist/mg.js'
+  git commit -qm 'add pathspec-magic-prefixed package'
+  cat > mg-build.sh <<'SH'
+#!/usr/bin/env bash
+set -e
+mkdir -p ':(glob)magicpkg/dist'
+echo "mg" > ':(glob)magicpkg/dist/mg.js'
+# mg-orphan.js deliberately not recreated
+SH
+  chmod +x mg-build.sh
+)
+check "H14: a pathspec-magic-prefixed dist dir still reports a real orphan" 1 "$(run_check ':(glob)magicpkg/dist' ./mg-build.sh)"
+( cd "$REPO" && git show HEAD:':(glob)magicpkg/dist/mg-orphan.js' > ':(glob)magicpkg/dist/mg-orphan.js' )
+
+MUTANT_NOFLAG="$TMP/mutant-no-literal-pathspecs.sh"
+sed 's/--literal-pathspecs//g' "$CHECK" > "$MUTANT_NOFLAG"
+mutant_h14_exit="$( ( cd "$REPO" && bash "$MUTANT_NOFLAG" ':(glob)magicpkg/dist' ./mg-build.sh ) > /dev/null 2>&1; echo $? )"
+check "MUTANT H14: --literal-pathspecs removed -> false OK on the same real orphan" 0 "$mutant_h14_exit"
+( cd "$REPO" && git show HEAD:':(glob)magicpkg/dist/mg-orphan.js' > ':(glob)magicpkg/dist/mg-orphan.js' )
+
+# ═══════════════════════════════════════════════════════════════════════
+# Case 9 — S1/H7/H8: a signal during the build restores the pre-existing
+# dist/ rather than leaving it wiped. Round 1 only proved this for SIGTERM;
+# a round-2 review pointed out that a BACKGROUNDED job in a non-interactive
+# shell has SIGINT (and SIGQUIT) pre-ignored by the shell itself — this is
+# standard POSIX behaviour, not a bug, and it means a naive `kill -INT
+# "$pid"` against a plain `cmd &` job is silently a no-op: the signal is
+# delivered to a process with SIG_IGN already set, so nothing happens and
+# the build simply runs to completion. Measured directly: a bare `sleep 5 &`
+# in a non-interactive script ran the FULL 5 seconds after `kill -INT` was
+# sent to it. `set -m` (job control) in the subshell below is what restores
+# normal signal dispositions for its background jobs — confirmed to
+# correctly interrupt SIGINT, SIGTERM and SIGHUP alike, verified against the
+# real multi-process chain (this subshell's job -> check-dist-drift.sh's own
+# exec'd process -> its internal build subshell -> slow-build.sh -> `sleep`)
+# by sending the signal to the NEGATIVE pid (the whole process group `set -m`
+# creates for the job), which the kernel itself fans out to every member —
+# no manual process-tree walk needed. Scoped to its own subshell so `set -m`
+# (and the job-control status messages it prints) never leaks into the rest
+# of this harness.
+# ═══════════════════════════════════════════════════════════════════════
+
+# run_signal_test <signal-name> -> prints "EXIT\nCONTENT\nSTATUS\nSTRAYS", a
+# fresh sigrepo each call so one interrupted run never affects the next.
+run_signal_test() {
+  local sig="$1"
+  local sigrepo="$TMP/sig-repo-$sig"
+  mkdir -p "$sigrepo/pkg/dist"
+  (
+    cd "$sigrepo" || exit 1
+    git init -q
+    git config user.email t@example.com
+    git config user.name t
+    echo "original" > pkg/dist/a.js
+    git add -A
+    git commit -qm init
+    cat > slow-build.sh <<'SH'
+#!/usr/bin/env bash
+sleep 5
+mkdir -p pkg/dist
+echo changed > pkg/dist/a.js
+SH
+    chmod +x slow-build.sh
+  )
+  (
+    set -m
+    cd "$sigrepo" || exit 1
+    bash "$CHECK" pkg/dist ./slow-build.sh > /dev/null 2>&1 &
+    sigpid=$!
+    sleep 1
+    kill "-$sig" -- "-$sigpid" 2> /dev/null
+    wait "$sigpid" 2> /dev/null
+    ec=$?
+    printf '%s\n%s\n%s\n%s' \
+      "$ec" \
+      "$(cat pkg/dist/a.js 2> /dev/null)" \
+      "$(git status --short -- pkg/dist)" \
+      "$(find pkg -maxdepth 1 -name '.check-dist-drift-backup*' 2> /dev/null)"
+  )
+}
+
+for sig_pair in 'INT:130' 'TERM:143' 'HUP:129'; do
+  sig="${sig_pair%%:*}"
+  expected="${sig_pair#*:}"
+  result="$(run_signal_test "$sig")"
+  ec="$(printf '%s' "$result" | sed -n '1p')"
+  content="$(printf '%s' "$result" | sed -n '2p')"
+  status="$(printf '%s' "$result" | sed -n '3p')"
+  strays="$(printf '%s' "$result" | sed -n '4p')"
+  check "SIG$sig mid-build exits with the conventional 128+N code" "$expected" "$ec"
+  check "...and dist is restored to its pre-build content (SIG$sig)" "original" "$content"
+  check "...and git status is clean after the signal (SIG$sig)" "" "$status"
+  check "...and no backup directory is left behind (SIG$sig)" "" "$strays"
+done
+
+# ═══════════════════════════════════════════════════════════════════════
+# Case 10 — H9 (round-2 S1): a restore that itself FAILS keeps the backup
+# on disk and prints its path, rather than the EXIT trap discarding the
+# only remaining copy — round 1's own regression, re-isolated. A PATH shim
+# for `mv` refuses exactly the RESTORE call (source ends in "dist-backup";
+# the INITIAL backup-creation call's DESTINATION ends in "dist-backup" but
+# its SOURCE does not, so only the restore direction is blocked) in front of
+# a build that fails outright.
+# ═══════════════════════════════════════════════════════════════════════
+H9REPO="$TMP/h9-repo"
+mkdir -p "$H9REPO/pkg/dist"
+(
+  cd "$H9REPO" || exit 1
   git init -q
   git config user.email t@example.com
   git config user.name t
   echo "original" > pkg/dist/a.js
   git add -A
   git commit -qm init
-  cat > slow-build.sh <<'SH'
+  cat > fail.sh <<'SH'
 #!/usr/bin/env bash
-sleep 5
-mkdir -p pkg/dist
-echo changed > pkg/dist/a.js
+exit 7
 SH
-  chmod +x slow-build.sh
+  chmod +x fail.sh
 )
-# killtree <pid> — SIGTERM every descendant of <pid>, deepest first, then
-# <pid> itself. Needed because the process chain here is FOUR deep (this
-# harness's background job -> check-dist-drift.sh -> its internal build
-# subshell -> slow-build.sh's `sleep`), and bash defers running its own EXIT/
-# TERM trap until its current FOREGROUND command finishes. Signalling only
-# the top PID leaves the actual `sleep` untouched, so check-dist-drift.sh
-# would not observe the pending signal until the 5-second sleep ended on its
-# own — a false pass that looks identical to a correctly-fast restore in a
-# harness that does not bound the wait. No process-group / job-control setup
-# (`set -m`) is assumed, since it is unavailable in some non-interactive
-# shells this harness runs under; walking `pgrep -P` down to the real leaf
-# process is portable without it.
-killtree() {
-  local pid="$1" child
-  for child in $(pgrep -P "$pid" 2> /dev/null); do
-    killtree "$child"
-  done
-  kill -TERM "$pid" 2> /dev/null
-}
+MVSHIM_DIR="$TMP/mvshim"
+mkdir -p "$MVSHIM_DIR"
+cat > "$MVSHIM_DIR/mv" <<SH
+#!/usr/bin/env bash
+case "\$1" in
+  */dist-backup) echo "SHIMMED-MV-REFUSES-RESTORE" >&2; exit 1 ;;
+esac
+exec "$(command -v mv)" "\$@"
+SH
+chmod +x "$MVSHIM_DIR/mv"
+h9_output="$( cd "$H9REPO" && PATH="$MVSHIM_DIR:$PATH" bash "$CHECK" pkg/dist ./fail.sh 2>&1 )"
+h9_exit=$?
+check "H9: a build failure whose restore ALSO fails still exits non-zero" 1 "$h9_exit"
+h9_backup_path="$(printf '%s' "$h9_output" | sed -n "s/.*contents are kept at: //p")"
+check "H9: the error message names a backup path that actually exists" 0 "$([ -n "$h9_backup_path" ] && [ -e "$h9_backup_path" ] && echo 0 || echo 1)"
+check "H9: the kept backup is byte-identical to the original" "original" "$(cat "$h9_backup_path/a.js" 2>/dev/null)"
+rm -rf "$(dirname "$h9_backup_path")" 2>/dev/null
 
-# `exec` inside the subshell replaces it with check-dist-drift.sh itself
-# (rather than leaving a `cd && bash ...` wrapper process on top of it), so
-# $! is the script's own PID and `killtree` starts one level higher than it
-# would otherwise need to.
-( cd "$SIGREPO" && exec bash "$CHECK" pkg/dist ./slow-build.sh ) > /dev/null 2>&1 &
-SIGPID=$!
-sleep 1
-killtree "$SIGPID"
-wait "$SIGPID" 2>/dev/null
-SIGEC=$?
-check "SIGTERM mid-build exits with the conventional 128+15 code" 143 "$SIGEC"
-check "...and dist is restored to its pre-build content" "original" "$(cat "$SIGREPO/pkg/dist/a.js" 2> /dev/null)"
-check "...and git status is clean after the signal" "" "$( ( cd "$SIGREPO" && git status --short -- pkg/dist ) )"
-check "...and no backup directory is left behind" "" "$(find "$SIGREPO/pkg" -maxdepth 1 -name '.check-dist-drift-backup*' 2> /dev/null)"
+# MUTANT H9: restore round-1's bug (the EXIT trap deletes the backup
+# unconditionally instead of only after DONE=1 or a verified restore) and
+# confirm this isolating case goes RED against it — proving the case
+# actually exercises the invariant, not just the current code's shape.
+H9_MUTANT="$TMP/mutant-h9-cleanup.sh"
+awk '
+  /^cleanup\(\) \{$/ { print; print "  rm -rf \"$BACKUP_PARENT\" 2>/dev/null; return"; skipping=1; next }
+  skipping && /^\}$/ { print; skipping=0; next }
+  skipping { next }
+  { print }
+' "$CHECK" > "$H9_MUTANT"
+# A FRESH repo for the mutant run: the non-mutant H9 case above deliberately
+# left pkg/dist absent (the shimmed restore correctly refused to recreate
+# it), so re-using the same repo would need its own repair step first.
+H9MREPO="$TMP/h9-mutant-repo"
+mkdir -p "$H9MREPO/pkg/dist"
+(
+  cd "$H9MREPO" || exit 1
+  git init -q
+  git config user.email t@example.com
+  git config user.name t
+  echo "original" > pkg/dist/a.js
+  git add -A
+  git commit -qm init
+  cp "$H9REPO/fail.sh" .
+)
+mutant_h9_output="$( cd "$H9MREPO" && PATH="$MVSHIM_DIR:$PATH" bash "$H9_MUTANT" pkg/dist ./fail.sh 2>&1 )"
+mutant_h9_backup_path="$(printf '%s' "$mutant_h9_output" | sed -n "s/.*contents are kept at: //p")"
+check "MUTANT H9: round-1's unconditional-delete cleanup() loses the backup" "0 (no backup path printed, or it does not exist)" "$([ -z "$mutant_h9_backup_path" ] || [ ! -e "$mutant_h9_backup_path" ] && echo "0 (no backup path printed, or it does not exist)" || echo "1 (backup at $mutant_h9_backup_path survived — mutant did not reproduce the bug)")"
+
+# ═══════════════════════════════════════════════════════════════════════
+# Case 11 — H10 (round-2 S1): no backup directory survives a run that
+# reaches a real verdict — neither a CLEAN pass nor a DRIFT failure.
+# ═══════════════════════════════════════════════════════════════════════
+run_check dist ./build.sh > /dev/null
+check "H10: no backup left behind after a CLEAN verdict" "" "$(find "$REPO" -maxdepth 1 -name '.check-dist-drift-backup*' 2>/dev/null)"
+echo "a-modified-h10" > "$REPO/src/a.txt"
+run_check dist ./build.sh > /dev/null
+check "H10: no backup left behind after a DRIFT verdict" "" "$(find "$REPO" -maxdepth 1 -name '.check-dist-drift-backup*' 2>/dev/null)"
+echo "a" > "$REPO/src/a.txt"
+run_check dist ./build.sh > /dev/null
+
+# MUTANT H10: force cleanup() to SKIP the DONE=1 branch's rm -rf (simulating
+# a leak after a verdict) and confirm this isolating case goes RED.
+H10_MUTANT="$TMP/mutant-h10-cleanup.sh"
+# shellcheck disable=SC2016 # deliberate: single-quoted so the sed PATTERN
+# matches $CHECK's own literal source text; it must not be shell-expanded.
+sed '/\[ -n "\$BACKUP_PARENT" \] && \[ -d "\$BACKUP_PARENT" \] && rm -rf "\$BACKUP_PARENT"/d' "$CHECK" > "$H10_MUTANT"
+( cd "$REPO" && bash "$H10_MUTANT" dist ./build.sh ) > /dev/null 2>&1
+mutant_h10_leaked="$(find "$REPO" -maxdepth 1 -name '.check-dist-drift-backup*' 2>/dev/null)"
+check "MUTANT H10: a cleanup() that never rm -rfs the backup leaks one after a clean verdict" "leaked" "$([ -n "$mutant_h10_leaked" ] && echo leaked || echo "not leaked")"
+rm -rf "$REPO"/.check-dist-drift-backup* 2>/dev/null
+
+# ═══════════════════════════════════════════════════════════════════════
+# Case 12 — S2: a backup stranded by an earlier, incomplete run (e.g.
+# SIGKILL, which no trap can catch) is detected by the NEXT run before it
+# creates one of its own, rather than silently proceeding and leaving the
+# stray copy on disk forever.
+# ═══════════════════════════════════════════════════════════════════════
+STRANDREPO="$TMP/strand-repo"
+mkdir -p "$STRANDREPO/pkg/dist"
+(
+  cd "$STRANDREPO" || exit 1
+  git init -q
+  git config user.email t@example.com
+  git config user.name t
+  echo "x" > pkg/dist/a.js
+  git add -A
+  git commit -qm init
+)
+mkdir -p "$STRANDREPO/pkg/.check-dist-drift-backup.strandtest/dist-backup"
+echo "stranded-original" > "$STRANDREPO/pkg/.check-dist-drift-backup.strandtest/dist-backup/a.js"
+stranded_output="$( cd "$STRANDREPO" && bash "$CHECK" pkg/dist true 2>&1 )"
+stranded_exit=$?
+check "S2: a stranded backup from an earlier run is detected, not silently proceeded past" 2 "$stranded_exit"
+case "$stranded_output" in
+  *".check-dist-drift-backup.strandtest"*) check "S2: the error names the stranded backup's path" 0 0 ;;
+  *) check "S2: the error names the stranded backup's path" 0 1 ;;
+esac
+check "S2: the stranded backup itself is untouched" "stranded-original" "$(cat "$STRANDREPO/pkg/.check-dist-drift-backup.strandtest/dist-backup/a.js" 2>/dev/null)"
+check "S2: the real dist dir was never touched either (refused before any mv)" "x" "$(cat "$STRANDREPO/pkg/dist/a.js" 2>/dev/null)"
 
 echo "----"
 BROKEN=0

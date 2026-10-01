@@ -1,9 +1,10 @@
 import { after, before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import {
   readWorkflows,
   assertReaderSane,
@@ -358,12 +359,22 @@ describe('command wrappers: a first-party script whose argv IS a command (#8163)
     assert.ok(Object.keys(COMMAND_WRAPPERS).length > 0, 'COMMAND_WRAPPERS has no entries to check')
   })
 
-  it('every roster entry is a tracked script that exists on disk', () => {
+  it('every roster entry is a TRACKED script, not merely a file sitting on disk', () => {
+    // `git ls-files --error-unmatch` (not `existsSync`): an untracked file —
+    // one nobody committed, or one `git rm`'d without the roster entry being
+    // updated — would pass an `existsSync` check while being exactly the
+    // kind of stale entry this control exists to catch. Exit 0 means git
+    // itself considers the path tracked at the current index; nonzero
+    // (`--error-unmatch`'s whole purpose) means it does not.
     for (const scriptPath of Object.keys(COMMAND_WRAPPERS)) {
-      assert.ok(
-        existsSync(join(REPO_ROOT, scriptPath)),
-        `COMMAND_WRAPPERS names ${scriptPath}, which does not exist at ${REPO_ROOT} — a stale ` +
-          'entry, or the script moved'
+      const result = spawnSync('git', ['ls-files', '--error-unmatch', '--', scriptPath], {
+        cwd: REPO_ROOT,
+      })
+      assert.equal(
+        result.status,
+        0,
+        `COMMAND_WRAPPERS names ${scriptPath}, which git does not track at ${REPO_ROOT} — a stale ` +
+          'entry, an untracked file, or the script moved'
       )
     }
   })

@@ -71,9 +71,16 @@
 # (see below), which makes an unvalidated caller-supplied path a real data-
 # loss risk, not a hypothetical one: an unvalidated `../../outer` or `/` moved
 # the repository's enclosing directory, `.git` included, out of the way and
-# then failed to move it back. See `validate_dist_dir()` for the exact rules;
-# a path failing any of them is a usage error (exit 2), refused before the
-# first `mv`.
+# then failed to move it back. A SECOND round of review found that checking
+# the physical location is inside the repo is not the same claim as checking
+# that <dist-dir> NAMES that location — an npm-workspace symlink
+# (`node_modules/@chroxy/protocol/dist`), any other in-repo symlinked
+# intermediate component, and (on a case-preserving filesystem such as APFS)
+# a wrong-case spelling of a real path all physically resolve somewhere
+# legitimate while naming something git's pathspecs cannot see through, each
+# a silent false-clean. See `validate_dist_dir()` and the physical-containment
+# check below for the exact rules; a path failing any of them is a usage
+# error (exit 2), refused before the first `mv`.
 #
 # This script OWNS the build now, so it must leave the working tree no worse
 # off than it found it when it can't complete the check: the pre-existing
@@ -86,7 +93,19 @@
 # half-built. The backup is deleted only once it is confirmed no longer
 # needed: after a verdict is reached, or after a verified successful restore.
 # If a restore itself fails, the backup is kept on disk and its path is
-# printed loudly — never silently discarded — so nothing is lost twice.
+# printed loudly — never silently discarded — so nothing is lost twice. A
+# backup stranded by an even harsher failure (SIGKILL, which no trap can
+# catch) is detected by the NEXT run before it creates one of its own, and
+# that run refuses to proceed until the stray backup is resolved by hand.
+#
+# A RUN THAT REACHES A VERDICT (clean or drift) REPLACES <dist-dir> WITH THE
+# CLEAN BUILD'S OUTPUT, FULL STOP. Anything that was sitting in <dist-dir>
+# and that the build does not itself emit — an ignored local scratch file, a
+# stray editor artifact — is gone afterward, the same as a normal `rm -rf
+# <dist-dir> && npm run build` would discard it. This script does not special-
+# case preserving such files; it is not a general-purpose "diff a directory"
+# tool, it is a CI gate for whether a package's committed dist matches a
+# clean build.
 #
 # Exits:
 #   0 — a clean rebuild of <dist-dir> matches its committed state exactly (no
@@ -96,8 +115,10 @@
 #       exit code propagates unchanged via `set -e`; it is not remapped to 1,
 #       though in practice this is commonly 128). "Cannot check" must never
 #       read as "nothing to check" — see docs/false-safety-guards.md.
-#   2 — usage error: fewer than 2 arguments, an empty <dist-dir>, or
-#       <dist-dir> fails validation (see `validate_dist_dir()`).
+#   2 — usage error: fewer than 2 arguments, an empty <dist-dir>, <dist-dir>
+#       fails validation (see `validate_dist_dir()` and the physical-
+#       containment check below), or a backup from an earlier, incomplete run
+#       is already sitting on disk (see the stranded-backup check below).
 #   130/143/129 — interrupted by SIGINT/SIGTERM/SIGHUP respectively, after the
 #       EXIT trap has attempted to restore any pre-existing <dist-dir>.
 #
@@ -127,11 +148,17 @@ BUILD_CMD=("$@")
 # --literal-pathspecs shuts that off; strip any inherited pathspec-mode env var
 # first, since git refuses to start if two global pathspec modes are selected
 # at once (GIT_GLOB_PATHSPECS / GIT_ICASE_PATHSPECS / GIT_NOGLOB_PATHSPECS).
-# (A directory name that itself contains pathspec magic, e.g. `:(glob)dist`,
-# never reaches this flag in practice: `validate_dist_dir()` below requires
-# the LAST path component to be spelled exactly `dist`, which a magic prefix
-# is not — so that shape is now a usage error, not a case this flag alone
-# defends.)
+#
+# STILL LIVE, and this flag is the only thing defending it: pathspec magic is
+# a prefix of the WHOLE pathspec string, not of its last path component, so
+# `:(glob)pkg/dist` has an ordinary basename ("dist", passing
+# `validate_dist_dir()` below) while still being magic to git. Without
+# --literal-pathspecs, a `<dist-dir>` spelled that way would have its leading
+# `:(glob)` interpreted as a pathspec MAGIC marker rather than matched as a
+# literal directory-name prefix, changing what `git diff`/`git ls-files`
+# below actually match against. (An EARLIER version of this comment claimed
+# the basename rule alone made this moot — it does not; magic lives at the
+# front of the path, not the back.)
 unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS 2>/dev/null || true
 
 # Resolve the repo root so this is independent of the caller's exact cwd within
@@ -170,6 +197,23 @@ validate_dist_dir() {
   local raw="$1" d seg
   local -a segs
 
+  # Round 2 review: a control character (a literal embedded newline or CR
+  # above all) breaks the component scan below in a way that matters —
+  # `IFS='/' read -ra` reads only the FIRST LINE of its input, so any `..`
+  # or other component sitting after an embedded newline is never segment-
+  # checked at all. `$'a\n/link/../dist'` (a real on-disk directory literally
+  # named "a<newline>", containing a symlink out of the repo) reached the
+  # physical-containment check below with its embedded ".." never rejected
+  # by this function. Rejecting every control character up front closes that
+  # specific hole directly, independent of the containment fix: there is no
+  # legitimate reason a CI- or test-supplied <dist-dir> would ever contain
+  # one.
+  case "$raw" in
+    *[[:cntrl:]]*)
+      fail_validation "<dist-dir> may not contain control characters (including a newline or CR)"
+      ;;
+  esac
+
   case "$raw" in
     /*) fail_validation "<dist-dir> must be a path relative to the repo root, not absolute: $raw" ;;
   esac
@@ -184,7 +228,9 @@ validate_dist_dir() {
   # expansion, so a component containing a glob metacharacter is split on '/'
   # literally rather than expanded against whatever happens to be in the
   # CURRENT directory — the kind of shell-prediction hazard this repo's own
-  # review culture flags.
+  # review culture flags. (The control-character check above is what makes
+  # this a complete scan rather than "complete unless a newline hides part
+  # of the input from it".)
   IFS='/' read -ra segs <<< "$d"
   for seg in "${segs[@]}"; do
     case "$seg" in
@@ -232,16 +278,45 @@ if [ ! -d "$ABS_DIST_DIR" ]; then
   fail_validation "<dist-dir> exists but is not a directory: $DIST_DIR"
 fi
 
-# Physical containment: resolve both sides with symlinks removed (`pwd -P`,
-# the portable `cd`+`pwd` idiom — no `realpath` binary assumed) and require
-# the dist dir to sit STRICTLY inside the repo root, and not inside `.git`.
-# This is the backstop behind the string checks above, not a restatement of
-# them: `packages/protocol/../../..` contains a `..` component and is already
-# rejected above, but a path reaching outside the repo through a symlinked
-# INTERMEDIATE directory (not the dist dir itself, already refused above)
-# would pass every string-level rule and is only caught here.
-REPO_REAL="$(cd "$REPO_ROOT" && pwd -P)"
-DIST_REAL="$(cd "$ABS_DIST_DIR" && pwd -P)"
+# Physical containment, round 2: resolve both sides with symlinks removed and
+# require <dist-dir> to NAME its own physical location EXACTLY — not merely
+# resolve to somewhere under the repo root.
+#
+# Round 1 only checked the latter (a prefix match of DIST_REAL against
+# REPO_REAL), and a second review found that insufficient: it answers "is the
+# physical directory somewhere inside the repo", not "does <dist-dir> name
+# THAT directory". Three real inputs passed the prefix check as a result —
+#   * `node_modules/@chroxy/protocol/dist` (the ordinary npm-workspace
+#     symlink present in every checkout of this repo) physically resolves to
+#     packages/protocol/dist, which IS inside the repo — but git's pathspec
+#     cannot see through the symlink, so the diff/ls-files checks below find
+#     nothing and report a FALSE CLEAN while silently deleting a real orphan
+#     from the working tree;
+#   * the same shape for any in-repo symlinked intermediate component, not
+#     only the workspace one;
+#   * on a case-insensitive-but-preserving filesystem (APFS, the macOS
+#     default), a `<dist-dir>` spelled with the wrong case for an existing
+#     path still resolves to the SAME inode the correctly-cased spelling
+#     would, including `.GIT/dist` resolving to the real `.git/dist`.
+# Exact string equality between `$REPO_REAL/$DIST_DIR` (what the ARGUMENT
+# claims) and `$DIST_REAL` (what the filesystem actually resolves it to, with
+# every symlink and case variant collapsed) closes all three at once: a
+# symlinked component or a case mismatch makes the physical resolution differ
+# from the literal argument, which this comparison treats as untrusted no
+# differently from resolving outside the repo entirely.
+#
+# `cd -P` (not a bare `cd`, which is LOGICAL and resolves `..` lexically
+# against the path as TYPED rather than physically against the filesystem —
+# the mismatch a reviewer used to walk a crafted path through a symlink and
+# back "inside" the repo on paper while `mv`/`rm -rf` act on the real,
+# physically-resolved, OUTSIDE-the-repo target) and `/bin/pwd -P` — the
+# EXTERNAL binary, not the shell builtin: bash 3.2's builtin `pwd -P` has been
+# observed to preserve the case the caller typed on APFS rather than the
+# filesystem's canonical stored case, which would let a `.GIT` spelling slip
+# past a case-sensitive `.git` comparison. No `realpath` binary is assumed;
+# `cd -P` + `pwd -P` is the portable idiom for both of these.
+REPO_REAL="$(cd -P "$REPO_ROOT" && /bin/pwd -P)"
+DIST_REAL="$(cd -P "$ABS_DIST_DIR" && /bin/pwd -P)"
 case "$DIST_REAL" in
   "$REPO_REAL")
     fail_validation "<dist-dir> resolves to the repo root itself: $DIST_DIR"
@@ -249,8 +324,11 @@ case "$DIST_REAL" in
   "$REPO_REAL/.git" | "$REPO_REAL/.git/"*)
     fail_validation "<dist-dir> resolves inside .git: $DIST_DIR -> $DIST_REAL"
     ;;
+  "$REPO_REAL/$DIST_DIR")
+    : # names its own physical location exactly — the only accepted shape
+    ;;
   "$REPO_REAL"/*)
-    : # strictly inside the repo — the required shape
+    fail_validation "<dist-dir> does not name its own physical location (a symlinked component, a case variant, or an embedded '..' resolved it elsewhere): $DIST_DIR -> $DIST_REAL"
     ;;
   *)
     fail_validation "<dist-dir> resolves outside the repo root ($REPO_REAL): $DIST_DIR -> $DIST_REAL"
@@ -296,6 +374,28 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+# S2 (round-2 review): a STRANDED backup from an earlier, incomplete run is
+# otherwise invisible to every later invocation. SIGKILL mid-build (a signal
+# no trap can catch) leaves one on disk at exactly this name; so does a
+# restore that itself failed (which this script already keeps deliberately,
+# printing its path — see cleanup() above). Without this check, the NEXT run
+# simply creates its own new backup alongside the stale one and reports
+# whatever it finds in <dist-dir> with no mention of the orphaned copy
+# sitting next to it — the stale backup is correct and recoverable, but
+# nothing ever points a developer at it. Checked before anything is touched.
+# shellcheck disable=SC2125 # deliberate: stays a literal pattern in this
+# scalar assignment (bash does not glob-expand the right-hand side of a plain
+# `var=value`), and is glob-expanded on PURPOSE at the array assignment below.
+BACKUP_GLOB="$(dirname "$ABS_DIST_DIR")/.check-dist-drift-backup."*
+# shellcheck disable=SC2206 # deliberate glob expansion of a literal pattern
+STRAY=($BACKUP_GLOB)
+if [ -e "${STRAY[0]}" ]; then
+  echo "::error::$(basename "$0"): a backup from an earlier, incomplete run already exists at ${STRAY[0]} — refusing to start a new one until it is resolved." >&2
+  echo "This means a previous run was killed before it could restore $DIST_DIR (e.g. SIGKILL), or a restore itself failed and the backup was deliberately kept." >&2
+  echo "Recover by hand: compare ${STRAY[0]}/dist-backup against the current $DIST_DIR, then either 'rm -rf $DIST_DIR && mv ${STRAY[0]}/dist-backup $DIST_DIR' to restore it, or 'rm -rf ${STRAY[0]}' once you've confirmed it is no longer needed." >&2
+  exit 2
+fi
 
 # A SIBLING of the dist dir, not the system temp dir: `mktemp -d` alone ignores
 # TMPDIR on macOS (it uses /var/folders/...), which can put the backup on a

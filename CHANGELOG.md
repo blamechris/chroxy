@@ -110,6 +110,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unclassified (the exact failure this fix closes) rather than merely
   asserting the roster's presence.
 
+  **A second review round found the containment check itself still
+  bypassable.** It verified the physical directory sat somewhere inside the
+  repo, but not that `<dist-dir>` NAMED that location — so an npm-workspace
+  symlink (`node_modules/@chroxy/protocol/dist`, present in every checkout),
+  any other in-repo symlinked intermediate component, and (on a case-
+  preserving filesystem such as APFS) a wrong-case spelling of a real path
+  all physically resolved somewhere legitimate while git's pathspecs could
+  not see through them — a silent false-clean that deleted a real orphan
+  from the working tree while reporting "OK". A crafted path containing an
+  embedded newline (`IFS='/' read -ra` only scans the first line of its
+  input) reached the same containment check with its embedded `..` never
+  segment-checked, and walked a symlink back "inside" the repo on paper
+  while the physical `mv`/`rm -rf` acted on the real, outside-the-repo
+  target. Fixed by requiring an EXACT match between what `<dist-dir>` claims
+  and where it physically resolves (`cd -P` + the external `/bin/pwd -P`,
+  not the builtin, which was observed to preserve the caller's typed case on
+  APFS) — any symlinked component or case mismatch now fails validation —
+  plus an up-front rejection of any control character in `<dist-dir>`. Also
+  closed in the same round: a SIGINT/SIGHUP in addition to the already-
+  handled SIGTERM (bash pre-ignores SIGINT for a backgrounded job in a non-
+  interactive shell, which had made the harness's own INT coverage a no-op
+  rather than a real test); a backup stranded by a SIGKILL (which no trap
+  can catch) or an already-failed restore is now detected by the NEXT run
+  before it creates one of its own, refusing until the stray copy is
+  resolved by hand; and `--literal-pathspecs`, whose comment wrongly claimed
+  the basename rule made it moot — pathspec magic is a prefix of the WHOLE
+  path, not its last component, so a `:(glob)`-prefixed first component
+  still needs the flag.
+
+  `scripts/__tests__/check-dist-drift.test.sh` grows to 86 cases, adding
+  ISOLATING coverage for each safety layer individually (a round-2 review
+  found 11 of the original 14 such cases were each caught by two or more
+  overlapping layers at once, so deleting any single layer left the harness
+  green): a symlinked intermediate resolving outside the repo; `.git/dist`
+  targeted directly; an in-repo symlinked dist dir with a real orphan behind
+  it (reproducing the false-green, and the round-1 logic that would have
+  accepted it); the embedded-newline case; a pathspec-magic first component
+  with a real orphan, both with the flag intact and removed (mutant); SIGINT
+  and SIGHUP restoring `dist/` the same as SIGTERM; a restore that itself
+  fails via a PATH-shimmed `mv`, proving the backup is kept and byte-
+  identical (plus a mutant restoring round-1's unconditional-delete bug,
+  confirming the case actually catches it); no backup surviving a clean or a
+  drift verdict (plus a leak mutant); and the stranded-backup detection.
+
 - **Dashboard: worktree sessions show and group by their repo on the
   sidebar, footer, and file tree — not the opaque worktree-hex basename
   (#8123, follow-up to #7328).** #7328 fixed the SessionBar tab-cwd badge so
