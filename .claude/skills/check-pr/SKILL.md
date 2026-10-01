@@ -390,7 +390,7 @@ for tid in sys.stdin.read().split():
     print('  resolved: ' + tid if ok else '  FAILED to resolve: ' + tid)
 "
 
-# Verify zero unresolved threads remain. --paginate emits one length per page,
+# Verify zero unresolved threads remain. --paginate emits one length per page.
 # Sum page counts without positional-dollar tokens that native skill argument
 # expansion can rewrite, so the count stays correct on PRs with >100 threads. If
 # this stays nonzero, either the resolve loop failed on specific threads or new
