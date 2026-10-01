@@ -40,6 +40,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`web-task-manager.js`: a failed feature-detection probe is now logged, a
+  dash-led remote task id can no longer be captured, and a destroyed manager
+  stays destroyed (#7299).** Three pre-existing defects, all surfaced by the
+  #7294 review panel and left out of it as out of scope. `detectFeatures`'s
+  `claude --help` probe had a bare `catch {}` around the parse step — every
+  failure mode (missing binary, a hang past the 15s timeout, a non-zero
+  exit) correctly failed closed but left zero trace, so an operator saw web
+  tasks silently unavailable with nothing to search for; it now logs via
+  `log.warn` with the error's message and code, matching the existing
+  `_verifyBinary` refusal log just above it. The `.catch` at the
+  `ws-server.js` call site stays, with a corrected comment: `detectFeatures`
+  never rejects, but the catch also covers a throw inside the `.then`
+  handler, and an unhandled rejection on that fire-and-forget chain would
+  take the daemon down (#5369); a test now drives that path. The class
+  JSDoc's "re-detection can be triggered manually" was also false — nothing
+  in the codebase calls `detectFeatures()` a second time — and has been
+  corrected rather than wired up, since no caller for manual re-detection
+  exists. Separately, `_spawnRemoteTask`'s `remoteTaskId` capture,
+  `/task[:\s]+([a-zA-Z0-9-]+)/i`, put `-` inside the character class with no
+  position constraint — the same unanchored-dash shape catalogued as entry
+  13 in `docs/false-safety-guards.md` for `getDiff`'s revision allowlist, in
+  the very file #7291 hardened against it. `remoteTaskId` is dead today
+  (nothing consumes it), but it is a sibling argv site and would become live
+  the moment it feeds `--teleport`. The capture is now a dedicated
+  `parseRemoteTaskId` export: anchored so the first character can never be
+  `-`, and re-validated with `utils/argv-safety.js`'s `isSafeArgvValue`
+  before being returned. Finally, `_spawnRemoteTask`'s `execFile` callback
+  runs asynchronously and could fire after `destroy()` had already cleared
+  `_pollTimer`, calling `_startPolling()` again and leaking a fresh interval
+  on an already-destroyed manager; a `_destroyed` flag, set in `destroy()`
+  and checked in that callback (before any state mutation or polling), in
+  `_startPolling()`, and in `_pollTaskStatus()` (at entry and after its
+  awaited status check, so a poll in flight at `destroy()` neither mutates the
+  discarded task nor emits), closes the gap.
+
 - **Mobile app: a worktree-isolated session's nav header shows the repo
   name instead of `worktrees/<hex>` (#8181).** `App.tsx`'s `sessionTitle`
   selector derived the header purely from `session.cwd` — the last two

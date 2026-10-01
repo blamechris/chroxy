@@ -9,7 +9,7 @@ import { WsServer as _WsServer } from '../src/ws-server.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from '../src/base-session.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
-import { setLogListener } from '../src/logger.js'
+import { setLogListener, addLogListener } from '../src/logger.js'
 import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 import { CliSession } from '../src/cli-session.js'
 
@@ -4960,5 +4960,49 @@ describe('WsServer wires the real SessionManager into WebTaskManager (#8060 revi
     // WebTaskManager constructed in production holds the SAME sessionManager
     // instance passed into WsServer, not a stub/omitted one.
     assert.equal(server._webTaskManager._sessionManager, manager)
+  })
+
+  // #7299 review: detectFeatures() itself never rejects, but the chain it
+  // starts at start() is fire-and-forget, and the .catch on it also covers a
+  // throw inside the .then handler. Without it, that throw is an unhandled
+  // rejection, which the daemon treats as fatal (#5369).
+  it('a throw inside the detectFeatures().then handler is caught and logged, not left as an unhandled rejection', async () => {
+    const { manager } = createMockSessionManager([])
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-7299-catch',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    // Resolving to undefined makes the handler's `({ remote, teleport })`
+    // destructuring throw a TypeError. The promise is held open until the
+    // log listener is attached: the test WsServer.start() wrapper clears log
+    // listeners, so the failure has to land after start() returns.
+    let resolveDetect
+    server._webTaskManager.detectFeatures = () => new Promise((resolve) => { resolveDetect = resolve })
+
+    const unhandled = []
+    const onUnhandled = (reason) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    const warnings = []
+    try {
+      await startServerAndGetPort(server)
+      addLogListener((entry) => {
+        if (entry.level === 'warn') warnings.push(entry.message)
+      })
+      resolveDetect(undefined)
+      // Two macrotask turns: one for the rejection to settle, one for Node to
+      // decide it is unhandled and emit the event.
+      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled)
+      setLogListener(null)
+    }
+
+    assert.equal(unhandled.length, 0,
+      'a throw in the detectFeatures().then handler must be caught in ws-server.js, not surface as an unhandled rejection')
+    assert.ok(warnings.some((m) => m.includes('Claude Code Web feature detection failed')),
+      'the caught failure must be logged as a warning')
   })
 })

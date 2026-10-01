@@ -2395,13 +2395,20 @@ export class WsServer {
       this._startApprovalListener()
     }
 
-    // Detect Claude Code Web features (non-blocking)
+    // Detect Claude Code Web features (non-blocking). #7299: detectFeatures()
+    // itself never rejects — every failure mode (a gate refusal, a missing
+    // binary, a timed-out --help) degrades to remote=false/teleport=false and
+    // is logged inside it. The `.catch` stays anyway: it hangs off the promise
+    // `.then()` returns, so it also covers a throw inside the handler and any
+    // rejection path a future change adds. This chain is fire-and-forget, and
+    // an unhandled rejection takes the whole daemon down (#5369), so the catch
+    // is worth keeping even though nothing reaches it today.
     this._webTaskManager.detectFeatures().then(({ remote, teleport }) => {
       if (remote || teleport) {
         log.info(`Claude Code Web features detected: remote=${remote}, teleport=${teleport}`)
       }
     }).catch((err) => {
-      log.warn(`Failed to detect Claude Code Web features: ${err.message} (non-critical, web features disabled)`)
+      log.warn(`Claude Code Web feature detection failed: ${err?.message || err} (non-critical, web features disabled)`)
     })
 
     // Forward web task events to all authenticated clients
