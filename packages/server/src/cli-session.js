@@ -14,7 +14,7 @@ import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-cata
 import { forceKill, killProcessTree } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
-import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent } from './claude-stream-parser.js'
+import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent, formatStatusContent } from './claude-stream-parser.js'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
@@ -1289,6 +1289,23 @@ export class CliSession extends BaseSession {
             }
           } else {
             this._completeAgent(data.tool_use_id)
+          }
+        } else if (data.subtype === 'status') {
+          // #8153 (review nit): mirrors SdkSession's 'status' branch —
+          // `SDKStatusMessage` carries no `message`/`text` field, just
+          // `status: 'compacting' | 'requesting' | null`, so the generic
+          // fallback below would otherwise forward the bare literal string
+          // "status" as a chat bubble. `status: null` means the previous
+          // status cleared — nothing new to show, so it's suppressed
+          // entirely rather than emitted as an empty/placeholder bubble.
+          const statusText = formatStatusContent(data.status)
+          if (statusText) {
+            this.emit('message', {
+              type: 'system',
+              subtype: 'status',
+              content: statusText,
+              timestamp: Date.now(),
+            })
           }
         } else {
           // Forward non-init system events (e.g. usage limits, sub-agent

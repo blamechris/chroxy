@@ -160,16 +160,17 @@ Per-provider feature support. Capability-contract rows (Permission handling, Liv
 | Permission handling | Y (in-process) | Y (HTTP hook) | — | Y (in-process) |
 | Live model switching | Y | Y | Y | Y |
 | Permission mode switching | Y | Y | — | Y |
-| Plan mode | — | Y | — | — |
+| Plan mode | Y (#8153) | Y | — | — |
 | Conversation resume | Y | Y | — | — |
 | Reasoning / thinking level | Y | — | — | Y (per-model levels) |
 | Attachments | Y | Y | — (error on use) | Y (images → vision, other files by reference) |
 | Backing binary / SDK | `@anthropic-ai/claude-agent-sdk` | `claude -p` | `gemini --prompt=<text>` | `codex app-server` |
 | Required env | Claude Code login / `ANTHROPIC_API_KEY` | Claude Code login | `GEMINI_API_KEY` | `OPENAI_API_KEY` or a `codex login` session |
 
-Two cells above are worth reading twice, because they were stale here while [docs/providers.md](providers.md) had them right:
+Three cells above are worth reading twice. The first and third were stale here while [docs/providers.md](providers.md) had them right. The second, claude-sdk plan mode, was stale in both documents and #8153 corrects both:
 
 - **`claude-cli` conversation resume is `Y`.** `cli-session.js` declares `resume: true` (#4887): the upstream session id is wired into the spawn argv on respawn / restore, so the transcript survives instead of starting cold mid-conversation.
+- **`claude-sdk` plan mode is `Y`** (#8153). `sdk-session.js` declared `capabilities.planMode: false` from the provider adapter's introduction (#583) through #8153, but `_sdkPermissionMode()` had always passed `'plan'` straight through as the SDK's own native `PermissionMode` — a literal `--permission-mode plan` flag to the same `claude` CLI binary `claude-cli` spawns. The capability was stale, not the pass-through; #8153 wired the missing `plan_started`/`plan_ready` events and flipped the flag to match.
 - **The `codex` column is the app-server driver.** Against the legacy `codex exec` driver (`CHROXY_CODEX_APPSERVER=0`) these rows — and only these — read differently: Permission handling → **—** (codex runs whatever its own sandbox allows, with no Chroxy approval surface), Permission mode switching → **—**, Reasoning / thinking level → **—**, Attachments → **— (error on use)**, Backing binary / SDK → `codex exec`. Conversation *memory within a session* is **not** one of the differences — both drivers keep it (the exec path resumes its own thread on every turn, #3865).
 
 Neither codex driver supports plan mode, and neither resumes a conversation across a daemon restart.

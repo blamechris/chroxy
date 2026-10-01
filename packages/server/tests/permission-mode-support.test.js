@@ -163,7 +163,7 @@ describe('permission-mode adapter support (#7825)', () => {
 })
 
 // #8090: any provider that declares `capabilities.planMode: false`
-// (claude-tui, codex app-server/-exec, byok, sdk-session, gemini, ...) had
+// (claude-tui, codex app-server/-exec, byok, gemini, ...) had
 // its PreToolUse-hook-level reality (plan mode gives no genuine, chroxy-
 // guaranteed read-only restriction — see claude-tui's hooks/permission-hook.sh:
 // unlike approve/acceptEdits/auto, its `PERM_MODE=plan` branch skips the

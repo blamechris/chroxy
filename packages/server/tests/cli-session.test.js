@@ -950,6 +950,52 @@ describe('CliSession plan mode', () => {
   })
 })
 
+// #8153 (review nit) — `SDKStatusMessage` (`subtype: 'status'`) carries no
+// `message`/`text` field, just `status: 'compacting' | 'requesting' |
+// null`. Without the dedicated branch, the generic system-event fallback
+// (`data.message || data.text || data.subtype || 'System event'`) would
+// otherwise forward the bare literal string "status" as a chat bubble.
+describe("system/status message gets a human-readable label (#8153)", () => {
+  it('labels a compacting status event', () => {
+    const session = createSession()
+    const messages = []
+    session.on('message', (m) => messages.push(m))
+
+    session._handleEvent({ type: 'system', subtype: 'status', status: 'compacting' })
+
+    const statusMsgs = messages.filter((m) => m.type === 'system' && m.subtype === 'status')
+    assert.equal(statusMsgs.length, 1)
+    assert.equal(statusMsgs[0].content, 'Compacting conversation context…')
+    assert.notEqual(statusMsgs[0].content, 'status')
+    session.destroy()
+  })
+
+  it('labels a requesting status event', () => {
+    const session = createSession()
+    const messages = []
+    session.on('message', (m) => messages.push(m))
+
+    session._handleEvent({ type: 'system', subtype: 'status', status: 'requesting' })
+
+    const statusMsgs = messages.filter((m) => m.type === 'system' && m.subtype === 'status')
+    assert.equal(statusMsgs.length, 1)
+    assert.equal(statusMsgs[0].content, 'Waiting for a response…')
+    session.destroy()
+  })
+
+  it('suppresses a status: null event entirely (no bubble)', () => {
+    const session = createSession()
+    const messages = []
+    session.on('message', (m) => messages.push(m))
+
+    session._handleEvent({ type: 'system', subtype: 'status', status: null })
+
+    const statusMsgs = messages.filter((m) => m.type === 'system' && m.subtype === 'status')
+    assert.equal(statusMsgs.length, 0, 'status: null must not produce any chat bubble')
+    session.destroy()
+  })
+})
+
 describe('#988 — _killAndRespawn extraction', () => {
   it('has _killAndRespawn as a prototype method', () => {
     assert.equal(typeof CliSession.prototype._killAndRespawn, 'function',
