@@ -691,6 +691,7 @@ export declare const ServerProviderListSchema: z.ZodObject<{
             }, z.core.$strip>;
         }, z.core.$strict>>>;
     }, z.core.$strip>>;
+    defaultProvider: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$strip>;
 export declare const ServerAuthBootstrapSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_bootstrap">;
@@ -803,6 +804,7 @@ export declare const ServerAuthBootstrapSchema: z.ZodObject<{
     }, z.core.$strip>>>;
     sessionId: z.ZodOptional<z.ZodString>;
     tunnelUrl: z.ZodOptional<z.ZodString>;
+    defaultProvider: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$loose>;
 export declare const ServerTunnelUrlChangedSchema: z.ZodObject<{
     type: z.ZodLiteral<"tunnel_url_changed">;

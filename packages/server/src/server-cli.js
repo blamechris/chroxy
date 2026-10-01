@@ -23,6 +23,7 @@ import { waitForTunnel } from './tunnel-check.js'
 import { PushManager, settlePush } from './push.js'
 import { ensureIngestSecret } from './event-ingest.js'
 import { getChroxyHostEnv } from './chroxy-host-metadata.js'
+import { probeNodePtyAvailable } from './utils/node-pty-probe.js'
 import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
 import { StartupDisplay } from './server-cli/startup-display.js'
 import { TunnelLifecycleHandler } from './server-cli/tunnel-lifecycle-handler.js'
@@ -892,6 +893,14 @@ export async function startCliServer(config) {
   // via buildSpawnEnv). Computed + authoritative — a session can read
   // $CHROXY_HOST_VERSION / _GIT_SHA / _CHANNEL to confirm the exact running build.
   Object.assign(process.env, getChroxyHostEnv())
+
+  // #8151 (C3) — probe once, before the WS server can accept any real
+  // connection, so the very first `list_providers` / `auth_bootstrap` a
+  // client sees already reflects reality (claude-tui greyed out when
+  // node-pty can't load here, e.g. the official Docker image). Cheap either
+  // way (a failed resolution is a fast ENOENT-class failure) and cached for
+  // the rest of the process by node-pty-probe.js.
+  await probeNodePtyAvailable()
 
   // #7240 — state stranded at ~/.chroxy by a CHROXY_CONFIG_DIR relocation.
   //

@@ -39,7 +39,7 @@ LIB="$REPO_ROOT/scripts/lib/run-with-timeout.sh"
 # Every case below must run. Without this, a harness whose cases stop
 # executing prints "passed: 0  failed: 0" and exits 0 — "all cases passed" and
 # "no case executed" are the same observable outcome (#7653).
-EXPECTED_CASES=8
+EXPECTED_CASES=12
 
 PASS=0
 FAIL=0
@@ -158,6 +158,83 @@ else
   fail "perl fallback: returns 124 on a timeout, forced by a PATH without timeout/gtimeout" \
        "rc=$rc elapsed=${elapsed}s"
 fi
+
+# --- 9-10. #8151 round-2 review (S-e) — a TERM-ignoring command must still
+# be reaped (via the `-k 10` / perl grace-then-KILL escalation) rather than
+# outliving the bound, AND the call must still prompt-return with the
+# AGREED timeout code — not the raw "killed by signal" code the escalation
+# itself produces. GNU timeout's own convention conflates the two: a plain
+# TERM-reaped timeout reports 124, but when TERM is ignored and the `-k`
+# escalation has to fire, timeout reports the wrapped command's "killed by
+# signal 9" status (137) instead — measured directly (`gtimeout -k 10 2
+# <this script>` exits 137). run_with_timeout now normalizes 137 -> 124 in
+# the one place both GNU backends return through, so every caller's
+# existing `-eq 124` check keeps meaning "timed out" regardless of whether
+# escalation fired. Each case also confirms the actual process is gone
+# afterward (via `pgrep -f` on a per-run UNIQUE script name) — "the call
+# returned in time" alone would still pass if escalation silently failed to
+# reap anything and the TERM-ignoring process just kept running in the
+# background.
+make_term_ignoring_script() {
+  local path="$1"
+  cat > "$path" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+exec sleep 40
+EOF
+  chmod +x "$path"
+}
+
+# 9. Real backend (whatever the unmodified PATH provides — timeout, gtimeout,
+# or perl, same as case 3).
+term_script="$(mktemp /tmp/chroxy-rwt-term-ignore-XXXXXX.sh)"
+make_term_ignoring_script "$term_script"
+start=$(date +%s)
+env -i PATH="$PATH" HOME="$HOME" bash -c "source '$LIB'; run_with_timeout 1 '$term_script'"
+rc=$?
+elapsed=$(( $(date +%s) - start ))
+# The grace window (perl: hardcoded 10s; GNU timeout: `-k 10`) means this
+# returns at ~11s, not ~1s — bounded well under the TERM-ignoring script's
+# own 40s `sleep`, which is the actual property under test (it did NOT run
+# to completion).
+if [ "$rc" -eq 124 ] && [ "$elapsed" -lt 40 ]; then
+  pass "a TERM-ignoring command is still reaped and reports the agreed timeout code (124), not 137"
+else
+  fail "a TERM-ignoring command is still reaped and reports the agreed timeout code (124), not 137" \
+       "rc=$rc elapsed=${elapsed}s"
+fi
+sleep 1 # let process-table bookkeeping settle before checking
+if pgrep -f "$term_script" >/dev/null 2>&1; then
+  fail "no leftover process after a TERM-ignoring command's bound expires" \
+       "pgrep still finds a process for $term_script"
+else
+  pass "no leftover process after a TERM-ignoring command's bound expires"
+fi
+rm -f "$term_script"
+
+# 10. Forced perl fallback — the SAME property, under the backend that has
+# its own, independently-written grace-then-KILL loop (not GNU coreutils'
+# `-k`), so a fix that only patched the GNU path would leave this half red.
+term_script2="$(mktemp /tmp/chroxy-rwt-term-ignore-XXXXXX.sh)"
+make_term_ignoring_script "$term_script2"
+start=$(date +%s)
+env -i PATH="$NO_TIMEOUT_PATH" HOME="$HOME" bash -c "source '$LIB'; run_with_timeout 1 '$term_script2'"
+rc=$?
+elapsed=$(( $(date +%s) - start ))
+if [ "$rc" -eq 124 ] && [ "$elapsed" -lt 40 ]; then
+  pass "perl fallback: a TERM-ignoring command is still reaped and reports 124"
+else
+  fail "perl fallback: a TERM-ignoring command is still reaped and reports 124" \
+       "rc=$rc elapsed=${elapsed}s"
+fi
+sleep 1
+if pgrep -f "$term_script2" >/dev/null 2>&1; then
+  fail "perl fallback: no leftover process after a TERM-ignoring command's bound expires" \
+       "pgrep still finds a process for $term_script2"
+else
+  pass "perl fallback: no leftover process after a TERM-ignoring command's bound expires"
+fi
+rm -f "$term_script2"
 
 echo ""
 echo "passed: $PASS  failed: $FAIL"

@@ -6,7 +6,7 @@
  */
 import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { getPermissionModes } from './handler-utils.js'
-import { listProviders, getProvider } from './providers.js'
+import { listProviders, getProvider, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
@@ -1035,6 +1035,16 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 function sendAuthBootstrap(ctx, ws, info = {}) {
   const { send, services, agentConnections } = ctx
   const fileOps = ctx.fileOps || services?.fileOps || null
+  // #8151 round-2 review (Critical 1) — the real WsServer's `_historyCtx`
+  // carries `config` FLAT (matching `fileOps`/`tunnelUrl` above), never
+  // nested under `services` (that nesting is `_handlerCtx`'s shape, used by
+  // settings-handlers.js's list_providers). Reading ONLY `services?.config`
+  // here silently resolved to `undefined` on every real connection — never
+  // caught because the round-2 test built its ctx by hand, with exactly
+  // the `services.config` shape the (buggy) code expected. Same
+  // either-shape fallback as `fileOps`, so a differently-shaped test ctx
+  // (or a future caller) still works.
+  const config = ctx.config || services?.config || null
   const cwd = info.cwd || null
   const provider = info.provider || null
   // #6823: MCP prompts to fold into the bootstrap slash-command list (empty for
@@ -1077,6 +1087,9 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
     send(ws, {
       type: 'auth_bootstrap',
       providers,
+      // #8151 (C3) — same field/derivation as list_providers' response; see
+      // handleListProviders (settings-handlers.js).
+      defaultProvider: resolveDaemonDefaultProvider(config),
       slashCommands,
       agents,
       ...(info.sessionId ? { sessionId: info.sessionId } : {}),

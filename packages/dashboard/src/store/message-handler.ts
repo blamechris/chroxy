@@ -1681,6 +1681,25 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   applyRotatedTunnelUrl: (url, previousUrl) => {
     applyRotatedTunnelUrlDashboard(getStore().getState, url, previousUrl);
   },
+  // #8151 (C3) — the server's resolved default provider (e.g. a Docker
+  // image's ENV CHROXY_PROVIDER=claude-sdk) overrides the baked-in
+  // DEFAULT_PROVIDER fallback (claude-tui) for the New Session picker's
+  // initial selection — but ONLY when the user has not already made an
+  // explicit choice (setDefaultProvider's persisted localStorage key). An
+  // explicit choice must always win, and this is an in-memory-only apply:
+  // it deliberately does NOT call setDefaultProvider / write localStorage,
+  // since a server-supplied default is not the user's own choice and must
+  // not stick if they later connect to a server with a different default.
+  applyServerDefaultProvider: (name) => {
+    try {
+      if (localStorage.getItem('chroxy_default_provider') != null) return;
+    } catch {
+      // localStorage unavailable (private-mode / storage-denied) — fall
+      // through and apply the server's default, matching this file's other
+      // localStorage reads' fail-open behaviour.
+    }
+    getStore().setState({ defaultProvider: name } as Partial<ConnectionState>);
+  },
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();

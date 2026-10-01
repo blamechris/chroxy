@@ -40,6 +40,233 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The root Docker image serves the dashboard and defaults to the headless
+  `claude-sdk` provider, and actually proves it (#8151, HIGH-tier review
+  round).** An owner decision scoped the image to exactly two things: the
+  headless `claude-sdk` provider, and the web dashboard — the embedded
+  user-shell terminal and the `claude-tui` provider are not supported
+  (`node-pty` has no linux prebuild in this image, and `claude-tui` assumes
+  an interactive login shell).
+
+  A new `dashboard-builder` stage builds `@chroxy/dashboard` (Vite) from just
+  its own dependency graph (`@chroxy/design-tokens`, `@chroxy/protocol`,
+  `@chroxy/store-core` — installed via `npm ci --workspace=@chroxy/dashboard`,
+  never the whole monorepo) and the final image copies in only the built
+  `dist/`, so `GET /dashboard` now serves the real app instead of 404ing.
+  `ENV CHROXY_PROVIDER=claude-sdk` overrides the daemon's own default
+  (`claude-tui`) so a plain `docker run` no longer starts sessions doomed to
+  fail; `-e CHROXY_PROVIDER=...` still overrides it per the normal CLI > env
+  > config > default precedence — and so does `chroxy doctor`'s own provider
+  resolution now, which previously skipped the env tier entirely and
+  preflighted/reported on `claude-tui` even with `CHROXY_PROVIDER=claude-sdk`
+  set and no config file yet written.
+
+  Selecting the terminal or `claude-tui` anyway fails with a clear,
+  ACTIONABLE message (`describeNodePtyUnavailable`, shared by both call
+  sites, leading with "use claude-sdk instead" and appending only the first
+  line of the real cause) rather than a raw native-module error — and that
+  message is now the one a client actually SEES: `claude-tui-session.js`'s
+  `start()`/`_spawnPty()` split used to let a generic "claude PTY failed to
+  spawn" overwrite it the instant `start()` rejected (the `error` event and
+  the rejection are different channels; `session_create_failed.errorMessage`
+  reads the rejection). Both call sites now latch the real failure
+  (`.code: 'PTY_UNAVAILABLE'`) and reject with it directly.
+
+  The dashboard's own "New Session" provider picker also used to pre-select
+  the shared `DEFAULT_PROVIDER` constant (`claude-tui`) regardless of what
+  the connected server actually runs by default — `provider_list` /
+  `auth_bootstrap` now carry the daemon's resolved `defaultProvider`
+  (`resolveDaemonDefaultProvider`), applied client-side only when the user
+  has no persisted explicit choice; `listProviders()` also marks `claude-tui`
+  `auth.ready: false` with an actionable hint when a cached, one-shot
+  node-pty probe (`node-pty-probe.js`, warmed once at boot) finds it
+  unavailable, so the picker greys it out instead of letting it be chosen at
+  all.
+
+  `scripts/docker-image-smoke.sh` grew from three checks to six: (1) the
+  Default session actually comes up under `claude-sdk` — checked 2's
+  HEALTHCHECK answers regardless of session state, so a `claude-tui` image
+  was previously HEALTHCHECK-healthy while its Default session silently
+  failed and was torn down — proven by polling `docker logs` for the sdk
+  session's own ready line and asserting neither a node-pty failure nor a
+  destroyed-session line appears; (2) `GET /dashboard` first confirms NO
+  token is rejected (403), then extracts the REAL entry-bundle path from the
+  served HTML and fetches it — a `<title>` check alone passes on the UNBUILT
+  source `index.html` just as readily as on a real build; (3) every
+  THIRD-PARTY dependency in `packages/server/package.json` is checked via
+  the same subpath-aware specifier scan check 1 already used for
+  `@chroxy/*`, generalized — `@modelcontextprotocol/sdk` is resolved at its
+  real used subpaths instead of a hand-written exemption that hid it from
+  ever being checked at all, and the two remaining special cases
+  (`node-pty`, an EXPECTED import failure that itself fails loudly if it
+  ever unexpectedly succeeds; `@xterm/*`, checked by file existence at the
+  exact paths `http-routes.js`'s `readModule` reads, never exempted from
+  checking) are validated in both directions.
+
+  `docs/self-hosting-guide.md` documents the supported/unsupported split,
+  the terminal's actual failure message, the `CHROXY_CWD=/workspace` example
+  (new sessions otherwise default to `$HOME`, not the bind-mounted
+  workspace), and that the baked-in `ENV` outranks a mounted config file's
+  `provider`. `.dockerignore` and `ci.yml`'s `docker` path filter stay in
+  sync for the two newly-whitelisted packages, and `.dockerignore` now also
+  excludes stray `.env*`/coverage/`.tsbuildinfo` files, the dashboard's own
+  test sources, and `packages/server/src/dashboard-next` (the gitignored
+  Tauri-bundle copy of this same dashboard, invisible to `.dockerignore`
+  once it exists on a machine that has built the desktop app).
+
+  **Round-2 review** found four more CRITICAL gaps, each confirmed
+  independently, every one fixed here:
+
+  1. The two "start() rejects with the actionable message" tests only ever
+     exercised the TEST-ONLY `_ptyModOverride` seam — the PRODUCTION
+     `ptyMod = await import('node-pty')` branch was untested, and reverting
+     only that branch's catch (both files) left 2229 tests green. A new
+     `node-pty-production-import.test.js` runs the real `start()` in a
+     CHILD PROCESS with a `node:module` `registerHooks` resolve hook that
+     makes `import('node-pty')` actually reject, loaded alongside the usual
+     sandboxed `tests/_setup.mjs`. The two catch bodies (one per
+     import-invocation shape, kept separate so `lint-argv-sinks.mjs` still
+     sees the literal `ptyMod = await import('node-pty')` line) now share
+     ONE failure-building helper, `nodePtyImportFailureError`
+     (`node-pty-support.js`), instead of duplicating the construction.
+  2. `chroxy doctor`'s own CHROXY_PROVIDER/CHROXY_PROVIDERS fix (above) was
+     itself a regression outside Docker: `CHROXY_PROVIDERS` is a REAL,
+     documented env var for `config.providers` (the anthropic/openai
+     -compatible endpoint registrations), not a provider-name list — setting
+     it to its own documented JSON-object form got comma-split into garbage
+     tokens, and an unrelated `CHROXY_PROVIDERS` could make doctor check the
+     wrong provider entirely. `resolveProviders` now routes through the same
+     shared `mergeConfig`/`resolveDaemonDefaultProvider` the real daemon
+     startup path uses, instead of a second hand-written env/file read.
+  3. The whole C3 default-provider chain was unguarded end to end — deleting
+     the probe's real import, `auth_bootstrap`'s `defaultProvider` field, or
+     either store-core `applyServerDefaultProvider` call left every affected
+     suite green (211/211, 340/340, store-core 2445/dashboard 6228). New
+     tests cover each link: the probe's boolean under a real
+     success/failure import (child process + resolve hook, with an
+     attempt-counter proving the cache avoids a second resolution);
+     `sendPostAuthInfo`'s `auth_bootstrap` defaultProvider against a
+     configured provider and the DEFAULT_PROVIDER fallback; store-core's
+     `provider_list`/`auth_bootstrap` dispatch calling (or correctly NOT
+     calling) `applyServerDefaultProvider`; and the dashboard adapter
+     actually writing (or correctly not overwriting) the store's
+     `defaultProvider` depending on whether `chroxy_default_provider` is
+     already persisted.
+  4. The smoke script's own negative-signature grep (`'node-pty
+     unavailable'`) was DEAD — S8's rewording to "node-pty is unavailable
+     here" left it matching nothing a real regression would ever produce.
+     `describeNodePtyUnavailable()` now embeds a stable
+     `NODE_PTY_UNAVAILABLE_CODE` marker (`PTY_UNAVAILABLE`, also the
+     failure's `.code`), and the smoke script reads that SAME marker from
+     the image's own `node-pty-support.js` rather than hand-copying the
+     prose — so a future rewording can't silently disarm the check again.
+     Re-run against a `claude-tui`-mutant image with the earlier
+     "Ready for messages" gate temporarily bypassed, the marker check is
+     confirmed to independently catch the regression on its own.
+
+  Plus eight suggestions: the log-signature check now ALSO re-reads
+  `docker logs` at the very end of the run (after checks 4-6), not just
+  once right after the Default session comes up; the dashboard check now
+  fetches EVERY referenced `/dashboard/assets/*` file (script src + link
+  href), not just the first `<script>`, and the entry bundle additionally
+  gets a 10KB floor against a degenerate near-empty build; the dependency
+  scan's subpath scanner now fails and names the line if it finds a line
+  that both mentions `from`/`import`/`require` AND quotes a declared
+  dependency in a form the strict specifier regex doesn't recognise
+  (narrower than a bare substring match, which flagged 57 false positives —
+  common words like "ws"/"openai" are frequently plain string values
+  unrelated to any import); the non-Docker remediation now says "rebuild
+  AND restart the daemon", and the probe module's doc no longer claims Node
+  doesn't cache a rejected import (it does — measured: a throwing stand-in
+  module's body runs exactly once across four repeated imports; the real
+  reason this module still caches a boolean is that `listProviders()` is
+  synchronous and can't await on every call) and now notes that on win32 a
+  successful import proves only that the JS wrapper loaded, not that the
+  native binding actually works; the dispatch-table doc for
+  `applyServerDefaultProvider` no longer claims an app-side implementation
+  that doesn't exist — the mobile app's "Default" chip already sends no
+  explicit provider at session creation, so the functional behaviour this
+  field exists to fix is already correct there by construction, and wiring
+  the hook into the app's own persisted-settings store (closing a smaller,
+  cosmetic capability-lookup gap) is tracked as a follow-up rather than
+  folded in here; and `run_with_timeout`'s bounded calls now escalate to
+  SIGKILL after a 10s grace period if SIGTERM alone doesn't reap the
+  process (`-k 10` for `timeout`/`gtimeout`, a matching grace-then-KILL loop
+  in the perl fallback) instead of potentially hanging past their own bound
+  against a command that ignores SIGTERM.
+
+  **An independent verifier confirmed every round-2 mutant goes RED, and
+  found one more real production bug plus further test gaps, all fixed
+  here too.** The real bug: `auth_bootstrap.defaultProvider` was
+  UNCONDITIONALLY `DEFAULT_PROVIDER` (claude-tui) in every real connection
+  — `WsServer._historyCtx` (the ctx `sendAuthBootstrap` actually runs
+  against) had no `config`/`services` key at all, so
+  `resolveDaemonDefaultProvider(services?.config)` always resolved
+  `undefined`. The round-2 C3 test never caught it because it built its ctx
+  object by hand, with exactly the shape the (buggy) code expected — never
+  exercising a real `WsServer`. Fixed with a `get config() { return
+  self.config }` getter on `_historyCtx` (flat, matching its existing
+  `fileOps`/`tunnelUrl` shape — `_handlerCtx` nests the same read under
+  `services`, used by `list_providers`; both now read the same
+  `self.config`, so the two can't diverge again), and a new test that
+  builds a REAL `WsServer` with `config: { provider: 'claude-sdk' }`,
+  connects a real client, and asserts the real `auth_bootstrap` frame off
+  the wire.
+
+  The two new child-process test files also failed on Windows CI
+  (`ERR_UNSUPPORTED_ESM_URL_SCHEME`): `--import` goes through Node's ESM
+  loader, which requires a `file://` URL for a Windows absolute path — a
+  bare `A:\...\thing.mjs` throws. Fixed by converting every `--import`
+  value to `pathToFileURL(...).href` (a no-op on POSIX); the MAIN SCRIPT
+  argument stays a plain path, since it resolves through a different,
+  non-URL-aware mechanism (confirmed: a file:// URL there fails on POSIX
+  too). One of those same child-process harnesses was also found writing a
+  stray `~/.claude.json.chroxy.<uuid>.tmp` copy into the real developer
+  `$HOME` — `ClaudeTuiSession.start()`'s real `ensureCwdTrusted` call reads
+  `homedir()`, which the in-process fs sandbox cannot intercept in a
+  spawned child. Fixed by giving the child its own disposable `HOME`/
+  `USERPROFILE`, with a test assertion that the real `~/.claude.json`'s
+  mtime is unchanged after the run.
+
+  Further gaps closed: the boot-time probe cache and `listProviders()`'s
+  no-injection read of it were never exercised together (only each in
+  isolation) — a new child-process test resets the probe, forces a real
+  import failure, then calls `listProviders()` with no injection and
+  asserts `claude-tui` comes back greyed out, plus a
+  structural pin that `server-cli.js` still calls the probe before
+  `wsServer.start()`. `chroxy doctor`'s CONFIG-FILE provider tier (the
+  lowest of its four, below CLI/ENV/default) had no test coverage at all.
+  `run_with_timeout`'s own `-k 10` fix (above) returns 137, not 124, when
+  the KILL escalation actually fires — GNU `timeout`'s exit-code convention
+  reports the wrapped command's own "killed by signal" status once TERM
+  alone didn't work, not its usual 124 — normalized in the one place both
+  GNU backends return through, with new TERM-ignoring-process cases added
+  on both the real backend and the forced perl fallback. The dependency
+  scan's unrecognised-import-line floor missed a template-literal
+  specifier with interpolation (`` import(`@pkg/${sub}`) ``, never
+  followed by a closing quote); its mention-matcher now also accepts
+  `${` as a valid terminator. The entry-bundle size floor was applied to
+  "whichever `.js` asset happened to sort first" rather than the actual
+  `<script src>` entry tag — Vite's own lazily-loaded chunks (route
+  splits, heavy deps like `mermaid`/`katex`) aren't referenced from the
+  HTML at all today, but a future build emitting a small referenced one
+  would have silently floor-checked the wrong file. The S1 end-of-run
+  re-check only covered whatever the 2-3s gap between checks happened to
+  leave — now actively tops up to a 15s observation window past Ready,
+  and additionally asserts the container is still `Running` and that the
+  image's own HEALTHCHECK command still passes, not just that its logs
+  don't yet show a failure. A dead `|| fail "internal: ..."` guard (attached
+  to a process substitution's own discarded exit status, which bash never
+  propagates to the enclosing `while`) is now attached to a real command
+  substitution's exit status instead. The node-pty-probe module's win32
+  -vs-macOS claim was itself wrong — checked directly against the
+  installed package: node-pty ships prebuilt native addons for BOTH win32
+  AND darwin (none for linux), so the "a successful import doesn't prove
+  the native binding works" caveat applies to both platforms equally, not
+  just win32. `config.js`'s `envKeyForConfig` export (added for the now
+  -replaced direct-read approach) reverted to module-private — nothing
+  outside this file reads it anymore.
+
 - **`git_status` and `git_stage`/`git_unstage` now agree on what a path
   means, status paths are no longer C-quoted or octal-escaped, and a
   renamed entry's `oldPath` never leaks onto the wrong half or onto a copy

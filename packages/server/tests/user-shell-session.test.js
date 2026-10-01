@@ -57,6 +57,25 @@ describe('UserShellSession — class contract (#5983)', () => {
     assert.equal(s._provider, 'user-shell')
   })
 
+  // #8151 (C4) — start() rejects DIRECTLY with describeNodePtyUnavailable's
+  // actionable message (no intermediate generic-overwrite the way
+  // claude-tui-session.js's _spawnPty/start() split needed fixing for), and
+  // this proves it against the REAL start() rather than reimplementing its
+  // logic: the `_ptyModOverride` function seam simulates the import itself
+  // rejecting, so the real try/catch in start() is what runs.
+  it('start() rejects with the actionable node-pty-unavailable message when node-pty cannot load', async () => {
+    const s = new UserShellSession({ cwd: '/tmp' })
+    s._ptyModOverride = async () => { throw new Error('Cannot find module pty.node') }
+    await assert.rejects(s.start(), (err) => {
+      assert.match(err.message, /^node-pty is unavailable/,
+        `expected the actionable message, got: ${err.message}`)
+      assert.match(err.message, /claude-sdk/, 'names the working alternative')
+      assert.match(err.message, /Cannot find module pty\.node$/, 'appends the real cause last')
+      assert.equal(err.code, 'PTY_UNAVAILABLE')
+      return true
+    })
+  })
+
   it('sendMessage / interrupt are inert no-ops (no turns)', () => {
     const s = new UserShellSession({ cwd: '/tmp' })
     assert.equal(s.sendMessage('hi'), false)

@@ -52,14 +52,37 @@ run_with_timeout() {
       ;;
   esac
 
+  # #8151 round-2 review (nit) — `-k 10`: if the initial TERM doesn't reap
+  # the process within 10s, GNU timeout escalates to KILL itself rather than
+  # leaving a wedged process running past its own bound. Without this, a
+  # command that ignores (or is too stuck to handle) SIGTERM outlives the
+  # "bounded" call indefinitely — exactly the hang this wrapper exists to
+  # prevent. Mirrored in the perl fallback below.
+  # #8151 round-2 review (S-e) — GNU timeout's own exit-code convention is
+  # NOT what the `-k 10` nit above assumed: 124 means "the command was
+  # (successfully) reaped on the TERM alone", but when TERM is ignored and
+  # the KILL escalation actually fires, timeout reports the WRAPPED
+  # command's own "killed by signal" status (128 + 9 = 137), not 124.
+  # Measured directly: `gtimeout -k 10 2 <a TERM-ignoring script>` exits
+  # 137. Every caller in this codebase (docker-image-smoke.sh's
+  # `import_rc`/`marker_rc`/etc. checks) compares the raw exit status
+  # against the single value 124, so a 137 from a legitimately-timed-out
+  # call would misreport as "the command itself exited 137" instead of
+  # "this call timed out". Normalized here, in the ONE place both GNU
+  # backends return through, rather than teaching every caller to accept
+  # two codes.
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@"
-    return $?
+    timeout -k 10 "$secs" "$@"
+    local rc=$?
+    [ "$rc" -eq 137 ] && rc=124
+    return "$rc"
   fi
 
   if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$secs" "$@"
-    return $?
+    gtimeout -k 10 "$secs" "$@"
+    local rc=$?
+    [ "$rc" -eq 137 ] && rc=124
+    return "$rc"
   fi
 
   if ! command -v perl >/dev/null 2>&1; then
@@ -84,6 +107,7 @@ run_with_timeout() {
   # 124 contract would then depend on what the bounded command happened to
   # fork, rather than being unconditional (#8145 review).
   perl -e '
+    use POSIX qw(WNOHANG);
     my ($secs, @cmd) = @ARGV;
     my $pid = fork();
     if (!defined $pid) {
@@ -98,7 +122,21 @@ run_with_timeout() {
       exit 127;
     }
     my $timed_out = 0;
-    local $SIG{ALRM} = sub { $timed_out = 1; kill "TERM", -$pid; };
+    local $SIG{ALRM} = sub {
+      $timed_out = 1;
+      kill "TERM", -$pid;
+      # #8151 round-2 review (nit) — escalate to KILL after a 10s grace
+      # period if TERM alone did not reap the group, mirroring GNU
+      # timeout'"'"'s own `-k 10` above. A process that ignores (or is too
+      # wedged to handle) SIGTERM would otherwise run past this wrapper'"'"'s
+      # bound forever instead of being forcibly reaped.
+      my $reaped = 0;
+      for (1..10) {
+        if (waitpid($pid, WNOHANG) == $pid) { $reaped = 1; last; }
+        sleep(1);
+      }
+      kill "KILL", -$pid unless $reaped;
+    };
     alarm($secs);
     waitpid($pid, 0);
     alarm(0);

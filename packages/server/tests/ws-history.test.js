@@ -1528,6 +1528,44 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
     assert.equal(Object.prototype.hasOwnProperty.call(boot, 'sessionId'), false)
   })
 
+  // #8151 round-2 review (Critical 3b): the auth_bootstrap defaultProvider
+  // field (same derivation as list_providers') was unguarded end-to-end —
+  // deleting the line that sets it left all 340 tests in this file's worker
+  // green. These two pin it directly against sendPostAuthInfo's real output.
+  it('auth_bootstrap defaultProvider reflects services.config.provider when set (#8151 C3)', async () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      cliSession: { cwd: '/opt/project', isReady: false, model: null, permissionMode: 'approve' },
+      fileOps: makeFakeFileOps([], []),
+      services: { config: { provider: 'claude-sdk' } },
+    })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    await new Promise(r => setImmediate(r))
+
+    const boot = ctx._sends.find(m => m.type === 'auth_bootstrap')
+    assert.ok(boot, 'auth_bootstrap burst sent')
+    assert.equal(boot.defaultProvider, 'claude-sdk')
+  })
+
+  it('auth_bootstrap defaultProvider falls back to DEFAULT_PROVIDER when config has no provider set (#8151 C3)', async () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({
+      cliSession: { cwd: '/opt/project', isReady: false, model: null, permissionMode: 'approve' },
+      fileOps: makeFakeFileOps([], []),
+      services: { config: {} },
+    })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    await new Promise(r => setImmediate(r))
+
+    const boot = ctx._sends.find(m => m.type === 'auth_bootstrap')
+    assert.ok(boot, 'auth_bootstrap burst sent')
+    assert.equal(boot.defaultProvider, DEFAULT_PROVIDER)
+  })
+
   it('#5555 (sub-item 7): includes tunnelUrl when ctx.tunnelUrl is set', async () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Alpha', cwd: '/alpha' },

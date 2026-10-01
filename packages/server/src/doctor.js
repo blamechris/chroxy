@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'fs'
 import { dirname, isAbsolute, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { createServer } from 'net'
-import { validateConfig, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from './config.js'
+import { validateConfig, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled, mergeConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { verifyBinary as defaultVerifyBinary, BINARY_STATUS, describeBinaryHealth } from './utils/verify-binary.js'
 import { resolveDeclaredMinVersion } from './utils/binary-version.js'
@@ -11,7 +11,7 @@ import { isShellShim, buildBinaryProvenanceOptions } from './utils/preflight.js'
 import { verifyProvenance as defaultVerifyProvenance, PROVENANCE_STATUS } from './utils/verify-provenance.js'
 import { prepareSpawn } from './utils/win-spawn.js'
 import { cloudflaredInstallHint } from './platform.js'
-import { getProvider, DEFAULT_PROVIDER } from './providers.js'
+import { getProvider, DEFAULT_PROVIDER, resolveDaemonDefaultProvider } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
 import { parseTunnelArg } from './tunnel/index.js'
@@ -123,17 +123,54 @@ export function isBundledOrSupervisedContext() {
 /**
  * Resolve the list of providers to preflight check.
  *
+ * #8151 review round 2 (Critical 2) — the S6 version of this function (a
+ * hand-written copy of config.js's CLI > ENV > file > default precedence)
+ * was itself a regression outside Docker. It read `CHROXY_PROVIDERS`
+ * (plural) as a comma-separated list of PROVIDER NAMES — but
+ * `CHROXY_PROVIDERS` is a REAL, documented env var for `config.providers`
+ * (the anthropic-compatible/openai-compatible endpoint registrations: array
+ * OR object, see config.js's `CONFIG_SCHEMA` and `parseEnvValue`), not a
+ * provider roster. A daemon that set `CHROXY_PROVIDERS` to its own
+ * documented JSON-object form got that comma-split into garbage tokens here
+ * (3 bogus "names", `claude-sdk` never checked) — and even in the simple
+ * case, `CHROXY_PROVIDER=claude-sdk` with an unrelated `CHROXY_PROVIDERS`
+ * set made doctor check the WRONG provider while the daemon actually ran
+ * claude-sdk, because this function answered two different questions
+ * ("what provider does the daemon run" vs. "what is config.providers") with
+ * the same hand-rolled env read.
+ *
+ * Fixed by dropping this function's own env/file reads entirely and routing
+ * through the SAME shared loader `chroxy start`/`chroxy resume` use:
+ * `mergeConfig` (config.js) resolves CLI > ENV > file > default — including
+ * the `legacyCli` → `claude-cli` mapping — via its own
+ * `parseEnvValue`/`CONFIG_SCHEMA`-aware coercion (so `CHROXY_PROVIDERS`' object
+ * form is parsed as JSON, never comma-split, and is correctly ignored here
+ * since it feeds `merged.providers`, a field `resolveDaemonDefaultProvider`
+ * never reads). `resolveDaemonDefaultProvider` (providers.js) then reads
+ * `merged.provider` — the one function both doctor and the real daemon
+ * startup path share, so this can't drift from `chroxy start`'s own
+ * resolution again without touching shared code both paths run.
+ *
  * Precedence:
- *   1. Explicit `providers` option (array of provider names)
- *   2. `provider` field from loaded config file
- *   3. DEFAULT_PROVIDER (see providers.js)
+ *   1. Explicit `providers` option (array of provider names — doctor's own
+ *      `--provider a,b` flag; unrelated to config.js's `providers` key)
+ *   2. Everything `mergeConfig` resolves for `provider` (ENV > file >
+ *      default) — exactly one name, the one `chroxy start` would run.
  *
  * Returns an array of provider name strings.
+ *
+ * @param {object} args
+ * @param {string[]} [args.providers] - doctor's own explicit `--provider a,b`
+ *   flag; still the highest-precedence override when present.
+ * @param {object|null} [args.parsedConfig] - the raw parsed config.json (or
+ *   null/absent), fed to mergeConfig as the file tier.
  */
-function resolveProviders({ providers, configProvider }) {
+function resolveProviders({ providers, parsedConfig }) {
   if (Array.isArray(providers) && providers.length > 0) return providers
-  if (typeof configProvider === 'string' && configProvider.length > 0) return [configProvider]
-  return [DEFAULT_PROVIDER]
+  const merged = mergeConfig({
+    fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
+  })
+  return [resolveDaemonDefaultProvider(merged)]
 }
 
 /**
@@ -473,7 +510,6 @@ export async function runDoctorChecks({
   // AND (#8041) the binary-provenance gate below. Moved ahead of the
   // cloudflared check (previously step 2) because that check now needs the
   // gate's resolved mode/signatureGate before it can run.
-  let configProvider = null
   let configCheck = null
   // #5328 (WP-5.6): named-tunnel coordinates for the routability probe (step 5.6).
   let tunnelMode = null
@@ -491,7 +527,6 @@ export async function runDoctorChecks({
     try {
       const config = JSON.parse(readFileSync(configFile(), 'utf-8'))
       parsedConfig = config
-      if (typeof config.provider === 'string') configProvider = config.provider
       // Normalize the tunnel mode through parseTunnelArg so aliases resolve —
       // e.g. `cloudflare:named` (a documented --tunnel form persisted verbatim)
       // maps to mode 'named' and isn't silently skipped by the routability
@@ -646,7 +681,7 @@ export async function runDoctorChecks({
   // own binary and credential checks. Providers not in the user's config
   // are skipped entirely — a Gemini-only install does NOT fail because
   // `claude` is missing (#2951).
-  const resolvedProviders = resolveProviders({ providers, configProvider })
+  const resolvedProviders = resolveProviders({ providers, parsedConfig })
   for (const providerName of resolvedProviders) {
     const providerChecks = checkProvider(providerName, { platform, provenance: provenanceOptions, verifyProvenance })
     for (const c of providerChecks) checks.push(c)

@@ -401,6 +401,15 @@ export const ServerProviderListSchema = z.object({
         auth: ProviderAuthSchema.optional(),
         connections: z.array(AgentConnectionSchema).optional(),
     })),
+    // #8151 (C3) — the daemon's OWN resolved default provider
+    // (resolveDaemonDefaultProvider(config): CLI > env > config file > the
+    // shared DEFAULT_PROVIDER constant), so a client can override its baked-in
+    // DEFAULT_PROVIDER fallback (claude-tui) with what this specific server
+    // actually runs by default — e.g. the Docker image's `ENV
+    // CHROXY_PROVIDER=claude-sdk`. Optional/nullable so an older server that
+    // omits it still parses; mirrors `available_models`'s `defaultModel` field
+    // (schemas/server/stream.ts) in shape and intent.
+    defaultProvider: z.string().nullable().optional(),
 });
 // #5555 (auth_bootstrap) — single connect-time burst frame that carries the
 // provider / slash-command / agent lists right after auth_ok, so a new client
@@ -438,6 +447,11 @@ export const ServerAuthBootstrapSchema = z.object({
     // not receive the live `tunnel_url_changed` push). Absent in LAN / no-tunnel
     // deployments. Never a secret — the QR code already shares this URL.
     tunnelUrl: z.string().optional(),
+    // #8151 (C3) — same field as ServerProviderListSchema.defaultProvider,
+    // carried here too since auth_bootstrap is the connect-time fast path most
+    // clients actually receive their provider list from (see that schema's
+    // comment for the full rationale).
+    defaultProvider: z.string().nullable().optional(),
 }).passthrough();
 // #5555 (sub-item 7) — quick-tunnel recovery rotates the public URL. The
 // server pushes this to every connected client so they can update the stored

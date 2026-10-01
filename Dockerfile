@@ -126,6 +126,49 @@ RUN set -eu; \
     echo "${CHECKSUM}  /claude-cli/claude" | sha256sum -c -; \
     chmod 0755 /claude-cli/claude
 
+# #8151 — build the web dashboard (@chroxy/dashboard, Vite) so the final image
+# can serve it at /dashboard instead of 404ing. Separate builder stage: the
+# final image only ever gets the built `dist/`, never the dashboard's own
+# node_modules (react, vite, mermaid, ...) or its TypeScript sources.
+FROM node:22-slim AS dashboard-builder
+
+WORKDIR /app
+
+# Same two-phase install as the server stage below, and for the same reason:
+# a workspace's package.json present at `npm ci` time makes npm run that
+# workspace's OWN `prepare` script even under --ignore-scripts (there is no
+# TypeScript toolchain in this stage's node_modules until after ci). Only
+# @chroxy/dashboard itself has neither a `prepare` script nor an out-of-date
+# dist directory, so ONLY its package.json — plus the two root files
+# `npm ci --workspace` needs to resolve the workspace — is present up front.
+COPY package.json package-lock.json ./
+COPY packages/dashboard/package.json packages/dashboard/
+
+# Full install (dev deps included — vite/react/@vitejs/plugin-react/typescript
+# are devDependencies and the build needs them) of ONLY @chroxy/dashboard's own
+# dependency graph — not the whole monorepo, and in particular not the Expo
+# app (`--workspace` scopes both the linked workspaces AND what gets fetched).
+RUN npm ci --workspace=@chroxy/dashboard --ignore-scripts --no-audit --no-fund
+
+# Now that ci has already run, bring in the rest of the dashboard's own
+# source and the three workspace packages it imports at build time.
+# @chroxy/design-tokens has no prepare/build step (plain .js source, no
+# dist) so it's safe to copy in one shot. @chroxy/protocol and
+# @chroxy/store-core mirror the server stage's protocol/store-core copy
+# below: package.json + their COMMITTED dist/ only, deferred until after ci
+# for the same prepare-script reason. store-core's `"."` export (unlike its
+# `"./crypto"` subpath) resolves to raw `src/index.ts` — Vite transforms that
+# directly, no build step — so its `src/` is copied too, dist is not enough.
+COPY packages/dashboard/ packages/dashboard/
+COPY packages/design-tokens/ packages/design-tokens/
+COPY packages/protocol/package.json packages/protocol/
+COPY packages/protocol/dist/ packages/protocol/dist/
+COPY packages/store-core/package.json packages/store-core/
+COPY packages/store-core/dist/ packages/store-core/dist/
+COPY packages/store-core/src/ packages/store-core/src/
+
+RUN npm run build -w @chroxy/dashboard
+
 FROM node:22-slim
 
 # System dependencies (no tmux, no build-essential — CLI headless mode only)
@@ -178,6 +221,12 @@ COPY packages/protocol/dist/ packages/protocol/dist/
 COPY packages/store-core/package.json packages/store-core/
 COPY packages/store-core/dist/ packages/store-core/dist/
 
+# #8151 — the built dashboard, and ONLY the built dashboard: no node_modules,
+# no TypeScript sources, no dev toolchain. http-routes.js resolves
+# packages/dashboard/dist relative to packages/server/src at runtime, so this
+# must land at exactly that path for `/dashboard` to serve it instead of 404ing.
+COPY --from=dashboard-builder /app/packages/dashboard/dist packages/dashboard/dist
+
 # Copy and prepare entrypoint
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
@@ -196,6 +245,27 @@ ENV DISABLE_AUTOUPDATER=1 DISABLE_UPDATES=1
 # Records the pinned version so the smoke test can read it (docker inspect)
 # without parsing this file.
 LABEL org.chroxy.claude-code.version=$CLAUDE_CODE_VERSION
+
+# #8151 (owner decision) — this image supports exactly two things: the
+# headless claude-sdk provider, and the web dashboard (copied in above). It
+# does NOT support the embedded user-shell terminal or the claude-tui
+# provider: both need node-pty, which has no prebuilt linux binary and whose
+# native build this image deliberately skips (`npm ci --ignore-scripts`, no
+# build-essential/python3 above — see the "System dependencies" comment).
+# claude-tui also assumes an interactive login shell, which a container has
+# none of. Both fail with a clear "node-pty is unavailable here
+# [PTY_UNAVAILABLE] — use the claude-sdk provider instead" message rather than
+# crashing or hanging — see
+# claude-tui-session.js / user-shell-session.js's node-pty import catch, and
+# docs/self-hosting-guide.md's Docker section.
+#
+# `config.js` maps `provider` from `CHROXY_PROVIDER` with the usual
+# CLI > env > config-file > default precedence, so `docker run -e
+# CHROXY_PROVIDER=claude-tui ...` still overrides this — it just won't work,
+# for the reason above. Without this line the daemon's own default
+# (DEFAULT_PROVIDER, currently claude-tui) would apply instead, which is
+# exactly the "fails obscurely" case this issue is about.
+ENV CHROXY_PROVIDER=claude-sdk
 
 # Create non-root user with home directory for config
 RUN useradd -m -s /bin/bash chroxy && \

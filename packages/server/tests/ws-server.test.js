@@ -1235,6 +1235,47 @@ describe('outbound message sequence numbers', () => {
   })
 })
 
+// #8151 round-2 review (Critical 1) — in production, `_historyCtx` had no
+// `config`/`services` key at all, so `sendAuthBootstrap`'s
+// `resolveDaemonDefaultProvider(services?.config)` always read `undefined`
+// and `auth_bootstrap.defaultProvider` was unconditionally DEFAULT_PROVIDER
+// (claude-tui), regardless of the daemon's REAL configured provider. The C3
+// round-2 test never caught this because it built its ctx object by hand,
+// with exactly the `{ services: { config } }` shape the (buggy) code
+// expected — never exercising the real WsServer's actual ctx shape. This
+// test builds a REAL WsServer with a real `config`, connects a real client,
+// and reads the real `auth_bootstrap` frame off the wire.
+describe('auth_bootstrap.defaultProvider reflects the REAL server config (#8151 round-2 Critical 1)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('a server configured with provider: claude-sdk advertises claude-sdk, not the baked-in DEFAULT_PROVIDER', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: false,
+      config: { provider: 'claude-sdk' },
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, true)
+    const boot = await waitForMessage(messages, 'auth_bootstrap', 1000)
+
+    assert.equal(boot.defaultProvider, 'claude-sdk',
+      'auth_bootstrap must report the REAL configured provider, not a hardcoded fallback')
+
+    ws.close()
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Diff handler tests (#607)
 // ---------------------------------------------------------------------------

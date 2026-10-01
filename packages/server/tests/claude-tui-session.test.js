@@ -239,6 +239,31 @@ describe('ClaudeTuiSession', () => {
       assert.ok(!session._term, 'clean bail: no live PTY left behind after the throw')
     })
 
+    // #8151 (C4) — before this fix, start()'s generic "claude PTY failed to
+    // spawn (no live process after _spawnPty)" REJECTION overwrote whatever
+    // describeNodePtyUnavailable's 'error' emit carried: the emit and the
+    // rejection are two different channels, and session_create_failed's
+    // errorMessage (what a client actually renders as the toast) reads the
+    // REJECTION. This runs the REAL start() → _spawnPty against the
+    // `_ptyModOverride` function seam simulating the import itself rejecting
+    // (not a wholesale _spawnPty mock), so both halves of the fix — the latch
+    // in _spawnPty and the read in start() — are exercised together.
+    it('start() rejects with the actionable node-pty-unavailable message, not the generic fallback', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty // run the genuine method
+      session = new ClaudeTuiSession({ cwd: '/tmp', port: 12352, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session.on('error', () => {}) // _spawnPty's catch also emits; start() is what we assert on
+      session._ptyModOverride = async () => { throw new Error('Cannot find module pty.node') }
+      await assert.rejects(session.start(), (err) => {
+        assert.match(err.message, /^node-pty is unavailable/,
+          `expected the actionable message, got: ${err.message}`)
+        assert.match(err.message, /claude-sdk/, 'names the working alternative')
+        assert.match(err.message, /Cannot find module pty\.node$/, 'appends the real cause last')
+        assert.equal(err.code, 'PTY_UNAVAILABLE')
+        return true
+      })
+      assert.ok(!session._term, 'no PTY left behind after the rejected import')
+    })
+
     // #7929 follow-on — `_spawnPty` builds `['--resume', this._sessionId]` /
     // `['--session-id', this._sessionId]` and hands it straight to node-pty's
     // own `spawn`, not `child_process`'s — so `scripts/lint-argv-sinks.mjs`

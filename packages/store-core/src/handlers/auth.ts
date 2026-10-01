@@ -13,7 +13,7 @@
  * imports ./auth or ./index.
  */
 
-import { parseEnumField, parseRawStringField, parseUnknownArrayField } from './_shared'
+import { parseEnumField, parseRawStringField, parseStringField, parseUnknownArrayField } from './_shared'
 import { handleAvailablePermissionModes } from './permission'
 import type { PermissionMode } from './permission'
 
@@ -326,6 +326,7 @@ export function handleAuthBootstrap(
   agents: unknown[]
   sessionId: string | null
   tunnelUrl: string | null
+  defaultProvider: string | null
 } {
   const providers = parseUnknownArrayField(msg, 'providers')
   const slashCommands = parseUnknownArrayField(msg, 'slashCommands')
@@ -337,7 +338,10 @@ export function handleAuthBootstrap(
   // (not just non-empty) so the parser matches its documented contract and a
   // bogus scheme is dropped before either client's apply step.
   const tunnelUrl = asWssUrl(msg.tunnelUrl)
-  return { providers, slashCommands, agents, sessionId, tunnelUrl }
+  // #8151 (C3): the daemon's own resolved default provider, same field/shape
+  // as the discrete `provider_list` message — see handleProviderList.
+  const defaultProvider = parseStringField(msg, 'defaultProvider')
+  return { providers, slashCommands, agents, sessionId, tunnelUrl, defaultProvider }
 }
 
 /**
