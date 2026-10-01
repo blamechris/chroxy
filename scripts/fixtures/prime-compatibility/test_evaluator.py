@@ -150,5 +150,20 @@ class EvidenceTests(unittest.TestCase):
             prepare(Path(__file__).resolve().parents[3], self.root)
 
 
+class InstructionContractTests(unittest.TestCase):
+    def test_copilot_request_is_not_unconditional_approval(self):
+        # Regression: the preserved invariant contradicted PRIME's best-effort
+        # service policy and the live automatic-request ruleset. Check shipped
+        # copies too; generator checks separately enforce full artifact parity.
+        source = Path(__file__).resolve().parents[3]
+        for rel in ('.claude/commands/prime-directive.md',
+                    '.claude/skills/prime-directive/SKILL.md',
+                    '.gemini/commands/prime-directive.toml'):
+            with self.subTest(artifact=rel):
+                text = (source / rel).read_text()
+                self.assertFalse('main requires a third-party review (Copilot)' in text,
+                                 rel + ': stale unconditional Copilot approval claim')
+
+
 if __name__ == '__main__':
     unittest.main()

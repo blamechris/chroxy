@@ -94,6 +94,16 @@ were unavailable. No workflow instructions changed in response to those harness
 corrections. The final trial had writable action paths and exact native-body
 verification, so the negative results are not permission-denial artifacts.
 
+The subsequent review-gate correction removes a contradictory preserved sentence
+that called Copilot review unconditionally required. Current requirements must be
+read from live branch protection/rulesets; an automatic request is not a required
+approval. Independent review and all actual approvals, checks and findings remain
+binding. A focused regression assertion rejects the old claim in the canonical
+source and both generated copies. The original native-v7 hashes above describe
+the earlier tested revision; this follow-up has offline generation/regression
+coverage, not a new paid native trial. Its exact runtime bytes remain an adoption
+check for the operational pilot.
+
 ## Limits
 
 The fixture supplies simulated CI/review evidence; it does not run a real
