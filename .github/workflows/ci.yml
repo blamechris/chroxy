@@ -434,7 +434,8 @@ jobs:
               # nothing noticed until a publish depended on it. This mirrors
               # the script's own inputs rather than a hand-picked guess:
               # ci-publish-artifacts-path-filter.test.js checks this list
-              # against what the script and release.yml's job actually read.
+              # against the script's own PACKAGES and ./lib imports, the root
+              # manifest + lockfile, and both workflows (this one and release.yml).
               - 'scripts/verify-publish-artifacts.mjs'
               - 'scripts/lib/classify-doctor-output.mjs'
               - 'scripts/lib/daemon-entry-modules.mjs'

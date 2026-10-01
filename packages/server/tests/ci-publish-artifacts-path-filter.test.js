@@ -129,6 +129,16 @@ export function publishArtifactsFilterIssues({ packages, libImports, filter, exi
     }
   }
 
+  // #8191 review S1 — the job mirrors release.yml's verify-artifacts job and
+  // runs from ci.yml itself, so an edit to either workflow must re-run it.
+  for (const workflow of ['.github/workflows/release.yml', '.github/workflows/ci.yml']) {
+    if (!filter.includes(workflow)) {
+      issues.push(
+        `ci.yml's publish_artifacts filter is missing a '${workflow}' entry — a change to the job's own workflow (or to the release job it mirrors) must re-run the gate`
+      )
+    }
+  }
+
   // Direction two: every filter entry names something that actually exists.
   // Any OTHER glob (not the `packages/<x>/**` shape) is outside this check's
   // scope, the same deliberate limitation ci-docker-path-filter.test.js's
@@ -214,6 +224,8 @@ describe('publishArtifactsFilterIssues reports each defect it exists to find (#8
       'scripts/lib/classify-doctor-output.mjs',
       'package.json',
       'package-lock.json',
+      '.github/workflows/release.yml',
+      '.github/workflows/ci.yml',
       'packages/server/**',
       'packages/protocol/**',
     ],
@@ -261,6 +273,16 @@ describe('publishArtifactsFilterIssues reports each defect it exists to find (#8
     input.filter = input.filter.filter((f) => f !== 'package-lock.json')
     const issues = publishArtifactsFilterIssues(input)
     assert.ok(issues.some((i) => /missing a 'package-lock\.json' entry/.test(i)), JSON.stringify(issues))
+  })
+
+  it('reports a missing workflow entry (release.yml or ci.yml) — #8191 review S1', () => {
+    for (const wf of ['.github/workflows/release.yml', '.github/workflows/ci.yml']) {
+      const input = sound()
+      input.filter = input.filter.filter((f) => f !== wf)
+      const issues = publishArtifactsFilterIssues(input)
+      const re = new RegExp(`missing a '${wf.replace(/[.]/g, '\\.')}' entry`)
+      assert.ok(issues.some((i) => re.test(i)), JSON.stringify(issues))
+    }
   })
 
   it('reports a filter package entry naming a directory that does not exist (the OTHER direction)', () => {
