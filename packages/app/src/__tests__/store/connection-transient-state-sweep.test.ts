@@ -18,7 +18,8 @@
  * canonical-field-list parity guard (TRANSIENT_SESSION_SWEEP_FIELDS) so the
  * two clients' onclose sweeps can't drift apart again the way they just did.
  */
-import { TRANSIENT_SESSION_SWEEP_FIELDS } from '@chroxy/store-core';
+import { TRANSIENT_SESSION_SWEEP_FIELDS, createEmptyBaseSessionState } from '@chroxy/store-core';
+import type { BaseSessionState } from '@chroxy/store-core';
 
 jest.mock('expo-secure-store', () => ({
   getItemAsync: jest.fn(() => Promise.resolve('dev-id-123')),
@@ -160,6 +161,107 @@ function dirtySessionState(): SessionState {
   return { ...createEmptySessionState(), ...DIRTY_VALUES };
 }
 
+/**
+ * #8147 — the REVERSE direction of the parity guard below: a field the real
+ * onclose sweep clears but which is NOT listed in TRANSIENT_SESSION_SWEEP_FIELDS
+ * must also go red (the forward direction above only catches a LISTED field
+ * the sweep forgets).
+ *
+ * #8201 review — the FIRST version of this fixture iterated
+ * `Object.keys(createEmptyBaseSessionState())` instead of this map, which
+ * only ever sees whatever the factory actually emits. Every `BaseSessionState`
+ * field is required today, so that happened to be complete — but an OPTIONAL
+ * field the factory doesn't populate (none exist today; the idiom is in
+ * active use on the dashboard's own `SessionState` — see the dashboard half
+ * of this fix) would be invisible to both the dirty fixture and the `changed`
+ * comparison below. The review's proof: adding `probeOptionalField?: string |
+ * null` to `BaseSessionState`, leaving the factory unchanged, kept `tsc
+ * --noEmit` clean and the full suite green (7/7) even with an unmirrored,
+ * unlisted clear of it added to the app's sweep.
+ *
+ * `ALL_BASE_SESSION_STATE_KEYS` below is a COMPILE-TIME exhaustiveness check
+ * instead: every key of `BaseSessionState`, optional ones included, must
+ * appear in this map with a `true` value, enforced by the `satisfies
+ * Record<keyof Required<BaseSessionState>, true>` clause. `tsc` rejects the
+ * map — and therefore this whole test file — the moment `BaseSessionState`
+ * gains OR loses a key, independent of whether a factory happens to set it.
+ */
+const ALL_BASE_SESSION_STATE_KEYS = {
+  messages: true,
+  streamingMessageId: true,
+  pendingClientMessageId: true,
+  inputDeliveries: true,
+  claudeReady: true,
+  activeModel: true,
+  permissionMode: true,
+  contextUsage: true,
+  contextOccupancy: true,
+  lastResultCost: true,
+  lastResultDuration: true,
+  sessionCost: true,
+  cumulativeUsage: true,
+  costThresholdWarning: true,
+  isIdle: true,
+  lastClientActivityAt: true,
+  health: true,
+  stoppedAt: true,
+  stoppedCode: true,
+  containerLostAt: true,
+  containerReattachError: true,
+  activeAgents: true,
+  activeTools: true,
+  pendingBackgroundShells: true,
+  transcriptBackgroundTasks: true,
+  scheduledWakeup: true,
+  isPlanPending: true,
+  planAllowedPrompts: true,
+  primaryClientId: true,
+  sessionRole: true,
+  conversationId: true,
+  sessionContext: true,
+  statusLine: true,
+  mcpServers: true,
+  devPreviews: true,
+  inactivityWarning: true,
+  interventions: true,
+  queuedMessages: true,
+} satisfies Record<keyof Required<BaseSessionState>, true>;
+
+/**
+ * Picks a "dirty" value for one field from its clean/default value's
+ * runtime shape — distinct from the default, not necessarily domain-valid,
+ * because the test below only checks whether the real sweep code TOUCHED
+ * the field (object identity changes when a patch sets it; survives
+ * untouched otherwise — it does NOT verify the field was cleared to the
+ * *correct* value, which is the pre-existing forward-direction guard's job).
+ * A key the factory doesn't populate (`defaultValue === undefined` — none
+ * exist on `BaseSessionState` today) falls into the same branch as a real
+ * `null` default, so it still gets a usable dirty value.
+ */
+function dirtyValueFor(key: string, defaultValue: unknown): unknown {
+  if (defaultValue === null || defaultValue === undefined) return `__dirty__${key}`;
+  if (typeof defaultValue === 'boolean') return !defaultValue;
+  if (typeof defaultValue === 'number') return defaultValue + 1;
+  if (typeof defaultValue === 'string') return `${defaultValue}__dirty`;
+  if (Array.isArray(defaultValue)) return [`__dirty__${key}`];
+  if (typeof defaultValue === 'object') return { __dirty: key };
+  return defaultValue;
+}
+
+/**
+ * Every key `ALL_BASE_SESSION_STATE_KEYS` knows about (not
+ * `Object.keys(createEmptyBaseSessionState())` — see that map's docstring)
+ * gets a dirty value, reusing the factory's value where it sets one.
+ */
+function buildFullyDirtyBaseSessionState(): BaseSessionState {
+  const clean = createEmptyBaseSessionState() as unknown as Record<string, unknown>;
+  const dirty: Record<string, unknown> = {};
+  for (const key of Object.keys(ALL_BASE_SESSION_STATE_KEYS)) {
+    dirty[key] = dirtyValueFor(key, clean[key]);
+  }
+  return dirty as unknown as BaseSessionState;
+}
+
 describe('onclose clears transient streaming/plan state on all sessions (#7411)', () => {
   it('nulls streamingMessageId, isPlanPending and planAllowedPrompts on a BACKGROUND session', async () => {
     const { ws } = await openConnectedSocket();
@@ -248,6 +350,48 @@ describe('onclose clears transient streaming/plan state on all sessions (#7411)'
     for (const field of TRANSIENT_SESSION_SWEEP_FIELDS) {
       expect(st.sessionStates.b).toHaveProperty(field, CLEAN_VALUES[field]);
     }
+
+    ws.restore();
+  });
+});
+
+describe('reverse-direction parity guard: onclose sweeps nothing OUTSIDE the canonical list (#8147)', () => {
+  it('changes exactly TRANSIENT_SESSION_SWEEP_FIELDS on a fully-dirty background session — no more, no fewer', async () => {
+    const { ws } = await openConnectedSocket();
+
+    const dirtyBase = buildFullyDirtyBaseSessionState();
+    const dirty: SessionState = { ...createEmptySessionState(), ...dirtyBase };
+    const dirtyBaseRecord = dirtyBase as unknown as Record<string, unknown>;
+    // Driven by the compile-time-exhaustive map, not by whatever
+    // `dirtyBaseRecord` happens to contain — see ALL_BASE_SESSION_STATE_KEYS.
+    const baseFieldNames = Object.keys(ALL_BASE_SESSION_STATE_KEYS);
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: createEmptySessionState(),
+        b: dirty,
+      },
+    });
+
+    const socket = ws.instances[ws.instances.length - 1];
+    socket.onclose?.({ code: 1006 });
+    await flushPromises();
+
+    const after = useConnectionStore.getState().sessionStates.b as unknown as Record<string, unknown>;
+
+    // Every BaseSessionState field the sweep actually changed (by reference —
+    // untouched fields survive the sweep's object spreads byte-identical to
+    // the dirty value we seeded) must be exactly the canonical list. A field
+    // the sweep clears without it being listed (the issue's `stoppedAt`
+    // mutant) shows up here and fails the assertion below; a listed field the
+    // sweep forgets is already caught by the forward-direction guard above.
+    // Nit (#8201 review): this is touched-vs-untouched only, not
+    // touched-to-the-correct-value — a field cleared to the WRONG value is
+    // caught by the forward-direction guard's `toHaveProperty(field,
+    // CLEAN_VALUES[field])`, not by this one.
+    const changed = baseFieldNames.filter((key) => after[key] !== dirtyBaseRecord[key]);
+    expect(changed.sort()).toEqual([...TRANSIENT_SESSION_SWEEP_FIELDS].sort());
 
     ws.restore();
   });
