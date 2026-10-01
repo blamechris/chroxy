@@ -2330,8 +2330,9 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * the roster). `forgetSession` still does NOT spread it, deliberately: doing so
  * would move every `CLEARED_ON_DISCONNECT` member into answer 1 (and the
  * disjointness cell below would force that), which is a taxonomy rewrite and
- * would turn #7552's `environments` pin red. The behavioural cells are the
- * '#7570' describes in `connection-lifecycle-resets.test.ts`.
+ * would turn #7552's `environments` pin red. The behavioural cells live in the
+ * two '#7570' describe blocks in `connection-lifecycle-resets.test.ts` (the
+ * different-daemon block and the same-daemon block).
  *
  * What that leaves, named rather than omitted: a DIRECT `connect(url, …)` to a
  * different URL still reaches `forgetSession()` alone — in production that is the
