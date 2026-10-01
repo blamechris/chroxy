@@ -49,7 +49,7 @@ class MockWebSocket {
   json: async () => ({ status: 'ok' }),
 }))
 
-const { useConnectionStore } = await import('./connection')
+const { useConnectionStore, createEmptySessionState } = await import('./connection')
 // Import the namespace (not a destructured binding) so `mh.reconnectAttempt`
 // reflects the live module-level counter — destructuring a `let` export copies
 // the value at import time and would always read 0.
@@ -395,6 +395,80 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
     expect(st.sessionStates.a!.primaryClientId).toBeNull()
     expect(st.sessionStates.b!.sessionRole).toBeNull()
     expect(st.sessionStates.b!.primaryClientId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8147 — the REVERSE direction of the parity guard above: a field the real
+// onclose sweep clears but which is NOT listed in TRANSIENT_SESSION_SWEEP_FIELDS
+// must also go red. The forward-direction guard above only catches a LISTED
+// field a sweep forgets to clear; it says nothing about a field a sweep
+// clears that was never listed (the issue's `stoppedAt` mutant — one extra
+// line in `clearTransientSessionStatePatch`, never added to the shared list,
+// never mirrored to the app — passed every suite in #8144's head).
+// ---------------------------------------------------------------------------
+
+/**
+ * Picks a "dirty" value for one field from its clean/default value's runtime
+ * shape — distinct from the default, not necessarily domain-valid, because
+ * the test below only checks whether the real sweep code TOUCHED the field
+ * (object identity changes when a patch sets it; survives untouched
+ * otherwise), never the field's contents.
+ */
+function dirtyValueFor(key: string, defaultValue: unknown): unknown {
+  if (defaultValue === null || defaultValue === undefined) return `__dirty__${key}`
+  if (typeof defaultValue === 'boolean') return !defaultValue
+  if (typeof defaultValue === 'number') return defaultValue + 1
+  if (typeof defaultValue === 'string') return `${defaultValue}__dirty`
+  if (Array.isArray(defaultValue)) return [`__dirty__${key}`]
+  if (typeof defaultValue === 'object') return { __dirty: key }
+  return defaultValue
+}
+
+/**
+ * Every field of the dashboard's `SessionState` (BaseSessionState's fields
+ * PLUS the dashboard-only ones `createEmptySessionState` sets), each flipped
+ * to a distinctive dirty value. Derived from `createEmptySessionState()` —
+ * the canonical default-state factory — rather than a hand-typed field list,
+ * so a field added to either interface automatically gets a dirty value and
+ * automatically enters the comparison below; there is no parallel roster
+ * here that can silently go stale the way a hardcoded field list would.
+ */
+function buildFullyDirtySessionState(): Record<string, unknown> {
+  const clean = createEmptySessionState() as unknown as Record<string, unknown>
+  const dirty: Record<string, unknown> = {}
+  for (const key of Object.keys(clean)) dirty[key] = dirtyValueFor(key, clean[key])
+  return dirty
+}
+
+describe('reverse-direction parity guard: onclose sweeps nothing OUTSIDE the canonical list (#8147)', () => {
+  it('changes exactly TRANSIENT_SESSION_SWEEP_FIELDS plus the documented pendingEvaluatorClarify exception — no more, no fewer', async () => {
+    const ws = await openConnected()
+
+    const dirty = buildFullyDirtySessionState()
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: createEmptySessionState(),
+        b: dirty as never,
+      },
+    })
+
+    ws.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    const after = useConnectionStore.getState().sessionStates.b as unknown as Record<string, unknown>
+    const changed = Object.keys(dirty).filter((key) => after[key] !== dirty[key])
+
+    // `pendingEvaluatorClarify` is the ONE documented, deliberate exception —
+    // dashboard-only (#3188), explained in utils.ts's TRANSIENT_SESSION_SWEEP_FIELDS
+    // doc comment as to why it stays off the shared list even though this
+    // sweep clears it. Any OTHER field showing up here — listed or not — is
+    // exactly the #8147 mutant shape: an extra clear nothing catches.
+    expect(changed.sort()).toEqual(
+      [...TRANSIENT_SESSION_SWEEP_FIELDS, 'pendingEvaluatorClarify'].sort(),
+    )
   })
 })
 

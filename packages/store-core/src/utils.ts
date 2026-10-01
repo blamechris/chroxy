@@ -171,13 +171,20 @@ export function clearTransientSessionState(
  * one) when the socket closes. Each client's onclose sweep has a parity test
  * that iterates this list (app: connection-transient-state-sweep.test.ts;
  * dashboard: connection-reconnect-backoff.test.ts), so a field added HERE that
- * either client fails to clear goes red. The check runs in that direction
- * only: a field one client sweeps without it being listed here is not caught
- * — which is the shape #7411 itself had (#8147 tracks closing that).
+ * either client fails to clear goes red.
+ *
+ * The guard is now two-way (#8147 closed the gap #7411 itself had): each of
+ * those same test files also runs the real sweep over a session where EVERY
+ * `BaseSessionState` field is dirtied, then asserts the set of fields the
+ * sweep actually changed is EXACTLY this list — so a field a client's sweep
+ * clears WITHOUT it being listed here (an extra, un-mirrored clear, the exact
+ * shape #7411 had) goes red too, not just a listed field a sweep forgets.
  *
  * `pendingEvaluatorClarify` is deliberately excluded: it lives only on the
  * dashboard's `SessionState` (no evaluator-clarify feature exists on the
- * app yet), so there is no app-side field to hold it to parity against.
+ * app yet), so there is no app-side field to hold it to parity against. The
+ * dashboard's reverse-direction test carries it as a named, documented
+ * exception rather than treating it as an undetected extra clear.
  */
 export const TRANSIENT_SESSION_SWEEP_FIELDS = [
   'streamingMessageId',
