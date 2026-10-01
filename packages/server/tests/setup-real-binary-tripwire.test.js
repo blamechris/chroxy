@@ -41,6 +41,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, exec, execSync, execFile, execFileSync, fork } from 'node:child_process'
 import { promisify } from 'node:util'
+import { homedir } from 'node:os'
 import { isAbsolute, sep } from 'node:path'
 
 import { prepareSpawn } from '../src/utils/win-spawn.js'
@@ -496,6 +497,13 @@ describe('real-binary tripwire: explicit shells, env/npx/assignment wrappers, ne
       ['bash -o pipefail -c (a value flag before -c)', 'spawn', ['bash', ['-o', 'pipefail', '-c', 'claude -v']], 'claude'],
       ['bash --login -c (a long flag before -c)', 'spawn', ['bash', ['--login', '-c', 'claude']], 'claude'],
       ['bash --rcfile FILE -c (a long flag WITH a value before -c)', 'spawn', ['bash', ['--rcfile', 'x.rc', '-c', 'claude']], 'claude'],
+      ['bash -eo pipefail -c (a cluster that ENDS in o takes a value) — argv form', 'spawn', ['bash', ['-eo', 'pipefail', '-c', 'claude']], 'claude'],
+      ['bash -eo pipefail -c — exec() string form', 'exec', ["bash -eo pipefail -c 'claude'", noop], 'claude'],
+      ['bash +o pipefail -c (a + value flag)', 'spawn', ['bash', ['+o', 'pipefail', '-c', 'claude']], 'claude'],
+      ['bash -O extglob -c (a shopt value flag)', 'spawn', ['bash', ['-O', 'extglob', '-c', 'claude']], 'claude'],
+      ['bash +O extglob -c', 'spawn', ['bash', ['+O', 'extglob', '-c', 'claude']], 'claude'],
+      ['bash +x -c (a + flag that is not a value flag)', 'spawn', ['bash', ['+x', '-c', 'claude']], 'claude'],
+      ['bash -co pipefail CMD (the c and the o in one cluster)', 'spawn', ['bash', ['-co', 'pipefail', 'claude']], 'claude'],
       ['a chain INSIDE the command string', 'spawn', ['sh', ['-c', 'true && claude']], 'claude'],
       ['a shell inside a shell', 'spawn', ['sh', ['-c', 'sh -c "claude -v"']], 'claude'],
       ['an absolute guarded path inside the string', 'spawn', ['sh', ['-c', '/opt/homebrew/bin/claude -v']], '/opt/homebrew/bin/claude'],
@@ -574,6 +582,8 @@ describe('real-binary tripwire: explicit shells, env/npx/assignment wrappers, ne
   describe('every command separator, a newline and a lone & included; the exec builtin is unwrapped', () => {
     const blockedCases = [
       ['a ; separator', 'exec', ['build.sh; claude --dangerously-skip-permissions', noop], 'claude'],
+      ['TAB-separated words around an operator', 'exec', ['true\t&&\tclaude', noop], 'claude'],
+      ['a CRLF line ending after the command (\\r is whitespace, not part of the word)', 'exec', ['true && claude\r\n', noop], 'claude'],
       ['a | pipe', 'exec', ['echo x | claude', noop], 'claude'],
       ['a || separator', 'exec', ['false || gemini', noop], 'gemini'],
       ['LF newline', 'exec', ['true\nclaude -v', noop], 'claude'],
@@ -599,6 +609,7 @@ describe('real-binary tripwire: explicit shells, env/npx/assignment wrappers, ne
       ['`exec` as an ARGUMENT', 'exec', ['echo exec claude', noop]],
       ['a stderr redirect', 'exec', ['echo x 2>&1', noop]],
       ['a >& redirect whose TARGET is named like a guarded binary', 'exec', ['echo hi >& claude', noop]],
+      ['a <& redirect whose TARGET is named like a guarded binary', 'exec', ['cat <& claude', noop]],
       ['an UNTERMINATED single quote runs to the end of the line', 'exec', ["echo 'a && claude", noop]],
       ['an UNTERMINATED double quote runs to the end of the line', 'exec', ['echo "a && claude', noop]],
     ]
@@ -619,6 +630,12 @@ describe('real-binary tripwire: explicit shells, env/npx/assignment wrappers, ne
       ['double-quoted ||', 'exec', ['echo "a || claude"', noop]],
       ['a $( inside SINGLE quotes is literal', 'exec', ["echo 'a $(claude)'", noop]],
       ['an escaped quote does not close a double-quoted string', 'exec', ['echo "a \\" && claude"', noop]],
+      ['an escaped $ inside double quotes is not a substitution', 'exec', ['echo "\\$(claude)"', noop]],
+      // Only the OPENING backtick is escaped, on purpose: with both escaped, the
+      // second `\` is read by the unquoted-escape rule inside the group a broken
+      // first escape would open, and a regression hides itself (a mutant that
+      // dropped the backtick from the double-quote escape set survived it).
+      ['an escaped backtick inside double quotes is not a substitution', 'exec', ['echo "\\`claude"', noop]],
       ['the tail of a double-quoted string that follows a substitution', 'exec', ['echo "$(date) claude"', noop]],
       ['the same with no space before the tail', 'exec', ['echo "$(date)claude"', noop]],
       ['text after a backtick substitution that is NOT in command position', 'exec', ['echo `date` claude', noop]],
@@ -652,6 +669,12 @@ describe('real-binary tripwire: explicit shells, env/npx/assignment wrappers, ne
       ['an escaped quote inside a double-quoted region stays inside it', 'echo "a \\" && claude"', ['echo']],
       ['single quotes are fully literal, backslashes included', "echo 'a\\' && claude", ['echo', 'claude']],
       ['every separator starts a command', 'a;b|c&d\ne&&f||g', ['a', 'b', 'c', 'd', 'e', 'f', 'g']],
+      ['a comment runs to the end of the line; the next line is lexed normally', "true # it's a note\nclaude", ['true', 'claude']],
+      ['a comment hides a chain that is on its own line', 'true # && claude', ['true']],
+      ['a comment at the start of the line, and one after an operator', '# claude\ntrue;# claude\nfalse', ['true', 'false']],
+      ['a # in the middle of a word is not a comment', 'echo a#b && claude', ['echo', 'claude']],
+      ['$# is not a comment', 'echo $# && claude', ['echo', 'claude']],
+      ['a # inside quotes is not a comment', 'echo "# x" && claude', ['echo', 'claude']],
       ['a line that is only assignments execs nothing', 'FOO=1 BAR=2', []],
       ['empty input yields nothing', '', []],
     ]
@@ -661,6 +684,83 @@ describe('real-binary tripwire: explicit shells, env/npx/assignment wrappers, ne
     it('non-string input yields nothing', () => {
       assert.deepEqual(shellCommandTokens(undefined), [])
     })
+  })
+
+  describe('an unquoted # that STARTS a word is a comment to the end of the line', () => {
+    const blockedCases = [
+      ['a comment holding an apostrophe does not swallow the next line', 'exec', ["true # it's a note\nclaude", noop], 'claude'],
+      ['a comment holding an unbalanced double quote does not swallow the next line', 'exec', ['true # say "hi\nclaude', noop], 'claude'],
+      ['a # in the middle of a word is not a comment', 'exec', ['echo a#b && claude', noop], 'claude'],
+      ['$# is not a comment', 'exec', ['echo $# && claude', noop], 'claude'],
+      ['a # inside double quotes is not a comment', 'exec', ['echo "# x" && claude', noop], 'claude'],
+      ['a # inside single quotes is not a comment', 'exec', ["echo '#' ; claude", noop], 'claude'],
+      ['a comment ends at a CRLF newline too', 'exec', ['# a note\r\nclaude', noop], 'claude'],
+      ['a comment inside a sh -c string', 'spawn', ['sh', ['-c', "true # it's\nclaude"]], 'claude'],
+    ]
+    for (const [name, launcher, args, guarded] of blockedCases) {
+      it(`BLOCKS ${name}`, () => assertBlocked(launcher, args, guarded))
+    }
+
+    const passCases = [
+      ['a commented-out chain: `true # && claude`', 'exec', ['true # && claude', noop]],
+      ['a whole-line comment', 'exec', ['# claude', noop]],
+      ['a comment right after an operator', 'exec', ['true;# claude', noop]],
+      ['a commented-out command on a line of its own, then a safe one', 'exec', ['true\n# claude -v\nfalse', noop]],
+    ]
+    for (const [name, launcher, args] of passCases) {
+      it(`does NOT block ${name}`, () => assertPassesThrough(launcher, args))
+    }
+  })
+
+  describe('a home-prefixed program word in a SHELL line is expanded before the name check', () => {
+    // The real homedir() on purpose: REAL_INSTALL_PREFIXES is built from it, so
+    // the expanded path is a real-install path exactly as `~/.local/bin/claude`
+    // is on a developer machine (doctor-binary-provenance.test.js names it as
+    // the dev install location). Nothing is run — the stub sits underneath.
+    const home = homedir()
+    const claudePath = `${home}/.local/bin/claude`
+
+    const blockedCases = [
+      ['~/.local/bin/claude', 'exec', ['~/.local/bin/claude -v', noop]],
+      ['$HOME/.local/bin/claude', 'exec', ['$HOME/.local/bin/claude -v', noop]],
+      ['${HOME}/.local/bin/claude', 'exec', ['${HOME}/.local/bin/claude -v', noop]],
+      ['"$HOME/.local/bin/claude" (quoted)', 'exec', ['"$HOME/.local/bin/claude" -v', noop]],
+      ['"${HOME}/.local/bin/claude" (quoted)', 'exec', ['"${HOME}/.local/bin/claude" -v', noop]],
+      ['the same through shell:true', 'spawn', ['~/.local/bin/claude --version', { shell: true }]],
+      ['behind env in a shell line', 'exec', ['env ~/.local/bin/claude -v', noop]],
+      ['inside a sh -c string', 'spawn', ['sh', ['-c', '~/.local/bin/claude -v']]],
+      ['after a chain operator', 'exec', ['true && $HOME/.local/bin/claude', noop]],
+    ]
+    for (const [name, launcher, args] of blockedCases) {
+      it(`BLOCKS ${name}`, () => assertBlocked(launcher, args, claudePath))
+    }
+
+    const passCases = [
+      ['a home-prefixed word that is only an ARGUMENT', 'exec', ['echo ~/.local/bin/claude', noop]],
+      ['a home-prefixed fixture outside every install prefix', 'exec', ['~/fixtures/claude -v', noop]],
+      ['`~user` — someone else\'s home, not ours', 'exec', ['~root/.local/bin/claude -v', noop]],
+      ['`$HOMEX` — a different variable', 'exec', ['$HOMEX/.local/bin/claude -v', noop]],
+      ['a literal `~/...` argv program with NO shell — nothing expands it', 'spawn', ['~/.local/bin/claude', ['-v']]],
+      ['a literal `~/...` as the command of a no-shell env', 'spawn', ['env', ['~/.local/bin/claude']]],
+    ]
+    for (const [name, launcher, args] of passCases) {
+      it(`does NOT block ${name}`, () => assertPassesThrough(launcher, args))
+    }
+
+    const lexerCases = [
+      ['a leading ~/', '~/x', [`${home}/x`]],
+      ['a leading $HOME/', '$HOME/x', [`${home}/x`]],
+      ['a leading ${HOME}/', '${HOME}/x', [`${home}/x`]],
+      ['a quoted "$HOME/"', '"$HOME/x" -v', [`${home}/x`]],
+      ['a bare ~ and a bare $HOME', '~ ; $HOME', [home, home]],
+      ['~user is not expanded', '~root/x', ['~root/x']],
+      ['$HOMEX is not expanded', '$HOMEX/x', ['$HOMEX/x']],
+      ['only the program word is expanded, not its arguments', 'echo ~/x $HOME/y', ['echo']],
+      ['a ~ in the middle of a word is not expanded', 'a~/x', ['a~/x']],
+    ]
+    for (const [name, line, expected] of lexerCases) {
+      it(`shellCommandTokens: ${name}`, () => assert.deepEqual(shellCommandTokens(line), expected))
+    }
   })
 
   describe('documented limits (see the module header) — NOT detected today', () => {
@@ -686,6 +786,23 @@ describe('real-binary tripwire: explicit shells, env/npx/assignment wrappers, ne
       ['a brace group', 'exec', ['{ claude; }', noop]],
       ['a reserved word before the command', 'exec', ['! claude', noop]],
       ['a command named by a variable', 'exec', ['$CLAUDE_BIN -v', noop]],
+      ['a name PRODUCED by a substitution: $(echo claude)', 'exec', ['$(echo claude)', noop]],
+      ['a name PRODUCED by a substitution: backticks', 'exec', ['`echo claude`', noop]],
+      ['a name PRODUCED by a quoted substitution', 'exec', ['"$(echo claude)"', noop]],
+      ['a name PRODUCED inside a sh -c string', 'exec', ['bash -c "$(echo claude)"', noop]],
+      ['a redirect glued to the command word: claude>/dev/null', 'exec', ['claude>/dev/null', noop]],
+      ['a redirect glued to the command word: claude</dev/null', 'exec', ['claude</dev/null', noop]],
+      ['a backslash before an ordinary character: \\claude', 'exec', ['\\claude -v', noop]],
+      ['a backslash inside the name: cl\\aude', 'exec', ['cl\\aude -v', noop]],
+      ['trap, which runs its string later', 'exec', ["trap 'claude' EXIT", noop]],
+      ['source, which reads a script', 'exec', ['source claude', noop]],
+      ['brace expansion', 'exec', ['{claude,x}', noop]],
+      ['`then` as the first word of a command', 'exec', ['if true; then claude; fi', noop]],
+      ['`do` as the first word of a command', 'exec', ['for x in 1; do claude; done', noop]],
+      ['`else` as the first word of a command', 'exec', ['if false; then true; else claude; fi', noop]],
+      ['`while` as the first word of a command', 'exec', ['while claude; do true; done', noop]],
+      ['`until` as the first word of a command', 'exec', ['until claude; do true; done', noop]],
+      ['$\'...\' quoting (the one regression against the old regex splitter)', 'exec', ["echo $'a\\'b' && claude", noop]],
     ]
     for (const [name, launcher, args] of limits) {
       it(`passes through ${name}`, () => assertPassesThrough(launcher, args))
@@ -694,6 +811,25 @@ describe('real-binary tripwire: explicit shells, env/npx/assignment wrappers, ne
     it('CONSERVATIVE, the other direction: an inline `PATH=` assignment is not honoured, so `PATH= claude` is flagged although it cannot resolve', () => {
       assertBlocked('exec', ['PATH= claude -v', noop], 'claude')
     })
+
+    // The OVER-FLAGGED list in the module header. Each of these cannot exec a
+    // guarded binary (or is a syntax error) and is flagged anyway. Pinned so the
+    // header stays exact: if one is fixed, move it out of the header AND here.
+    const overFlagged = [
+      ['a heredoc BODY line that starts with a guarded name', 'exec', ['cat <<EOF\nclaude\nEOF', noop]],
+      ['a heredoc body with a quoted delimiter', 'exec', ["cat <<'EOF'\nclaude\nEOF", noop]],
+      ['a `case` pattern', 'exec', ['case x in\n claude) true;;\n esac', noop]],
+      ['a backslash-newline continuation (the newline splits)', 'exec', ['echo \\\nclaude', noop]],
+      ['a `>|` redirect target (the | splits)', 'exec', ['echo hi >| claude', noop]],
+      ['env -i clears PATH, so the name cannot resolve', 'spawn', ['env', ['-i', 'claude']]],
+      ['env PATH= claude', 'spawn', ['env', ['PATH=', 'claude']]],
+      ['env -u PATH claude', 'spawn', ['env', ['-u', 'PATH', 'claude']]],
+      ['env FOO=1 -- claude (env takes the -- after an operand as the program name)', 'spawn', ['env', ['FOO=1', '--', 'claude']]],
+      ['a short-circuited command: [ -x claude ] && claude', 'exec', ['[ -x claude ] && claude', noop]],
+    ]
+    for (const [name, launcher, args] of overFlagged) {
+      it(`OVER-FLAGGED, conservative: ${name}`, () => assertBlocked(launcher, args, 'claude'))
+    }
   })
 
   describe('the error names the line a guarded token was found in', () => {

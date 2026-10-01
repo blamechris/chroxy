@@ -57,7 +57,10 @@
 // survives intact. `echo "a && claude"` is therefore one command with one
 // argument, not two commands (#8186), while `echo "$(claude -v)"` and
 // `echo "x" && claude` still reach `claude`. A quote left open runs to the end
-// of the line.
+// of the line. An unquoted `#` that STARTS a word begins a comment, which runs
+// to the end of the line; the newline still ends it and the next line is lexed
+// normally (`true # it's a note\nclaude` reaches `claude`; `echo a#b && claude`
+// does too, because a mid-word `#` is not a comment).
 //
 // The reducer. Per simple command, in order:
 //   1. leading `NAME=value` assignments are skipped (`FOO=1 claude`);
@@ -77,12 +80,17 @@
 //                   below, and it is the same code path (`shellWrapperTokens()`);
 //        - `cmd`  : the win-spawn.js wrapper, below;
 //        - anything else: the program itself is the candidate.
+//   4. in a SHELL line, a leading `~`, `~/`, `$HOME` or `${HOME}` on the
+//      program word is expanded with `os.homedir()` before the name check, so
+//      `~/.local/bin/claude` (the default dev-machine install) is the real
+//      install it names. `~user` and `$HOMEX` are left alone.
 //
 // The same reduction runs on the argv of a call with NO shell
 // (`spawn('sh', ['-c', 'claude -v'])`, `spawn('env', ['claude'])`) — there the
 // words are the already-split `[file, ...args]` rather than a lexed line, and
-// a LEADING assignment or `exec` is NOT unwrapped, because without a shell
-// they are ordinary (and nonexistent) program names. (`env`'s own `NAME=value`
+// a LEADING assignment or `exec` is NOT unwrapped, and a leading `~`/`$HOME`
+// is NOT expanded, because without a shell they are ordinary (and nonexistent)
+// program names. (`env`'s own `NAME=value`
 // operands are still skipped: that is `env` parsing its argv, not a shell.)
 //
 // Deliberately narrow in the OTHER direction too: a guarded name that appears
@@ -113,27 +121,56 @@
 //     `npx -c '...'`, `npx --cache DIR`.
 //   - Shells outside `sh`/`bash`/`zsh`/`dash` (`ksh`, `fish`, `busybox ash`,
 //     `pwsh`, `powershell`).
-//   - A command string that is not in the argv: `echo claude | sh`, a heredoc,
-//     `bash script.sh` (the script's contents are never read), `eval`,
-//     `node -e "require('child_process')..."`, `$CLAUDE_BIN`, an alias or a
-//     function. The guarded name must be a literal word in command position.
-//   - Package specifiers: `npx @openai/codex`, `npx claude@latest`
-//     — the word must equal the binary name (or an absolute path to it under
-//     a real install prefix) exactly.
+//   - A command string that is not in the argv: `echo claude | sh`, a heredoc
+//     fed to a shell, `bash script.sh` (the script's contents are never read),
+//     `eval`, `trap 'claude' EXIT`, `source` and `.`, and
+//     `node -e "require('child_process')..."`. `bash claude` (a script operand
+//     named like a guarded binary) is not flagged either: right for a native
+//     binary, which bash refuses to read as a script, wrong for a `#!/bin/sh`
+//     wrapper script.
+//   - A name that is PRODUCED rather than written: `$(echo claude)` and its
+//     backtick form, `"$(echo claude)"`, `bash -c "$(echo claude)"`, `$CLAUDE_BIN`
+//     and any other variable, an alias or a function, brace expansion
+//     (`{claude,x}`). The guarded name must be a literal word in command
+//     position.
+//   - A word that is not literally the name: a redirect glued to it
+//     (`claude>/dev/null`, `claude</dev/null`, `claude>out` — the word is the
+//     whole `claude>/dev/null`) and a backslash before an ordinary character
+//     (`\claude`, `cl\aude`), which is kept as a literal backslash on purpose so
+//     a Windows path survives.
+//   - Package specifiers: `npx @openai/codex`, `npx claude@latest` — the word
+//     must equal the binary name (or an absolute path to it under a real
+//     install prefix) exactly.
 //   - Syntax the lexer does not model: redirections before the command
-//     (`>out claude`), brace groups (`{ claude; }`), reserved words
-//     (`! claude`, `if claude; then`), `case` patterns, `${...}` and
-//     arithmetic expansion, `$'...'` quoting, and backslash-newline line
-//     continuation.
+//     (`>out claude`, `2>/dev/null claude`), brace groups (`{ claude; }`),
+//     function bodies, reserved words (`! claude`, and `then`/`do`/`else`/
+//     `elif`/`while`/`until` as the first word of a command, as in
+//     `if true; then claude; fi` and `for x in 1; do claude; done`), `${...}`
+//     and arithmetic expansion, `$'...'` quoting (a regression against the old
+//     regex splitter: `echo $'a\'b' && claude`), and backslash-newline line
+//     continuation (`cla\<newline>ude`).
 //   - A QUOTED Windows path that ends in a backslash (`"C:\dir\"`): inside
 //     double quotes `\"` reads as an escaped quote and the quote stays open,
 //     hiding whatever follows it on the line.
 //
 // OVER-FLAGGED — a call that cannot exec a guarded binary but is flagged
 // anyway (conservative: a false alarm is a visible red, a miss is not):
-//   - Comments are not recognised: `# && claude` is split as if it were code.
-//   - An inline `PATH=` assignment is not honoured the way `options.env.PATH`
-//     is: `PATH= claude` cannot resolve, and is flagged anyway.
+//   - A heredoc BODY line that starts with a guarded name
+//     (`cat <<EOF\nclaude\nEOF`, quoted delimiter or not) is lexed as a
+//     command, because a newline starts one. The pre-#8186 module passed it.
+//   - `case` patterns (`case x in claude) ... esac`) and unbalanced groups
+//     (`claude --version (`, `echo $(claude`), which are syntax errors in a
+//     real shell; a test pins the unbalanced case.
+//   - A backslash-newline continuation (`echo \<newline>claude`) and a `>|`
+//     redirect target (`echo hi >| claude`): the newline and the `|` split.
+//   - A PATH that cannot resolve the name is not honoured the way
+//     `options.env.PATH` is: `PATH= claude`, `env -i claude`, `env PATH=
+//     claude` and `env -u PATH claude` are flagged although they cannot find
+//     it. (`env FOO=1 -- claude` is flagged too, although `env` takes the
+//     `--` after an operand as the program name.)
+//   - A command a shell would short-circuit past or never reach
+//     (`[ -x claude ] && claude`, a function named `claude`) is flagged: the
+//     lexer reads "could run", not "does run".
 //
 // If a real call shape turns up in either list, extend the grammar and the
 // tests together — and move it out of the list in the same change.
@@ -164,7 +201,12 @@
 // `options.shell` case above. Still not a full parser — an adversarially
 // crafted shim PATH containing a caret-escaped space ahead of the binary
 // name could still confuse the split — but it catches the shape win-spawn.js
-// actually produces, which is what this guard exists to backstop.
+// actually produces, which is what this guard exists to backstop. The line it
+// recovers is lexed with POSIX rules (single quotes quote, `#` starts a
+// comment, a lone `&` separates, `^` does not escape), none of which is true of
+// cmd.exe: a directory literally named like `a & claude.cmd`, whose `&`
+// escapeCommand() caret-escapes and this function un-escapes, is read as a
+// real separator.
 //
 // ── Bypass ───────────────────────────────────────────────────────────────
 //
@@ -206,6 +248,10 @@ import { SPAWN_LAUNCHERS, findOptionsIndex } from './test-spawn-home-sandbox.mjs
 
 const require = createRequire(import.meta.url)
 
+// Captured ONCE, so the install prefixes below and the `~`/`$HOME` expansion in
+// shellCommandTokens() can never disagree about where "home" is.
+const HOME_DIR = homedir()
+
 /** Marks a patched function so a test can enumerate what was ACTUALLY installed. */
 export const REAL_BINARY_MARKER = Symbol.for('chroxy.testRealBinaryTripwire')
 
@@ -230,11 +276,11 @@ export const GUARDED_BASENAMES = new Set(['cloudflared', 'claude', 'codex', 'gem
 export const REAL_INSTALL_PREFIXES = Object.freeze([
   '/opt/homebrew/',
   '/usr/local/',
-  join(homedir(), '.local') + sep,
-  join(homedir(), '.npm-global') + sep,
-  join(homedir(), '.bun') + sep,
-  join(homedir(), '.volta') + sep,
-  join(homedir(), 'Library', 'pnpm') + sep,
+  join(HOME_DIR, '.local') + sep,
+  join(HOME_DIR, '.npm-global') + sep,
+  join(HOME_DIR, '.bun') + sep,
+  join(HOME_DIR, '.volta') + sep,
+  join(HOME_DIR, 'Library', 'pnpm') + sep,
 ])
 
 // win32 resolves paths case-insensitively and accepts EITHER separator in a
@@ -393,6 +439,17 @@ function parseShellLine(line) {
           append(c)
         }
         break
+      case '#':
+        // A comment runs to the end of the line — but only when the `#` STARTS
+        // a word. `a#b` and `$#` are ordinary text. The newline is left for the
+        // next iteration, so the following line is lexed normally.
+        if (inWord) {
+          append(c)
+        } else {
+          const newline = line.indexOf('\n', i)
+          i = newline === -1 ? line.length : newline - 1
+        }
+        break
       case '(':
         openGroup(false)
         break
@@ -416,13 +473,21 @@ function parseShellLine(line) {
   return commands
 }
 
-// Flags of a POSIX shell that take a VALUE word, which must not be mistaken
-// for the command string or for the end of the options.
-const POSIX_SHELL_VALUE_FLAGS = new Set(['-o', '+o', '-O', '+O', '--rcfile', '--init-file'])
+// Long flags of a POSIX shell that take a VALUE word, which must not be
+// mistaken for the command string or for the end of the options. (The SHORT
+// value flags, `-o`/`+o`/`-O`/`+O`, are matched by SHELL_VALUE_CLUSTER_RE.)
+const POSIX_SHELL_VALUE_FLAGS = new Set(['--rcfile', '--init-file'])
 const POSIX_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash'])
 
 /** `-c` alone or in a short-flag cluster: `-c`, `-lc`, `-ec`, `-ce` ... */
 const SHELL_C_FLAG_CLUSTER_RE = /^-[A-Za-z]*c[A-Za-z]*$/
+
+/**
+ * A short flag or cluster that ENDS in `o`/`O` takes the next word as its
+ * value — the option name: `-o pipefail`, `+o pipefail`, `-O extglob`, and the
+ * common `-eo pipefail` (so `pipefail` is not mistaken for the command string).
+ */
+const SHELL_VALUE_CLUSTER_RE = /^[-+][A-Za-z]*[oO]$/
 
 /**
  * The `-c` COMMAND STRING of an explicit POSIX shell invocation (`words[0]` is
@@ -441,6 +506,7 @@ function posixShellCommandString(words) {
     }
     if (!/^[-+]/.test(w)) break
     if (SHELL_C_FLAG_CLUSTER_RE.test(w)) sawC = true
+    if (SHELL_VALUE_CLUSTER_RE.test(w)) i++
   }
   return sawC && i < words.length ? words[i] : null
 }
@@ -547,6 +613,17 @@ function simpleCommandTokens(words) {
   return i < words.length ? argvTokens(words.slice(i)) : []
 }
 
+// A shell expands a leading `~`, `~/`, `$HOME` or `${HOME}` before it execs
+// the word, so `~/.local/bin/claude` IS the real install under REAL_INSTALL_
+// PREFIXES (the default dev-machine location for the claude CLI). `~user` and
+// `$HOMEX` are other things and are left alone.
+const HOME_PREFIX_RE = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/
+
+/** `word` with a leading `~`/`$HOME`/`${HOME}` replaced by the home directory. */
+function expandHomePrefix(word) {
+  return word.replace(HOME_PREFIX_RE, () => HOME_DIR)
+}
+
 /**
  * Split a shell command LINE into the program name(s) of every simple
  * command in it — see the module docblock for exactly what this does and does
@@ -555,7 +632,9 @@ function simpleCommandTokens(words) {
  */
 export function shellCommandTokens(cmdString) {
   if (typeof cmdString !== 'string' || cmdString.length === 0) return []
-  return parseShellLine(cmdString).flatMap(simpleCommandTokens)
+  // Home-prefix expansion is a SHELL's job, so it lives here and not in
+  // argvTokens(): a no-shell `spawn('~/.local/bin/claude')` is a literal name.
+  return parseShellLine(cmdString).flatMap(simpleCommandTokens).map(expandHomePrefix)
 }
 
 /**
