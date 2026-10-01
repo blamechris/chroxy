@@ -22,6 +22,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { ConfirmDialog } from './ConfirmDialog'
+// #7292 — a staged/unstaged rename or copy entry carries its pre-rename
+// `oldPath`; expandRenamePathsForStaging inserts it alongside the selected
+// `path` before a git_stage/git_unstage request so both index halves of the
+// rename move together (see @chroxy/store-core's handlers/git.ts).
+import { expandRenamePathsForStaging } from '@chroxy/store-core'
 import type {
   GitFileStatus,
   GitStatusResult,
@@ -56,9 +61,10 @@ function statusClass(status: GitFileStatus['status']): string {
 }
 
 function FileRow({
-  path, status, selected, onToggle,
+  path, oldPath, status, selected, onToggle,
 }: {
   path: string
+  oldPath?: string
   status: GitFileStatus['status'] | 'untracked'
   selected: boolean
   onToggle: () => void
@@ -77,8 +83,12 @@ function FileRow({
         aria-label={`${selected ? 'Deselect' : 'Select'} ${path}`}
       />
       <span className={`git-status-badge ${cls}`}>{label}</span>
-      <span className="git-file-path" title={path}>
-        {dir && <span className="git-file-dir">{dir}</span>}
+      <span className="git-file-path" title={oldPath ? `${oldPath} → ${path}` : path}>
+        {/* #8183 review (nit) — a renamed row shows its source, not just the
+            destination `dir` (which is often misleading for a cross-directory
+            rename). */}
+        {oldPath && <span className="git-file-dir">{oldPath} → </span>}
+        {!oldPath && dir && <span className="git-file-dir">{dir}</span>}
         <span className="git-file-name">{name}</span>
       </span>
     </label>
@@ -237,21 +247,25 @@ export function GitPanel() {
 
   const handleStageSelected = useCallback(() => {
     const paths = Array.from(selectedPaths).filter(p => unstagedPaths.has(p) || untrackedSet.has(p))
-    performMutation(paths, requestGitStage, 'Stage not sent — reconnect and try again')
-  }, [selectedPaths, unstagedPaths, untrackedSet, performMutation, requestGitStage])
+    // #7292 — a selected rename/copy entry's oldPath rides along so the whole
+    // rename is staged, not just the destination half.
+    performMutation(expandRenamePathsForStaging(paths, unstaged), requestGitStage, 'Stage not sent — reconnect and try again')
+  }, [selectedPaths, unstagedPaths, untrackedSet, unstaged, performMutation, requestGitStage])
 
   const handleUnstageSelected = useCallback(() => {
     const paths = Array.from(selectedPaths).filter(p => stagedPaths.has(p))
-    performMutation(paths, requestGitUnstage, 'Unstage not sent — reconnect and try again')
-  }, [selectedPaths, stagedPaths, performMutation, requestGitUnstage])
+    // #7292 — see handleStageSelected: an unstaged rename entry would
+    // otherwise leave its source's staged change behind.
+    performMutation(expandRenamePathsForStaging(paths, staged), requestGitUnstage, 'Unstage not sent — reconnect and try again')
+  }, [selectedPaths, stagedPaths, staged, performMutation, requestGitUnstage])
 
   const handleStageAll = useCallback(() => {
-    const paths = [...unstaged.map(f => f.path), ...untracked]
+    const paths = [...expandRenamePathsForStaging(unstaged.map(f => f.path), unstaged), ...untracked]
     performMutation(paths, requestGitStage, 'Stage not sent — reconnect and try again')
   }, [unstaged, untracked, performMutation, requestGitStage])
 
   const handleUnstageAll = useCallback(() => {
-    performMutation(staged.map(f => f.path), requestGitUnstage, 'Unstage not sent — reconnect and try again')
+    performMutation(expandRenamePathsForStaging(staged.map(f => f.path), staged), requestGitUnstage, 'Unstage not sent — reconnect and try again')
   }, [staged, performMutation, requestGitUnstage])
 
   // Commit-button click: empty-message + nothing-staged guard, then open the
@@ -517,6 +531,7 @@ export function GitPanel() {
                 <FileRow
                   key={`staged-${f.path}`}
                   path={f.path}
+                  oldPath={f.oldPath}
                   status={f.status}
                   selected={selectedPaths.has(f.path)}
                   onToggle={() => toggleSelection(f.path)}
@@ -537,6 +552,7 @@ export function GitPanel() {
                 <FileRow
                   key={`unstaged-${f.path}`}
                   path={f.path}
+                  oldPath={f.oldPath}
                   status={f.status}
                   selected={selectedPaths.has(f.path)}
                   onToggle={() => toggleSelection(f.path)}
