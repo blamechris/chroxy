@@ -40,6 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Mobile app: a worktree-isolated session's nav header shows the repo
+  name instead of `worktrees/<hex>` (#8181).** `App.tsx`'s `sessionTitle`
+  selector derived the header purely from `session.cwd` — the last two
+  path segments, after shortening `/Users/<name>` to `~` — but a
+  worktree-isolated session's `cwd` is the opaque
+  `~/.chroxy/worktrees/<32-hex session id>` checkout, so the header read
+  e.g. `worktrees/34914672f8578ecdf71accf8f8aec47e` instead of the repo it
+  belonged to. The server already sends the session's ORIGINAL repo
+  directory as `repoCwd` on every `session_list` entry (added for the
+  dashboard's #7328/#8123 fix of the same class of bug); the selector now
+  prefers `basename(repoCwd)` when present, via a `deriveSessionTitle`
+  helper (`utils/sessionTitle.ts`) built on `repoDisplayName`, hoisted from
+  the dashboard's `utils/repoLabel.ts` into `@chroxy/store-core` so both
+  clients share one implementation. A normal session, and a session or
+  server without `repoCwd`, render exactly as before.
+
 - **`chroxy schedule` resolves the default provider through the same CLI >
   ENV > file > default pipeline `chroxy start` and `chroxy doctor` use, so
   `CHROXY_PROVIDER` (as set by the Docker image, for example) is no longer

@@ -23,6 +23,7 @@ import { setupNotificationResponseListener, handleColdStartNotificationResponse 
 import { useBiometricLock } from './hooks/useBiometricLock';
 import { useNotificationStore } from './store/notifications';
 import { extractSessionIdFromDeepLink } from './utils/session-deep-link';
+import { deriveSessionTitle } from './utils/sessionTitle';
 
 // Enable LayoutAnimation on Android (must be called before any component uses it)
 if (Platform.OS === 'android') {
@@ -58,12 +59,13 @@ export default function App() {
   const sessionTitle = useConnectionStore((s) => {
     const id = s.activeSessionId;
     const session = id ? s.sessions.find((sess) => sess.sessionId === id) : null;
-    if (!session?.cwd) return 'Session';
-    // Shorten /Users/name/Projects → ~/Projects
-    const cwd = session.cwd.replace(/^\/Users\/[^/]+/, '~');
-    // Take last two path components for readability
-    const parts = cwd.split('/');
-    return parts.length > 2 ? parts.slice(-2).join('/') : cwd;
+    // #8181: prefers the basename of the server-supplied `repoCwd` (the
+    // session's ORIGINAL repo directory) over the opaque
+    // `~/.chroxy/worktrees/<hex>` `cwd` for a worktree-isolated session, so
+    // the nav header reads e.g. "chroxy" instead of "worktrees/<hex>". Falls
+    // back to the pre-#8181 cwd-shortening behaviour unchanged for a plain
+    // session, or a session/server without `repoCwd`.
+    return deriveSessionTitle(session);
   });
   const { isLocked, gateReady, unlock } = useBiometricLock();
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);

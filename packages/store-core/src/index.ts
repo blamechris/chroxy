@@ -1088,3 +1088,9 @@ export {
   DEFAULT_CONTEXT_LINES,
   MAX_DIFF_LINES,
 } from './hunk-diff'
+
+// #8181 (hoisted from the dashboard's #7328/#8123 `utils/repoLabel.ts`):
+// worktree-aware repo display label, shared by the dashboard's cwd badges
+// and the mobile app's nav header so both clients derive a worktree
+// session's human-readable repo name the same way.
+export { abbreviateCwd, repoDisplayName, sessionGroupKey } from './repo-label'
