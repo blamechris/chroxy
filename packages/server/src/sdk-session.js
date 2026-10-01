@@ -141,7 +141,17 @@ export class SdkSession extends BaseSession {
       // killing the turn. Declared false so the capability matrix is uniform —
       // CliSession is the only provider where the auto-switch is destructive.
       interruptsTurnOnAutoSwitch: false,
-      planMode: false,
+      // #8153: was `false` since the provider adapter's introduction (#583),
+      // stale even then — `_sdkPermissionMode()` has always passed `'plan'`
+      // straight through as the SDK's own native `PermissionMode`, which
+      // query() forwards as a literal `--permission-mode plan` flag to the
+      // same `claude` CLI binary CliSession spawns (query() execs
+      // `pathToClaudeCodeExecutable`, #7986) — same binary, same read-only
+      // enforcement, same EnterPlanMode/ExitPlanMode tool-use protocol. The
+      // only missing piece was event wiring (now added in
+      // _handleToolUseBlock + the 'result' case in _callQuery), not a
+      // structural gap, so the capability is now `true` to match reality.
+      planMode: true,
       resume: true,
       terminal: false,
       thinkingLevel: true,
@@ -443,6 +453,11 @@ export class SdkSession extends BaseSession {
 
     this._sdkSessionId = resumeSessionId || null
     this._sessionId = null
+    // #8153: plan-mode bookkeeping, mirroring CliSession's _inPlanMode /
+    // _planAllowedPrompts (see _handleToolUseBlock + the 'result' case in
+    // _callQuery, and _clearMessageState's stale-flag reset).
+    this._inPlanMode = false
+    this._planAllowedPrompts = null
     // #4828: session-scoped logger, lazily bound on the SDK's first `init`
     // message (where session_id becomes known). Pre-init log lines stay on
     // the module-level `log` — same fallback pattern as ClaudeTuiSession.
@@ -1362,6 +1377,17 @@ export class SdkSession extends BaseSession {
             // their previous snapshot (or the honest dash state).
             const contextUsageSnapshot = await this._getContextUsageSnapshot()
 
+            // #8153: emit plan_ready before result — mirrors CliSession's
+            // "the turn that calls ExitPlanMode ends with a normal result
+            // event" ordering. `_planAllowedPrompts` is only non-null once
+            // ExitPlanMode's tool_use block has been parsed (see
+            // _handleToolUseBlock's 'exit_plan' branch above).
+            if (this._inPlanMode && this._planAllowedPrompts !== null) {
+              this.emit('plan_ready', { allowedPrompts: this._planAllowedPrompts })
+              this._inPlanMode = false
+              this._planAllowedPrompts = null
+            }
+
             // #4628: sweep any orphan tool_starts before emitting result
             // so the dashboard's activeTools clears as part of the same
             // turn-end burst. _clearMessageState (called next) would also
@@ -1861,9 +1887,21 @@ export class SdkSession extends BaseSession {
         background: semantics.payload.background,
       })
     }
-    // EnterPlanMode / ExitPlanMode are not currently surfaced by SdkSession
-    // (plan-mode flow is CliSession-only today). Extracting via the shared
-    // parser leaves the door open without changing observable behavior.
+    // #8153: EnterPlanMode / ExitPlanMode wiring, mirroring CliSession's
+    // _applyToolInputSemantics. `permissionMode: 'plan'` is a literal
+    // `--permission-mode plan` pass-through to the same `claude` CLI binary
+    // CliSession spawns (query() execs `pathToClaudeCodeExecutable`, #7986),
+    // so the native read-only enforcement and EnterPlanMode/ExitPlanMode tool
+    // calls are identical on both providers — only the event wiring was
+    // missing here. Unlike CliSession (which buffers `toolInputChunks` across
+    // stream deltas), SdkSession receives the full `block.input` directly, so
+    // there is no overflow-discard case to special-case.
+    if (semantics.kind === 'enter_plan') {
+      this._inPlanMode = true
+      this.emit('plan_started')
+    } else if (semantics.kind === 'exit_plan') {
+      this._planAllowedPrompts = semantics.payload.allowedPrompts
+    }
   }
 
   /**
@@ -2398,6 +2436,15 @@ export class SdkSession extends BaseSession {
     this._permissionPauseCount = 0
     this._resultTimeoutPaused = false
     this._resetResultTimeout = null
+    // #8153: mirrors CliSession's stale-flag reset. If plan mode is active
+    // but ExitPlanMode never arrived (interrupt/crash), the flag is stale —
+    // reset it. In normal flow, _planAllowedPrompts is non-null (set by
+    // ExitPlanMode) and plan_ready has already been emitted + both flags
+    // reset before we reach here (see the 'result' case in _callQuery).
+    if (this._inPlanMode && this._planAllowedPrompts === null) {
+      this._inPlanMode = false
+    }
+    this._planAllowedPrompts = null
   }
 
   /**

@@ -1278,7 +1278,12 @@ describe('Provider Capabilities', () => {
     assert.equal(caps.inProcessPermissions, true)
     assert.equal(caps.modelSwitch, true)
     assert.equal(caps.permissionModeSwitch, true)
-    assert.equal(caps.planMode, false)
+    // #8153 — was `false`, stale against the SDK's native `--permission-mode
+    // plan` pass-through (query() execs the same `claude` CLI binary
+    // CliSession spawns). Flipped to `true` once plan_started/plan_ready
+    // wiring landed in sdk-session.js (see sdk-session.test.js's
+    // "#8153 — plan mode").
+    assert.equal(caps.planMode, true)
     assert.equal(caps.resume, true)
     assert.equal(caps.terminal, false)
   })

@@ -171,6 +171,14 @@ describe('SdkSession', () => {
     it('exposes skillToggle: true via static capabilities', () => {
       assert.equal(SdkSession.capabilities.skillToggle, true)
     })
+
+    // #8153: was `false` since #583 — stale against the SDK's native
+    // `--permission-mode plan` pass-through (same `claude` CLI binary
+    // CliSession spawns). Now `true` to match the wired plan_started /
+    // plan_ready events (see '_handleToolUseBlock' → '#8153 — plan mode').
+    it('exposes planMode: true via static capabilities (#8153)', () => {
+      assert.equal(SdkSession.capabilities.planMode, true)
+    })
   })
 
   // -- start() --
@@ -549,6 +557,115 @@ describe('SdkSession', () => {
       s._handleToolUseBlock('msg-1', { name: 'Bash', id: 'tool-4', input: { cmd: 'x'.repeat(2000) } })
       assert.equal(errors.length, 1)
       s.destroy()
+    })
+
+    // #8153: EnterPlanMode / ExitPlanMode wiring — previously a no-op
+    // comment ("not currently surfaced by SdkSession"). Mirrors
+    // cli-session.test.js's "detects EnterPlanMode tool" / "detects
+    // ExitPlanMode tool and emits plan_ready on result", adapted for
+    // SdkSession receiving the full tool input directly (no buffered
+    // toolInputChunks to parse).
+    describe('#8153 — plan mode', () => {
+      it('detects EnterPlanMode tool and emits plan_started', () => {
+        const events = []
+        session.on('plan_started', (d) => events.push(d))
+
+        session._handleToolUseBlock('msg-1', { name: 'EnterPlanMode', id: 'toolu_plan1', input: {} })
+
+        assert.equal(session._inPlanMode, true)
+        assert.equal(events.length, 1)
+      })
+
+      it('stashes ExitPlanMode allowedPrompts without emitting plan_ready yet', () => {
+        session._inPlanMode = true
+        const events = []
+        session.on('plan_ready', (d) => events.push(d))
+
+        session._handleToolUseBlock('msg-1', {
+          name: 'ExitPlanMode',
+          id: 'toolu_exit1',
+          input: { allowedPrompts: [{ tool: 'Bash', prompt: 'run tests' }] },
+        })
+
+        // plan_ready only fires at turn end (the 'result' case in
+        // _callQuery) — asserted end-to-end below via sendMessage.
+        assert.equal(events.length, 0)
+        assert.deepEqual(session._planAllowedPrompts, [{ tool: 'Bash', prompt: 'run tests' }])
+      })
+
+      it('defaults ExitPlanMode allowedPrompts to [] when input omits it', () => {
+        session._handleToolUseBlock('msg-1', { name: 'ExitPlanMode', id: 'toolu_exit2', input: {} })
+        assert.deepEqual(session._planAllowedPrompts, [])
+      })
+
+      it('ignores EnterPlanMode/ExitPlanMode for agent tracking (not Task)', () => {
+        const spawned = []
+        session.on('agent_spawned', (d) => spawned.push(d))
+        session._handleToolUseBlock('msg-1', { name: 'EnterPlanMode', id: 'toolu_plan3', input: {} })
+        session._handleToolUseBlock('msg-1', { name: 'ExitPlanMode', id: 'toolu_exit3', input: {} })
+        assert.equal(spawned.length, 0)
+      })
+
+      it('end-to-end: ExitPlanMode tool_use followed by a result message emits plan_ready then result, in order', async () => {
+        const s = createSession()
+        s._processReady = true
+        const events = []
+        s.on('plan_started', () => events.push('plan_started'))
+        s.on('plan_ready', (d) => events.push({ type: 'plan_ready', ...d }))
+        s.on('result', () => events.push('result'))
+
+        s._callQuery = () => (async function* () {
+          yield {
+            type: 'assistant',
+            message: {
+              content: [
+                { type: 'tool_use', name: 'EnterPlanMode', id: 'toolu_plan1', input: {} },
+              ],
+            },
+          }
+          yield {
+            type: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  name: 'ExitPlanMode',
+                  id: 'toolu_exit1',
+                  input: { allowedPrompts: [{ tool: 'Bash', prompt: 'run tests' }] },
+                },
+              ],
+            },
+          }
+          yield {
+            type: 'result',
+            session_id: 'plan-e2e-1',
+            total_cost_usd: 0.01,
+            duration_ms: 5,
+            usage: {},
+          }
+        })()
+
+        await s.sendMessage('make a plan')
+        s.destroy()
+
+        assert.deepEqual(events.map((e) => (typeof e === 'string' ? e : e.type)), [
+          'plan_started', 'plan_ready', 'result',
+        ])
+        const planReady = events.find((e) => typeof e === 'object' && e.type === 'plan_ready')
+        assert.deepEqual(planReady.allowedPrompts, [{ tool: 'Bash', prompt: 'run tests' }])
+        assert.equal(s._inPlanMode, false)
+        assert.equal(s._planAllowedPrompts, null)
+      })
+
+      it('resets stale _inPlanMode on _clearMessageState when ExitPlanMode never arrived (interrupt/crash)', () => {
+        session._handleToolUseBlock('msg-1', { name: 'EnterPlanMode', id: 'toolu_plan4', input: {} })
+        assert.equal(session._inPlanMode, true)
+
+        session._clearMessageState()
+
+        assert.equal(session._inPlanMode, false,
+          'stale flag must reset — otherwise a later turn would think plan mode is still active')
+      })
     })
 
     // #4307: background-shell tracking wired through SdkSession's

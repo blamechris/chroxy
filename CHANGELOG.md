@@ -40,6 +40,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`claude-sdk` advertises `planMode: true` — the capability was stale, not
+  the plan-mode pass-through (#8153).** `sdk-session.js` declared
+  `capabilities.planMode: false` since the provider adapter's introduction
+  (#583), yet `_sdkPermissionMode()` had always mapped `'plan'` straight
+  through as the SDK's own native `PermissionMode` — a literal
+  `--permission-mode plan` flag `query()` forwards to the same installed
+  `claude` CLI binary `claude-cli` spawns (`pathToClaudeCodeExecutable`,
+  #7986), so the native read-only tool restriction and the
+  `EnterPlanMode`/`ExitPlanMode` tool-use protocol were always identical on
+  both providers. The only real gap was event wiring: SdkSession parsed
+  `EnterPlanMode`/`ExitPlanMode` via the shared `extractToolInputSemantics`
+  (used for `Task`/`Agent` tool tracking) but explicitly skipped the
+  `enter_plan`/`exit_plan` kinds. `_handleToolUseBlock` now tracks
+  `_inPlanMode`/`_planAllowedPrompts` and emits `plan_started` /
+  `plan_ready` the same way `cli-session.js` does — `plan_ready` fires
+  right before the turn's `result` — and `_clearMessageState` resets a
+  stale flag left by an interrupt/crash the same way CliSession does. Since
+  #8090/#8087 derive the advertised permission-mode list and the
+  dashboard's "Plan" picker option directly from `capabilities.planMode`
+  (not a per-provider name check), both the mobile app and dashboard now
+  correctly surface Plan mode for `claude-sdk` sessions instead of hiding a
+  mode that actually worked. `DockerSdkSession` inherits the flip via its
+  existing `{ ...SdkSession.capabilities }` spread (same CLI binary via
+  `docker exec`). `docs/providers.md` and `docs/feature-matrix.md` updated
+  to match.
+
 - **The root Docker image serves the dashboard and defaults to the headless
   `claude-sdk` provider, and actually proves it (#8151, HIGH-tier review
   round).** An owner decision scoped the image to exactly two things: the

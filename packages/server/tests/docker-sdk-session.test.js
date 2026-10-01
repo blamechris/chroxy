@@ -37,7 +37,11 @@ class FakeDockerSdkSession extends EventEmitter {
       inProcessPermissions: true,
       modelSwitch: true,
       permissionModeSwitch: true,
-      planMode: false,
+      // #8153: mirrors SdkSession.capabilities.planMode, which flipped to
+      // `true` — the container still runs the same `query()` → CLI-arg →
+      // spawnClaudeCodeProcess path, so `--permission-mode plan` reaches the
+      // same binary (via `docker exec`) just as it does on the host.
+      planMode: true,
       resume: true,
       terminal: false,
       thinkingLevel: true,
@@ -357,7 +361,7 @@ describe('DockerSdkSession capabilities', () => {
     assert.equal(caps.inProcessPermissions, true)
     assert.equal(caps.modelSwitch, true)
     assert.equal(caps.permissionModeSwitch, true)
-    assert.equal(caps.planMode, false)
+    assert.equal(caps.planMode, true) // #8153
     assert.equal(caps.resume, true)
     assert.equal(caps.terminal, false)
     assert.equal(caps.thinkingLevel, true)
