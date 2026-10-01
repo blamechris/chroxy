@@ -441,10 +441,16 @@ describe('the rule reads the real .dockerignore and ci.yml (mutation proof, #815
 
   it("goes RED when ci.yml's docker filter gains a (fictional) package .dockerignore does not whitelist", async () => {
     const dir = freshCopy()
+    // Anchored on the trailing #8151 comment, not the bare store-core line:
+    // #8167 added a SECOND `publish_artifacts:` filter category that lists
+    // the same three packages (server/protocol/store-core) for an unrelated
+    // reason, so the bare line now occurs twice in ci.yml. The comment
+    // immediately after it is unique to the `docker:` category, which keeps
+    // this mutation landing where it means to.
     mutate(
       join(dir, 'workflows', 'ci.yml'),
-      "              - 'packages/store-core/**'\n",
-      "              - 'packages/store-core/**'\n              - 'packages/zz-mutant-not-a-package/**'\n"
+      "              - 'packages/store-core/**'\n              # #8151 — the dashboard-builder stage.",
+      "              - 'packages/store-core/**'\n              - 'packages/zz-mutant-not-a-package/**'\n              # #8151 — the dashboard-builder stage."
     )
     const issues = await loadIssues(dir)
     assert.ok(issues.some((i) => /docker filter has packages\/zz-mutant-not-a-package\/\*\* but \.dockerignore does not whitelist/.test(i)), JSON.stringify(issues))

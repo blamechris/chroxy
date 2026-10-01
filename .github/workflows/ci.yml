@@ -343,7 +343,8 @@ jobs:
     name: Detect Changed Paths
     # Lightweight ubuntu job that classifies which paths a PR touches so
     # downstream jobs can self-gate. Its live consumers are `Renovate Config`
-    # (the `renovate` output) and `Docker Image Smoke` (`docker`). The
+    # (the `renovate` output), `Docker Image Smoke` (`docker`), and
+    # `Verify Publish Artifacts (PR)` (`publish_artifacts`, #8167). The
     # `platform` output was written for the Windows platform-tests job
     # (#5002), which no longer reads it: `server-tests-windows` carries no
     # `if:` of its own and runs on every same-repo event (#7642). Pushes to
@@ -368,6 +369,7 @@ jobs:
       platform: ${{ steps.filter.outputs.platform }}
       renovate: ${{ steps.filter.outputs.renovate }}
       docker: ${{ steps.filter.outputs.docker }}
+      publish_artifacts: ${{ steps.filter.outputs.publish_artifacts }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -421,6 +423,31 @@ jobs:
               # versa).
               - 'packages/dashboard/**'
               - 'packages/design-tokens/**'
+              - '.github/workflows/ci.yml'
+            publish_artifacts:
+              # #8167 — scripts/verify-publish-artifacts.mjs packs
+              # @chroxy/protocol, @chroxy/store-core and @chroxy/server,
+              # installs them into a clean prefix, and proves the packed
+              # artifact actually boots. Before this, the only thing that ever
+              # ran it end-to-end was a release — v0.11.1's release.yml
+              # verify-artifacts job was broken for as long as it existed, and
+              # nothing noticed until a publish depended on it. This mirrors
+              # the script's own inputs rather than a hand-picked guess:
+              # ci-publish-artifacts-path-filter.test.js checks this list
+              # against the script's own PACKAGES and ./lib imports, the root
+              # manifest + lockfile, and both workflows (this one and release.yml).
+              - 'scripts/verify-publish-artifacts.mjs'
+              - 'scripts/lib/classify-doctor-output.mjs'
+              - 'scripts/lib/daemon-entry-modules.mjs'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'packages/server/**'
+              - 'packages/protocol/**'
+              - 'packages/store-core/**'
+              # release.yml's verify-artifacts job is what this PR-time job
+              # mirrors (runner, setup steps) — a change to it needs the same
+              # re-run.
+              - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
 
   server-tests-windows:
@@ -1653,6 +1680,54 @@ jobs:
 
       - name: Smoke-start image
         run: bash scripts/docker-image-smoke.sh chroxy:ci
+
+  verify-publish-artifacts-pr:
+    # Not named `Verify Publish Artifacts`: release.yml already has a job by
+    # that name, and branch protection matches check names across workflows
+    # (the same reasoning as `Docker Image Smoke` above).
+    name: Verify Publish Artifacts (PR)
+    # #8167 — scripts/verify-publish-artifacts.mjs packs @chroxy/protocol,
+    # @chroxy/store-core and @chroxy/server, installs them into a clean
+    # prefix, and proves the packed artifact actually boots (chroxy
+    # --version, chroxy doctor via classifyDoctorSpawnResult, and the
+    # daemon's lazily imported entry points). Its only callers used to be
+    # release.yml's verify-artifacts job (which runs only when a release is
+    # cut) and the manual scripts/publish-siblings.sh — so the end-to-end
+    # path was first exercised by a release, and v0.11.1 showed how that
+    # fails: the release job was broken for as long as it existed, and
+    # nothing noticed until a publish depended on it.
+    #
+    # PR-only, like Renovate Config / Docker Image Smoke: `changes` runs on
+    # pull_request events only, so a push to main skips this job.
+    #
+    # Mirrors release.yml's verify-artifacts job (runner, checkout,
+    # setup-node, npm ci, then the script) rather than reinventing it, so the
+    # exact setup a release depends on is exercised on every PR that touches
+    # it, not just at release time.
+    #
+    # No cache: on setup-node, deliberately: hardcoding `cache: npm` here
+    # would need a new entry in ci-npm-cache-routing.test.js's
+    # ALLOWED_HARDCODED_CACHE allowlist, and this job is rare enough
+    # (path-filtered) that a cold install each run is an acceptable cost
+    # against that complexity.
+    needs: changes
+    if: needs.changes.outputs.publish_artifacts == 'true'
+    runs-on: ubuntu-24.04  # always GitHub-hosted — matches release.yml's verify-artifacts runner
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pack, install into a clean prefix, and run
+        run: node scripts/verify-publish-artifacts.mjs
 
   scripts-tests:
     name: Scripts Tests
