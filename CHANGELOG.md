@@ -154,6 +154,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   confirming the case actually catches it); no backup surviving a clean or a
   drift verdict (plus a leak mutant); and the stranded-backup detection.
 
+  **A third review round, having confirmed all three round-2 bypasses
+  closed (including the `.GIT` case variant, established directly against a
+  freshly-mounted case-insensitive disk image rather than inferred), found
+  two more problems in this round's own additions.** The stranded-backup
+  glob (`STRAY=($BACKUP_GLOB)`) expanded its pattern UNQUOTED, so the
+  directory part — not just the intended trailing `*` — was both word-split
+  and glob-interpreted: a space or glob character in the repo root or the
+  dist dir's parent silently skipped the whole check (every invocation from
+  such a checkout never saw a stranded backup again), and a space-containing
+  parent with an unrelated real sibling directory misread that sibling AS a
+  stranded backup and told a developer to `rm -rf` it. Fixed by quoting only
+  the dirname and leaving the literal glob suffix outside the quotes; the
+  printed recovery commands are now `printf '%q'`-quoted too (an unquoted
+  path with a space previously split `rm -rf parent/dist` into two wrong
+  arguments), and the restore form now ends in `&& rmdir <parent>` so
+  following it verbatim doesn't leave an empty backup directory for the next
+  run to trip over. Separately, the harness's own isolating case for the
+  round-2 exact-match fix never actually reached it: its fixture symlink was
+  named `linked-dist`, which the "must end in `dist`" basename rule rejects
+  BEFORE containment ever runs, so reverting the exact match to round 1's
+  prefix-only logic — the one thing round 2 was blocking on — left the
+  harness fully green. Replaced with a symlinked INTERMEDIATE component
+  (the actual npm-workspace shape) whose own last component is literally
+  `dist`, which does reach and is rejected by the exact-match check, proven
+  by a mutant that reintroduces the prefix-only regression.
+
+  Folded in the same round: the harness's "RED proof" for that same case had
+  been run inside a pipeline subshell, silently discarding its pass/fail
+  result (measured: forcing it to fail left 87 printed outcomes against a
+  summary of 86); `check()` now also appends to a real file on every call,
+  and the final tally cross-checks against that file's line count, which a
+  subshell cannot make disappear. The INT/HUP signal cases were found to
+  signal only the whole process group, under which bash's own default fatal-
+  signal handling fires regardless of whether this script's own trap is
+  present — so removing either trap went unnoticed; per-PID-only variants
+  (with `set -m` still active so the job's signal dispositions stay normal)
+  now isolate each trap, backed by its own mutant. A nested, non-submodule
+  `.git` (e.g. `packages/sub/.git/dist`) was previously accepted, since the
+  physical check's own `.git` rule only ever compared against the top-level
+  path; a component-level `.git` rule now rejects one at any depth. The
+  case-variant closure gained a harness case too, detected at runtime
+  (case-insensitive filesystems only) with a visible, count-neutral SKIP
+  line where it cannot run.
+
+  `scripts/__tests__/check-dist-drift.test.sh` grows to 120 cases.
+
 - **`git_status` and `git_stage`/`git_unstage` now agree on what a path
   means, status paths are no longer C-quoted or octal-escaped, and a
   renamed entry's `oldPath` never leaks onto the wrong half or onto a copy

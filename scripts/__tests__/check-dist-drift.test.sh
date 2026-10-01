@@ -74,23 +74,40 @@ CHECK="$REPO_ROOT/scripts/check-dist-drift.sh"
 # prints "PASS — all 0 cases" and exits 0 — "all cases passed" and "no case
 # executed" are the same observable outcome, the second recurring cause in
 # docs/false-safety-guards.md (#7653).
-EXPECTED_CASES=86
+EXPECTED_CASES=120
 
 PASS=0
 FAIL=0
 FAILED=()
 
+# RESULTLOG: round 3 found a case ("RED PROOF: round-1's prefix-only
+# containment accepts the same symlink") whose `check` call ran inside a
+# PIPELINE subshell (`cmd | { read x; check ...; }`), so its PASS/FAIL
+# increment was silently discarded when that subshell exited — the printed
+# "NOT  - ..." line was real (87 of them, forced by the reviewer), but the
+# harness still summed to 86 and exited 0. A subshell losing a variable
+# INCREMENT is exactly the shape `set -e`/pipe-exit-code bugs take in this
+# repo's own experience; a FILE APPEND is not lost the same way, because it
+# is a real filesystem side effect rather than shell state scoped to the
+# subshell. `check()` now appends its own verdict line here on every call,
+# subshell or not, and the final tally (below) is cross-checked against
+# THIS file's line count — not only against PASS+FAIL — so a future case
+# with the same subshell mistake fails loud instead of silently vanishing.
+RESULTLOG="$(mktemp)"
+
 # check <name> <expected-exit> <actual-exit>
 check() {
   if [ "$2" = "$3" ]; then
-    PASS=$((PASS + 1)); echo "ok   - $1"
+    PASS=$((PASS + 1)); echo "ok   - $1"; echo "ok" >> "$RESULTLOG"
   else
-    FAIL=$((FAIL + 1)); FAILED+=("$1 (expected exit $2, got $3)"); echo "NOT  - $1 (expected exit $2, got $3)"
+    FAIL=$((FAIL + 1)); FAILED+=("$1 (expected exit $2, got $3)"); echo "NOT  - $1 (expected exit $2, got $3)"; echo "NOT" >> "$RESULTLOG"
   fi
 }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# ONE trap: a second `trap ... EXIT` would silently REPLACE the first rather
+# than stacking, which would have left either $TMP or $RESULTLOG uncleaned.
+trap 'rm -rf "$TMP"; rm -f "$RESULTLOG"' EXIT
 
 REPO="$TMP/fixture-repo"
 mkdir -p "$REPO/dist" "$REPO/src"
@@ -482,9 +499,65 @@ check_path_rejected "H1: symlinked intermediate resolves outside the repo" "pkgh
 # ═══ H6 (round-2 S1): `.git/dist` exists and is targeted DIRECTLY (no case
 # trick needed — this isolates the `.git` RULE itself, so a mutant that
 # removes it is caught regardless of whether this filesystem's case
-# sensitivity can reproduce the APFS-specific variant too).
+# sensitivity can reproduce the APFS-specific variant too). Round 3: caught
+# by the EARLIER string-level per-segment scan now, not the physical
+# containment check's own narrower (top-level-only) `.git` branch — both
+# reject it, but the earlier-firing layer's message is what a caller sees.
 mkdir -p "$SANDBOX/repo/.git/dist"
-check_path_rejected "H6: .git/dist is refused" ".git/dist" "inside .git"
+check_path_rejected "H6: .git/dist is refused" ".git/dist" "'.git' path component"
+
+# ═══ S4/N2 (round 3): a NESTED `.git` — a non-submodule, vendored/checked-in
+# repo sitting inside this repo, e.g. `packages/sub/.git/dist` — is the
+# shape the physical containment check's `.git` branch NEVER caught (it only
+# ever compared against the TOP-level `$REPO_REAL/.git`), and the ONLY
+# shape that isolates the per-segment string rule from the top-level case
+# above: deleting just this rule (leaving the top-level-specific physical
+# branch intact) still passes the H6 case above but must fail THIS one.
+mkdir -p "$SANDBOX/repo/pkgs4/sub/.git/dist"
+check_path_rejected "S4: a NESTED .git component (packages/sub/.git/dist) is refused" "pkgs4/sub/.git/dist" "'.git' path component"
+
+# ═══ S3 (round 3): the CASE-VARIANT closure (`/bin/pwd -P` resolving
+# through to the filesystem's canonical stored case) only has a sandbox to
+# run in on a case-insensitive-but-preserving filesystem — APFS, the macOS
+# default, but NOT Linux CI's case-sensitive filesystem. "Cannot check this"
+# must never silently read as "nothing to check" (docs/false-safety-
+# guards.md): detected at runtime (`touch a; [ -e A ]`), this prints a
+# visible SKIP line when it cannot run rather than omitting the case
+# silently, and stays COUNT-NEUTRAL either way — exactly one `check` call on
+# both branches — so EXPECTED_CASES does not have to differ between a
+# case-insensitive Mac and case-sensitive CI.
+CASE_PROBE="$TMP/case-probe"
+mkdir -p "$CASE_PROBE"
+touch "$CASE_PROBE/a"
+if [ -e "$CASE_PROBE/A" ]; then
+  # Case-insensitive: ".GIT/dist" resolves via case-insensitive lookup to
+  # the SAME real "repo/.git/dist" H6 already created; /bin/pwd -P must
+  # report it back in its CANONICAL (lowercase) stored case for the
+  # physical-containment ".git" branch to recognise it.
+  case_variant_output="$( cd "$SANDBOX/repo" && bash "$CHECK" ".GIT/dist" true 2>&1 )"
+  case_variant_exit=$?
+  case "$case_variant_output" in
+    *"inside .git"*) case_variant_msg_ok=0 ;;
+    *) case_variant_msg_ok=1 ;;
+  esac
+  check "S3: case-insensitive fs — '.GIT/dist' resolves to the real .git and is refused" "2 0" "$case_variant_exit $case_variant_msg_ok"
+
+  # NOTE on what is deliberately NOT asserted here: swapping the builtin
+  # `pwd -P` back in (the X1 mutant a round-3 review used to prove the
+  # external binary is load-bearing) does NOT reliably reopen the bypass on
+  # every case-insensitive volume — measured directly on this sandbox's
+  # `/private/tmp` (APFS, case-insensitive): the builtin and `/bin/pwd -P`
+  # returned the SAME canonical case here, unlike the reviewer's dedicated,
+  # freshly-mounted disk image with a cold vnode cache. A mutant assertion
+  # that only sometimes reproduces its own claimed finding is worse than no
+  # assertion — it would read as proof on a volume where it proves nothing.
+  # The reviewer's own methodology (a fresh `hdiutil`-created image,
+  # detached and reattached before the first lookup) is what actually
+  # isolates this; it is not reproducible as a single portable harness case.
+else
+  echo "SKIP (case-sensitive filesystem): S3's case-variant closure cannot be exercised here"
+  check "S3: case-insensitive fs — '.GIT/dist' resolves to the real .git and is refused" "SKIP (case-sensitive fs)" "SKIP (case-sensitive fs)"
+fi
 
 # A directory literally named with git pathspec magic, moved to the FIRST
 # path component (round-2 S3): magic is a prefix of the WHOLE pathspec
@@ -497,17 +570,20 @@ check_path_rejected "H6: .git/dist is refused" ".git/dist" "inside .git"
 # here.
 
 # ═══════════════════════════════════════════════════════════════════════
-# Case 8b — THE ROUND-2 FALSE GREEN. An IN-REPO symlinked component (the
-# shape of a real npm-workspace link, e.g.
-# `node_modules/@chroxy/protocol/dist` -> `../../packages/protocol/dist`)
-# physically resolves to somewhere legitimately inside the repo — round 1's
-# prefix-only containment check accepted it — while git's pathspecs cannot
-# see through the symlink at all, so a REAL orphan sitting behind it is
-# invisible to both `git diff` and `git ls-files`, and the clean rebuild
-# silently deletes it from the working tree while reporting "OK". The
-# round-2 exact-match fix closes this: the symlink's physical target differs
-# from the literal argument string, so it is refused before the build (and
-# the deletion) ever runs.
+# Case 8b — R2 (round 3), THE ROUND-2 FALSE GREEN, PROPERLY ISOLATED. The
+# round-3 review found this case's ORIGINAL fixture — a symlink literally
+# NAMED `linked-dist` — never reached the exact-match containment check at
+# all: `linked-dist` does not end in a component named `dist`, so the
+# BASENAME rule rejects it first (`<dist-dir> must be a path ending in a
+# component named exactly 'dist', got: linked-dist`), and reverting the
+# exact-match fix to round 1's prefix-only logic left this harness green —
+# the one thing round 2 was blocking on would have gone unnoticed.
+#
+# The corrected fixture matches the ACTUAL npm-workspace shape: the symlink
+# is an INTERMEDIATE component (`alias`), and the dist-dir ARGUMENT's own
+# LAST component is literally `dist` (`alias/dist`) — passing the basename
+# rule and the dist-itself-symlink check, so only the exact-match physical-
+# containment comparison can reject it.
 # ═══════════════════════════════════════════════════════════════════════
 (
   cd "$REPO" || exit 1
@@ -517,7 +593,7 @@ check_path_rejected "H6: .git/dist is refused" ".git/dist" "inside .git"
   echo "fg-orphan" > real-pkg/dist/fg-orphan.js
   git add -f real-pkg/dist/fg.js real-pkg/dist/fg-orphan.js
   git commit -qm 'add real-pkg with an about-to-be-orphaned file'
-  ln -s real-pkg/dist linked-dist
+  ln -s real-pkg alias
   cat > fg-build.sh <<'SH'
 #!/usr/bin/env bash
 set -e
@@ -527,23 +603,34 @@ echo "fg" > real-pkg/dist/fg.js
 SH
   chmod +x fg-build.sh
 )
-fg_result="$(run_check_capture linked-dist ./fg-build.sh)"
+fg_result="$(run_check_capture alias/dist ./fg-build.sh)"
 fg_exit="${fg_result%%$'\n'*}"
-check "H-symlink: an in-repo symlinked dist dir is refused, not silently resolved" 2 "$fg_exit"
+fg_output="${fg_result#*$'\n'}"
+check "R2: an in-repo symlinked INTERMEDIATE, final component literally 'dist', is refused" 2 "$fg_exit"
+case "$fg_output" in
+  *"does not name its own physical location"*) check "R2: ...with the exact-match message (not basename, not dist-itself-symlink)" 0 0 ;;
+  *) check "R2: ...with the exact-match message (not basename, not dist-itself-symlink)" 0 1 ;;
+esac
 check "...and the real orphan was NEVER touched (still on disk, untouched by any rebuild)" "fg-orphan" "$(cd "$REPO" && cat real-pkg/dist/fg-orphan.js 2>/dev/null | tr -d '\n')"
-# Prove the ROUND-1 (prefix-only) logic specifically would have accepted
-# this and let the rebuild silently delete the orphan — reproduced inline,
-# not sourced from git history, the same way the #8163/#8152 RED proofs are.
-(
-  cd "$REPO" || exit 1
-  REPO_REAL_R1="$(cd "$PWD" && pwd -P)"
-  ABS_R1="$PWD/linked-dist"
-  DIST_REAL_R1="$(cd "$ABS_R1" && pwd -P)"
-  case "$DIST_REAL_R1" in
-    "$REPO_REAL_R1"/*) echo accepted ;;
-    *) echo rejected ;;
-  esac
-) | { read -r r1_verdict; check "RED PROOF: round-1's prefix-only containment accepts the same symlink" "accepted" "$r1_verdict"; }
+
+# MUTANT X2 (R2's own proof): revert the exact-match containment to round
+# 1's prefix-only logic and confirm THIS case goes RED against it — proving
+# it actually exercises the round-2 fix, not just today's code shape. (S1:
+# captured into a variable, never piped into a subshell `check` call, which
+# a round-3 review found silently discarded an earlier version of this
+# exact proof's result.)
+X2_MUTANT="$TMP/mutant-x2-prefix-only.sh"
+awk '
+  /^case "\$DIST_REAL" in$/ { print; print "  \"$REPO_REAL\"/*) : ;; # MUTANT: prefix-only (round 1)"; skipping=1; next }
+  skipping && /^esac$/ { print; skipping=0; next }
+  skipping { next }
+  { print }
+' "$CHECK" > "$X2_MUTANT"
+bash -n "$X2_MUTANT" > /dev/null 2>&1
+check "MUTANT X2 SANITY: the prefix-only mutant still parses" 0 "$?"
+x2_mutant_exit="$( ( cd "$REPO" && git show HEAD:real-pkg/dist/fg-orphan.js > real-pkg/dist/fg-orphan.js 2>/dev/null; bash "$X2_MUTANT" alias/dist ./fg-build.sh ) > /dev/null 2>&1; echo $? )"
+check "MUTANT X2: round-1's prefix-only containment gives a FALSE OK (the #8163-round-2 regression)" 0 "$x2_mutant_exit"
+( cd "$REPO" && git show HEAD:real-pkg/dist/fg-orphan.js > real-pkg/dist/fg-orphan.js )
 
 # ═══════════════════════════════════════════════════════════════════════
 # Case 8c — S3: `--literal-pathspecs` is the ONLY thing defending a
@@ -658,6 +745,162 @@ for sig_pair in 'INT:130' 'TERM:143' 'HUP:129'; do
 done
 
 # ═══════════════════════════════════════════════════════════════════════
+# S2 (round 3): the process-group tests above do not isolate the INT/HUP
+# TRAPS specifically. A review found that signalling the whole group still
+# runs bash's own default fatal-signal handling regardless of whether this
+# script's `trap 'exit N' INT`/`HUP` lines are present — so removing either
+# trap survived the group-signalled cases above unnoticed (H7/H8 in the
+# round-2 reply were NOT actually isolating, despite the claim). Signalling
+# the SCRIPT'S PID ALONE (not the group) is what tells them apart: measured
+# directly, with `set -m` still active so the background job's signal
+# dispositions are normal (not the SIG_IGN-for-background-jobs state a
+# non-job-control shell would otherwise leave it in) —
+#   PR head,          SIGINT -> PID alone: 130, restored
+#   INT trap removed, SIGINT -> PID alone: exit 1, build runs to
+#     completion, the ORIGINAL nested file is lost, no backup remains
+#   PR head,          SIGHUP -> PID alone: 129, restored
+#   HUP trap removed, SIGHUP -> PID alone: exit 129 (bash's own default
+#     disposition for an untrapped HUP is also fatal) but at ~1.2s — the
+#     build is still running in the background and OVERWRITES the just-
+#     restored dist/ moments later
+# The fingerprint is taken several seconds after `wait` returns specifically
+# to let an orphaned build (one bash's own trap/signal machinery did not
+# actually stop) finish and reveal that overwrite, which asserting
+# immediately after `wait` would miss.
+# ═══════════════════════════════════════════════════════════════════════
+run_signal_test_pid_only() {
+  local sig="$1"
+  local sigrepo="$TMP/sig-pidonly-repo-$sig"
+  mkdir -p "$sigrepo/pkg/dist/sub"
+  (
+    cd "$sigrepo" || exit 1
+    git init -q
+    git config user.email t@example.com
+    git config user.name t
+    echo "original" > pkg/dist/a.js
+    echo "nested" > pkg/dist/sub/b.js
+    git add -A
+    git commit -qm init
+    cat > slow-build.sh <<'SH'
+#!/usr/bin/env bash
+sleep 5
+mkdir -p pkg/dist
+echo changed > pkg/dist/a.js
+SH
+    chmod +x slow-build.sh
+  )
+  (
+    set -m
+    cd "$sigrepo" || exit 1
+    bash "$CHECK" pkg/dist ./slow-build.sh > /dev/null 2>&1 &
+    sigpid=$!
+    sleep 1
+    kill "-$sig" "$sigpid" 2> /dev/null # PID ALONE — no leading dash, no group fanout
+    wait "$sigpid" 2> /dev/null
+    ec=$?
+    sleep 5 # let any orphaned (un-killed) build run to completion
+    printf '%s\n%s\n%s\n%s\n%s' \
+      "$ec" \
+      "$(cat pkg/dist/a.js 2> /dev/null)" \
+      "$([ -e pkg/dist/sub/b.js ] && echo present || echo missing)" \
+      "$(git status --short -- pkg/dist)" \
+      "$(find pkg -maxdepth 1 -name '.check-dist-drift-backup*' 2> /dev/null)"
+  )
+}
+
+for sig_pair in 'INT:130' 'HUP:129'; do
+  sig="${sig_pair%%:*}"
+  expected="${sig_pair#*:}"
+  result="$(run_signal_test_pid_only "$sig")"
+  ec="$(printf '%s' "$result" | sed -n '1p')"
+  content="$(printf '%s' "$result" | sed -n '2p')"
+  nested="$(printf '%s' "$result" | sed -n '3p')"
+  status="$(printf '%s' "$result" | sed -n '4p')"
+  strays="$(printf '%s' "$result" | sed -n '5p')"
+  check "S2 PID-only SIG$sig: exits with the conventional 128+N code" "$expected" "$ec"
+  check "S2 PID-only SIG$sig: dist is restored to its pre-build content" "original" "$content"
+  check "S2 PID-only SIG$sig: the nested file survives" "present" "$nested"
+  check "S2 PID-only SIG$sig: git status is clean" "" "$status"
+  check "S2 PID-only SIG$sig: no backup directory is left behind" "" "$strays"
+done
+
+# MUTANT H7 (PID-only INT, trap removed): the run continues to a verdict,
+# the nested file is lost, no backup remains.
+H7_MUTANT="$TMP/mutant-h7-no-int-trap.sh"
+sed "/trap 'exit 130' INT/d" "$CHECK" > "$H7_MUTANT"
+bash -n "$H7_MUTANT" > /dev/null 2>&1
+check "MUTANT H7 SANITY: the no-INT-trap mutant still parses" 0 "$?"
+h7repo="$TMP/mutant-h7-repo"
+mkdir -p "$h7repo/pkg/dist/sub"
+(
+  cd "$h7repo" || exit 1
+  git init -q; git config user.email t@example.com; git config user.name t
+  echo "original" > pkg/dist/a.js
+  echo "nested" > pkg/dist/sub/b.js
+  git add -A; git commit -qm init
+  cat > slow-build.sh <<'SH'
+#!/usr/bin/env bash
+sleep 5
+mkdir -p pkg/dist
+echo changed > pkg/dist/a.js
+SH
+  chmod +x slow-build.sh
+)
+h7_result="$(
+  set -m
+  cd "$h7repo" || exit 1
+  bash "$H7_MUTANT" pkg/dist ./slow-build.sh > /dev/null 2>&1 &
+  sigpid=$!
+  sleep 1
+  kill -INT "$sigpid" 2> /dev/null
+  wait "$sigpid" 2> /dev/null
+  ec=$?
+  sleep 5
+  printf '%s\n%s\n%s' "$ec" "$(cat pkg/dist/a.js 2> /dev/null)" "$([ -e pkg/dist/sub/b.js ] && echo present || echo missing)"
+)"
+h7_ec="$(printf '%s' "$h7_result" | sed -n '1p')"
+h7_content="$(printf '%s' "$h7_result" | sed -n '2p')"
+h7_nested="$(printf '%s' "$h7_result" | sed -n '3p')"
+check "MUTANT H7: PID-only SIGINT with the trap removed runs the build to completion" "1 changed missing" "$h7_ec $h7_content $h7_nested"
+
+# MUTANT H8 (PID-only HUP, trap removed): bash's OWN default disposition for
+# an untrapped HUP is still fatal, so the EXIT CODE alone does not change —
+# but the orphaned build (not actually stopped by anything check-dist-
+# drift.sh's own code did) finishes moments later and OVERWRITES the just-
+# restored dist/, which is what this isolates.
+H8_MUTANT="$TMP/mutant-h8-no-hup-trap.sh"
+sed "/trap 'exit 129' HUP/d" "$CHECK" > "$H8_MUTANT"
+bash -n "$H8_MUTANT" > /dev/null 2>&1
+check "MUTANT H8 SANITY: the no-HUP-trap mutant still parses" 0 "$?"
+h8repo="$TMP/mutant-h8-repo"
+mkdir -p "$h8repo/pkg/dist"
+(
+  cd "$h8repo" || exit 1
+  git init -q; git config user.email t@example.com; git config user.name t
+  echo "original" > pkg/dist/a.js
+  git add -A; git commit -qm init
+  cat > slow-build.sh <<'SH'
+#!/usr/bin/env bash
+sleep 5
+mkdir -p pkg/dist
+echo changed > pkg/dist/a.js
+SH
+  chmod +x slow-build.sh
+)
+h8_content_after_overwrite="$(
+  set -m
+  cd "$h8repo" || exit 1
+  bash "$H8_MUTANT" pkg/dist ./slow-build.sh > /dev/null 2>&1 &
+  sigpid=$!
+  sleep 1
+  kill -HUP "$sigpid" 2> /dev/null
+  wait "$sigpid" 2> /dev/null
+  sleep 5 # the orphaned build finishes here and overwrites the restored file
+  cat pkg/dist/a.js 2> /dev/null
+)"
+check "MUTANT H8: PID-only SIGHUP with the trap removed lets the orphaned build overwrite the restore" "changed" "$h8_content_after_overwrite"
+
+# ═══════════════════════════════════════════════════════════════════════
 # Case 10 — H9 (round-2 S1): a restore that itself FAILS keeps the backup
 # on disk and prints its path, rather than the EXIT trap discarding the
 # only remaining copy — round 1's own regression, re-isolated. A PATH shim
@@ -769,10 +1012,21 @@ mkdir -p "$STRANDREPO/pkg/dist"
   echo "x" > pkg/dist/a.js
   git add -A
   git commit -qm init
+  # Reproduces the COMMITTED content ("x"), not the stranded backup's — once
+  # the stranded backup is restored and the check is re-run, the clean
+  # rebuild compares against the INDEX, not against whatever the recovery
+  # command happened to put there.
+  cat > keep.sh <<'SH'
+#!/usr/bin/env bash
+set -e
+mkdir -p pkg/dist
+echo "x" > pkg/dist/a.js
+SH
+  chmod +x keep.sh
 )
 mkdir -p "$STRANDREPO/pkg/.check-dist-drift-backup.strandtest/dist-backup"
 echo "stranded-original" > "$STRANDREPO/pkg/.check-dist-drift-backup.strandtest/dist-backup/a.js"
-stranded_output="$( cd "$STRANDREPO" && bash "$CHECK" pkg/dist true 2>&1 )"
+stranded_output="$( cd "$STRANDREPO" && bash "$CHECK" pkg/dist ./keep.sh 2>&1 )"
 stranded_exit=$?
 check "S2: a stranded backup from an earlier run is detected, not silently proceeded past" 2 "$stranded_exit"
 case "$stranded_output" in
@@ -782,6 +1036,143 @@ esac
 check "S2: the stranded backup itself is untouched" "stranded-original" "$(cat "$STRANDREPO/pkg/.check-dist-drift-backup.strandtest/dist-backup/a.js" 2>/dev/null)"
 check "S2: the real dist dir was never touched either (refused before any mv)" "x" "$(cat "$STRANDREPO/pkg/dist/a.js" 2>/dev/null)"
 
+# ═══════════════════════════════════════════════════════════════════════
+# Case 13 — R1 (round 3): the stranded-backup glob must stay scoped to the
+# LITERAL dist-dir parent path, not word-split or glob-interpreted. The
+# first version of this check (`STRAY=($BACKUP_GLOB)`, fully unquoted) broke
+# three ways: a SPACE in the parent path silently skipped the check
+# entirely (nothing to word-split correctly on); a GLOB CHARACTER in the
+# parent path did the same; and — the dangerous direction — a space-
+# containing parent with an UNRELATED real sibling directory misread that
+# sibling AS a stranded backup and told a developer to `rm -rf` it.
+# ═══════════════════════════════════════════════════════════════════════
+
+# R1a — a space in the dist dir's parent path, WITH a real stranded backup:
+# must still be detected (exit 2, naming it).
+SPACEREPO="$TMP/space repo"
+mkdir -p "$SPACEREPO/has space/dist"
+(
+  cd "$SPACEREPO" || exit 1
+  git init -q
+  git config user.email t@example.com
+  git config user.name t
+  echo "x" > "has space/dist/a.js"
+  git add -A
+  git commit -qm init
+  # A real build (not a bare `true`): the stranded check should fire BEFORE
+  # this ever runs, but every case below that expects the check to be
+  # SKIPPED still needs a build that reproduces the committed content, or
+  # the zero-emit floor fires instead and masks what is actually being
+  # tested.
+  cat > "keep.sh" <<'SH'
+#!/usr/bin/env bash
+set -e
+mkdir -p "has space/dist"
+echo "x" > "has space/dist/a.js"
+SH
+  chmod +x keep.sh
+)
+mkdir -p "$SPACEREPO/has space/.check-dist-drift-backup.spacetest/dist-backup"
+echo "space-stranded" > "$SPACEREPO/has space/.check-dist-drift-backup.spacetest/dist-backup/a.js"
+space_output="$( cd "$SPACEREPO" && bash "$CHECK" "has space/dist" ./keep.sh 2>&1 )"
+space_exit=$?
+check "R1a: a stranded backup is still detected when the parent path has a SPACE" 2 "$space_exit"
+case "$space_output" in
+  *".check-dist-drift-backup.spacetest"*) check "R1a: ...and the message names it" 0 0 ;;
+  *) check "R1a: ...and the message names it" 0 1 ;;
+esac
+
+# R1b — a glob character ('[') in the dist dir's parent path, WITH a real
+# stranded backup: must still be detected.
+GLOBREPO="$TMP/glob-repo"
+mkdir -p "$GLOBREPO/pkg[1]/dist"
+(
+  cd "$GLOBREPO" || exit 1
+  git init -q
+  git config user.email t@example.com
+  git config user.name t
+  echo "x" > "pkg[1]/dist/a.js"
+  git add -A
+  git commit -qm init
+  cat > "keep.sh" <<'SH'
+#!/usr/bin/env bash
+set -e
+mkdir -p "pkg[1]/dist"
+echo "x" > "pkg[1]/dist/a.js"
+SH
+  chmod +x keep.sh
+)
+mkdir -p "$GLOBREPO/pkg[1]/.check-dist-drift-backup.globtest/dist-backup"
+echo "glob-stranded" > "$GLOBREPO/pkg[1]/.check-dist-drift-backup.globtest/dist-backup/a.js"
+glob_output="$( cd "$GLOBREPO" && bash "$CHECK" "pkg[1]/dist" ./keep.sh 2>&1 )"
+glob_exit=$?
+check "R1b: a stranded backup is still detected when the parent path has a GLOB CHARACTER" 2 "$glob_exit"
+case "$glob_output" in
+  *".check-dist-drift-backup.globtest"*) check "R1b: ...and the message names it" 0 0 ;;
+  *) check "R1b: ...and the message names it" 0 1 ;;
+esac
+
+# R1c — the dangerous direction: a space in the parent path, an UNRELATED
+# real sibling directory that happens to share a path PREFIX with the dist
+# parent once split on whitespace, and NO stranded backup at all. The buggy
+# (unquoted) version misread the sibling as a stranded backup here.
+FALSEPOSREPO="$TMP/falsepos-repo"
+mkdir -p "$FALSEPOSREPO/has space/dist" "$FALSEPOSREPO/has"
+(
+  cd "$FALSEPOSREPO" || exit 1
+  git init -q
+  git config user.email t@example.com
+  git config user.name t
+  echo "x" > "has space/dist/a.js"
+  git add -A
+  git commit -qm init
+  cat > "keep.sh" <<'SH'
+#!/usr/bin/env bash
+set -e
+mkdir -p "has space/dist"
+echo "x" > "has space/dist/a.js"
+SH
+  chmod +x keep.sh
+)
+falsepos_exit="$( ( cd "$FALSEPOSREPO" && bash "$CHECK" "has space/dist" ./keep.sh ) > /dev/null 2>&1; echo $? )"
+check "R1c: an unrelated sibling dir is NOT misread as a stranded backup" 0 "$falsepos_exit"
+
+# MUTANT R1: revert to the original fully-unquoted glob and confirm these
+# three cases go RED against it — proving they actually exercise the fix,
+# not just today's code shape.
+R1_MUTANT="$TMP/mutant-r1-unquoted-glob.sh"
+# shellcheck disable=SC2016 # deliberate: single-quoted so the sed PATTERN
+# and REPLACEMENT match/produce $CHECK's own literal source text; neither
+# side should be shell-expanded here.
+sed 's|STRAY=("\$(dirname "\$ABS_DIST_DIR")"/.check-dist-drift-backup.\*)|BACKUP_GLOB="$(dirname "$ABS_DIST_DIR")/.check-dist-drift-backup."*; STRAY=($BACKUP_GLOB)|' "$CHECK" > "$R1_MUTANT"
+bash -n "$R1_MUTANT" > /dev/null 2>&1
+check "MUTANT R1 SANITY: the reverted-glob mutant still parses" 0 "$?"
+mutant_space_exit="$( ( cd "$SPACEREPO" && bash "$R1_MUTANT" "has space/dist" ./keep.sh ) > /dev/null 2>&1; echo $? )"
+check "MUTANT R1a: the unquoted glob silently SKIPS the space-path stranded backup" 0 "$mutant_space_exit"
+mutant_glob_exit="$( ( cd "$GLOBREPO" && bash "$R1_MUTANT" "pkg[1]/dist" ./keep.sh ) > /dev/null 2>&1; echo $? )"
+check "MUTANT R1b: the unquoted glob silently SKIPS the glob-char-path stranded backup" 0 "$mutant_glob_exit"
+mutant_falsepos_exit="$( ( cd "$FALSEPOSREPO" && bash "$R1_MUTANT" "has space/dist" ./keep.sh ) > /dev/null 2>&1; echo $? )"
+check "MUTANT R1c: the unquoted glob FALSELY refuses over the unrelated sibling" 2 "$mutant_falsepos_exit"
+
+# R1d (printf '%q' quoting) — the printed recovery commands must be shell-
+# safe even when the path contains a space: a raw space in an unquoted
+# `rm -rf has space/dist` splits into two separate (wrong) arguments.
+case "$space_output" in
+  *'has\ space'*) check "R1d: the recovery commands are %q-quoted (space is escaped)" 0 0 ;;
+  *) check "R1d: the recovery commands are %q-quoted (space is escaped)" 0 1 ;;
+esac
+
+# N1 — running the printed restore command VERBATIM must not leave an empty
+# backup-parent directory behind (which would make the NEXT run refuse
+# again over nothing). Extract the actual restore command from the message
+# and eval it for real, then confirm a follow-up run reports clean.
+restore_cmd="$(printf '%s' "$stranded_output" | sed -n "s/.*either '\\(.*\\)' to restore it,.*/\\1/p")"
+( cd "$STRANDREPO" && eval "$restore_cmd" ) > /dev/null 2>&1
+check "N1: the printed restore command leaves NO empty backup dir behind" "" "$(find "$STRANDREPO/pkg" -maxdepth 1 -name '.check-dist-drift-backup*' 2>/dev/null)"
+check "N1: ...and dist is restored to the stranded content" "stranded-original" "$(cat "$STRANDREPO/pkg/dist/a.js" 2>/dev/null)"
+followup_exit="$( ( cd "$STRANDREPO" && bash "$CHECK" pkg/dist ./keep.sh ) > /dev/null 2>&1; echo $? )"
+check "N1: ...and a FOLLOW-UP run no longer refuses" 0 "$followup_exit"
+
 echo "----"
 BROKEN=0
 if [ "$FAIL" -ne 0 ]; then
@@ -790,6 +1181,26 @@ if [ "$FAIL" -ne 0 ]; then
 fi
 if [ "$((PASS + FAIL))" -ne "$EXPECTED_CASES" ]; then
   echo "HARNESS BROKEN: ran $((PASS + FAIL)) cases, expected $EXPECTED_CASES — a case stopped executing"
+  BROKEN=1
+fi
+
+# S1 (round 3): the AUTHORITATIVE count. $PASS/$FAIL are shell variables, and
+# a `check` call made inside a pipeline subshell loses its increment to them
+# even though its "ok"/"NOT" line still prints for real — measured directly:
+# forcing that one case to fail left the printed transcript at 87 lines
+# while PASS+FAIL (and EXPECTED_CASES, tuned to match the undercount) stayed
+# at 86, and the harness exited 0. $RESULTLOG is a real file append from
+# inside `check()` itself, so it cannot go missing the same way. Any
+# mismatch here — in EITHER direction — means some case's outcome was not
+# correctly tallied, independent of whatever $PASS/$FAIL happen to say.
+LOGGED_COUNT="$(wc -l < "$RESULTLOG" | tr -d '[:space:]')"
+LOGGED_NOT="$(grep -c '^NOT$' "$RESULTLOG" 2> /dev/null || true)"
+if [ "$LOGGED_COUNT" -ne "$EXPECTED_CASES" ] || [ "$LOGGED_COUNT" -ne "$((PASS + FAIL))" ]; then
+  echo "HARNESS BROKEN: \$RESULTLOG recorded $LOGGED_COUNT case(s), PASS+FAIL says $((PASS + FAIL)), EXPECTED_CASES is $EXPECTED_CASES — these must all agree"
+  BROKEN=1
+fi
+if [ "${LOGGED_NOT:-0}" -ne "$FAIL" ]; then
+  echo "HARNESS BROKEN: \$RESULTLOG recorded $LOGGED_NOT failing case(s) but \$FAIL says $FAIL — a check() call's result was lost to a subshell"
   BROKEN=1
 fi
 [ "$BROKEN" -eq 0 ] || exit 1

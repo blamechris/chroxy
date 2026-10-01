@@ -237,6 +237,20 @@ validate_dist_dir() {
       ''|.|..)
         fail_validation "<dist-dir> may not contain an empty, '.' or '..' path component: $raw"
         ;;
+      .git)
+        # Round 3 (S4/N2): the physical-containment check's own `.git` rule
+        # only ever compared against `$REPO_REAL/.git` — the TOP-level repo
+        # .git. A NESTED one (a non-submodule vendored/checked-in repo at
+        # e.g. packages/sub/.git) never matched that pattern and fell
+        # through to the ordinary "inside the repo" acceptance: exit 0,
+        # packages/sub/.git/dist silently replaced by build output. This
+        # catches a literal `.git` component at ANY depth, up front. Case
+        # variants (`.GIT`, `.Git`, ...) are deliberately NOT handled here —
+        # they are already caught by the physical exact-match check below,
+        # which resolves through `/bin/pwd -P` to the filesystem's
+        # canonical stored case before comparing.
+        fail_validation "<dist-dir> may not contain a '.git' path component at any depth: $raw"
+        ;;
     esac
   done
 
@@ -384,16 +398,36 @@ trap 'exit 129' HUP
 # whatever it finds in <dist-dir> with no mention of the orphaned copy
 # sitting next to it — the stale backup is correct and recoverable, but
 # nothing ever points a developer at it. Checked before anything is touched.
-# shellcheck disable=SC2125 # deliberate: stays a literal pattern in this
-# scalar assignment (bash does not glob-expand the right-hand side of a plain
-# `var=value`), and is glob-expanded on PURPOSE at the array assignment below.
-BACKUP_GLOB="$(dirname "$ABS_DIST_DIR")/.check-dist-drift-backup."*
-# shellcheck disable=SC2206 # deliberate glob expansion of a literal pattern
-STRAY=($BACKUP_GLOB)
+#
+# Round 3 review: the FIRST version of this glob left the whole pattern
+# unquoted (`STRAY=($BACKUP_GLOB)`), so the DIRNAME half — not just the
+# intended trailing `*` — was both word-split and glob-interpreted. A space
+# in the repo root or the dist dir's parent silently skipped the check
+# entirely (every invocation from such a checkout never saw a real stranded
+# backup again); a glob character in that same parent did the same; and
+# `packages/has space/dist` with an unrelated real sibling directory
+# `packages/has` (no stranded backup at all) misread that directory AS the
+# stranded backup and told a developer to `rm -rf` it. Quoting the dirname
+# and leaving ONLY the literal `.check-dist-drift-backup.*` suffix outside
+# the quotes keeps the glob expansion scoped to exactly that suffix: the
+# directory PATH is matched literally, no matter what it contains.
+STRAY=("$(dirname "$ABS_DIST_DIR")"/.check-dist-drift-backup.*)
 if [ -e "${STRAY[0]}" ]; then
+  # printf '%q': round 3 also found the recovery commands themselves were
+  # unquoted, so a space in the path broke the printed shell commands in a
+  # way that silently acted on the wrong thing if pasted verbatim (e.g.
+  # `rm -rf packages/has space/dist` removes `packages/has` AND `./space/dist`
+  # — two unrelated, partial paths — instead of the one path intended).
+  stray_backup_q="$(printf '%q' "${STRAY[0]}/dist-backup")"
+  stray_parent_q="$(printf '%q' "${STRAY[0]}")"
+  dist_q="$(printf '%q' "$DIST_DIR")"
   echo "::error::$(basename "$0"): a backup from an earlier, incomplete run already exists at ${STRAY[0]} — refusing to start a new one until it is resolved." >&2
   echo "This means a previous run was killed before it could restore $DIST_DIR (e.g. SIGKILL), or a restore itself failed and the backup was deliberately kept." >&2
-  echo "Recover by hand: compare ${STRAY[0]}/dist-backup against the current $DIST_DIR, then either 'rm -rf $DIST_DIR && mv ${STRAY[0]}/dist-backup $DIST_DIR' to restore it, or 'rm -rf ${STRAY[0]}' once you've confirmed it is no longer needed." >&2
+  # N1: the restore form ends in `&& rmdir <parent>` — without it, a
+  # developer who runs the printed command verbatim is left with the now-
+  # EMPTY backup parent directory still on disk, and the NEXT run refuses
+  # again over that leftover empty shell.
+  echo "Recover by hand: compare $stray_backup_q against the current $dist_q, then either 'rm -rf $dist_q && mv $stray_backup_q $dist_q && rmdir $stray_parent_q' to restore it, or 'rm -rf $stray_parent_q' once you've confirmed it is no longer needed." >&2
   exit 2
 fi
 
