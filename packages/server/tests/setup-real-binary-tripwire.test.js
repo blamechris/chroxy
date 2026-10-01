@@ -11,10 +11,30 @@
  * next one reaches a real binary again — see
  * `scripts/lib/test-real-binary-tripwire.mjs` for the full design note.
  *
- * Every "throws" assertion below is safe regardless of what is actually
- * installed on the machine running this suite: the guard throws
- * SYNCHRONOUSLY, before `child_process`'s own launcher ever runs, so no real
- * process is created either way.
+ * ── Stubbed child_process, not the real one (#8185) ─────────────────────
+ *
+ * Every test below that exercises a throw/pass-through DECISION installs
+ * the tripwire's own `installRealBinaryTripwire()` onto a fresh,
+ * `makeStubbedTripwire()`-built stand-in for `node:child_process` — a plain
+ * object of recording, always-safe launcher stubs — via that function's
+ * `target` seam, rather than relying on the real module `_setup.mjs` already
+ * patched. If the guard regresses and fails to throw for a guarded binary,
+ * the call falls through to the STUB underneath it, not a real launcher —
+ * nothing is ever spawned, hashed, or exec'd for real, regardless of what
+ * the guard actually decides. A regression then shows up as a RED,
+ * legible assertion: either `assert.throws` itself fails (the guard didn't
+ * throw), or the stub's recorded-calls array — asserted empty right next to
+ * it — is no longer empty. Before #8185, the equivalent regression called
+ * through to `require('node:child_process')`'s real `spawn`/`exec`/etc. and
+ * started a real `codex exec` on a developer machine (confirmed once, during
+ * review of #8184).
+ *
+ * The two tests that read `REAL_BINARY_TRIPWIRE_INSTALLED` /
+ * `REAL_BINARY_TRIPWIRE_SKIPPED` (from `_setup.mjs`) or the top-level
+ * `node:child_process` imports directly are the exception: they only inspect
+ * what the REAL, production install already wired up (marker symbols, the
+ * installed/skipped arrays) and never invoke a launcher, so there is nothing
+ * for a stub to sit underneath.
  */
 
 import { describe, it } from 'node:test'
@@ -34,7 +54,92 @@ import {
   REAL_INSTALL_PREFIXES,
   REAL_BINARY_ERROR_CODE,
   REAL_BINARY_MARKER,
+  installRealBinaryTripwire,
 } from '../../../scripts/lib/test-real-binary-tripwire.mjs'
+
+/**
+ * Build a fresh, isolated stand-in for `node:child_process` — one recording,
+ * always-safe stub function per launcher name — and install the SAME
+ * `installRealBinaryTripwire()` wrapping logic onto it via its `target` seam
+ * (#8185), instead of onto the real module.
+ *
+ * Each call records its full argument list into `calls.<launcherName>` and
+ * returns an inert value (never throws, never touches a real process).
+ * `stub.<launcherName>` is the TRIPWIRE-WRAPPED function — calling it runs
+ * the exact same guard logic the real install runs; a guarded command still
+ * throws before ever reaching the recording stub underneath, and a
+ * non-guarded command reaches it and gets recorded.
+ *
+ * A fresh stub is built per call (never shared across tests) so one test's
+ * recorded calls can never leak into another's "recorded zero calls"
+ * assertion.
+ */
+function makeStubbedTripwire(installOpts = {}) {
+  const calls = {
+    spawn: [],
+    spawnSync: [],
+    exec: [],
+    execSync: [],
+    execFile: [],
+    execFileSync: [],
+    fork: [],
+  }
+
+  // A minimal stand-in for the `ChildProcess` instance spawn/fork normally
+  // return — just enough surface for the handful of tests below that call
+  // `.on('error', ...)` / check `.pid` / call `.kill()` on the result. `pid`
+  // is always `undefined`, so every `if (proc.pid !== undefined) proc.kill(...)`
+  // guard already in this file is a no-op against it, same as it already is
+  // today against a real spawn that failed before a pid was ever assigned.
+  function fakeChildProcess() {
+    return { pid: undefined, on() {}, kill() {} }
+  }
+
+  function recordAndReturnChild(name) {
+    return (...args) => {
+      calls[name].push(args)
+      return fakeChildProcess()
+    }
+  }
+
+  // exec/execFile's async callback form: record, then — if a trailing
+  // callback was actually passed — invoke it on the next tick with a
+  // successful, empty result. Nothing currently exercised in this file
+  // resolves through that callback (every exec/execFile use below is either
+  // a throwing case, where the guard fires before the stub is ever reached,
+  // or synchronous), but a stub that never calls back a provided callback
+  // would hang a future async-passthrough test instead of failing it loudly.
+  function recordAndMaybeCallback(name) {
+    return (...args) => {
+      calls[name].push(args)
+      const cb = args[args.length - 1]
+      if (typeof cb === 'function') process.nextTick(() => cb(null, '', ''))
+      return fakeChildProcess()
+    }
+  }
+
+  const target = {
+    spawn: recordAndReturnChild('spawn'),
+    fork: recordAndReturnChild('fork'),
+    exec: recordAndMaybeCallback('exec'),
+    execFile: recordAndMaybeCallback('execFile'),
+    spawnSync(...args) {
+      calls.spawnSync.push(args)
+      return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from('') }
+    },
+    execSync(...args) {
+      calls.execSync.push(args)
+      return Buffer.from('')
+    },
+    execFileSync(...args) {
+      calls.execFileSync.push(args)
+      return Buffer.from('')
+    },
+  }
+
+  const { installed, skipped } = installRealBinaryTripwire({ ...installOpts, target })
+  return { stub: target, calls, installed, skipped }
+}
 
 describe('real-binary tripwire: pure isGuardedRealBinary() rule (#8096)', () => {
   it('flags a bare guarded name', () => {
@@ -104,31 +209,50 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
     assert.deepEqual(REAL_BINARY_TRIPWIRE_SKIPPED, [])
   })
 
-  it('a bare `cloudflared` spawn() throws the tripwire error — no real process is ever created', () => {
+  it('CONTROL: a non-guarded command passes through the tripwire and reaches the underlying stub — proves the stub really sits UNDER the wrapped functions, so every "recorded zero calls" assertion below is not vacuous (#8185)', () => {
+    const { stub, calls } = makeStubbedTripwire()
+    assert.doesNotThrow(() => {
+      const proc = stub.spawn('echo', ['ok'], { stdio: 'ignore' })
+      proc.on('error', () => {})
+      if (proc.pid !== undefined) proc.kill('SIGKILL')
+    })
+    assert.equal(calls.spawn.length, 1, 'a non-guarded command must reach the stub underneath the tripwire')
+    assert.deepEqual(calls.spawn[0][0], 'echo')
+    assert.deepEqual(calls.spawn[0][1], ['ok'])
+  })
+
+  it('a bare `cloudflared` spawn() throws the tripwire error — and the stub it wraps never sees the call, so no real process is ever created', () => {
+    const { stub, calls } = makeStubbedTripwire()
     assert.throws(
-      () => spawn('cloudflared', []),
+      () => stub.spawn('cloudflared', []),
       (err) => {
         assert.equal(err.code, REAL_BINARY_ERROR_CODE)
         assert.match(err.message, /cloudflared/)
         return true
       },
     )
+    assert.equal(calls.spawn.length, 0, 'the tripwire must never reach the launcher underneath it for a guarded binary')
   })
 
   it('an absolute /opt/homebrew/bin/cloudflared execFileSync() throws the tripwire error', () => {
+    const { stub, calls } = makeStubbedTripwire()
     assert.throws(
-      () => execFileSync('/opt/homebrew/bin/cloudflared', ['--version']),
+      () => stub.execFileSync('/opt/homebrew/bin/cloudflared', ['--version']),
       (err) => {
         assert.equal(err.code, REAL_BINARY_ERROR_CODE)
         return true
       },
     )
+    assert.equal(calls.execFileSync.length, 0)
   })
 
   it('a bare `claude` spawnSync() and a real-prefix `codex`/`gemini` execFileSync() all throw', () => {
-    assert.throws(() => spawnSync('claude', ['--version']), { code: REAL_BINARY_ERROR_CODE })
-    assert.throws(() => execFileSync('/usr/local/bin/codex', ['--version']), { code: REAL_BINARY_ERROR_CODE })
-    assert.throws(() => execFileSync('/opt/homebrew/bin/gemini', ['--version']), { code: REAL_BINARY_ERROR_CODE })
+    const { stub, calls } = makeStubbedTripwire()
+    assert.throws(() => stub.spawnSync('claude', ['--version']), { code: REAL_BINARY_ERROR_CODE })
+    assert.throws(() => stub.execFileSync('/usr/local/bin/codex', ['--version']), { code: REAL_BINARY_ERROR_CODE })
+    assert.throws(() => stub.execFileSync('/opt/homebrew/bin/gemini', ['--version']), { code: REAL_BINARY_ERROR_CODE })
+    assert.equal(calls.spawnSync.length, 0)
+    assert.equal(calls.execFileSync.length, 0)
   })
 
   it('spawn/spawnSync/execFileSync with options.shell: true still throw — the guarded name is inside a shell command STRING, not args[0] literally (#8102)', () => {
@@ -136,36 +260,46 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
     // { shell: true })` — with `shell` truthy, args[0] is a shell command
     // LINE, not a literal filename, so the guard must split it the same way
     // exec/execSync's shell-string form already does.
+    const { stub, calls } = makeStubbedTripwire()
     assert.throws(
-      () => spawn('cloudflared --version', { shell: true, stdio: 'ignore' }),
+      () => stub.spawn('cloudflared --version', { shell: true, stdio: 'ignore' }),
       { code: REAL_BINARY_ERROR_CODE },
     )
     assert.throws(
-      () => spawnSync('cloudflared --version', { shell: true, stdio: 'ignore' }),
+      () => stub.spawnSync('cloudflared --version', { shell: true, stdio: 'ignore' }),
       { code: REAL_BINARY_ERROR_CODE },
     )
     assert.throws(
-      () => execFileSync('cloudflared --version', { shell: true }),
+      () => stub.execFileSync('cloudflared --version', { shell: true }),
       { code: REAL_BINARY_ERROR_CODE },
     )
+    assert.equal(calls.spawn.length, 0)
+    assert.equal(calls.spawnSync.length, 0)
+    assert.equal(calls.execFileSync.length, 0)
   })
 
   it('exec()/execSync() shell-command strings of a guarded binary throw — the exec branch of resolveCommandArg actually FIRES, not merely wraps', () => {
-    // The wrap-marker test above proves exec/execSync were PATCHED; this proves
+    // The wrap-marker test below proves exec/execSync were PATCHED; this proves
     // the patch reaches its decision (firstShellToken on a command string).
     // The absolute path is a real install prefix with no binary behind it, so a
-    // regressed guard cannot reach a real program even under the normal PATH.
-    assert.throws(() => execSync('claude --version', { stdio: 'ignore' }), { code: REAL_BINARY_ERROR_CODE })
-    assert.throws(() => exec('cloudflared --version', () => {}), { code: REAL_BINARY_ERROR_CODE })
-    assert.throws(() => execSync('/usr/local/bin/gemini --version', { stdio: 'ignore' }), { code: REAL_BINARY_ERROR_CODE })
+    // regressed guard cannot reach a real program even under the normal PATH —
+    // and now it cannot reach anything but the recording stub either way.
+    const { stub, calls } = makeStubbedTripwire()
+    assert.throws(() => stub.execSync('claude --version', { stdio: 'ignore' }), { code: REAL_BINARY_ERROR_CODE })
+    assert.throws(() => stub.exec('cloudflared --version', () => {}), { code: REAL_BINARY_ERROR_CODE })
+    assert.throws(() => stub.execSync('/usr/local/bin/gemini --version', { stdio: 'ignore' }), { code: REAL_BINARY_ERROR_CODE })
+    assert.equal(calls.exec.length, 0)
+    assert.equal(calls.execSync.length, 0)
   })
 
   it('a safe command with options.shell: true is unaffected (proves the shell:true branch is not a blanket refusal)', () => {
-    assert.doesNotThrow(() => execFileSync('git --version', { shell: true, encoding: 'utf-8' }))
+    const { stub } = makeStubbedTripwire()
+    assert.doesNotThrow(() => stub.execFileSync('git --version', { shell: true, encoding: 'utf-8' }))
   })
 
   it('a promisified execFile() of a guarded binary still throws, not merely warns', async () => {
-    const execFileAsync = promisify(execFile)
+    const { stub, calls } = makeStubbedTripwire()
+    const execFileAsync = promisify(stub.execFile)
     await assert.rejects(
       () => execFileAsync('/opt/homebrew/bin/cloudflared', ['--version']),
       (err) => {
@@ -173,25 +307,23 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
         return true
       },
     )
+    assert.equal(calls.execFile.length, 0)
   })
 
   it('passes for node/git — this guard does not block ordinary test plumbing', () => {
-    assert.doesNotThrow(() => execFileSync(process.execPath, ['--version'], { encoding: 'utf-8' }))
-    assert.doesNotThrow(() => execFileSync('git', ['--version'], { encoding: 'utf-8' }))
+    const { stub } = makeStubbedTripwire()
+    assert.doesNotThrow(() => stub.execFileSync(process.execPath, ['--version'], { encoding: 'utf-8' }))
+    assert.doesNotThrow(() => stub.execFileSync('git', ['--version'], { encoding: 'utf-8' }))
   })
 
   it('a bare guarded name is NOT flagged when the call scopes PATH to empty — the #8096 fix-1 pattern', () => {
     // Mirrors cloudflare-provenance.test.js's #6937 tests: an empty PATH means
     // the OS's own search can't find anything, real binary or not, so this
-    // must pass through to the real spawn() (which then ENOENTs on its own).
-    // #8096: do NOT call `.kill()` here — with PATH empty the spawn fails
-    // synchronously and `proc.pid` never gets assigned, and calling `.kill()`
-    // on a ChildProcess that never actually started crashes the process
-    // (measured). `cloudflare-provenance.test.js`'s own `reapChild()` helper
-    // checks `pid === undefined` before ever calling `.kill()` for exactly
-    // this reason — there is nothing to reap here either.
+    // must pass through to the launcher underneath (the stub, which ENOENTs
+    // on nothing — it just records the call and returns an inert value).
+    const { stub } = makeStubbedTripwire()
     assert.doesNotThrow(() => {
-      const proc = spawn('cloudflared', [], { stdio: 'ignore', env: { PATH: '' } })
+      const proc = stub.spawn('cloudflared', [], { stdio: 'ignore', env: { PATH: '' } })
       proc.on('error', () => {})
       if (proc.pid !== undefined) proc.kill('SIGKILL')
     })
@@ -201,9 +333,9 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
     const prev = process.env.CHROXY_TEST_ALLOW_REAL_BINARY
     process.env.CHROXY_TEST_ALLOW_REAL_BINARY = '1'
     try {
-      // Same "don't kill a never-started process" reasoning as above.
+      const { stub } = makeStubbedTripwire()
       assert.doesNotThrow(() => {
-        const proc = spawn('cloudflared', [], { stdio: 'ignore', env: { PATH: '' } })
+        const proc = stub.spawn('cloudflared', [], { stdio: 'ignore', env: { PATH: '' } })
         proc.on('error', () => {})
         if (proc.pid !== undefined) proc.kill('SIGKILL')
       })
@@ -222,30 +354,39 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
 })
 
 describe('real-binary tripwire: guarded names past the first shell token, and the win-spawn cmd.exe wrapper (#8102)', () => {
-  // The throwing cases below (through the win-spawn cmd.exe wrapper) throw synchronously, before child_process's own launcher ever
-  // runs — same safety property the file's header note already establishes
-  // for every other "throws" assertion in this file.
+  // The throwing cases below (through the win-spawn cmd.exe wrapper) throw synchronously, before the stub underneath ever
+  // sees the call — same safety property the file's header note already establishes
+  // for every other "throws" assertion in this file, now doubly so since
+  // there is no real launcher anywhere in reach.
 
   it('a CHAINED command (`true && codex exec`) via exec() throws — the guarded name is past the first whitespace token, not at the start of the string', () => {
-    assert.throws(() => exec('true && codex exec', () => {}), { code: REAL_BINARY_ERROR_CODE })
+    const { stub, calls } = makeStubbedTripwire()
+    assert.throws(() => stub.exec('true && codex exec', () => {}), { code: REAL_BINARY_ERROR_CODE })
+    assert.equal(calls.exec.length, 0)
   })
 
   it('a CHAINED command hiding in the separate args ARRAY of a shell:true spawn() throws — `args[0]` alone ("true") is safe; the guarded name only appears once `args[0]` and the args array are joined the way Node itself joins them', () => {
+    const { stub, calls } = makeStubbedTripwire()
     assert.throws(
-      () => spawn('true', ['&&', 'codex', 'exec'], { shell: true, stdio: 'ignore' }),
+      () => stub.spawn('true', ['&&', 'codex', 'exec'], { shell: true, stdio: 'ignore' }),
       { code: REAL_BINARY_ERROR_CODE },
     )
+    assert.equal(calls.spawn.length, 0)
   })
 
   it('execFileSync with a shell PATH STRING (not just `shell: true`) throws — `options.shell` is truthy for any non-empty string too', () => {
+    const { stub, calls } = makeStubbedTripwire()
     assert.throws(
-      () => execFileSync('claude -v', [], { shell: '/bin/sh' }),
+      () => stub.execFileSync('claude -v', [], { shell: '/bin/sh' }),
       { code: REAL_BINARY_ERROR_CODE },
     )
+    assert.equal(calls.execFileSync.length, 0)
   })
 
   it('a `$(...)` command SUBSTITUTION throws — the substituted command still execs a real subprocess, unlike a plain argument mention', () => {
-    assert.throws(() => exec('echo $(claude -v)', () => {}), { code: REAL_BINARY_ERROR_CODE })
+    const { stub, calls } = makeStubbedTripwire()
+    assert.throws(() => stub.exec('echo $(claude -v)', () => {}), { code: REAL_BINARY_ERROR_CODE })
+    assert.equal(calls.exec.length, 0)
   })
 
   it("win-spawn.js's actual `cmd.exe /d /s /c \"<line>\"` wrapper shape throws — built with the REAL prepareSpawn(), not a hand-approximated shape", () => {
@@ -253,25 +394,29 @@ describe('real-binary tripwire: guarded names past the first shell token, and th
     // runs on (see win-spawn.test.js for the same {platform:'win32'} override
     // pattern). `claude.cmd` is the standard npm-global install shape this
     // guard exists to catch on a real Windows host.
+    const { stub, calls } = makeStubbedTripwire()
     const spec = prepareSpawn('claude.cmd', ['--version'], { platform: 'win32' })
     assert.throws(
-      () => spawn(spec.command, spec.args, spec.options),
+      () => stub.spawn(spec.command, spec.args, spec.options),
       { code: REAL_BINARY_ERROR_CODE },
     )
+    assert.equal(calls.spawn.length, 0)
   })
 
   it('the cmd.exe wrapper shape is unaffected when the /c string names no guarded binary (proves this is shape-recognition, not "block every cmd.exe call")', () => {
+    const { stub } = makeStubbedTripwire()
     const spec = prepareSpawn('somethingelse.cmd', ['--version'], { platform: 'win32' })
     assert.doesNotThrow(() => {
-      const proc = spawn(spec.command, spec.args, { ...spec.options, stdio: 'ignore' })
+      const proc = stub.spawn(spec.command, spec.args, { ...spec.options, stdio: 'ignore' })
       proc.on('error', () => {})
       if (proc.pid !== undefined) proc.kill('SIGKILL')
     })
   })
 
   it('a bare `cmd`/`cmd.exe` call with NO `/c` flag is unaffected (e.g. launching an interactive shell) — proves this only recognizes the specific `/c "<line>"` shape', () => {
+    const { stub } = makeStubbedTripwire()
     assert.doesNotThrow(() => {
-      const proc = spawn('cmd.exe', ['/k'], { stdio: 'ignore' })
+      const proc = stub.spawn('cmd.exe', ['/k'], { stdio: 'ignore' })
       proc.on('error', () => {})
       if (proc.pid !== undefined) proc.kill('SIGKILL')
     })
@@ -282,16 +427,18 @@ describe('real-binary tripwire: guarded names past the first shell token, and th
     // scan — exactly the "denies everything" shape docs/false-safety-
     // guards.md warns about (#7273) — and would start false-positiving on
     // any test that merely prints/logs/asserts-on the word "cloudflared".
+    const { stub } = makeStubbedTripwire()
     assert.doesNotThrow(() => {
-      const proc = spawn('echo cloudflared', { shell: true, stdio: 'ignore' })
+      const proc = stub.spawn('echo cloudflared', { shell: true, stdio: 'ignore' })
       proc.on('error', () => {})
       if (proc.pid !== undefined) proc.kill('SIGKILL')
     })
   })
 
   it('a literal, non-shell spawn() of an ordinary command is unaffected (`spawn("node", ["x.js"], { shell: false })`)', () => {
+    const { stub } = makeStubbedTripwire()
     assert.doesNotThrow(() => {
-      const proc = spawn('node', ['x.js'], { shell: false, stdio: 'ignore' })
+      const proc = stub.spawn('node', ['x.js'], { shell: false, stdio: 'ignore' })
       proc.on('error', () => {})
       if (proc.pid !== undefined) proc.kill('SIGKILL')
     })

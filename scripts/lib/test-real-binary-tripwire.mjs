@@ -394,7 +394,19 @@ export function isGuardedRealBinary(cmd) {
 }
 
 /**
- * Install the tripwire on the live `node:child_process` CJS exports object.
+ * Install the tripwire on the live `node:child_process` CJS exports object,
+ * or onto a supplied `target` instead (#8185).
+ *
+ * The real install (`_setup.mjs`, called with no `target`) is unaffected —
+ * `cp` resolves to `require('node:child_process')` exactly as before, so its
+ * behaviour is byte-identical. The seam exists so
+ * `setup-real-binary-tripwire.test.js` can install this SAME wrapping logic
+ * onto a throwaway object of recording, always-safe stub launchers instead
+ * of the real module: when the guard below regresses and fails to throw for
+ * a guarded binary, the call falls through to that stub — never to a real
+ * `claude`/`codex`/`gemini`/`cloudflared` — and the regression shows up as
+ * the stub recording a call the test asserts should never happen.
+ *
  * Safe to install alongside (before or after) `installSpawnHomeSandbox` —
  * each layer wraps whatever `cp[name]` currently is and calls through to it,
  * so the two compose regardless of install order.
@@ -402,10 +414,14 @@ export function isGuardedRealBinary(cmd) {
  * @param {object} [opts]
  * @param {string} [opts.allowEnv] Env var name whose value `'1'` disables the
  *   guard entirely. Defaults to `CHROXY_TEST_ALLOW_REAL_BINARY`.
+ * @param {object} [opts.target] The object to patch in place of the real
+ *   `node:child_process` CJS exports — must expose the same launcher names
+ *   (`SPAWN_LAUNCHERS`) as plain functions. Test-only seam; defaults to the
+ *   real module.
  * @returns {{installed: string[], skipped: Array<{name: string, reason: string}>}}
  */
-export function installRealBinaryTripwire({ allowEnv = 'CHROXY_TEST_ALLOW_REAL_BINARY' } = {}) {
-  const cp = require('node:child_process')
+export function installRealBinaryTripwire({ allowEnv = 'CHROXY_TEST_ALLOW_REAL_BINARY', target } = {}) {
+  const cp = target ?? require('node:child_process')
 
   function makeError(launcherName, cmd) {
     const err = new Error(
