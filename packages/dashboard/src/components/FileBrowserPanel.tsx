@@ -15,6 +15,7 @@ import {
 } from './fileTreeLogic'
 import type { VisibleTreeItem } from './fileTreeLogic'
 import { ViewerPreWriteReview } from './ViewerPreWriteReview'
+import { repoDisplayName } from '../utils/repoLabel'
 
 /** File icon by extension */
 function fileIcon(name: string, isDirectory: boolean): string {
@@ -252,6 +253,13 @@ export function FileBrowserPanel() {
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const savedFilePath = useConnectionStore(s =>
     activeSessionId ? s.sessionStates[activeSessionId]?.selectedFilePath ?? null : null
+  )
+  // #8123 — the active session's original repo dir (worktree-isolated
+  // sessions only), so the root breadcrumb can show the repo name instead
+  // of `rootPath`'s opaque `~/.chroxy/worktrees/<hex>` basename. Same field
+  // #7328 already threads into the SessionBar tab badge and the sidebar.
+  const activeSessionRepoCwd = useConnectionStore(s =>
+    s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.repoCwd ?? null
   )
   const [selectedFile, _setSelectedFile] = useState<string | null>(savedFilePath)
   // #6497 — the file-content callback is registered once, so it can't close over
@@ -559,9 +567,14 @@ export function FileBrowserPanel() {
   }, [symbolLocation, openFileInBrowser])
 
   // #6470 — breadcrumbs for the selected file (VSCode-style: root → dirs → file).
+  // #8123 — the root crumb's LABEL prefers the repo name for a worktree
+  // session (repoDisplayName falls back to the rootPath basename when
+  // activeSessionRepoCwd is null/undefined, i.e. unchanged for a plain
+  // session). `rootPath` itself is untouched, so the root crumb's `path` —
+  // and so breadcrumb navigation — still targets the real worktree dir.
   const breadcrumbs = useMemo(
-    () => buildBreadcrumbs(selectedFile, rootPath || ''),
-    [selectedFile, rootPath],
+    () => buildBreadcrumbs(selectedFile, rootPath || '', rootPath ? repoDisplayName(rootPath, activeSessionRepoCwd) : undefined),
+    [selectedFile, rootPath, activeSessionRepoCwd],
   )
 
   // #6470 — the flattened visible tree: root children + expanded subtrees.
