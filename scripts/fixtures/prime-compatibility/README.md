@@ -9,6 +9,27 @@ Requires Python 3.9+, an authenticated Claude Code CLI, and an explicitly author
 model-evaluation budget. Each case has a $4 **test harness** cap; this does not
 reinstate Chroxy's paused production cost breaker. Six cases are prepared.
 
+## Offline native-argument regression (2026-10-01)
+
+The separate operational pilot at commit `5774fdbc` captured a successful native
+check-pr load that rewrote the unresolved-count example's awk field reference
+into the argument word `evidence`. The sanitized source/injected excerpts and
+call identity are in [check-pr-positional-expansion.json](check-pr-positional-expansion.json).
+The pilot had no shell tool; it did not execute the corrupted example.
+
+The count aggregation now uses Python integer summation without positional-dollar
+tokens. `test_evaluator.py` replays only the observed numeric-dollar transformation,
+demonstrates the captured false zero using local awk, and runs the corrected
+source/Claude/Gemini aggregation with zero, multiple pages, nonzero later pages,
+large totals and malformed input. Python is already used elsewhere in this skill.
+The offline suite requires Python 3.9+ and awk; it does not require Claude auth or
+make inference/network calls. It is already included in Scripts Tests CI.
+
+These checks prove the local aggregation semantics and absence of the observed
+interpolation syntax. They do not emulate every native argument rule or establish
+a new corrected native-session result. The recorded pilot payload remains a
+historical failing transport example; no native rerun accompanies this repair.
+
 ## Run
 
 From the repository root, choose a new directory **outside the source checkout**, then:
