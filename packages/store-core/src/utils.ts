@@ -175,16 +175,31 @@ export function clearTransientSessionState(
  *
  * The guard is now two-way (#8147 closed the gap #7411 itself had): each of
  * those same test files also runs the real sweep over a session where EVERY
- * `BaseSessionState` field is dirtied, then asserts the set of fields the
- * sweep actually changed is EXACTLY this list — so a field a client's sweep
- * clears WITHOUT it being listed here (an extra, un-mirrored clear, the exact
- * shape #7411 had) goes red too, not just a listed field a sweep forgets.
+ * field is dirtied, then asserts the set of fields the sweep actually
+ * changed is EXACTLY this list — so a field a client's sweep clears WITHOUT
+ * it being listed here (an extra, un-mirrored clear, the exact shape #7411
+ * had) goes red too, not just a listed field a sweep forgets.
  *
- * `pendingEvaluatorClarify` is deliberately excluded: it lives only on the
- * dashboard's `SessionState` (no evaluator-clarify feature exists on the
- * app yet), so there is no app-side field to hold it to parity against. The
- * dashboard's reverse-direction test carries it as a named, documented
- * exception rather than treating it as an undetected extra clear.
+ * "EVERY field" is enforced at COMPILE TIME, not by iterating whatever the
+ * default-state factory happens to emit: each test file keeps its own
+ * `ALL_BASE_SESSION_STATE_KEYS` / `ALL_SESSION_STATE_KEYS` map, written as
+ * `satisfies Record<keyof Required<...>, true>`, so `tsc` rejects the map —
+ * and the test file — the moment the type gains or loses a key, OPTIONAL
+ * ones included. An #8201 review proof showed why the factory-iteration
+ * approach wasn't enough on its own: an optional field with no factory
+ * default (e.g. the dashboard's own already-existing `pendingTrustGrants?`)
+ * is invisible to a loop over `Object.keys(createEmptyBaseSessionState())`,
+ * so an extra, unlisted clear of such a field stayed green end to end.
+ *
+ * `pendingEvaluatorClarify` and `pendingTrustGrants` are deliberately
+ * excluded from this list even though the dashboard's sweep clears both:
+ * the former lives only on the dashboard's `SessionState` (no
+ * evaluator-clarify feature exists on the app yet), and the latter is
+ * cleared by `clearAllSessionPendingTrustGrants` (#3605/#3588) — a sibling
+ * onclose cleanup unrelated to this transient-state sweep that happens to
+ * run in the same handler. The dashboard's reverse-direction test carries
+ * both as named, documented exceptions rather than treating either as an
+ * undetected extra clear.
  */
 export const TRANSIENT_SESSION_SWEEP_FIELDS = [
   'streamingMessageId',

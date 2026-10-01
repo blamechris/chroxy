@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { RECONNECT_MAX_RUNG, TRANSIENT_SESSION_SWEEP_FIELDS } from '@chroxy/store-core'
+import type { SessionState } from './types'
 
 const store: Record<string, string> = {}
 const localStorageMock = {
@@ -409,11 +410,87 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
 // ---------------------------------------------------------------------------
 
 /**
+ * #8201 review — the FIRST version of this fixture iterated
+ * `Object.keys(createEmptySessionState())`, which only sees whatever the
+ * factory actually emits. The factory leaves several of the dashboard's OWN
+ * `SessionState` fields unset (they're all optional): `terminalSize`,
+ * `sessionRules`, `persistentRules`, `skills`, `mismatchedSkillNames`,
+ * `pendingCommunitySkills`, `pendingTrustGrants` — so all seven were
+ * invisible to the old dirty fixture and to the `changed` comparison below.
+ * Copilot's review flagged `pendingTrustGrants` specifically
+ * (types.ts:794) as a concrete, PRE-EXISTING instance of the same gap the
+ * `probeOptionalField` proof demonstrated against `BaseSessionState` itself.
+ *
+ * `ALL_SESSION_STATE_KEYS` is a COMPILE-TIME exhaustiveness check instead:
+ * every key of the dashboard's `SessionState`, optional ones included, must
+ * appear here with a `true` value, enforced by `satisfies
+ * Record<keyof Required<SessionState>, true>`. `tsc` rejects the map — and
+ * this whole test file — the moment `SessionState` (or the `BaseSessionState`
+ * it extends) gains or loses a key, independent of whether a factory
+ * happens to set it.
+ */
+const ALL_SESSION_STATE_KEYS = {
+  // BaseSessionState fields
+  messages: true,
+  streamingMessageId: true,
+  pendingClientMessageId: true,
+  inputDeliveries: true,
+  claudeReady: true,
+  activeModel: true,
+  permissionMode: true,
+  contextUsage: true,
+  contextOccupancy: true,
+  lastResultCost: true,
+  lastResultDuration: true,
+  sessionCost: true,
+  cumulativeUsage: true,
+  costThresholdWarning: true,
+  isIdle: true,
+  lastClientActivityAt: true,
+  health: true,
+  stoppedAt: true,
+  stoppedCode: true,
+  containerLostAt: true,
+  containerReattachError: true,
+  activeAgents: true,
+  activeTools: true,
+  pendingBackgroundShells: true,
+  transcriptBackgroundTasks: true,
+  scheduledWakeup: true,
+  isPlanPending: true,
+  planAllowedPrompts: true,
+  primaryClientId: true,
+  sessionRole: true,
+  conversationId: true,
+  sessionContext: true,
+  statusLine: true,
+  mcpServers: true,
+  devPreviews: true,
+  inactivityWarning: true,
+  interventions: true,
+  queuedMessages: true,
+  // Dashboard-only fields (packages/dashboard/src/store/types.ts)
+  terminalRawBuffer: true,
+  terminalSize: true,
+  selectedFilePath: true,
+  thinkingLevel: true,
+  sessionRules: true,
+  persistentRules: true,
+  skills: true,
+  mismatchedSkillNames: true,
+  pendingCommunitySkills: true,
+  pendingTrustGrants: true,
+  pendingEvaluatorClarify: true,
+} satisfies Record<keyof Required<SessionState>, true>
+
+/**
  * Picks a "dirty" value for one field from its clean/default value's runtime
  * shape — distinct from the default, not necessarily domain-valid, because
  * the test below only checks whether the real sweep code TOUCHED the field
  * (object identity changes when a patch sets it; survives untouched
- * otherwise), never the field's contents.
+ * otherwise — it does NOT verify the field was cleared to the *correct*
+ * value; that's the pre-existing forward-direction guards' job, e.g. the
+ * `toEqual(CLEAN[field])` assertions above).
  */
 function dirtyValueFor(key: string, defaultValue: unknown): unknown {
   if (defaultValue === null || defaultValue === undefined) return `__dirty__${key}`
@@ -426,26 +503,55 @@ function dirtyValueFor(key: string, defaultValue: unknown): unknown {
 }
 
 /**
- * Every field of the dashboard's `SessionState` (BaseSessionState's fields
- * PLUS the dashboard-only ones `createEmptySessionState` sets), each flipped
- * to a distinctive dirty value. Derived from `createEmptySessionState()` —
- * the canonical default-state factory — rather than a hand-typed field list,
- * so a field added to either interface automatically gets a dirty value and
- * automatically enters the comparison below; there is no parallel roster
- * here that can silently go stale the way a hardcoded field list would.
+ * "Zero value of the right JS type" for the handful of `SessionState` fields
+ * `createEmptySessionState()` leaves unset (all optional) — NOT a real
+ * default, just enough shape for `dirtyValueFor` to produce a value of the
+ * right TYPE instead of falling into its null/undefined branch for
+ * everything. `pendingTrustGrants` is the one that matters behaviorally:
+ * `clearAllSessionPendingTrustGrants` (#3605/#3588 — a DIFFERENT onclose
+ * cleanup than the transient sweep this issue is about, but one that runs in
+ * the SAME onclose handler) only clears it when `Array.isArray(...) &&
+ * .length > 0`; a non-array dirty value would dodge that real codepath and
+ * silently miss the exception this test documents below. Keyed by the SAME
+ * names `ALL_SESSION_STATE_KEYS` already enumerates — not a second roster —
+ * so a key missing a seed here just falls back to `dirtyValueFor`'s generic
+ * null/undefined branch rather than going uncovered.
+ */
+const OPTIONAL_FIELD_SEEDS: Partial<Record<keyof SessionState, unknown>> = {
+  terminalSize: { cols: 0, rows: 0 },
+  sessionRules: [],
+  persistentRules: [],
+  skills: [],
+  mismatchedSkillNames: [],
+  pendingCommunitySkills: [],
+  pendingTrustGrants: [],
+}
+
+/**
+ * Every key `ALL_SESSION_STATE_KEYS` knows about (not
+ * `Object.keys(createEmptySessionState())` — see that map's docstring) gets
+ * a dirty value, reusing the factory's value where it sets one and an
+ * `OPTIONAL_FIELD_SEEDS` shape hint otherwise.
  */
 function buildFullyDirtySessionState(): Record<string, unknown> {
   const clean = createEmptySessionState() as unknown as Record<string, unknown>
+  const seeds = OPTIONAL_FIELD_SEEDS as Record<string, unknown>
   const dirty: Record<string, unknown> = {}
-  for (const key of Object.keys(clean)) dirty[key] = dirtyValueFor(key, clean[key])
+  for (const key of Object.keys(ALL_SESSION_STATE_KEYS)) {
+    const seed = key in clean ? clean[key] : seeds[key]
+    dirty[key] = dirtyValueFor(key, seed)
+  }
   return dirty
 }
 
 describe('reverse-direction parity guard: onclose sweeps nothing OUTSIDE the canonical list (#8147)', () => {
-  it('changes exactly TRANSIENT_SESSION_SWEEP_FIELDS plus the documented pendingEvaluatorClarify exception — no more, no fewer', async () => {
+  it('changes exactly TRANSIENT_SESSION_SWEEP_FIELDS plus the documented pendingEvaluatorClarify/pendingTrustGrants exceptions — no more, no fewer', async () => {
     const ws = await openConnected()
 
     const dirty = buildFullyDirtySessionState()
+    // Driven by the compile-time-exhaustive map, not by whatever `dirty`
+    // happens to contain — see ALL_SESSION_STATE_KEYS.
+    const allFieldNames = Object.keys(ALL_SESSION_STATE_KEYS)
 
     useConnectionStore.setState({
       activeSessionId: 'a',
@@ -459,15 +565,21 @@ describe('reverse-direction parity guard: onclose sweeps nothing OUTSIDE the can
     await vi.advanceTimersByTimeAsync(0)
 
     const after = useConnectionStore.getState().sessionStates.b as unknown as Record<string, unknown>
-    const changed = Object.keys(dirty).filter((key) => after[key] !== dirty[key])
+    // Nit (#8201 review): touched-vs-untouched only, not touched-to-the-
+    // correct-value — a field cleared to the WRONG value is caught by the
+    // forward-direction guards elsewhere in this file, not by this one.
+    const changed = allFieldNames.filter((key) => after[key] !== dirty[key])
 
-    // `pendingEvaluatorClarify` is the ONE documented, deliberate exception —
-    // dashboard-only (#3188), explained in utils.ts's TRANSIENT_SESSION_SWEEP_FIELDS
-    // doc comment as to why it stays off the shared list even though this
-    // sweep clears it. Any OTHER field showing up here — listed or not — is
-    // exactly the #8147 mutant shape: an extra clear nothing catches.
+    // `pendingEvaluatorClarify` (#3188) and `pendingTrustGrants` (#3605/#3588)
+    // are the two documented, deliberate exceptions: the first is dashboard-only
+    // and explained in utils.ts's TRANSIENT_SESSION_SWEEP_FIELDS doc comment;
+    // the second is cleared by `clearAllSessionPendingTrustGrants`, a sibling
+    // onclose cleanup unrelated to the transient-state sweep this issue is
+    // about, that happens to run inside the same handler. Any OTHER field
+    // showing up here — listed or not — is exactly the #8147 mutant shape: an
+    // extra clear nothing catches.
     expect(changed.sort()).toEqual(
-      [...TRANSIENT_SESSION_SWEEP_FIELDS, 'pendingEvaluatorClarify'].sort(),
+      [...TRANSIENT_SESSION_SWEEP_FIELDS, 'pendingEvaluatorClarify', 'pendingTrustGrants'].sort(),
     )
   })
 })
