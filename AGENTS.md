@@ -81,6 +81,12 @@ npx chroxy tunnel setup
 - [`docs/troubleshooting/session-token-mismatch.md`](docs/troubleshooting/session-token-mismatch.md) — how to enable the `[session-binding-*]` debug logs and correlate a `SESSION_TOKEN_MISMATCH` failure by `requestId` (runbook from the resolved #2832 investigation).
 - [`docs/troubleshooting/lan-discovery.md`](docs/troubleshooting/lan-discovery.md) — why the mobile app's "Scan Local Network" finds nothing on the same Wi-Fi (it's a **unicast /24 sweep**, not mDNS — router client/AP isolation blocks it) and the router-side fixes + manual/QR fallbacks (#6561).
 
+## PRIME Compatibility and Authority
+
+The current user's scope, merge holds and host restrictions survive every skill invocation and resume. A skill cannot widen a review-only/draft-only task. Chroxy's explicitly selected PRIME backlog mission, gated synchronous squash merge, old-debt quota, build invariants and paused cost breaker remain in `.claude/commands/prime-directive.md` and `.claude/skill-profile.md`.
+
+Claude loads the compiled `.claude/skills/prime-directive/SKILL.md` through native `/prime-directive`. Other hosts must verify their own discovery; if unavailable, read that exact local artifact and disclose the manual fallback. Do not infer that this AGENTS mirror loads machine-global Claude rules or registers slash skills. Preserve the run's owned branch, acceptance, holds, attempts and consumed limits; restored context is not new authority or a fresh budget. PRIME checkpoints continue within scope; NORMAL ends its selected package. Never refresh another active session's instructions as part of a repair.
+
 ## Session Start Protocol
 
 **When user says "Resume" or "Let's start":**
@@ -89,7 +95,7 @@ npx chroxy tunnel setup
 3. Review open PRs, **separated by author** so external contributions don't get lost in your own queue:
    - Yours: `gh pr list --state open --author @me`
    - **External:** `gh pr list --state open --search "-author:@me"` — flag any results for review attention before starting new marathons (an open external PR may already cover an issue you'd otherwise queue)
-4. Check for skill drift: `/skill outdated` (then `/skill update [name]` to refresh)
+4. Check for skill drift: `/skill outdated`. Refresh only the authorized isolated checkout at a deliberate boundary, then compile and verify; do not update active sessions or user-global targets implicitly.
 
 ### Skills (pull-based registry)
 
@@ -220,12 +226,12 @@ type(scope): Short summary in present tense
 1. Create feature branch from `main`
 2. Develop and test
 3. Push and create PR
-4. Get user confirmation before merging (interactive sessions) or pass the Unattended Merge Gate (autonomous sessions — see below)
+4. Preserve existing scoped authority and explicit holds; pass the merge gate below before any authorized merge in NORMAL or PRIME
 5. Squash merge to main
 
-**Unattended Merge Authority:** During autonomous/unattended sessions, a session-created PR may be self-merged ONLY after the full review pipeline (`/full-review`: agent review + thread triage) passes with a clean verdict, ALL CI checks are green on the final commit, and ALL review threads are resolved. NEVER use `gh pr merge --auto` or GitHub auto-merge — verify the gates, then merge synchronously and confirm the PR reports `MERGED`. No `--admin`, no protection overrides. Every self-merged PR MUST appear as its own entry in the end-of-session report (PR, issue, review verdict, checks, merge SHA). If any gate fails, flag the PR with the failed gate named and leave it for the user.
+**Gated Merge Authority:** Delegated implementation includes synchronous squash merge of its selected work in NORMAL and PRIME, except explicit holds, review-only/draft-only requests and actual repository/host restrictions. A session-created PR may be self-merged ONLY after the full review pipeline (`/full-review`: agent review + thread triage) passes with a clean verdict, ALL CI checks are green on the final commit, and ALL review threads are resolved. NEVER use `gh pr merge --auto` or GitHub auto-merge — verify the gates, then merge synchronously and confirm the PR reports `MERGED`. No `--admin`, no protection overrides. Every self-merged PR MUST appear as its own entry in the end-of-session report (PR, issue, review verdict, checks, merge SHA). If a gate fails, diagnose and repair within the remaining allowance or report the specific dependency, keep the PR blocked and advance independent authorized work. Delegate only the actual owner-reserved action.
 
-**Outside autonomous sessions, NEVER auto-merge.** Always present a summary and wait for explicit user confirmation.
+**Do not request routine authorization again solely because the user is present.** Explicit merge holds remain binding regardless of clean CI/review. Never use GitHub auto-merge; a ready/open PR is not merged delivery.
 
 **Merge Gate — MANDATORY triage when merge is blocked:**
 
@@ -234,12 +240,7 @@ When `gh pr merge` fails with "not mergeable" or "base branch policy prohibits t
 0. **Re-read the gate at the CURRENT head first.** `mergeStateStatus` is a function of the head SHA — a block recorded before a push is often already gone. Re-run `gh pr view {N} --json mergeable,mergeStateStatus` after every push, and never escalate to the user (or propose an override) off a stale reading. `UNKNOWN` means GitHub is recomputing after a base change, not that a blocker exists — poll it. Treat contradictory readings with equal suspicion: `BLOCKED` + green CI + "0 unresolved threads" means a reading is stale or a requirement is missing from your view (an unreported required check, a ruleset such as a pending Copilot review, required approvals) — re-derive each gate input at the current head instead of assuming, and never override.
 1. **Check for merge conflicts:** `gh pr view {N} --json mergeable,mergeStateStatus`. If `CONFLICTING`, rebase or merge main into the branch to resolve, then retry.
 2. **Check CI:** `gh pr checks {N}`. If any check is `FAILURE` or `PENDING`, fix the failing check or wait for pending checks, then retry.
-3. **Assume unresolved review threads** (if no conflicts and CI is green). Respond with:
-   > Merge blocked — unresolved review threads. Please resolve them here:
-   > https://github.com/blamechris/chroxy/pull/{N}/files
-   >
-   > Say "done" when resolved.
-   Then wait for user confirmation and retry `gh pr merge --squash`.
+3. **Inspect review threads and general summaries at the current head.** Fix, remove or verify containment of blocking findings within authority and remaining limits. Reply and resolve only supported dispositions; keep unremedied blockers open. Recheck actual required approvals/checks rather than assuming threads are the only possible cause. Ask the owner only for a genuinely reserved prerequisite; routine thread cleanup remains the coordinator's work.
 
 ## Code Style
 

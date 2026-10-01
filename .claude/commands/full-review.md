@@ -10,7 +10,7 @@ Run a complete review pipeline: agent-review first, then check-pr. The agent-rev
 
 ### Phase 1: Agent Review
 
-Run the `/agent-review` skill on the PR. This is a deep expert review that:
+Run the `/agent-review` skill on the PR with an independent reviewer who did not implement the change; record the reviewed head SHA. This is a deep expert review that:
 - Reads CLAUDE.md and the full PR diff
 - Reviews against project-specific code quality, architecture, and testing criteria
 - Posts a review comment on the PR
@@ -21,26 +21,23 @@ Run the `/agent-review` skill on the PR. This is a deep expert review that:
 
 ### Phase 2: Check-PR
 
+Carry the caller's durable run record and remaining correction/budget allowance into `/check-pr`, `/fix-ci` and any fix-delta verification. Record each correction before editing; a nested skill, fresh reviewer or restart does not reset the allowance. Read-only triage does not consume a repair round. If exhausted or unknown, retain `request_changes` for blocking findings and return to the caller for independent work.
+
 After agent-review completes, run the `/check-pr` skill on the same PR. By now, Copilot review has typically arrived (~4 min). This skill:
 - Waits for Copilot review if still pending (Step 0 polling)
-- Processes every review comment (Copilot + human + agent-review findings if inline)
-- Fixes, dismisses, or defers each comment with inline replies
+- Processes inline comments and general review/issue summaries from all reviewers, including findings without threads
+- Verifies impact and fixes/removes/contains blocking defects, disproves false positives with evidence, or records eligible nonblocking follow-ups; replies at the original source
 - Pushes all fixes and verifies every thread has a reply
-- **Resolves every conversation thread via GraphQL** so branch protection's "conversations resolved" gate clears. Replies alone don't do this.
+- **Resolves only verified eligible dispositions via GraphQL**. An unresolved blocking finding stays open and keeps the verdict `request_changes`; an issue URL is not a fix.
 - Cross-references fixes against open from-review issues
 
 **Capture the results:** comments processed, fixes committed, issues created/closed.
 
-### Phase 2.5: Verify CI (Optional)
+### Phase 2.5: Verify the Current Head
 
-If check-pr pushed any fix commits in Phase 2, CI needs to pass on the new HEAD before merge. Concurrency groups commonly cancel the in-progress run when fixes are pushed, leaving CI stale.
+Read the current PR head, existing CI and independent review evidence even when this pass made no commits. After any fix or branch update, verify the affected fix delta independently within the shared review/repair allowance and require checks covering the final head. Do not reuse old-head green results. If needed, use `/fix-ci` within the remaining allowance; pending/unavailable checks remain pending/unknown, never a pass. A watcher ending is not a verdict.
 
-1. Check if any commits were pushed in Phase 2 (check-pr fixes)
-2. If yes, run `/fix-ci` on the same PR
-3. Common outcome: retriggering a cancelled run after concurrency cancellation
-4. If no commits were pushed, skip this phase (CI is still valid from before)
-
-**Capture the results:** CI status, any action taken (retrigger/fix/escalate).
+Fix, remove or verify containment of blocking correctness, security, data-integrity and promised-acceptance defects before a clean verdict. Effort over 15 minutes, filed issues, resolved threads and green CI alone do not discharge a finding. Nonblocking follow-ups need evidence that acceptance and safety remain intact. Keep unavailable gates explicit and return blocked work to the coordinator without inventing a reviewer or another allowance.
 
 ### Phase 3: Combined Summary
 
@@ -55,7 +52,7 @@ Output a **single combined summary table** covering both phases. This is the PRI
 **Column guide:**
 - **Review:** Verdict + finding counts from agent-review
 - **Check-PR:** `N comments → M fixed` (add `, X false pos` / `, Y deferred` if any)
-- **CI:** Status from Phase 2.5. `PASS` / `PASS (after retrigger)` / `PASS (after fix)` / `ESCALATED` / `—` (if Phase 2.5 was skipped because no commits were pushed)
+- **CI:** Status from Phase 2.5. `PASS` / `PENDING` / `FAILED` / `UNKNOWN`, with the head SHA covered
 - **Changes:** Comma-separated brief descriptions of what changed (2-5 words each, from check-pr fixes)
 - **Issues:** Combined from both phases. `Created: #X` for new follow-ups. `Closed: #Y` for resolved issues. Deduplicate (agent-review may create issues that check-pr then closes).
 
@@ -63,13 +60,13 @@ Then below the table:
 - Full commit hashes for each fix
 - Reasons for any false positives
 - URLs for all created/closed issues
-- PR ready for re-review: Yes/No
+- Reviewed/current head SHA, remaining blockers and explicit holds; ready/open is not merged delivery
 
 ## Execution Notes
 
 - **Sequential, not parallel.** Agent-review MUST complete before check-pr starts. This is by design — the delay lets Copilot review arrive.
 - **Same branch.** Both skills operate on the same PR branch. Check-pr may commit fixes on top of the reviewed code.
 - **Deduplication.** If agent-review creates a follow-up issue and check-pr's fixes resolve it, close the issue in Phase 2 with a PR cross-reference.
-- **Threads resolved before declaring done.** Check-pr's step 6b runs the GraphQL `resolveReviewThread` mutation for every thread. Without it, branch protection blocks merge silently — the user has to click "Resolve conversation" once per thread. If you skip this, full-review is not done; you've handed the user manual cleanup.
+- **Blocking findings remain blocking.** Resolve supported dispositions only; all required threads and general findings must be accounted for before merge. Return the verified verdict to the coordinator; a review-only request or explicit merge hold never grants merge authority.
 - **Attribution.** Follow Zero Attribution Policy throughout — no AI mentions in commits, replies, or issues.
 <!-- skill-templates: full-review 1e5962e 2026-07-30 -->
