@@ -750,6 +750,78 @@ function abortTranscriptFetchesOnSocketDrop(
   }
 }
 
+/**
+ * #7570 — the context-SWITCH teardown: everything that must happen, in this
+ * order, before the tab is pointed at a DIFFERENT daemon (`serverId`), or at
+ * the registry-less local one (`null`). One definition, run by `switchServer`,
+ * `connectLocal` and `connectToServer`'s different-daemon branch, so a fourth
+ * way of retargeting cannot grow its own subset of it.
+ *
+ * It is not "`_resetSessionMemory()` plus bookkeeping" — each step has a reason
+ * for where it sits:
+ *   1. `disconnect()` only when the phase is not 'disconnected'. What the guard
+ *      protects is the SOCKET teardown (close, attempt-id bump, request
+ *      correlations), which a socketless tab does not need. It must not be
+ *      relied on for the STORE state: a FAILED CONNECT rests at 'disconnected'
+ *      with the previous daemon's values intact, which is why step 3 spreads
+ *      the connection-scoped roster itself (#7559).
+ *   2. `setServerScope` BEFORE the reset — it flushes pending old-scope writes,
+ *      and the reset's subscriber side-effects must then target the NEW scope.
+ *   3. READ the new scope's persisted active session NOW, before the reset.
+ *      The reset nulls `activeSessionId`, and the persistence subscriber answers
+ *      that change with `persistActiveSession(null)` under the scope step 2 just
+ *      moved to — removing the very key this step restores from. A read placed
+ *      after the reset finds nothing whenever the outgoing tab had a session
+ *      open (`disconnect()` preserves `activeSessionId`), which is the normal
+ *      case (#8206 review).
+ *   4. `_resetSessionMemory()` — the in-memory wipe: the session roster, the
+ *      connection-scoped roster (`createEmptyConnectionScope()`), and the
+ *      module-level trackers (message queue, replay cursors, transcript fetch,
+ *      delta buffers, batched terminal writes). It does NOT clear persisted
+ *      data on purpose: a switch KEEPS each server's cache in its own scope.
+ *   5. Apply the active session read in step 3, so the first `session_list`
+ *      resolves against what this tab last had open under the new scope.
+ *
+ * Takes `set`/`get` rather than closing over them, in the shape
+ * `clearGitOneshotCallbacks` already uses, and calls the actions through
+ * `get()` so a test that swaps `disconnect` / `_resetSessionMemory` into the
+ * store observes them.
+ */
+function retargetToServer(
+  set: (partial: Partial<ConnectionState>) => void,
+  get: () => ConnectionState,
+  serverId: string | null,
+): void {
+  if (get().connectionPhase !== 'disconnected') {
+    get().disconnect();
+  }
+  setServerScope(serverId);
+  const persisted = loadPersistedState();
+  get()._resetSessionMemory();
+  set({ activeServerId: serverId, userDisconnected: false });
+  if (persisted.activeSessionId) {
+    set({ activeSessionId: persisted.activeSessionId });
+  }
+}
+
+/**
+ * #7570 — the one definition of "the store last spoke to a different daemon",
+ * shared by `connect()`'s url-differs self-clear and `connectToServer`'s
+ * retarget branch. They asked the same question with two hand-written copies of
+ * the same comparison, and nothing kept them agreeing: a loosened comparator in
+ * one site alone passed every test (#8206 review, S2).
+ *
+ * `current` is the store's `wsUrl` (recorded at `auth_ok`, nulled by the
+ * teardown): `null` means "never connected" — a fresh page, or right after a
+ * teardown — and is NOT a different daemon. The comparison is the raw strict
+ * inequality both sites always used; no trailing-slash, scheme or case
+ * normalisation (the registry only `.trim()`s at write), so a URL that differs
+ * only by a trailing slash IS different, here and at both call sites alike.
+ */
+function isDifferentDaemonUrl(current: string | null, target: string): boolean {
+  return current !== null && current !== target;
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionPhase: 'disconnected',
   wsUrl: null,
@@ -2543,7 +2615,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
     // Detect if connecting to a different server — clear old session data + queue
     const currentUrl = get().wsUrl;
-    if (_retryCount === 0 && currentUrl !== null && currentUrl !== url) {
+    if (_retryCount === 0 && isDifferentDaemonUrl(currentUrl, url)) {
       get().forgetSession();
       clearMessageQueue();
     }
@@ -3553,11 +3625,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // one; and `clearPersistedState()` is deliberately NOT mirrored here because
     // `switchServer` KEEPS the old server's cached data on purpose. (`resetReplay
     // Flags()` in `disconnect()` is subsumed by the cursor reset above.)
-    // These do NOT propagate to the reconnect paths — `connectToServer` /
-    // `retryConnection` do NOT run this action — so cursors stay retained and
-    // tunnel-blip delta replay is unaffected; only the context-SWITCH paths reach
-    // here. Keeping this set in lockstep with `disconnect()`'s teardown by hand is
-    // what #7592 (extract a shared helper) exists to remove.
+    // These do NOT propagate to the reconnect paths — `retryConnection` and a
+    // `connectToServer` aimed at the daemon the tab already talks to do NOT run
+    // this action — so cursors stay retained and tunnel-blip delta replay is
+    // unaffected; only the context-SWITCH paths reach here, all through
+    // `retargetToServer`: `switchServer`, `connectLocal`, and (#7570) a
+    // `connectToServer` whose `wsUrl` differs from the store's. Keeping this set
+    // in lockstep with `disconnect()`'s teardown by hand is what #7592 (extract a
+    // shared helper) exists to remove.
     clearMessageQueue();
     resetReplayReconcile({ clearCursors: true });
     resetTranscriptFetchTracking();
@@ -5859,20 +5934,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!server) return;
     // No-op if already connected to this server
     if (serverId === get().activeServerId && get().connectionPhase === 'connected') return;
-    // Disconnect from current server (if connected)
-    if (get().connectionPhase !== 'disconnected') {
-      get().disconnect();
-    }
-    // Switch persistence scope first — flushes pending old-scope writes, then
-    // resets in-memory state so subscriber side-effects target the new scope
-    setServerScope(serverId);
-    get()._resetSessionMemory();
-    set({ activeServerId: serverId, userDisconnected: false });
-    // Restore persisted data for the new server
-    const persisted = loadPersistedState();
-    if (persisted.activeSessionId) {
-      set({ activeSessionId: persisted.activeSessionId });
-    }
+    // Disconnect, switch persistence scope, reset in-memory state, restore the
+    // new scope's persisted active session — the shared context-switch teardown.
+    retargetToServer(set, get, serverId);
     // Connect to the new server
     get().connect(server.wsUrl, server.token);
   },
@@ -5880,12 +5944,39 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   /**
    * Reconnect to a known server without clearing session state.
    * Use for auto-reconnect on startup or after transient disconnects.
+   *
+   * #7570 — "without clearing session state" holds for the SAME daemon:
+   * `retryConnection` and the startup auto-connect both pass the active server.
+   * When `serverId`'s `wsUrl` is not the one the store last connected to, this is
+   * a context SWITCH however it was reached, and it runs the same teardown as
+   * `switchServer` — otherwise the connection-scoped roster (`serverCapabilities`,
+   * `availablePermissionModes`, `environments`, `checkpoints`, …) crosses to the
+   * other daemon, because `connect()`'s url-differs self-clear runs
+   * `forgetSession()`, which does not clear it. A roster crossing to a DIFFERENT
+   * daemon needs `activeServerId` to move without `switchServer` (the registry
+   * edited in another tab, corrupt storage) and is not reachable today; the
+   * branch itself is: a Retry after a #5555 tunnel-URL rotation passes the active
+   * server with a repointed `wsUrl`.
+   *
+   * The test is `isDifferentDaemonUrl`, the predicate `connect()`'s own
+   * self-clear uses for the same question: the target's `wsUrl` against the
+   * store's. `wsUrl` is recorded at `auth_ok` and nulled by the teardown, so
+   * `null` means "never connected" (a fresh page's startup auto-connect, which
+   * must keep the cache it just hydrated) and is not a different daemon. A
+   * registry entry repointed to a rotated tunnel URL reads as different —
+   * `connect()` always treated it so — and takes the full teardown instead of the
+   * lighter `forgetSession()`; that keeps the persisted cache and restores the
+   * active session, where the self-clear wiped both.
    */
   connectToServer: (serverId: string) => {
     const server = get().serverRegistry.find(s => s.id === serverId);
     if (!server) return;
-    setServerScope(serverId);
-    set({ activeServerId: serverId });
+    if (isDifferentDaemonUrl(get().wsUrl, server.wsUrl)) {
+      retargetToServer(set, get, serverId);
+    } else {
+      setServerScope(serverId);
+      set({ activeServerId: serverId });
+    }
     get().connect(server.wsUrl, server.token);
   },
 
@@ -5902,19 +5993,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const wsUrl = `${proto}://${window.location.host}/ws`;
     // Already on local and connected — nothing to do.
     if (get().activeServerId === null && get().connectionPhase === 'connected') return;
-    if (get().connectionPhase !== 'disconnected') {
-      get().disconnect();
-    }
-    // Switch persistence scope to local (null) before resetting in-memory state,
-    // so subscriber side-effects target the local scope (same ordering as
-    // switchServer).
-    setServerScope(null);
-    get()._resetSessionMemory();
-    set({ activeServerId: null, userDisconnected: false });
-    const persisted = loadPersistedState();
-    if (persisted.activeSessionId) {
-      set({ activeSessionId: persisted.activeSessionId });
-    }
+    // Same teardown as switchServer, with the persistence scope switched to
+    // local (null).
+    retargetToServer(set, get, null);
     get().connect(wsUrl, token);
   },
 
@@ -5926,7 +6007,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
    * reconnected a dropped remote LAN session to the *local* daemon instead
    * (#5284). Unlike switchServer/connectLocal this preserves session state — a
    * retry resumes the same connection rather than switching contexts, so it
-   * reuses connectToServer's no-reset reconnect for the registry case.
+   * reuses connectToServer's no-reset reconnect for the registry case. (That
+   * reconnect is no-reset only while the target is the daemon the store last
+   * connected to; a repointed `wsUrl` takes the switch teardown — #7570.)
    */
   retryConnection: () => {
     // #5698 — a user-initiated retry starts a fresh reconnect ladder. Without

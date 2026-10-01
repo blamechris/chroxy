@@ -2320,12 +2320,27 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * answer 2 still means "really cleared by disconnect()" and now holds on the
  * switch as well.
  *
- * The remaining hole, named rather than omitted: `connectToServer` goes through
- * NEITHER action — it calls `connect()`, whose `currentUrl !== url` self-clear
- * runs `forgetSession()`, and `forgetSession` does not spread this roster. A
- * `connectToServer` to a DIFFERENT daemon from a disconnected tab would still
- * carry the seventeen. Its callers target the ACTIVE server, so nothing reaches
- * it today; filed rather than folded.
+ * The hole this paragraph used to name — `connectToServer` went through NEITHER
+ * action, so a call at a DIFFERENT daemon carried the whole roster across (its
+ * only protection was `connect()`'s `currentUrl !== url` self-clear, which runs
+ * `forgetSession()`) — is closed by #7570, and closed WITHOUT moving anything
+ * between the answers. `connectToServer` aimed at a `wsUrl` other than the
+ * store's now runs the same teardown as `switchServer` / `connectLocal` (one
+ * shared `retargetToServer`, ending in `_resetSessionMemory()`, which spreads
+ * the roster). `forgetSession` still does NOT spread it, deliberately: doing so
+ * would move every `CLEARED_ON_DISCONNECT` member into answer 1 (and the
+ * disjointness cell below would force that), which is a taxonomy rewrite and
+ * would turn #7552's `environments` pin red. The behavioural cells live in the
+ * two '#7570' describe blocks in `connection-lifecycle-resets.test.ts` (the
+ * different-daemon block and the same-daemon block).
+ *
+ * What that leaves, named rather than omitted: a DIRECT `connect(url, …)` to a
+ * different URL still reaches `forgetSession()` alone — in production the Tauri
+ * `server_ready` handler dialling a daemon that came back on another port, and
+ * the reconnect scheduler and health-check retry, which re-resolve the registry
+ * endpoint and call `connect()` directly — and the `forgetSession()` it runs
+ * nulls `wsUrl`, so a `connectToServer` made afterwards reads "never connected"
+ * and cannot tell the roster is stale. Tracked by #8207.
  */
 describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one', () => {
   /**
