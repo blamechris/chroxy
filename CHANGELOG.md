@@ -40,6 +40,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`git_status` and `git_stage`/`git_unstage` now agree on what a path
+  means, status paths are no longer C-quoted or octal-escaped, and a
+  renamed entry's `oldPath` never leaks onto the wrong half or onto a copy
+  (#7292, review follow-up #8183).**
+  `gitStatus` (`packages/server/src/ws-file-ops/git.js`) forwarded `git
+  status --porcelain=v1` paths to the client verbatim. Defects fell out of
+  that, all invisible at the repo root (every prior git-status/git-stage
+  fixture used it) and all real from a session cwd that is a repo
+  subdirectory: (1) `git status` paths are REPO-ROOT-relative even when run
+  from a subdirectory, while `gitStage`/`gitUnstage` resolve whatever they
+  receive against the SESSION CWD — staging from a subdirectory session
+  could silently stage the wrong file, or fail with an opaque pathspec
+  error; (2) porcelain C-quotes/octal-escapes a path containing spaces or
+  non-ASCII bytes (`"caf\303\251.txt"`), and the client received the
+  literal quotes/escapes, which can never match a real file; (3) a
+  staged rename reported only its destination, so unstaging it left the
+  source's staged deletion behind (git records a rename as two independent
+  index operations, not one atomic move).
+  The wire contract is now explicit (documented in `git.js`'s header and the
+  protocol schema): `git_status_result` paths are always relative to the
+  SESSION CWD — the same base `git_stage`/`git_unstage` already resolve
+  `file` against — '/'-separated, and never quoted/escaped. `gitStatus` gets
+  there with `git status --porcelain=v1 -z` (NUL-delimited, which disables
+  quoting and reports a rename/copy as two separate fields instead of an
+  ambiguous `<path> -> <path>` join) and rebases every repo-root-relative
+  path onto the session cwd via `git rev-parse --show-toplevel`.
+  A **rename-only** `oldPath` field was then found to leak in a follow-up
+  review: it was attached to BOTH halves of a record whenever the STAGED
+  side was a rename/copy, so an "RM" record (a staged rename whose
+  destination is further modified, unstaged) wrongly carried `oldPath` on
+  the plain `modified` unstaged entry too, and a **copy** (whose source is
+  NOT removed, unlike a rename) got expanded the same way a rename does —
+  staging/unstaging a copy's destination could fold in the source's own,
+  unrelated changes. `oldPath` is now attached per COLUMN (only when that
+  half's own code is `R`), never for `C`, and the extra NUL field is
+  consumed whenever EITHER column is `R`/`C` (a worktree-side rename via
+  `git add -N` on a moved file previously desynced the NUL parser, inventing
+  ghost entries and swallowing real ones). `@chroxy/store-core`'s
+  `expandRenamePathsForStaging` — sent alongside `path` by the dashboard's
+  `GitPanel` and the mobile app's `GitView` on stage/unstage — also checks
+  `status === 'renamed'` directly as defense in depth. Also fixed in the
+  same follow-up: `--show-toplevel`'s output is trimmed of only its
+  trailing newline (not `.trim()`-ed, which mis-based every path when the
+  repo root's own directory name ended in whitespace); an untracked
+  directory keeps its trailing slash on the wire instead of losing it to
+  `relative()`; a session cwd inside (or that IS) an untracked directory no
+  longer emits a bare `''`/`'..'` untracked entry nothing could act on;
+  and `gitStage`/`gitUnstage`'s pathspec args gained fixtures proving the
+  existing `--` separator actually matters (a file named `--all`/`--hard`
+  would otherwise be read as a flag by git's own argv parser).
+
 - **Dashboard: worktree sessions show and group by their repo on the
   sidebar, footer, and file tree — not the opaque worktree-hex basename
   (#8123, follow-up to #7328).** #7328 fixed the SessionBar tab-cwd badge so

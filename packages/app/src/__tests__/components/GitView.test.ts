@@ -110,4 +110,24 @@ describe('GitView source scan', () => {
     expect(SRC).toContain('GitStageResult');
     expect(SRC).toContain('GitCommitResult');
   });
+
+  // #8183 review (S4) — a rename's oldPath must ride along on BOTH
+  // stage and unstage, or unstaging/staging a renamed entry leaves the
+  // other half of the rename behind (#7292). Guards against the wiring
+  // being silently dropped from one or both handlers.
+  it('imports expandRenamePathsForStaging from @chroxy/store-core', () => {
+    expect(SRC).toContain("from '@chroxy/store-core'");
+    expect(SRC).toContain('expandRenamePathsForStaging');
+  });
+
+  it('expands rename paths before both requestGitStage and requestGitUnstage', () => {
+    const stageIdx = SRC.indexOf('handleStageSelected');
+    const unstageIdx = SRC.indexOf('handleUnstageSelected');
+    expect(stageIdx).toBeGreaterThan(-1);
+    expect(unstageIdx).toBeGreaterThan(-1);
+    const stageBody = SRC.slice(stageIdx, unstageIdx);
+    const unstageBody = SRC.slice(unstageIdx, SRC.indexOf('handleCommit'));
+    expect(stageBody).toContain('expandRenamePathsForStaging(');
+    expect(unstageBody).toContain('expandRenamePathsForStaging(');
+  });
 });
