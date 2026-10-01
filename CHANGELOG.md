@@ -40,6 +40,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The protocol and store-core dist-drift CI checks now catch a tracked dist
+  file orphaned by a deleted source, not just a modified or new one (#8163).**
+  #8152 closed the "new untracked/ignored file" blind spot, but a narrower one
+  survived: a tracked dist file whose SOURCE was deleted is byte-identical to
+  what's committed and matches neither check — `tsc` never removes output for
+  a source file no longer in its program, it just leaves the old file sitting
+  there. `scripts/check-dist-drift.sh` now owns the build itself instead of
+  diffing whatever a separate build step left behind: it takes the build
+  command as arguments, wipes `<dist-dir>`, reruns that command from scratch,
+  and only then diffs — a source file that no longer exists simply produces
+  nothing for it, which turns the orphan into an ordinary tracked-file
+  deletion that `git diff --name-status` reports as `D` and the script names
+  explicitly. Deriving "what's expected" from a real clean build (rather than
+  a hardcoded file list) also means the check keeps working as each package's
+  set of tracked dist files grows, instead of needing to be told about it.
+  Both CI call sites (`ci.yml`'s `protocol-tests` and `store-core-tests` jobs)
+  now pass their build command straight to the script instead of running it
+  as a separate prior step.
+
+  A review of the first version of this fix found three problems before
+  merge, all addressed here. **The script now VALIDATES `<dist-dir>` before
+  moving or deleting anything** — owning the build means owning `mv`/`rm -rf`
+  on a caller-supplied path, and an unvalidated one let a reviewer
+  permanently delete the directory containing the repo (`../../outer`) and a
+  sibling directory (`../sibling`) in reproducible sandboxes; `<dist-dir>`
+  must now be a relative path with no `.`/`..` component, ending in a
+  component named exactly `dist`, that resolves (symlinks included) strictly
+  inside the repo and outside `.git`, or the script refuses with a usage
+  error before touching anything. The backup used to restore a failed or
+  empty build is now a same-filesystem sibling of `<dist-dir>` (atomic
+  rename, no TMPDIR cross-device copy) and is deleted only once a verdict is
+  reached or a restore is verified to have succeeded — never on a failed
+  restore, which now keeps the backup on disk and prints its path instead of
+  discarding the only copy. SIGINT/SIGTERM/SIGHUP during the build now
+  restore the pre-existing `dist/` the same way a failed build does, instead
+  of leaving it wiped. **The untracked-file check was also widened**: it used
+  to list only *ignored* untracked files (`git ls-files --others --ignored
+  --exclude-standard`), which misses a file matching a package's own
+  `!dist/<file>` negation — store-core's real shape — so an emitted file
+  matching that negation but missing from the index passed as clean; it now
+  lists any untracked file under `<dist-dir>` at all.
+
+  `scripts/__tests__/check-dist-drift.test.sh` (48 cases) adds: the orphan
+  case (proven red against the old one-argument contract on the same
+  fixture); the untracked-but-not-ignored case (reproducing the real
+  store-core false-green and proving the fix closes it); the zero-emit floor
+  isolated against a dist dir with no tracked files at all; a build that
+  fails after emitting everything (the `tsc`-on-a-type-error shape the
+  zero-emit floor alone cannot catch); a git failure aborting non-zero; a
+  SIGTERM mid-build restoring `dist/`; and, for the path-validation fix,
+  every rejected shape (absolute, `..`-containing, repo root, `.git`,
+  wrong basename, symlink) proven against disposable sandboxes with a canary
+  checksummed before and after — alongside the existing clean/modified/
+  untracked coverage from #8152.
+
+  Passing the build command as a `check-dist-drift.sh <dist-dir> npm run
+  ...` argument also broke the `#7613`/`#7661` npm-resolve CI-budget guard
+  (`packages/server/tests/ci-npm-resolve-budget.test.js`): its reader had no
+  way to know that `npm` sitting behind this particular first-party wrapper
+  script is still in command position, since nothing there tries to guess
+  whether an arbitrary prefix like `sudo`/`xargs`/`timeout` runs its operand.
+  `workflow-reader.js` adds a narrow, explicit `COMMAND_WRAPPERS` roster
+  (currently just this one script) recording how many of a wrapper's own
+  arguments precede the command it execs, verified against the wrapper's own
+  source rather than guessed at — every entry is checked to both exist on
+  disk and be genuinely invoked by some real workflow job, and a mutation
+  test removes the entry to prove the real `ci.yml` call sites revert to
+  unclassified (the exact failure this fix closes) rather than merely
+  asserting the roster's presence.
+
+  **A second review round found the containment check itself still
+  bypassable.** It verified the physical directory sat somewhere inside the
+  repo, but not that `<dist-dir>` NAMED that location — so an npm-workspace
+  symlink (`node_modules/@chroxy/protocol/dist`, present in every checkout),
+  any other in-repo symlinked intermediate component, and (on a case-
+  preserving filesystem such as APFS) a wrong-case spelling of a real path
+  all physically resolved somewhere legitimate while git's pathspecs could
+  not see through them — a silent false-clean that deleted a real orphan
+  from the working tree while reporting "OK". A crafted path containing an
+  embedded newline (`IFS='/' read -ra` only scans the first line of its
+  input) reached the same containment check with its embedded `..` never
+  segment-checked, and walked a symlink back "inside" the repo on paper
+  while the physical `mv`/`rm -rf` acted on the real, outside-the-repo
+  target. Fixed by requiring an EXACT match between what `<dist-dir>` claims
+  and where it physically resolves (`cd -P` + the external `/bin/pwd -P`,
+  not the builtin, which was observed to preserve the caller's typed case on
+  APFS) — any symlinked component or case mismatch now fails validation —
+  plus an up-front rejection of any control character in `<dist-dir>`. Also
+  closed in the same round: a SIGINT/SIGHUP in addition to the already-
+  handled SIGTERM (bash pre-ignores SIGINT for a backgrounded job in a non-
+  interactive shell, which had made the harness's own INT coverage a no-op
+  rather than a real test); a backup stranded by a SIGKILL (which no trap
+  can catch) or an already-failed restore is now detected by the NEXT run
+  before it creates one of its own, refusing until the stray copy is
+  resolved by hand; and `--literal-pathspecs`, whose comment wrongly claimed
+  the basename rule made it moot — pathspec magic is a prefix of the WHOLE
+  path, not its last component, so a `:(glob)`-prefixed first component
+  still needs the flag.
+
+  `scripts/__tests__/check-dist-drift.test.sh` grows to 86 cases, adding
+  ISOLATING coverage for each safety layer individually (a round-2 review
+  found 11 of the original 14 such cases were each caught by two or more
+  overlapping layers at once, so deleting any single layer left the harness
+  green): a symlinked intermediate resolving outside the repo; `.git/dist`
+  targeted directly; an in-repo symlinked dist dir with a real orphan behind
+  it (reproducing the false-green, and the round-1 logic that would have
+  accepted it); the embedded-newline case; a pathspec-magic first component
+  with a real orphan, both with the flag intact and removed (mutant); SIGINT
+  and SIGHUP restoring `dist/` the same as SIGTERM; a restore that itself
+  fails via a PATH-shimmed `mv`, proving the backup is kept and byte-
+  identical (plus a mutant restoring round-1's unconditional-delete bug,
+  confirming the case actually catches it); no backup surviving a clean or a
+  drift verdict (plus a leak mutant); and the stranded-backup detection.
+
+  **A third review round, having confirmed all three round-2 bypasses
+  closed (including the `.GIT` case variant, established directly against a
+  freshly-mounted case-insensitive disk image rather than inferred), found
+  two more problems in this round's own additions.** The stranded-backup
+  glob (`STRAY=($BACKUP_GLOB)`) expanded its pattern UNQUOTED, so the
+  directory part — not just the intended trailing `*` — was both word-split
+  and glob-interpreted: a space or glob character in the repo root or the
+  dist dir's parent silently skipped the whole check (every invocation from
+  such a checkout never saw a stranded backup again), and a space-containing
+  parent with an unrelated real sibling directory misread that sibling AS a
+  stranded backup and told a developer to `rm -rf` it. Fixed by quoting only
+  the dirname and leaving the literal glob suffix outside the quotes; the
+  printed recovery commands are now `printf '%q'`-quoted too (an unquoted
+  path with a space previously split `rm -rf parent/dist` into two wrong
+  arguments), and the restore form now ends in `&& rmdir <parent>` so
+  following it verbatim doesn't leave an empty backup directory for the next
+  run to trip over. Separately, the harness's own isolating case for the
+  round-2 exact-match fix never actually reached it: its fixture symlink was
+  named `linked-dist`, which the "must end in `dist`" basename rule rejects
+  BEFORE containment ever runs, so reverting the exact match to round 1's
+  prefix-only logic — the one thing round 2 was blocking on — left the
+  harness fully green. Replaced with a symlinked INTERMEDIATE component
+  (the actual npm-workspace shape) whose own last component is literally
+  `dist`, which does reach and is rejected by the exact-match check, proven
+  by a mutant that reintroduces the prefix-only regression.
+
+  Folded in the same round: the harness's "RED proof" for that same case had
+  been run inside a pipeline subshell, silently discarding its pass/fail
+  result (measured: forcing it to fail left 87 printed outcomes against a
+  summary of 86); `check()` now also appends to a real file on every call,
+  and the final tally cross-checks against that file's line count, which a
+  subshell cannot make disappear. The INT/HUP signal cases were found to
+  signal only the whole process group, under which bash's own default fatal-
+  signal handling fires regardless of whether this script's own trap is
+  present — so removing either trap went unnoticed; per-PID-only variants
+  (with `set -m` still active so the job's signal dispositions stay normal)
+  now isolate each trap, backed by its own mutant. A nested, non-submodule
+  `.git` (e.g. `packages/sub/.git/dist`) was previously accepted, since the
+  physical check's own `.git` rule only ever compared against the top-level
+  path; a component-level `.git` rule now rejects one at any depth. The
+  case-variant closure gained a harness case too, detected at runtime
+  (case-insensitive filesystems only) with a visible, count-neutral SKIP
+  line where it cannot run.
+
+  `scripts/__tests__/check-dist-drift.test.sh` grows to 120 cases.
+
 - **The root Docker image serves the dashboard and defaults to the headless
   `claude-sdk` provider, and actually proves it (#8151, HIGH-tier review
   round).** An owner decision scoped the image to exactly two things: the

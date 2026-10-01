@@ -2397,6 +2397,62 @@ function commandWords(line, from, scan = scanQuoting(line)) {
 }
 
 /**
+ * First-party scripts whose OWN trailing argv is itself a command line, so a
+ * command name appearing after the wrapper's fixed leading arguments really is
+ * in command position — the wrapper execs it.
+ *
+ * THIS IS NOT THE #7341 CLASS `isCommandPosition`'s docblock refuses to
+ * extend to `sudo`/`xargs`/`timeout`. Those are arbitrary, external commands;
+ * nothing here can read whether a given build of `sudo` runs its operand, so
+ * guessing is "predicting a shell" and the safe answer is `unclassified`. A
+ * roster entry here is instead a claim about ONE script this repo commits and
+ * controls — verified by reading ITS source, the same way a person reading
+ * `unclassified` output would — not a guess about an external command's
+ * documented behaviour. `scripts/check-dist-drift.sh` (#8163) does
+ * `"${BUILD_CMD[@]}"` after its own single fixed `<dist-dir>` argument; that is
+ * the whole justification for the `1` below, and it changes the moment the
+ * script's argv shape does.
+ *
+ * The value is how many of the wrapper's OWN arguments precede the wrapped
+ * command — not a count of anything about the wrapped command itself. A
+ * roster entry that stops matching any real invocation (the script is
+ * renamed, or no workflow calls it this way any more) is caught by
+ * `ci-npm-resolve-budget.test.js`'s two-directional control: every key here
+ * must both exist as a tracked file and be genuinely INVOKED (`invokes()`,
+ * not merely mentioned) in some real workflow, or that test goes red and asks
+ * a person to remove the stale entry.
+ */
+export const COMMAND_WRAPPERS = {
+  'scripts/check-dist-drift.sh': 1, // argv: <dist-dir> <build-cmd...>
+}
+
+/**
+ * Does this (already masked-and-trimmed) segment consist of NOTHING but a
+ * known wrapper's own invocation — `[interpreter] <wrapper-path> <its fixed
+ * leading args>` — with nothing else in front of the command word that
+ * follows?
+ *
+ * The match consumes the WHOLE segment: an optional single interpreter word
+ * (the same `INTERPRETERS` set `isCommandPosition` uses — every wrapper in
+ * this repo is spelled `bash <path> ...`, never invoked bare), the wrapper's
+ * path exactly as `COMMAND_WRAPPERS` names it, and EXACTLY its recorded
+ * fixed-argument count — no more, no fewer. Anything left over (another
+ * command in front, a typo'd path, the wrong number of leading arguments)
+ * fails the match and falls through to `unclassified`, the safe direction
+ * this whole module is built toward.
+ */
+function isWrapperCommandPrefix(segment) {
+  const words = segment.split(/\s+/).filter(Boolean)
+  if (words.length === 0) return false
+  const idx = INTERPRETERS.has(words[0]) ? 1 : 0
+  const scriptWord = words[idx]
+  if (scriptWord === undefined) return false
+  const fixedArgs = COMMAND_WRAPPERS[scriptWord]
+  if (fixedArgs === undefined) return false
+  return words.length - (idx + 1) === fixedArgs
+}
+
+/**
  * Every place `name` appears in a `run:` body, classified — see the section
  * header for the three buckets and why the third one exists.
  *
@@ -2437,11 +2493,17 @@ export function commandUses(runBody, name) {
     for (const at of namePositions(line, name)) {
       if (masked.slice(at, at + name.length) !== name) {
         uses.push({ kind: 'quoted', line, args: [], argsComplete: false })
-      } else if (segmentBefore(masked, at).trim() !== '') {
-        uses.push({ kind: 'unclassified', line, args: [], argsComplete: false })
       } else {
-        const { words, complete } = commandWords(line, at + name.length, scan)
-        uses.push({ kind: 'invocation', line, args: words, argsComplete: complete })
+        const segBefore = segmentBefore(masked, at).trim()
+        // Empty segment: the ordinary bare command position. A non-empty one
+        // is ALSO command position if — and only if — it is exactly a known
+        // wrapper's own invocation (#8163); see isWrapperCommandPrefix's doc.
+        if (segBefore !== '' && !isWrapperCommandPrefix(segBefore)) {
+          uses.push({ kind: 'unclassified', line, args: [], argsComplete: false })
+        } else {
+          const { words, complete } = commandWords(line, at + name.length, scan)
+          uses.push({ kind: 'invocation', line, args: words, argsComplete: complete })
+        }
       }
     }
   }

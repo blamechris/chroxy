@@ -1063,11 +1063,19 @@ jobs:
         # ignored by packages/store-core/.gitignore's blanket `dist/*`).
         # scripts/check-dist-drift.sh checks the whole dist/ directory instead
         # of one file, so it also catches that case; see its header.
+        #
+        # #8163 — a THIRD blind spot: a tracked dist file whose source was
+        # deleted is byte-identical to HEAD and neither modified nor
+        # untracked, so it matched neither check above either. Fixed by having
+        # check-dist-drift.sh own the build itself (it wipes dist/, reruns the
+        # given build command from scratch, then diffs) — NEVER run an
+        # emitting `tsc` on packages/store-core directly outside that script's
+        # own wipe/rebuild (it corrupts the committed dist/crypto.js; see
+        # CLAUDE.md).
         working-directory: .
         run: |
-          npm run build:crypto -w @chroxy/store-core
-          bash scripts/check-dist-drift.sh packages/store-core/dist || {
-            echo "::error::Run 'npm run build:crypto -w @chroxy/store-core' and commit the result (a NEW dist file needs 'git add -f' since dist/ is gitignored)."
+          bash scripts/check-dist-drift.sh packages/store-core/dist npm run build:crypto -w @chroxy/store-core || {
+            echo "::error::Run 'npm run build:crypto -w @chroxy/store-core' and commit the result (a NEW dist file needs 'git add -f' since dist/ is gitignored; a file no longer produced needs 'git rm')."
             exit 1
           }
 
@@ -1352,9 +1360,6 @@ jobs:
         run: npm ci
         working-directory: .
 
-      - name: Build @chroxy/protocol
-        run: npm run build
-
       - name: Check protocol dist is in sync with src
         # #8152 — a bare `git diff --exit-code` only looks at TRACKED paths.
         # dist/ is gitignored, so a NEW file the build emits (a new
@@ -1362,10 +1367,30 @@ jobs:
         # invisible to `git diff` — and this step stayed green while the file
         # was never committed. scripts/check-dist-drift.sh also fails on that
         # untracked/ignored case; see its header for the full writeup.
+        #
+        # #8163 — a SECOND blind spot: a tracked dist file whose source was
+        # deleted is byte-identical to the index and neither modified nor
+        # untracked, so it matched neither check either. Fixed by having
+        # check-dist-drift.sh own the build itself — it wipes
+        # packages/protocol/dist, reruns the given build command from
+        # scratch, then diffs — instead of diffing whatever a separate,
+        # possibly non-clean prior build step left behind. There is no
+        # standalone "Build @chroxy/protocol" step before this one anymore;
+        # this step's own clean rebuild is the only build packages/protocol
+        # gets in this job. That IS still needed before "Run tests" below:
+        # most of this package's tests import straight from ../src via tsx,
+        # but handler-coverage.test.js and handler-coverage-extract.test.js
+        # import `@chroxy/protocol/handler-coverage`, which resolves through
+        # `exports` to dist/handler-coverage-extract.js. Removing the
+        # standalone build step is safe only because dist is committed
+        # (so a complete dist already exists at checkout) and this step
+        # still runs — and leaves a freshly rebuilt dist in place — before
+        # "Run tests"; do not reorder this step after the tests, or give it
+        # `continue-on-error`.
         working-directory: .
         run: |
-          bash scripts/check-dist-drift.sh packages/protocol/dist || {
-            echo "::error::Run 'npm run build -w packages/protocol' and commit the changes (a NEW dist file needs 'git add -f' since dist/ is gitignored)."
+          bash scripts/check-dist-drift.sh packages/protocol/dist npm run build -w packages/protocol || {
+            echo "::error::Run 'npm run build -w packages/protocol' and commit the changes (a NEW dist file needs 'git add -f' since dist/ is gitignored; a file no longer produced needs 'git rm')."
             exit 1
           }
 
@@ -1772,10 +1797,26 @@ jobs:
         run: node scripts/__tests__/lint-workflow-npm-env.test.mjs
 
       - name: Run check-dist-drift.sh tests
-        # #8152 — golden test for the protocol/store-core dist-drift guards
-        # above: a clean dist passes, a modified tracked file fails, a NEW
-        # untracked+ignored file fails (the bug this script fixes), and a
-        # missing dist directory fails loudly rather than reading as clean.
+        # #8152 / #8163 — golden test for the protocol/store-core dist-drift
+        # guards above. check-dist-drift.sh now owns the build: it wipes
+        # <dist-dir>, reruns the caller's build command, then diffs. Covers a
+        # clean dist passing; a modified tracked file failing; a new
+        # untracked file failing whether or not it is gitignored (an #8152
+        # fix widened by a review finding: a file matching a package's own
+        # `!dist/<file>` negation was untracked but not ignored, and the old
+        # `--ignored`-scoped check missed it); an orphaned tracked file (its
+        # source deleted) failing and being named as orphaned, not modified;
+        # the zero-emit floor failing closed even with zero tracked files to
+        # diff against; a failed build failing closed whether or not it
+        # emitted output first; a git failure aborting non-zero; a SIGTERM
+        # mid-build restoring the pre-existing dist rather than leaving it
+        # wiped; and — the review's most serious finding — every shape of
+        # caller-supplied <dist-dir> that let an earlier version of this
+        # script `mv`/`rm -rf` something outside the intended dist directory
+        # (an absolute path, a `..`-containing path, the repo root, a
+        # symlink, a wrong basename) being refused with a usage error before
+        # anything is touched, proven against disposable sandboxes with a
+        # canary checksummed before and after.
         run: bash scripts/__tests__/check-dist-drift.test.sh
 
       - name: No write-only per-connection state (app context + dashboard bindings)
