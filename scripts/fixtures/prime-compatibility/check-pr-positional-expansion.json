@@ -1,0 +1,10 @@
+{
+  "description": "Sanitized excerpts captured from the one authorized Claude Code CLI 2.1.285 pilot; not a new native trial or complete interpolation emulator.",
+  "commit": "5774fdbcbb5acd91f2d0f0c2d9e722bc83a3f5d2",
+  "tool_call_id": "toolu_01UEQwxuAop3GcHs7grNq4Qv",
+  "compiled_artifact_sha256": "bfa2776e45ddaf317849aee9cf04566f9aacda14d03458429a4982073790e32a",
+  "native_injected_body_sha256": "ff328418c320f6fca2df37c777de9380342d55e1d66dd37434d0bd02e26d9f12",
+  "arguments": "Read-only evidence reconciliation, no new reviewer, no external action, no fixes, no merge. Inspect recorded merged evidence for #8200/#8202 only; do not reply to, resolve or post on any thread.",
+  "source_aggregation": "awk '{s+=$1} END {print s+0}'",
+  "injected_aggregation": "awk '{s+=evidence} END {print s+0}'"
+}

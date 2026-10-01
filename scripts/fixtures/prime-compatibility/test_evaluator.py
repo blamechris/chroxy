@@ -2,6 +2,10 @@
 import copy
 import json
 from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -148,6 +152,66 @@ class EvidenceTests(unittest.TestCase):
     def test_preparation_does_not_overwrite_evidence(self):
         with self.assertRaises(ValueError):
             prepare(Path(__file__).resolve().parents[3], self.root)
+
+
+class NativeCountTransportTests(unittest.TestCase):
+    """Replay the captured positional expansion offline, not the native host."""
+
+    def setUp(self):
+        self.fixture = json.loads(Path(__file__).with_name(
+            'check-pr-positional-expansion.json').read_text())
+        self.source = Path(__file__).resolve().parents[3]
+
+    def observed_expansion(self, text):
+        # Only the numeric-dollar transformation evidenced by this capture.
+        # No claim about escaped tokens, other argument syntax or other hosts.
+        words = self.fixture['arguments'].split()
+        return re.sub(r'\$(\d+)', lambda m: words[int(m[1])], text)
+
+    def aggregations(self):
+        for name in ('.claude/commands/check-pr.md',
+                     '.claude/skills/check-pr/SKILL.md',
+                     '.gemini/commands/check-pr.toml'):
+            text = (self.source / name).read_text().split('UNRESOLVED=$(', 1)[1]
+            match = re.search(r'^  \| (.+)\)$', text, re.MULTILINE)
+            self.assertIsNotNone(match, name + ': missing count aggregation')
+            yield name, match[1]
+
+    def run_count(self, aggregation, page_counts):
+        argv = shlex.split(aggregation)
+        if argv[0] == 'python3':
+            argv[0] = sys.executable
+        return subprocess.run(argv, input=page_counts, text=True,
+                              capture_output=True, check=False)
+
+    def test_captured_payload_exposes_false_zero(self):
+        before = self.fixture['source_aggregation']
+        after = self.fixture['injected_aggregation']
+        self.assertEqual(self.observed_expansion(before), after)
+        self.assertEqual(self.run_count(before, '0\n7\n').stdout.strip(), '7')
+        self.assertEqual(self.run_count(after, '0\n7\n').stdout.strip(), '0')
+
+    def test_shipped_aggregation_has_no_positional_interpolation(self):
+        for name, aggregation in self.aggregations():
+            with self.subTest(artifact=name):
+                self.assertNotRegex(aggregation, r'\$\d+')
+                self.assertEqual(self.observed_expansion(aggregation), aggregation)
+
+    def test_transported_count_keeps_nonzero_later_pages_blocking(self):
+        for name, aggregation in self.aggregations():
+            for pages, expected in (('', '0'), ('0\n', '0'), ('0\n0\n3\n', '3'),
+                                    ('2\n3\n5\n', '10'), ('1000000000\n2\n', '1000000002')):
+                with self.subTest(artifact=name, pages=pages):
+                    result = self.run_count(self.observed_expansion(aggregation), pages)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), expected)
+
+    def test_malformed_count_does_not_become_clean(self):
+        for name, aggregation in self.aggregations():
+            with self.subTest(artifact=name):
+                result = self.run_count(self.observed_expansion(aggregation), '0\nnot-a-count\n')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotEqual(result.stdout.strip(), '0')
 
 
 class InstructionContractTests(unittest.TestCase):

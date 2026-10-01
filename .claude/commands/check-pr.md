@@ -387,7 +387,8 @@ for tid in sys.stdin.read().split():
 "
 
 # Verify zero unresolved threads remain. --paginate emits one length per page,
-# which we sum with awk so the count is correct on PRs with >100 threads. If
+# Sum page counts without positional-dollar tokens that native skill argument
+# expansion can rewrite, so the count stays correct on PRs with >100 threads. If
 # this stays nonzero, either the resolve loop failed on specific threads or new
 # threads landed mid-flight — re-run step 6b.
 UNRESOLVED=$(gh api graphql --paginate -f query="
@@ -401,7 +402,7 @@ UNRESOLVED=$(gh api graphql --paginate -f query="
       }
     }
   }" --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length' \
-  | awk '{s+=$1} END {print s+0}')
+  | python3 -c 'import sys; print(sum(int(n) for n in sys.stdin))')
 
 echo "Unresolved threads: ${UNRESOLVED}"
 [ "$UNRESOLVED" -eq 0 ] || { echo "FAIL: ${UNRESOLVED} threads still unresolved"; exit 1; }
