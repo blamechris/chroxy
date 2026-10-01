@@ -117,7 +117,7 @@ Verify the agreed acceptance criteria and report the usable result, its evidence
 - **Protocol dist** — after a `packages/protocol/src/schemas` change: `npm run build -w packages/protocol`, then `git add -f packages/protocol/dist/<each built file>` (name each file; dist is gitignored).
 - **Control-char regexes** — never author `\uXXXX` control-char regexes via Edit/Write (writes literal bytes); use a node script + verify with `cat -v`.
 - **Review agents** — isolate or forbid `git checkout`/`switch`/`stash`; re-assert the feature branch after any concurrent worktree agent.
-- **Merge ruleset** — re-derive current `main` branch protection and rulesets at the PR’s final head, including required checks, approvals and conversation resolution. An automatic Copilot review request is not itself a required approval; honor any actual required review or approval and account for every posted finding. Mandatory independent review, a clean `/full-review` verdict and final-head CI gates still apply. Diagnose `BLOCKED` from current evidence instead of assuming it means a missing Copilot review.
+- **Merge ruleset** — re-derive current `main` branch protection and rulesets at the PR's final head, including required checks, approvals and conversation resolution. An automatic Copilot review request is not itself a required approval; honor any actual required review or approval and account for every posted finding. Mandatory independent review, a clean `/full-review` verdict and final-head CI gates still apply. Diagnose `BLOCKED` from current evidence instead of assuming it means a missing Copilot review.
 
 ## State / where things live
 
