@@ -10,6 +10,8 @@ Address all PR review comments systematically and respond inline.
 
 ## Instructions
 
+Honor the caller's authority, explicit holds and remaining correction/budget allowance. Review-only means no fixes or external posts unless already authorized. A resumed/nested call shares the same run record; record correction consumption before the first edit. If exhausted or unknown, triage read-only, leave blockers open and return `request_changes`. Inspect general review/issue-comment summaries as well as inline findings; lack of a thread never clears a blocking finding.
+
 ### 0. Wait for Automated Reviews
 
 Copilot review typically takes **3-5 minutes** after PR creation to even begin. If you run `/check-pr` immediately after creating the PR, the review won't exist yet.
@@ -58,13 +60,15 @@ fi
 gh api repos/${REPO}/pulls/${PR_NUM}/comments --paginate
 
 # Fetch all reviews
-gh api repos/${REPO}/pulls/${PR_NUM}/reviews
+gh api repos/${REPO}/pulls/${PR_NUM}/reviews --paginate
 
 # Fetch issue-level comments (to check if previous check-pr already ran)
-gh api repos/${REPO}/issues/${PR_NUM}/comments
+gh api repos/${REPO}/issues/${PR_NUM}/comments --paginate
 ```
 
-### 2. Skip Already-Replied Comments (Idempotency)
+### 2. Revalidate Prior Dispositions (Idempotency)
+
+Avoid duplicate replies, but revalidate every carried-forward finding at the current head before calling the PR clean. The pending-comment filter below is only a reply deduplicator, not an acceptance gate; a prior reply, issue link or resolved thread does not prove the defect is fixed.
 
 Before processing, filter out comments that already have replies from this workflow.
 This makes `/check-pr` safe to re-run without duplicating work.
@@ -86,7 +90,7 @@ PENDING_COMMENTS=$(echo "$ALL_COMMENTS" \
     '[.[] | select(.in_reply_to_id == null) | select([.id] | inside($replied) | not)]')
 ```
 
-Only process comments in `PENDING_COMMENTS`. If all comments already have replies, report "All comments already addressed" and exit.
+Use `PENDING_COMMENTS` only to avoid duplicate inline replies. Revalidate all inline and general-summary findings at the current head before returning a verdict, including already-replied/resolved findings. No pending replies does not mean no blocking findings; never exit early on that basis. Record BLOCKED/request_changes when any blocker remains.
 
 ### 3. Process EVERY Pending Comment — ONE AT A TIME
 
@@ -98,28 +102,23 @@ For each pending review comment (Copilot or human), you MUST do ALL of these ste
 
 **CRITICAL: The inline reply (`gh api ... /comments/${COMMENT_ID}/replies`) is the PRIMARY output of this skill.** The summary comment is secondary. If you only post a summary without inline replies, the skill has FAILED — conversation threads will remain unresolved and block merging.
 
-**Default stance: FIX IT NOW** — Only defer if the suggestion is a false positive or requires scope expansion (tracked via follow-up issue).
+**Classify impact first.** Fix, remove or verify authorized containment of blocking correctness, security, data-integrity and promised-acceptance defects before merge. A false positive requires evidence. Defer only nonblocking findings with evidence that acceptance and safety remain intact. Effort, provenance or an issue URL alone cannot clear a blocker.
 
-**CRITICAL: There are ONLY FOUR valid outcomes for each comment. Every comment MUST result in one of these:**
+**Four completed dispositions are available.** If a blocking finding cannot be remedied within authority and remaining allowance, report **BLOCKED**, leave its thread open and retain `request_changes`; do not force it into a completed disposition.
 
 1. **FIX** — Make the code change, commit, reply with commit hash + before/after code
-2. **FOLD** — The fix is ≤15 minutes but sits outside this PR's stated scope. Make it anyway,
+2. **FOLD** — The fix is ≤15 minutes, adjacent to this PR and within the user's authorized scope. Make it here,
    in this PR, and reply with the commit hash. **A FOLD reply without a commit SHA is invalid**
    — that is the "acknowledge and move on" this file has always banned, wearing a new label.
 3. **FALSE POSITIVE** — Reply explaining why the suggestion is incorrect, with evidence
 4. **FOLLOW-UP ISSUE** — Create a GitHub issue, reply with the issue URL
 
 **There is no silent "acknowledge and move on".** A valid finding must end in a FIX, a FOLD, a
-FALSE POSITIVE with evidence, or a FOLLOW-UP ISSUE. Never reply with "good idea, maybe later".
+FALSE POSITIVE with evidence, an eligible FOLLOW-UP ISSUE, or explicit unresolved BLOCKED with evidence. Never reply with "good idea, maybe later".
 
-**Which of FOLD and FOLLOW-UP ISSUE applies is decided by effort, not by provenance.** A
-correct, trivial finding outside this PR's abstraction belongs in **FOLD**. Reserve
-FOLLOW-UP ISSUE for work that exceeds ~15 minutes, needs a decision, or is critical/security
-severity — those are exempt and must always be filed. Note that FALSE POSITIVE cannot absorb
-"correct but trivial": it requires proving the finding factually wrong, which is why, before
-FOLD existed, a valid two-minute nitpick outside scope had exactly one legal destination.
+**FOLD versus FOLLOW-UP depends on impact and authorization.** A cheap adjacent fix may be folded within authorized scope. A verified nonblocking finding may be filed with its evidence and URL. Critical/security severity or a >15-minute estimate is not a deferral exemption: fix, remove or verify containment, otherwise retain BLOCKED. Filing the underlying defect is permitted when authorized but does not make the current PR clean.
 
-**REPLY FORMAT IS NON-NEGOTIABLE.** Every reply MUST start with the bold label (`**FIX**`, `**FOLD**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**`) on its own line. Replies without this label are malformed and will be rejected.
+**REPLY FORMAT IS NON-NEGOTIABLE.** Every reply MUST start with the bold label (`**FIX**`, `**FOLD**`, `**FALSE POSITIVE**`, `**FOLLOW-UP ISSUE**`, or unresolved `**BLOCKED**`) on its own line. Replies without this label are malformed and will be rejected.
 
 ### Reply Format Examples
 
@@ -164,7 +163,7 @@ Study these examples. Your replies must match this structure exactly.
 >
 > Created https://github.com/owner/repo/issues/123 to track this.
 >
-> **Reason for deferral:** Switching from absolute `expiresAt` to relative `remainingMs` requires changing the WS protocol contract and both server broadcast paths — out of scope for this countdown UI PR.
+> **Reason for deferral:** Optional diagnostics in an unchanged background task. The acceptance cases and safety checks pass without these diagnostics; no promised behavior depends on them.
 
 ---
 
@@ -219,7 +218,7 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
 
 #### Outcome 3: FOLLOW-UP ISSUE (GitHub issue creation MANDATORY)
 
-When a suggestion is valid but out of scope for this PR. You MUST create a GitHub issue — never reply with just "good idea" or "noted for later" without an issue URL.
+Only for a verified nonblocking finding: record why promised acceptance, correctness and safety remain intact, then create/link an issue when authorized. A blocking finding stays BLOCKED even if separately filed. Never claim an issue was created without its URL.
 
 **Required in reply:** the created issue URL. No exceptions.
 
@@ -257,7 +256,7 @@ gh api repos/${REPO}/pulls/${PR_NUM}/comments/${COMMENT_ID}/replies \
 
 Created ${ISSUE_URL} to track this.
 
-**Reason for deferral:** Brief explanation why not in this PR"
+**Reason for deferral:** Impact evidence showing this is nonblocking and acceptance/safety remain intact"
 ```
 
 ---
@@ -268,7 +267,7 @@ Created ${ISSUE_URL} to track this.
 - "Follow-up." or "Deferred." without a `**FOLLOW-UP ISSUE**` label and issue URL
 - "Intentional design decision" without evidence — use FALSE POSITIVE with evidence instead
 - "Noted" / "Acknowledged" without a FIX or ISSUE URL
-- Any reply that doesn't start with `**FIX**`, `**FOLD**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**`
+- Any reply that doesn't start with `**FIX**`, `**FOLD**`, `**FALSE POSITIVE**`, or `**FOLLOW-UP ISSUE**` or unresolved `**BLOCKED**`
 - `**FOLD**` with no commit SHA, or with a SHA that is not a commit on THIS PR — that is the
   banned "acknowledge and move on" wearing a new label, and step 6c rejects it
 - Empty Reference cells in the summary table
@@ -340,7 +339,9 @@ above and changes nothing relevant.
 If there are no FOLD replies, `/tmp/fold-shas.txt` is empty and the loop runs zero times. **That
 is a pass over zero rows, not a pass** — say so explicitly rather than reporting the step green.
 
-### 6b. Resolve Conversation Threads
+### 6b. Resolve Eligible Conversation Threads
+
+Before using the bulk-resolution example below, verify every selected thread has a supported FIX/FOLD/FALSE POSITIVE or nonblocking FOLLOW-UP disposition at the current head. If any unresolved blocking finding remains, **do not run the bulk loop**: resolve only individually verified eligible IDs and leave the blocker open. Report `request_changes`; failure to reach zero unresolved threads is the correct blocked state, not a reason to resolve it.
 
 **This step is MANDATORY whenever branch protection requires conversation resolution before merge.** Posting an inline reply does NOT auto-resolve the thread on GitHub — the REST `/replies` endpoint only adds a comment, leaving the thread state as `isResolved: false`. If you skip this step, the PR sits blocked at merge time even when every comment has a reply, every check is green, and the summary comment claims success. The user has to click "Resolve conversation" once per unresolved thread to unblock the merge. Don't make them.
 
@@ -410,11 +411,11 @@ echo "Unresolved threads: ${UNRESOLVED}"
 
 **Pagination cap:** `gh api graphql --paginate` follows `pageInfo.hasNextPage` until exhausted — no implicit cap. On the rare PR with thousands of threads, GitHub's GraphQL rate limit (5000 points/hr) is the practical ceiling. If you see HTTP 403 with "API rate limit exceeded" from gh on step 6b, the resolve loop will short-circuit on the failing call and the verify will report nonzero — re-run after the rate limit window resets.
 
-**When to skip this step:** only if the repo's branch protection does NOT require conversation resolution AND you have explicit evidence (e.g., a memory/customization note) that unresolved threads are acceptable here. Default behavior is **always resolve**. Chroxy branch protection REQUIRES conversation resolution — do NOT skip.
+**When to skip this step:** only if the repo's branch protection does NOT require conversation resolution AND you have explicit evidence (e.g., a memory/customization note) that unresolved threads are acceptable here. Default behavior is **resolve verified eligible dispositions only**. Chroxy branch protection REQUIRES conversation resolution — do NOT skip.
 
 **Edge cases:**
 - A thread you marked FALSE POSITIVE: still resolve it. The reply records the rationale; if a reviewer disagrees, they can re-open the thread.
-- A FOLLOW-UP ISSUE thread: still resolve it. The issue link in the reply is the paper trail; the conversation in the PR has served its purpose.
+- A FOLLOW-UP ISSUE thread: resolve only when impact evidence establishes a nonblocking deferral. A filed blocking defect stays open with `request_changes`.
 - A FIX thread: resolve it after the fix commit lands and the reply with the commit SHA is posted.
 
 ### 7. Post Summary Comment
@@ -471,17 +472,17 @@ Then below the table, list:
 
 1. **EVERY pending comment gets a reply** — No silent dismissals. The `gh api .../replies` call is the MOST IMPORTANT output. A summary comment WITHOUT inline replies is a FAILURE.
 2. **Reply IMMEDIATELY after each comment** — Process one comment at a time: read → fix/defer → post inline reply → next. Do NOT batch all fixes and try to reply later.
-3. **Exactly 4 valid outcomes** — FIX, FOLD, FALSE POSITIVE, or FOLLOW-UP ISSUE. Nothing else.
+3. **Four completed dispositions, or BLOCKED** — FIX, FOLD, FALSE POSITIVE, eligible FOLLOW-UP ISSUE; unresolved blockers remain BLOCKED with `request_changes`.
 4. **FIX requires commit hash + code diff** — Both mandatory in reply
 4b. **FOLD requires a commit SHA that is on THIS PR** — verified mechanically in step 6c.
-   FOLD is for a valid finding whose fix is ≤15 min but outside this PR's stated scope:
-   make the change here, name it, and say in the reply that scope was deliberately widened.
+   FOLD is for a valid adjacent fix within existing authorization, usually ≤15 min.
+   Name the change; it does not grant broader scope or turn a blocker into a follow-up.
 5. **FALSE POSITIVE requires evidence** — No bare dismissals
-6. **FOLLOW-UP requires issue URL** — Never say "good idea" without creating an issue
+6. **FOLLOW-UP requires eligibility, evidence and issue URL** — blocking findings stay blocked; a link or effort estimate is not a fix
 7. **Summary table has no empty cells** — Every row has a reference
 8. **Verify before summarizing** — Run the verification step (step 6) and confirm all threads have replies BEFORE posting the summary comment. If any are missing, go back and post them.
-9. **Resolve every thread (step 6b)** — Posting a reply does NOT mark the thread resolved on GitHub. After replying to every thread, call the GraphQL `resolveReviewThread` mutation for each. Branch protection that requires conversation resolution will block merge otherwise — silently, from the user's perspective. Skip this only with explicit per-repo evidence that unresolved threads are acceptable.
-10. **Idempotent** — Safe to re-run; already-replied comments are skipped (author-filtered). Already-resolved threads are also skipped in step 6b.
+9. **Resolve eligible threads only (step 6b)** — after verifying the disposition at the current head; blocking findings remain open. All required threads must be resolved before merge, but resolution alone does not prove acceptance.
+10. **Idempotent** — Safe to re-run; deduplicate replies (author-filtered), but revalidate acceptance and prior dispositions at the current head, including resolved threads.
 11. **No attribution** — Follow Zero Attribution Policy (no Co-Authored-By, no "Generated with Claude", no AI mentions anywhere)
 
 ## Example Workflow
@@ -496,12 +497,12 @@ Then below the table, list:
 5. Comment B: "This variable seems unused"
    → Outcome: FALSE POSITIVE
    → Reply with **FALSE POSITIVE** + evidence: "Used on line 78 in _process()"
-6. Comment C: "Add retry logic for network calls"
+6. Comment C: "Optional diagnostics in an unchanged background task"
    → Outcome: FOLLOW-UP ISSUE
-   → Create issue #99 with labels, reply with **FOLLOW-UP ISSUE** + URL
+   → Verify low impact and independence from acceptance, create issue #99, reply with **FOLLOW-UP ISSUE** + evidence + URL
 7. Push fixes
 8. Verify all threads have replies (step 6)
-9. Resolve all conversation threads via GraphQL (step 6b)
+9. Resolve verified eligible threads via GraphQL (step 6b); unresolved blockers keep request_changes
 10. Post summary table (all Reference cells filled)
 11. Report to user
 ```

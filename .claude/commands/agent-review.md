@@ -121,40 +121,11 @@ EOF
 
 ### 5. Create Follow-Up Issues for Deferred Items
 
-**Fold, don't file, when the fix is small.**
+**Classify impact before choosing a disposition.** Read inline and general-summary findings; a narrative location does not exempt a finding from acceptance review. Blocking correctness, security, data-integrity and promised-acceptance defects require a fix, removal or verified authorized containment before a clean verdict. A >15-minute estimate or follow-up issue URL is not a fix. If the repair is outside authority, unavailable or exceeds the shared remaining allowance, keep `request_changes`, name the blocker and return it to the coordinator.
 
-The follow-on test has two halves — *in-scope* **and** *≤15 minutes*. Only the first half was
-ever implemented here, and the result is measurable: over the 30 days to 2026-09-12 this
-pipeline filed **208 of the repo's 361 new issues (57.6% of all intake)**, and a hand
-classification of a random sample found **half of them were ≤15-minute fixes**.
+For a cheap adjacent fix within existing user authorization, prefer **FOLD** over filing another issue: the implementer fixes it in this PR, names the scope adjustment and cites the actual commit SHA. A read-only reviewer proposes that change rather than editing. Nonblocking findings may become follow-up issues with evidence that acceptance, correctness and safety remain intact. Critical/security severity is not an exemption to the blocking gate. False positives need evidence. Optional narrative observations need no new issue, but must not conceal a real blocking finding from `/check-pr`.
 
-So apply **both** halves:
-
-- **≤15 minutes → FIX IT IN THIS PR**, even when it sits outside the abstraction this PR owns.
-  Name it in the Deferred Items table with its commit SHA instead of an issue link.
-- **This AMENDS the follow-on protocol's first clause; it does not merely restore it.** The
-  written test is *in-scope **and** ≤15 min*, a conjunction. Scope-provenance is the rationale in
-  **all 22** explicit fold-vs-file arguments sampled from those 208 issues, and **none** mentions
-  effort — and because a fix-PR's scope is by construction one previously-filed issue, almost
-  everything adjacent fails a provenance test. A conjunction whose first term is nearly always
-  false is a branch that cannot be taken. So effort, not provenance, decides fold-vs-file here.
-- **Widening scope is therefore permitted, but never silently.** The protocol's clause 4 —
-  *"Never expand scope silently, never fake-merge, never drop a follow-on unrecorded"* — is
-  unchanged and binding. A folded item MUST be named in the review comment with its commit SHA
-  **and** flagged in the PR description as a deliberate scope widening, so the PR author and any
-  later reviewer see it without reading resolved threads.
-- **File an issue** only when the fix exceeds ~15 minutes, needs a decision, or is
-  **critical or security** severity. Those are exempt from this test entirely.
-- If something is worth mentioning but is neither worth 15 minutes nor worth an issue, put it in
-  the review comment's **narrative body** — never as an inline thread and never as a Deferred
-  Items row. **This is the one outcome with no tracked artifact, so it must not be left anywhere
-  `/check-pr` reads as a pending comment.** That file's taxonomy is total: every comment it sees
-  must end in FIX, FOLD, FALSE POSITIVE or FOLLOW-UP ISSUE, so an inline "just noting this"
-  thread does not stay untracked — it gets promoted back into a fix or an issue, which is the
-  filing pressure this section exists to relieve, re-entering by the side door.
-
-This does not reduce what a review *finds*. It changes a small finding's destination from a
-tracker row to a commit — which is strictly more work done, sooner.
+Honor explicit holds and the caller's durable correction/budget record. A new review agent, nested skill or resumed context grants no extra repair allowance or merge authority.
 
 ```bash
 ISSUE_URL=$(gh issue create \
