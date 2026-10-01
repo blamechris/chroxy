@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkTunnelRoutability } from '../src/doctor.js'
@@ -91,7 +91,7 @@ describe('runDoctorChecks', () => {
     // mergeConfig exactly like the real daemon does (parsed as config.providers,
     // never read by resolveDaemonDefaultProvider) and never contributes bogus
     // provider names to what doctor preflights.
-    const withIsolatedEnv = async (envOverrides, fn) => {
+    const withIsolatedEnv = async (envOverrides, fn, fileConfig = null) => {
       const configDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-provider-env-'))
       // CHROXY_CONFIG_DIR is a SIDE EFFECT of this helper (for isolation), not
       // one of the caller's explicit overrides — it must be saved/restored
@@ -109,6 +109,11 @@ describe('runDoctorChecks', () => {
         if (v === undefined) delete process.env[k]
         else process.env[k] = v
       }
+      // #8151 round-2 review (S-d): optional — the FILE tier of
+      // resolveProviders' precedence had no coverage at all (only env and
+      // bare-default were tested). Written into THIS isolated configDir,
+      // never the developer's real ~/.chroxy.
+      if (fileConfig) writeFileSync(join(configDir, 'config.json'), JSON.stringify(fileConfig))
       try {
         return await fn()
       } finally {
@@ -170,6 +175,27 @@ describe('runDoctorChecks', () => {
       const { providers } = await withIsolatedEnv(
         { CHROXY_PROVIDER: 'claude-sdk', CHROXY_PROVIDERS: 'gemini' },
         () => runDoctorChecks({}),
+      )
+      assert.deepEqual(providers, ['claude-sdk'])
+    })
+
+    // #8151 round-2 review (S-d) — the FILE tier of resolveProviders'
+    // precedence (CLI > ENV > file > default) had no coverage at all; only
+    // the env and bare-default tiers were tested.
+    it('a config file with {provider: "gemini"} and no env resolves to [\'gemini\']', async () => {
+      const { providers } = await withIsolatedEnv(
+        { CHROXY_PROVIDER: undefined, CHROXY_PROVIDERS: undefined },
+        () => runDoctorChecks({}),
+        { provider: 'gemini' },
+      )
+      assert.deepEqual(providers, ['gemini'])
+    })
+
+    it('CHROXY_PROVIDER beats a config file provider (ENV > file precedence)', async () => {
+      const { providers } = await withIsolatedEnv(
+        { CHROXY_PROVIDER: 'claude-sdk' },
+        () => runDoctorChecks({}),
+        { provider: 'gemini' },
       )
       assert.deepEqual(providers, ['claude-sdk'])
     })

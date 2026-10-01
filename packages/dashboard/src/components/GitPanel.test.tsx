@@ -6,7 +6,7 @@
  * simulate a *_result reply landing on the wire.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, within } from '@testing-library/react'
 import { GitPanel } from './GitPanel'
 
 const mockRequestGitStatus = vi.fn()
@@ -152,6 +152,65 @@ describe('GitPanel', () => {
     fireEvent.click(screen.getByText('Unstage all'))
 
     expect(mockRequestGitUnstage).toHaveBeenCalledWith(['src/staged.ts'])
+  })
+
+  // #8183 review (S4) — exact paths sent to requestGitStage/requestGitUnstage
+  // for a renamed (R), a combined stage+worktree-modify ("RM" shape), and a
+  // copied (C) entry: deleting the rename-expansion logic from GitPanel must
+  // make these fail, which they did not before this coverage existed.
+  it('unstaging a selected RENAMED entry sends BOTH oldPath and path (source + destination)', () => {
+    const status = {
+      branch: 'main',
+      staged: [{ path: 'new.txt', status: 'renamed' as const, oldPath: 'old.txt' }],
+      unstaged: [],
+      untracked: [],
+      error: null,
+    }
+    render(<GitPanel />)
+    act(() => capturedStatusCallback!(status))
+
+    fireEvent.click(screen.getByLabelText('Select new.txt'))
+    fireEvent.click(screen.getByTestId('git-unstage-selected-btn'))
+
+    expect(mockRequestGitUnstage).toHaveBeenCalledWith(['old.txt', 'new.txt'])
+  })
+
+  it('an "RM" shape (staged rename, unstaged modification of the destination) does not leak oldPath onto the unstaged half', () => {
+    const status = {
+      branch: 'main',
+      staged: [{ path: 'new.txt', status: 'renamed' as const, oldPath: 'old.txt' }],
+      unstaged: [{ path: 'new.txt', status: 'modified' as const }],
+      untracked: [],
+      error: null,
+    }
+    render(<GitPanel />)
+    act(() => capturedStatusCallback!(status))
+
+    // Selecting the UNSTAGED row (the modification) must stage only the
+    // destination — never fold in the (already-staged) rename source. Both
+    // sections render a "new.txt" row (one staged, one unstaged), so scope
+    // the query to the unstaged section specifically.
+    fireEvent.click(within(screen.getByTestId('git-unstaged-section')).getByLabelText('Select new.txt'))
+    fireEvent.click(screen.getByTestId('git-stage-selected-btn'))
+
+    expect(mockRequestGitStage).toHaveBeenCalledWith(['new.txt'])
+  })
+
+  it('unstaging a selected COPIED entry sends only its own path (never the copy source)', () => {
+    const status = {
+      branch: 'main',
+      staged: [{ path: 'copy.txt', status: 'copied' as const }],
+      unstaged: [],
+      untracked: [],
+      error: null,
+    }
+    render(<GitPanel />)
+    act(() => capturedStatusCallback!(status))
+
+    fireEvent.click(screen.getByLabelText('Select copy.txt'))
+    fireEvent.click(screen.getByTestId('git-unstage-selected-btn'))
+
+    expect(mockRequestGitUnstage).toHaveBeenCalledWith(['copy.txt'])
   })
 
   it('re-fetches git status after a successful stage', () => {

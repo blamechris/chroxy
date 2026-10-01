@@ -58,14 +58,31 @@ run_with_timeout() {
   # command that ignores (or is too stuck to handle) SIGTERM outlives the
   # "bounded" call indefinitely — exactly the hang this wrapper exists to
   # prevent. Mirrored in the perl fallback below.
+  # #8151 round-2 review (S-e) — GNU timeout's own exit-code convention is
+  # NOT what the `-k 10` nit above assumed: 124 means "the command was
+  # (successfully) reaped on the TERM alone", but when TERM is ignored and
+  # the KILL escalation actually fires, timeout reports the WRAPPED
+  # command's own "killed by signal" status (128 + 9 = 137), not 124.
+  # Measured directly: `gtimeout -k 10 2 <a TERM-ignoring script>` exits
+  # 137. Every caller in this codebase (docker-image-smoke.sh's
+  # `import_rc`/`marker_rc`/etc. checks) compares the raw exit status
+  # against the single value 124, so a 137 from a legitimately-timed-out
+  # call would misreport as "the command itself exited 137" instead of
+  # "this call timed out". Normalized here, in the ONE place both GNU
+  # backends return through, rather than teaching every caller to accept
+  # two codes.
   if command -v timeout >/dev/null 2>&1; then
     timeout -k 10 "$secs" "$@"
-    return $?
+    local rc=$?
+    [ "$rc" -eq 137 ] && rc=124
+    return "$rc"
   fi
 
   if command -v gtimeout >/dev/null 2>&1; then
     gtimeout -k 10 "$secs" "$@"
-    return $?
+    local rc=$?
+    [ "$rc" -eq 137 ] && rc=124
+    return "$rc"
   fi
 
   if ! command -v perl >/dev/null 2>&1; then

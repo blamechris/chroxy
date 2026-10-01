@@ -18,16 +18,25 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { listProviders } from '../src/providers.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { resetNodePtyProbeForTest, cachedNodePtyAvailable, probeNodePtyAvailable } from '../src/utils/node-pty-probe.js'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const SETUP = join(__dirname, '_setup.mjs')
-const REJECT_HOOK = join(__dirname, 'fixtures', 'reject-node-pty-import.mjs')
-const SUCCESS_HOOK = join(__dirname, 'fixtures', 'resolve-node-pty-import-success.mjs')
+// #8151 round-2 review (Windows fallout) — `--import` goes through Node's
+// ESM loader, which rejects a bare Windows absolute path
+// ("A:\foo\bar.mjs") with ERR_UNSUPPORTED_ESM_URL_SCHEME. `pathToFileURL`
+// gives the portable form (a no-op on POSIX, `file:///A:/...` on Windows).
+// The MAIN SCRIPT argument (PROBE_CHILD) must stay a plain path — Node
+// resolves it through a different, path-based mechanism than `--import`'s
+// ESM loader, and a file:// URL there fails even on POSIX (confirmed:
+// resolved relative to cwd instead of being recognised as a URL). See
+// node-pty-production-import.test.js for the full writeup.
+const SETUP = pathToFileURL(join(__dirname, '_setup.mjs')).href
+const REJECT_HOOK = pathToFileURL(join(__dirname, 'fixtures', 'reject-node-pty-import.mjs')).href
+const SUCCESS_HOOK = pathToFileURL(join(__dirname, 'fixtures', 'resolve-node-pty-import-success.mjs')).href
 const PROBE_CHILD = join(__dirname, 'fixtures', 'node-pty-probe-child.mjs')
 
 describe('listProviders() marks claude-tui unavailable when node-pty cannot load (#8151 C3)', () => {
@@ -150,6 +159,40 @@ describe('node-pty-probe.js — probe once and cache (#8151 C3)', () => {
     } finally {
       rmSync(dirname(countFile), { recursive: true, force: true })
     }
+  })
+
+  // #8151 round-2 review (S-b) — the probe's own boolean and
+  // `listProviders({ nodePtyAvailable: false })`'s EXPLICIT-injection
+  // branch were each tested directly, but nothing proved they're actually
+  // WIRED together the way production uses them: a boot-time probe, then
+  // `listProviders()` called with NO argument, reading whatever got
+  // cached. This closes that gap with a real child process.
+  it('listProviders() with NO injection reads the boot-time probe\'s cache: claude-tui auth.ready is false after a real import failure', () => {
+    const stdout = execFileSync(
+      process.execPath,
+      ['--import', SETUP, '--import', REJECT_HOOK, join(__dirname, 'fixtures', 'node-pty-probe-then-listproviders-child.mjs')],
+      { encoding: 'utf8' },
+    )
+    const lines = stdout.trim().split('\n').filter(Boolean)
+    const result = JSON.parse(lines[lines.length - 1])
+    assert.equal(result.ready, false)
+    assert.match(result.hint, /node-pty unavailable/)
+  })
+
+  // #8151 round-2 review (S-b) — a cheap, structural pin (matching this
+  // file's existing source-level call-site checks, e.g.
+  // entry-point-call-sites.test.js) that the boot path actually calls the
+  // probe BEFORE the WS server can accept a connection — not merely that
+  // the probe/listProviders wiring works in isolation, which the test
+  // above already proves.
+  it('server-cli.js calls probeNodePtyAvailable() before wsServer.start() (boot-order pin)', () => {
+    const src = readFileSync(join(__dirname, '..', 'src', 'server-cli.js'), 'utf8')
+    const probeIdx = src.indexOf('await probeNodePtyAvailable()')
+    const startIdx = src.indexOf('wsServer.start(')
+    assert.ok(probeIdx !== -1, 'server-cli.js no longer calls probeNodePtyAvailable() at all')
+    assert.ok(startIdx !== -1, 'server-cli.js no longer calls wsServer.start() — update this pin\'s anchor')
+    assert.ok(probeIdx < startIdx,
+      'probeNodePtyAvailable() must run BEFORE wsServer.start() — otherwise the very first client connection can race the probe')
   })
 })
 

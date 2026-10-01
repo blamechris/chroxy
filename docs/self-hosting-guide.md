@@ -54,13 +54,18 @@ login shell, which a container doesn't have one of.
   this image fails at session start with an actionable error rather than a
   crash or a raw native-module stack trace — the real message (server logs /
   the client's error toast) reads:
-  > node-pty is unavailable here — use the claude-sdk provider instead. The
-  > embedded terminal and the claude-tui provider both require a native PTY
-  > binding that failed to load. This is expected inside the official chroxy
-  > Docker image, which ships without a native build toolchain (node-pty has
-  > no linux prebuild). Outside Docker, reinstall it (`npm rebuild
-  > node-pty`) — on Linux this needs python3, make and a C++ compiler.
+  > node-pty is unavailable here [PTY_UNAVAILABLE] — use the claude-sdk
+  > provider instead. The embedded terminal and the claude-tui provider both
+  > require a native PTY binding that failed to load. This is expected
+  > inside the official chroxy Docker image, which ships without a native
+  > build toolchain (node-pty has no linux prebuild). Outside Docker, run
+  > `npm rebuild node-pty` and restart the chroxy daemon — on Linux the
+  > rebuild needs python3, make and a C++ compiler.
   > Cause: \<the underlying load error\>
+
+  (the exact wording may drift; the `[PTY_UNAVAILABLE]` marker and the
+  leading "use the claude-sdk provider instead" sentence are the stable
+  part — see `packages/server/src/utils/node-pty-support.js`.)
 
 ```bash
 docker build -t chroxy .

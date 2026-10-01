@@ -56,10 +56,14 @@
 #    own `node-pty-support.js` (`NODE_PTY_UNAVAILABLE_CODE`), never hand-typed
 #    here — a hardcoded copy of that prose string silently stopped matching
 #    anything the first time the message was reworded (S8), and the negative
-#    assertion could never fire again. (S1): the same assertion also re-runs
-#    against a FRESH `docker logs` read at the very end of the script, after
-#    checks 4-6 — a session that fails partway through those checks would
-#    otherwise go unnoticed by check 3's one-time snapshot.
+#    assertion could never fire again. (S1, extended by round-2 review S-g):
+#    the same assertion also re-runs against a FRESH `docker logs` read at
+#    the end of the script, after an observation window topped up to at
+#    least 15s past when Ready was first seen (not however long checks 4-6
+#    happened to take) — alongside a `docker inspect` Running check and a
+#    re-run of the image's own HEALTHCHECK command. A session or daemon
+#    that degrades a few seconds in would otherwise go unnoticed by check
+#    3's one-time snapshot.
 #
 #    Mutant: build `FROM <this image>` + `ENV CHROXY_PROVIDER=claude-tui` —
 #    still HEALTHCHECK-healthy, still passes checks 1/2/4/6, and goes RED here.
@@ -352,6 +356,11 @@ while [ "$SECONDS" -lt "$SDK_READY_DEADLINE" ]; do
   LOGS="$(docker logs "$NAME" 2>&1)"
   if grep -qF '[sdk] Ready for messages' <<<"$LOGS"; then
     sdk_ready=1
+    # #8151 round-2 review (S-g) — the wall-clock SECOND Ready was first
+    # observed, so the S1 end-of-run re-check (below, after checks 4-6) can
+    # compute how much more of its own ~15s observation window it still
+    # owes, rather than assuming checks 4-6 always burn through it.
+    SDK_READY_AT="$SECONDS"
     break
   fi
   sleep 1
@@ -447,31 +456,48 @@ grep -qF '<title>Chroxy Dashboard</title>' <<<"$DASH_BODY" \
 # fetched and required to return 200 with a non-empty body.
 # Built as a loop rather than `mapfile`/`readarray` (bash 4+ only) — this
 # repo's scripts stay compatible with macOS's stock /bin/bash 3.2.
-ASSET_PATHS=()
-while IFS= read -r _asset_path; do
-  [ -n "$_asset_path" ] && ASSET_PATHS+=("$_asset_path")
-done < <(
+#
+# #8151 round-2 review (nit) — captured into a variable via `$(...)` FIRST,
+# rather than piping straight into `done < <(...)`: a process substitution's
+# own exit status is NOT the `while` loop's, so the `|| fail "internal: ..."`
+# that used to sit on the `done < <(...)` line could never actually fire —
+# dead from the day it was written. A command substitution's exit status
+# (here, `sort -u`'s, with `pipefail` — set at the top of this script —
+# covering the stages before it) is real, so this guard now is too.
+ASSET_SCAN_OUT="$(
   { grep_or_empty -oE 'src="(/dashboard/assets/[^"]+)"' <<<"$DASH_BODY"
     grep_or_empty -oE 'href="(/dashboard/assets/[^"]+)"' <<<"$DASH_BODY"
   } | sed -E 's/^(src|href)="//; s/"$//' | sort -u
-) || fail "internal: asset-path extraction errored"
+)" || fail "internal: asset-path extraction errored"
+ASSET_PATHS=()
+while IFS= read -r _asset_path; do
+  [ -n "$_asset_path" ] && ASSET_PATHS+=("$_asset_path")
+done <<<"$ASSET_SCAN_OUT"
 if [ "${#ASSET_PATHS[@]}" -eq 0 ]; then
   fail "GET /dashboard's HTML has no <script src=\"/dashboard/assets/*\"> or <link href=\"/dashboard/assets/*\"> tag — this is the SOURCE index.html (script src=\"/src/main.tsx\"), not a built dashboard"
 fi
 
-# The entry bundle (the one .js asset) additionally gets a minimum-size
-# floor (#8151 round-2 review S2) — a 200 + non-empty body alone still
-# passes a degenerate near-empty bundle (a build that silently dropped the
-# app's own code while still emitting SOME output). 10KB is well under any
-# real Vite-built React bundle for this app (which runs to hundreds of KB)
-# and well above a stub/placeholder file.
+# The entry bundle additionally gets a minimum-size floor (#8151 round-2
+# review S2) — a 200 + non-empty body alone still passes a degenerate
+# near-empty bundle (a build that silently dropped the app's own code
+# while still emitting SOME output). 10KB is well under any real
+# Vite-built React bundle for this app (which runs to hundreds of KB) and
+# well above a stub/placeholder file.
+#
+# #8151 round-2 review (nit) — this MUST be the actual `<script src>` entry
+# bundle, extracted on its own, not "whichever .js happens to sort first"
+# out of the combined script+link list: Vite's build also emits lazily
+# -loaded chunks (route splits, `mermaid`/`katex` and similar heavy deps —
+# see the image's own `dist/assets/` listing) that this page never
+# REFERENCES from its HTML at all (they're pulled in at runtime by the
+# entry bundle's own code, not by a tag here) — but a future build that DID
+# emit a small referenced chunk sorting ahead of the real entry file would
+# have applied the floor to the wrong asset entirely.
 ENTRY_BUNDLE_MIN_BYTES=10000
-BUNDLE_PATH=""
-for p in "${ASSET_PATHS[@]}"; do
-  case "$p" in *.js) BUNDLE_PATH="$p"; break ;; esac
-done
+BUNDLE_PATH="$(grep_or_empty -oE 'src="(/dashboard/assets/[^"]+\.js)"' <<<"$DASH_BODY" | head -1 | sed -E 's/^src="//; s/"$//')" \
+  || fail "internal: entry-bundle <script src> extraction errored"
 [ -n "$BUNDLE_PATH" ] \
-  || fail "none of the extracted dashboard asset paths end in .js — no entry bundle to apply the size floor to: ${ASSET_PATHS[*]}"
+  || fail "GET /dashboard's HTML has no <script src=\"/dashboard/assets/*.js\"> entry-bundle tag to apply the size floor to"
 
 for ASSET_PATH in "${ASSET_PATHS[@]}"; do
   echo "== Fetching dashboard asset: $ASSET_PATH"
@@ -637,7 +663,15 @@ RESOLVE_OUT="$(run_with_timeout 120 docker run --rm --init --name "$NAME-deps" -
     for (const line of srcLines) {
       if (!importKeywordRe.test(line)) continue
       for (const name of checkableNames) {
-        const mentionRe = new RegExp("[\x27\"\x60]" + escapeRegex(name) + "(?:/[A-Za-z0-9_./-]*)?[\x27\"\x60]")
+        // #8151 round-2 review (S-f) — a template-literal specifier with
+        // interpolation (`` import(\x60@modelcontextprotocol/sdk/${sub}\x60) ``)
+        // mentions the name in a backtick-quoted, import-shaped line, but
+        // the subpath is NEVER followed by a closing quote (it is followed
+        // by \x24{ instead) — the original mentionRe required a trailing
+        // quote unconditionally, so this form was invisible to BOTH this
+        // scan and the strict regex below, silently falling through to a
+        // bare-name resolution. \x24{ is now an equally valid terminator.
+        const mentionRe = new RegExp("[\x27\"\x60]" + escapeRegex(name) + "(?:/[A-Za-z0-9_./-]*)?(?:[\x27\"\x60]|\\$\\{)")
         if (!mentionRe.test(line)) continue
         const strictRe = new RegExp(
           "(?:^|[^A-Za-z0-9_$.])(?:from|import|require)\\s*\\(?\\s*[\x27\"\x60]" + escapeRegex(name) + "(?:/[A-Za-z0-9_./-]+)?[\x27\"\x60]",
@@ -720,11 +754,25 @@ echo "== Dependency checks OK"
 # Default session's "Ready for messages" line appeared. Checks 4-6 above run
 # real commands against the SAME long-lived container (a separate `claude
 # --version` container, two curl requests, a dependency scan) — none of them
-# touch the Default session, but nothing proves the session stayed up and
-# healthy for the ~minute or more those checks took to run. Re-reading the
-# logs now and re-applying the SAME negative assertions catches a session
-# that failed AFTER check 3's snapshot (e.g. a delayed node-pty import
-# rejection, or a crash loop that only manifests a few seconds in).
-echo "== Re-checking the Default session's logs at the end of the run (#8151 review S1)"
+# touch the Default session, and in practice they run fast enough that this
+# re-check could land only 2-3s after check 3's own read (#8151 round-2
+# review S-g) — nowhere near enough to catch a session that degrades a
+# few seconds into its life. Fixed three ways: (1) actively top up the
+# observation window to at least 15s after Ready was first seen, not
+# however long checks 4-6 happened to take; (2) assert the container is
+# still Running via `docker inspect`, not merely that its logs don't
+# (yet) contain a failure signature — a crashed container's last-known
+# logs would otherwise read as clean; (3) re-run the image's OWN
+# HEALTHCHECK command, the same probe check 2 used, so a daemon that is
+# still running but has stopped actually answering is caught too.
+OBSERVE_UNTIL=$((SDK_READY_AT + 15))
+while [ "$SECONDS" -lt "$OBSERVE_UNTIL" ]; do
+  sleep 1
+done
+echo "== Re-checking the Default session is still alive, healthy, and clean at least 15s after Ready (#8151 review S1/S-g)"
+[ "$(docker inspect -f '{{.State.Running}}' "$NAME")" = "true" ] \
+  || fail "the container is no longer Running at the end of the script — it exited or was killed after check 3's initial read"
+run_with_timeout "$HC_TIMEOUT_S" docker exec "$NAME" sh -c "$HC_CMD" >/dev/null 2>&1 \
+  || fail "the image's own HEALTHCHECK command no longer passes at the end of the script — the daemon is running but not answering"
 assert_no_pty_failure_signature "$(docker logs "$NAME" 2>&1)" "at end of script"
-echo "== End-of-run log check OK: still no $NODE_PTY_MARKER or session-teardown signature"
+echo "== End-of-run check OK: still Running, still healthy, no $NODE_PTY_MARKER or session-teardown signature"

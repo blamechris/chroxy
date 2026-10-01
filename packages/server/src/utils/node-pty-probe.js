@@ -39,15 +39,19 @@
  * and `listProviders()` reads the cached result synchronously via
  * `cachedNodePtyAvailable()`, injectable per-call for tests.
  *
- * #8151 round-2 review (S5, nit): on win32, node-pty ships a prebuilt
- * native addon for every supported Node ABI, so `import('node-pty')`
- * resolving here proves only that the JS wrapper module loads — it does
- * NOT prove the native binding underneath it actually works (a corrupt
- * install, an ABI mismatch Windows doesn't surface at require() time, etc.
- * could still fail later, at spawn time). The probe's "available" result is
- * therefore a necessary, not sufficient, signal on win32; it remains both on
- * Linux/macOS, where there IS no prebuild to fall back to and a successful
- * import means the real native addon actually loaded.
+ * #8151 round-2 review (S5, nit, corrected) — node-pty ships PREBUILT
+ * native addons for win32 (`win32-x64`, `win32-arm64`) AND darwin
+ * (`darwin-x64`, `darwin-arm64`) — checked directly against the installed
+ * package's own `prebuilds/` directory — but for NEITHER does a successful
+ * `import('node-pty')` prove the binding actually WORKS: a corrupt
+ * install, or an ABI mismatch the loader doesn't surface at require()
+ * time, could still fail later, at spawn time. The probe's "available"
+ * result is a necessary, not sufficient, signal on BOTH of those
+ * platforms. Linux is the one case where it IS sufficient in practice,
+ * because node-pty ships no Linux prebuild at all (the reason this image
+ * is unsupported for claude-tui in the first place) — there, "the import
+ * resolved" means a real native build actually happened and linked, not
+ * that a vendored binary merely loaded.
  */
 
 let _cached = null

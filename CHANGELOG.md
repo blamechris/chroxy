@@ -195,6 +195,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the perl fallback) instead of potentially hanging past their own bound
   against a command that ignores SIGTERM.
 
+  **An independent verifier confirmed every round-2 mutant goes RED, and
+  found one more real production bug plus further test gaps, all fixed
+  here too.** The real bug: `auth_bootstrap.defaultProvider` was
+  UNCONDITIONALLY `DEFAULT_PROVIDER` (claude-tui) in every real connection
+  — `WsServer._historyCtx` (the ctx `sendAuthBootstrap` actually runs
+  against) had no `config`/`services` key at all, so
+  `resolveDaemonDefaultProvider(services?.config)` always resolved
+  `undefined`. The round-2 C3 test never caught it because it built its ctx
+  object by hand, with exactly the shape the (buggy) code expected — never
+  exercising a real `WsServer`. Fixed with a `get config() { return
+  self.config }` getter on `_historyCtx` (flat, matching its existing
+  `fileOps`/`tunnelUrl` shape — `_handlerCtx` nests the same read under
+  `services`, used by `list_providers`; both now read the same
+  `self.config`, so the two can't diverge again), and a new test that
+  builds a REAL `WsServer` with `config: { provider: 'claude-sdk' }`,
+  connects a real client, and asserts the real `auth_bootstrap` frame off
+  the wire.
+
+  The two new child-process test files also failed on Windows CI
+  (`ERR_UNSUPPORTED_ESM_URL_SCHEME`): `--import` goes through Node's ESM
+  loader, which requires a `file://` URL for a Windows absolute path — a
+  bare `A:\...\thing.mjs` throws. Fixed by converting every `--import`
+  value to `pathToFileURL(...).href` (a no-op on POSIX); the MAIN SCRIPT
+  argument stays a plain path, since it resolves through a different,
+  non-URL-aware mechanism (confirmed: a file:// URL there fails on POSIX
+  too). One of those same child-process harnesses was also found writing a
+  stray `~/.claude.json.chroxy.<uuid>.tmp` copy into the real developer
+  `$HOME` — `ClaudeTuiSession.start()`'s real `ensureCwdTrusted` call reads
+  `homedir()`, which the in-process fs sandbox cannot intercept in a
+  spawned child. Fixed by giving the child its own disposable `HOME`/
+  `USERPROFILE`, with a test assertion that the real `~/.claude.json`'s
+  mtime is unchanged after the run.
+
+  Further gaps closed: the boot-time probe cache and `listProviders()`'s
+  no-injection read of it were never exercised together (only each in
+  isolation) — a new child-process test resets the probe, forces a real
+  import failure, then calls `listProviders()` with no injection and
+  asserts `claude-tui` comes back greyed out, plus a
+  structural pin that `server-cli.js` still calls the probe before
+  `wsServer.start()`. `chroxy doctor`'s CONFIG-FILE provider tier (the
+  lowest of its four, below CLI/ENV/default) had no test coverage at all.
+  `run_with_timeout`'s own `-k 10` fix (above) returns 137, not 124, when
+  the KILL escalation actually fires — GNU `timeout`'s exit-code convention
+  reports the wrapped command's own "killed by signal" status once TERM
+  alone didn't work, not its usual 124 — normalized in the one place both
+  GNU backends return through, with new TERM-ignoring-process cases added
+  on both the real backend and the forced perl fallback. The dependency
+  scan's unrecognised-import-line floor missed a template-literal
+  specifier with interpolation (`` import(`@pkg/${sub}`) ``, never
+  followed by a closing quote); its mention-matcher now also accepts
+  `${` as a valid terminator. The entry-bundle size floor was applied to
+  "whichever `.js` asset happened to sort first" rather than the actual
+  `<script src>` entry tag — Vite's own lazily-loaded chunks (route
+  splits, heavy deps like `mermaid`/`katex`) aren't referenced from the
+  HTML at all today, but a future build emitting a small referenced one
+  would have silently floor-checked the wrong file. The S1 end-of-run
+  re-check only covered whatever the 2-3s gap between checks happened to
+  leave — now actively tops up to a 15s observation window past Ready,
+  and additionally asserts the container is still `Running` and that the
+  image's own HEALTHCHECK command still passes, not just that its logs
+  don't yet show a failure. A dead `|| fail "internal: ..."` guard (attached
+  to a process substitution's own discarded exit status, which bash never
+  propagates to the enclosing `while`) is now attached to a real command
+  substitution's exit status instead. The node-pty-probe module's win32
+  -vs-macOS claim was itself wrong — checked directly against the
+  installed package: node-pty ships prebuilt native addons for BOTH win32
+  AND darwin (none for linux), so the "a successful import doesn't prove
+  the native binding works" caveat applies to both platforms equally, not
+  just win32. `config.js`'s `envKeyForConfig` export (added for the now
+  -replaced direct-read approach) reverted to module-private — nothing
+  outside this file reads it anymore.
+
+- **`git_status` and `git_stage`/`git_unstage` now agree on what a path
+  means, status paths are no longer C-quoted or octal-escaped, and a
+  renamed entry's `oldPath` never leaks onto the wrong half or onto a copy
+  (#7292, review follow-up #8183).**
+  `gitStatus` (`packages/server/src/ws-file-ops/git.js`) forwarded `git
+  status --porcelain=v1` paths to the client verbatim. Defects fell out of
+  that, all invisible at the repo root (every prior git-status/git-stage
+  fixture used it) and all real from a session cwd that is a repo
+  subdirectory: (1) `git status` paths are REPO-ROOT-relative even when run
+  from a subdirectory, while `gitStage`/`gitUnstage` resolve whatever they
+  receive against the SESSION CWD — staging from a subdirectory session
+  could silently stage the wrong file, or fail with an opaque pathspec
+  error; (2) porcelain C-quotes/octal-escapes a path containing spaces or
+  non-ASCII bytes (`"caf\303\251.txt"`), and the client received the
+  literal quotes/escapes, which can never match a real file; (3) a
+  staged rename reported only its destination, so unstaging it left the
+  source's staged deletion behind (git records a rename as two independent
+  index operations, not one atomic move).
+  The wire contract is now explicit (documented in `git.js`'s header and the
+  protocol schema): `git_status_result` paths are always relative to the
+  SESSION CWD — the same base `git_stage`/`git_unstage` already resolve
+  `file` against — '/'-separated, and never quoted/escaped. `gitStatus` gets
+  there with `git status --porcelain=v1 -z` (NUL-delimited, which disables
+  quoting and reports a rename/copy as two separate fields instead of an
+  ambiguous `<path> -> <path>` join) and rebases every repo-root-relative
+  path onto the session cwd via `git rev-parse --show-toplevel`.
+  A **rename-only** `oldPath` field was then found to leak in a follow-up
+  review: it was attached to BOTH halves of a record whenever the STAGED
+  side was a rename/copy, so an "RM" record (a staged rename whose
+  destination is further modified, unstaged) wrongly carried `oldPath` on
+  the plain `modified` unstaged entry too, and a **copy** (whose source is
+  NOT removed, unlike a rename) got expanded the same way a rename does —
+  staging/unstaging a copy's destination could fold in the source's own,
+  unrelated changes. `oldPath` is now attached per COLUMN (only when that
+  half's own code is `R`), never for `C`, and the extra NUL field is
+  consumed whenever EITHER column is `R`/`C` (a worktree-side rename via
+  `git add -N` on a moved file previously desynced the NUL parser, inventing
+  ghost entries and swallowing real ones). `@chroxy/store-core`'s
+  `expandRenamePathsForStaging` — sent alongside `path` by the dashboard's
+  `GitPanel` and the mobile app's `GitView` on stage/unstage — also checks
+  `status === 'renamed'` directly as defense in depth. Also fixed in the
+  same follow-up: `--show-toplevel`'s output is trimmed of only its
+  trailing newline (not `.trim()`-ed, which mis-based every path when the
+  repo root's own directory name ended in whitespace); an untracked
+  directory keeps its trailing slash on the wire instead of losing it to
+  `relative()`; a session cwd inside (or that IS) an untracked directory no
+  longer emits a bare `''`/`'..'` untracked entry nothing could act on;
+  and `gitStage`/`gitUnstage`'s pathspec args gained fixtures proving the
+  existing `--` separator actually matters (a file named `--all`/`--hard`
+  would otherwise be read as a flag by git's own argv parser).
+
 - **Dashboard: worktree sessions show and group by their repo on the
   sidebar, footer, and file tree — not the opaque worktree-hex basename
   (#8123, follow-up to #7328).** #7328 fixed the SessionBar tab-cwd badge so

@@ -1706,16 +1706,22 @@ export function mergeConfig({ fileConfig = {}, cliOverrides = {}, defaults = {},
 /**
  * Convert config key to corresponding environment variable name.
  *
- * Exported (#8151 review S6) so a caller outside mergeConfig's own precedence
- * walk — currently doctor.js's `resolveProviders` — can read the SAME env var
- * name this file uses for a given config key, rather than a second hand-typed
- * copy of e.g. "provider's env var is CHROXY_PROVIDER" drifting from this one
- * if it's ever renamed.
+ * #8151 round-2 review (nit) — was exported (S6) for doctor.js's
+ * `resolveProviders` to read the same env-var name this file uses for a
+ * given config key, rather than a second hand-typed copy. Round-2 Critical
+ * 2 removed that direct read entirely — `resolveProviders` now goes
+ * through `mergeConfig`/`resolveDaemonDefaultProvider` instead, the actual
+ * fix for the regression that export-for-direct-reads turned out to be
+ * (CHROXY_PROVIDERS is `config.providers`'s env var, not a provider-name
+ * list, and a direct per-key env read couldn't tell the difference). No
+ * remaining caller outside this file reads `envKeyForConfig` itself
+ * (confirmed: `grep -rl` finds none), so this reverts to module-private
+ * rather than carry a stale-justification export.
  *
  * @param {string} key - Config key
  * @returns {string} Environment variable name
  */
-export function envKeyForConfig(key) {
+function envKeyForConfig(key) {
   const envMap = {
     apiToken: 'API_TOKEN',
     port: 'PORT',
