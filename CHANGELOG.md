@@ -477,6 +477,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dockerfile's pin ever falls below that floor again. Renovate now tracks the
   root Dockerfile's pin alongside the sidecar's.
 
+- **`scripts/verify-publish-artifacts.mjs` now runs on PRs that touch what it
+  verifies, not only at release time (#8167).** The script packs
+  `@chroxy/protocol`, `@chroxy/store-core` and `@chroxy/server`, installs them
+  into a clean prefix, and proves the result boots — `chroxy --version`,
+  `chroxy doctor` through `classifyDoctorOutput`, and the daemon's lazily
+  imported entry points. Its only callers were `release.yml`'s
+  `verify-artifacts` job (which runs only when a release is cut) and the
+  manual `scripts/publish-siblings.sh`, so the end-to-end path — doctor's real
+  output on the real hosted runner going through the classifier — was first
+  exercised by a release. `v0.11.1` showed how that fails: the release job
+  was broken for as long as it existed, and nothing noticed until a publish
+  depended on it. `ci.yml` now has a new path-filtered `Verify Publish
+  Artifacts (PR)` job, gated on a new `publish_artifacts` `dorny/paths-filter`
+  output covering `packages/server/**`, `packages/protocol/**`,
+  `packages/store-core/**`, the verify script and its `scripts/lib/` helpers,
+  the root manifest/lockfile, and `release.yml` itself (which this job
+  mirrors — same runner, same checkout/setup-node/`npm ci` steps). It is
+  **not** a required check: like `Docker Image Smoke` before it, it is new,
+  rare (path-filtered), has no measured flake baseline yet, and its install
+  step resolves dependencies from the npm registry on every run — recorded in
+  `CONTRIBUTING.md`'s not-required table alongside the same reasoning. A new
+  static test, `ci-publish-artifacts-path-filter.test.js`, checks the filter
+  list against the verify script's own `PACKAGES` array and `./lib/*` imports
+  in both directions, and against the real repo tree, so the two cannot
+  silently drift apart the way `ci-docker-path-filter.test.js` (#8150) already
+  guards for the Docker image's filter.
+
 ## [0.11.2] - 2026-09-30
 
 ### Fixed
