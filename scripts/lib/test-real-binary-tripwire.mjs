@@ -35,36 +35,66 @@
 // fail") for why a guard that is too broad is exactly as unproven as one that
 // is too narrow until something demonstrates the boundary.
 //
-// ── Shell command strings: `options.shell`, chained/substituted commands
-// (#8102) ─────────────────────────────────────────────────────────────────
+// ── Shell command lines: what is inspected (#8102, #8186) ────────────────
 //
-// `spawn`/`spawnSync`/`execFile`/`execFileSync` normally take `args[0]` as a
-// literal file/command name — no shell parsing. But when the call's own
-// `options.shell` is truthy (a boolean, or a shell path STRING — anything
-// truthy), Node runs `args[0]` (plus any `args` ARRAY, joined with a space —
-// `[file, ...args].join(' ')`, the same shape Node's own spawn-argument
-// normalization builds) through an actual shell, exactly like `exec`/
-// `execSync` always do — so `spawn('cloudflared --version', { shell: true })`
-// is a shell command STRING, not a literal filename. `resolveCommandArg()`
-// below detects `options.shell` for every launcher except `fork` (which has
-// no such option), reconstructs that same joined line (`buildShellLine()`),
-// and runs it through `shellCommandTokens()`.
+// `exec`/`execSync` ALWAYS hand `args[0]` to a shell. `spawn`/`spawnSync`/
+// `execFile`/`execFileSync` do the same when `options.shell` is truthy (a
+// boolean, or a shell path STRING — anything truthy), joining `[file, ...args]`
+// with a space, the shape Node's own spawn-argument normalization builds
+// (`buildShellLine()`; `fork` has no such option). Either way the line goes
+// through `shellCommandTokens()`, which is the one place that reads shell
+// syntax: it lexes the line into simple commands (`parseShellLine()`), then
+// reduces each to the program name(s) it would exec (`simpleCommandTokens()`).
 //
-// A single `firstShellToken()` call on the whole line is not enough: a
-// guarded name can sit after a shell control operator rather than at the
-// very start of the string — `spawn('true && codex exec', { shell: true })`,
-// `exec('build.sh; claude --dangerously-skip-permissions')`, or a nested
-// `$(claude -v)` / `` `claude -v` `` command substitution. `shellCommandTokens()`
-// splits the string on `&&`, `||`, `;`, `|`, `$(` and `` ` `` — this is NOT a
-// real shell-grammar parse (no quote/paren-depth tracking, no `${...}`
-// expansion, no redirection handling, no escaped-operator awareness) — and
-// takes `firstShellToken()` of each resulting segment: "the first token of
-// every simple command", which is exactly the position a guarded binary
-// would occupy if the shell actually ran it. That is the floor this change
-// commits to; a deeper parse was not needed to cover the shapes #8102 found.
+// The lexer. A new simple command starts at any of these, OUTSIDE quotes:
+// `&&`, `||`, `;`, `|`, a lone `&` (not the `>&` / `<&` redirections),
+// a newline, `(`, `)`, a backtick, and `$(`. Quoting follows the shell: inside
+// single quotes everything is literal; inside double quotes every operator is
+// literal EXCEPT `$(` and a backtick, which still run a command. A backslash
+// escapes the next character where that character is quote/operator syntax
+// (`\"`, `\\`, `\$`, `\;`, `\ ` ...) and is otherwise kept as a literal
+// backslash, so the usual Windows path (`C:\Program Files\...\claude.cmd`)
+// survives intact. `echo "a && claude"` is therefore one command with one
+// argument, not two commands (#8186), while `echo "$(claude -v)"` and
+// `echo "x" && claude` still reach `claude`. A quote left open runs to the end
+// of the line. An unquoted `#` that STARTS a word begins a comment, which runs
+// to the end of the line; the newline still ends it and the next line is lexed
+// normally (`true # it's a note\nclaude` reaches `claude`; `echo a#b && claude`
+// does too, because a mid-word `#` is not a comment).
 //
-// Deliberately narrow in the OTHER direction too: a guarded name that
-// appears as an ARGUMENT rather than in command position —
+// The reducer. Per simple command, in order:
+//   1. leading `NAME=value` assignments are skipped (`FOO=1 claude`);
+//   2. the bare `exec` builtin and its own flags (`-c`, `-l`, `-a NAME`) are
+//      skipped (`exec claude`);
+//   3. the first remaining word is the PROGRAM, and is looked at by basename
+//      (case-folded, `.exe`/`.cmd`/`.bat`/`.com` stripped, so `/usr/bin/env`,
+//      `/bin/bash` and `bash.exe` all match):
+//        - `env`  : its flags, `-u NAME`/`-C DIR`, and `NAME=value` operands are
+//                   skipped, and what follows is reduced again;
+//        - `npx`  : its flags and `-p`/`--package PKG` are skipped, and what
+//                   follows is reduced again;
+//        - `sh` `bash` `zsh` `dash` : when the options contain a `-c` (alone or
+//                   in a cluster: `-c`, `-lc`, `-ec` ...), the first operand
+//                   after the options is a COMMAND STRING and is lexed again,
+//                   recursively — the POSIX counterpart of the cmd.exe case
+//                   below, and it is the same code path (`shellWrapperTokens()`);
+//        - `cmd`  : the win-spawn.js wrapper, below;
+//        - anything else: the program itself is the candidate.
+//   4. in a SHELL line, a leading `~`, `~/`, `$HOME` or `${HOME}` on the
+//      program word is expanded with `os.homedir()` before the name check, so
+//      `~/.local/bin/claude` (the default dev-machine install) is the real
+//      install it names. `~user` and `$HOMEX` are left alone.
+//
+// The same reduction runs on the argv of a call with NO shell
+// (`spawn('sh', ['-c', 'claude -v'])`, `spawn('env', ['claude'])`) — there the
+// words are the already-split `[file, ...args]` rather than a lexed line, and
+// a LEADING assignment or `exec` is NOT unwrapped, and a leading `~`/`$HOME`
+// is NOT expanded, because without a shell they are ordinary (and nonexistent)
+// program names. (`env`'s own `NAME=value`
+// operands are still skipped: that is `env` parsing its argv, not a shell.)
+//
+// Deliberately narrow in the OTHER direction too: a guarded name that appears
+// as an ARGUMENT rather than in command position —
 // `spawn('echo cloudflared', { shell: true })` — is NOT flagged. `echo`
 // never execs `cloudflared`; scanning every whitespace-separated word for a
 // substring match would degenerate into the "denies everything" shape
@@ -73,6 +103,77 @@
 // against is a real BINARY being exec'd, not a string that merely mentions
 // one. `setup-real-binary-tripwire.test.js` proves this call passes through
 // un-flagged.
+//
+// ── Limits: what this does NOT detect, and where it over-flags ───────────
+//
+// This is a small, explicit grammar, NOT a shell parser, and the wrapper and
+// shell lists above are CLOSED — a hand-written list beside a set that grows
+// is a recurring false-safety shape (docs/false-safety-guards.md), so the
+// edges are written down here and the tests pin a sample of both lists.
+//
+// MISSED — a guarded name that reaches an exec through any of these is
+// invisible, exactly as before #8186:
+//   - Wrappers outside the closed list above: `sudo`, `nohup`, `time`,
+//     `timeout`, `nice`, `xargs`, `command`, `builtin`, `npm exec`,
+//     `pnpm dlx`, `yarn dlx`, `bunx`, `watch`, `find -exec`, ... — and any
+//     `env`/`npx` flag that takes a value other than the ones named above:
+//     `env -S 'claude -v'` (its string operand is not re-lexed), `env -P DIR`,
+//     `npx -c '...'`, `npx --cache DIR`.
+//   - Shells outside `sh`/`bash`/`zsh`/`dash` (`ksh`, `fish`, `busybox ash`,
+//     `pwsh`, `powershell`).
+//   - A command string that is not in the argv: `echo claude | sh`, a heredoc
+//     fed to a shell, `bash script.sh` (the script's contents are never read),
+//     `eval`, `trap 'claude' EXIT`, `source` and `.`, and
+//     `node -e "require('child_process')..."`. `bash claude` (a script operand
+//     named like a guarded binary) is not flagged either: right for a native
+//     binary, which bash refuses to read as a script, wrong for a `#!/bin/sh`
+//     wrapper script.
+//   - A name that is PRODUCED rather than written: `$(echo claude)` and its
+//     backtick form, `"$(echo claude)"`, `bash -c "$(echo claude)"`, `$CLAUDE_BIN`
+//     and any other variable, an alias or a function, brace expansion
+//     (`{claude,x}`). The guarded name must be a literal word in command
+//     position.
+//   - A word that is not literally the name: a redirect glued to it
+//     (`claude>/dev/null`, `claude</dev/null`, `claude>out` — the word is the
+//     whole `claude>/dev/null`) and a backslash before an ordinary character
+//     (`\claude`, `cl\aude`), which is kept as a literal backslash on purpose so
+//     a Windows path survives.
+//   - Package specifiers: `npx @openai/codex`, `npx claude@latest` — the word
+//     must equal the binary name (or an absolute path to it under a real
+//     install prefix) exactly.
+//   - Syntax the lexer does not model: redirections before the command
+//     (`>out claude`, `2>/dev/null claude`), brace groups (`{ claude; }`),
+//     function bodies, reserved words (`! claude`, and `then`/`do`/`else`/
+//     `elif`/`while`/`until` as the first word of a command, as in
+//     `if true; then claude; fi` and `for x in 1; do claude; done`), `${...}`
+//     and arithmetic expansion, `$'...'` quoting (a regression against the old
+//     regex splitter: `echo $'a\'b' && claude`), and backslash-newline line
+//     continuation (`cla\<newline>ude`).
+//   - A QUOTED Windows path that ends in a backslash (`"C:\dir\"`): inside
+//     double quotes `\"` reads as an escaped quote and the quote stays open,
+//     hiding whatever follows it on the line.
+//
+// OVER-FLAGGED — a call that cannot exec a guarded binary but is flagged
+// anyway (conservative: a false alarm is a visible red, a miss is not):
+//   - A heredoc BODY line that starts with a guarded name
+//     (`cat <<EOF\nclaude\nEOF`, quoted delimiter or not) is lexed as a
+//     command, because a newline starts one. The pre-#8186 module passed it.
+//   - `case` patterns (`case x in claude) ... esac`) and unbalanced groups
+//     (`claude --version (`, `echo $(claude`), which are syntax errors in a
+//     real shell; a test pins the unbalanced case.
+//   - A backslash-newline continuation (`echo \<newline>claude`) and a `>|`
+//     redirect target (`echo hi >| claude`): the newline and the `|` split.
+//   - A PATH that cannot resolve the name is not honoured the way
+//     `options.env.PATH` is: `PATH= claude`, `env -i claude`, `env PATH=
+//     claude` and `env -u PATH claude` are flagged although they cannot find
+//     it. (`env FOO=1 -- claude` is flagged too, although `env` takes the
+//     `--` after an operand as the program name.)
+//   - A command a shell would short-circuit past or never reach
+//     (`[ -x claude ] && claude`, a function named `claude`) is flagged: the
+//     lexer reads "could run", not "does run".
+//
+// If a real call shape turns up in either list, extend the grammar and the
+// tests together — and move it out of the list in the same change.
 //
 // ── win-spawn.js's `cmd.exe` wrapper (#8102) ────────────────────────────────
 //
@@ -87,10 +188,10 @@
 // `args[0]`'s basename is `cmd`/`cmd.exe` — never a guarded name directly —
 // and the actual target binary is inside the escaped `/c` string.
 //
-// `resolveCmdExeWrapperTokens()` recognizes the SHAPE rather than reversing
-// the full cross-spawn escaping: a launcher whose `args[0]` basename (after
-// `stripExeExtension`) is `cmd`, with an args ARRAY that contains a `/c` (or
-// `-c`) flag. It joins everything after that flag, strips one layer of
+// `shellWrapperTokens()` recognizes the SHAPE rather than reversing
+// the full cross-spawn escaping: a program whose basename (after
+// `stripExeExtension`) is `cmd`, with a `/c` (or `-c`) flag among its words. It
+// joins everything after that flag, strips one layer of
 // wrapping quotes (the single outer pair `/s` strips — see `prepareSpawn`'s
 // own comment), reverses one layer of `^`-escaping (`escapeCommand()`'s
 // single pass over the COMMAND token — unlike an argument, it is never
@@ -100,7 +201,12 @@
 // `options.shell` case above. Still not a full parser — an adversarially
 // crafted shim PATH containing a caret-escaped space ahead of the binary
 // name could still confuse the split — but it catches the shape win-spawn.js
-// actually produces, which is what this guard exists to backstop.
+// actually produces, which is what this guard exists to backstop. The line it
+// recovers is lexed with POSIX rules (single quotes quote, `#` starts a
+// comment, a lone `&` separates, `^` does not escape), none of which is true of
+// cmd.exe: a directory literally named like `a & claude.cmd`, whose `&`
+// escapeCommand() caret-escapes and this function un-escapes, is read as a
+// real separator.
 //
 // ── Bypass ───────────────────────────────────────────────────────────────
 //
@@ -142,6 +248,10 @@ import { SPAWN_LAUNCHERS, findOptionsIndex } from './test-spawn-home-sandbox.mjs
 
 const require = createRequire(import.meta.url)
 
+// Captured ONCE, so the install prefixes below and the `~`/`$HOME` expansion in
+// shellCommandTokens() can never disagree about where "home" is.
+const HOME_DIR = homedir()
+
 /** Marks a patched function so a test can enumerate what was ACTUALLY installed. */
 export const REAL_BINARY_MARKER = Symbol.for('chroxy.testRealBinaryTripwire')
 
@@ -166,11 +276,11 @@ export const GUARDED_BASENAMES = new Set(['cloudflared', 'claude', 'codex', 'gem
 export const REAL_INSTALL_PREFIXES = Object.freeze([
   '/opt/homebrew/',
   '/usr/local/',
-  join(homedir(), '.local') + sep,
-  join(homedir(), '.npm-global') + sep,
-  join(homedir(), '.bun') + sep,
-  join(homedir(), '.volta') + sep,
-  join(homedir(), 'Library', 'pnpm') + sep,
+  join(HOME_DIR, '.local') + sep,
+  join(HOME_DIR, '.npm-global') + sep,
+  join(HOME_DIR, '.bun') + sep,
+  join(HOME_DIR, '.volta') + sep,
+  join(HOME_DIR, 'Library', 'pnpm') + sep,
 ])
 
 // win32 resolves paths case-insensitively and accepts EITHER separator in a
@@ -207,54 +317,324 @@ function stripExeExtension(name) {
   return name
 }
 
+// A leading `NAME=value` shell assignment word (`FOO=1`, `PATH=/x`).
+const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+// Characters a backslash escapes, per context. Outside quotes a backslash
+// before any OTHER character is kept as a literal backslash (a Windows path
+// separator in `C:\Program Files\nodejs\claude.cmd`); inside double quotes the
+// shell's own set is `"`, `\`, `$` and a backtick.
+const UNQUOTED_ESCAPABLE = ' \t"\'\\$`&;|()<>'
+const DOUBLE_QUOTED_ESCAPABLE = '"\\$`'
+
 /**
- * `exec`/`execSync` take a single SHELL COMMAND STRING (`'which cloudflared'`),
- * not a `(file, args)` pair — every other launcher's first argument IS the
- * command/file/modulePath directly. This is a best-effort first-token split
- * (whitespace, with a leading matched quote stripped), sufficient for the
- * plain `'cmd arg arg'` shape every call site in this repo actually uses; it
- * is not a shell-grammar parser and does not need to be one to cover the
- * calls this guard exists for — see the module docblock.
+ * Lex a shell command LINE into simple commands, each a list of WORDS with
+ * quoting removed — see the module docblock's "The lexer" for exactly which
+ * syntax starts a new command and what is not modelled. Command substitutions
+ * (`$(...)`, backticks) and `( ... )` groups are parsed as commands of their
+ * own and the line they sit in resumes, with its partial word, once they close
+ * — so `echo "$(date) claude"` is ONE command (`echo`) whose argument contains
+ * a substitution, never a second command whose program is the tail `claude`.
  */
-function firstShellToken(cmdString) {
-  const trimmed = cmdString.trim()
-  const quote = trimmed[0]
-  if (quote === '"' || quote === "'") {
-    const end = trimmed.indexOf(quote, 1)
-    if (end > 0) return trimmed.slice(1, end)
+function parseShellLine(line) {
+  const commands = []
+  let words = []
+  let word = ''
+  let inWord = false
+  let dq = false
+  // Open `$(`/`(`/backtick groups. Each remembers the OUTER line's partial
+  // state so closing the group restores it.
+  const frames = []
+
+  const endWord = () => {
+    if (inWord) {
+      words.push(word)
+      word = ''
+      inWord = false
+    }
   }
-  const spaceIdx = trimmed.search(/\s/)
-  return spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx)
+  const endCommand = () => {
+    endWord()
+    if (words.length > 0) {
+      commands.push(words)
+      words = []
+    }
+  }
+  const append = (ch) => {
+    word += ch
+    inWord = true
+  }
+  const openGroup = (tick) => {
+    frames.push({ tick, resumeDq: dq, words, word, inWord })
+    words = []
+    word = ''
+    inWord = false
+    dq = false
+  }
+  const closeGroup = () => {
+    endCommand()
+    const frame = frames.pop()
+    dq = frame.resumeDq
+    words = frame.words
+    word = frame.word
+    inWord = frame.inWord
+  }
+
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    const next = line[i + 1]
+    const top = frames[frames.length - 1]
+
+    if (dq) {
+      if (c === '"') {
+        dq = false
+      } else if (c === '\\' && next !== undefined && DOUBLE_QUOTED_ESCAPABLE.includes(next)) {
+        append(next)
+        i++
+      } else if (c === '$' && next === '(') {
+        openGroup(false)
+        i++
+      } else if (c === '`') {
+        openGroup(true)
+      } else {
+        append(c)
+      }
+      continue
+    }
+
+    switch (c) {
+      case ' ':
+      case '\t':
+      case '\r':
+        endWord()
+        break
+      case '\n':
+      case ';':
+      case '|':
+        endCommand()
+        break
+      case '&':
+        // `>&` and `<&` are redirections, not command separators — and the
+        // word after one is a redirect TARGET (`echo hi >& claude`), not a command.
+        if (line[i - 1] === '>' || line[i - 1] === '<') append(c)
+        else endCommand()
+        break
+      case "'": {
+        const close = line.indexOf("'", i + 1)
+        const stop = close === -1 ? line.length : close
+        word += line.slice(i + 1, stop)
+        inWord = true
+        i = stop
+        break
+      }
+      case '"':
+        dq = true
+        inWord = true
+        break
+      case '\\':
+        if (next !== undefined && UNQUOTED_ESCAPABLE.includes(next)) {
+          append(next)
+          i++
+        } else {
+          append(c)
+        }
+        break
+      case '#':
+        // A comment runs to the end of the line — but only when the `#` STARTS
+        // a word. `a#b` and `$#` are ordinary text. The newline is left for the
+        // next iteration, so the following line is lexed normally.
+        if (inWord) {
+          append(c)
+        } else {
+          const newline = line.indexOf('\n', i)
+          i = newline === -1 ? line.length : newline - 1
+        }
+        break
+      case '(':
+        openGroup(false)
+        break
+      case ')':
+        // An unmatched `)` (or one inside a backtick pair) just ends the command.
+        if (top && !top.tick) closeGroup()
+        else endCommand()
+        break
+      case '`':
+        if (top && top.tick) closeGroup()
+        else openGroup(true)
+        break
+      default:
+        append(c)
+    }
+  }
+  // An unbalanced `(`/backtick must not swallow the commands around it: unwind
+  // every still-open group so the outer line's words are kept.
+  while (frames.length > 0) closeGroup()
+  endCommand()
+  return commands
 }
 
-// Shell control operators that start a NEW simple command within a larger
-// shell command line — `&&`, `||`, `;`, `|` (pipe), and `$(`/backtick command
-// substitution (which DOES exec a subprocess, unlike a plain argument — see
-// the module docblock for why those two are treated differently). `\|\|`
-// must precede the single-pipe alternative so `||` splits as one operator,
-// not two adjacent `|` matches.
-const SHELL_COMMAND_BOUNDARY_RE = /&&|\|\||;|\||\$\(|`/g
+// Long flags of a POSIX shell that take a VALUE word, which must not be
+// mistaken for the command string or for the end of the options. (The SHORT
+// value flags, `-o`/`+o`/`-O`/`+O`, are matched by SHELL_VALUE_CLUSTER_RE.)
+const POSIX_SHELL_VALUE_FLAGS = new Set(['--rcfile', '--init-file'])
+const POSIX_SHELLS = new Set(['sh', 'bash', 'zsh', 'dash'])
 
-// Trailing punctuation a split segment can inherit from its own boundary
-// (most concretely `$(claude)`'s closing paren, with no argument to give
-// `firstShellToken` a whitespace stop) — stripped so the token compares
-// clean against GUARDED_BASENAMES instead of carrying it as part of the name.
-const TRAILING_SHELL_PUNCTUATION_RE = /[)`'"]+$/
+/** `-c` alone or in a short-flag cluster: `-c`, `-lc`, `-ec`, `-ce` ... */
+const SHELL_C_FLAG_CLUSTER_RE = /^-[A-Za-z]*c[A-Za-z]*$/
 
 /**
- * Split a shell command LINE into "the first token of every simple command"
- * — see the module docblock's shell-command-strings section for exactly what
- * this does and does not parse. Empty segments (e.g. two operators in a row)
- * contribute nothing.
+ * A short flag or cluster that ENDS in `o`/`O` takes the next word as its
+ * value — the option name: `-o pipefail`, `+o pipefail`, `-O extglob`, and the
+ * common `-eo pipefail` (so `pipefail` is not mistaken for the command string).
  */
-function shellCommandTokens(cmdString) {
-  if (typeof cmdString !== 'string' || cmdString.length === 0) return []
-  const tokens = []
-  for (const segment of cmdString.split(SHELL_COMMAND_BOUNDARY_RE)) {
-    const token = firstShellToken(segment).replace(TRAILING_SHELL_PUNCTUATION_RE, '')
-    if (token) tokens.push(token)
+const SHELL_VALUE_CLUSTER_RE = /^[-+][A-Za-z]*[oO]$/
+
+/**
+ * The `-c` COMMAND STRING of an explicit POSIX shell invocation (`words[0]` is
+ * the shell): the first operand after the options when those options include a
+ * `-c`, or `null` when this is not a `-c` invocation (`bash script.sh`, a bare
+ * `sh`, `bash -l`).
+ */
+function posixShellCommandString(words) {
+  let sawC = false
+  let i = 1
+  for (; i < words.length; i++) {
+    const w = words[i]
+    if (POSIX_SHELL_VALUE_FLAGS.has(w)) {
+      i++
+      continue
+    }
+    if (!/^[-+]/.test(w)) break
+    if (SHELL_C_FLAG_CLUSTER_RE.test(w)) sawC = true
+    if (SHELL_VALUE_CLUSTER_RE.test(w)) i++
   }
-  return tokens
+  return sawC && i < words.length ? words[i] : null
+}
+
+/** Strips exactly one matched pair of wrapping quotes, if present. */
+function stripOuterQuotes(s) {
+  const t = s.trim()
+  if (t.length >= 2 && (t[0] === '"' || t[0] === "'") && t[t.length - 1] === t[0]) {
+    return t.slice(1, -1)
+  }
+  return t
+}
+
+/**
+ * The command line a `cmd`/`cmd.exe` program would run via its `/c` flag
+ * (win-spawn.js's wrapper — see the module docblock), or `null` when there is
+ * no `/c`/`-c` flag among the words (nothing for the caller to do, distinct
+ * from "found the flag but nothing after it").
+ */
+function cmdExeCommandString(words) {
+  const flagIndex = words.findIndex((a, i) => i > 0 && /^[/-]c$/i.test(a))
+  if (flagIndex === -1) return null
+  const rest = words.slice(flagIndex + 1).join(' ')
+  if (rest.length === 0) return ''
+  const unwrapped = stripOuterQuotes(rest)
+  // Reverse ONE layer of `^`-escaping (escapeCommand()'s single pass over the
+  // command token — see the module docblock for why a single pass is enough
+  // for the names this guard cares about).
+  return unwrapped.replace(/\^(.)/g, '$1')
+}
+
+/**
+ * Recognize a SHELL invoked with an inline command string — an explicit POSIX
+ * shell with `-c` (#8186), or win-spawn.js's `cmd.exe /c "<line>"` wrapper
+ * (#8102) — and return the candidates inside that string, or `null` when
+ * `base` is not such a shell or the call has no command string. One function
+ * for both dialects: find the flag, take the string, lex it again.
+ */
+function shellWrapperTokens(base, words) {
+  let commandString = null
+  if (POSIX_SHELLS.has(base)) commandString = posixShellCommandString(words)
+  else if (base === 'cmd') commandString = cmdExeCommandString(words)
+  return commandString === null ? null : shellCommandTokens(commandString)
+}
+
+// `env` flags that take a value word (`env -u NAME claude`, `env -C DIR claude`).
+const ENV_VALUE_FLAGS = new Set(['-u', '--unset', '-C', '--chdir'])
+// `npx` flags that take a value word (`npx -p some-pkg claude`).
+const NPX_VALUE_FLAGS = new Set(['-p', '--package'])
+
+/**
+ * Drop an `env`/`npx` wrapper's own flags (and, for `env`, its `NAME=value`
+ * operands) from `words` — `words[0]` is the wrapper — and return the rest,
+ * which starts at the command the wrapper runs.
+ */
+function skipWrapperArgs(words, valueFlags, skipAssignments) {
+  let i = 1
+  for (; i < words.length; i++) {
+    const w = words[i]
+    if (valueFlags.has(w)) {
+      i++
+      continue
+    }
+    if (w.startsWith('-')) continue
+    if (skipAssignments && ASSIGNMENT_RE.test(w)) continue
+    break
+  }
+  return words.slice(i)
+}
+
+/**
+ * Reduce an ARGV (`words[0]` is the program) to the program name(s) it would
+ * exec — unwrapping `env`, `npx` and shells run with an inline command string
+ * (see the module docblock's reducer list). The common case is `[words[0]]`.
+ */
+function argvTokens(words) {
+  const program = words[0]
+  const base = stripExeExtension(basename(program)).toLowerCase()
+  if (base === 'env' || base === 'npx') {
+    const rest = base === 'env'
+      ? skipWrapperArgs(words, ENV_VALUE_FLAGS, true)
+      : skipWrapperArgs(words, NPX_VALUE_FLAGS, false)
+    return rest.length > 0 ? argvTokens(rest) : []
+  }
+  const wrapped = shellWrapperTokens(base, words)
+  if (wrapped !== null) return wrapped
+  return [program]
+}
+
+/**
+ * Reduce one SIMPLE COMMAND of a shell line (a word list from
+ * `parseShellLine`) to the program name(s) it would exec: skip leading
+ * assignments and the `exec` builtin, then `argvTokens`. A command that is
+ * only assignments execs nothing.
+ */
+function simpleCommandTokens(words) {
+  let i = 0
+  while (i < words.length && ASSIGNMENT_RE.test(words[i])) i++
+  if (words[i] === 'exec') {
+    i++
+    // exec's own flags: `-c` (empty env), `-l` (login), `-a NAME` (argv[0]).
+    while (i < words.length && words[i].startsWith('-')) i += words[i] === '-a' ? 2 : 1
+  }
+  return i < words.length ? argvTokens(words.slice(i)) : []
+}
+
+// A shell expands a leading `~`, `~/`, `$HOME` or `${HOME}` before it execs
+// the word, so `~/.local/bin/claude` IS the real install under REAL_INSTALL_
+// PREFIXES (the default dev-machine location for the claude CLI). `~user` and
+// `$HOMEX` are other things and are left alone.
+const HOME_PREFIX_RE = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/
+
+/** `word` with a leading `~`/`$HOME`/`${HOME}` replaced by the home directory. */
+function expandHomePrefix(word) {
+  return word.replace(HOME_PREFIX_RE, () => HOME_DIR)
+}
+
+/**
+ * Split a shell command LINE into the program name(s) of every simple
+ * command in it — see the module docblock for exactly what this does and does
+ * not read. Empty segments (e.g. two operators in a row) contribute nothing.
+ * Exported so the tests can pin the exact candidate list, not just "it threw".
+ */
+export function shellCommandTokens(cmdString) {
+  if (typeof cmdString !== 'string' || cmdString.length === 0) return []
+  // Home-prefix expansion is a SHELL's job, so it lives here and not in
+  // argvTokens(): a no-shell `spawn('~/.local/bin/claude')` is a literal name.
+  return parseShellLine(cmdString).flatMap(simpleCommandTokens).map(expandHomePrefix)
 }
 
 /**
@@ -288,55 +668,35 @@ function buildShellLine(args) {
   return [first, ...args[argsArrayIndex]].join(' ')
 }
 
-/** Strips exactly one matched pair of wrapping quotes, if present. */
-function stripOuterQuotes(s) {
-  const t = s.trim()
-  if (t.length >= 2 && (t[0] === '"' || t[0] === "'") && t[t.length - 1] === t[0]) {
-    return t.slice(1, -1)
-  }
-  return t
+/** `s` cut to 120 characters, for an error message. */
+function abbreviate(s) {
+  return s.length > 120 ? `${s.slice(0, 117)}...` : s
 }
 
-/**
- * Recognize win-spawn.js's `cmd.exe /d /s /c "<line>"` wrapper (see the
- * module docblock) and return the guarded-name candidates inside it, or
- * `null` when this call isn't that shape at all (not a `cmd`/`cmd.exe`
- * launcher, or no `/c`/`-c` flag in its args array — nothing for this
- * function to do, distinct from "found the shape but no tokens").
- */
-function resolveCmdExeWrapperTokens(first, args) {
-  const base = stripExeExtension(basename(first)).toLowerCase()
-  if (base !== 'cmd') return null
+/** The call's argv as a word list — `[file, ...argsArray]`, every word a string. */
+function buildArgv(args) {
   const argsArrayIndex = findArgsArrayIndex(args)
-  if (argsArrayIndex === -1) return null
-  const argv = args[argsArrayIndex]
-  const flagIndex = argv.findIndex((a) => typeof a === 'string' && /^[/-]c$/i.test(a))
-  if (flagIndex === -1) return null
-  const rest = argv.slice(flagIndex + 1).join(' ')
-  if (rest.length === 0) return []
-  const unwrapped = stripOuterQuotes(rest)
-  // Reverse ONE layer of `^`-escaping (escapeCommand()'s single pass over the
-  // command token — see the module docblock for why a single pass is enough
-  // for the names this guard cares about).
-  const unescaped = unwrapped.replace(/\^(.)/g, '$1')
-  return shellCommandTokens(unescaped)
+  const rest = argsArrayIndex === -1 ? [] : args[argsArrayIndex]
+  return [args[0], ...rest.map((a) => (typeof a === 'string' ? a : String(a)))]
 }
 
 /**
  * Extract "the command(s) this call would resolve/exec" as an ARRAY of
  * candidate strings — one per launcher shape:
- *   - exec/execSync: args[0] is ALWAYS a shell command STRING; split via
- *     shellCommandTokens.
+ *   - exec/execSync: args[0] is ALWAYS a shell command STRING; lexed and
+ *     reduced by shellCommandTokens.
  *   - spawn/spawnSync/execFile/execFileSync with a truthy `options.shell`
  *     (#8102): Node shell-parses the joined `args[0]` + args-array line
- *     exactly like exec/execSync do; same split, via buildShellLine() +
+ *     exactly like exec/execSync do; same path, via buildShellLine() +
  *     shellCommandTokens().
- *   - spawn/spawnSync/execFile/execFileSync matching win-spawn.js's
- *     `cmd.exe /c "<line>"` wrapper shape (#8102): the guarded name is
- *     buried inside the escaped `/c` string; see
- *     resolveCmdExeWrapperTokens().
- *   - Otherwise (including fork): args[0] IS the file/module — a literal
- *     name, never shell-parsed — returned as the sole candidate.
+ *   - spawn/spawnSync/execFile/execFileSync without a shell: `args[0]` is the
+ *     literal program and the args array its argv — never shell-parsed — but
+ *     the program may itself be a wrapper that runs another command: `env`,
+ *     `npx`, an explicit POSIX shell with `-c` (#8186) or win-spawn.js's
+ *     `cmd.exe /c "<line>"` (#8102). argvTokens() unwraps those; for any other
+ *     program it returns `args[0]` untouched as the sole candidate.
+ *   - fork: args[0] IS the module path — a literal name, never shell-parsed,
+ *     never a wrapper — returned as the sole candidate.
  * Returns null when args[0] isn't a usable string (malformed call — let the
  * real function's own validation report that; not this guard's job).
  */
@@ -348,8 +708,7 @@ function resolveCommandArg(launcherName, args) {
     const optIndex = findOptionsIndex(args)
     const options = optIndex === -1 ? undefined : args[optIndex]
     if (options && options.shell) return shellCommandTokens(buildShellLine(args))
-    const cmdExeTokens = resolveCmdExeWrapperTokens(first, args)
-    if (cmdExeTokens !== null) return cmdExeTokens
+    return argvTokens(buildArgv(args))
   }
   return [first]
 }
@@ -423,9 +782,13 @@ export function isGuardedRealBinary(cmd) {
 export function installRealBinaryTripwire({ allowEnv = 'CHROXY_TEST_ALLOW_REAL_BINARY', target } = {}) {
   const cp = target ?? require('node:child_process')
 
-  function makeError(launcherName, cmd) {
+  function makeError(launcherName, cmd, line) {
+    // A guarded name found INSIDE a wrapper or shell line (`sh -c 'claude -v'`)
+    // is not the call's own first argument — name the line it was found in, or
+    // the message points at a command that does not appear at the call site.
+    const where = line !== cmd ? ` (found inside ${JSON.stringify(abbreviate(line))})` : ''
     const err = new Error(
-      `[chroxy-test-real-binary] BLOCKED ${launcherName}(${JSON.stringify(cmd)}) — this call would ` +
+      `[chroxy-test-real-binary] BLOCKED ${launcherName}(${JSON.stringify(cmd)})${where} — this call would ` +
       `resolve/exec a REAL, host-installed provider binary (or cloudflared) instead of a fixture (#8096).\n` +
       `  Point this test at a fixture (a fake, always-present absolute path, or a scoped-empty PATH plus\n` +
       `  empty candidates so resolution can never fall through to a real install), or set\n` +
@@ -464,7 +827,7 @@ export function installRealBinaryTripwire({ allowEnv = 'CHROXY_TEST_ALLOW_REAL_B
 
     const patched = function guardedLauncher(...args) {
       const hit = guard(args)
-      if (hit !== null) throw makeError(launcherName, hit)
+      if (hit !== null) throw makeError(launcherName, hit, hit === args[0] ? hit : buildShellLine(args))
       return original.apply(this, args)
     }
 
