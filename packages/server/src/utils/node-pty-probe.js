@@ -6,22 +6,48 @@
  * a session create fails and is immediately torn down.
  *
  * `import('node-pty')` is a real dynamic import — it rejects, it does NOT
- * throw synchronously — and a REJECTED dynamic import is not cached by Node
- * itself: re-running it repeats the full resolution attempt (stat the
- * package, fail to find/load the native addon) every time. `listProviders()`
- * is called on every dashboard/app connect (`list_providers` request +
- * every `auth_bootstrap` burst), so probing fresh each time would repeat that
- * failed resolution on every single connect. This module probes ONCE and
- * caches the boolean for the life of the process — there is no scenario
- * where node-pty's native binding appears or disappears mid-process (it is
- * either built into the image at build time, or it never will be), so a
- * process-lifetime cache cannot go stale.
+ * throw synchronously. `listProviders()` is called on every dashboard/app
+ * connect (`list_providers` request + every `auth_bootstrap` burst), and
+ * awaiting a promise on every one of those calls doesn't fit
+ * `listProviders()`'s existing synchronous contract (see below) — so this
+ * module probes ONCE, at boot, and caches a plain boolean `listProviders()`
+ * can read without awaiting anything.
+ *
+ * #8151 round-2 review (S4): an earlier version of this comment justified
+ * the cache by claiming Node does NOT cache a rejected dynamic import, so a
+ * second `import('node-pty')` would repeat the full resolution/load attempt.
+ * That claim is wrong, and the correction matters because it was the stated
+ * REASON for caching, not just a background detail: Node's module graph
+ * records an evaluation failure against the resolved module record, and
+ * replays the SAME cached rejection on every subsequent `import()` of the
+ * same specifier — measured directly (a throwing stand-in module's body
+ * executes exactly once across four repeated `import()` calls in the same
+ * process, evaluation-failure or not). node-pty's real failure mode is
+ * exactly this shape: its JS entry module is found and starts evaluating,
+ * and a `require()`/native-binding load INSIDE that evaluation throws — so
+ * Node's own cache already makes a second `import('node-pty')` cheap. The
+ * reason this module still probes once and caches a boolean is simply that
+ * `listProviders()` is synchronous and cannot `await` a promise on every
+ * call — not a missing Node-level cache. node-pty's native binding also
+ * cannot appear or disappear mid-process either way (it is either built into
+ * the image at build time, or it never will be), so a process-lifetime
+ * cache — Node's or this module's — cannot go stale.
  *
  * `listProviders()` itself stays synchronous (existing contract, existing
  * callers): `probeNodePtyAvailable()` is awaited ONCE at server boot
  * (server-cli.js, before the WS server starts accepting real connections),
  * and `listProviders()` reads the cached result synchronously via
  * `cachedNodePtyAvailable()`, injectable per-call for tests.
+ *
+ * #8151 round-2 review (S5, nit): on win32, node-pty ships a prebuilt
+ * native addon for every supported Node ABI, so `import('node-pty')`
+ * resolving here proves only that the JS wrapper module loads — it does
+ * NOT prove the native binding underneath it actually works (a corrupt
+ * install, an ABI mismatch Windows doesn't surface at require() time, etc.
+ * could still fail later, at spawn time). The probe's "available" result is
+ * therefore a necessary, not sufficient, signal on win32; it remains both on
+ * Linux/macOS, where there IS no prebuild to fall back to and a successful
+ * import means the real native addon actually loaded.
  */
 
 let _cached = null

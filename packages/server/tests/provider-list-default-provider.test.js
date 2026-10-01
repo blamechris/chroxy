@@ -14,10 +14,21 @@
  */
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { listProviders } from '../src/providers.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { resetNodePtyProbeForTest, cachedNodePtyAvailable, probeNodePtyAvailable } from '../src/utils/node-pty-probe.js'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const SETUP = join(__dirname, '_setup.mjs')
+const REJECT_HOOK = join(__dirname, 'fixtures', 'reject-node-pty-import.mjs')
+const SUCCESS_HOOK = join(__dirname, 'fixtures', 'resolve-node-pty-import-success.mjs')
+const PROBE_CHILD = join(__dirname, 'fixtures', 'node-pty-probe-child.mjs')
 
 describe('listProviders() marks claude-tui unavailable when node-pty cannot load (#8151 C3)', () => {
   it('nodePtyAvailable: false → claude-tui auth.ready is false with an actionable hint', () => {
@@ -92,6 +103,53 @@ describe('node-pty-probe.js — probe once and cache (#8151 C3)', () => {
     const first = await probeNodePtyAvailable()
     const second = await probeNodePtyAvailable()
     assert.equal(first, second)
+  })
+
+  // #8151 round-2 review (Critical 3a): the tests above never actually
+  // exercise a REAL `import('node-pty')` succeeding or failing — in this
+  // bare test process, the real import's outcome depends on whatever
+  // happens to be installed on the machine running the suite, and nothing
+  // here counted resolution attempts. The reviewer proved the gap: with the
+  // probe hardcoded to a constant `true` and the boot call removed
+  // entirely, all 211 tests in this file's worker stayed green. These two
+  // run the REAL probe in a child process under a `node:module` resolve
+  // hook (shared with Critical 1's production-import test) that forces a
+  // controlled outcome, and count actual resolve() attempts via a file the
+  // hook appends to — proving BOTH that the probe's boolean tracks a real
+  // import outcome, AND that the cache genuinely avoids a second resolution
+  // (not merely that two calls happen to return the same value).
+  function runProbeChild(hookPath, countFile) {
+    const stdout = execFileSync(
+      process.execPath,
+      ['--import', SETUP, '--import', hookPath, PROBE_CHILD],
+      { encoding: 'utf8', env: { ...process.env, PTY_RESOLVE_COUNT_FILE: countFile } },
+    )
+    const lines = stdout.trim().split('\n').filter(Boolean)
+    return JSON.parse(lines[lines.length - 1])
+  }
+
+  it('probeNodePtyAvailable() returns false (and caches false) when the real import(\'node-pty\') rejects, resolving exactly once across two calls', () => {
+    const countFile = join(mkdtempSync(join(tmpdir(), 'chroxy-pty-probe-count-')), 'count')
+    try {
+      const result = runProbeChild(REJECT_HOOK, countFile)
+      assert.deepEqual(result, { first: false, second: false, cached: false })
+      assert.ok(existsSync(countFile), 'the hook never recorded a resolve() attempt at all')
+      assert.equal(readFileSync(countFile, 'utf8'), '.', 'expected exactly ONE resolve() attempt across two probe calls')
+    } finally {
+      rmSync(dirname(countFile), { recursive: true, force: true })
+    }
+  })
+
+  it('probeNodePtyAvailable() returns true (and caches true) when the real import(\'node-pty\') resolves, resolving exactly once across two calls', () => {
+    const countFile = join(mkdtempSync(join(tmpdir(), 'chroxy-pty-probe-count-')), 'count')
+    try {
+      const result = runProbeChild(SUCCESS_HOOK, countFile)
+      assert.deepEqual(result, { first: true, second: true, cached: true })
+      assert.ok(existsSync(countFile), 'the hook never recorded a resolve() attempt at all')
+      assert.equal(readFileSync(countFile, 'utf8'), '.', 'expected exactly ONE resolve() attempt across two probe calls')
+    } finally {
+      rmSync(dirname(countFile), { recursive: true, force: true })
+    }
   })
 })
 

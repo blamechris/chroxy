@@ -52,13 +52,19 @@ run_with_timeout() {
       ;;
   esac
 
+  # #8151 round-2 review (nit) — `-k 10`: if the initial TERM doesn't reap
+  # the process within 10s, GNU timeout escalates to KILL itself rather than
+  # leaving a wedged process running past its own bound. Without this, a
+  # command that ignores (or is too stuck to handle) SIGTERM outlives the
+  # "bounded" call indefinitely — exactly the hang this wrapper exists to
+  # prevent. Mirrored in the perl fallback below.
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@"
+    timeout -k 10 "$secs" "$@"
     return $?
   fi
 
   if command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$secs" "$@"
+    gtimeout -k 10 "$secs" "$@"
     return $?
   fi
 
@@ -84,6 +90,7 @@ run_with_timeout() {
   # 124 contract would then depend on what the bounded command happened to
   # fork, rather than being unconditional (#8145 review).
   perl -e '
+    use POSIX qw(WNOHANG);
     my ($secs, @cmd) = @ARGV;
     my $pid = fork();
     if (!defined $pid) {
@@ -98,7 +105,21 @@ run_with_timeout() {
       exit 127;
     }
     my $timed_out = 0;
-    local $SIG{ALRM} = sub { $timed_out = 1; kill "TERM", -$pid; };
+    local $SIG{ALRM} = sub {
+      $timed_out = 1;
+      kill "TERM", -$pid;
+      # #8151 round-2 review (nit) — escalate to KILL after a 10s grace
+      # period if TERM alone did not reap the group, mirroring GNU
+      # timeout'"'"'s own `-k 10` above. A process that ignores (or is too
+      # wedged to handle) SIGTERM would otherwise run past this wrapper'"'"'s
+      # bound forever instead of being forcibly reaped.
+      my $reaped = 0;
+      for (1..10) {
+        if (waitpid($pid, WNOHANG) == $pid) { $reaped = 1; last; }
+        sleep(1);
+      }
+      kill "KILL", -$pid unless $reaped;
+    };
     alarm($secs);
     waitpid($pid, 0);
     alarm(0);

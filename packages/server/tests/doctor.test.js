@@ -68,8 +68,8 @@ describe('runDoctorChecks', () => {
     assert.ok(configCheck)
   })
 
-  describe('resolveProviders honours CHROXY_PROVIDER / CHROXY_PROVIDERS (#8151 S6)', () => {
-    // Before this fix, `chroxy doctor` (and the image's own preflight) fell
+  describe('resolveProviders honours CHROXY_PROVIDER, and never misreads CHROXY_PROVIDERS as a name list (#8151 S6 / round-2 Critical 2)', () => {
+    // Before the S6 fix, `chroxy doctor` (and the image's own preflight) fell
     // straight from "no explicit --provider" to the CONFIG FILE's provider,
     // skipping the env tier entirely — a Docker image with no config file yet
     // written and `CHROXY_PROVIDER=claude-sdk` set still reported/preflighted
@@ -78,6 +78,19 @@ describe('runDoctorChecks', () => {
     // present (the real fix only matters when the file tier has nothing to
     // say), independent of whatever other tests in this file/worker write to
     // the shared sandboxed config dir.
+    //
+    // The S6 fix was ITSELF a regression (round-2 review, Critical 2): it read
+    // `CHROXY_PROVIDERS` (plural) as a comma-separated list of PROVIDER NAMES.
+    // But CHROXY_PROVIDERS is a REAL, documented env var for `config.providers`
+    // (the anthropic/openai-compatible endpoint registrations — array OR
+    // object, see config.js's CONFIG_SCHEMA + parseEnvValue) — not a provider
+    // roster. Its documented JSON-object form got comma-split into garbage
+    // tokens, and a daemon running CHROXY_PROVIDER=claude-sdk alongside an
+    // unrelated CHROXY_PROVIDERS had doctor check the WRONG provider. The
+    // tests below pin the CORRECTED behaviour: CHROXY_PROVIDERS is fed through
+    // mergeConfig exactly like the real daemon does (parsed as config.providers,
+    // never read by resolveDaemonDefaultProvider) and never contributes bogus
+    // provider names to what doctor preflights.
     const withIsolatedEnv = async (envOverrides, fn) => {
       const configDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-provider-env-'))
       // CHROXY_CONFIG_DIR is a SIDE EFFECT of this helper (for isolation), not
@@ -112,11 +125,6 @@ describe('runDoctorChecks', () => {
       assert.deepEqual(providers, ['claude-sdk'])
     })
 
-    it('CHROXY_PROVIDERS (plural, comma-separated) resolves to multiple providers', async () => {
-      const { providers } = await withIsolatedEnv({ CHROXY_PROVIDERS: 'claude-sdk, gemini' }, () => runDoctorChecks({}))
-      assert.deepEqual(providers, ['claude-sdk', 'gemini'])
-    })
-
     it('an explicit providers option still wins over the env var (CLI > ENV precedence)', async () => {
       const { providers } = await withIsolatedEnv({ CHROXY_PROVIDER: 'claude-sdk' }, () => runDoctorChecks({ providers: ['gemini'] }))
       assert.deepEqual(providers, ['gemini'])
@@ -125,6 +133,45 @@ describe('runDoctorChecks', () => {
     it('with neither an env var nor a config file, still falls back to DEFAULT_PROVIDER (no regression on the old floor)', async () => {
       const { providers } = await withIsolatedEnv({ CHROXY_PROVIDER: undefined, CHROXY_PROVIDERS: undefined }, () => runDoctorChecks({}))
       assert.deepEqual(providers, [DEFAULT_PROVIDER])
+    })
+
+    // --- round-2 Critical 2: CHROXY_PROVIDERS must never be misread as names ---
+
+    it('CHROXY_PROVIDERS set to its documented JSON-object form yields no bogus provider names — claude-sdk is still what gets checked', async () => {
+      const { providers } = await withIsolatedEnv(
+        { CHROXY_PROVIDER: 'claude-sdk', CHROXY_PROVIDERS: '{"anthropicCompatible":[{"name":"x","baseUrl":"https://x.example.test","apiKey":"k"}]}' },
+        () => runDoctorChecks({}),
+      )
+      // The old (S6) bug comma-split the JSON text itself, producing garbage
+      // tokens like '{"anthropicCompatible":[{"name":"x"' as "provider names".
+      // The fix must resolve to EXACTLY the one real provider the daemon
+      // runs, with the JSON-object value never touched by provider
+      // resolution at all.
+      assert.deepEqual(providers, ['claude-sdk'])
+    })
+
+    it('CHROXY_PROVIDERS set to its legacy comma-separated array form (no CHROXY_PROVIDER) still falls back to DEFAULT_PROVIDER, not the CHROXY_PROVIDERS entries', async () => {
+      const { providers } = await withIsolatedEnv(
+        { CHROXY_PROVIDER: undefined, CHROXY_PROVIDERS: 'gemini,claude-sdk' },
+        () => runDoctorChecks({}),
+      )
+      // This is the exact shape the old bug got right BY ACCIDENT (a plain
+      // csv of provider-shaped strings) — pinned here specifically because a
+      // fix that special-cased "looks like provider names" rather than
+      // dropping the CHROXY_PROVIDERS read entirely would still pass the
+      // JSON-object test above yet reintroduce this one. CHROXY_PROVIDERS
+      // has no bearing on which PROVIDER runs, so with no CHROXY_PROVIDER
+      // and no config file this must still be the bare DEFAULT_PROVIDER —
+      // never ['gemini', 'claude-sdk'].
+      assert.deepEqual(providers, [DEFAULT_PROVIDER])
+    })
+
+    it('CHROXY_PROVIDER beats CHROXY_PROVIDERS when both are set — they answer different questions, not a precedence tie', async () => {
+      const { providers } = await withIsolatedEnv(
+        { CHROXY_PROVIDER: 'claude-sdk', CHROXY_PROVIDERS: 'gemini' },
+        () => runDoctorChecks({}),
+      )
+      assert.deepEqual(providers, ['claude-sdk'])
     })
   })
 

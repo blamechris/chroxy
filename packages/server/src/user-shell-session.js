@@ -20,7 +20,7 @@ import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
 import { isWindows, defaultShell, killProcessTree } from './platform.js'
 import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
-import { describeNodePtyUnavailable } from './utils/node-pty-support.js'
+import { nodePtyImportFailureError } from './utils/node-pty-support.js'
 
 const log = createLogger('user-shell-session')
 
@@ -192,22 +192,32 @@ export class UserShellSession extends BaseSession {
     // it — a wrapper would make the lint blind to this call site (see
     // claude-tui-session.js's `_spawnPty` for the same reasoning, applied
     // there first).
+    //
+    // #8151 round-2 review (Critical 1): the two catch BODIES below used to
+    // duplicate the `describeNodePtyUnavailable` + `Object.assign(..., {
+    // code })` construction verbatim — only the `try`/`await import(...)`
+    // shape stays duplicated (for lint-argv-sinks, above); the failure
+    // object itself is now built by the one shared `nodePtyImportFailureError`
+    // helper, so there is a single place to change what this failure looks
+    // like.
     if (typeof this._ptyModOverride === 'function') {
       try {
         ptyMod = await this._ptyModOverride()
       } catch (err) {
-        throw Object.assign(new Error(describeNodePtyUnavailable(err)), { code: 'PTY_UNAVAILABLE' })
+        throw nodePtyImportFailureError(err)
       }
     } else {
       try {
         ptyMod = await import('node-pty')
       } catch (err) {
-        // #8151 (C4) — start() already rejects directly with the actionable
-        // message (no intermediate generic-message overwrite the way
-        // claude-tui-session.js's _spawnPty/start() split needed fixing for);
-        // `.code` is added here purely for parity with that fix, so both
-        // providers' session_create_failed carry the same, taggable code.
-        throw Object.assign(new Error(describeNodePtyUnavailable(err)), { code: 'PTY_UNAVAILABLE' })
+        // start() already rejects directly with the actionable message (no
+        // intermediate generic-message overwrite the way
+        // claude-tui-session.js's _spawnPty/start() split needed fixing
+        // for) — this is the PRODUCTION branch: node-pty-production-import
+        // .test.js exercises it in a real child process via a
+        // `node:module` resolve hook, not just the `_ptyModOverride` test
+        // seam above.
+        throw nodePtyImportFailureError(err)
       }
     }
 

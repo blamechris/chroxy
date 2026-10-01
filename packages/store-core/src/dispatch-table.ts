@@ -568,14 +568,29 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * best-effort (optional-chained), only when the server actually sent a
    * non-null value.
    *
-   * The STORAGE and "did the user already choose explicitly?" check are both
-   * platform-local (dashboard: a localStorage key; the app: its own
-   * persisted-settings store), so — like {@link applyRotatedTunnelUrl} —
-   * this stays a hook rather than a shared write: the adapter decides
-   * whether an explicit user choice should win.
+   * The STORAGE and "did the user already choose explicitly?" check are
+   * platform-local, so — like {@link applyRotatedTunnelUrl} — this stays a
+   * hook rather than a shared write: the adapter decides whether an
+   * explicit user choice should win.
    *
    * OPTIONAL: when omitted, a client keeps using its own hardcoded
-   * DEFAULT_PROVIDER fallback, exactly as before this field existed.
+   * DEFAULT_PROVIDER fallback, exactly as before this field existed. The
+   * dashboard implements it (a `chroxy_default_provider` localStorage key
+   * gates the apply — see message-handler.ts). The mobile app does NOT
+   * implement it (#8151 round-2 review S6) — not because it needs to: the
+   * app's "Default" chip already sends no explicit `provider` at session
+   * creation (CreateSessionModal), deferring entirely to the SERVER's own
+   * resolution, so the real functional behaviour this field exists to fix
+   * (a Docker image's CHROXY_PROVIDER picking the wrong provider) is
+   * already correct there by construction. What the app does NOT get from
+   * this field is cosmetic: its own capability lookups that fall back to
+   * the baked-in `DEFAULT_PROVIDER` constant (e.g. `provider ||
+   * DEFAULT_PROVIDER` in CreateSessionModal) can describe the wrong
+   * provider's capabilities for a "Default" selection on a non-claude-tui
+   * -default server, until a session actually exists and reports its own
+   * real provider. Wiring this hook into the app's own persisted-settings
+   * store would close that cosmetic gap; it is tracked as a follow-up
+   * rather than folded in here.
    */
   applyServerDefaultProvider?(name: string): void
 }

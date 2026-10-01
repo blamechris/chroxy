@@ -114,6 +114,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tauri-bundle copy of this same dashboard, invisible to `.dockerignore`
   once it exists on a machine that has built the desktop app).
 
+  **Round-2 review** found four more CRITICAL gaps, each confirmed
+  independently, every one fixed here:
+
+  1. The two "start() rejects with the actionable message" tests only ever
+     exercised the TEST-ONLY `_ptyModOverride` seam — the PRODUCTION
+     `ptyMod = await import('node-pty')` branch was untested, and reverting
+     only that branch's catch (both files) left 2229 tests green. A new
+     `node-pty-production-import.test.js` runs the real `start()` in a
+     CHILD PROCESS with a `node:module` `registerHooks` resolve hook that
+     makes `import('node-pty')` actually reject, loaded alongside the usual
+     sandboxed `tests/_setup.mjs`. The two catch bodies (one per
+     import-invocation shape, kept separate so `lint-argv-sinks.mjs` still
+     sees the literal `ptyMod = await import('node-pty')` line) now share
+     ONE failure-building helper, `nodePtyImportFailureError`
+     (`node-pty-support.js`), instead of duplicating the construction.
+  2. `chroxy doctor`'s own CHROXY_PROVIDER/CHROXY_PROVIDERS fix (above) was
+     itself a regression outside Docker: `CHROXY_PROVIDERS` is a REAL,
+     documented env var for `config.providers` (the anthropic/openai
+     -compatible endpoint registrations), not a provider-name list — setting
+     it to its own documented JSON-object form got comma-split into garbage
+     tokens, and an unrelated `CHROXY_PROVIDERS` could make doctor check the
+     wrong provider entirely. `resolveProviders` now routes through the same
+     shared `mergeConfig`/`resolveDaemonDefaultProvider` the real daemon
+     startup path uses, instead of a second hand-written env/file read.
+  3. The whole C3 default-provider chain was unguarded end to end — deleting
+     the probe's real import, `auth_bootstrap`'s `defaultProvider` field, or
+     either store-core `applyServerDefaultProvider` call left every affected
+     suite green (211/211, 340/340, store-core 2445/dashboard 6228). New
+     tests cover each link: the probe's boolean under a real
+     success/failure import (child process + resolve hook, with an
+     attempt-counter proving the cache avoids a second resolution);
+     `sendPostAuthInfo`'s `auth_bootstrap` defaultProvider against a
+     configured provider and the DEFAULT_PROVIDER fallback; store-core's
+     `provider_list`/`auth_bootstrap` dispatch calling (or correctly NOT
+     calling) `applyServerDefaultProvider`; and the dashboard adapter
+     actually writing (or correctly not overwriting) the store's
+     `defaultProvider` depending on whether `chroxy_default_provider` is
+     already persisted.
+  4. The smoke script's own negative-signature grep (`'node-pty
+     unavailable'`) was DEAD — S8's rewording to "node-pty is unavailable
+     here" left it matching nothing a real regression would ever produce.
+     `describeNodePtyUnavailable()` now embeds a stable
+     `NODE_PTY_UNAVAILABLE_CODE` marker (`PTY_UNAVAILABLE`, also the
+     failure's `.code`), and the smoke script reads that SAME marker from
+     the image's own `node-pty-support.js` rather than hand-copying the
+     prose — so a future rewording can't silently disarm the check again.
+     Re-run against a `claude-tui`-mutant image with the earlier
+     "Ready for messages" gate temporarily bypassed, the marker check is
+     confirmed to independently catch the regression on its own.
+
+  Plus eight suggestions: the log-signature check now ALSO re-reads
+  `docker logs` at the very end of the run (after checks 4-6), not just
+  once right after the Default session comes up; the dashboard check now
+  fetches EVERY referenced `/dashboard/assets/*` file (script src + link
+  href), not just the first `<script>`, and the entry bundle additionally
+  gets a 10KB floor against a degenerate near-empty build; the dependency
+  scan's subpath scanner now fails and names the line if it finds a line
+  that both mentions `from`/`import`/`require` AND quotes a declared
+  dependency in a form the strict specifier regex doesn't recognise
+  (narrower than a bare substring match, which flagged 57 false positives —
+  common words like "ws"/"openai" are frequently plain string values
+  unrelated to any import); the non-Docker remediation now says "rebuild
+  AND restart the daemon", and the probe module's doc no longer claims Node
+  doesn't cache a rejected import (it does — measured: a throwing stand-in
+  module's body runs exactly once across four repeated imports; the real
+  reason this module still caches a boolean is that `listProviders()` is
+  synchronous and can't await on every call) and now notes that on win32 a
+  successful import proves only that the JS wrapper loaded, not that the
+  native binding actually works; the dispatch-table doc for
+  `applyServerDefaultProvider` no longer claims an app-side implementation
+  that doesn't exist — the mobile app's "Default" chip already sends no
+  explicit provider at session creation, so the functional behaviour this
+  field exists to fix is already correct there by construction, and wiring
+  the hook into the app's own persisted-settings store (closing a smaller,
+  cosmetic capability-lookup gap) is tracked as a follow-up rather than
+  folded in here; and `run_with_timeout`'s bounded calls now escalate to
+  SIGKILL after a 10s grace period if SIGTERM alone doesn't reap the
+  process (`-k 10` for `timeout`/`gtimeout`, a matching grace-then-KILL loop
+  in the perl fallback) instead of potentially hanging past their own bound
+  against a command that ignores SIGTERM.
+
 - **`release.yml` smokes the Docker image before pushing it (#8150).** The
   `docker` job built the root Dockerfile with `docker/build-push-action`,
   `push: true`, and pushed straight to GHCR — nothing in the job ever

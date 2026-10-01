@@ -41,7 +41,7 @@ import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
-import { describeNodePtyUnavailable } from './utils/node-pty-support.js'
+import { nodePtyImportFailureError } from './utils/node-pty-support.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -84,6 +84,29 @@ function nativeConnectionError(code, message) {
   const err = new Error(message)
   err.code = code
   return err
+}
+
+/**
+ * The ONE catch body shared by `_spawnPty`'s two node-pty import shapes
+ * (the `_ptyModOverride` test seam and the real `await import('node-pty')`).
+ *
+ * #8151 round-2 review (Critical 1): before this, each `catch` block below
+ * duplicated the `describeNodePtyUnavailable` + latch + emit construction
+ * verbatim. Only the `try`/`await import(...)` SHAPE stays duplicated
+ * (lint-argv-sinks.mjs needs to see the literal `ptyMod = await
+ * import('node-pty')` AST form to argv-guard that spawn sink — a wrapper
+ * around the import call itself would make the lint blind to it); the
+ * failure object and the session-visible side effects (the `_spawnFailure`
+ * latch `start()` rethrows, and the `error` emit) are not part of that AST
+ * shape and are safe to share.
+ *
+ * @param {ClaudeTuiSession} session
+ * @param {unknown} err - the caught import rejection
+ */
+function latchNodePtyImportFailure(session, err) {
+  const failure = nodePtyImportFailureError(err)
+  session._spawnFailure = failure
+  session.emit('error', { code: failure.code, message: failure.message })
 }
 
 function runClaudeAuthStatus({ binary, args, cwd, env }) {
@@ -2745,14 +2768,13 @@ export class ClaudeTuiSession extends BaseSession {
     // it — routing the real import through a wrapper would make the lint
     // blind to this call site, which is exactly the "guard that goes blind"
     // defect class docs/false-safety-guards.md warns about. The two branches
-    // below duplicate the 5-line catch body rather than risk that.
+    // below duplicate the `try`/`await import(...)` SHAPE (see
+    // latchNodePtyImportFailure's doc, above) rather than risk that.
     if (typeof this._ptyModOverride === 'function') {
       try {
         ptyMod = await this._ptyModOverride()
       } catch (err) {
-        const message = describeNodePtyUnavailable(err)
-        this._spawnFailure = Object.assign(new Error(message), { code: 'PTY_UNAVAILABLE' })
-        this.emit('error', { code: 'PTY_UNAVAILABLE', message })
+        latchNodePtyImportFailure(this, err)
         return
       }
     } else if (this._ptyModOverride) {
@@ -2767,10 +2789,11 @@ export class ClaudeTuiSession extends BaseSession {
         // whatever this emit() carried the instant start() rejected — the
         // 'error' event and the REJECTION are two different channels, and
         // session_create_failed.errorMessage (what the client actually
-        // renders) reads the rejection, not the emit.
-        const message = describeNodePtyUnavailable(err)
-        this._spawnFailure = Object.assign(new Error(message), { code: 'PTY_UNAVAILABLE' })
-        this.emit('error', { code: 'PTY_UNAVAILABLE', message })
+        // renders) reads the rejection, not the emit. This is the
+        // PRODUCTION branch: node-pty-production-import.test.js exercises
+        // it in a real child process via a `node:module` resolve hook, not
+        // just the `_ptyModOverride` test seam above.
+        latchNodePtyImportFailure(this, err)
         return
       }
     }
