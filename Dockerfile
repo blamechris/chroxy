@@ -253,8 +253,9 @@ LABEL org.chroxy.claude-code.version=$CLAUDE_CODE_VERSION
 # native build this image deliberately skips (`npm ci --ignore-scripts`, no
 # build-essential/python3 above — see the "System dependencies" comment).
 # claude-tui also assumes an interactive login shell, which a container has
-# none of. Both fail with a clear "node-pty unavailable ... not supported in
-# this environment" message rather than crashing or hanging — see
+# none of. Both fail with a clear "node-pty is unavailable here
+# [PTY_UNAVAILABLE] — use the claude-sdk provider instead" message rather than
+# crashing or hanging — see
 # claude-tui-session.js / user-shell-session.js's node-pty import catch, and
 # docs/self-hosting-guide.md's Docker section.
 #

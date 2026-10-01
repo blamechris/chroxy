@@ -43,7 +43,7 @@ this image has no linux prebuild for it — the build deliberately skips native
 compilation (`npm ci --ignore-scripts`, no `build-essential`/`python3`) to
 keep the image small and avoid a compiler toolchain in a container that runs
 as an unprivileged user. `claude-tui` additionally assumes an interactive
-login shell, which a container doesn't have one of.
+login shell, which a container doesn't have.
 
 - The **user-shell terminal** is already off by default on every chroxy
   install (`userShell.enabled` must be explicitly set) — selecting it in this
