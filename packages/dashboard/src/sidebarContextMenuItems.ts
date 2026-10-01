@@ -23,6 +23,7 @@
 import type { SessionInfo, ConversationSummary } from '@chroxy/store-core'
 import type { ContextMenuItem } from './components/SessionContextMenu'
 import type { ContextMenuTarget } from './components/Sidebar'
+import { sessionGroupKey } from './utils/repoLabel'
 
 export interface BuildSidebarContextMenuItemsArgs {
   /** Current right-click target. */
@@ -171,12 +172,17 @@ export function buildSidebarContextMenuItems(
   if (target.type === 'repo' && target.path) {
     const repoPath = target.path
     // #5547: the group's live sessions, most-recent first. The repo group is
-    // keyed by cwd, so sessions sharing this cwd belong to the group. A single
-    // live session gets one "Summarize…" item targeting it; several get one
-    // item per session (a simple in-menu picker) so the operator disambiguates
-    // which conversation to carry forward.
+    // keyed by `sessionGroupKey` (#8123: `repoCwd || cwd`, matching App.tsx's
+    // `sidebarRepos` memo) — shared with that memo through the one helper so
+    // the two can't drift again (review follow-up on PR #8180, Critical #1: a
+    // worktree-only group's Summarize item silently vanished, and a mixed
+    // group could only ever target its plain session, because this filter
+    // still compared against raw `cwd` after the memo's key changed). A
+    // single live session gets one "Summarize…" item targeting it; several
+    // get one item per session (a simple in-menu picker) so the operator
+    // disambiguates which conversation to carry forward.
     const groupSessions = sessions
-      .filter(s => s.cwd === repoPath)
+      .filter(s => sessionGroupKey(s) === repoPath)
       .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0))
     const soleSession = groupSessions.length === 1 ? groupSessions[0] : null
     const summarizeItems: ContextMenuItem[] = soleSession

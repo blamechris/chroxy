@@ -15,6 +15,7 @@ import {
   modelTooltip,
   agentCountTooltip,
 } from '../lib/status-tooltips'
+import { repoDisplayName } from '../utils/repoLabel'
 
 declare const __APP_VERSION__: string
 
@@ -27,6 +28,14 @@ export interface FooterBarProps {
   tunnelProgress?: { attempt: number; maxAttempts: number } | null
   serverVersion?: string | null
   cwd?: string
+  /**
+   * #8123: the active session's original repo dir (worktree-isolated
+   * sessions only — `null`/`undefined` for a plain session or a server
+   * that predates the field). When present, the cwd breadcrumb shows the
+   * repo name instead of `cwd`'s opaque `~/.chroxy/worktrees/<hex>`
+   * basename.
+   */
+  repoCwd?: string | null
   model?: string
   cost?: number
   context?: string
@@ -76,7 +85,14 @@ export interface FooterBarProps {
   activeSessionId?: string | null
 }
 
-/** Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar */
+/**
+ * Abbreviate a full path to the last 2 segments: /Users/foo/Projects/bar → Projects/bar
+ *
+ * #8123: passed to `repoDisplayName` as its non-worktree `fallback` — this
+ * footer predates the shared helper and intentionally shows 2 segments
+ * where SessionBar/the sidebar/the file-tree root show 1, so a plain
+ * session's cwd renders exactly as it did before #8123.
+ */
 function abbreviateCwd(cwd: string): string {
   const parts = cwd.replace(/\/+$/, '').split('/')
   return parts.length <= 2 ? cwd : parts.slice(-2).join('/')
@@ -109,6 +125,7 @@ export function FooterBar({
   tunnelProgress,
   serverVersion,
   cwd,
+  repoCwd,
   model,
   cost,
   context,
@@ -210,7 +227,9 @@ export function FooterBar({
             title={cwd}
             aria-label={`Working directory: ${cwd}`}
           >
-            {abbreviateCwd(cwd)}
+            {/* #8123: prefer the repo name for a worktree session; falls back to
+                this footer's own last-2-segments abbreviation otherwise. */}
+            {repoDisplayName(cwd, repoCwd, abbreviateCwd)}
           </span>
         )}
       </div>

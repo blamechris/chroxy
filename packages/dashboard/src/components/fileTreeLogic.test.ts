@@ -134,4 +134,46 @@ describe('buildBreadcrumbs', () => {
       { label: 'root', path: '/root', isLeaf: true },
     ])
   })
+
+  // #8123 — the file-tree root label leaked the opaque worktree-hex basename
+  // of `rootPath` (same bug class as the sidebar group header and footer
+  // cwd). An optional `rootLabel` override lets the caller (FileBrowserPanel,
+  // which has `repoCwd` in scope) substitute a repo-aware label WITHOUT
+  // changing what the root crumb navigates to — `path` always stays derived
+  // from `rootPath`, never from `rootLabel`.
+  describe('optional rootLabel override (#8123)', () => {
+    it('overrides only the root crumb label when nothing is selected; path is still the real root', () => {
+      const out = buildBreadcrumbs(
+        null,
+        '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e',
+        'chroxy',
+      )
+      expect(out).toEqual([
+        { label: 'chroxy', path: '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e', isLeaf: true },
+      ])
+    })
+
+    it('overrides the root crumb label in a full root → dirs → file chain; descendant crumbs are untouched', () => {
+      const out = buildBreadcrumbs(
+        '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e/src/index.ts',
+        '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e',
+        'chroxy',
+      )
+      expect(out.map(c => c.label)).toEqual(['chroxy', 'src', 'index.ts'])
+      // Navigation target for the root crumb is the real worktree path — never the label.
+      expect(out[0]!.path).toBe('/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e')
+      expect(out[0]!.path).not.toBe('chroxy')
+    })
+
+    it('falls back to the basename-of-root behaviour when rootLabel is omitted (positive control — unchanged for a non-worktree root)', () => {
+      expect(buildBreadcrumbs(null, '/home/me/proj')).toEqual([
+        { label: 'proj', path: '/home/me/proj', isLeaf: true },
+      ])
+    })
+
+    it('falls back to the basename when rootLabel is an empty string', () => {
+      const out = buildBreadcrumbs(null, '/home/me/proj', '')
+      expect(out[0]!.label).toBe('proj')
+    })
+  })
 })
