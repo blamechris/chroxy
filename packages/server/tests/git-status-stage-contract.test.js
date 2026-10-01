@@ -396,7 +396,11 @@ describe('git status -> stage round trip (#7292)', () => {
   // trailing newline stripped, not `.trim()`-ed: a repo root whose directory
   // name genuinely ends in a space is a rare but real path, and trimming it
   // would rebase every path against the WRONG root.
-  it('a repo root directory name ending in a space is not mis-rebased', async () => {
+  // Windows cannot create a directory whose name ends in a space (Win32 strips
+  // trailing spaces/dots from path components), so this shape cannot exist there.
+  it('a repo root directory name ending in a space is not mis-rebased', {
+    skip: process.platform === 'win32' && 'Windows cannot create a directory name ending in a space',
+  }, async () => {
     const parent = await mkdtemp(join(tmpdir(), 'chroxy-git-trailing-space-'))
     const tmpDir = join(parent, 'repo ') // trailing space in the repo root's own name
     try {
