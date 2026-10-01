@@ -23,6 +23,7 @@ import { spawn, spawnSync, exec, execSync, execFile, execFileSync, fork } from '
 import { promisify } from 'node:util'
 import { isAbsolute, sep } from 'node:path'
 
+import { prepareSpawn } from '../src/utils/win-spawn.js'
 import {
   REAL_BINARY_TRIPWIRE_INSTALLED,
   REAL_BINARY_TRIPWIRE_SKIPPED,
@@ -217,5 +218,82 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
     for (const name of REAL_BINARY_TRIPWIRE_INSTALLED) {
       assert.equal(launchers[name][REAL_BINARY_MARKER], name, `${name} should carry the marker`)
     }
+  })
+})
+
+describe('real-binary tripwire: guarded names past the first shell token, and the win-spawn cmd.exe wrapper (#8102)', () => {
+  // The throwing cases below (through the win-spawn cmd.exe wrapper) throw synchronously, before child_process's own launcher ever
+  // runs — same safety property the file's header note already establishes
+  // for every other "throws" assertion in this file.
+
+  it('a CHAINED command (`true && codex exec`) via exec() throws — the guarded name is past the first whitespace token, not at the start of the string', () => {
+    assert.throws(() => exec('true && codex exec', () => {}), { code: REAL_BINARY_ERROR_CODE })
+  })
+
+  it('a CHAINED command hiding in the separate args ARRAY of a shell:true spawn() throws — `args[0]` alone ("true") is safe; the guarded name only appears once `args[0]` and the args array are joined the way Node itself joins them', () => {
+    assert.throws(
+      () => spawn('true', ['&&', 'codex', 'exec'], { shell: true, stdio: 'ignore' }),
+      { code: REAL_BINARY_ERROR_CODE },
+    )
+  })
+
+  it('execFileSync with a shell PATH STRING (not just `shell: true`) throws — `options.shell` is truthy for any non-empty string too', () => {
+    assert.throws(
+      () => execFileSync('claude -v', [], { shell: '/bin/sh' }),
+      { code: REAL_BINARY_ERROR_CODE },
+    )
+  })
+
+  it('a `$(...)` command SUBSTITUTION throws — the substituted command still execs a real subprocess, unlike a plain argument mention', () => {
+    assert.throws(() => exec('echo $(claude -v)', () => {}), { code: REAL_BINARY_ERROR_CODE })
+  })
+
+  it("win-spawn.js's actual `cmd.exe /d /s /c \"<line>\"` wrapper shape throws — built with the REAL prepareSpawn(), not a hand-approximated shape", () => {
+    // Forces the win32 branch regardless of the platform this suite actually
+    // runs on (see win-spawn.test.js for the same {platform:'win32'} override
+    // pattern). `claude.cmd` is the standard npm-global install shape this
+    // guard exists to catch on a real Windows host.
+    const spec = prepareSpawn('claude.cmd', ['--version'], { platform: 'win32' })
+    assert.throws(
+      () => spawn(spec.command, spec.args, spec.options),
+      { code: REAL_BINARY_ERROR_CODE },
+    )
+  })
+
+  it('the cmd.exe wrapper shape is unaffected when the /c string names no guarded binary (proves this is shape-recognition, not "block every cmd.exe call")', () => {
+    const spec = prepareSpawn('somethingelse.cmd', ['--version'], { platform: 'win32' })
+    assert.doesNotThrow(() => {
+      const proc = spawn(spec.command, spec.args, { ...spec.options, stdio: 'ignore' })
+      proc.on('error', () => {})
+      if (proc.pid !== undefined) proc.kill('SIGKILL')
+    })
+  })
+
+  it('a bare `cmd`/`cmd.exe` call with NO `/c` flag is unaffected (e.g. launching an interactive shell) — proves this only recognizes the specific `/c "<line>"` shape', () => {
+    assert.doesNotThrow(() => {
+      const proc = spawn('cmd.exe', ['/k'], { stdio: 'ignore' })
+      proc.on('error', () => {})
+      if (proc.pid !== undefined) proc.kill('SIGKILL')
+    })
+  })
+
+  it('DECISION: a guarded name mentioned as an ARGUMENT, not invoked in command position, does NOT trip (`spawn(\'echo cloudflared\', { shell: true })`) — this guard blocks a binary being EXEC\'D, not a string that merely names one', () => {
+    // If this ever throws, the guard has regressed into a blanket substring
+    // scan — exactly the "denies everything" shape docs/false-safety-
+    // guards.md warns about (#7273) — and would start false-positiving on
+    // any test that merely prints/logs/asserts-on the word "cloudflared".
+    assert.doesNotThrow(() => {
+      const proc = spawn('echo cloudflared', { shell: true, stdio: 'ignore' })
+      proc.on('error', () => {})
+      if (proc.pid !== undefined) proc.kill('SIGKILL')
+    })
+  })
+
+  it('a literal, non-shell spawn() of an ordinary command is unaffected (`spawn("node", ["x.js"], { shell: false })`)', () => {
+    assert.doesNotThrow(() => {
+      const proc = spawn('node', ['x.js'], { shell: false, stdio: 'ignore' })
+      proc.on('error', () => {})
+      if (proc.pid !== undefined) proc.kill('SIGKILL')
+    })
   })
 })
