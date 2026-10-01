@@ -443,6 +443,71 @@ describe('buildSidebarContextMenuItems', () => {
       )
       expect(items.some(i => i.id.startsWith('summarize'))).toBe(false)
     })
+
+    // Review follow-up on PR #8180 (issuecomment-5921537989, Critical #1):
+    // #8123 changed App.tsx's sidebarRepos GROUP KEY to `repoCwd || cwd`, so
+    // a worktree-only group's `target.path` is the repo dir — but this
+    // filter still compared against raw `s.cwd`, so `groupSessions` computed
+    // to `[]` and the Summarize item silently never rendered.
+    it('#8123 review — a worktree-ONLY repo group still yields a Summarize item (target.path is the repoCwd, not cwd)', () => {
+      const summarizeAndCreateSession = vi.fn()
+      const worktreeSession = makeSession({
+        sessionId: 'wt1',
+        name: 'Worktree',
+        cwd: '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e',
+        repoCwd: '/Users/blamechris/Projects/chroxy',
+      })
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'repo', path: '/Users/blamechris/Projects/chroxy' },
+          sessions: [worktreeSession],
+          summarizeAndCreateSession,
+        }),
+      )
+      const summarize = items.filter(i => i.id.startsWith('summarize'))
+      expect(summarize).toHaveLength(1)
+      expect(summarize[0]?.id).toBe('summarize')
+      summarize[0]?.onClick?.()
+      expect(summarizeAndCreateSession).toHaveBeenCalledWith('wt1')
+    })
+
+    // A MIXED group (a plain session + a worktree session of the same repo)
+    // must summarize BOTH — pre-fix, only the plain session ever matched
+    // `s.cwd === repoPath`, so the worktree session's own conversation could
+    // never be targeted from this menu even though it's visibly grouped
+    // under the repo.
+    it('#8123 review — a MIXED group (plain + worktree session sharing a repo) summarizes BOTH', () => {
+      const summarizeAndCreateSession = vi.fn()
+      const plain = makeSession({
+        sessionId: 'plain',
+        name: 'Plain',
+        cwd: '/Users/blamechris/Projects/chroxy',
+        lastActivityAt: 100,
+      })
+      const worktree = makeSession({
+        sessionId: 'wt',
+        name: 'Worktree',
+        cwd: '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e',
+        repoCwd: '/Users/blamechris/Projects/chroxy',
+        lastActivityAt: 999,
+      })
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'repo', path: '/Users/blamechris/Projects/chroxy' },
+          sessions: [plain, worktree],
+          summarizeAndCreateSession,
+        }),
+      )
+      const summarize = items.filter(i => i.id.startsWith('summarize-'))
+      expect(summarize).toHaveLength(2)
+      // Most-recent first — the worktree session is the newer one.
+      expect(summarize[0]?.label).toContain('Worktree')
+      expect(summarize[1]?.label).toContain('Plain')
+      summarize[0]?.onClick?.()
+      expect(summarizeAndCreateSession).toHaveBeenCalledWith('wt')
+      summarize[1]?.onClick?.()
+      expect(summarizeAndCreateSession).toHaveBeenCalledWith('plain')
+    })
   })
 
   it('returns [] for an unknown target type', () => {

@@ -4046,3 +4046,161 @@ describe('#7328 — worktree-aware session tab cwd badge', () => {
     expect(container.querySelector('.tab-cwd')?.textContent).toBe('api')
   })
 })
+
+// #8123 — follow-up to #7328: the same opaque worktree-hex leak, on the
+// sidebar repo GROUP (not just the tab badge). Sessions were grouped by raw
+// `cwd`, so a worktree-isolated session landed in its own hex-named group
+// instead of alongside its repo's other sessions — the grouping's whole
+// purpose (see sessions belonging to the same project together) was lost.
+describe('#8123 — sidebar groups worktree sessions under their repo', () => {
+  const chroxyRepo = '/Users/blamechris/Projects/chroxy'
+  const worktreeCwd = '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e'
+
+  it('groups a worktree session and a plain session of the SAME repo into ONE sidebar group named after the repo', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        {
+          sessionId: 's1',
+          name: 'Normal',
+          cwd: chroxyRepo,
+          type: 'cli',
+          hasTerminal: true,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 1,
+          conversationId: null,
+          provider: 'claude-sdk',
+          worktree: false,
+        },
+        {
+          sessionId: 's2',
+          name: 'Worktree',
+          cwd: worktreeCwd,
+          repoCwd: chroxyRepo,
+          type: 'cli',
+          hasTerminal: true,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 2,
+          conversationId: null,
+          provider: 'claude-sdk',
+          worktree: true,
+        },
+      ],
+      activeSessionId: 's1',
+    }
+    const { container } = render(<App />)
+    // Exactly one repo group — not two (one per distinct cwd, pre-fix).
+    expect(container.querySelectorAll('.sidebar-repo-header').length).toBe(1)
+    expect(container.querySelector('.sidebar-repo-name')?.textContent).toBe('chroxy')
+    expect(screen.getByTestId(`repo-header-${chroxyRepo}`)).toBeInTheDocument()
+    // The worktree hex must never surface as its own group key/testid.
+    expect(screen.queryByTestId(`repo-header-${worktreeCwd}`)).not.toBeInTheDocument()
+    // Both sessions rendered as rows (SessionBar tabs) — neither dropped by the regroup.
+    expect(screen.getByTestId('session-tab-s1')).toBeInTheDocument()
+    expect(screen.getByTestId('session-tab-s2')).toBeInTheDocument()
+  })
+
+  it('positive control: a non-worktree session without repoCwd still groups by its own cwd (unchanged)', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        {
+          sessionId: 's1',
+          name: 'API',
+          cwd: '/home/user/projects/api',
+          type: 'cli',
+          hasTerminal: true,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 1,
+          conversationId: null,
+          provider: 'claude-sdk',
+        },
+      ],
+      activeSessionId: 's1',
+    }
+    const { container } = render(<App />)
+    expect(container.querySelectorAll('.sidebar-repo-header').length).toBe(1)
+    expect(container.querySelector('.sidebar-repo-name')?.textContent).toBe('api')
+    expect(screen.getByTestId('repo-header-/home/user/projects/api')).toBeInTheDocument()
+  })
+
+  it('two DIFFERENT repos each keep their own group even when both have worktree sessions', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        {
+          sessionId: 's1',
+          name: 'Chroxy WT',
+          cwd: worktreeCwd,
+          repoCwd: chroxyRepo,
+          type: 'cli',
+          hasTerminal: true,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 1,
+          conversationId: null,
+          provider: 'claude-sdk',
+          worktree: true,
+        },
+        {
+          sessionId: 's2',
+          name: 'Other WT',
+          cwd: '/Users/blamechris/.chroxy/worktrees/aaaa1111bbbb2222cccc3333dddd4444',
+          repoCwd: '/Users/blamechris/Projects/other-repo',
+          type: 'cli',
+          hasTerminal: true,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 2,
+          conversationId: null,
+          provider: 'claude-sdk',
+          worktree: true,
+        },
+      ],
+      activeSessionId: 's1',
+    }
+    const { container } = render(<App />)
+    expect(container.querySelectorAll('.sidebar-repo-header').length).toBe(2)
+    const names = [...container.querySelectorAll('.sidebar-repo-name')].map(n => n.textContent)
+    expect(names.sort()).toEqual(['chroxy', 'other-repo'])
+  })
+
+  // "New session in this repo" (Sidebar's per-group `+` button) must still
+  // work after the regroup — and now targets the REAL repo dir (repoCwd),
+  // not a worktree hex path, which is the more useful behaviour anyway.
+  it('the "new session in this repo" action still works for a worktree-grouped repo', () => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [
+        {
+          sessionId: 's1',
+          name: 'Worktree',
+          cwd: worktreeCwd,
+          repoCwd: chroxyRepo,
+          type: 'cli',
+          hasTerminal: true,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 1,
+          conversationId: null,
+          provider: 'claude-sdk',
+          worktree: true,
+        },
+      ],
+      activeSessionId: 's1',
+    }
+    render(<App />)
+    expect(screen.queryByTestId('create-session-modal-mock')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId(`sidebar-new-session-${chroxyRepo}`))
+    expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
+  })
+})

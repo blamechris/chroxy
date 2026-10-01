@@ -72,6 +72,28 @@ describe('RepoEventsSection pure helpers (#5966)', () => {
     expect([...set].sort()).toEqual(['chroxy', 'widget'])
   })
 
+  // Review suggestion on PR #8180 (issuecomment-5921537989): same bug class
+  // as the sidebar/footer/file-tree leak #8123 fixed elsewhere — a
+  // worktree-isolated session's cwd is the opaque `~/.chroxy/worktrees/<hex>`
+  // checkout, so the pre-repoCwd basename never matched the real repo name,
+  // and the "active repos" scope silently failed to include it.
+  it('#8123 review — prefers repoCwd basename for a worktree-isolated session', () => {
+    const set = activeRepoBasenames([
+      {
+        cwd: '/Users/me/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e',
+        repoCwd: '/Users/me/Projects/chroxy',
+      },
+    ])
+    expect([...set]).toEqual(['chroxy'])
+    // The opaque hex must never surface as a "basename".
+    expect(set.has('34914672f8578ecdf71accf8f8aec47e')).toBe(false)
+  })
+
+  it('#8123 review — positive control: falls back to the cwd basename when repoCwd is absent (unchanged)', () => {
+    const set = activeRepoBasenames([{ cwd: '/Users/me/Projects/widget', repoCwd: null }])
+    expect([...set]).toEqual(['widget'])
+  })
+
   // Backward-compat basename fallback (older daemon: exactRepos null).
   const basenameScope = (bases: string[]) => ({ exactRepos: null, basenames: new Set(bases) })
 

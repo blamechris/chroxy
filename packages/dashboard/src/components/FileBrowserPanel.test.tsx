@@ -21,6 +21,11 @@ let gitStatusCallback: ((result: any) => void) | null = null
 
 let mockSessionStates: Record<string, any> = {}
 let mockActiveSessionId: string | null = 's1'
+// #8123 — the active session's `repoCwd` (worktree-isolated sessions only)
+// so the file-tree root breadcrumb label can show the repo name instead of
+// the opaque worktree-hex basename of `rootPath`. Defaults to no sessions —
+// existing tests don't care about this and must keep passing unchanged.
+let mockSessions: Array<{ sessionId: string; repoCwd?: string | null }> = []
 // #6472 symbol-panel store state
 let mockSymbols: any = null
 let mockSymbolsLoading = false
@@ -49,6 +54,8 @@ vi.mock('../store/connection', () => {
     openFileInBrowser: mockOpenFileInBrowser,
     symbolLocation: mockSymbolLocation,
     lastFileContentRequestId: mockLastFileContentRequestId,
+    // #8123
+    sessions: mockSessions,
   })
 
   const useConnectionStore = Object.assign(
@@ -88,6 +95,7 @@ beforeEach(() => {
   mockFileBrowserPendingOpen = null
   mockSymbolLocation = null
   mockLastFileContentRequestId = null
+  mockSessions = []
 })
 
 describe('FileBrowserPanel', () => {
@@ -739,5 +747,65 @@ describe('FileBrowserPanel — nonce correlation guard (#6502)', () => {
       fileContentCallback!({ path: '/root/a.ts', content: 'OK', language: 'typescript', size: 6, truncated: false, error: null })
     })
     await waitFor(() => screen.getByText('OK'))
+  })
+})
+
+// #8123 — follow-up to #7328: the file-tree root breadcrumb leaked the
+// opaque worktree-hex basename of `rootPath`, same bug class as the
+// SessionBar tab badge and the sidebar repo group. `repoCwd` on the active
+// session (already on `SessionInfo` since #7328) lets the root crumb show
+// the repo name while `rootPath` itself — and so navigation — is untouched.
+describe('#8123 — worktree-aware file-tree root label', () => {
+  const worktreeCwd = '/Users/blamechris/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e'
+  const repoCwd = '/Users/blamechris/Projects/chroxy'
+
+  it('shows the repo name as the root breadcrumb label for a worktree session', async () => {
+    mockSessions = [{ sessionId: 's1', repoCwd }]
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: worktreeCwd,
+        parentPath: null,
+        entries: [{ name: 'src', isDirectory: true, size: null }],
+        error: null,
+      })
+    })
+    await waitFor(() => {
+      expect(screen.getByText('chroxy')).toBeInTheDocument()
+    })
+    // The opaque hex must never leak into the breadcrumb.
+    expect(screen.queryByText(/34914672f8578ecdf71accf8f8aec47e/)).not.toBeInTheDocument()
+  })
+
+  it('positive control: falls back to the basename when the active session has no repoCwd (non-worktree, unchanged)', async () => {
+    mockSessions = [{ sessionId: 's1', repoCwd: null }]
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project',
+        parentPath: null,
+        entries: [],
+        error: null,
+      })
+    })
+    await waitFor(() => {
+      expect(screen.getByText('project')).toBeInTheDocument()
+    })
+  })
+
+  it('positive control: falls back to the basename when the session list has no matching entry at all', async () => {
+    mockSessions = []
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project',
+        parentPath: null,
+        entries: [],
+        error: null,
+      })
+    })
+    await waitFor(() => {
+      expect(screen.getByText('project')).toBeInTheDocument()
+    })
   })
 })
