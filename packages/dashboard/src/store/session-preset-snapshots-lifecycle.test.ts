@@ -193,6 +193,13 @@ describe('#7488 the cross-server bleed, end to end', () => {
   // microtasks before the test ends makes the probe's rejection land inside
   // the test instead of after it — same technique as
   // `connection-server-down.test.ts`.
+  //
+  // Two macrotask ticks are enough, not a timing guess. Both console calls
+  // on the failure path (`probe`'s "Health check failed" and
+  // `scheduleRetry`'s "Retrying in Xms") are reached purely through
+  // microtasks once the stubbed `fetch` rejects. The one real timer (the
+  // retry's `setTimeout`) is gated on `connectionAttemptId`, which
+  // `disconnect()` bumps before this flush runs, so it fires as a no-op.
   async function flushMicrotasks() {
     const real = globalThis.setTimeout
     await new Promise((r) => real(r, 0))
