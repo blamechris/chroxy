@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { execFile } from 'child_process'
 import { randomUUID } from 'crypto'
-import { cliHelpAdvertisesFlag, cliHelpFlagArity } from './utils/argv-safety.js'
+import { cliHelpAdvertisesFlag, cliHelpFlagArity, isSafeArgvValue } from './utils/argv-safety.js'
 import { CliSession } from './cli-session.js'
 import { createLogger } from './logger.js'
 
@@ -18,7 +18,9 @@ const log = createLogger('web-task-manager')
  * Feature detection:
  *   Parses `claude --help` at startup to check for `--remote` and `--teleport`
  *   flags. When unavailable, launchTask() returns a clear error message.
- *   Re-detection can be triggered manually (e.g. after CLI upgrade).
+ *   Detection runs once at daemon start and latches via `_detected` — no
+ *   caller in this codebase invokes `detectFeatures()` again afterwards, so
+ *   picking up a newly-upgraded CLI's flags requires a daemon restart (#7299).
  *
  * Events:
  *   task_created  { task }           - New task launched
@@ -82,6 +84,7 @@ export class WebTaskManager extends EventEmitter {
     this._pollTimer = null
     this._pollCount = 0
     this._inPoll = false
+    this._destroyed = false
   }
 
   /**
@@ -184,9 +187,17 @@ export class WebTaskManager extends EventEmitter {
       const remoteArity = cliHelpFlagArity(stdout, '--remote')
       this._remoteAvailable = remoteArity === 'boolean' || remoteArity === 'optional'
       this._teleportAvailable = cliHelpAdvertisesFlag(stdout, '--teleport')
-    } catch {
+    } catch (err) {
       this._remoteAvailable = false
       this._teleportAvailable = false
+      // #7299: this used to be a bare `catch {}` — every failure mode (a
+      // missing binary, a hang past the 15s timeout, a non-zero exit) fails
+      // closed correctly but left ZERO trace, so an operator sees the feature
+      // quietly absent with nothing to search for. Logged the same way
+      // _verifyBinary's own refusal above is, including the error's message
+      // and code.
+      const codeSuffix = err?.code ? ` (code=${err.code})` : ''
+      log.warn(`web task feature detection failed: ${err?.message || err}${codeSuffix}`)
     }
     this._detected = true
     return {
@@ -352,6 +363,12 @@ export class WebTaskManager extends EventEmitter {
     // Use execFile with args array to prevent command injection
     const child = execFile(bin, buildRemoteTaskArgs(task.prompt), { cwd: task.cwd, timeout: 300_000 }, (err, stdout, stderr) => {
       this._childProcesses.delete(child)
+      // #7299: this callback runs asynchronously and can fire AFTER
+      // destroy() has already cleared _pollTimer and cleared _tasks — a late
+      // callback mutating `task` and calling _startPolling() would arm a
+      // fresh interval on an already-destroyed manager, leaking a timer that
+      // outlives the object. Return before any state mutation or polling.
+      if (this._destroyed) return
 
       if (err) {
         task.status = 'failed'
@@ -362,11 +379,9 @@ export class WebTaskManager extends EventEmitter {
         return
       }
 
-      // Parse task ID from CLI output if available
-      const remoteIdMatch = stdout.match(/task[:\s]+([a-zA-Z0-9-]+)/i)
-      if (remoteIdMatch) {
-        task.remoteTaskId = remoteIdMatch[1]
-      }
+      // Parse task ID from CLI output if available (#7299: see
+      // parseRemoteTaskId below for the anchoring + validation).
+      task.remoteTaskId = parseRemoteTaskId(stdout)
 
       task.status = 'running'
       task.updatedAt = Date.now()
@@ -384,6 +399,7 @@ export class WebTaskManager extends EventEmitter {
    * @private
    */
   _startPolling() {
+    if (this._destroyed) return // #7299: never arm a timer on a destroyed manager
     if (this._pollTimer) return
 
     this._pollCount = 0
@@ -507,6 +523,7 @@ export class WebTaskManager extends EventEmitter {
    * Clean up timers and state.
    */
   destroy() {
+    this._destroyed = true // #7299: block a late execFile callback from restarting polling
     this._stopPolling()
     // Kill any in-flight child processes
     for (const child of this._childProcesses) {
@@ -557,6 +574,32 @@ export class WebTaskUnavailableError extends Error {
  */
 export function buildRemoteTaskArgs(prompt) {
   return ['--remote', '--', prompt]
+}
+
+/**
+ * Parse a remote task ID out of the launch CLI's stdout, if present (#7299).
+ *
+ * The old capture, `/task[:\s]+([a-zA-Z0-9-]+)/i`, put `-` inside the
+ * character class with no position constraint — the identical shape
+ * catalogued as entry 13 in docs/false-safety-guards.md for `getDiff`'s
+ * revision allowlist. Output like `task: --evil` would capture `--evil`
+ * verbatim. `remoteTaskId` is dead today (nothing consumes it yet), but it is
+ * a sibling argv site in the very file #7291 hardened, and the moment it
+ * feeds `--teleport` or similar it becomes the same class of bug.
+ *
+ * Fixed two ways, deliberately redundant: the capture group is anchored so
+ * its first character can never be `-` (`[a-zA-Z0-9][a-zA-Z0-9-]*`), and the
+ * result is re-validated with `isSafeArgvValue` before being returned — the
+ * same guard `utils/argv-safety.js` documents as fix (1) for a value that can
+ * never legitimately start with `-`.
+ *
+ * @param {string} stdout
+ * @returns {string|null} the captured ID, or `null` when absent or unsafe.
+ */
+export function parseRemoteTaskId(stdout) {
+  const match = typeof stdout === 'string' ? stdout.match(/task[:\s]+([a-zA-Z0-9][a-zA-Z0-9-]*)/i) : null
+  const candidate = match ? match[1] : null
+  return candidate && isSafeArgvValue(candidate) ? candidate : null
 }
 
 /**

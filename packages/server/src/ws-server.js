@@ -2395,13 +2395,15 @@ export class WsServer {
       this._startApprovalListener()
     }
 
-    // Detect Claude Code Web features (non-blocking)
+    // Detect Claude Code Web features (non-blocking). #7299: detectFeatures()
+    // never rejects — every failure mode (a gate refusal, a missing binary, a
+    // timed-out --help) degrades to remote=false/teleport=false internally
+    // and is logged there via log.warn, so a `.catch` here could never run.
+    // Removed rather than left as unreachable dead code.
     this._webTaskManager.detectFeatures().then(({ remote, teleport }) => {
       if (remote || teleport) {
         log.info(`Claude Code Web features detected: remote=${remote}, teleport=${teleport}`)
       }
-    }).catch((err) => {
-      log.warn(`Failed to detect Claude Code Web features: ${err.message} (non-critical, web features disabled)`)
     })
 
     // Forward web task events to all authenticated clients

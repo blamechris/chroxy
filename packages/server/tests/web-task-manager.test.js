@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, chmodSync, existsSync
 import { createHash } from 'crypto'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { WebTaskManager, WebTaskUnavailableError, buildRemoteTaskArgs } from '../src/web-task-manager.js'
+import { WebTaskManager, WebTaskUnavailableError, buildRemoteTaskArgs, parseRemoteTaskId } from '../src/web-task-manager.js'
 import { SessionManager } from '../src/session-manager.js'
 import { waitFor } from './test-helpers.js'
 
@@ -206,6 +206,56 @@ describe('WebTaskManager', () => {
       assert.equal(manager.detected, true)
     })
 
+    // ── #7299: the --help catch used to be a bare `catch {}` — every failure
+    // mode fails closed correctly (asserted above) but left ZERO log trace,
+    // so an operator sees the feature quietly absent with nothing to search
+    // for. These assert the new log.warn fires, with the error's message and
+    // (when present) its code — the test that goes red if that line is
+    // deleted.
+    describe('#7299 a failed --help invocation is logged, not silently swallowed', () => {
+      it('logs the error message and code when --help throws', async () => {
+        manager = makeManager()
+        const capturedWarn = []
+        const originalWarn = console.warn
+        console.warn = (...args) => capturedWarn.push(args.join(' '))
+        try {
+          await manager.detectFeatures({
+            exec: async () => {
+              const err = new Error('claude: command not found')
+              err.code = 'ENOENT'
+              throw err
+            },
+          })
+        } finally {
+          console.warn = originalWarn
+        }
+
+        assert.equal(manager.isAvailable, false)
+        assert.equal(manager.teleportAvailable, false)
+        const hit = capturedWarn.find((line) =>
+          line.includes('claude: command not found') && line.includes('ENOENT'))
+        assert.ok(hit, 'a failed --help invocation must be logged with the error message and code — this is the test that goes red if the new log.warn line is removed')
+      })
+
+      it('logs with no code suffix when the error carries none', async () => {
+        manager = makeManager()
+        const capturedWarn = []
+        const originalWarn = console.warn
+        console.warn = (...args) => capturedWarn.push(args.join(' '))
+        try {
+          await manager.detectFeatures({ exec: async () => { throw new Error('transient probe failure') } })
+        } finally {
+          console.warn = originalWarn
+        }
+
+        assert.equal(manager.isAvailable, false)
+        const hit = capturedWarn.find((line) => line.includes('web task feature detection failed'))
+        assert.ok(hit, 'a failure with no .code must also be logged')
+        assert.ok(hit.includes('transient probe failure'))
+        assert.ok(!hit.includes('(code='), 'no code suffix when the error carries no .code')
+      })
+    })
+
     it('returns feature status object', async () => {
       manager = makeManager()
       await manager.detectFeatures({ exec: async () => 'Usage: claude [options]\n' })
@@ -344,6 +394,73 @@ describe('WebTaskManager', () => {
       assert.equal(manager.listTasks().length, 0)
       assert.equal(manager.listenerCount('task_created'), 0)
       manager = null // prevent double destroy in afterEach
+    })
+
+    // ── #7299: _spawnRemoteTask's execFile callback runs asynchronously and
+    // can fire AFTER destroy() has already cleared _pollTimer, calling
+    // _startPolling() again and leaking a fresh interval on an already-
+    // destroyed manager. Fixed with a `_destroyed` flag checked both in the
+    // callback (before any state mutation or polling) and in _startPolling()
+    // itself.
+    describe('#7299 stays stopped after destroy() — no post-destroy polling restart', () => {
+      it('sets _destroyed and _startPolling() refuses to arm a timer once destroyed', () => {
+        manager = new WebTaskManager()
+        assert.equal(manager._destroyed, false)
+        manager.destroy()
+        assert.equal(manager._destroyed, true, 'destroy() must set the _destroyed flag')
+
+        manager._startPolling()
+        assert.equal(manager._pollTimer, null,
+          "_startPolling() must refuse to arm a timer once destroyed — this is the test that goes red if its _destroyed early return is removed")
+        manager = null // already destroyed; afterEach must not double-destroy
+      })
+
+      it('a destroy() before the real execFile callback fires leaves no poll timer behind', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
+        const shim = makeGateShim()
+        try {
+          manager = makeManager()
+          manager._remoteAvailable = true
+          FixtureClaudeProvider.resolvedOverride = shim.shimPath
+
+          const { taskId } = manager.launchTask('test')
+          const liveTask = manager._tasks.get(taskId)
+          assert.equal(liveTask.status, 'pending',
+            "execFile's callback is always async — it must not have fired before launchTask() returns")
+
+          const countTimeouts = () =>
+            typeof process.getActiveResourcesInfo === 'function'
+              ? process.getActiveResourcesInfo().filter((r) => r === 'Timeout').length
+              : null
+          const timeoutsBefore = countTimeouts()
+
+          // destroy() runs synchronously, strictly before the real child's
+          // execFile callback has any chance to fire.
+          const mgr = manager
+          manager = null // destroying manually below; afterEach must not double-destroy
+          mgr.destroy()
+          assert.equal(mgr._destroyed, true)
+          assert.equal(mgr._pollTimer, null)
+
+          // Let the event loop turn so the real (now-killed, or already
+          // finished) child's execFile callback actually fires before we
+          // assert on its effects.
+          await new Promise((resolve) => setTimeout(resolve, 400))
+
+          assert.equal(mgr._pollTimer, null,
+            'a late execFile callback after destroy() must not create a poll timer — this is the test that goes red if the callback\'s _destroyed early return is removed')
+          assert.equal(liveTask.status, 'pending',
+            'a late callback after destroy() must not mutate the (already-discarded) task object either')
+
+          const timeoutsAfter = countTimeouts()
+          if (timeoutsBefore !== null) {
+            assert.ok(timeoutsAfter <= timeoutsBefore,
+              'no new Timeout resource (a leaked poll interval) must exist after the late callback fires')
+          }
+        } finally {
+          FixtureClaudeProvider.resolvedOverride = null
+          rmSync(shim.dir, { recursive: true, force: true })
+        }
+      })
     })
   })
 
@@ -604,6 +721,58 @@ describe('WebTaskManager', () => {
     })
   })
 
+
+  describe('#7299 parseRemoteTaskId (remoteTaskId capture anchored against a leading dash)', () => {
+    // The old capture, /task[:\s]+([a-zA-Z0-9-]+)/i, put `-` inside the
+    // character class with no position constraint — the #7290 shape
+    // (docs/false-safety-guards.md entry 13) in the very file that fixed it.
+    // remoteTaskId is dead today, but a sibling argv site in this class.
+    it('does not capture a dash-leading id (the #7290 argv-injection shape)', () => {
+      assert.equal(parseRemoteTaskId('task: --evil'), null,
+        'a leading-dash capture must never be returned as a task id — this is the test that goes red if the old unanchored regex is restored')
+    })
+
+    it('still captures a normal id', () => {
+      assert.equal(parseRemoteTaskId('task: abc-123'), 'abc-123')
+    })
+
+    it('captures across the task:/task<space> separator shapes the old regex accepted', () => {
+      assert.equal(parseRemoteTaskId('Task abc-123 queued'), 'abc-123')
+      assert.equal(parseRemoteTaskId('TASK: XYZ789'), 'XYZ789')
+    })
+
+    it('returns null when stdout has no task marker at all', () => {
+      assert.equal(parseRemoteTaskId('Deployed successfully'), null)
+    })
+
+    it('returns null for a non-string input', () => {
+      assert.equal(parseRemoteTaskId(undefined), null)
+      assert.equal(parseRemoteTaskId(123), null)
+    })
+  })
+
+  describe('#7299 the production call site is wired to parseRemoteTaskId', () => {
+    // Mirrors the '#7291 the production call site is wired to the builder'
+    // test below: parseRemoteTaskId is covered as a pure function above, but
+    // nothing proves the real _spawnRemoteTask callback actually calls it
+    // rather than a re-inlined (and possibly re-broken) regex of its own.
+    it("_spawnRemoteTask's execFile callback delegates to parseRemoteTaskId(stdout)", async () => {
+      const { fileURLToPath } = await import('node:url')
+      const { join: joinPath, dirname } = await import('node:path')
+      const src = readFileSync(
+        joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'web-task-manager.js'),
+        'utf8',
+      )
+      const defIdx = src.indexOf('_spawnRemoteTask(task) {')
+      assert.ok(defIdx !== -1, '_spawnRemoteTask definition not found')
+      const callSite = src.slice(defIdx, src.indexOf('\n  }', defIdx))
+
+      assert.match(callSite, /task\.remoteTaskId\s*=\s*parseRemoteTaskId\(stdout\)/,
+        '_spawnRemoteTask must delegate remoteTaskId parsing to parseRemoteTaskId, not an inline regex')
+      assert.ok(!/\.match\(\s*\/task/.test(callSite),
+        '_spawnRemoteTask must not construct its own task-id regex inline')
+    })
+  })
 
   describe('#7291 --remote arity gate', () => {
     // buildRemoteTaskArgs protects the prompt with a `--`, and a separator is
