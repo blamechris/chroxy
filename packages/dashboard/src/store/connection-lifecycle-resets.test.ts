@@ -88,7 +88,10 @@ const {
 const mh = await import('./message-handler')
 // #7570 — the persistence scope the switch teardown moves, driven through the
 // real module (it reads the `localStorage` mock installed above).
-const { setServerScope, persistActiveSession } = await import('./persistence')
+const {
+  setServerScope, persistActiveSession, persistSessionList, loadSessionList,
+  flushPendingWrites, loadPersistedState,
+} = await import('./persistence')
 // Cursors live in store-core; `resetReplayReconcile` is shared by both clients.
 const { recordHistorySeq, getHistoryCursors, resetReplayReconcile } =
   await import('@chroxy/store-core')
@@ -723,6 +726,32 @@ describe.each([
   })
 })
 
+// #8206 S1 — `retargetToServer` is shared, so the persisted-active-session fix
+// reaches `switchServer` / `connectLocal` too. Both always CLAIMED to restore it
+// ("Restore persisted data for the new server"); with the outgoing tab holding a
+// session — `disconnect()` preserves `activeSessionId` — the old read-after-reset
+// order found the key already removed and restored nothing.
+describe.each([
+  ['switchServer', (bId: string): string | null => bId, (id: string) => useConnectionStore.getState().switchServer(id)],
+  ['connectLocal', (_bId: string): string | null => null, (_id: string) => useConnectionStore.getState().connectLocal()],
+] as const)('#8206 S1 %s restores the target scope\'s persisted active session', (_name, targetScope, run) => {
+  afterEach(() => { setServerScope(null) })
+
+  it('when the outgoing tab has a session open', () => {
+    useConnectionStore.setState({ connect: vi.fn() } as unknown as Partial<State>)
+    const a = useConnectionStore.getState().addServer('A', 'wss://server-a/ws', 'tok-a')
+    const b = useConnectionStore.getState().addServer('B', 'wss://server-b/ws', 'tok-b')
+    setServerScope(targetScope(b.id))
+    persistActiveSession('sess-target-persisted')
+    setServerScope(a.id)
+    seedServerA({ activeServerId: a.id, connectionPhase: 'disconnected', socket: null } as unknown as Partial<State>)
+    useConnectionStore.setState({ activeSessionId: 'sess-a-active' } as unknown as Partial<State>)
+    expect(useConnectionStore.getState().activeSessionId, 'control: A has a session open').toBe('sess-a-active')
+    run(b.id)
+    expect(useConnectionStore.getState().activeSessionId).toBe('sess-target-persisted')
+  })
+})
+
 describe('#7559 the failed connect, end to end', () => {
   let socket: { close: ReturnType<typeof vi.fn>; readyState: number }
   const ctx = () => ({ url: 'wss://server-a/ws', token: 'tok-a', socket, isReconnect: false, silent: true })
@@ -829,17 +858,26 @@ describe('#7559 the failed connect, end to end', () => {
 // `createEmptyConnectionScope()`. So a `connectToServer` aimed at a daemon other
 // than the one the tab last spoke to carried the whole roster across.
 //
-// Reachability, stated so the cells below are not mistaken for a hypothetical:
+// Reachability, stated so the cells below are not mistaken for a hypothetical.
+// The roster crossing to a DIFFERENT daemon is not reachable today:
 // `retryConnection` and the startup auto-connect both pass the ACTIVE server, so
 // the only way in is `activeServerId` moving without `switchServer` — the
 // registry edited in another tab (there is no `storage` listener syncing it) or
 // corrupt storage. The second shape below, "desynced registry", drives exactly
-// that.
+// that. The new BRANCH, however, is reachable: a Retry after a #5555 tunnel-URL
+// rotation (or a tab-visible wake while `server_down`) calls
+// `retryConnection` -> `connectToServer(active)` with a repointed `wsUrl`, and
+// takes the teardown — which, unlike `connect()`'s `forgetSession()`, keeps the
+// persisted cache. The direct-`connect()` routes that still reach only
+// `forgetSession()` (Tauri `server_ready`, the reconnect scheduler, the
+// health-check retry) are tracked by #8207.
 //
-// The discriminator is the one `connect()` already uses for the same question:
-// the target's `wsUrl` against the store's `wsUrl` (recorded at `auth_ok`, so it
-// is the daemon the tab ACTUALLY last spoke to). `null` means "never connected"
-// (a fresh page, or right after a teardown) and is not a different daemon.
+// The discriminator is `isDifferentDaemonUrl`, the ONE predicate `connect()`'s
+// own self-clear and `connectToServer` both call: the target's `wsUrl` against
+// the store's `wsUrl` (recorded at `auth_ok`, so it is the daemon the tab
+// ACTUALLY last spoke to). `null` means "never connected" (a fresh page, or right
+// after a teardown) and is not a different daemon. The describe titled "share ONE
+// comparison" holds both call sites to it.
 // ---------------------------------------------------------------------------
 
 const SERVER_A_URL = 'wss://server-a/ws'
@@ -1002,17 +1040,61 @@ describe('#7570 connectToServer to a DIFFERENT daemon runs the switch teardown',
       expect(getHistoryCursors()).toEqual({})
     })
 
-    it("moves the persistence scope to B and restores B's persisted active session", () => {
-      // The two steps of the shared teardown a roster check cannot see. B's
-      // scope holds the session this tab last had open there; the teardown must
-      // scope to B BEFORE it reads, or the read lands in A's keys and B's tab
-      // opens on nothing (or on A's session id).
+    it("restores B's persisted active session when the OUTGOING tab has one open (#8206 S1)", () => {
+      // The steps of the shared teardown a roster check cannot see. B's scope
+      // holds the session this tab last had open there; the teardown must scope
+      // to B BEFORE it reads (or the read lands in A's keys), and must read it
+      // BEFORE `_resetSessionMemory`.
+      //
+      // The outgoing tab HAS an active session, and that is the whole cell. The
+      // first draft started with `activeSessionId` null — the one state in which
+      // the reset's `activeSessionId` change never fires, so the persistence
+      // subscriber never answered it with `persistActiveSession(null)` under B's
+      // scope (removing the key being restored from) and the cell passed against
+      // a restore that did not work in the normal case.
       setServerScope(bId)
       persistActiveSession('sess-b-persisted')
       setServerScope(aId)
-      expect(useConnectionStore.getState().activeSessionId, 'control: nothing active yet').toBeNull()
+      useConnectionStore.setState({ activeSessionId: 'sess-a-active' } as unknown as Partial<State>)
+      expect(useConnectionStore.getState().activeSessionId, 'control: A has a session open').toBe('sess-a-active')
       run()
       expect(useConnectionStore.getState().activeSessionId).toBe('sess-b-persisted')
+      // …and the key is still on disk, not just back in memory.
+      setServerScope(bId)
+      expect(loadPersistedState().activeSessionId, "B's key was removed by the reset").toBe('sess-b-persisted')
+    })
+
+    it("a persisted terminal buffer under A survives the switch (the scope moves before the reset) (#8206 S3)", () => {
+      // The reset empties `terminalBuffer`, and the persistence subscriber answers
+      // by clearing the persisted terminal key under WHATEVER scope is current.
+      // Scope-then-reset aims that clear at B; reset-then-scope would aim it at
+      // A and destroy the cache the teardown exists to leave alone.
+      setServerScope(aId)
+      useConnectionStore.setState({ terminalBuffer: 'A-terminal' } as unknown as Partial<State>)
+      flushPendingWrites()
+      setServerScope(aId)
+      expect(loadPersistedState().terminalBuffer, 'control: A-terminal is on disk first').toBe('A-terminal')
+      run()
+      flushPendingWrites()
+      setServerScope(aId)
+      expect(loadPersistedState().terminalBuffer).toBe('A-terminal')
+    })
+
+    it("B's persisted session list is kept by the teardown (a switch keeps each server's cache) (#8206 S3)", () => {
+      // The docstring promise, pinned: the teardown wipes MEMORY and nothing on
+      // disk. An appended `clearPersistedState()` — `forgetSession`'s step, which
+      // is exactly what the old path ran — would empty B's cache here.
+      setServerScope(bId)
+      persistSessionList([{
+        sessionId: 'sess-b-list', name: 'B', cwd: '/b', type: 'cli', hasTerminal: false,
+        model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null,
+      }])
+      flushPendingWrites()
+      expect(loadSessionList(), 'control: B list is on disk first').toHaveLength(1)
+      setServerScope(aId)
+      run()
+      setServerScope(bId)
+      expect(loadSessionList(), "B's cached session list was wiped by the teardown").toHaveLength(1)
     })
 
     it('POSITIVE CONTROL: from a CONNECTED tab the socket is torn down and the roster cleared', () => {
@@ -1028,6 +1110,73 @@ describe('#7570 connectToServer to a DIFFERENT daemon runs the switch teardown',
       expect(closed, 'disconnect() did not close the old socket').toHaveBeenCalled()
       expect(CONNECTION_SCOPED_RESET_FIELDS.filter((f) => populated(f))).toEqual([])
     })
+  })
+})
+
+describe('#7570 connect() and connectToServer() share ONE "different daemon" comparison (#8206 S2)', () => {
+  // Both sites ask "is this target a different daemon than the one the store last
+  // spoke to?" — `connect()`'s url-differs self-clear and `connectToServer`'s
+  // retarget branch. They were two hand-written copies of the same comparison,
+  // and a comparator loosened in ONE of them passed every test. They now call
+  // `isDifferentDaemonUrl`, and these cells hold both call sites to it with an
+  // input where a loosened comparator disagrees with the raw `!==` both sites
+  // have always used: a URL that differs only by a trailing slash. No
+  // normalisation is the contract — the registry only `.trim()`s on write.
+  const realActions = {
+    connect: useConnectionStore.getState().connect,
+    forgetSession: useConnectionStore.getState().forgetSession,
+    _resetSessionMemory: useConnectionStore.getState()._resetSessionMemory,
+  }
+  const SLASH_URL = `${SERVER_A_URL}/`
+  let aId = ''
+  let slashId = ''
+
+  beforeEach(() => {
+    aId = useConnectionStore.getState().addServer('A', SERVER_A_URL, 'tok-a').id
+    slashId = useConnectionStore.getState().addServer('A-slash', SLASH_URL, 'tok-slash').id
+    seedServerA({
+      activeServerId: aId,
+      wsUrl: SERVER_A_URL,
+      connectionPhase: 'disconnected',
+      socket: null,
+    } as unknown as Partial<State>)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    useConnectionStore.setState({ ...realActions } as unknown as Partial<State>)
+    clearMessageQueue()
+    resetReplayReconcile({ clearCursors: true })
+  })
+
+  it('connectToServer: a target differing only by a trailing slash IS a different daemon', () => {
+    const resetSpy = vi.fn(realActions._resetSessionMemory)
+    useConnectionStore.setState({ connect: vi.fn(), _resetSessionMemory: resetSpy } as unknown as Partial<State>)
+    expect(CONNECTION_SCOPED_RESET_FIELDS.filter((f) => !populated(f)), 'control: roster populated first').toEqual([])
+    useConnectionStore.getState().connectToServer(slashId)
+    expect(resetSpy, 'the teardown did not run — the comparison was loosened at this site').toHaveBeenCalledTimes(1)
+    expect(CONNECTION_SCOPED_RESET_FIELDS.filter((f) => populated(f))).toEqual([])
+  })
+
+  it.each([
+    ['a trailing-slash variant', SLASH_URL, true],
+    ['the identical URL (control: the spy is wired, and nothing fires for the same daemon)', SERVER_A_URL, false],
+  ] as const)('connect(): %s', (_label, url, expectSelfClear) => {
+    // The REAL `connect()`, with its network edge cut: `fetch` never settles and
+    // timers are fake, so nothing is dialled and nothing logs after the test
+    // body (#6063). Only the synchronous self-clear at its top is observed.
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})))
+    const forgetSpy = vi.fn(realActions.forgetSession)
+    useConnectionStore.setState({ connect: realActions.connect, forgetSession: forgetSpy } as unknown as Partial<State>)
+    useConnectionStore.getState().connect(url, 'tok')
+    try {
+      expect(forgetSpy).toHaveBeenCalledTimes(expectSelfClear ? 1 : 0)
+    } finally {
+      // Cancel the attempt this call armed, so no retry timer outlives the cell.
+      useConnectionStore.getState().disconnect()
+    }
   })
 })
 

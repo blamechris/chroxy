@@ -2335,10 +2335,12 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * different-daemon block and the same-daemon block).
  *
  * What that leaves, named rather than omitted: a DIRECT `connect(url, …)` to a
- * different URL still reaches `forgetSession()` alone — in production that is the
- * Tauri `server_ready` handler dialling a daemon that came back on another port —
- * and the `forgetSession()` it runs nulls `wsUrl`, so a `connectToServer` made
- * afterwards reads "never connected" and cannot tell the roster is stale.
+ * different URL still reaches `forgetSession()` alone — in production the Tauri
+ * `server_ready` handler dialling a daemon that came back on another port, and
+ * the reconnect scheduler and health-check retry, which re-resolve the registry
+ * endpoint and call `connect()` directly — and the `forgetSession()` it runs
+ * nulls `wsUrl`, so a `connectToServer` made afterwards reads "never connected"
+ * and cannot tell the roster is stale. Tracked by #8207.
  */
 describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one', () => {
   /**

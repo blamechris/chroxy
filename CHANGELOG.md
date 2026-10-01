@@ -50,22 +50,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`serverCapabilities`, `availablePermissionModes`, `environments`,
   `checkpoints`, `customAgents`, `conversationHistory`, …), nor the replay
   cursors. So a `connectToServer` to a `wsUrl` other than the one the tab last
-  connected to carried all of that onto the new daemon. Not reachable today
-  (`retryConnection` and the startup auto-connect pass the active server);
-  it needs `activeServerId` to move without `switchServer`, e.g. the registry
-  edited in another tab or corrupt storage. The teardown now lives in one
-  `retargetToServer` helper that `switchServer`, `connectLocal` and
-  `connectToServer`'s different-daemon branch all run. A target whose `wsUrl`
-  equals the store's — `retryConnection` — and a store with no `wsUrl` yet — the
-  startup auto-connect, which must keep the cache it just hydrated — still
-  reconnect in place, unchanged. Chosen over spreading the roster in
-  `forgetSession` because that would move every `CLEARED_ON_DISCONNECT` member
-  into the "cleared at both full-reset sites" answer and force a taxonomy
-  rewrite of the guard in `session-destroy-prunes-pr-maps.test.ts`, which
-  also pins `environments` (#7552) there. Behavioural cells drive both the
-  issue's shape and the desynced-registry `retryConnection` shape, iterate
+  connected to carried all of that onto the new daemon. The roster crossing
+  to a DIFFERENT daemon is not reachable today (`retryConnection` and the
+  startup auto-connect pass the active server); it needs `activeServerId` to
+  move without `switchServer`, e.g. the registry edited in another tab or
+  corrupt storage. The new branch itself is reachable: a Retry after a
+  tunnel-URL rotation (#5555) passes the active server with a repointed
+  `wsUrl`, takes the teardown, and — unlike `connect()`'s `forgetSession()` —
+  keeps the persisted cache. The teardown now lives in one `retargetToServer`
+  helper that `switchServer`, `connectLocal` and `connectToServer`'s
+  different-daemon branch all run, and "is this a different daemon" is one
+  shared `isDifferentDaemonUrl` predicate used by both `connectToServer` and
+  `connect()`'s own url-differs self-clear (raw strict inequality, no
+  normalisation, `null` = never connected), so the two cannot drift. A target
+  whose `wsUrl` equals the store's — `retryConnection` — and a store with no
+  `wsUrl` yet — the startup auto-connect, which must keep the cache it just
+  hydrated — still reconnect in place, unchanged. Chosen over spreading the
+  roster in `forgetSession` because that would move every
+  `CLEARED_ON_DISCONNECT` member into the "cleared at both full-reset sites"
+  answer and force a taxonomy rewrite of the guard in
+  `session-destroy-prunes-pr-maps.test.ts`, which also pins `environments`
+  (#7552) there. The direct-`connect()` routes that still reach only
+  `forgetSession()` (Tauri `server_ready`, the reconnect scheduler, the
+  health-check retry) are tracked by #8207.
+
+  Also fixed here, because the shared helper is what exposed it: switching
+  servers (`switchServer`, `connectLocal`, and this branch) did not actually
+  restore the target's persisted active session whenever the outgoing tab had
+  one open — `disconnect()` preserves `activeSessionId`, `_resetSessionMemory`
+  then nulls it, and the persistence subscriber answered by removing the new
+  scope's stored key before it was read back. The helper now reads the new
+  scope's persisted active session BEFORE the reset and applies it after, which
+  is the behaviour those actions always claimed. Behavioural cells drive both
+  the issue's shape and the desynced-registry `retryConnection` shape, iterate
   `createEmptyConnectionScope()`'s keys so a new roster field cannot escape,
-  and pin the same-daemon path.
+  pin the same-daemon path, and pin that the teardown scopes before it resets
+  and leaves the disk cache alone (the outgoing server's terminal buffer, the
+  target's session list).
 
 - **`web-task-manager.js`: a failed feature-detection probe is now logged, a
   dash-led remote task id can no longer be captured, and a destroyed manager
