@@ -40,6 +40,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dashboard: `connectToServer` aimed at a different daemon now runs the same
+  teardown as `switchServer`, so the connection-scoped roster no longer
+  crosses over (#7570).** `switchServer` and `connectLocal` call
+  `disconnect()` (when not already disconnected) and `_resetSessionMemory()`;
+  `connectToServer` ran neither. Its only protection was `connect()`'s
+  url-differs self-clear, which runs `forgetSession()` — and `forgetSession`
+  does not clear the roster #7559 gathered into `createEmptyConnectionScope()`
+  (`serverCapabilities`, `availablePermissionModes`, `environments`,
+  `checkpoints`, `customAgents`, `conversationHistory`, …), nor the replay
+  cursors. So a `connectToServer` to a `wsUrl` other than the one the tab last
+  connected to carried all of that onto the new daemon. Not reachable today
+  (`retryConnection` and the startup auto-connect pass the active server);
+  it needs `activeServerId` to move without `switchServer`, e.g. the registry
+  edited in another tab or corrupt storage. The teardown now lives in one
+  `retargetToServer` helper that `switchServer`, `connectLocal` and
+  `connectToServer`'s different-daemon branch all run. A target whose `wsUrl`
+  equals the store's — `retryConnection` — and a store with no `wsUrl` yet — the
+  startup auto-connect, which must keep the cache it just hydrated — still
+  reconnect in place, unchanged. Chosen over spreading the roster in
+  `forgetSession` because that would move every `CLEARED_ON_DISCONNECT` member
+  into the "cleared at both full-reset sites" answer and force a taxonomy
+  rewrite of the guard in `session-destroy-prunes-pr-maps.test.ts`, which
+  also pins `environments` (#7552) there. Behavioural cells drive both the
+  issue's shape and the desynced-registry `retryConnection` shape, iterate
+  `createEmptyConnectionScope()`'s keys so a new roster field cannot escape,
+  and pin the same-daemon path.
+
 - **`web-task-manager.js`: a failed feature-detection probe is now logged, a
   dash-led remote task id can no longer be captured, and a destroyed manager
   stays destroyed (#7299).** Three pre-existing defects, all surfaced by the

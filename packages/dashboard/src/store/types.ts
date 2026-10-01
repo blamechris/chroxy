@@ -2658,7 +2658,9 @@ export interface ConnectionState {
   updateServer: (serverId: string, patch: Partial<Pick<ServerEntry, 'name' | 'wsUrl' | 'token' | 'pinnedIdentityKey'>>) => void;
   /** Switch to a different server — disconnects, clears session, connects fresh. */
   switchServer: (serverId: string) => void;
-  /** Reconnect to a server without clearing session state (auto-reconnect/startup). */
+  /** Reconnect to a server without clearing session state (auto-reconnect/startup).
+   *  If the server's `wsUrl` differs from the one the store last connected to, it is a
+   *  different daemon and runs the same teardown as `switchServer` instead (#7570). */
   connectToServer: (serverId: string) => void;
   /** Connect to the local same-origin daemon ("this machine"); registry-less local target. */
   connectLocal: () => void;
