@@ -666,6 +666,60 @@ describe('SdkSession', () => {
         assert.equal(session._inPlanMode, false,
           'stale flag must reset — otherwise a later turn would think plan mode is still active')
       })
+
+      // #8153 (review, M7): the OPPOSITE leftover shape — ExitPlanMode DID
+      // arrive (so _planAllowedPrompts is a non-null array), but the turn
+      // was interrupted/crashed before the normal 'result' case ran, so
+      // plan_ready never fired and never cleared it. _clearMessageState's
+      // unconditional `this._planAllowedPrompts = null` at the end is what
+      // prevents this stashed value from surviving into the NEXT turn — a
+      // later turn's unrelated 'result' would otherwise find
+      // `_inPlanMode && _planAllowedPrompts !== null` still true and fire a
+      // SPURIOUS plan_ready carrying turn-1's stale allowedPrompts, even
+      // though turn 2 never called ExitPlanMode. Proven RED by deleting
+      // that clearing line (see PR description's mutant table).
+      it('an interrupted plan does not leak a spurious plan_ready into the next turn (#8153 M7)', async () => {
+        const s = createSession()
+        s._processReady = true
+        const events = []
+        s.on('plan_ready', (d) => events.push(d))
+
+        // Turn 1: EnterPlanMode + ExitPlanMode fire (stashing allowedPrompts),
+        // then the turn is interrupted/crashes BEFORE the 'result' case runs
+        // — so plan_ready is never emitted and never clears the stash via
+        // the 'result' handler's own reset.
+        s._handleToolUseBlock('msg-1', { name: 'EnterPlanMode', id: 'toolu_plan_m7', input: {} })
+        s._handleToolUseBlock('msg-1', {
+          name: 'ExitPlanMode',
+          id: 'toolu_exit_m7',
+          input: { allowedPrompts: [{ tool: 'Bash', prompt: 'turn-1 stale prompt' }] },
+        })
+        assert.equal(s._inPlanMode, true)
+        assert.ok(s._planAllowedPrompts)
+        s._clearMessageState() // simulates the interrupt/crash path
+
+        // Turn 2: an entirely normal turn with no plan-mode tool calls at
+        // all, ending in a normal result.
+        s._callQuery = () => (async function* () {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'tool_use', name: 'Bash', id: 'toolu_normal', input: { command: 'ls' } }] },
+          }
+          yield {
+            type: 'result',
+            session_id: 'm7-turn-2',
+            total_cost_usd: 0.01,
+            duration_ms: 5,
+            usage: {},
+          }
+        })()
+
+        await s.sendMessage('continue')
+        s.destroy()
+
+        assert.equal(events.length, 0,
+          'turn 2 must not emit plan_ready — it never called ExitPlanMode, so a plan_ready here would be turn 1\'s stale state leaking forward')
+      })
     })
 
     // #4307: background-shell tracking wired through SdkSession's
@@ -2111,6 +2165,67 @@ describe('SdkSession', () => {
       } finally {
         SdkSession.CONTEXT_USAGE_SNAPSHOT_TIMEOUT_MS = original
       }
+    })
+  })
+
+  // #8153 (review nit) — `SDKStatusMessage` (`subtype: 'status'`) carries no
+  // `message`/`text` field, just `status: 'compacting' | 'requesting' |
+  // null`. Without the dedicated branch, the generic system-event fallback
+  // (`msg.message || msg.text || msg.subtype || 'System event'`) would
+  // forward the bare literal string "status" as a chat bubble.
+  describe("system/status message gets a human-readable label (#8153)", () => {
+    function messageCapture(s) {
+      const messages = []
+      s.on('message', (m) => messages.push(m))
+      return messages
+    }
+
+    it('labels a compacting status event', async () => {
+      const s = createSession()
+      s._processReady = true
+      s._callQuery = () => (async function* () {
+        yield { type: 'system', subtype: 'status', status: 'compacting', session_id: 'status-1' }
+        yield { type: 'result', session_id: 'status-1', total_cost_usd: 0, duration_ms: 1, usage: {} }
+      })()
+      const messages = messageCapture(s)
+      await s.sendMessage('go')
+      s.destroy()
+
+      const statusMsgs = messages.filter((m) => m.type === 'system' && m.subtype === 'status')
+      assert.equal(statusMsgs.length, 1)
+      assert.equal(statusMsgs[0].content, 'Compacting conversation context…')
+      assert.notEqual(statusMsgs[0].content, 'status')
+    })
+
+    it('labels a requesting status event', async () => {
+      const s = createSession()
+      s._processReady = true
+      s._callQuery = () => (async function* () {
+        yield { type: 'system', subtype: 'status', status: 'requesting', session_id: 'status-2' }
+        yield { type: 'result', session_id: 'status-2', total_cost_usd: 0, duration_ms: 1, usage: {} }
+      })()
+      const messages = messageCapture(s)
+      await s.sendMessage('go')
+      s.destroy()
+
+      const statusMsgs = messages.filter((m) => m.type === 'system' && m.subtype === 'status')
+      assert.equal(statusMsgs.length, 1)
+      assert.equal(statusMsgs[0].content, 'Waiting for a response…')
+    })
+
+    it('suppresses a status: null event entirely (no bubble)', async () => {
+      const s = createSession()
+      s._processReady = true
+      s._callQuery = () => (async function* () {
+        yield { type: 'system', subtype: 'status', status: null, session_id: 'status-3' }
+        yield { type: 'result', session_id: 'status-3', total_cost_usd: 0, duration_ms: 1, usage: {} }
+      })()
+      const messages = messageCapture(s)
+      await s.sendMessage('go')
+      s.destroy()
+
+      const statusMsgs = messages.filter((m) => m.type === 'system' && m.subtype === 'status')
+      assert.equal(statusMsgs.length, 0, 'status: null must not produce any chat bubble')
     })
   })
 

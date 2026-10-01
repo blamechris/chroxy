@@ -47,9 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through as the SDK's own native `PermissionMode` — a literal
   `--permission-mode plan` flag `query()` forwards to the same installed
   `claude` CLI binary `claude-cli` spawns (`pathToClaudeCodeExecutable`,
-  #7986), so the native read-only tool restriction and the
-  `EnterPlanMode`/`ExitPlanMode` tool-use protocol were always identical on
-  both providers. The only real gap was event wiring: SdkSession parsed
+  #7986), so the native read-only tool restriction was always the same on
+  both providers — though the approval routing and per-turn process model
+  differ: SdkSession builds a brand-new `query()` every turn and simply
+  reads `this.permissionMode` fresh each time (a mode change lands on the
+  very next turn, no sidecar file or restart needed), `EnterPlanMode` only
+  resets stale plan-ready state, and the plan-approval card itself comes
+  from `ExitPlanMode`, which flows through the same `canUseTool` →
+  `PermissionManager` pipeline as any other tool call. The only real gap
+  was event wiring: SdkSession parsed
   `EnterPlanMode`/`ExitPlanMode` via the shared `extractToolInputSemantics`
   (used for `Task`/`Agent` tool tracking) but explicitly skipped the
   `enter_plan`/`exit_plan` kinds. `_handleToolUseBlock` now tracks
@@ -65,6 +71,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing `{ ...SdkSession.capabilities }` spread (same CLI binary via
   `docker exec`). `docs/providers.md` and `docs/feature-matrix.md` updated
   to match.
+
+- **A `system`/`status` event no longer renders as a bare "status" chat
+  bubble (#8153 review).** The SDK's `SDKStatusMessage`
+  (`status: 'compacting' | 'requesting' | null`) carries no `message`/`text`
+  field, so both providers' generic system-event fallback
+  (`msg.message || msg.text || msg.subtype || 'System event'`) fell through
+  to the literal subtype string. `claude-stream-parser.js`'s new
+  `formatStatusContent()` gives `compacting`/`requesting` a human-readable
+  label; `status: null` (the previous status clearing) is suppressed
+  entirely rather than emitted as an empty bubble. Wired identically in
+  `cli-session.js` and `sdk-session.js` so the two providers cannot drift.
 
 - **The protocol and store-core dist-drift CI checks now catch a tracked dist
   file orphaned by a deleted source, not just a modified or new one (#8163).**

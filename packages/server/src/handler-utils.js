@@ -55,17 +55,19 @@ export const PERMISSION_MODES = buildModes(MODE_DESCRIPTIONS.default).map((mode)
 
 // #8090 — the advertised list follows `capabilities.planMode` directly, for
 // EVERY provider that declares it `false` (claude-tui, codex app-server/-exec,
-// byok, sdk-session, gemini, ...), not just claude-tui. This is the same rule
-// the dashboard has applied since #8087/#8084 — `showPlanMode: caps?.planMode
-// !== false` in `packages/dashboard/src/App.tsx`, consumed by
+// byok, gemini, ...), not just claude-tui. (sdk-session declared `planMode:
+// false` too at the time this was written; #8153 found the capability was
+// stale — the SDK's own `'plan'` pass-through was never gated — and flipped
+// it to `true`, so sdk-session no longer belongs in this list.) This is the
+// same rule the dashboard has applied since #8087/#8084 — `showPlanMode:
+// caps?.planMode !== false` in `packages/dashboard/src/App.tsx`, consumed by
 // `CreateSessionModal.tsx` — so every client that trusts the server flag
 // (mobile, dashboard, any future client) agrees with the dashboard instead of
 // disagreeing per provider. An earlier version of this check special-cased
 // `provider === 'claude-tui'`; that made mobile disagree with the dashboard
-// for codex/byok/gemini/sdk-session, and is exactly the "hardcoded list
-// beside a growing set" shape docs/false-safety-guards.md catalogues as a
-// recurring defect class, so it was replaced with the plain capability check
-// below.
+// for codex/byok/gemini, and is exactly the "hardcoded list beside a growing
+// set" shape docs/false-safety-guards.md catalogues as a recurring defect
+// class, so it was replaced with the plain capability check below.
 //
 // This is intentionally NOT folded into `getProviderPermissionModeSupport()`
 // itself, which also feeds `assertProviderPermissionModeSupported`

@@ -361,7 +361,14 @@ describe('DockerSdkSession capabilities', () => {
     assert.equal(caps.inProcessPermissions, true)
     assert.equal(caps.modelSwitch, true)
     assert.equal(caps.permissionModeSwitch, true)
-    assert.equal(caps.planMode, true) // #8153
+    // planMode is NOT asserted here (#8153 review): this FAKE harness
+    // hand-duplicates the capabilities literal instead of spreading the real
+    // SdkSession.capabilities, so a check against ITS OWN hardcoded field can
+    // never go red for a real regression. The genuine inheritance check —
+    // importing the real DockerSdkSession/SdkSession classes and proving the
+    // actual `{ ...SdkSession.capabilities, ... }` spread — lives in
+    // providers.test.js's "docker-sdk genuinely inherits planMode from
+    // SdkSession via the real capabilities spread (#8153)".
     assert.equal(caps.resume, true)
     assert.equal(caps.terminal, false)
     assert.equal(caps.thinkingLevel, true)

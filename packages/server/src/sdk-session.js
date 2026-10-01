@@ -18,7 +18,7 @@ import {
   isRunInBackgroundInput,
   parseBashOutputShellId,
 } from './background-shells.js'
-import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent } from './claude-stream-parser.js'
+import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent, formatStatusContent } from './claude-stream-parser.js'
 import { createLogger, loggerForSession } from './logger.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
@@ -1119,6 +1119,24 @@ export class SdkSession extends BaseSession {
                 compactMetadata: meta,
                 timestamp: Date.now(),
               })
+              break
+            } else if (msg.subtype === 'status') {
+              // #8153 (review nit): `SDKStatusMessage` carries no
+              // `message`/`text` field, just `status: 'compacting' |
+              // 'requesting' | null` — the generic fallback below would
+              // otherwise forward the bare literal string "status" as a
+              // chat bubble. `status: null` means the previous status
+              // cleared, nothing new to show, so it's suppressed entirely
+              // rather than emitted as an empty/placeholder bubble.
+              const statusText = formatStatusContent(msg.status)
+              if (statusText) {
+                this.emit('message', {
+                  type: 'system',
+                  subtype: 'status',
+                  content: statusText,
+                  timestamp: Date.now(),
+                })
+              }
               break
             } else {
               // Forward non-init system events (e.g. /usage, /cost, other

@@ -1117,6 +1117,20 @@ describe('Docker Provider Naming (#2475)', () => {
     assert.equal(DockerSdkSession.capabilities.containerized, true)
   })
 
+  // #8153 (review) — docker-sdk-session.test.js's FakeDockerSdkSession harness
+  // hand-duplicates the full capabilities literal rather than spreading the
+  // real SdkSession.capabilities, so its own planMode assertion can never go
+  // red for a real regression (the fake's value only ever agrees with
+  // itself). This test imports the REAL classes — the actual
+  // `{ ...SdkSession.capabilities, containerized: true, ... }` spread in
+  // docker-sdk-session.js — so it fails if that spread ever breaks, or if
+  // SdkSession.capabilities.planMode ever reverts.
+  it('docker-sdk genuinely inherits planMode from SdkSession via the real capabilities spread (#8153)', async () => {
+    const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
+    assert.equal(DockerSdkSession.capabilities.planMode, SdkSession.capabilities.planMode)
+    assert.equal(DockerSdkSession.capabilities.planMode, true)
+  })
+
   // #4780: the docker providers used to inherit the host-CLI preflight
   // credentials block from their parent, which suggested the user "run
   // `claude login`". Inside a container that command cannot work — the

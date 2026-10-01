@@ -187,3 +187,26 @@ export function formatCompactBoundaryContent(meta) {
   }
   return `Context compacted (${meta.trigger})`
 }
+
+/**
+ * #8153 (review nit) — human-readable label for a `system`/`status` event's
+ * `content` field. Without this, CliSession's and SdkSession's shared
+ * generic-system-event fallback (`msg.message || msg.text || msg.subtype`)
+ * renders the bare literal string "status" as a chat bubble: the SDK's
+ * `SDKStatusMessage` (`sdk.d.ts`'s `subtype: 'status'`) carries no
+ * `message`/`text` field at all, just `status: 'compacting' | 'requesting' |
+ * null`.
+ *
+ * Returns `null` for `status === null` (and any other falsy/unrecognized
+ * value) — that value signals the PREVIOUS status cleared, not a new event
+ * worth a bubble of its own, so the caller should suppress the emit
+ * entirely rather than render an empty or placeholder one.
+ *
+ * @param {'compacting'|'requesting'|null|undefined} status
+ * @returns {string|null}
+ */
+export function formatStatusContent(status) {
+  if (status === 'compacting') return 'Compacting conversation context…'
+  if (status === 'requesting') return 'Waiting for a response…'
+  return null
+}

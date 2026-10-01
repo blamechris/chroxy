@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   extractToolInputSemantics,
   buildToolStartData,
+  formatStatusContent,
 } from '../src/claude-stream-parser.js'
 
 /**
@@ -216,5 +217,31 @@ describe('buildToolStartData', () => {
       name: 'Read',
     })
     assert.equal('serverName' in result, false)
+  })
+})
+
+// #8153 (review nit): `SDKStatusMessage` (`status: 'compacting' |
+// 'requesting' | null`) carries no `message`/`text` field, so CliSession's
+// and SdkSession's shared generic-system-event fallback would otherwise
+// forward the bare literal string "status" as a chat bubble.
+describe('formatStatusContent', () => {
+  it('labels compacting', () => {
+    assert.equal(formatStatusContent('compacting'), 'Compacting conversation context…')
+  })
+
+  it('labels requesting', () => {
+    assert.equal(formatStatusContent('requesting'), 'Waiting for a response…')
+  })
+
+  it('returns null for status: null (previous status cleared — suppress, do not bubble)', () => {
+    assert.equal(formatStatusContent(null), null)
+  })
+
+  it('returns null for an unrecognized/future status value (fail closed, not a raw echo)', () => {
+    assert.equal(formatStatusContent('some-future-status'), null)
+  })
+
+  it('returns null for undefined', () => {
+    assert.equal(formatStatusContent(undefined), null)
   })
 })
