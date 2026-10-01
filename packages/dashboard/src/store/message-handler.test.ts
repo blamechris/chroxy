@@ -308,6 +308,63 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #8151 round-2 review (Critical 3d) — applyServerDefaultProvider's
+  // "only when the user has not already chosen" guard was unguarded
+  // end-to-end: the reviewer's mutant (both dispatch-table apply calls
+  // deleted, this adapter a no-op) left all 6228 dashboard tests green.
+  describe('applyServerDefaultProvider — provider_list / auth_bootstrap (#8151 C3)', () => {
+    it('provider_list: the store default becomes the server value when no chroxy_default_provider key is persisted', () => {
+      handleMessage(
+        { type: 'provider_list', providers: [{ name: 'claude-sdk' }], defaultProvider: 'claude-sdk' },
+        ctx() as any,
+      )
+      expect((store.getState() as any).defaultProvider).toBe('claude-sdk')
+    })
+
+    it('provider_list: the store default stays the persisted (user-chosen) value when chroxy_default_provider exists', () => {
+      localStorage.setItem('chroxy_default_provider', 'gemini')
+      store = createMockStore(baseState({ defaultProvider: 'gemini' } as Partial<ConnectionState>))
+      setStore(store)
+      handleMessage(
+        { type: 'provider_list', providers: [{ name: 'claude-sdk' }], defaultProvider: 'claude-sdk' },
+        ctx() as any,
+      )
+      // The server's value must NOT overwrite the user's explicit choice.
+      expect((store.getState() as any).defaultProvider).toBe('gemini')
+    })
+
+    it('auth_bootstrap: the store default becomes the server value when no chroxy_default_provider key is persisted', () => {
+      handleMessage(
+        {
+          type: 'auth_bootstrap',
+          providers: [{ name: 'claude-sdk' }],
+          slashCommands: [],
+          agents: [],
+          defaultProvider: 'claude-sdk',
+        },
+        ctx() as any,
+      )
+      expect((store.getState() as any).defaultProvider).toBe('claude-sdk')
+    })
+
+    it('auth_bootstrap: the store default stays the persisted (user-chosen) value when chroxy_default_provider exists', () => {
+      localStorage.setItem('chroxy_default_provider', 'gemini')
+      store = createMockStore(baseState({ defaultProvider: 'gemini' } as Partial<ConnectionState>))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'auth_bootstrap',
+          providers: [{ name: 'claude-sdk' }],
+          slashCommands: [],
+          agents: [],
+          defaultProvider: 'claude-sdk',
+        },
+        ctx() as any,
+      )
+      expect((store.getState() as any).defaultProvider).toBe('gemini')
+    })
+  })
+
   describe('monthly_budget dispatch (#5665)', () => {
     it('stores the latest monthly credit-meter snapshot', () => {
       store = createMockStore(baseState({ monthlyBudget: null }))

@@ -35,6 +35,7 @@ import {
   resetCachesForTest,
 } from './auth-probes.js'
 import { AgentConnectionRegistry } from './agent-connections.js'
+import { cachedNodePtyAvailable } from './utils/node-pty-probe.js'
 
 // #6616 — values of CHROXY_CODEX_APPSERVER that opt the codex provider OUT of the
 // (now-default) app-server path and back to the legacy `codex exec` path.
@@ -297,13 +298,31 @@ export function getProviderDataDirs() {
  * dashboard grey-out unusable providers and surface a billing-confidence
  * panel without making the user shell out and run `chroxy doctor`.
  *
+ * #8151 (C3) — `claude-tui`'s `auth` is additionally overridden to
+ * `ready: false` with an actionable hint when node-pty cannot load in this
+ * process (e.g. the official Docker image, which ships without a native
+ * build toolchain). Without this, `claude-tui` looked exactly as usable as
+ * every other provider right up until a client actually created a session
+ * with it, which then failed and was torn down 1ms later (#8151 C4) — this
+ * lets the dashboard grey it out (and explain why) before that ever happens.
+ * `nodePtyAvailable` is injectable for tests; production reads the
+ * process-lifetime cache `probeNodePtyAvailable()` warmed at boot
+ * (server-cli.js), via `cachedNodePtyAvailable()`. `null` (never probed —
+ * e.g. a test that constructs this directly) is treated as "assume
+ * available", preserving prior behaviour for every caller that predates
+ * this field.
+ *
+ * @param {{ agentConnections?: Array, nodePtyAvailable?: boolean }} [opts]
  * @returns {Array<{ name: string, capabilities: object, auth: object }>}
  */
-export function listProviders({ agentConnections = [] } = {}) {
+export function listProviders({ agentConnections = [], nodePtyAvailable } = {}) {
   const connections = new AgentConnectionRegistry({
     definitions: agentConnections,
     getProvider,
   }).list()
+  const effectiveNodePtyAvailable = nodePtyAvailable !== undefined
+    ? nodePtyAvailable
+    : (cachedNodePtyAvailable() ?? true)
   const list = []
   for (const name of Object.keys(PROVIDERS)) {
     if (HIDDEN.has(name)) continue
@@ -315,6 +334,15 @@ export function listProviders({ agentConnections = [] } = {}) {
     // class delegates dataDir/resolveAuth/preflight to the exec class, so `auth` is
     // unchanged — only the capability shape follows the runtime driver.
     const ProviderClass = getProvider(name)
+    let auth = getProviderAuthInfo(name, ProviderClass)
+    if (name === 'claude-tui' && !effectiveNodePtyAvailable) {
+      auth = {
+        ...auth,
+        ready: false,
+        hint: 'not supported in this environment (node-pty unavailable) — use claude-sdk',
+        detail: 'node-pty unavailable — the embedded PTY this provider needs cannot load here (e.g. the official Docker image, which has no linux prebuild and skips the native build)',
+      }
+    }
     list.push({
       name,
       capabilities: {
@@ -322,7 +350,7 @@ export function listProviders({ agentConnections = [] } = {}) {
         sessionRules: typeof ProviderClass.prototype.setPermissionRules === 'function',
         thinkingLevelLegacyFallback: thinkingLevelLegacyFallbackApplies(name, ProviderClass),
       },
-      auth: getProviderAuthInfo(name, ProviderClass),
+      auth,
       connections: connections.filter((connection) => connection.runtime.id === name),
     })
   }

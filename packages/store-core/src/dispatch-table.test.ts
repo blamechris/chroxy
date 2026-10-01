@@ -116,6 +116,14 @@ function makeAdapter(init?: {
    * is absent (the dashboard's behaviour: flat write only, no mirror).
    */
   checkpointMirror?: boolean
+  /**
+   * When true, the adapter wires `applyServerDefaultProvider` (records into
+   * `appliedDefaultProviders`) — the server-resolved-default apply for
+   * provider_list / auth_bootstrap (#8151 C3). When omitted, the hook is
+   * absent (the optional-chained apply call below is a safe no-op), matching
+   * a client that hasn't opted in.
+   */
+  defaultProviderHook?: boolean
 }) {
   const sessions: Record<string, FakeSession> = init?.sessions ?? {}
   let activeSessionId = init?.activeSessionId ?? null
@@ -133,6 +141,7 @@ function makeAdapter(init?: {
   const primaryClientIds: Array<string | null> = []
   const costUpdates: Array<{ totalCost: number | null; budget: number | null }> = []
   const rotatedTunnelUrls: Array<{ url: string; previousUrl: string | null }> = []
+  const appliedDefaultProviders: string[] = []
   const checkpointSyncs: Array<
     { kind: 'append'; checkpoint: Checkpoint } | { kind: 'replace'; checkpoints: Checkpoint[] }
   > = []
@@ -206,6 +215,9 @@ function makeAdapter(init?: {
           ) => checkpointSyncs.push(op),
         }
       : {}),
+    ...(init?.defaultProviderHook
+      ? { applyServerDefaultProvider: (name: string) => appliedDefaultProviders.push(name) }
+      : {}),
   }
 
   return {
@@ -222,6 +234,7 @@ function makeAdapter(init?: {
     primaryClientIds,
     costUpdates,
     rotatedTunnelUrls,
+    appliedDefaultProviders,
     setActive: (id: string | null) => {
       activeSessionId = id
     },
@@ -1097,6 +1110,27 @@ describe('shared dispatch table', () => {
       expect(dispatch(env, { type: 'provider_list' })).toBe(true)
       expect(env.flat.availableProviders).toBeUndefined()
     })
+
+    // #8151 round-2 review (Critical 3c) — dispatchProviderList's
+    // applyServerDefaultProvider call was unguarded: deleting it (with the
+    // dashboard adapter a no-op either way) left 2445 store-core tests green.
+    it('provider_list calls applyServerDefaultProvider with the server value when present', () => {
+      const env = makeAdapter({ defaultProviderHook: true })
+      dispatch(env, {
+        type: 'provider_list',
+        providers: [{ name: 'claude' }],
+        defaultProvider: 'claude-sdk',
+      })
+      expect(env.appliedDefaultProviders).toEqual(['claude-sdk'])
+    })
+
+    it('provider_list does NOT call applyServerDefaultProvider when defaultProvider is absent or blank', () => {
+      const env = makeAdapter({ defaultProviderHook: true })
+      dispatch(env, { type: 'provider_list', providers: [{ name: 'claude' }] })
+      dispatch(env, { type: 'provider_list', providers: [{ name: 'claude' }], defaultProvider: '' })
+      dispatch(env, { type: 'provider_list', providers: [{ name: 'claude' }], defaultProvider: null })
+      expect(env.appliedDefaultProviders).toEqual([])
+    })
   })
 
   describe('session_restore_failed / session_persist_failed / session_stopped (#5618 Batch 3)', () => {
@@ -1433,6 +1467,41 @@ describe('shared dispatch table', () => {
       expect(env.flat.availableProviders).toEqual([{ name: 'claude' }])
       expect(env.flat.slashCommands).toBeUndefined()
       expect(env.flat.customAgents).toBeUndefined()
+    })
+
+    // #8151 round-2 review (Critical 3c) — same unguarded gap as
+    // provider_list: auth_bootstrap's applyServerDefaultProvider call was
+    // deleted in the reviewer's mutant and stayed green.
+    it('auth_bootstrap calls applyServerDefaultProvider with the server value when present', () => {
+      const env = makeAdapter({ defaultProviderHook: true })
+      dispatch(env, {
+        type: 'auth_bootstrap',
+        providers: [{ name: 'claude' }],
+        slashCommands: [],
+        agents: [],
+        defaultProvider: 'claude-sdk',
+      })
+      expect(env.appliedDefaultProviders).toEqual(['claude-sdk'])
+    })
+
+    it('auth_bootstrap does NOT call applyServerDefaultProvider when defaultProvider is absent or blank', () => {
+      const env = makeAdapter({ defaultProviderHook: true })
+      dispatch(env, { type: 'auth_bootstrap', providers: [{ name: 'claude' }], slashCommands: [], agents: [] })
+      dispatch(env, {
+        type: 'auth_bootstrap',
+        providers: [{ name: 'claude' }],
+        slashCommands: [],
+        agents: [],
+        defaultProvider: '',
+      })
+      dispatch(env, {
+        type: 'auth_bootstrap',
+        providers: [{ name: 'claude' }],
+        slashCommands: [],
+        agents: [],
+        defaultProvider: null,
+      })
+      expect(env.appliedDefaultProviders).toEqual([])
     })
   })
 

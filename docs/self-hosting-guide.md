@@ -29,6 +29,85 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 The server prints a QR code. Scan it with the Chroxy app to connect.
 
+## Docker
+
+The root `Dockerfile` builds a self-contained image of the chroxy daemon. It
+supports exactly two things (an owner decision, #8151):
+
+- the **headless `claude-sdk` provider** (needs `ANTHROPIC_API_KEY`);
+- the **web dashboard**, served at `/dashboard`.
+
+It does **not** support the embedded user-shell terminal or the `claude-tui`
+provider. Both need [`node-pty`](https://github.com/microsoft/node-pty), and
+this image has no linux prebuild for it — the build deliberately skips native
+compilation (`npm ci --ignore-scripts`, no `build-essential`/`python3`) to
+keep the image small and avoid a compiler toolchain in a container that runs
+as an unprivileged user. `claude-tui` additionally assumes an interactive
+login shell, which a container doesn't have.
+
+- The **user-shell terminal** is already off by default on every chroxy
+  install (`userShell.enabled` must be explicitly set) — selecting it in this
+  image fails the same way it would anywhere else it's disabled: a
+  `USER_SHELL_DISABLED` error naming the config key to flip. It is NOT
+  recommended to enable it in this image, since node-pty can't load here.
+- Selecting **`claude-tui`** (or an operator-enabled user-shell terminal) in
+  this image fails at session start with an actionable error rather than a
+  crash or a raw native-module stack trace — the real message (server logs /
+  the client's error toast) reads:
+  > node-pty is unavailable here [PTY_UNAVAILABLE] — use the claude-sdk
+  > provider instead. The embedded terminal and the claude-tui provider both
+  > require a native PTY binding that failed to load. This is expected
+  > inside the official chroxy Docker image, which ships without a native
+  > build toolchain (node-pty has no linux prebuild). Outside Docker, run
+  > `npm rebuild node-pty` and restart the chroxy daemon — on Linux the
+  > rebuild needs python3, make and a C++ compiler.
+  > Cause: \<the underlying load error\>
+
+  (the exact wording may drift; the `[PTY_UNAVAILABLE]` marker and the
+  leading "use the claude-sdk provider instead" sentence are the stable
+  part — see `packages/server/src/utils/node-pty-support.js`.)
+
+```bash
+docker build -t chroxy .
+
+docker run -d --name chroxy \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e CHROXY_TUNNEL=none \
+  -e CHROXY_CWD=/workspace \
+  -p 8765:8765 \
+  -v chroxy-data:/home/chroxy/.chroxy \
+  -v "$(pwd)":/workspace \
+  chroxy start
+```
+
+`-e CHROXY_CWD=/workspace` matters: without it, new sessions default to
+`$HOME` (`/home/chroxy` in this image), NOT the bind-mounted project
+directory — `/workspace` sits outside `$HOME`, and the daemon's own cwd
+resolution (`config.cwd || (cwd is under $HOME ? cwd : homedir())`) only
+picks it up when told to. Note this only fixes the **Default** session's
+starting directory; creating an *additional* session rooted under
+`/workspace` from the dashboard/app is a separate gate
+(`validateCwdAllowed`'s "home fallback" layer, `handler-utils.js`), which
+still requires the cwd to be under `$HOME` unless `config.workspaceRoots`
+explicitly allowlists `/workspace` — not yet wired into this image's default
+config, and not solved by this PR.
+
+Then open `http://localhost:8765/dashboard?token=<the token from the logs>`
+(the entrypoint auto-generates and logs an `API_TOKEN` prefix on first start;
+the full token is written to `~/.chroxy/config.json` inside the `chroxy-data`
+volume, or pass your own with `-e API_TOKEN=...`).
+
+The image sets `CHROXY_PROVIDER=claude-sdk` by default — without it, the
+daemon's own default provider (`claude-tui`, unsupported here — see above)
+would apply, and sessions would fail the moment they started. This is an
+**image-level `ENV`, not a config-file value** — if you also mount a
+`config.json` with its own `"provider"` field, the baked-in `ENV` still wins
+(config precedence is CLI flag > env var > config file > default, and the
+image's `ENV` is read at the env-var tier). Override it with `-e
+CHROXY_PROVIDER=...` or `--provider` if you ever need to (see
+[docs/providers.md](providers.md) for the full provider list); every provider
+other than `claude-sdk` is untested/unsupported in this image.
+
 ## Production Setup (Named Tunnel)
 
 For a stable URL that survives restarts, use a Named Tunnel with supervisor mode.

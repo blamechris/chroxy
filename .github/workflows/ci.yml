@@ -414,6 +414,13 @@ jobs:
               - 'packages/server/**'
               - 'packages/protocol/**'
               - 'packages/store-core/**'
+              # #8151 — the dashboard-builder stage. Mirrors .dockerignore's
+              # whitelist; a sibling PR adds a test asserting these two stay in
+              # sync in both directions (a new .dockerignore whitelist entry
+              # under packages/<x> needs a matching filter line here, and vice
+              # versa).
+              - 'packages/dashboard/**'
+              - 'packages/design-tokens/**'
               - '.github/workflows/ci.yml'
 
   server-tests-windows:

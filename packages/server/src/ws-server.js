@@ -1080,6 +1080,23 @@ export class WsServer {
       // letting the client skip its 3-request connect-time round trip.
       get fileOps() { return self._fileOps },
       get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
+      // #8151 round-2 review (Critical 1) — `sendAuthBootstrap`
+      // (ws-history.js) reads this to resolve the daemon's actual default
+      // provider (`resolveDaemonDefaultProvider`), the same value
+      // `_handlerCtx.services.config` feeds to the `list_providers`
+      // handler (settings-handlers.js). Before this getter existed,
+      // `_historyCtx` had no `config`/`services` key at all, so
+      // `auth_bootstrap.defaultProvider` was unconditionally
+      // `DEFAULT_PROVIDER` (claude-tui) in every real connection — the C3
+      // fix's own test only ever built its ctx by hand and never caught
+      // this, because a hand-built ctx is exactly the shape the fix
+      // assumed, not the shape the real server actually produces. Both
+      // ctx objects read the SAME `self.config` — the one property on the
+      // WsServer instance itself — so `provider_list` and `auth_bootstrap`
+      // cannot report two different "daemon default" values again, even
+      // though `_handlerCtx` nests its copy under `services` and this one
+      // is flat (matching this ctx's existing `fileOps`/`tunnelUrl` shape).
+      get config() { return self.config },
       // #5555 (sub-item 7): the current public tunnel URL (wss://), folded into
       // the auth_bootstrap burst so a reconnecting client always re-learns the
       // live URL — the durable recovery path when a quick-tunnel rotation
