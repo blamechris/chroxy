@@ -20,12 +20,15 @@ import { z } from 'zod'
 const GitStatusEntrySchema = z.object({
   path: z.string(),
   status: z.enum(['modified', 'added', 'deleted', 'renamed', 'copied', 'unknown']),
-  // #7292 — present only on a 'renamed'/'copied' entry: the pre-rename/copy
-  // path (same base/encoding as `path`). git stages a rename as two
-  // independent index operations (remove the source, add the destination),
-  // so a client that stages/unstages this entry should send BOTH `path` and
-  // `oldPath` back on git_stage/git_unstage — sending only `path` leaves the
-  // other half of the rename staged. Omitted entirely for every other status.
+  // #7292 — present only on a 'renamed' entry (never 'copied', #8183 review):
+  // the pre-rename path (same base/encoding as `path`). git stages a rename
+  // as two independent index operations (remove the source, add the
+  // destination), so a client that stages/unstages this entry should send
+  // BOTH `path` and `oldPath` back on git_stage/git_unstage — sending only
+  // `path` leaves the other half of the rename staged. A copy's source is
+  // NOT removed (the two index entries are independent), so folding it in
+  // would touch the source's own, unrelated changes — `oldPath` is omitted
+  // entirely for a 'copied' entry and every other status.
   oldPath: z.string().optional(),
 })
 

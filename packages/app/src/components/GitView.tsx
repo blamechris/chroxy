@@ -66,6 +66,10 @@ function FileStatusItem({
   const statusLabel = STATUS_LABELS[file.status] || '?';
   const fileName = file.path.split('/').pop() || file.path;
   const dirPath = file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/') + 1) : '';
+  // #8183 review (nit) — a renamed row shows its source, not just the
+  // destination's own `dirPath` (often misleading for a cross-directory
+  // rename).
+  const prefix = file.oldPath ? `${file.oldPath} → ` : dirPath;
 
   return (
     <TouchableOpacity
@@ -79,7 +83,7 @@ function FileStatusItem({
         <Text style={[styles.statusBadgeText, { color: statusColor }]}>{statusLabel}</Text>
       </View>
       <View style={styles.fileNameContainer}>
-        {dirPath ? <Text style={styles.fileDirPath}>{dirPath}</Text> : null}
+        {prefix ? <Text style={styles.fileDirPath}>{prefix}</Text> : null}
         <Text style={styles.fileName}>{fileName}</Text>
       </View>
       <View style={[styles.checkbox, selected && styles.checkboxSelected]}>

@@ -61,9 +61,10 @@ function statusClass(status: GitFileStatus['status']): string {
 }
 
 function FileRow({
-  path, status, selected, onToggle,
+  path, oldPath, status, selected, onToggle,
 }: {
   path: string
+  oldPath?: string
   status: GitFileStatus['status'] | 'untracked'
   selected: boolean
   onToggle: () => void
@@ -82,8 +83,12 @@ function FileRow({
         aria-label={`${selected ? 'Deselect' : 'Select'} ${path}`}
       />
       <span className={`git-status-badge ${cls}`}>{label}</span>
-      <span className="git-file-path" title={path}>
-        {dir && <span className="git-file-dir">{dir}</span>}
+      <span className="git-file-path" title={oldPath ? `${oldPath} → ${path}` : path}>
+        {/* #8183 review (nit) — a renamed row shows its source, not just the
+            destination `dir` (which is often misleading for a cross-directory
+            rename). */}
+        {oldPath && <span className="git-file-dir">{oldPath} → </span>}
+        {!oldPath && dir && <span className="git-file-dir">{dir}</span>}
         <span className="git-file-name">{name}</span>
       </span>
     </label>
@@ -526,6 +531,7 @@ export function GitPanel() {
                 <FileRow
                   key={`staged-${f.path}`}
                   path={f.path}
+                  oldPath={f.oldPath}
                   status={f.status}
                   selected={selectedPaths.has(f.path)}
                   onToggle={() => toggleSelection(f.path)}
@@ -546,6 +552,7 @@ export function GitPanel() {
                 <FileRow
                   key={`unstaged-${f.path}`}
                   path={f.path}
+                  oldPath={f.oldPath}
                   status={f.status}
                   selected={selectedPaths.has(f.path)}
                   onToggle={() => toggleSelection(f.path)}

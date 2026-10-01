@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, mkdir, writeFile, symlink } from 'fs/promises'
+import { mkdtemp, rm, mkdir, writeFile, symlink, readFile } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFile as execFileCb } from 'child_process'
@@ -664,5 +664,45 @@ describe('gitStage/gitUnstage pathspec magic (#7281)', () => {
     assert.equal(lastMessage.type, 'git_stage_result')
     assert.ok(lastMessage.error, 'an empty pathspec must be an error')
     assert.deepEqual(await stagedPaths(), [], 'an empty pathspec must not stage anything')
+  })
+
+  // #8183 review (S3) — filenames beginning with `--` are flag-injection
+  // vectors: `--literal-pathspecs` disables pathspec MAGIC, but does nothing
+  // about argv parsing. The `--` pathspec separator already present in the
+  // exec call is what stops `--all`/`--hard` from being read as a FLAG by
+  // git's own option parser instead of as a filename; these fixtures give
+  // that separator something to actually prove (MUTANT D below).
+  it('stages a file named "--all" without it being read as a flag', async () => {
+    await resetIndex()
+    const weird = '--all'
+    await writeFile(join(subDir, weird), 'flag-shaped name')
+    lastMessage = null
+    await fileOps.gitStage(ws, [weird], subDir)
+    assert.equal(lastMessage.type, 'git_stage_result')
+    assert.equal(lastMessage.error, null, `expected the --all-named file to stage, got: ${lastMessage.error}`)
+    assert.deepEqual(await stagedPaths(), ['sub/--all'], 'exactly the --all-named file must be staged, nothing else')
+    await resetIndex()
+    await rm(join(subDir, weird), { force: true })
+  })
+
+  it('unstaging a file named "--hard" leaves other worktree content intact', async () => {
+    await resetIndex()
+    const weird = '--hard'
+    await writeFile(join(subDir, weird), 'flag-shaped name')
+    await execFileAsync('git', ['add', '--', `sub/${weird}`], { cwd: repoDir })
+    assert.deepEqual(await stagedPaths(), [`sub/${weird}`], 'fixture precondition')
+
+    lastMessage = null
+    await fileOps.gitUnstage(ws, [weird], subDir)
+    assert.equal(lastMessage.type, 'git_unstage_result')
+    assert.equal(lastMessage.error, null, `expected the --hard-named file to unstage, got: ${lastMessage.error}`)
+    assert.deepEqual(await stagedPaths(), [], 'the --hard-named file was not actually unstaged')
+    // Other worktree content (inside.txt, dirtied in before()) must be
+    // untouched — a flag reaching git's own parser instead of naming a file
+    // could discard unrelated work (e.g. `--hard` read by a `reset`).
+    const insideContent = await readFile(join(subDir, 'inside.txt'), 'utf8')
+    assert.equal(insideContent, 'modified', 'unrelated worktree content must be untouched')
+    await resetIndex()
+    await rm(join(subDir, weird), { force: true })
   })
 })

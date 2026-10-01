@@ -227,10 +227,10 @@ export function handleGitStatusResult(
 
 /**
  * #7292 — expand a set of selected `git_status_result` entry paths to also
- * include each entry's `oldPath`, so staging/unstaging a rename or copy moves
+ * include each RENAMED entry's `oldPath`, so staging/unstaging a rename moves
  * BOTH halves together.
  *
- * git records a rename/copy as two independent index operations (remove the
+ * git records a rename as two independent index operations (remove the
  * source, add the destination) rather than one atomic move; a pathspec
  * naming only the destination (what a UI naturally has on hand — the
  * entry's `path`) leaves the source's staged change behind. `entries` should
@@ -239,6 +239,13 @@ export function handleGitStatusResult(
  * unchanged. De-duplicates (a path selected more than once, or an `oldPath`
  * that coincides with another selected `path`) and preserves first-seen
  * order so the emitted pathspec list stays deterministic.
+ *
+ * #8183 review — never expands a COPY. A copy's source is NOT removed (the
+ * two index entries are independent), so folding it in would stage/unstage
+ * the source's own, unrelated changes. The server never sets `oldPath` on a
+ * 'copied' entry (see GitFileStatus), but this also checks `status ===
+ * 'renamed'` directly as defense in depth — this helper must stay correct
+ * even if that server invariant is ever violated.
  */
 export function expandRenamePathsForStaging(
   selectedPaths: readonly string[],
@@ -246,7 +253,7 @@ export function expandRenamePathsForStaging(
 ): string[] {
   const oldPathByPath = new Map<string, string>()
   for (const entry of entries) {
-    if (entry.oldPath) oldPathByPath.set(entry.path, entry.oldPath)
+    if (entry.status === 'renamed' && entry.oldPath) oldPathByPath.set(entry.path, entry.oldPath)
   }
   const seen = new Set<string>()
   const out: string[] = []

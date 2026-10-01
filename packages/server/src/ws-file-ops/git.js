@@ -3,7 +3,7 @@
  * unstage, commit, create PR.
  *
  * #7292 — WIRE CONTRACT for `git_status_result` paths (`staged[].path`,
- * `unstaged[].path`, `untracked[]`, and the rename/copy `oldPath` field):
+ * `unstaged[].path`, `untracked[]`, and the renamed-entry `oldPath` field):
  * every path is relative to the SESSION CWD, '/'-separated on every platform,
  * and never quoted/escaped. This is the same base `git_stage`/`git_unstage`
  * already resolve `file` against (`resolve(cwdReal, file)` below), so a path
@@ -20,12 +20,21 @@
  * `gitUnstage` correctly refuse it via the existing containment check — git
  * ops are confined to the session cwd by design, independent of this fix.
  *
- * A renamed/copied entry additionally carries `oldPath` (the pre-rename
- * path, same base/encoding): git records a rename as two independent index
- * operations (remove the source, add the destination), so a pathspec naming
- * only the destination leaves the source's staged change behind. A client
- * that stages/unstages a rename/copy entry should send both `path` and
- * `oldPath`.
+ * A RENAMED entry additionally carries `oldPath` (the pre-rename path, same
+ * base/encoding): git records a rename as two independent index operations
+ * (remove the source, add the destination), so a pathspec naming only the
+ * destination leaves the source's staged change behind. A client that
+ * stages/unstages a renamed entry should send both `path` and `oldPath`.
+ *
+ * `oldPath` is RENAME-ONLY (#8183 review) — a COPIED entry never carries it,
+ * even though git reports a copy's source the same way on the wire (porcelain
+ * `-z` format). A copy's source is NOT removed; the two index entries are
+ * independent, so folding the source into a stage/unstage of the destination
+ * would touch the source's own, unrelated changes. `oldPath` is therefore
+ * attached per COLUMN (staged only when that entry's own code is 'R', never
+ * 'C'; unstaged likewise) — an "RM" record (a staged rename whose destination
+ * is further modified, unstaged, in the worktree) must not leak `oldPath`
+ * onto the plain 'modified' unstaged half either.
  */
 import { normalize, resolve, join, relative, sep } from 'path'
 import { execFile as execFileCb } from 'child_process'
@@ -274,7 +283,32 @@ function toCwdRelativeGitPath(repoRoot, cwdReal, repoRelativePath) {
   const rel = relative(cwdReal, abs)
   // git (and the wire contract, #7282) always uses '/'; relative() yields
   // backslashes on Windows.
-  return sep === '\\' ? rel.split(sep).join('/') : rel
+  const posixRel = sep === '\\' ? rel.split(sep).join('/') : rel
+  // #8183 review (S2) — `relative()` strips a trailing slash. git reports an
+  // entirely-untracked DIRECTORY as e.g. "newdir/" (never expanding into its
+  // contents); restore the slash so it stays distinguishable on the wire
+  // from an untracked FILE of the same name. Not restored onto an empty
+  // result — `/` alone would be a worse signal than the caller's own
+  // degenerate-path handling (see isDegenerateUntrackedPath below).
+  return repoRelativePath.endsWith('/') && posixRel !== '' ? `${posixRel}/` : posixRel
+}
+
+/**
+ * #8183 review (S2) — an untracked entry whose rebased path is empty (the
+ * untracked directory IS the session cwd) or made ENTIRELY of '..' segments
+ * (the untracked directory is an ancestor of the session cwd) names nothing
+ * a client can act on — `gitStage` already refuses an empty pathspec and
+ * refuses anything outside the cwd, so these can only ever surface as a
+ * confusing, inert row (a blank name, or a bare ".."). Dropped rather than
+ * sent, rather than relying on every client to independently special-case
+ * them.
+ * @param {string} untrackedPath - cwd-relative, possibly trailing-slashed
+ * @returns {boolean}
+ */
+function isDegenerateUntrackedPath(untrackedPath) {
+  const trimmed = untrackedPath.endsWith('/') ? untrackedPath.slice(0, -1) : untrackedPath
+  if (trimmed === '') return true
+  return trimmed.split('/').every(seg => seg === '..')
 }
 
 /**
@@ -337,7 +371,11 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
           cwd: cwdReal,
           timeout: 5000,
         })
-        const top = stdout.trim()
+        // #8183 review (S6) — `.trim()` would also strip a trailing space
+        // that is genuinely part of the repo root's directory name (a rare
+        // but real macOS/Linux path); only the ONE trailing newline exec
+        // output always carries is stripped here.
+        const top = stdout.replace(/\r?\n$/, '')
         if (top) repoRoot = top
       } catch {
         // Not a git repo — handled by the git status call below.
@@ -382,9 +420,16 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
 
         // Rename/copy: the NEXT NUL-terminated field is the pre-rename/copy
         // (source) path — consume it here so it isn't mistaken for its own
-        // status record on the next loop iteration.
+        // status record on the next loop iteration. #8183 review — this is
+        // triggered by EITHER column independently (a STAGED rename/copy,
+        // x='R'/'C', or a WORKTREE-side one, y='R'/'C' — e.g. after a plain
+        // filesystem rename followed by `git add -N`) and by a COPY exactly
+        // like a rename (measured: `-c status.renames=copies` emits the copy
+        // source as the same kind of extra field); git only ever appends ONE
+        // extra field per record regardless of which column (or both, as in
+        // a combined "RM"/"RC" record) triggered it.
         let oldPath = null
-        if (x === 'R' || x === 'C') {
+        if (x === 'R' || x === 'C' || y === 'R' || y === 'C') {
           i += 1
           const repoRelOldPath = fields[i]
           if (repoRelOldPath !== undefined) {
@@ -395,22 +440,36 @@ export function createGitOps(sendFn, resolveSessionCwd, validatePathWithinCwd, w
         const filePath = toCwdRelativeGitPath(repoRoot, cwdReal, repoRelPath)
 
         if (x === '?' && y === '?') {
-          untracked.push(filePath)
+          // #8183 review (S2) — an entirely-untracked directory that IS the
+          // session cwd, or an ancestor of it, rebases to '' or a bare '..'
+          // chain: nothing a client could usefully show or act on.
+          if (!isDegenerateUntrackedPath(filePath)) untracked.push(filePath)
         } else {
           if (x !== ' ' && x !== '?') {
             const entry = { path: filePath, status: STATUS_MAP[x] || 'unknown' }
-            // #7292 — carry the pre-rename/copy path so a client can ask
+            // #7292 — carry the pre-rename path so a client can ask
             // gitUnstage/gitStage to move both halves together: a pathspec
             // naming only the destination leaves the source's staged change
             // behind (git records a rename as two independent index
             // entries — removal of the source, addition of the
             // destination — not as one atomic operation).
-            if (oldPath !== null) entry.oldPath = oldPath
+            //
+            // #8183 review — RENAME-ONLY, and only when THIS half (x) is
+            // itself the rename: a copy's source is NOT removed (both index
+            // entries stand independently), so folding it in would stage or
+            // unstage the source's own, unrelated changes — measured: a
+            // staged copy alongside the source's own independent staged edit
+            // produces "C  dest|src|" then a separate "M  src" record, and
+            // the source must stay untouched by an action on the copy. An
+            // "RM" record (staged rename, destination further modified in
+            // the worktree) must also not leak oldPath onto the plain
+            // 'modified' unstaged half.
+            if (x === 'R' && oldPath !== null) entry.oldPath = oldPath
             staged.push(entry)
           }
           if (y !== ' ' && y !== '?') {
             const entry = { path: filePath, status: STATUS_MAP[y] || 'unknown' }
-            if (oldPath !== null) entry.oldPath = oldPath
+            if (y === 'R' && oldPath !== null) entry.oldPath = oldPath
             unstaged.push(entry)
           }
         }
