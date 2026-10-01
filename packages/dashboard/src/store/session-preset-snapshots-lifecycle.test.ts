@@ -181,13 +181,32 @@ describe('#7488 the cross-server bleed, end to end', () => {
   let mockSocket: WebSocket
   const ctx = () => ({ url: 'wss://server-b', token: 'tok', socket: mockSocket, isReconnect: false, silent: false })
 
+  // #8168 — the two INVARIANT tests below call the REAL `connect()`, which
+  // kicks off `runConnectAttempt`'s `/health` fetch WITHOUT awaiting it
+  // (`void runConnectAttempt(...)`). Against a real `fetch` that promise dials
+  // `https://server-a` / `https://server-b`, fails asynchronously, and its
+  // catch handler logs `[ws] Health check failed: ...` (connection.ts's
+  // `probe`) after the synchronous test body — and sometimes the whole file —
+  // has already finished, racing vitest's worker teardown exactly like #6063
+  // (`EnvironmentTeardownError: ... "onUserConsoleLog" was pending`). Stubbing
+  // `fetch` to fail FAST (no real DNS/network round trip) and flushing
+  // microtasks before the test ends makes the probe's rejection land inside
+  // the test instead of after it — same technique as
+  // `connection-server-down.test.ts`.
+  async function flushMicrotasks() {
+    const real = globalThis.setTimeout
+    await new Promise((r) => real(r, 0))
+    await new Promise((r) => real(r, 0))
+  }
+
   beforeEach(() => {
     clearDeltaBuffers(); clearPermissionSplits(); resetReplayFlags()
     mockSocket = { send: vi.fn(), close: vi.fn(), readyState: 1, addEventListener: vi.fn(), removeEventListener: vi.fn() } as unknown as WebSocket
     resetStoreSlice()
     seedServerAPresets()
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new Error('network disabled in test'))))
   })
-  afterEach(() => { stopHeartbeat(); resetStoreSlice() })
+  afterEach(() => { stopHeartbeat(); resetStoreSlice(); vi.unstubAllGlobals() })
 
   it('a switchServer to a daemon with the SAME cwd reads no preset', () => {
     // The whole defect in one sequence: server A's preset for `/home/user/project`,
@@ -257,7 +276,7 @@ describe('#7488 the cross-server bleed, end to end', () => {
       .toBe('SECRET PREAMBLE FROM SERVER A')
   })
 
-  it('INVARIANT: connect() to a DIFFERENT url self-clears the presets via forgetSession', () => {
+  it('INVARIANT: connect() to a DIFFERENT url self-clears the presets via forgetSession', async () => {
     // #7564 review, finding 6 — the thing the adjudication actually rests on,
     // converted from prose into a test. This is the door that defuses every
     // route into `auth_ok`'s non-reconnect branch that does NOT go through
@@ -276,9 +295,12 @@ describe('#7488 the cross-server bleed, end to end', () => {
       "connect() to a different url must self-clear server A's presets",
     ).toEqual({})
     useConnectionStore.getState().disconnect()
+    // #8168 — let the stubbed-fetch rejection (and its console.log) land here,
+    // inside the test, instead of after it.
+    await flushMicrotasks()
   })
 
-  it('INVARIANT control: connect() to the SAME url does NOT self-clear', () => {
+  it('INVARIANT control: connect() to the SAME url does NOT self-clear', async () => {
     // The negative half — otherwise the cell above would pass on a `connect()`
     // that cleared unconditionally, which would silently drop the presets on
     // every ordinary reconnect and make the whole `auth_ok`-KEEP adjudication
@@ -288,6 +310,9 @@ describe('#7488 the cross-server bleed, end to end', () => {
     expect(useConnectionStore.getState().sessionPresetSnapshots[SHARED_CWD]?.preamble)
       .toBe('SECRET PREAMBLE FROM SERVER A')
     useConnectionStore.getState().disconnect()
+    // #8168 — same flush as above; this path reaches the probe too (connect()
+    // runs runConnectAttempt regardless of isReconnect).
+    await flushMicrotasks()
   })
 
   it('a session_list that removes a session does NOT touch the map', () => {
