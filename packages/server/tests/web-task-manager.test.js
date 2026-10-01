@@ -92,7 +92,7 @@ function hashFile(path) {
  * its marker, exactly as the existing #8030/#8035 gate suites already do
  * for other providers.
  */
-function makeGateShim() {
+function makeGateShim(stdout = 'shim-ok') {
   const dir = mkdtempSync(join(tmpdir(), 'web-task-gate-shim-'))
   const shimPath = join(dir, 'gate-shim.mjs')
   const markerPath = join(dir, 'marker.txt')
@@ -100,7 +100,7 @@ function makeGateShim() {
     '#!/usr/bin/env node',
     `import { writeFileSync } from 'node:fs'`,
     `writeFileSync(${JSON.stringify(markerPath)}, 'ran')`,
-    `console.log('shim-ok')`,
+    `console.log(${JSON.stringify(stdout)})`,
     'process.exit(0)',
   ].join('\n')
   writeFileSync(shimPath, body)
@@ -413,6 +413,31 @@ describe('WebTaskManager', () => {
         assert.equal(manager._pollTimer, null,
           "_startPolling() must refuse to arm a timer once destroyed — this is the test that goes red if its _destroyed early return is removed")
         manager = null // already destroyed; afterEach must not double-destroy
+      })
+
+      it('a poll whose status check is still in flight at destroy() does not mutate the task afterwards (#7299 review)', async () => {
+        const mgr = new WebTaskManager()
+        mgr._remoteAvailable = true
+        mgr._spawnRemoteTask = () => {}
+        const { taskId } = mgr.launchTask('test')
+        const task = mgr._tasks.get(taskId)
+        task.status = 'running'
+
+        let resolveStatus
+        mgr._checkRemoteStatus = () => new Promise((resolve) => { resolveStatus = resolve })
+        const emitted = []
+        const realEmit = mgr.emit.bind(mgr)
+        mgr.emit = (event, ...args) => { emitted.push(event); return realEmit(event, ...args) }
+
+        const poll = mgr._pollTaskStatus()
+        mgr.destroy()
+        resolveStatus({ status: 'completed', result: 'late' })
+        await poll
+
+        assert.equal(task.status, 'running',
+          'a status result that lands after destroy() must not be applied to the discarded task')
+        assert.equal(task.result, null)
+        assert.deepEqual(emitted, [], 'a destroyed manager must not emit')
       })
 
       it('a destroy() before the real execFile callback fires leaves no poll timer behind', { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
@@ -772,6 +797,30 @@ describe('WebTaskManager', () => {
       assert.ok(!/\.match\(\s*\/task/.test(callSite),
         '_spawnRemoteTask must not construct its own task-id regex inline')
     })
+
+    // #7299 review: the source-text check above pins the spelling. These two
+    // pin the behaviour, through a real child whose stdout is the CLI output.
+    for (const [stdout, expected] of [['task: --evil', null], ['task: abc-123', 'abc-123']]) {
+      it(`a real launch whose CLI prints ${JSON.stringify(stdout)} stores remoteTaskId ${JSON.stringify(expected)}`, { skip: WINDOWS_SHIM_EXEC_SKIP }, async () => {
+        const shim = makeGateShim(stdout)
+        try {
+          manager = makeManager()
+          manager._remoteAvailable = true
+          FixtureClaudeProvider.resolvedOverride = shim.shimPath
+
+          const { taskId } = manager.launchTask('test')
+          const task = manager._tasks.get(taskId)
+          await waitFor(() => task.status !== 'pending', { label: 'launch callback' })
+
+          assert.equal(task.status, 'running')
+          assert.equal(task.remoteTaskId, expected,
+            '_spawnRemoteTask must store only a task id that cannot be read as an option')
+        } finally {
+          FixtureClaudeProvider.resolvedOverride = null
+          rmSync(shim.dir, { recursive: true, force: true })
+        }
+      })
+    }
   })
 
   describe('#7291 --remote arity gate', () => {

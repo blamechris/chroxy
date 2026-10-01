@@ -437,6 +437,8 @@ export class WebTaskManager extends EventEmitter {
     // wall-clock (premature timeout) and race task-state transitions. The flag
     // is cleared in finally so a rejection can't wedge polling permanently.
     if (this._inPoll) return
+    // #7299 review: a tick already queued when destroy() ran must not run.
+    if (this._destroyed) return
     this._inPoll = true
     try {
       this._pollCount++
@@ -477,6 +479,10 @@ export class WebTaskManager extends EventEmitter {
           // timeout backstop catch a genuinely stuck one. Skip this pass.
           continue
         }
+        // #7299 review: destroy() can run while the status check above is
+        // awaited. Stop here instead of mutating discarded tasks or emitting
+        // from a destroyed manager.
+        if (this._destroyed) return
         const next = result && result.status
         if (next === 'completed') {
           task.status = 'completed'
@@ -523,7 +529,7 @@ export class WebTaskManager extends EventEmitter {
    * Clean up timers and state.
    */
   destroy() {
-    this._destroyed = true // #7299: block a late execFile callback from restarting polling
+    this._destroyed = true // #7299: block late execFile callbacks and in-flight polls from mutating state or re-arming the timer
     this._stopPolling()
     // Kill any in-flight child processes
     for (const child of this._childProcesses) {

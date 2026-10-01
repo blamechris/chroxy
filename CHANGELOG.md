@@ -49,9 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exit) correctly failed closed but left zero trace, so an operator saw web
   tasks silently unavailable with nothing to search for; it now logs via
   `log.warn` with the error's message and code, matching the existing
-  `_verifyBinary` refusal log just above it. The matching `.catch` at the
-  `ws-server.js` call site was unreachable dead code (`detectFeatures` never
-  rejects) and has been removed rather than left unexplained; the class
+  `_verifyBinary` refusal log just above it. The `.catch` at the
+  `ws-server.js` call site stays, with a corrected comment: `detectFeatures`
+  never rejects, but the catch also covers a throw inside the `.then`
+  handler, and an unhandled rejection on that fire-and-forget chain would
+  take the daemon down (#5369); a test now drives that path. The class
   JSDoc's "re-detection can be triggered manually" was also false — nothing
   in the codebase calls `detectFeatures()` a second time — and has been
   corrected rather than wired up, since no caller for manual re-detection
@@ -68,8 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs asynchronously and could fire after `destroy()` had already cleared
   `_pollTimer`, calling `_startPolling()` again and leaking a fresh interval
   on an already-destroyed manager; a `_destroyed` flag, set in `destroy()`
-  and checked both in that callback (before any state mutation or polling)
-  and in `_startPolling()` itself, closes the gap.
+  and checked in that callback (before any state mutation or polling), in
+  `_startPolling()`, and in `_pollTaskStatus()` (at entry and after its
+  awaited status check, so a poll in flight at `destroy()` neither mutates the
+  discarded task nor emits), closes the gap.
 
 - **Mobile app: a worktree-isolated session's nav header shows the repo
   name instead of `worktrees/<hex>` (#8181).** `App.tsx`'s `sessionTitle`
