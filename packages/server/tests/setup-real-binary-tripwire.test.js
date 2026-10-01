@@ -293,8 +293,11 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
   })
 
   it('a safe command with options.shell: true is unaffected (proves the shell:true branch is not a blanket refusal)', () => {
-    const { stub } = makeStubbedTripwire()
+    const { stub, calls } = makeStubbedTripwire()
     assert.doesNotThrow(() => stub.execFileSync('git --version', { shell: true, encoding: 'utf-8' }))
+    // The call must reach the launcher underneath — a tripwire that silently
+    // swallowed it would also not throw.
+    assert.equal(calls.execFileSync.length, 1)
   })
 
   it('a promisified execFile() of a guarded binary still throws, not merely warns', async () => {
@@ -311,9 +314,10 @@ describe('real-binary tripwire: installed for this process (#8096)', () => {
   })
 
   it('passes for node/git — this guard does not block ordinary test plumbing', () => {
-    const { stub } = makeStubbedTripwire()
+    const { stub, calls } = makeStubbedTripwire()
     assert.doesNotThrow(() => stub.execFileSync(process.execPath, ['--version'], { encoding: 'utf-8' }))
     assert.doesNotThrow(() => stub.execFileSync('git', ['--version'], { encoding: 'utf-8' }))
+    assert.equal(calls.execFileSync.length, 2, 'both calls must reach the launcher underneath the tripwire')
   })
 
   it('a bare guarded name is NOT flagged when the call scopes PATH to empty — the #8096 fix-1 pattern', () => {
