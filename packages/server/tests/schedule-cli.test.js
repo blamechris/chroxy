@@ -7,7 +7,7 @@
 // re-implemented fake.
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync } from 'fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'fs'
 import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { tmpdir, homedir } from 'os'
@@ -664,6 +664,119 @@ describe('chroxy schedule — registry path agrees with the daemon (#7015, #7052
       readSrc('session-manager.js'),
       /new ScheduledTaskStore\(\{ filePath: defaultScheduledTasksPath\(this\._stateFilePath\) \}\)/,
       'the daemon no longer derives its registry from the session-state path — re-check the CLI resolver',
+    )
+  })
+})
+
+// #8189 — `buildDeps`'s `defaultProviderName` (schedule-cmd.js, the field used
+// as the fallback provider for any task with no explicit `target.provider`)
+// used to be derived by hand — `overrides.defaultProviderName || config.provider
+// || DEFAULT_PROVIDER` over a raw `readConfigSoft` — which skipped the ENV tier
+// entirely. `CHROXY_PROVIDER`, as set by the Docker image for example, was
+// therefore silently ignored and a scheduled task would warn/fire against a
+// different provider than the one the daemon itself defaults to. #8177 fixed
+// the identical defect class in `chroxy doctor` by routing through the shared
+// `mergeConfig` + `resolveDaemonDefaultProvider` pipeline that `chroxy start`
+// uses; this pins the same fix for `chroxy schedule`.
+//
+// These tests call the REAL (non-overridden) `buildDeps` derivation — only
+// `store` and `write` are stubbed in `resolvedProviderFromCreate` below, so
+// `defaultProviderName` and `checkProviderRefusal` run the production code
+// this suite is pinning, not a test double. The resolved provider is read off
+// the create-time warning text (`computeWarnings` embeds the literal
+// `defaultProviderName` into "provider '<name>' will be REFUSED…" whenever
+// the resolved provider is hook-routed), exactly as the pre-existing #7014
+// coverage in tests/cli/schedule-cmd.test.js does — 'claude-sdk' has
+// in-process permissions (no warning), 'claude-tui' (DEFAULT_PROVIDER) is
+// hook-routed (always warns).
+describe('buildDeps defaultProviderName resolution honours CLI > ENV > file > default (#8189)', () => {
+  // Mirrors doctor.test.js's `withIsolatedEnv` (#8151) — gives this test its
+  // OWN temp CHROXY_CONFIG_DIR rather than the single per-PROCESS tmp dir
+  // tests/_setup.mjs points CHROXY_CONFIG_DIR at (shared with every other test
+  // in this file), so writing a config.json here can never leak into a
+  // sibling test or race with one running concurrently.
+  const withIsolatedEnv = async (envOverrides, fn, fileConfig = null) => {
+    const configDir = mkdtempSync(join(tmpdir(), 'chroxy-schedule-provider-env-'))
+    const savedKeys = [...Object.keys(envOverrides), 'CHROXY_CONFIG_DIR']
+    const saved = {}
+    for (const k of savedKeys) saved[k] = process.env[k]
+    process.env.CHROXY_CONFIG_DIR = configDir
+    for (const [k, v] of Object.entries(envOverrides)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+    if (fileConfig) writeFileSync(join(configDir, 'config.json'), JSON.stringify(fileConfig))
+    try {
+      return await fn()
+    } finally {
+      for (const k of savedKeys) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  }
+
+  /** `schedule create` with no --provider flag, through the real (non-stubbed) buildDeps. */
+  function resolvedProviderFromCreate(depsOverrides = {}) {
+    const store = makeStore()
+    const w = cap()
+    const res = runScheduleCreate(
+      { prompt: 'x', cron: '0 9 * * *' },
+      { store, write: w.write, ...depsOverrides },
+    )
+    return { res, output: w.text() }
+  }
+
+  it('(a) CHROXY_PROVIDER=claude-sdk with no config file resolves to claude-sdk, not DEFAULT_PROVIDER', async () => {
+    await withIsolatedEnv({ CHROXY_PROVIDER: 'claude-sdk', CHROXY_PROVIDERS: undefined }, async () => {
+      const { res, output } = resolvedProviderFromCreate()
+      assert.equal(res.created, true)
+      // The old hand-rolled chain skipped the ENV tier and fell straight to
+      // `config.provider || DEFAULT_PROVIDER` — with no config file, that is
+      // claude-tui (hook-routed), which DOES warn "will be REFUSED". claude-sdk
+      // has in-process permissions, so the fixed resolution warns about neither.
+      assert.doesNotMatch(output, /will be REFUSED/, `expected no provider-refusal warning, got:\n${output}`)
+    })
+  })
+
+  it('(b) an explicit defaultProviderName override still wins over CHROXY_PROVIDER', async () => {
+    await withIsolatedEnv({ CHROXY_PROVIDER: 'claude-sdk' }, async () => {
+      const { output } = resolvedProviderFromCreate({ defaultProviderName: 'claude-tui' })
+      assert.match(output, /provider 'claude-tui' will be REFUSED/)
+    })
+  })
+
+  it('(c) a config-file provider is used when no env var is set', async () => {
+    await withIsolatedEnv({ CHROXY_PROVIDER: undefined, CHROXY_PROVIDERS: undefined }, async () => {
+      const { output } = resolvedProviderFromCreate()
+      assert.match(output, /provider 'claude-tui' will be REFUSED/)
+    }, { provider: 'claude-tui' })
+  })
+
+  it('(d) CHROXY_PROVIDER beats a config-file provider (ENV > file precedence)', async () => {
+    await withIsolatedEnv({ CHROXY_PROVIDER: 'claude-sdk' }, async () => {
+      const { output } = resolvedProviderFromCreate()
+      assert.doesNotMatch(output, /will be REFUSED/, `expected ENV to beat the file-configured claude-tui, got:\n${output}`)
+    }, { provider: 'claude-tui' })
+  })
+
+  // (e) the #8151-round-2 regression class: CHROXY_PROVIDERS (plural) is a
+  // REAL, documented env var for config.providers (anthropic/openai-compatible
+  // endpoint registrations), never a provider-name list. A hand-rolled resolver
+  // that comma-splits it (or otherwise inspects it) produces bogus names; the
+  // shared mergeConfig/resolveDaemonDefaultProvider pipeline never reads
+  // `merged.providers` when resolving the default provider at all.
+  it('(e) CHROXY_PROVIDERS object form never contributes bogus provider names', async () => {
+    await withIsolatedEnv(
+      {
+        CHROXY_PROVIDER: 'claude-sdk',
+        CHROXY_PROVIDERS: '{"anthropicCompatible":[{"name":"x","baseUrl":"https://x.example.test","apiKey":"k"}]}',
+      },
+      async () => {
+        const { output } = resolvedProviderFromCreate()
+        assert.doesNotMatch(output, /will be REFUSED/, `expected claude-sdk, got:\n${output}`)
+      },
     )
   })
 })

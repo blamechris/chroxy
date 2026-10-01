@@ -45,9 +45,9 @@ import {
   ScheduledTaskValidationError,
   defaultScheduledTasksPath,
 } from '../scheduled-task-store.js'
-import { isSchedulerEnabled } from '../config.js'
+import { isSchedulerEnabled, mergeConfig } from '../config.js'
 import { scheduledProviderRefusalReason, resolveScheduledPermissionMode } from '../scheduler.js'
-import { DEFAULT_PROVIDER } from '../providers.js'
+import { resolveDaemonDefaultProvider } from '../providers.js'
 
 // -- default wiring (production) ---------------------------------------------
 
@@ -121,14 +121,22 @@ function buildDeps(overrides = {}) {
     store: overrides.store || getDefaultStore(),
     write: overrides.write || console.log,
     // The provider a task would ACTUALLY run against when none is set
-    // explicitly — mirrors the daemon's own resolution, `config.provider ||
-    // DEFAULT_PROVIDER` (server-cli.js's `providerType` wiring; scheduler.js's
-    // live `_resolveProviderName` falls back to the wired SessionManager's
-    // `providerType`, which IS this same expression). Reading config.provider
-    // here (not just hardcoding DEFAULT_PROVIDER) matters: if the operator's
-    // configured default ever diverges from DEFAULT_PROVIDER, this warning
-    // must track what will actually run, not the out-of-the-box default.
-    defaultProviderName: overrides.defaultProviderName || config.provider || DEFAULT_PROVIDER,
+    // explicitly — must mirror the daemon's own resolution EXACTLY, including
+    // the ENV tier (`CHROXY_PROVIDER`, as set by the Docker image for
+    // example). #8189: this used to be hand-derived as `config.provider ||
+    // DEFAULT_PROVIDER` over the raw `readConfigSoft` result above, which
+    // skipped ENV entirely — the same defect class #8177 fixed in `chroxy
+    // doctor` (round-2 Critical 2). Routed through the SAME shared pipeline
+    // `chroxy start`/`chroxy doctor` use — `mergeConfig` (config.js) resolves
+    // CLI > ENV > file > default (including the `legacyCli` → `claude-cli`
+    // mapping), then `resolveDaemonDefaultProvider` (providers.js) reads
+    // `merged.provider` — so this can't drift from the real daemon default
+    // again without touching code every one of those paths shares. `config`
+    // here is fed in as the FILE tier only; there is no CLI tier for this
+    // value (an explicit `overrides.defaultProviderName`, when present, wins
+    // outright and never reaches mergeConfig at all).
+    defaultProviderName: overrides.defaultProviderName
+      || resolveDaemonDefaultProvider(mergeConfig({ fileConfig: config })),
     checkProviderRefusal: overrides.checkProviderRefusal || ((name) => scheduledProviderRefusalReason(name)),
     resolvePermissionMode: overrides.resolvePermissionMode || resolveScheduledPermissionMode,
     checkSchedulerEnabled: overrides.checkSchedulerEnabled || (() => isSchedulerEnabled(config)),

@@ -40,6 +40,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`chroxy schedule` resolves the default provider through the same CLI >
+  ENV > file > default pipeline `chroxy start` and `chroxy doctor` use, so
+  `CHROXY_PROVIDER` (as set by the Docker image, for example) is no longer
+  ignored (#8189).** `schedule-cmd.js`'s `buildDeps` derived
+  `defaultProviderName` by hand — `overrides.defaultProviderName ||
+  config.provider || DEFAULT_PROVIDER` over a raw `readConfigSoft` result —
+  which skipped the env tier entirely, the same defect class #8151/#8177
+  fixed in `chroxy doctor`. A scheduled task with no explicit
+  `target.provider` could therefore warn about (and, once fired, actually
+  run against) a different provider than the one the daemon itself defaults
+  to. `buildDeps` now routes through the SAME shared `mergeConfig` +
+  `resolveDaemonDefaultProvider` pipeline those commands use — no
+  hand-written copy of the derivation remains in `schedule-cmd.js` — while an
+  explicit `overrides.defaultProviderName` (dependency injection for tests)
+  still wins outright, ahead of the pipeline.
+
+  A repo-wide sweep for the same hand-rolled shape found two more,
+  behavior-preserving since both already sat downstream of an already-merged
+  `config` object (so `CHROXY_PROVIDER` was never actually dropped at either
+  site — this is a DRY/drift-prevention fix, not a second active bug):
+  `server-cli.js`'s `startCliServer` passed the raw `config.provider` field
+  into `buildServerBanner` instead of `resolveDaemonDefaultProvider(config)`,
+  and `handlers/session-handlers.js`'s `handleSwitchSession` passed
+  `ctx.services.config?.provider` into `resolveRosterProvider` instead of the
+  shared helper, unlike every other call site of that function.
+
 - **`claude-sdk` advertises `planMode: true` — the capability was stale, not
   the plan-mode pass-through (#8153).** `sdk-session.js` declared
   `capabilities.planMode: false` since the provider adapter's introduction

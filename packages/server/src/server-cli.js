@@ -976,7 +976,12 @@ export async function startCliServer(config) {
     log.warn(`Credentials at-rest encryption check failed: ${err.message}`)
   }
 
-  const banner = buildServerBanner({ version: SERVER_VERSION, provider: config.provider })
+  // #8189: pass the daemon's actually-resolved default through the shared
+  // helper rather than the raw `config.provider` field — `buildServerBanner`
+  // itself still floors to DEFAULT_PROVIDER internally (its own unit tests
+  // call it directly with no provider at all), so this is belt-and-suspenders
+  // against the two ever drifting apart, not a behavior change today.
+  const banner = buildServerBanner({ version: SERVER_VERSION, provider: resolveDaemonDefaultProvider(config) })
   const pad = Math.max(0, 38 - banner.length)
   const left = Math.floor(pad / 2)
   const right = pad - left

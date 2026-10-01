@@ -9,6 +9,7 @@ import { isBoundClient } from '../environments/authority.js'
 import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS, getPermissionModes } from '../handler-utils.js'
 import { getRegistryForProvider, resolveRosterProvider } from '../models.js'
+import { resolveDaemonDefaultProvider } from '../providers.js'
 import { CODEX_SANDBOX_MODES } from '../codex-session.js'
 import { isUserShellEnabled, isUserShellApprovalRequired } from '../config.js'
 import { createLogger, loggerForSession } from '../logger.js'
@@ -85,14 +86,17 @@ function handleSwitchSession(ws, client, msg, ctx) {
   // which `getRegistryForProvider` answers with the CLAUDE registry and the
   // client files in its UNTAGGED bucket ("a pre-provider daemon"), then serves
   // to a session of any provider. Tag the daemon's resolved default instead —
-  // `config.provider || DEFAULT_PROVIDER`, the same value
-  // `billingCanary.defaultProvider` carries to the ws-history senders — and
-  // resolve the registry from that same name so the tag names whatever
-  // produced the rows. #7811 — the permission-mode copy below now reads the
-  // SAME resolved roster provider: a provider-less entry runs as the daemon
-  // default, so the default's mode copy is the one that describes it.
+  // `resolveDaemonDefaultProvider(config)`, the same value
+  // `billingCanary.defaultProvider` carries to the ws-history senders (#8189:
+  // was the raw `ctx.services.config?.provider` field, re-deriving the same
+  // precedence by hand instead of calling the shared helper every other call
+  // site of `resolveRosterProvider` already uses) — and resolve the registry
+  // from that same name so the tag names whatever produced the rows. #7811 —
+  // the permission-mode copy below now reads the SAME resolved roster
+  // provider: a provider-less entry runs as the daemon default, so the
+  // default's mode copy is the one that describes it.
   const switchProvider = entry.provider || null
-  const switchRosterProvider = resolveRosterProvider(switchProvider, ctx.services.config?.provider)
+  const switchRosterProvider = resolveRosterProvider(switchProvider, resolveDaemonDefaultProvider(ctx.services.config))
   const switchRegistry = getRegistryForProvider(switchRosterProvider)
   ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchRosterProvider })
   // #6638: also re-send the permission-mode copy so switching to/from a Codex
