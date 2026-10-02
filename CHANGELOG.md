@@ -832,6 +832,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently drift apart the way `ci-docker-path-filter.test.js` (#8150) already
   guards for the Docker image's filter.
 
+- **The wiring of every path-filtered CI job is now guarded (#8193).**
+  `Renovate Config`, `Docker Image Smoke` and `Verify Publish Artifacts (PR)`
+  each gate on an output of ci.yml's `changes` job
+  (`if: needs.changes.outputs.<name> == 'true'`), and none of them is a required
+  check — so a typo in that `if:`, a deleted or misspelled output mapping, or a
+  `|| true` / `continue-on-error` on the job's own step made the job stop
+  running (or stop failing) while looking exactly like "nothing relevant
+  changed". Five mutants of that shape stayed green across every existing
+  `ci-*` / `release-*` / `contributing-*` guard. A new test,
+  `ci-paths-filter-wiring.test.js`, derives the `changes` job's outputs, its
+  paths-filter filter names and every job that reads `needs.changes` from
+  ci.yml itself (no hand-written list) and checks that each output maps a step
+  output that exists, under the name of the filter it reads; that every
+  consumer names an existing output, compares it to `'true'` and lists
+  `changes` in its OWN `needs:` (the `needs` context holds direct dependencies
+  only); that every output is read by some job or carries a reasoned
+  exemption (the `platform` output, whose Windows consumer is gone), and every
+  exemption still matches; and that no consumer swallows its own failure.
+  Every one of those defects is also injected into a copy of the real ci.yml,
+  aimed at each consumer the rule discovered, and must turn the rule red. No
+  workflow change; actionlint in CI would catch some of the same typos and is
+  a possible follow-up.
+
 ## [0.11.2] - 2026-09-30
 
 ### Fixed
