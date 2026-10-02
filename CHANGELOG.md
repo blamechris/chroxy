@@ -845,13 +845,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths-filter filter names and every job that reads `needs.changes` from
   ci.yml itself (no hand-written list) and checks that each output maps a step
   output that exists, under the name of the filter it reads; that every
-  consumer names an existing output, compares it to `'true'` and lists
-  `changes` in its OWN `needs:` (the `needs` context holds direct dependencies
-  only); that every output is read by some job or carries a reasoned
+  job's `needs.<id>` read names a job in that job's OWN `needs:` (the `needs`
+  context holds direct dependencies only, and a typo'd `needs.chnages` reads as
+  empty), and that every consumer names an existing output and compares it to
+  `'true'`; that every output is read by some job or carries a reasoned
   exemption (the `platform` output, whose Windows consumer is gone), and every
-  exemption still matches; and that no consumer swallows its own failure.
-  Every one of those defects is also injected into a copy of the real ci.yml,
-  aimed at each consumer the rule discovered, and must turn the rule red. No
+  exemption still matches; and that neither a consumer nor the `changes` job
+  itself swallows its own failure (`continue-on-error`, `|| true` and its
+  zero-exit spellings, `set +e`, a shell without `-e`), with the `changes`
+  job's own `if:` checked against the workflow's triggers. Every one of those
+  defects is also injected into a copy of the real ci.yml, aimed at each
+  consumer the rule discovered and repeated over valid rewrites of the file
+  (a `working-directory:` after `run:`, quoted mappings, a commented, quoted
+  or block-list `needs:`, a second reader of an output), and must turn the rule
+  red without false-alarming on the valid layouts. Spellings of a swallowed
+  failure the test does not enumerate pass silently; its header lists them. No
   workflow change; actionlint in CI would catch some of the same typos and is
   a possible follow-up.
 
