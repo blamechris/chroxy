@@ -355,6 +355,12 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // reply lands in `sessionPresetSnapshots[cwd]` and the disclosure below reads
   // from there. Only fires when the modal is open and a cwd is present.
   const trimmedCwd = cwd.trim()
+  // #7332 (review): the worktree tick only means something while a working
+  // directory is set. Both the checkbox and the submitted payload read this
+  // derived value, so a cleared cwd can never submit `worktree: true` (the
+  // daemon rejects that), and the tick comes back if the user re-enters a cwd,
+  // preserving their choice.
+  const effectiveWorktree = worktree && Boolean(trimmedCwd)
   useEffect(() => {
     if (!open || !trimmedCwd || !requestSessionPresetSafe) return
     const t = setTimeout(() => { requestSessionPresetSafe(trimmedCwd) }, 400)
@@ -493,8 +499,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // instead of being silently overridden. Other providers never forward it.
     const codexSandboxOut: CodexSandboxMode | undefined =
       provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, connectionId: connectionId || undefined, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
-  }, [onCreate, provider, connectionId, permissionMode, defaultModel, modelsByProvider, worktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoUnsupported])
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, connectionId: connectionId || undefined, permissionMode: permissionMode || undefined, model, worktree: effectiveWorktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
+  }, [onCreate, provider, connectionId, permissionMode, defaultModel, modelsByProvider, effectiveWorktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoUnsupported])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -1099,17 +1105,22 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               <input
                 type="checkbox"
                 id="worktree-checkbox"
-                checked={worktree}
+                checked={effectiveWorktree}
                 onChange={e => setWorktree(e.target.checked)}
-                disabled={!cwdValRef.current.trim()}
+                disabled={!trimmedCwd}
                 aria-describedby="worktree-hint"
               />
               <span className="label-text">Isolate filesystem (worktree)</span>
             </label>
+            {/* #7332: the checkbox is disabled only while the (optional-looking)
+                Working directory is empty, so the hint states that blocker
+                first. A `title` on the disabled input would never render. */}
             <span id="worktree-hint" className="form-hint">
-              {worktree
-                ? 'CWD must point to an existing git repository'
-                : 'Runs in an isolated git worktree — requires a git repo CWD'}
+              {!trimmedCwd
+                ? 'Choose a working directory first — worktree isolation needs a git repo'
+                : effectiveWorktree
+                  ? 'CWD must point to an existing git repository'
+                  : 'Runs in an isolated git worktree — requires a git repo CWD'}
             </span>
           </div>
           {/* #4208/#4244: TUI-only opt-in to spawn `claude --dangerously-skip-permissions`.

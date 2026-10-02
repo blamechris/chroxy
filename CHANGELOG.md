@@ -40,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dashboard: the "Isolate filesystem (worktree)" checkbox now says why it is
+  disabled (#7332).** In New Session > Advanced the checkbox is disabled while
+  the Working directory field is empty, but that field is labelled optional
+  and the hint under the checkbox only described git, so the dead control read
+  as a broken feature. The hint now names the real precondition first
+  ("Choose a working directory first…"), and the disabled state is derived
+  from the cwd state rather than a ref read during render. A tick made before
+  clearing the cwd no longer survives into the submitted payload as
+  `worktree: true` with an empty cwd, which the daemon rejected; the tick
+  comes back if a cwd is entered again. Web dashboard only — the mobile app
+  sibling is tracked in #8214.
 - **Dashboard: `connectToServer` aimed at a different daemon now runs the same
   teardown as `switchServer`, so the connection-scoped roster no longer
   crosses over (#7570).** `switchServer` and `connectLocal` call
