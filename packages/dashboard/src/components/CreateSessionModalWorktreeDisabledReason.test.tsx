@@ -32,7 +32,11 @@ function mockStore() {
       selector({
         defaultProvider: 'claude-tui',
         defaultModel: null,
-        modelsByProvider: {},
+        // No modelsByProvider on purpose: the component then falls back to its
+        // stable EMPTY_MODELS_BY_PROVIDER, so the submit useCallback is NOT
+        // rebuilt every render and a missing dependency (e.g. effectiveWorktree)
+        // shows up as a stale-closure failure in the payload case. A fresh `{}`
+        // here would rebuild the callback each render and hide that regression.
         availableProviders: [TUI_PROVIDER],
         availablePermissionModes: [],
         environments: [],
