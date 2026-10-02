@@ -48,7 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by clearing the persisted buffer under the target's scope — before anything
   read it. The subscriber now skips that clear during the switch's reset, and
   the switch restores the target's persisted buffer into memory alongside its
-  active session, as a page load under that server does.
+  active session, as a page load under that server does. As after a page load,
+  a successful handshake with the target (a fresh `auth_ok`) still resets the
+  buffer; this fix covers the switch itself, including a target that is
+  unreachable or slow to answer.
 
 - **Dashboard: `connectToServer` aimed at a different daemon now runs the same
   teardown as `switchServer`, so the connection-scoped roster no longer

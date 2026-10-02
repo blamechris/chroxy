@@ -751,6 +751,25 @@ function abortTranscriptFetchesOnSocketDrop(
 }
 
 /**
+ * #8208 — true only while `retargetToServer` runs `_resetSessionMemory()`. The
+ * reset empties `terminalBuffer`, and the persistence subscriber answers an
+ * emptied buffer with `clearPersistedTerminalBuffer()` under the CURRENT scope —
+ * which step 2 has already moved to the target, so it deleted the target's
+ * cached buffer before step 5 could restore it. The subscriber skips that clear
+ * while this is set. Suppressing (rather than re-writing after the fact, as
+ * `activeSessionId` does) matters here because the terminal write is debounced:
+ * a clear followed by a rewrite leaves the key absent for a second, and a tab
+ * closed inside it loses the cache for good.
+ *
+ * Scope: this keeps the cache through the SWITCH. A successful connect that
+ * follows is a fresh (non-reconnect) `auth_ok`, which empties `terminalBuffer`
+ * again and — with the flag long since false — clears the key, exactly as it
+ * does after a page load's hydration. That wipe is the existing fresh-connect
+ * contract (the daemon replays its own terminal output) and is not changed here.
+ */
+let _retargetResetInProgress = false;
+
+/**
  * #7570 — the context-SWITCH teardown: everything that must happen, in this
  * order, before the tab is pointed at a DIFFERENT daemon (`serverId`), or at
  * the registry-less local one (`null`). One definition, run by `switchServer`,
@@ -816,19 +835,6 @@ function retargetToServer(
     set({ terminalBuffer: persisted.terminalBuffer });
   }
 }
-
-/**
- * #8208 — true only while `retargetToServer` runs `_resetSessionMemory()`. The
- * reset empties `terminalBuffer`, and the persistence subscriber answers an
- * emptied buffer with `clearPersistedTerminalBuffer()` under the CURRENT scope —
- * which step 2 has already moved to the target, so it deleted the target's
- * cached buffer before step 5 could restore it. The subscriber skips that clear
- * while this is set. Suppressing (rather than re-writing after the fact, as
- * `activeSessionId` does) matters here because the terminal write is debounced:
- * a clear followed by a rewrite leaves the key absent for a second, and a tab
- * closed inside it loses the cache for good.
- */
-let _retargetResetInProgress = false;
 
 /**
  * #7570 — the one definition of "the store last spoke to a different daemon",
