@@ -1101,15 +1101,20 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 id="worktree-checkbox"
                 checked={worktree}
                 onChange={e => setWorktree(e.target.checked)}
-                disabled={!cwdValRef.current.trim()}
+                disabled={!trimmedCwd}
                 aria-describedby="worktree-hint"
               />
               <span className="label-text">Isolate filesystem (worktree)</span>
             </label>
+            {/* #7332: the checkbox is disabled only while the (optional-looking)
+                Working directory is empty, so the hint states that blocker
+                first. A `title` on the disabled input would never render. */}
             <span id="worktree-hint" className="form-hint">
-              {worktree
-                ? 'CWD must point to an existing git repository'
-                : 'Runs in an isolated git worktree — requires a git repo CWD'}
+              {!trimmedCwd
+                ? 'Choose a working directory first — worktree isolation runs in a git repo'
+                : worktree
+                  ? 'CWD must point to an existing git repository'
+                  : 'Runs in an isolated git worktree — requires a git repo CWD'}
             </span>
           </div>
           {/* #4208/#4244: TUI-only opt-in to spawn `claude --dangerously-skip-permissions`.
