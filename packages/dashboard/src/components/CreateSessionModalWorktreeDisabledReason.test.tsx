@@ -7,9 +7,13 @@
  * under the checkbox was keyed on the CHECKED state and described git, so the
  * user read "requires a git repo CWD" and concluded the feature was broken.
  *
- * The reason has to be visible text (or on the label). A `title` on a disabled
- * <input> never renders — disabled inputs do not fire pointer events — so that
- * is explicitly not a fix and these tests do not accept it.
+ * The reason has to be rendered hint text that the checkbox's aria-describedby
+ * points at. A `title` on a disabled <input> never renders — disabled inputs do
+ * not fire pointer events — so that is explicitly not a fix and these tests do
+ * not accept it.
+ *
+ * Related (#7332 review): a worktree tick made while a cwd is set must not
+ * survive a cleared cwd, either in the checkbox or in the submitted payload.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
@@ -18,9 +22,9 @@ vi.mock('../hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
 }))
 
-const DISABLED_REASON = 'Choose a working directory first — worktree isolation runs in a git repo'
+const DISABLED_REASON = 'Choose a working directory first — worktree isolation needs a git repo'
 
-const TUI_PROVIDER ={ name: 'claude-tui', capabilities: {}, auth: { ready: true, source: 'static', detail: '' } }
+const TUI_PROVIDER = { name: 'claude-tui', capabilities: {}, auth: { ready: true, source: 'static', detail: '' } }
 
 function mockStore() {
   vi.doMock('../store/connection', () => ({
@@ -118,5 +122,77 @@ describe('CreateSessionModal worktree checkbox disabled reason (#7332)', () => {
     expect(checkbox.disabled).toBe(false)
     expect(checkbox.closest('.form-field')!.textContent).not.toMatch(/choose a working directory/i)
     expect(document.getElementById('worktree-hint')!.textContent).toMatch(/git/i)
+  })
+
+  // Guards the `.trim()` on the cwd: without it a whitespace-only cwd would
+  // enable the checkbox and the daemon would reject the resulting create.
+  it('a whitespace-only working directory counts as empty: checkbox disabled and the reason is shown', async () => {
+    mockStore()
+    const CreateSessionModal = await loadModal()
+    render(<CreateSessionModal {...baseProps} initialCwd="   " />)
+    openAdvanced()
+
+    const checkbox = worktreeCheckbox()
+    expect(checkbox.disabled).toBe(true)
+    expect(document.getElementById('worktree-hint')!.textContent).toBe(DISABLED_REASON)
+  })
+
+  it('clearing the working directory after ticking the checkbox unticks it and shows the reason; re-entering the cwd restores the tick', async () => {
+    mockStore()
+    const CreateSessionModal = await loadModal()
+    render(<CreateSessionModal {...baseProps} initialCwd="/Users/me/projects" />)
+    openAdvanced()
+
+    fireEvent.click(worktreeCheckbox())
+    expect(worktreeCheckbox().checked).toBe(true)
+
+    const cwdInput = screen.getByLabelText('Working directory')
+    fireEvent.change(cwdInput, { target: { value: '' } })
+
+    // The box must not stay "checked + disabled" with the tick still counting.
+    expect(worktreeCheckbox().disabled).toBe(true)
+    expect(worktreeCheckbox().checked).toBe(false)
+    expect(document.getElementById('worktree-hint')!.textContent).toBe(DISABLED_REASON)
+
+    // The user's choice is preserved: typing the cwd back brings the tick back.
+    fireEvent.change(cwdInput, { target: { value: '/Users/me/projects' } })
+    expect(worktreeCheckbox().disabled).toBe(false)
+    expect(worktreeCheckbox().checked).toBe(true)
+  })
+
+  // Proves the payload, not just the UI. Against the pre-fix code this fails:
+  // the stale `worktree` state was submitted as `worktree: true` alongside an
+  // empty cwd, which the daemon rejects ("Worktree requires an explicit CWD").
+  it('submitting after clearing a ticked worktree checkbox sends worktree: undefined with the empty cwd', async () => {
+    mockStore()
+    const CreateSessionModal = await loadModal()
+    const onCreate = vi.fn()
+    render(<CreateSessionModal {...baseProps} onCreate={onCreate} initialCwd="/Users/me/projects" />)
+    openAdvanced()
+
+    fireEvent.click(worktreeCheckbox())
+    expect(worktreeCheckbox().checked).toBe(true)
+    fireEvent.change(screen.getByLabelText('Working directory'), { target: { value: '' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+
+    expect(onCreate).toHaveBeenCalledTimes(1)
+    const payload = onCreate.mock.calls[0]?.[0] as { cwd: string; worktree?: boolean } | undefined
+    expect(payload?.cwd).toBe('')
+    expect(payload?.worktree).toBeUndefined()
+  })
+
+  it('submitting with a cwd and a ticked worktree checkbox still sends worktree: true', async () => {
+    mockStore()
+    const CreateSessionModal = await loadModal()
+    const onCreate = vi.fn()
+    render(<CreateSessionModal {...baseProps} onCreate={onCreate} initialCwd="/Users/me/projects" />)
+    openAdvanced()
+
+    fireEvent.click(worktreeCheckbox())
+    fireEvent.click(screen.getByRole('button', { name: /create/i }))
+
+    expect(onCreate).toHaveBeenCalledTimes(1)
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ cwd: '/Users/me/projects', worktree: true }))
   })
 })
