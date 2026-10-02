@@ -90,7 +90,7 @@ const mh = await import('./message-handler')
 // real module (it reads the `localStorage` mock installed above).
 const {
   setServerScope, persistActiveSession, persistSessionList, loadSessionList,
-  flushPendingWrites, loadPersistedState,
+  flushPendingWrites, loadPersistedState, persistTerminalBuffer, clearPersistedTerminalBuffer,
 } = await import('./persistence')
 // Cursors live in store-core; `resetReplayReconcile` is shared by both clients.
 const { recordHistorySeq, getHistoryCursors, resetReplayReconcile } =
@@ -1283,5 +1283,119 @@ describe('#7570 connectToServer to the SAME daemon still reconnects in place', (
     expect(disconnectSpy).not.toHaveBeenCalled()
     expect(connectSpy).not.toHaveBeenCalled()
     expect(useConnectionStore.getState().activeServerId).toBe('srv_gone')
+  })
+})
+
+// #8208 — the TARGET scope's persisted terminal buffer. `retargetToServer`
+// moves the persistence scope to the target and then runs `_resetSessionMemory`,
+// which empties `terminalBuffer`; the persistence subscriber answered that with
+// `clearPersistedTerminalBuffer()` under the scope just moved to — deleting the
+// target's cached buffer before anything read it. Only reachable when the
+// OUTGOING tab holds a non-empty buffer (an empty one does not change, so the
+// subscriber never fires), which is why every cell starts with A's buffer set.
+// #8206's S3 cell pins A's buffer; these pin B's, through all three entry points
+// that share the helper.
+describe.each([
+  ['switchServer', (bId: string): string | null => bId,
+    (bId: string) => useConnectionStore.getState().switchServer(bId)],
+  ['connectLocal', (_bId: string): string | null => null,
+    (_bId: string) => useConnectionStore.getState().connectLocal()],
+  ['connectToServer (different daemon)', (bId: string): string | null => bId,
+    (bId: string) => useConnectionStore.getState().connectToServer(bId)],
+] as const)('#8208 %s keeps the TARGET scope\'s persisted terminal buffer', (_name, targetScope, run) => {
+  const realConnect = useConnectionStore.getState().connect
+  let aId = ''
+  let bId = ''
+  let target: string | null = null
+
+  /** The target scope's terminal key, read straight from storage — no flush. */
+  const readTarget = (): string | null => {
+    setServerScope(target)
+    return loadPersistedState().terminalBuffer
+  }
+  const readA = (): string | null => {
+    setServerScope(aId)
+    return loadPersistedState().terminalBuffer
+  }
+
+  beforeEach(() => {
+    useConnectionStore.setState({ connect: vi.fn() } as unknown as Partial<State>)
+    aId = useConnectionStore.getState().addServer('A', SERVER_A_URL, 'tok-a').id
+    bId = useConnectionStore.getState().addServer('B', SERVER_B_URL, 'tok-b').id
+    target = targetScope(bId)
+    // B's cache: a buffer and a selected session, as a previous visit left them.
+    setServerScope(target)
+    persistTerminalBuffer('B-terminal')
+    persistActiveSession('sess-b-persisted')
+    flushPendingWrites()
+    // The tab is on A, with A's own (different) buffer and an open session. The
+    // `wsUrl` is A's so `connectToServer(B)` takes the different-daemon branch.
+    setServerScope(aId)
+    seedServerA({
+      activeServerId: aId, wsUrl: SERVER_A_URL, connectionPhase: 'disconnected', socket: null,
+    } as unknown as Partial<State>)
+    useConnectionStore.setState({
+      terminalBuffer: 'A-terminal', activeSessionId: 'sess-a-active',
+    } as unknown as Partial<State>)
+    flushPendingWrites()
+  })
+
+  afterEach(() => {
+    flushPendingWrites()
+    useConnectionStore.setState({ connect: realConnect, terminalBuffer: '' } as unknown as Partial<State>)
+    flushPendingWrites()
+    setServerScope(null)
+  })
+
+  it("control: both buffers are on disk, distinct, and the outgoing tab's is non-empty", () => {
+    // Without this the "still there" cells below pass against a fixture that
+    // never wrote B's key, or an outgoing buffer that never changes on reset.
+    expect(useConnectionStore.getState().terminalBuffer).toBe('A-terminal')
+    expect(readA()).toBe('A-terminal')
+    expect(readTarget()).toBe('B-terminal')
+    setServerScope(aId)
+  })
+
+  it("B's persisted buffer is intact immediately after the switch — no clear-then-rewrite window", () => {
+    // Read BEFORE any flush. A fix that let the reset delete the key and relied
+    // on a debounced (1 s) rewrite would leave it missing here — and a tab
+    // closed inside that second loses it for good (nothing flushes on unload).
+    run(bId)
+    expect(readTarget(), "the target's persisted terminal buffer was cleared by the switch (#8208)")
+      .toBe('B-terminal')
+  })
+
+  it("B's persisted buffer is still intact once pending writes flush", () => {
+    run(bId)
+    flushPendingWrites()
+    expect(readTarget()).toBe('B-terminal')
+  })
+
+  it("B's buffer is restored into memory, as a page load under B would", () => {
+    run(bId)
+    expect(useConnectionStore.getState().terminalBuffer).toBe('B-terminal')
+  })
+
+  it("A's buffer and B's selected session are preserved alongside it", () => {
+    run(bId)
+    flushPendingWrites()
+    expect(useConnectionStore.getState().activeSessionId).toBe('sess-b-persisted')
+    expect(readTarget()).toBe('B-terminal')
+    expect(loadPersistedState().activeSessionId).toBe('sess-b-persisted')
+    expect(readA(), "the outgoing server's buffer was touched").toBe('A-terminal')
+  })
+
+  it('a target with NO persisted buffer starts empty, and its key stays absent', () => {
+    // The restore is conditional: nothing on disk means nothing applied, and the
+    // suppressed clear must not have been a write either.
+    setServerScope(target)
+    clearPersistedTerminalBuffer()
+    expect(loadPersistedState().terminalBuffer, 'control: removed').toBeNull()
+    setServerScope(aId)
+    run(bId)
+    flushPendingWrites()
+    expect(useConnectionStore.getState().terminalBuffer).toBe('')
+    expect(readTarget()).toBeNull()
+    expect(readA()).toBe('A-terminal')
   })
 })

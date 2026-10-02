@@ -779,8 +779,13 @@ function abortTranscriptFetchesOnSocketDrop(
  *      module-level trackers (message queue, replay cursors, transcript fetch,
  *      delta buffers, batched terminal writes). It does NOT clear persisted
  *      data on purpose: a switch KEEPS each server's cache in its own scope.
- *   5. Apply the active session read in step 3, so the first `session_list`
- *      resolves against what this tab last had open under the new scope.
+ *      Run under `_retargetResetInProgress`, so the persistence subscriber does
+ *      not answer the emptied `terminalBuffer` by clearing the new scope's
+ *      persisted buffer (#8208).
+ *   5. Apply the active session and terminal buffer read in step 3, so the
+ *      first `session_list` resolves against what this tab last had open under
+ *      the new scope, and the terminal shows that scope's cache — the same two
+ *      values a page load under the new scope restores.
  *
  * Takes `set`/`get` rather than closing over them, in the shape
  * `clearGitOneshotCallbacks` already uses, and calls the actions through
@@ -797,12 +802,33 @@ function retargetToServer(
   }
   setServerScope(serverId);
   const persisted = loadPersistedState();
-  get()._resetSessionMemory();
+  _retargetResetInProgress = true;
+  try {
+    get()._resetSessionMemory();
+  } finally {
+    _retargetResetInProgress = false;
+  }
   set({ activeServerId: serverId, userDisconnected: false });
   if (persisted.activeSessionId) {
     set({ activeSessionId: persisted.activeSessionId });
   }
+  if (persisted.terminalBuffer) {
+    set({ terminalBuffer: persisted.terminalBuffer });
+  }
 }
+
+/**
+ * #8208 — true only while `retargetToServer` runs `_resetSessionMemory()`. The
+ * reset empties `terminalBuffer`, and the persistence subscriber answers an
+ * emptied buffer with `clearPersistedTerminalBuffer()` under the CURRENT scope —
+ * which step 2 has already moved to the target, so it deleted the target's
+ * cached buffer before step 5 could restore it. The subscriber skips that clear
+ * while this is set. Suppressing (rather than re-writing after the fact, as
+ * `activeSessionId` does) matters here because the terminal write is debounced:
+ * a clear followed by a rewrite leaves the key absent for a second, and a tab
+ * closed inside it loses the cache for good.
+ */
+let _retargetResetInProgress = false;
 
 /**
  * #7570 — the one definition of "the store last spoke to a different daemon",
@@ -6128,8 +6154,10 @@ useConnectionStore.subscribe((state) => {
     _prevTerminalBufferLen = state.terminalBuffer.length;
     if (state.terminalBuffer) {
       persistTerminalBuffer(state.terminalBuffer);
-    } else {
-      // Clear persisted terminal buffer when buffer is emptied
+    } else if (!_retargetResetInProgress) {
+      // Clear persisted terminal buffer when buffer is emptied — except by a
+      // server switch's in-memory reset, which runs under the TARGET's scope and
+      // would delete the cache it is about to restore (#8208).
       clearPersistedTerminalBuffer();
     }
   }
