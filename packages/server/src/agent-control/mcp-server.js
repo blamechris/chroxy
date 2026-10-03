@@ -32,7 +32,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { isEntryPoint } from '../utils/is-entry-point.js'
 import { getErrorMessage } from '../utils/error-message.js'
 import { AgentControlClient, redactPublicText, CLIENT_MESSAGE_ID_PATTERN, RESERVED_CLIENT_MESSAGE_IDS } from './client.js'
-import { resolveConnectionTarget } from './local-connection.js'
+import { resolveConnectionTarget, validateExplicitUrl } from './local-connection.js'
 
 export const SERVER_NAME = 'chroxy-agent-control'
 export const SERVER_VERSION = '0.1.0'
@@ -46,6 +46,13 @@ const MUTATION_TOOL_NAMES = new Set(['chroxy_create_session', 'chroxy_send_input
 function logToStderr(...args) {
   console.error(`[${SERVER_NAME}]`, ...args)
 }
+
+// #7969 — one sentence, used by BOTH the fail-fast startup refusal in `main()`
+// and the lazy `describeConnectionFailure` case, so the two can never drift.
+// It deliberately names neither the URL nor the host nor the token: this module
+// never logs the URL, and a refusal line is exactly the kind of text that ends
+// up pasted into an issue.
+const INSECURE_REMOTE_WS_REFUSAL = 'refusing a remote ws:// endpoint: the bearer token is sent in cleartext in the first auth frame, before any key exchange, so anyone on the network path can read it, and an identity pin cannot protect it (the pin is only checked after the token has gone out). Use a wss:// URL, or pass --allow-insecure-ws to accept that risk on a network you trust.'
 
 function textResult(value) {
   return {
@@ -251,6 +258,11 @@ class ClientManager {
       readOnly: this._clientOpts.readOnly === true,
       identityPublicKey: this._clientOpts.identityPublicKey,
       allowCommandApprovals: this._clientOpts.allowCommandApprovals === true,
+      // TEST SEAM ONLY: `undefined` in production (the client then uses the
+      // `ws` library). Set solely by a programmatic caller of
+      // `createAgentControlMcpServer`; `main()` never passes it, so it cannot
+      // be reached from argv or the environment.
+      WebSocketImpl: this._clientOpts.WebSocketImpl,
       modelExpectations: this._modelExpectations,
       ownedSessions: this._ownedSessions,
       log: logToStderr,
@@ -323,6 +335,8 @@ function describeConnectionFailure(reason) {
       return '--url must be a valid ws:// or wss:// URL.'
     case 'url_contains_credentials':
       return '--url must not embed credentials (ws://token@host/...) — pass the token via CHROXY_AGENT_CONTROL_TOKEN instead.'
+    case 'insecure_remote_ws':
+      return INSECURE_REMOTE_WS_REFUSAL
     default:
       return `could not resolve a daemon connection (${reason})`
   }
@@ -342,13 +356,21 @@ function describeConnectionFailure(reason) {
  * @param {boolean} [opts.allowCommandApprovals] - #7973: let chroxy_respond_permission
  *   approve a command-style tool (Bash/PowerShell/Monitor/codex shell). Default false. See client.js's
  *   respondPermission doc comment.
+ * @param {boolean} [opts.allowInsecureWs] - #7969: opt in to a cleartext `ws://`
+ *   endpoint on a host that is not loopback (only the boolean `true` counts).
+ *   Default false: the first connect then fails with `insecure_remote_ws`.
+ * @param {typeof WebSocket} [opts.WebSocketImpl] - TEST SEAM: a WebSocket
+ *   constructor forwarded to `AgentControlClient`, so a test can observe or
+ *   fake the transport instead of letting the `ws` library resolve a name and
+ *   open a socket. Programmatic only — `main()` does not pass it, and nothing
+ *   reads it from argv or the environment.
  * @returns {{ mcp: Server, clientManager: ClientManager }}
  */
 export function createAgentControlMcpServer(opts = {}) {
   const readOnly = opts.readOnly === true
   const clientManager = opts.clientManager || new ClientManager(
-    { explicitUrl: opts.url, explicitToken: opts.token },
-    { readOnly, identityPublicKey: opts.identityPublicKey, allowCommandApprovals: opts.allowCommandApprovals === true },
+    { explicitUrl: opts.url, explicitToken: opts.token, allowInsecureWs: opts.allowInsecureWs === true },
+    { readOnly, identityPublicKey: opts.identityPublicKey, allowCommandApprovals: opts.allowCommandApprovals === true, WebSocketImpl: opts.WebSocketImpl },
   )
 
   const toolNames = Object.keys(TOOLS).filter((name) => readOnly ? !MUTATION_TOOL_NAMES.has(name) : true)
@@ -402,6 +424,7 @@ export async function main(options) {
         url: { type: 'string' },
         'pin-identity': { type: 'string' },
         'allow-command-approvals': { type: 'boolean' },
+        'allow-insecure-ws': { type: 'boolean' },
       },
     })
     return {
@@ -409,11 +432,42 @@ export async function main(options) {
       url: values.url,
       identityPublicKey: values['pin-identity'],
       allowCommandApprovals: values['allow-command-approvals'],
+      allowInsecureWs: values['allow-insecure-ws'],
     }
   })()
   const readOnly = parsed.readOnly === true
   const url = parsed.url
   const allowCommandApprovals = parsed.allowCommandApprovals === true
+  // #7969: argv only — deliberately NO environment-variable equivalent, so a
+  // URL configured through CHROXY_AGENT_CONTROL_URL still needs this flag in
+  // the arguments that spawn the process.
+  const allowInsecureWs = parsed.allowInsecureWs === true
+  // `CHROXY_AGENT_CONTROL_URL` selects the explicit (remote) path inside
+  // resolveConnectionTarget exactly like `--url` does, so it counts here too.
+  const explicitTarget = url || process.env.CHROXY_AGENT_CONTROL_URL
+
+  // #7969: FAIL FAST, before the MCP server exists and before the stdio
+  // transport connects. The bearer token goes out in the first `auth` frame,
+  // before any key exchange, so over plain ws:// to another host it is readable
+  // on the path and no identity pin can protect it. Without this, the refusal
+  // would surface only as a tool-call error on the first call — after the host
+  // had already registered the server as healthy. One line to stderr, nothing
+  // on stdout (that stream is MCP frames only), a non-zero exit. Only THIS
+  // refusal is fail-fast; every other `validateExplicitUrl` / resolver failure
+  // keeps surfacing lazily, exactly as before. The rule itself is the same
+  // `validateExplicitUrl` the resolver calls — there is no second copy of it.
+  //
+  // `process.exitCode` + return (not a throw): cli.js calls `program.parse()`,
+  // not `parseAsync`, so a rejected action promise is an unhandled rejection
+  // with a stack trace, and `process.exit()` can truncate a pipe write. Nothing
+  // has been started yet — no listeners, no socket, no stdin handle — so
+  // returning here lets the process drain stderr and end on its own.
+  const urlCheck = explicitTarget ? validateExplicitUrl(explicitTarget, { allowInsecureWs }) : null
+  if (urlCheck && !urlCheck.ok && urlCheck.reason === 'insecure_remote_ws') {
+    logToStderr(INSECURE_REMOTE_WS_REFUSAL)
+    process.exitCode = 1
+    return
+  }
   // Deliberately NO --token argv flag — argv is visible to every other
   // process on the machine (`ps`), unlike an env var scoped to this
   // process's own environment block. A remote connection's token is read
@@ -435,7 +489,25 @@ export async function main(options) {
     }
   }
 
-  const { mcp, clientManager } = createAgentControlMcpServer({ readOnly, url, token, identityPublicKey, allowCommandApprovals })
+  // #7969: same shape as the --allow-command-approvals notice above — a loud
+  // one-time WARNING when the flag is actually admitting something, and a plain
+  // "has no effect" when it is moot, so an operator who passes it needlessly
+  // does not conclude cleartext transport is in play. "Moot" means the gate
+  // would never have refused this target: no explicit target at all, or one
+  // that validates with `insecureRemoteWs` false. A target that fails
+  // validation for ANOTHER reason (`invalid_url`, a bad scheme, embedded
+  // credentials) is neither: the flag's relevance is unknown until the URL is
+  // fixed, so say nothing about it — the lazy path reports the real problem on
+  // the first tool call, exactly when it always did.
+  if (allowInsecureWs) {
+    if (urlCheck?.ok && urlCheck.insecureRemoteWs) {
+      logToStderr('WARNING: --allow-insecure-ws is ENABLED and the target is a ws:// endpoint on another host. The bearer token will travel in cleartext in the first auth frame, before any key exchange, so anyone on the network path can read it; an identity pin does not protect it. Only use this on a network you trust, or switch to wss://.')
+    } else if (!urlCheck || urlCheck.ok) {
+      logToStderr('--allow-insecure-ws has no effect: the target is not a remote ws:// URL (the local default, a loopback ws:// URL and any wss:// URL are never refused).')
+    }
+  }
+
+  const { mcp, clientManager } = createAgentControlMcpServer({ readOnly, url, token, identityPublicKey, allowCommandApprovals, allowInsecureWs })
 
   let shuttingDown = false
   const shutdown = async (signal) => {
@@ -459,10 +531,8 @@ export async function main(options) {
   // with no embedded credentials is still connection metadata this process
   // doesn't need to put in a log stream; "remote" vs "local" is all a reader
   // needs to know which path was taken.
-  // `CHROXY_AGENT_CONTROL_URL` selects the explicit (remote) path inside
-  // resolveConnectionTarget exactly like `--url` does, so it must count here
-  // too — otherwise an env-configured remote target is logged as 'local'.
-  const explicitTarget = url || process.env.CHROXY_AGENT_CONTROL_URL
+  // `explicitTarget` (hoisted above) counts `CHROXY_AGENT_CONTROL_URL` too —
+  // otherwise an env-configured remote target would be logged as 'local'.
   logToStderr(`ready (readOnly=${readOnly}, target=${explicitTarget ? 'remote' : 'local'})`)
 }
 

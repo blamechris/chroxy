@@ -83,8 +83,11 @@ daemon's existing authority checks are the actual floor. Specific to `agent-cont
 - **Local is the default and the safe path**: it reads the daemon's `connection.json` for
   its `port` field and always dials `127.0.0.1` — **never** the public tunnel URL, even
   though `connection.json` may also contain one.
-- A **remote** endpoint is never inferred. It requires an explicit `--url ws://` or
-  `wss://` plus `CHROXY_AGENT_CONTROL_TOKEN` in the environment.
+- A **remote** endpoint is never inferred. It requires an explicit `--url` (or
+  `CHROXY_AGENT_CONTROL_URL`) plus `CHROXY_AGENT_CONTROL_TOKEN` in the environment, and the
+  URL should be `wss://`. **A plain `ws://` URL to any host that is not loopback is refused
+  at startup** (#7969) unless you pass `--allow-insecure-ws` — see "A pin does not protect
+  the token" below for why, and "Running it" for the exact rule and the flag.
 - E2E encryption is negotiated exactly as any other chroxy client (eager or discrete key
   exchange, per the daemon's `auth_ok`). Optional daemon-identity pinning via
   `--pin-identity <base64 key>` (or `CHROXY_AGENT_CONTROL_PIN`) refuses a handshake that
@@ -95,8 +98,13 @@ daemon's existing authority checks are the actual floor. Specific to `agent-cont
   "Auth Token Transmitted Before Encryption" in the
   [threat model](../security/encryption-threat-model.md)). A pin makes an impersonating
   endpoint's handshake fail and the session is refused — but by then the impersonator has
-  the token. Only TLS keeps the token off the wire: use `wss://` for any non-loopback
-  `--url`. Over `ws://` to another host, anyone on the path can read the token.
+  the token. Only TLS keeps the token off the wire, so the CLI enforces it rather than
+  merely advising it: `chroxy agent-control --stdio` **refuses to start** on a `ws://` URL
+  whose host is not loopback, printing one line to stderr and exiting non-zero with nothing
+  on stdout (it is a startup check, not a failure on the first tool call). The two ways out
+  are `wss://`, or `--allow-insecure-ws` to accept that anyone on the path can read the
+  token — only sensible on a network you trust. With the flag the process prints a
+  `WARNING:` line at startup and runs normally.
 - **Pinning the local daemon needs `encryptLocalhost`.** A genuine loopback connection gets
   the daemon's localhost plaintext bypass (same threat-model doc), so `auth_ok` offers no
   encryption and a pinned client refuses with `IDENTITY_PIN_REQUIRES_ENCRYPTION`. That is
@@ -223,12 +231,53 @@ chroxy agent-control --stdio                        # local daemon, read-write
 chroxy agent-control --stdio --read-only            # local daemon, mutation tools absent
 chroxy agent-control --stdio --allow-command-approvals   # let the planner approve Bash/PowerShell/Monitor/codex shell too (logs a startup warning)
 chroxy agent-control --stdio --url wss://your-tunnel-host --pin-identity <base64-key>
+chroxy agent-control --stdio --url ws://192.168.1.5:8765 --allow-insecure-ws   # cleartext ws:// to another host: opt-in only, logs a startup WARNING
 ```
 
 There is **no `--token` flag** — argv is visible to every other process on the machine via
 `ps`. A remote connection's token comes **only** from `CHROXY_AGENT_CONTROL_TOKEN` in the
 environment; the local (default) case needs no token anywhere in argv or config, since it
 reads `connection.json` itself.
+
+### Cleartext `ws://` is refused unless you opt in (#7969)
+
+The bearer token is sent in the first `auth` frame, before any key exchange, so over plain
+`ws://` to another host anyone on the network path can read it — and `--pin-identity` cannot
+help, because the pin is only checked after the token has gone out. So a `ws://` `--url` is
+**refused** at startup unless the host is loopback, which means exactly one of:
+
+- `localhost` (case-insensitive);
+- an IPv4 address in `127.0.0.0/8` (so `127.0.0.1`, `127.0.0.2`, and the shorthand `127.1`,
+  which the URL parser expands to `127.0.0.1`);
+- `[::1]`.
+
+**Everything else counts as remote, and the check fails closed.** That includes spellings
+that look local but are not: `localhost.` (trailing dot), `foo.localhost`,
+`localhost.localdomain`, `127.0.0.1.evil.com`, `0.0.0.0`, `[::]`, and IPv4-mapped IPv6 such as
+`[::ffff:127.0.0.1]`. `wss://` is never refused, to any host.
+
+A refused start looks like this — one line on stderr, a non-zero exit, nothing on stdout. It
+deliberately does not repeat your URL, host or token:
+
+```
+[chroxy-agent-control] refusing a remote ws:// endpoint: the bearer token is sent in cleartext in the first auth frame, before any key exchange, so anyone on the network path can read it, and an identity pin cannot protect it (the pin is only checked after the token has gone out). Use a wss:// URL, or pass --allow-insecure-ws to accept that risk on a network you trust.
+```
+
+To accept the risk on a network you trust, add `--allow-insecure-ws`. The process then prints
+a `WARNING:` line saying the token will travel in cleartext and runs normally. Where the flag
+cannot matter (the local default, a loopback `ws://` URL, any `wss://` URL) it prints a
+`has no effect` line instead. A URL that fails validation for another reason (not a URL, a
+non-`ws` scheme, embedded credentials) prints neither: the first tool call reports that error.
+
+Boolean flags take no value. `chroxy agent-control` rejects stray arguments, so
+`--allow-insecure-ws false` (or `0`) is an error — `error: too many arguments for
+'agent-control'` on stderr, a non-zero exit, nothing on stdout — rather than being read as
+"off" or, worse, silently turning the flag on. The same holds for `--allow-command-approvals`.
+
+The flag is **argv-only — there is no environment-variable equivalent.** A URL configured
+through `CHROXY_AGENT_CONTROL_URL` is held to the same rule, and still needs
+`--allow-insecure-ws` in the arguments that start the process; an MCP host's `args` list is
+where the decision is visible and reviewable.
 
 **Not yet on npm.** `chroxy agent-control` has not shipped in a published `chroxy` release
 yet (this is the PR introducing it) — the published `chroxy@0.11` package does not have this

@@ -40,6 +40,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security: `chroxy agent-control` refuses a `ws://` URL to a non-loopback host
+  unless `--allow-insecure-ws` is passed (#7969).** The daemon's bearer token is
+  sent in the first `auth` frame, before any key exchange, so over plain `ws://`
+  to another host anyone on the path can read it, and `--pin-identity` cannot
+  help (the pin is checked only after the token has gone out). Previously the
+  CLI accepted such a URL, and the guide only advised `wss://`. Now
+  `agent-control --stdio` fails at startup — one line on stderr, a non-zero
+  exit, nothing on stdout — naming both ways out (`wss://`, or the flag). The
+  same applies to a URL configured through `CHROXY_AGENT_CONTROL_URL`, and the
+  flag is argv-only: there is no environment-variable equivalent. "Loopback" is
+  strict and fails closed: `localhost`, an IPv4 address in `127.0.0.0/8`, or
+  `[::1]` — so `localhost.`, `foo.localhost`, `127.0.0.1.evil.com`, `0.0.0.0`,
+  `[::]` and IPv4-mapped IPv6 are all remote. `wss://` and loopback `ws://` are
+  unchanged. **Existing configs that point `--url` at a remote `ws://` daemon
+  will stop starting** until they switch to `wss://` or add the flag (which
+  logs a startup `WARNING:`). The command now also rejects stray positional
+  arguments, so a value after a boolean flag (`--allow-insecure-ws false`) is an
+  error instead of silently enabling the flag; this covers
+  `--allow-command-approvals` too, where `--allow-command-approvals false`
+  used to turn command approvals ON.
 - **Dashboard: the "Isolate filesystem (worktree)" checkbox now says why it is
   disabled (#7332).** In New Session > Advanced the checkbox is disabled while
   the Working directory field is empty, but that field is labelled optional
