@@ -231,7 +231,7 @@ describe('resolveConnectionTarget: ws:// to a non-loopback host (#7969)', () => 
   it('allowInsecureWs: true admits every spelling in the REFUSED table (the opt-in is the only way through)', () => {
     for (const [, url] of REFUSED) {
       const result = resolveConnectionTarget({ explicitUrl: url, explicitToken: TOKEN, allowInsecureWs: true, env: {} })
-      assert.equal(result.ok, true, `${url} should be admitted with the explicit opt-in`)
+      assert.deepEqual(result, { ok: true, url, token: TOKEN, source: 'explicit' }, `${url} should be admitted with the explicit opt-in, URL string unchanged`)
     }
   })
 
@@ -250,7 +250,10 @@ describe('resolveConnectionTarget: ws:// to a non-loopback host (#7969)', () => 
   it('there is no environment-variable opt-in: an env-configured URL still needs the option', () => {
     const env = { CHROXY_AGENT_CONTROL_URL: 'ws://example.com:9', CHROXY_AGENT_CONTROL_TOKEN: TOKEN, CHROXY_AGENT_CONTROL_ALLOW_INSECURE_WS: '1', CHROXY_ALLOW_INSECURE_WS: '1' }
     assert.deepEqual(resolveConnectionTarget({ env }), { ok: false, reason: 'insecure_remote_ws' })
-    assert.equal(resolveConnectionTarget({ env, allowInsecureWs: true }).ok, true)
+    assert.deepEqual(
+      resolveConnectionTarget({ env, allowInsecureWs: true }),
+      { ok: true, url: 'ws://example.com:9', token: TOKEN, source: 'explicit' },
+    )
   })
 
   it('the insecure-transport refusal wins over the missing-token refusal', () => {
@@ -322,11 +325,17 @@ describe('validateExplicitUrl (#7969)', () => {
   })
 
   it('a loopback-looking prefix with a remote suffix is remote (the host is judged whole, never by prefix)', () => {
-    for (const url of ['ws://127.0.0.1.evil.com:9', 'ws://localhost.evil.com:9', 'ws://127.evil.com:9', 'ws://[::1].evil.com:9']) {
-      let verdict
-      try { verdict = validateExplicitUrl(url) } catch { verdict = { ok: false, reason: 'threw' } }
-      assert.equal(verdict.ok, false, `${url} must not be treated as loopback`)
+    // No try/catch: a validator that THROWS on one of these must fail the test,
+    // not pass as a refusal. Each URL pins its exact result.
+    for (const url of ['ws://127.0.0.1.evil.com:9', 'ws://localhost.evil.com:9', 'ws://127.evil.com:9']) {
+      assert.deepEqual(validateExplicitUrl(url), { ok: false, reason: 'insecure_remote_ws' }, `${url} must be refused as a remote ws:// target`)
     }
+  })
+
+  it('a bracketed IPv6 literal followed by a suffix is not a URL at all', () => {
+    // `new URL` throws on this, so it is rejected earlier than the transport
+    // check — pinned separately because its reason is different.
+    assert.deepEqual(validateExplicitUrl('ws://[::1].evil.com:9'), { ok: false, reason: 'invalid_url' })
   })
 
   it('an IPv6-looking or IPv4-mapped host other than [::1] is remote', () => {
@@ -372,7 +381,7 @@ describe('validateExplicitUrl (#7969)', () => {
   })
 
   it('the gate and the port fallback disagree on 127.0.0.2, deliberately', () => {
-    assert.equal(validateExplicitUrl('ws://127.0.0.2:9').ok, true, 'the gate admits it as an explicit URL')
+    assert.deepEqual(validateExplicitUrl('ws://127.0.0.2:9'), { ok: true, insecureRemoteWs: false }, 'the gate admits it as an explicit URL, and not as an insecure remote one')
     const info = { pid: process.pid, httpUrl: 'http://127.0.0.2:9300/', apiToken: 'fixture' }
     assert.equal(resolveLocalConnection({ readConnectionInfo: () => info }).port, 8765, 'the fallback does not borrow its port')
   })
