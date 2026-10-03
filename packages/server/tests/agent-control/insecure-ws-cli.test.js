@@ -18,16 +18,18 @@
  *   - stderr does NOT contain the host or the token — this module deliberately
  *     never logs the URL, and a token in a log line would defeat the point.
  *
- * NO test here opens a connection off this machine. The refusal paths exit
- * before any socket exists; the opt-in path only lists tools (the daemon is
- * dialed lazily, on the first tool CALL, which these tests never make); and the
- * one in-process opt-in test aims at `localhost.` port 9, which the gate treats
- * as remote but which resolves to this machine and is refused/unresolvable
- * immediately.
+ * NO test here resolves a name or opens a socket. The refusal paths exit
+ * before any socket exists; the spawned opt-in/moot paths only list tools (the
+ * daemon is dialed lazily, on the first tool CALL, which these tests never
+ * make); and every in-process test that reaches `connect()` supplies a FAKE
+ * WebSocket constructor through the `WebSocketImpl` test seam, which records
+ * the URL it is given and fails with a sentinel the test asserts on — so the
+ * production `ws` implementation is never constructed.
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -83,7 +85,7 @@ async function runCliToExit(args, env, { boundMs = 15000 } = {}) {
 function assertRefusal(result) {
   assert.equal(result.spawnError, undefined, 'the CLI must spawn')
   assert.equal(result.timedOut, false, 'the refusal must be immediate: the process should exit by itself, not hang on stdin')
-  assert.notEqual(result.code, 0, 'a refusal exits non-zero')
+  assert.equal(result.code, 1, 'a refusal exits with code 1 (set by main(), not a crash)')
   assert.equal(result.signal, null, 'a refusal is a clean exit, not a signal')
   assert.equal(result.stdout, '', 'stdout carries MCP frames only: a refusal writes nothing there')
   assert.ok(result.stderr.includes('--allow-insecure-ws'), 'stderr must name the opt-in flag')
@@ -235,9 +237,44 @@ describe('chroxy agent-control --stdio: no refusal where the transport is not in
   }
 })
 
+// A controlled transport for the in-process tests. `WebSocketImpl` is the
+// test seam `createAgentControlMcpServer` forwards to `AgentControlClient`
+// (never reachable from argv or the environment). The fake records every URL it
+// is constructed with and then fails DETERMINISTICALLY with a sentinel, so a
+// test can assert on the one outcome it expects — never "some error other than
+// X" — and nothing resolves a name or opens a socket.
+const FAKE_WS_SENTINEL_CODE = 'FAKE_WS_SENTINEL_7969'
+const FAKE_WS_SENTINEL_MESSAGE = 'fake transport failure (sentinel 7969)'
+
+function makeFakeWebSocket() {
+  const constructedWith = []
+  class FakeWebSocket extends EventEmitter {
+    constructor(url) {
+      super()
+      constructedWith.push(url)
+      // Emitted on a later tick, after the client has attached its listeners
+      // (connect() wires 'message'/'close'/'error' and _waitForOpen's
+      // once('error') synchronously after construction).
+      setImmediate(() => {
+        this.emit('error', Object.assign(new Error(FAKE_WS_SENTINEL_MESSAGE), { code: FAKE_WS_SENTINEL_CODE }))
+      })
+    }
+
+    close() { /* nothing was ever opened */ }
+  }
+  return { FakeWebSocket, constructedWith }
+}
+
+function isSentinelFailure(err) {
+  assert.equal(err.code, FAKE_WS_SENTINEL_CODE, `expected the fake transport's sentinel, got ${err.code}: ${err.message}`)
+  assert.equal(err.message, FAKE_WS_SENTINEL_MESSAGE)
+  return true
+}
+
 describe('createAgentControlMcpServer: the lazy path enforces the same rule (#7969)', () => {
-  it('without the opt-in, the first connect rejects with insecure_remote_ws and a message that names both ways out', async () => {
-    const { clientManager } = createAgentControlMcpServer({ url: REMOTE_WS_URL, token: TOKEN })
+  it('without the opt-in, the first connect rejects with insecure_remote_ws, names both ways out, and never constructs a transport', async () => {
+    const { FakeWebSocket, constructedWith } = makeFakeWebSocket()
+    const { clientManager } = createAgentControlMcpServer({ url: REMOTE_WS_URL, token: TOKEN, WebSocketImpl: FakeWebSocket })
     try {
       await assert.rejects(
         () => clientManager.get(),
@@ -251,40 +288,53 @@ describe('createAgentControlMcpServer: the lazy path enforces the same rule (#79
           return true
         },
       )
+      assert.deepEqual(constructedWith, [], 'a refused target must never reach the transport')
     } finally {
       await clientManager.close()
     }
   })
 
-  it('allowInsecureWs: true is threaded to the connect path — it stops reporting insecure_remote_ws', { timeout: 30000 }, async () => {
-    // `localhost.` (trailing dot) is REMOTE under the strict gate, yet resolves
-    // to this machine; nothing listens on port 9, so the dial fails at once.
-    // The point is the differential: same URL, refused without the opt-in,
-    // past the gate with it. No packet leaves the machine.
-    const url = 'ws://localhost.:9'
-    const refused = createAgentControlMcpServer({ url, token: TOKEN })
-    const admitted = createAgentControlMcpServer({ url, token: TOKEN, allowInsecureWs: true })
+  it('allowInsecureWs: true is threaded to the connect path — the transport is constructed exactly once with the URL, and the failure is the fake\'s sentinel', async () => {
+    const url = NEVER_DIALED_WS_URL
+    const refused = makeFakeWebSocket()
+    const admitted = makeFakeWebSocket()
+    const withoutOptIn = createAgentControlMcpServer({ url, token: TOKEN, WebSocketImpl: refused.FakeWebSocket })
+    const withOptIn = createAgentControlMcpServer({ url, token: TOKEN, allowInsecureWs: true, WebSocketImpl: admitted.FakeWebSocket })
     try {
-      await assert.rejects(() => refused.clientManager.get(), (err) => err.code === 'insecure_remote_ws')
-      await assert.rejects(
-        () => admitted.clientManager.get(),
-        (err) => {
-          assert.notEqual(err.code, 'insecure_remote_ws', 'with the opt-in the gate must be passed')
-          return true
-        },
-      )
+      await assert.rejects(() => withoutOptIn.clientManager.get(), (err) => err.code === 'insecure_remote_ws')
+      assert.deepEqual(refused.constructedWith, [], 'without the opt-in the transport is never constructed')
+
+      await assert.rejects(() => withOptIn.clientManager.get(), isSentinelFailure)
+      assert.deepEqual(admitted.constructedWith, [url], 'with the opt-in the transport is constructed exactly once, with the URL as given')
     } finally {
-      await refused.clientManager.close()
-      await admitted.clientManager.close()
+      await withoutOptIn.clientManager.close()
+      await withOptIn.clientManager.close()
     }
   })
 
-  it('a truthy non-boolean allowInsecureWs does not opt in', async () => {
-    const { clientManager } = createAgentControlMcpServer({ url: REMOTE_WS_URL, token: TOKEN, allowInsecureWs: 'false' })
-    try {
-      await assert.rejects(() => clientManager.get(), (err) => err.code === 'insecure_remote_ws')
-    } finally {
-      await clientManager.close()
+  it('a truthy non-boolean allowInsecureWs does not opt in, and never constructs a transport', async () => {
+    for (const truthy of ['false', 1]) {
+      const { FakeWebSocket, constructedWith } = makeFakeWebSocket()
+      const { clientManager } = createAgentControlMcpServer({ url: NEVER_DIALED_WS_URL, token: TOKEN, allowInsecureWs: truthy, WebSocketImpl: FakeWebSocket })
+      try {
+        await assert.rejects(() => clientManager.get(), (err) => err.code === 'insecure_remote_ws')
+        assert.deepEqual(constructedWith, [], `allowInsecureWs: ${JSON.stringify(truthy)}`)
+      } finally {
+        await clientManager.close()
+      }
+    }
+  })
+
+  it('positive control: wss:// and loopback ws:// reach the transport WITHOUT the opt-in (the gate is not denying everything)', async () => {
+    for (const url of ['wss://agent-control-test.invalid:9', 'ws://127.0.0.1:9', 'ws://localhost:9']) {
+      const { FakeWebSocket, constructedWith } = makeFakeWebSocket()
+      const { clientManager } = createAgentControlMcpServer({ url, token: TOKEN, WebSocketImpl: FakeWebSocket })
+      try {
+        await assert.rejects(() => clientManager.get(), isSentinelFailure)
+        assert.deepEqual(constructedWith, [url], url)
+      } finally {
+        await clientManager.close()
+      }
     }
   })
 })

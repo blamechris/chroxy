@@ -258,6 +258,11 @@ class ClientManager {
       readOnly: this._clientOpts.readOnly === true,
       identityPublicKey: this._clientOpts.identityPublicKey,
       allowCommandApprovals: this._clientOpts.allowCommandApprovals === true,
+      // TEST SEAM ONLY: `undefined` in production (the client then uses the
+      // `ws` library). Set solely by a programmatic caller of
+      // `createAgentControlMcpServer`; `main()` never passes it, so it cannot
+      // be reached from argv or the environment.
+      WebSocketImpl: this._clientOpts.WebSocketImpl,
       modelExpectations: this._modelExpectations,
       ownedSessions: this._ownedSessions,
       log: logToStderr,
@@ -354,13 +359,18 @@ function describeConnectionFailure(reason) {
  * @param {boolean} [opts.allowInsecureWs] - #7969: opt in to a cleartext `ws://`
  *   endpoint on a host that is not loopback (only the boolean `true` counts).
  *   Default false: the first connect then fails with `insecure_remote_ws`.
+ * @param {typeof WebSocket} [opts.WebSocketImpl] - TEST SEAM: a WebSocket
+ *   constructor forwarded to `AgentControlClient`, so a test can observe or
+ *   fake the transport instead of letting the `ws` library resolve a name and
+ *   open a socket. Programmatic only — `main()` does not pass it, and nothing
+ *   reads it from argv or the environment.
  * @returns {{ mcp: Server, clientManager: ClientManager }}
  */
 export function createAgentControlMcpServer(opts = {}) {
   const readOnly = opts.readOnly === true
   const clientManager = opts.clientManager || new ClientManager(
     { explicitUrl: opts.url, explicitToken: opts.token, allowInsecureWs: opts.allowInsecureWs === true },
-    { readOnly, identityPublicKey: opts.identityPublicKey, allowCommandApprovals: opts.allowCommandApprovals === true },
+    { readOnly, identityPublicKey: opts.identityPublicKey, allowCommandApprovals: opts.allowCommandApprovals === true, WebSocketImpl: opts.WebSocketImpl },
   )
 
   const toolNames = Object.keys(TOOLS).filter((name) => readOnly ? !MUTATION_TOOL_NAMES.has(name) : true)

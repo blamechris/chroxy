@@ -27,7 +27,7 @@
  * `--pin-identity` cannot protect it (the pin is checked only afterwards). Use
  * `wss://`, or pass `--allow-insecure-ws` to accept that risk on a network you
  * trust. "Loopback" is strict: `localhost`, an IPv4 address in 127.0.0.0/8, or
- * `[::1]` — see `isLoopbackHostname` in agent-control/local-connection.js. The
+ * `[::1]` — see `hostStaysOnThisMachine` in agent-control/local-connection.js. The
  * flag is argv-only: a URL configured through CHROXY_AGENT_CONTROL_URL still
  * needs `--allow-insecure-ws` in the arguments. The rule lives in
  * `validateExplicitUrl` (agent-control/local-connection.js), shared by the

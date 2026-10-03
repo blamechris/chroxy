@@ -335,15 +335,45 @@ describe('validateExplicitUrl (#7969)', () => {
     }
   })
 
-  it('the loopback port fallback in resolveLocalConnection uses the same predicate', () => {
-    // 127.0.0.2 is in 127.0.0.0/8 and was NOT loopback under the old exact-match list.
-    const info = { pid: process.pid, httpUrl: 'http://127.0.0.2:9300/', apiToken: 'tok' }
-    assert.equal(resolveLocalConnection({ readConnectionInfo: () => info }).port, 9300)
-    // 127.0.0.1.evil.com must never donate a port.
-    const evil = { pid: process.pid, httpUrl: 'http://127.0.0.1.evil.com:9301/', apiToken: 'tok' }
-    assert.equal(resolveLocalConnection({ readConnectionInfo: () => evil }).port, 8765)
-    // The IPv6 loopback still counts.
-    const v6 = { pid: process.pid, wsUrl: 'ws://[::1]:9302/', apiToken: 'tok' }
-    assert.equal(resolveLocalConnection({ readConnectionInfo: () => v6 }).port, 9302)
+  // The transport gate and the port fallback answer DIFFERENT questions and
+  // use different predicates on purpose (see the note above
+  // `hostStaysOnThisMachine` in local-connection.js). The gate admits all of
+  // 127.0.0.0/8; the fallback only borrows a port from a URL that names the
+  // listener resolveLocalConnection dials at 127.0.0.1. These expectations are
+  // what `origin/main` produced before the gate existed — a regression here
+  // changes where the local DEFAULT path dials.
+  it('the port fallback keeps its own exact-match predicate: 127.0.0.1, localhost, [::1] donate a port', () => {
+    const cases = [
+      ['httpUrl', 'http://127.0.0.1:9300/', 9300],
+      ['httpUrl', 'http://localhost:9301/dashboard', 9301],
+      ['httpUrl', 'http://[::1]:9302/', 9302],
+      ['wsUrl', 'ws://127.0.0.1:9303/', 9303],
+      ['wsUrl', 'ws://localhost:9304/', 9304],
+      ['wsUrl', 'ws://[::1]:9305/', 9305],
+    ]
+    for (const [field, url, port] of cases) {
+      const info = { pid: process.pid, [field]: url, apiToken: 'tok' }
+      assert.equal(resolveLocalConnection({ readConnectionInfo: () => info }).port, port, `${field}: ${url}`)
+    }
+  })
+
+  it('the port fallback does NOT borrow a port from a URL that is loopback-range but not the dialed listener', () => {
+    // 127.0.0.2 is admitted by the TRANSPORT gate (it stays on this machine),
+    // but it is not the socket at 127.0.0.1: origin/main resolves the default
+    // port here, and so must this.
+    for (const url of ['http://127.0.0.2:9300/', 'http://127.1.2.3:9300/', 'http://127.0.0.1.evil.com:9301/', 'http://0.0.0.0:9302/', 'http://localhost.:9303/', 'http://foo.localhost:9304/']) {
+      for (const field of ['httpUrl', 'wsUrl']) {
+        const info = { pid: process.pid, [field]: url, apiToken: 'fixture' }
+        const result = resolveLocalConnection({ readConnectionInfo: () => info })
+        assert.equal(result.port, 8765, `${field}: ${url} must not donate its port`)
+        assert.equal(result.url, 'ws://127.0.0.1:8765', `${field}: ${url}`)
+      }
+    }
+  })
+
+  it('the gate and the port fallback disagree on 127.0.0.2, deliberately', () => {
+    assert.equal(validateExplicitUrl('ws://127.0.0.2:9').ok, true, 'the gate admits it as an explicit URL')
+    const info = { pid: process.pid, httpUrl: 'http://127.0.0.2:9300/', apiToken: 'fixture' }
+    assert.equal(resolveLocalConnection({ readConnectionInfo: () => info }).port, 8765, 'the fallback does not borrow its port')
   })
 })

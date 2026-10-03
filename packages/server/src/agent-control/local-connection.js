@@ -74,11 +74,33 @@ function isValidPort(port) {
   return Number.isInteger(port) && port >= MIN_PORT && port <= MAX_PORT
 }
 
+// TWO host predicates live in this module, on purpose. They answer different
+// questions and must not be unified (a unification already regressed the local
+// default path once — #7969 review):
+//
+//   hostStaysOnThisMachine      "does traffic to this host stay on this
+//                               machine?" — the transport gate in
+//                               `validateExplicitUrl`. Broad: all of
+//                               127.0.0.0/8 qualifies, because every address
+//                               in it is loopback.
+//   hostNamesTheDialedListener  "does a URL in connection.json describe the
+//                               listener that will be dialed at 127.0.0.1?" —
+//                               the port fallback in `loopbackPortFromUrl`.
+//                               Narrow: a URL on 127.0.0.2 is a loopback
+//                               address but is NOT the socket at 127.0.0.1, so
+//                               a port borrowed from it would point the local
+//                               default path at the wrong listener.
+//
+// Widening the second to match the first changes where the default (local)
+// path dials; narrowing the first to match the second would refuse
+// `ws://127.0.0.2:…`, which stays on this machine.
+
 /**
- * The ONE definition of "loopback" in this module, applied to the hostname
- * `new URL(...)` produced (so it is already WHATWG-normalized: lowercased,
- * percent-decoded, `127.1` / `0x7f.1` / `2130706433` expanded to `127.0.0.1`,
- * `[0:0:0:0:0:0:0:1]` shortened to `[::1]`). A host is loopback ONLY if it is
+ * The transport gate's predicate: is traffic to this host kept on this
+ * machine? Applied to the hostname `new URL(...)` produced (so it is already
+ * WHATWG-normalized: lowercased, percent-decoded, `127.1` / `0x7f.1` /
+ * `2130706433` expanded to `127.0.0.1`, `[0:0:0:0:0:0:0:1]` shortened to
+ * `[::1]`). A host qualifies ONLY if it is
  *
  *   - exactly `localhost`;
  *   - an IPv4 literal in 127.0.0.0/8; or
@@ -93,14 +115,27 @@ function isValidPort(port) {
  * false positive is tolerable; this one gates whether a bearer token may be
  * sent in cleartext, where it is not.
  */
-function isLoopbackHostname(hostname) {
+function hostStaysOnThisMachine(hostname) {
   if (typeof hostname !== 'string') return false
   if (hostname === 'localhost' || hostname === '[::1]') return true
   return isIPv4(hostname) && hostname.split('.')[0] === '127'
 }
 
 /**
- * Extract a port from a URL — but ONLY when the URL's host is loopback.
+ * The port fallback's predicate: does a URL recorded in connection.json
+ * describe the listener `resolveLocalConnection` will dial at `127.0.0.1`?
+ * This is the exact match this module has always used — `127.0.0.1`,
+ * `localhost`, `::1`, `[::1]` — kept byte-for-byte so the local default path
+ * resolves exactly as it did before the transport gate existed. It is
+ * deliberately NOT `hostStaysOnThisMachine`: see the note above.
+ */
+function hostNamesTheDialedListener(hostname) {
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]'
+}
+
+/**
+ * Extract a port from a URL — but ONLY when the URL's host names the listener
+ * this module dials (`hostNamesTheDialedListener`).
  * A public tunnel URL (`https://<random>.trycloudflare.com`, or an explicit
  * `wss://host:443/...`) is the daemon's PUBLIC endpoint; its port number is
  * Cloudflare's edge port, not the local daemon's bind port, so it must never
@@ -117,7 +152,7 @@ function loopbackPortFromUrl(url) {
   } catch {
     return null
   }
-  if (!isLoopbackHostname(parsed.hostname)) return null
+  if (!hostNamesTheDialedListener(parsed.hostname)) return null
   if (!parsed.port) return null
   const port = Number(parsed.port)
   return isValidPort(port) ? port : null
@@ -165,7 +200,8 @@ export function resolveLocalConnection(deps = {}) {
  * embedded credentials → insecure transport. The token check belongs to the
  * caller and comes after all of these.
  *
- * Exported because it is the ONE implementation of that rule: the resolver
+ * Exported because it is the ONE implementation of the TRANSPORT rule (not of
+ * "loopback" in general — see the note on the two host predicates above): the resolver
  * below and `main()`'s fail-fast startup check in `mcp-server.js` both call it,
  * so the two can never disagree about which targets are refused.
  *
@@ -190,7 +226,7 @@ export function validateExplicitUrl(url, opts = {}) {
   if (parsed.username || parsed.password) {
     return { ok: false, reason: 'url_contains_credentials' }
   }
-  const insecureRemoteWs = parsed.protocol === 'ws:' && !isLoopbackHostname(parsed.hostname)
+  const insecureRemoteWs = parsed.protocol === 'ws:' && !hostStaysOnThisMachine(parsed.hostname)
   if (insecureRemoteWs && opts.allowInsecureWs !== true) {
     return { ok: false, reason: 'insecure_remote_ws' }
   }
