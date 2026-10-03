@@ -55,7 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[::]` and IPv4-mapped IPv6 are all remote. `wss://` and loopback `ws://` are
   unchanged. **Existing configs that point `--url` at a remote `ws://` daemon
   will stop starting** until they switch to `wss://` or add the flag (which
-  logs a startup `WARNING:`).
+  logs a startup `WARNING:`). The command now also rejects stray positional
+  arguments, so a value after a boolean flag (`--allow-insecure-ws false`) is an
+  error instead of silently enabling the flag; this covers
+  `--allow-command-approvals` too, where `--allow-command-approvals false`
+  used to turn command approvals ON.
 - **Dashboard: the "Isolate filesystem (worktree)" checkbox now says why it is
   disabled (#7332).** In New Session > Advanced the checkbox is disabled while
   the Working directory field is empty, but that field is labelled optional

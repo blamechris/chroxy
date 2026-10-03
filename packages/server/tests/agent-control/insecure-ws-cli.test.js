@@ -237,6 +237,129 @@ describe('chroxy agent-control --stdio: no refusal where the transport is not in
   }
 })
 
+// A boolean flag takes no value, but Commander tolerates a stray positional
+// word by default, so `--allow-insecure-ws false` used to parse as the flag
+// being SET: the operator wrote "false" and got cleartext. The command now
+// rejects excess arguments. Each case below uses a target the transport gate
+// would NOT refuse on its own (wss:// or the local default), so a pass can only
+// mean the stray word was rejected — never that the refusal fired instead.
+describe('chroxy agent-control --stdio: a stray value after a boolean flag is an error (#7969)', () => {
+  const STRAY_CASES = [
+    ['--allow-insecure-ws false', ['--url', 'wss://agent-control-test.invalid:9', '--allow-insecure-ws', 'false']],
+    ['--allow-insecure-ws 0', ['--url', 'wss://agent-control-test.invalid:9', '--allow-insecure-ws', '0']],
+    ['--allow-insecure-ws false with a remote ws:// target (the case that used to enable cleartext)', ['--url', 'ws://agent-control-test.invalid:9', '--allow-insecure-ws', 'false']],
+    ['--allow-command-approvals false', ['--url', 'wss://agent-control-test.invalid:9', '--allow-command-approvals', 'false']],
+    ['--allow-command-approvals false against the local default', ['--allow-command-approvals', 'false']],
+  ]
+
+  for (const [label, args] of STRAY_CASES) {
+    it(`${label} exits 1 with a legible stderr line, empty stdout, and no ready/WARNING`, async () => {
+      const result = await runCliToExit(args, childEnv({ CHROXY_AGENT_CONTROL_TOKEN: TOKEN }))
+      assert.equal(result.spawnError, undefined, 'the CLI must spawn')
+      assert.equal(result.timedOut, false, 'the rejection must be immediate: the process should exit by itself')
+      assert.equal(result.signal, null)
+      assert.equal(result.code, 1)
+      assert.equal(result.stdout, '', 'stdout carries MCP frames only')
+      assert.ok(result.stderr.includes("too many arguments for 'agent-control'"), `stderr must say why, got: ${result.stderr.slice(0, 200)}`)
+      assert.equal(result.stderr.includes('ready'), false, 'the server must not have started')
+      assert.equal(result.stderr.includes('WARNING'), false, 'no WARNING: the flag must not have been taken as set')
+      assert.equal(result.stderr.includes(TOKEN), false)
+    })
+  }
+
+  it('control: the bare flags still work', async () => {
+    const { client, transport, readStderr } = await startWithSdkClient(
+      ['--url', NEVER_DIALED_WS_URL, '--allow-insecure-ws', '--allow-command-approvals'],
+      childEnv({ CHROXY_AGENT_CONTROL_TOKEN: TOKEN }),
+    )
+    try {
+      const { tools } = await client.listTools()
+      assert.equal(tools.length, 7)
+      assert.ok(await waitFor(() => /ready \(/.test(readStderr())), 'the server reports ready')
+      assert.ok(/WARNING: --allow-insecure-ws is ENABLED/.test(readStderr()))
+      assert.ok(/WARNING: --allow-command-approvals is ENABLED/.test(readStderr()))
+    } finally {
+      await client.close().catch(() => {})
+      await transport.close().catch(() => {})
+    }
+  })
+})
+
+// main() computes `allowInsecureWs` itself for its startup check AND must hand
+// it to `createAgentControlMcpServer`, or the flag is accepted, the WARNING
+// prints, and the first tool call is refused anyway: a dead opt-in. Only a real
+// first tool call through the real CLI can see that hand-off.
+//
+// The target is a REMOTE ws:// URL carrying a fragment. The `ws` library throws
+// a SyntaxError on a fragment synchronously, inside the WebSocket constructor,
+// before any name resolution or socket — so this reaches past the gate and
+// fails with ONE exact, network-free, OS-independent message. The preferred
+// shape (a real loopback listener reached through a remote-classified literal
+// such as `ws://[::ffff:127.0.0.1]:<port>` or `ws://0.0.0.0:<port>`) was
+// measured: both connect on macOS and in a Linux container, but `0.0.0.0` is
+// not connectable on Windows and the IPv4-mapped form is unverified there, and
+// the Windows server-test job runs this directory — so it was not adopted.
+describe('chroxy agent-control --stdio: main() hands --allow-insecure-ws to the connect path (#7969)', () => {
+  const FRAGMENT_WS_URL = 'ws://agent-control-test.invalid:9/#ws-throws-on-a-fragment-before-any-io'
+  const WS_FRAGMENT_ERROR = 'The URL contains a fragment identifier'
+
+  it('with the flag, the first tool call gets past the gate and fails with the ws library\'s exact message — not insecure_remote_ws', async () => {
+    const { client, transport } = await startWithSdkClient(
+      ['--url', FRAGMENT_WS_URL, '--allow-insecure-ws'],
+      childEnv({ CHROXY_AGENT_CONTROL_TOKEN: TOKEN }),
+    )
+    try {
+      const result = await client.callTool({ name: 'chroxy_list_sessions', arguments: {} })
+      assert.equal(result.isError, true)
+      assert.deepEqual(result.structuredContent, { error: WS_FRAGMENT_ERROR })
+    } finally {
+      await client.close().catch(() => {})
+      await transport.close().catch(() => {})
+    }
+  })
+
+  it('without the flag, the same URL exits 1 with the refusal and never starts', async () => {
+    const result = await runCliToExit(['--url', FRAGMENT_WS_URL], childEnv({ CHROXY_AGENT_CONTROL_TOKEN: TOKEN }))
+    assertRefusal(result)
+  })
+})
+
+// A target that fails validation for a reason OTHER than the transport rule is
+// not one the flag is moot for — it is one whose relevance is unknown until the
+// URL is fixed. Say nothing about the flag, and let the lazy path report the
+// real problem on the first tool call, exactly as it always did.
+describe('chroxy agent-control --stdio --allow-insecure-ws with a URL that fails for another reason (#7969)', () => {
+  const OTHER_FAILURES = [
+    ['not a URL', 'not a url', 'invalid_url'],
+    ['a non-ws scheme', 'http://agent-control-test.invalid:9', 'invalid_url_scheme'],
+    ['embedded credentials', 'ws://user:hunter2@agent-control-test.invalid:9', 'url_contains_credentials'],
+  ]
+
+  for (const [label, url, code] of OTHER_FAILURES) {
+    it(`${label}: starts, says nothing about the flag, and the first tool call reports ${code}`, async () => {
+      const { client, transport, readStderr } = await startWithSdkClient(
+        ['--url', url, '--allow-insecure-ws'],
+        childEnv({ CHROXY_AGENT_CONTROL_TOKEN: TOKEN }),
+      )
+      try {
+        const { tools } = await client.listTools()
+        assert.equal(tools.length, 7, 'the process still starts')
+        assert.ok(await waitFor(() => /ready \(/.test(readStderr())), 'the server reports ready')
+        assert.equal(/has no effect/.test(readStderr()), false, 'must not claim the flag is moot for a URL it has not been judged against')
+        assert.equal(/WARNING:[^\n]*cleartext/i.test(readStderr()), false, 'must not claim cleartext transport is in play')
+        assert.equal(readStderr().includes('hunter2'), false, 'stderr must not echo URL credentials')
+
+        const result = await client.callTool({ name: 'chroxy_list_sessions', arguments: {} })
+        assert.equal(result.isError, true)
+        assert.equal(result.structuredContent.code, code, 'the lazy path still reports the real problem, on the first call')
+      } finally {
+        await client.close().catch(() => {})
+        await transport.close().catch(() => {})
+      }
+    })
+  }
+})
+
 // A controlled transport for the in-process tests. `WebSocketImpl` is the
 // test seam `createAgentControlMcpServer` forwards to `AgentControlClient`
 // (never reachable from argv or the environment). The fake records every URL it

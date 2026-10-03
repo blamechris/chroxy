@@ -86,8 +86,8 @@ daemon's existing authority checks are the actual floor. Specific to `agent-cont
 - A **remote** endpoint is never inferred. It requires an explicit `--url` (or
   `CHROXY_AGENT_CONTROL_URL`) plus `CHROXY_AGENT_CONTROL_TOKEN` in the environment, and the
   URL should be `wss://`. **A plain `ws://` URL to any host that is not loopback is refused
-  at startup** (#7969) unless you pass `--allow-insecure-ws` — see the next bullet for why,
-  and "Running it" for the exact rule and the flag.
+  at startup** (#7969) unless you pass `--allow-insecure-ws` — see "A pin does not protect
+  the token" below for why, and "Running it" for the exact rule and the flag.
 - E2E encryption is negotiated exactly as any other chroxy client (eager or discrete key
   exchange, per the daemon's `auth_ok`). Optional daemon-identity pinning via
   `--pin-identity <base64 key>` (or `CHROXY_AGENT_CONTROL_PIN`) refuses a handshake that
@@ -266,7 +266,13 @@ deliberately does not repeat your URL, host or token:
 To accept the risk on a network you trust, add `--allow-insecure-ws`. The process then prints
 a `WARNING:` line saying the token will travel in cleartext and runs normally. Where the flag
 cannot matter (the local default, a loopback `ws://` URL, any `wss://` URL) it prints a
-`has no effect` line instead.
+`has no effect` line instead. A URL that fails validation for another reason (not a URL, a
+non-`ws` scheme, embedded credentials) prints neither: the first tool call reports that error.
+
+Boolean flags take no value. `chroxy agent-control` rejects stray arguments, so
+`--allow-insecure-ws false` (or `0`) is an error — `error: too many arguments for
+'agent-control'` on stderr, a non-zero exit, nothing on stdout — rather than being read as
+"off" or, worse, silently turning the flag on. The same holds for `--allow-command-approvals`.
 
 The flag is **argv-only — there is no environment-variable equivalent.** A URL configured
 through `CHROXY_AGENT_CONTROL_URL` is held to the same rule, and still needs

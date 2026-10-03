@@ -37,6 +37,14 @@
 export function registerAgentControlCommand(program) {
   program
     .command('agent-control')
+    // Boolean flags take no value, but Commander tolerates a stray positional
+    // word by default, so `--allow-insecure-ws false` (or `0`, or
+    // `--allow-command-approvals false`) parsed as the flag being SET: the
+    // operator wrote "false" and got cleartext transport / command approvals
+    // (#7969). Reject excess arguments on THIS command only, so a value after
+    // a boolean flag is an error instead of silently enabling it. The command
+    // takes no positional arguments, so nothing legitimate is lost.
+    .allowExcessArguments(false)
     .description('Run a stdio MCP server exposing chroxy session control to an external agent harness (Codex, Claude, Gemini, …). Requires --stdio (the only supported mode). Remote connections read the token ONLY from CHROXY_AGENT_CONTROL_TOKEN — there is no --token flag.')
     .option('--stdio', 'Run as a stdio MCP server (required — this command has no other mode)')
     .option('--read-only', 'Disable mutation tools (create/send-input/interrupt/respond-permission)')

@@ -492,11 +492,17 @@ export async function main(options) {
   // #7969: same shape as the --allow-command-approvals notice above — a loud
   // one-time WARNING when the flag is actually admitting something, and a plain
   // "has no effect" when it is moot, so an operator who passes it needlessly
-  // does not conclude cleartext transport is in play.
+  // does not conclude cleartext transport is in play. "Moot" means the gate
+  // would never have refused this target: no explicit target at all, or one
+  // that validates with `insecureRemoteWs` false. A target that fails
+  // validation for ANOTHER reason (`invalid_url`, a bad scheme, embedded
+  // credentials) is neither: the flag's relevance is unknown until the URL is
+  // fixed, so say nothing about it — the lazy path reports the real problem on
+  // the first tool call, exactly when it always did.
   if (allowInsecureWs) {
     if (urlCheck?.ok && urlCheck.insecureRemoteWs) {
       logToStderr('WARNING: --allow-insecure-ws is ENABLED and the target is a ws:// endpoint on another host. The bearer token will travel in cleartext in the first auth frame, before any key exchange, so anyone on the network path can read it; an identity pin does not protect it. Only use this on a network you trust, or switch to wss://.')
-    } else {
+    } else if (!urlCheck || urlCheck.ok) {
       logToStderr('--allow-insecure-ws has no effect: the target is not a remote ws:// URL (the local default, a loopback ws:// URL and any wss:// URL are never refused).')
     }
   }
