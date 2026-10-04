@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { getErrorPresentation, type ErrorKind } from './error-presentation'
+import { getErrorPresentation, CLAUDE_LOGIN_COMMAND, type ErrorKind } from './error-presentation'
 import { RETRYABLE_ASK_USER_QUESTION_ERROR_CODES } from './ask-user-question-errors'
 
 describe('getErrorPresentation', () => {
@@ -36,6 +36,13 @@ describe('getErrorPresentation', () => {
     const p = getErrorPresentation('AUTH_REQUIRED')
     expect(p.headline).toBe('Claude is not signed in on this host')
     expect(p.headline).not.toMatch(/retry/i)
+  })
+
+  // #8223: the dashboard and app chips render this; a stale `claude login` is what the
+  // constant exists to prevent. The server keeps its own definition, pinned to this one
+  // by packages/server/tests/claude-login-command.test.js.
+  it('names the current login command (claude 2.1.x spells it `auth login`)', () => {
+    expect(CLAUDE_LOGIN_COMMAND).toBe('claude auth login')
   })
 
   it('matches AUTH_REQUIRED case-sensitively, like every other code', () => {

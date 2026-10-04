@@ -3225,6 +3225,12 @@ button.sidebar-token-view-session-row:hover {
   align-self: center;
   font-size: var(--text-base);
 }
+.auth-required-chip-alert {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
 .auth-required-chip-headline {
   font-weight: 600;
 }
@@ -3254,6 +3260,9 @@ button.sidebar-token-view-session-row:hover {
   min-width: 44px;
   font-size: var(--text-sm);
   cursor: pointer;
+}
+.auth-required-chip-copied {
+  font-size: var(--text-sm);
 }
 .auth-required-chip-copy:hover,
 .auth-required-chip-copy:focus {
@@ -4462,7 +4471,7 @@ button.sidebar-token-view-session-row:hover {
   border-radius: 3px;
   background: var(--bg-primary);
   color: var(--text-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 10px;
   line-height: 1.4;
 }
@@ -9695,7 +9704,7 @@ button.sidebar-token-view-session-row:hover {
 /* #6474 — Cmd+Shift+F find-in-project result row: the matched line as a preview,
    monospace + truncated, with the file:line pushed to the right by symbol-item-line. */
 .code-search-preview {
-  font-family: var(--font-mono);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;

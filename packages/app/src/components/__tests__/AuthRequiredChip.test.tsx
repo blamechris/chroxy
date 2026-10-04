@@ -11,8 +11,8 @@
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
 import { Text } from 'react-native';
-import { getErrorPresentation } from '@chroxy/store-core';
-import { AuthRequiredChip, AUTH_LOGIN_COMMAND } from '../AuthRequiredChip';
+import { getErrorPresentation, CLAUDE_LOGIN_COMMAND } from '@chroxy/store-core';
+import { AuthRequiredChip } from '../AuthRequiredChip';
 
 const SERVER_TEXT =
   'Claude is not logged in on this host, or its login expired. Run `claude auth login` in a terminal on the host (or `/login` inside claude), then retry.';
@@ -44,8 +44,8 @@ describe('AuthRequiredChip (#8223)', () => {
     expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-headline' })))
       .toBe(getErrorPresentation('AUTH_REQUIRED').headline);
     expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-body' }))).toBe(SERVER_TEXT);
-    expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-command' }))).toBe('claude auth login');
-    expect(AUTH_LOGIN_COMMAND).toBe('claude auth login');
+    expect(textOf(t.root.findByProps({ testID: 'auth-required-chip-command' }))).toBe(CLAUDE_LOGIN_COMMAND);
+    expect(CLAUDE_LOGIN_COMMAND).toBe('claude auth login');
   });
 
   it('makes the message and the command selectable so they can be copied', () => {

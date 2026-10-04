@@ -20,6 +20,16 @@
 
 import { isRetryableAskUserQuestionError } from './ask-user-question-errors'
 
+/**
+ * #8223 — the command that signs the `claude` CLI in on a host: claude 2.1.x spells
+ * it `auth login` (plain `claude login` is stale). Defined HERE, beside the
+ * `AUTH_REQUIRED` presentation entry that tells the user to run it, so the
+ * dashboard and the app chips read one string instead of each hard-coding it. The
+ * server keeps its own single definition (`utils/claude-login-command.js`) — the
+ * packages cannot share a module — and a store-core test pins the two together.
+ */
+export const CLAUDE_LOGIN_COMMAND = 'claude auth login'
+
 /** Coarse classification of a recoverable chat error by what it represents.
  *  `generic` is the catch-all for an unrecognised / missing error code. */
 export type ErrorKind = 'stall' | 'question' | 'resume' | 'auth' | 'generic'

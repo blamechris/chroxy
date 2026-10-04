@@ -18,13 +18,10 @@
  * mobile app cannot drift.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getErrorPresentation } from '@chroxy/store-core'
+import { getErrorPresentation, CLAUDE_LOGIN_COMMAND } from '@chroxy/store-core'
 import { writeText } from '../utils/clipboard'
 
-/** The command that fixes it — claude 2.1.x's `auth login` (plain `claude login` is stale). */
-export const AUTH_LOGIN_COMMAND = 'claude auth login'
-
-// How long the button reads "Copied" before it goes back to "Copy".
+// How long the "Copied" confirmation stays before it clears.
 const COPIED_FEEDBACK_MS = 2000
 
 export interface AuthRequiredChipProps {
@@ -44,7 +41,7 @@ export function AuthRequiredChip({ errorText }: AuthRequiredChipProps) {
   const handleCopy = useCallback(() => {
     // writeText resolves true only when the OS clipboard was actually written
     // (#4673), so "Copied" is never shown for a write that no-oped.
-    void writeText(AUTH_LOGIN_COMMAND).then((ok) => {
+    void writeText(CLAUDE_LOGIN_COMMAND).then((ok) => {
       if (!ok) return
       setCopied(true)
       if (timer.current) clearTimeout(timer.current)
@@ -56,29 +53,48 @@ export function AuthRequiredChip({ errorText }: AuthRequiredChipProps) {
     <div
       className="auth-required-chip"
       data-testid="auth-required-chip"
-      role={presentation.role}
       title={errorText}
     >
-      <span className="auth-required-chip-headline" data-testid="auth-required-chip-headline">
-        {presentation.headline}
-      </span>
-      {errorText && (
-        <span className="auth-required-chip-body" data-testid="auth-required-chip-body">
-          {errorText}
+      {/* The alert is the headline and the message ONLY. The Copy control and its
+          confirmation live outside it: an alert is atomic, so a "Copy" -> "Copied"
+          swap inside it would re-announce the whole card. */}
+      <div
+        className="auth-required-chip-alert"
+        data-testid="auth-required-chip-alert"
+        role={presentation.role}
+      >
+        <span className="auth-required-chip-headline" data-testid="auth-required-chip-headline">
+          {presentation.headline}
         </span>
-      )}
+        {errorText && (
+          <span className="auth-required-chip-body" data-testid="auth-required-chip-body">
+            {errorText}
+          </span>
+        )}
+      </div>
       <span className="auth-required-chip-command-row">
         <code className="auth-required-chip-command" data-testid="auth-required-chip-command">
-          {AUTH_LOGIN_COMMAND}
+          {CLAUDE_LOGIN_COMMAND}
         </code>
         <button
           type="button"
           className="auth-required-chip-copy"
           data-testid="auth-required-chip-copy"
+          aria-label={`Copy ${CLAUDE_LOGIN_COMMAND}`}
           onClick={handleCopy}
         >
-          {copied ? 'Copied' : 'Copy'}
+          Copy
         </button>
+        {/* Always mounted (a live region must exist before its text changes to be
+            announced); empty until a copy succeeds, then a polite "Copied". */}
+        <span
+          className="auth-required-chip-copied"
+          data-testid="auth-required-chip-copied"
+          role="status"
+          aria-live="polite"
+        >
+          {copied ? 'Copied' : ''}
+        </span>
       </span>
     </div>
   )

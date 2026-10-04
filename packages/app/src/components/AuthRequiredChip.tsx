@@ -14,11 +14,8 @@
  * cannot drift. Palette follows ResumeUnknownChip / StreamStallChip.
  */
 import { Platform, StyleSheet, Text, View } from 'react-native';
-import { getErrorPresentation } from '@chroxy/store-core';
+import { getErrorPresentation, CLAUDE_LOGIN_COMMAND } from '@chroxy/store-core';
 import { COLORS } from '../constants/colors';
-
-/** The command that fixes it — claude 2.1.x's `auth login` (plain `claude login` is stale). */
-export const AUTH_LOGIN_COMMAND = 'claude auth login';
 
 export interface AuthRequiredChipProps {
   /**
@@ -53,7 +50,7 @@ export function AuthRequiredChip({ errorText }: AuthRequiredChipProps) {
         </Text>
       )}
       <Text testID="auth-required-chip-command" style={styles.command} selectable>
-        {AUTH_LOGIN_COMMAND}
+        {CLAUDE_LOGIN_COMMAND}
       </Text>
     </View>
   );
