@@ -28,6 +28,20 @@ import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 
 const log = createLogger('sdk')
 
+// #8223: an authentication failure is surfaced with this code so the clients can
+// render a "sign in" card instead of a raw error line. Same wire code claude-tui
+// emits (claude-tui/pty-driver.js AUTH_REQUIRED_CODE) — kept as a local literal
+// because that module resolves the claude binary at import time, which this one
+// must not do.
+const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'
+// The SDK reads credentials from ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN or a
+// prior `claude auth login`, and nothing at the point of failure says which one
+// this host meant to use — so the message covers both.
+const AUTH_REQUIRED_MESSAGE = 'Claude authentication failed on this host. If you use a Claude subscription, run `claude auth login` in a terminal on the host; if you use an API key, check ANTHROPIC_API_KEY. Then retry.'
+// A containerised session has no `claude auth login` to run (see
+// DockerSdkSession.preflight): its credentials are the container's env.
+const AUTH_REQUIRED_CONTAINER_MESSAGE = 'Claude authentication failed inside the session container. Check that ANTHROPIC_API_KEY is set for it, then retry.'
+
 /**
  * Manages a Claude Code session using the Agent SDK.
  *
@@ -419,8 +433,14 @@ export class SdkSession extends BaseSession {
       msg: 'Insufficient API credits or billing limit reached. Check your API provider dashboard.' },
     { test: /rate.limit|too many requests|429/i,
       msg: 'API rate limit exceeded. Please wait a moment and try again.' },
-    { test: /authentication|invalid.api.key|401|unauthorized/i,
-      msg: 'API authentication failed. Check your API key configuration.' },
+    // #8223: carries `code: AUTH_REQUIRED`; `msg` is only the fallback — a session
+    // swaps in its own host/container wording via `_authRequiredMessage()`.
+    // `failed to authenticate` and `oauth session|token … expired|revoked|invalid`
+    // are the OAuth-login wording ("Failed to authenticate: OAuth session expired
+    // and could not be refreshed"), which the pre-existing alternatives missed.
+    { test: /authentication|invalid.api.key|401|unauthorized|failed to authenticate|oauth (?:session|token)\b[^.\n]{0,80}\b(?:expired|revoked|invalid)/i,
+      msg: AUTH_REQUIRED_MESSAGE,
+      code: AUTH_REQUIRED_CODE },
     { test: /overloaded|503|529|temporarily unavailable/i,
       msg: 'The API is temporarily overloaded. Please try again in a few minutes.' },
     { test: /SIGABRT|SIGKILL|SIGSEGV|terminated by signal/i,
@@ -428,11 +448,28 @@ export class SdkSession extends BaseSession {
   ]
 
   static _enrichErrorMessage(raw) {
-    if (!raw) return 'Unknown error'
-    for (const { test, msg } of SdkSession._ERROR_PATTERNS) {
-      if (test.test(raw)) return msg
+    return SdkSession._classifyError(raw).message
+  }
+
+  /**
+   * #8223: `_enrichErrorMessage` plus the row's `code`, when it has one. First
+   * matching row wins, exactly as before, so a message that reads as a billing or
+   * rate-limit failure is never reclassified as an auth one.
+   * @returns {{ message: string, code?: string }}
+   */
+  static _classifyError(raw) {
+    if (!raw) return { message: 'Unknown error' }
+    for (const { test, msg, code } of SdkSession._ERROR_PATTERNS) {
+      if (test.test(raw)) return code ? { message: msg, code } : { message: msg }
     }
-    return raw
+    return { message: raw }
+  }
+
+  /** #8223: the AUTH_REQUIRED text for THIS session — container-aware. */
+  _authRequiredMessage() {
+    return this.constructor.capabilities?.containerized
+      ? AUTH_REQUIRED_CONTAINER_MESSAGE
+      : AUTH_REQUIRED_MESSAGE
   }
 
   get thinkingLevel() { return this._thinkingLevel }
@@ -945,6 +982,11 @@ export class SdkSession extends BaseSession {
     // message has streamed, the binary plainly launched fine and a later
     // failure is something else entirely.
     let receivedAnyMessage = false
+    // #8223: an authentication failure can reach this turn twice — as an assistant
+    // message carrying `error: 'authentication_failed'`, and again as the query
+    // throwing. Declared outside the try for the same reason as the flags above;
+    // the first one to surface it wins, so a turn shows one AUTH_REQUIRED.
+    let authRequiredEmitted = false
 
     try {
       // #7986 / #8030: point the SDK at the installed `claude` binary on every
@@ -1282,6 +1324,19 @@ export class SdkSession extends BaseSession {
           }
 
           case 'assistant': {
+            // #8223: the SDK marks a synthetic assistant message with the failure
+            // class (`SDKAssistantMessage.error`). For `authentication_failed` its
+            // text block is the raw "Failed to authenticate: …" line; surface the
+            // typed error INSTEAD of that text as a chat response, and do not take
+            // this non-turn message as the fork boundary below.
+            if (msg.error === 'authentication_failed') {
+              if (!authRequiredEmitted) {
+                authRequiredEmitted = true
+                ;(this._log || log).warn('Assistant message reported authentication_failed')
+                this.emit('error', { code: AUTH_REQUIRED_CODE, message: this._authRequiredMessage() })
+              }
+              break
+            }
             // #6766: remember this message's transcript UUID as the fork
             // boundary. A checkpoint auto-created at the start of the NEXT turn
             // captures this as its boundary, so restoring that checkpoint can
@@ -1524,7 +1579,19 @@ export class SdkSession extends BaseSession {
             // #4828: session-scoped when init has fired; falls back to module
             // `log` for pre-init query failures (e.g. spawn refused).
             ;(this._log || log).error(`Query error: ${err.message}`)
-            this.emit('error', { message: labeled || SdkSession._enrichErrorMessage(err.message) })
+            // #8223: an auth-shaped failure carries AUTH_REQUIRED (so the clients
+            // render the sign-in card) unless this turn already surfaced one from
+            // the assistant message. A binary-launch label wins over classification,
+            // exactly as it wins over enrichment.
+            const classified = labeled ? { message: labeled } : SdkSession._classifyError(err.message)
+            if (classified.code === AUTH_REQUIRED_CODE) {
+              if (!authRequiredEmitted) {
+                authRequiredEmitted = true
+                this.emit('error', { code: AUTH_REQUIRED_CODE, message: this._authRequiredMessage() })
+              }
+            } else {
+              this.emit('error', { message: classified.message })
+            }
           }
         }
       }

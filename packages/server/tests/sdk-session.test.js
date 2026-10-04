@@ -2594,6 +2594,155 @@ describe('SdkSession', () => {
       assert.equal(errors[0].message, 'Something completely unknown went wrong')
     })
 
+    // #8223 — an authentication failure is a typed AUTH_REQUIRED, from both of the
+    // ways the SDK reports it: an assistant message tagged `error:
+    // 'authentication_failed'`, and the query throwing.
+    describe('AUTH_REQUIRED (#8223)', () => {
+      const OAUTH_EXPIRED = 'Failed to authenticate: OAuth session expired and could not be refreshed'
+
+      async function runTurn(s, makeStream) {
+        s._processReady = true
+        s._spawnPreflight = () => process.execPath // see queryWithError: keep the binary backstop out of the way
+        const errors = []
+        const messages = []
+        const results = []
+        s.on('error', (data) => errors.push(data))
+        s.on('message', (data) => messages.push(data))
+        s.on('result', (data) => results.push(data))
+        s._callQuery = () => makeStream()
+        await s.sendMessage('hello')
+        return { errors, messages, results }
+      }
+
+      const authAssistantMsg = {
+        type: 'assistant',
+        error: 'authentication_failed',
+        message: { content: [{ type: 'text', text: OAUTH_EXPIRED }] },
+      }
+      const resultMsg = { type: 'result', session_id: 'auth-1', total_cost_usd: 0, duration_ms: 1, usage: {} }
+
+      it('an assistant message with error:authentication_failed emits one AUTH_REQUIRED and not its text as a response', async () => {
+        const s = createSession()
+        const { errors, messages, results } = await runTurn(s, () => (async function* () {
+          yield authAssistantMsg
+          yield resultMsg
+        })())
+        const busy = s._isBusy
+        s.destroy()
+
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].code, 'AUTH_REQUIRED')
+        assert.match(errors[0].message, /claude auth login/)
+        assert.match(errors[0].message, /ANTHROPIC_API_KEY/)
+        assert.deepEqual(messages.filter((m) => m.type === 'response'), [],
+          'the raw "Failed to authenticate" text must not also reach the chat as a response')
+        assert.equal(results.length, 1, 'the turn still completes (result → agent_idle)')
+        assert.equal(busy, false)
+      })
+
+      it('does not take the failed assistant message as the fork boundary', async () => {
+        const s = createSession()
+        const boundaries = []
+        s._captureBoundaryMessage = (m) => boundaries.push(m)
+        await runTurn(s, () => (async function* () {
+          yield authAssistantMsg
+          yield resultMsg
+        })())
+        s.destroy()
+        assert.equal(boundaries.length, 0)
+      })
+
+      it('another assistant error class still shows its text and is not AUTH_REQUIRED', async () => {
+        const s = createSession()
+        const { errors, messages } = await runTurn(s, () => (async function* () {
+          yield { type: 'assistant', error: 'rate_limit', message: { content: [{ type: 'text', text: 'Rate limited, try later' }] } }
+          yield resultMsg
+        })())
+        s.destroy()
+        assert.deepEqual(errors, [])
+        assert.equal(messages.filter((m) => m.type === 'response').length, 1)
+      })
+
+      it('a thrown "Failed to authenticate: OAuth session expired…" is AUTH_REQUIRED', async () => {
+        const s = createSession()
+        const { errors } = await runTurn(s, () => (async function* () { throw new Error(OAUTH_EXPIRED) })())
+        s.destroy()
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].code, 'AUTH_REQUIRED')
+        assert.match(errors[0].message, /claude auth login/)
+        assert.ok(!errors[0].message.includes('could not be refreshed'), 'raw SDK text is replaced by the actionable message')
+      })
+
+      for (const raw of [
+        'OAuth token has been revoked. Please obtain a new token',
+        'OAuth session invalid',
+        'authentication_error: invalid api key',
+        'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
+        'Request failed: Unauthorized',
+      ]) {
+        it(`a thrown ${JSON.stringify(raw)} is AUTH_REQUIRED`, async () => {
+          const s = createSession()
+          const { errors } = await runTurn(s, () => (async function* () { throw new Error(raw) })())
+          s.destroy()
+          assert.equal(errors.length, 1)
+          assert.equal(errors[0].code, 'AUTH_REQUIRED')
+        })
+      }
+
+      for (const raw of [
+        'rate_limit_error: too many requests',
+        'Your account has insufficient credits',
+        'overloaded_error: the API is temporarily overloaded',
+        'Claude Code process terminated by signal SIGABRT',
+        'Something completely unknown went wrong',
+        'OAuth discovery succeeded for the MCP server',
+      ]) {
+        it(`a thrown ${JSON.stringify(raw)} carries no AUTH_REQUIRED code`, async () => {
+          const s = createSession()
+          const { errors } = await runTurn(s, () => (async function* () { throw new Error(raw) })())
+          s.destroy()
+          assert.equal(errors.length, 1)
+          assert.equal(errors[0].code, undefined)
+        })
+      }
+
+      it('surfaces ONE AUTH_REQUIRED when the assistant message AND the throw both report it', async () => {
+        const s = createSession()
+        const { errors, messages } = await runTurn(s, () => (async function* () {
+          yield authAssistantMsg
+          throw new Error(OAUTH_EXPIRED)
+        })())
+        s.destroy()
+        assert.equal(errors.filter((e) => e.code === 'AUTH_REQUIRED').length, 1)
+        assert.equal(errors.length, 1)
+        assert.deepEqual(messages.filter((m) => m.type === 'response'), [])
+      })
+
+      it('the next turn can surface AUTH_REQUIRED again (the once-per-turn latch is per turn)', async () => {
+        const s = createSession()
+        s._processReady = true
+        s._spawnPreflight = () => process.execPath
+        const errors = []
+        s.on('error', (data) => errors.push(data))
+        s._callQuery = () => (async function* () { yield authAssistantMsg; yield resultMsg })()
+        await s.sendMessage('one')
+        await s.sendMessage('two')
+        s.destroy()
+        assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED', 'AUTH_REQUIRED'])
+      })
+
+      it('a containerised session does not tell the user to run `claude auth login` on the host', () => {
+        class ContainerSdk extends SdkSession {
+          static get capabilities() { return { ...SdkSession.capabilities, containerized: true } }
+        }
+        const c = new ContainerSdk({ cwd: '/tmp' })
+        const message = c._authRequiredMessage()
+        c.destroy()
+        assert.ok(!/claude auth login/.test(message), message)
+        assert.match(message, /ANTHROPIC_API_KEY/)
+      })
+    })
+
     it('emits stream_end when error occurs after streaming started', async () => {
       const s = createSession()
       s._processReady = true
