@@ -264,6 +264,117 @@ describe('ClaudeTuiSession', () => {
       assert.ok(!session._term, 'no PTY left behind after the rejected import')
     })
 
+    // #8223 — the pre-spawn login probe. Runs `claude auth status --json` once, on
+    // a session's FIRST spawn, and refuses the start only on an EXPLICIT logged-out
+    // answer. Every case below runs the REAL _spawnPty (and, where it says so, the
+    // real start()) against an injected runner and a node-pty stand-in, so neither a
+    // real claude nor a real PTY is ever launched.
+    describe('pre-spawn login probe (#8223)', () => {
+      const LOGGED_OUT = { status: 1, stdout: JSON.stringify({ loggedIn: false, authMethod: 'none' }) }
+      const LOGGED_IN = { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', subscriptionType: 'max' }) }
+
+      function probeSession(runner, extra = {}) {
+        const calls = []
+        const spawns = []
+        const s = new ClaudeTuiSession({
+          cwd: '/tmp',
+          port: 12360,
+          skillsDir: emptySkillsDir,
+          repoSkillsDir: null,
+          loginProbeRunner: async (call) => { calls.push(call); return runner(call) },
+          ...extra,
+        })
+        const errors = []
+        s.on('error', (e) => errors.push(e))
+        s._sessionId = 'probe-uuid-0001'
+        s._settingsPath = join(fakeHome, 'settings.json')
+        s._ptyModOverride = {
+          // Throws after recording, which _spawnPty's own spawn try/catch turns
+          // into a clean early return: reaching it is what "proceeds" means here.
+          spawn: (cmd, args) => { spawns.push({ cmd, args }); throw new Error('captured-and-bail') },
+        }
+        return { s, calls, spawns, errors }
+      }
+
+      beforeEach(() => { ClaudeTuiSession.prototype._spawnPty = origSpawnPty })
+
+      it('an explicit loggedIn:false rejects with AUTH_REQUIRED and never spawns the PTY', async () => {
+        const { s, calls, spawns, errors } = probeSession(() => LOGGED_OUT)
+        session = s
+        let rejection = null
+        await s._spawnPty(true).catch((err) => { rejection = err })
+        assert.ok(rejection, '_spawnPty rejects for a logged-out host')
+        assert.equal(rejection.code, 'AUTH_REQUIRED')
+        assert.match(rejection.message, /claude auth login/)
+        assert.equal(spawns.length, 0, 'the PTY must not be spawned for a logged-out host')
+        assert.equal(calls.length, 1)
+        assert.deepEqual(calls[0].args, ['auth', 'status', '--json', '--settings', join(fakeHome, 'settings.json')],
+          'asks with the same --settings the spawn will use')
+        assert.equal(typeof calls[0].binary, 'string')
+        assert.equal(calls[0].env.ANTHROPIC_API_KEY, undefined, 'probed with the env the PTY gets: no API key')
+        assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED'], 'exactly one AUTH_REQUIRED error event')
+        assert.equal(errors[0].message, rejection.message, 'the emitted error and the rejection carry the same text')
+        assert.ok(!s._term, 'no live PTY left behind')
+      })
+
+      it('start() rejects with AUTH_REQUIRED through the real start path', async () => {
+        const { s, spawns, errors } = probeSession(() => LOGGED_OUT)
+        session = s
+        await assert.rejects(s.start(), (err) => err.code === 'AUTH_REQUIRED')
+        assert.equal(spawns.length, 0)
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].code, 'AUTH_REQUIRED')
+        assert.equal(s._processReady, false)
+      })
+
+      it('a logged-in answer proceeds to the spawn', async () => {
+        const { s, calls, spawns } = probeSession(() => LOGGED_IN)
+        session = s
+        await s._spawnPty(true)
+        assert.equal(calls.length, 1)
+        assert.equal(spawns.length, 1, 'exit 0 + loggedIn:true must reach node-pty spawn')
+      })
+
+      for (const [name, runner] of [
+        ['the runner throws (ENOENT)', () => { throw Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' }) }],
+        ['the runner times out', () => Promise.reject(Object.assign(new Error('Command failed: timed out'), { killed: true, signal: 'SIGTERM' }))],
+        ['exit 1 with non-JSON stdout', () => ({ status: 1, stdout: 'error: unknown command auth' })],
+        ['exit 1 with empty stdout', () => ({ status: 1, stdout: '' })],
+        ['exit 0 with non-JSON stdout', () => ({ status: 0, stdout: 'garbage' })],
+        ['exit 1 with JSON that omits loggedIn', () => ({ status: 1, stdout: JSON.stringify({ authMethod: 'none' }) })],
+        ['exit 1 with loggedIn:true', () => ({ status: 1, stdout: JSON.stringify({ loggedIn: true }) })],
+        ['exit 0 with loggedIn:false (contradictory)', () => ({ status: 0, stdout: JSON.stringify({ loggedIn: false }) })],
+        ['loggedIn is the string "false"', () => ({ status: 1, stdout: JSON.stringify({ loggedIn: 'false' }) })],
+        ['the runner returns nothing', () => undefined],
+      ]) {
+        it(`fails open when ${name}`, async () => {
+          const { s, calls, spawns, errors } = probeSession(runner)
+          session = s
+          await s._spawnPty(true)
+          assert.equal(calls.length, 1, 'the probe ran')
+          assert.equal(spawns.length, 1, 'and the spawn proceeded exactly as without a probe')
+          assert.ok(!errors.some((e) => e.code === 'AUTH_REQUIRED'), 'no AUTH_REQUIRED from an inconclusive probe')
+        })
+      }
+
+      it('probes the first spawn only: a later spawn on the same session never re-asks', async () => {
+        const { s, calls, spawns } = probeSession(() => LOGGED_IN)
+        session = s
+        await s._spawnPty(true)
+        await s._spawnPty(true)
+        assert.equal(calls.length, 1, 'one probe for the session, not one per spawn')
+        assert.equal(spawns.length, 2)
+      })
+
+      it('skips the native connection route, which already runs claude auth status itself', async () => {
+        const { s, calls } = probeSession(() => LOGGED_OUT)
+        session = s
+        s._connectionAuthRoute = 'native'
+        await s._probeLoginBeforeFirstSpawn({ binary: '/fixture/claude', cwd: '/tmp', env: {} })
+        assert.equal(calls.length, 0)
+      })
+    })
+
     // #7929 follow-on — `_spawnPty` builds `['--resume', this._sessionId]` /
     // `['--session-id', this._sessionId]` and hands it straight to node-pty's
     // own `spawn`, not `child_process`'s — so `scripts/lint-argv-sinks.mjs`
@@ -1305,6 +1416,114 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
+    // #8223 — byte shapes captured from claude 2.1.289. The scan reads `_outputTail`,
+    // which `_appendToOutputTail` derives from the RAW bytes via ANSI_STRIP; that
+    // strip deletes the CSI cursor moves AND the `\r` claude lays rows out with and
+    // replaces them with nothing, so every banner below is fed through the real
+    // append path rather than assigned to `_outputTail` pre-flattened.
+    const ROW_BREAK = '\r\x1b[1B' // how claude separates rendered rows
+    const FOOTER_LOGGED_OUT = '\x1b[93G\x1b[38;5;211mNot\x1b[97Glogged\x1b[104Gin\x1b[107G·\x1b[109GRun\x1b[113G/login\x1b[39m\r\r\n'
+    const BANNER_EXPIRED_120COL = '\r\x1b[1B\x1b[38;5;220m⏺\x1b[39m \x1b[38;5;220mLogin expired · Please run /login\x1b[39m\x1b[K\r\x1b[2C\x1b[1B\x1b[K'
+    const BANNER_NO_CREDS = '  ⎿  \x1b[38;5;211mNot logged in · Please run /login\r\x1b[1B'
+    // Continuation rows are indented with CUF (`\x1b[2C`), as the 120-column capture
+    // above does, not with literal spaces — a literal indent would survive the strip
+    // and let the old patterns match, which is not the failure being reproduced.
+    const BANNER_EXPIRED_10COL = [
+      '⏺ Login',
+      '\x1b[2Cexpired ·',
+      '\x1b[2CPlease',
+      '\x1b[2Crun',
+      '\x1b[2C/login',
+    ].join(ROW_BREAK)
+
+    function tailAfter(session, ...chunks) {
+      session._outputTail = ''
+      session._outputTailRaw = Buffer.alloc(0)
+      for (const chunk of chunks) session._appendToOutputTail(chunk)
+      return session._outputTail
+    }
+
+    it('_scanOutputForAuthFailure matches each captured logged-out byte shape (#8223)', () => {
+      const s = makeSession()
+      for (const [name, bytes] of [
+        ['expired-login banner at 120 columns', BANNER_EXPIRED_120COL],
+        ['expired-login banner wrapped at 10 columns', BANNER_EXPIRED_10COL],
+        ['no-credentials banner', BANNER_NO_CREDS],
+        ['footer status line alone', FOOTER_LOGGED_OUT],
+      ]) {
+        const tail = tailAfter(s, bytes)
+        assert.ok(s._scanOutputForAuthFailure(), `${name} must match; stripped tail was ${JSON.stringify(tail)}`)
+      }
+    })
+
+    it('the wrapped banner and the footer reach the tail with their whitespace deleted (#8223 premise)', () => {
+      // Pins WHY the compact patterns exist: if ANSI_STRIP ever starts leaving a
+      // space where claude moved the cursor, these stop being true and the
+      // compact list can be retired. Until then the space-requiring patterns
+      // cannot see either shape.
+      const s = makeSession()
+      assert.equal(tailAfter(s, FOOTER_LOGGED_OUT).trim(), 'Notloggedin·Run/login')
+      assert.ok(tailAfter(s, BANNER_EXPIRED_10COL).endsWith('Pleaserun/login'), JSON.stringify(s._outputTail))
+    })
+
+    it('_scanOutputForAuthFailure matches a banner whose chunks split mid-escape (#8223)', () => {
+      const s = makeSession()
+      const cut = FOOTER_LOGGED_OUT.indexOf('Run') + 1
+      tailAfter(s, FOOTER_LOGGED_OUT.slice(0, cut), FOOTER_LOGGED_OUT.slice(cut))
+      assert.ok(s._scanOutputForAuthFailure())
+    })
+
+    it('_scanOutputForAuthFailure stays false for prose and near-misses, flat or wrapped (#8223)', () => {
+      const s = makeSession()
+      const prose = [
+        'If you see an auth error, please log in again',
+        'authentication failed',
+        'you are not logged in',
+        'Not logged in · rerun /login',
+        'rerun /loginfoo',
+        'the run/login route handles the sign-in form',
+        'Invalid API key',
+      ]
+      for (const sample of prose) {
+        tailAfter(s, sample)
+        assert.ok(!s._scanOutputForAuthFailure(), `flat must NOT match: ${JSON.stringify(sample)}`)
+        // The same words wrapped one per row the way claude lays out a narrow pane.
+        tailAfter(s, sample.split(' ').join(ROW_BREAK))
+        assert.ok(!s._scanOutputForAuthFailure(), `wrapped must NOT match: ${JSON.stringify(s._outputTail)}`)
+      }
+    })
+
+    it('start() rejects with AUTH_REQUIRED when the footer appears during warmup (#8223)', async () => {
+      const s = makeSession()
+      // Live PTY, never ready; the only evidence is the footer status line claude
+      // paints on its first frame when logged out — no latch, no banner.
+      s._spawnPty = async function () {
+        this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
+        this._appendToOutputTail(FOOTER_LOGGED_OUT)
+      }
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      await assert.rejects(s.start(), (err) => err.code === 'AUTH_REQUIRED')
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'AUTH_REQUIRED')
+      await s.destroy() // start() created a sink dir under /tmp — clean it up
+    })
+
+    it('_waitForPrompt latches the auth failure on the footer alone (#8223)', async () => {
+      const s = makeSession()
+      s._term = { pid: 4242 }
+      tailAfter(s, FOOTER_LOGGED_OUT)
+      const origRead = ClaudeTuiSession.readSessionStatus
+      ClaudeTuiSession.readSessionStatus = () => null
+      try {
+        const ready = await s._waitForPrompt(60_000, { detectAuthFailure: true })
+        assert.equal(ready, false)
+        assert.equal(s._authFailureDetected, true)
+      } finally {
+        ClaudeTuiSession.readSessionStatus = origRead
+      }
+    })
+
     it('start() rejects with AUTH_REQUIRED when warmup classifies a logged-out session', async () => {
       const s = makeSession()
       // Stub _spawnPty to mimic a logged-out warmup: live PTY, never ready,
@@ -1322,7 +1541,7 @@ describe('ClaudeTuiSession', () => {
       assert.equal(readys.length, 0, 'no ready emitted for a logged-out session')
       assert.equal(errors.length, 1)
       assert.equal(errors[0].code, 'AUTH_REQUIRED', 'AUTH_REQUIRED error surfaced')
-      assert.match(errors[0].message, /claude login/, 'guidance included')
+      assert.match(errors[0].message, /claude auth login/, 'guidance names the current command (#8223)')
       assert.equal(s._processReady, false)
       await s.destroy() // start() created a sink dir under /tmp — clean it up
     })

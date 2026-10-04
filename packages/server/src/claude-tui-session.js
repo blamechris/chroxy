@@ -67,6 +67,7 @@ import {
   CLAUDE_BINARY_CANDIDATES,
   resolveClaudeBinary,
   AUTH_FAILURE_PATTERNS,
+  AUTH_FAILURE_COMPACT_PATTERNS,
   AUTH_REQUIRED_CODE,
   AUTH_REQUIRED_MESSAGE,
   ensureCwdTrusted,
@@ -402,6 +403,13 @@ export class ClaudeTuiSession extends BaseSession {
     this._connectionAuthStatusRunner = typeof opts.connectionAuthStatusRunner === 'function'
       ? opts.connectionAuthStatusRunner
       : runClaudeAuthStatus
+    // #8223: the pre-spawn login probe (_probeLoginBeforeFirstSpawn) has its OWN
+    // runner rather than sharing the native route's. A native-route test that
+    // blocks `connectionAuthStatusRunner` to hold a respawn open would otherwise
+    // also block the probe on the FIRST spawn, which is a different step.
+    this._loginProbeRunner = typeof opts.loginProbeRunner === 'function'
+      ? opts.loginProbeRunner
+      : runClaudeAuthStatus
 
     // #5332: monotonic clock for turn-duration logging and watchdog poll-loop
     // deadlines (hook poll, waitForPrompt, PTY write). Wall-clock (Date.now())
@@ -512,6 +520,9 @@ export class ClaudeTuiSession extends BaseSession {
     // #5321 (WP-4.1) — latched true when warmup classifies claude's output as a
     // logged-out / expired-login failure, so start() rejects with AUTH_REQUIRED.
     this._authFailureDetected = false
+    // #8223 — the pre-spawn `claude auth status` probe runs on this session's FIRST
+    // spawn only (see _probeLoginBeforeFirstSpawn); a respawn never re-asks.
+    this._loginProbeRan = false
     // #5315 (WP-2.1) — bounded per-session PTY auto-respawn state, mirroring
     // CliSession (cli-session.js:351). WHY: when the persistent claude PTY dies
     // unexpectedly mid-session, `_onPtyGone` used to tear the session down into
@@ -2620,6 +2631,63 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  /**
+   * #8223 — ask `claude auth status --json` whether this host is logged in, once,
+   * before the session's first PTY spawn. Only an EXPLICIT logged-out answer
+   * (non-zero exit AND stdout that parses as JSON AND `loggedIn === false`) fails
+   * the start, with the same AUTH_REQUIRED error the warmup scan produces. Every
+   * other outcome — spawn error, ENOENT, the runner's 5s timeout, a claude too old
+   * to have the `auth` subcommand, unparseable output, `loggedIn` true or absent,
+   * exit 0 — proceeds exactly as before: this is a fast pre-check in front of the
+   * PTY scan, never a new way for a healthy session to be refused.
+   *
+   * What it can and cannot see: a logged-OUT host reports `loggedIn: false`, but an
+   * EXPIRED oauth token still reports `loggedIn: true`, so expiry is still caught
+   * only by the PTY scan (AUTH_FAILURE_PATTERNS). What it adds is the never-logged-
+   * in case, including claude's first-run onboarding screen, which prints no
+   * `/login` text for the scan to find.
+   *
+   * The native connection route is skipped: `_verifyNativeConnectionRoute` already
+   * runs the same command (and is strict where this is not). The runner is the
+   * injectable `_loginProbeRunner` (default: the same `runClaudeAuthStatus` the
+   * native route uses, so one execFile site and one 5s timeout).
+   */
+  async _probeLoginBeforeFirstSpawn({ binary, cwd, env }) {
+    if (this._loginProbeRan) return
+    this._loginProbeRan = true
+    if (this._connectionAuthRoute === 'native') return
+
+    const args = ['auth', 'status', '--json']
+    if (typeof this._settingsPath === 'string' && this._settingsPath) {
+      args.push('--settings', this._settingsPath)
+    }
+    let result
+    try {
+      result = await this._loginProbeRunner({ binary, args, cwd, env })
+    } catch (err) {
+      ;(this._log || log).debug?.(`login probe could not run (${err?.code || err?.message || 'error'}) — proceeding to spawn`)
+      return
+    }
+    if (typeof result?.status !== 'number' || result.status === 0) return
+    let status
+    try {
+      status = JSON.parse(result.stdout || '')
+    } catch {
+      ;(this._log || log).debug?.(`login probe exited ${result.status} without JSON — proceeding to spawn`)
+      return
+    }
+    if (status?.loggedIn !== false) return
+    // destroy() can land during the await above; a torn-down session has nothing
+    // left to refuse, and start()'s own `_destroying` guard resolves it quietly.
+    if (this._destroying) return
+
+    ;(this._log || log).warn(`claude auth status reports logged out — ${AUTH_REQUIRED_CODE} before spawning the PTY`)
+    this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
+    const err = new Error(AUTH_REQUIRED_MESSAGE)
+    err.code = AUTH_REQUIRED_CODE
+    throw err
+  }
+
   _beginNativeRouteVerification() {
     if (this._connectionAuthRoute !== 'native' || !this.agentConnection) return
     this.agentConnection.readiness = {
@@ -2750,6 +2818,11 @@ export class ClaudeTuiSession extends BaseSession {
       this._blockNativeRouteVerification(err)
       throw err
     }
+
+    // #8223: a host that is logged out would otherwise spawn a PTY that sits on
+    // claude's login screen (or first-run onboarding, which no output scan can
+    // classify) until the 90s first-output watchdog fires.
+    await this._probeLoginBeforeFirstSpawn({ binary: attemptedBinary, cwd: cwdReal, env })
 
     let ptyMod
     // Test seam (#6417): a test may inject a capturing node-pty stand-in so the
@@ -3484,6 +3557,13 @@ export class ClaudeTuiSession extends BaseSession {
    * rendered response text, so the false-positive defence lives in the patterns
    * themselves: each requires claude's `/login` / `claude login` remediation
    * command token, which a model merely *discussing* authentication won't emit.
+   *
+   * #8223: also matches the SAME banner with all whitespace removed
+   * (AUTH_FAILURE_COMPACT_PATTERNS). `ANSI_STRIP` deletes the cursor-move
+   * sequences claude uses to space words and rows, and replaces them with
+   * nothing, so a banner or footer painted at a narrow PTY arrives as
+   * "Pleaserun/login" / "Notloggedin·Run/login" and the space-requiring
+   * patterns miss it.
    */
   _scanOutputForAuthFailure() {
     const tail = this._outputTail || ''
@@ -3491,7 +3571,9 @@ export class ClaudeTuiSession extends BaseSession {
     // Collapse whitespace (the TUI wraps/box-pads the banner with newlines +
     // spaces) so a line-wrapped "Please run\n  /login" still matches.
     const normalized = tail.replace(/\s+/g, ' ')
-    return AUTH_FAILURE_PATTERNS.some((re) => re.test(normalized))
+    if (AUTH_FAILURE_PATTERNS.some((re) => re.test(normalized))) return true
+    const compact = tail.replace(/\s+/g, '')
+    return AUTH_FAILURE_COMPACT_PATTERNS.some((re) => re.test(compact))
   }
 
   /**

@@ -138,9 +138,34 @@ export const AUTH_FAILURE_PATTERNS = [
   /\brun `?\/login`?/i,                 // "run /login" / "run `/login`"
   /\brun `?claude login`?/i,            // CLI-command guidance: "run claude login"
 ]
+// #8223 — the same banner with EVERY whitespace character removed. `ANSI_STRIP`
+// deletes the CSI cursor moves claude uses to lay a row out (CHA `\x1b[<n>G`
+// between words, CUD `\x1b[1B` between wrapped rows) AND the `\r` that rides
+// with them, and it replaces them with nothing, not a space — so at a narrow PTY
+// (the dashboard Chat tab resizes it to 10 columns, #8254) a banner that renders
+// as "Please run /login" reaches the tail as "Pleaserun/login", and every
+// pattern above (each needs a literal space) misses it. Likewise the footer
+// status line claude paints from its FIRST frame whenever it is logged out or
+// its login expired: "Not logged in · Run /login" strips to "Notloggedin·Run/login".
+//
+// These are matched against the tail with ALL whitespace removed, and are held
+// to the same standard as the list above — each one still requires claude's own
+// `/login` command token, never a bare English phrase:
+//   - `pleaserun/login`: claude's remediation sentence, run together.
+//   - `<status phrase>·(please)run/login`: claude's own status phrase, then the
+//     `·` separator it prints, then the command. The phrase AND the separator
+//     are both required, so a model writing "if you are not logged in, run
+//     /login" (no `·`) and prose that merely contains "run/login" (a path) do not
+//     match.
+// A bare `run/login` is deliberately absent: it is exactly what the squeezed
+// text of "rerun /login" or a `run/login` route would produce.
+export const AUTH_FAILURE_COMPACT_PATTERNS = [
+  /pleaserun`?\/login/i,
+  /(?:notloggedin|loginexpired|invalidapikey)·(?:please)?run`?\/login/i,
+]
 // Structured error surfaced when an auth failure is classified.
 export const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'
-export const AUTH_REQUIRED_MESSAGE = 'Claude is not logged in (or the subscription login expired). Run `claude login` in a terminal on the host, then retry. This provider uses the Claude subscription and does NOT accept ANTHROPIC_API_KEY.'
+export const AUTH_REQUIRED_MESSAGE = 'Claude is not logged in on this host, or its login expired. Run `claude auth login` in a terminal on the host (or `/login` inside claude), then retry. This provider uses the Claude subscription and does not accept ANTHROPIC_API_KEY.'
 
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
 // block headless spawn. The dialog is interactive-only — without this, the
