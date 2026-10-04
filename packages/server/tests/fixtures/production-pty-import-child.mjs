@@ -36,7 +36,17 @@ async function main() {
     const { ClaudeTuiSession } = await import('../../src/claude-tui-session.js')
     const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-skills-prodimport-'))
     try {
-      const session = new ClaudeTuiSession({ cwd: '/tmp', port: 12353, skillsDir, repoSkillsDir: null })
+      // #8223: this child is a REAL process outside the parent's real-binary
+      // tripwire, and `_spawnPty` now runs the pre-spawn `claude auth status`
+      // probe before the node-pty import. Left to its default it would exec the
+      // developer's real `claude` under the fake HOME, read "logged out", and
+      // reject with AUTH_REQUIRED before ever reaching the import this harness
+      // exists to exercise. A runner that fails keeps the probe fail-open and
+      // hermetic: nothing real is launched, and start() proceeds to the import.
+      const session = new ClaudeTuiSession({
+        cwd: '/tmp', port: 12353, skillsDir, repoSkillsDir: null,
+        loginProbeRunner: async () => { throw new Error('login probe disabled in this fixture') },
+      })
       session.on('error', () => {
         // _spawnPty's catch also emits — start()'s rejection (below) is what
         // this harness reports; an unhandled 'error' event would otherwise

@@ -710,6 +710,15 @@ export class ClaudeTuiSession extends BaseSession {
     // (the TUI re-invokes itself on notifications — chroxy sees no turn).
     this._backgroundTaskPollTimer = null
     this._lastBackgroundTaskKey = null
+    // #8223: transcript-based fast path for an EXPIRED login (see
+    // _checkTranscriptForAuthFailure). `_authFailureBaseline` is the transcript's
+    // cumulative auth-failure count captured at turn start (null until a scan
+    // could read it); `_lastAuthTranscriptScanMs` throttles the poll-loop scan.
+    // `_authTranscriptScanMs` is an instance field, not only a static, so a test
+    // can shrink the ~1s cadence without sleeping.
+    this._authFailureBaseline = null
+    this._lastAuthTranscriptScanMs = 0
+    this._authTranscriptScanMs = ClaudeTuiSession.AUTH_TRANSCRIPT_SCAN_MS
   }
 
   /**
@@ -1861,6 +1870,12 @@ export class ClaudeTuiSession extends BaseSession {
   // stop-hook yet). Sized so healthy short turns (<5s end-to-end) emit
   // zero heartbeats but wedges produce a 5s-cadence trail of state.
   static get HOOK_HEARTBEAT_MS() { return 5_000 }
+  // #8223: how often the hook-poll loop re-reads the transcript for an
+  // authentication_failed entry while a turn has produced no output yet. The
+  // scan reads only the bytes appended since the last one, so ~1s is cheap and
+  // is what bounds how long an expired login takes to surface (vs the 90s
+  // first-output watchdog).
+  static get AUTH_TRANSCRIPT_SCAN_MS() { return 1_000 }
   // #6178: per-call timeout for the hot-path hook-drain fs ops (readdir/readFile/
   // unlink). A healthy sink read is sub-ms; this generous 2s bound only trips on
   // a genuinely stuck mount (FUSE/NFS freeze), letting the poll loop re-check its
@@ -3792,6 +3807,9 @@ export class ClaudeTuiSession extends BaseSession {
     // consumed its first hook). Must happen BEFORE `_armResultTimeout`
     // below — that helper checks the latch.
     this._resetFirstOutputWatchdogForTurn()
+    // #8223: baseline the transcript's auth-failure count BEFORE the prompt is
+    // written, so a failure the prompt itself causes is always newer than it.
+    this._beginAuthFailureWatchForTurn()
 
     try {
       // #4269: claude TUI's paste detector triggers on byte-arrival rate,
@@ -4059,6 +4077,15 @@ export class ClaudeTuiSession extends BaseSession {
       // through an extra 150ms sleep before the loop notices; the `!_isBusy`
       // guard at the top of the loop would eventually catch it either way.
       if (!this._isBusy) break
+      // #8223: an EXPIRED login is invisible to the PTY scan — claude paints no
+      // footer at startup and, at a narrow PTY, never paints the banner either —
+      // but it writes the failed API call to the transcript as a structured
+      // entry. While the turn has produced nothing, look for it; the 90s
+      // first-output watchdog stays as the backstop for everything this misses.
+      if (!this._firstOutputDisarmed && this._checkTranscriptForAuthFailure()) {
+        this._handleTranscriptAuthFailure()
+        break
+      }
       // Wedge instrumentation (#4678 follow-up): if the loop has been
       // running >= HOOK_HEARTBEAT_MS since the last heartbeat with no
       // stop-hook, emit a progress line. Sized at 5s so a healthy
@@ -4950,6 +4977,86 @@ export class ClaudeTuiSession extends BaseSession {
           message: `Stream stalled — no response for ${friendly}. Try sending again.`,
           timeoutMs: this._streamStallTimeoutMs,
         },
+      errorBeforeResult: false,
+      gateStreamEndOnMessageId: true,
+    })
+  }
+
+  /**
+   * #8223 — start of a turn: forget the previous turn's baseline and capture a
+   * fresh one. A resumed (or simply long) transcript can already hold an old
+   * `authentication_failed` entry, and only an entry NEWER than turn start may
+   * fire the fast path below.
+   */
+  _beginAuthFailureWatchForTurn() {
+    this._authFailureBaseline = null
+    this._lastAuthTranscriptScanMs = this._nowMonotonic()
+    this._checkTranscriptForAuthFailure({ force: true })
+  }
+
+  /**
+   * #8223 — has the transcript gained an `authentication_failed` API-error entry
+   * since this turn's baseline? Reads through `_scanTranscript()`: the SAME
+   * incremental scanner the background-task poll and the observed-model refresh
+   * share, and with none of `getBackgroundTaskSnapshot()`'s bookkeeping
+   * (`_lastBackgroundTaskKey` / the idle poll). Sharing is safe because the
+   * snapshot is cumulative — bytes consumed here still show in the next idle
+   * poll tick's snapshot, so the key changes there and nothing is lost.
+   *
+   * Throttled to `_authTranscriptScanMs` (~1s) so the 150ms poll loop does not
+   * stat the transcript on every pass; `force` bypasses it (baseline capture).
+   *
+   * The baseline is taken from the first scan that can READ the transcript
+   * (`authFailureCount` a number): a scan that cannot — no PTY pid or per-PID
+   * session file yet, or an unreadable transcript, `null` — leaves it unset
+   * rather than baselining against a guess, and a transcript that does not
+   * exist yet counts as a known 0. Trade-off: a failure written before the
+   * first scan that could read the transcript is folded into the baseline and
+   * missed; the 90s first-output watchdog (and its PTY scan) still covers that.
+   *
+   * Fails quiet: a missing scanner, a missing transcript, a scan error, or
+   * transcripts switched off all just mean "no fast path" — never a throw out
+   * of the poll loop.
+   * @returns {boolean} true when a NEW auth failure has appeared
+   */
+  _checkTranscriptForAuthFailure({ force = false } = {}) {
+    try {
+      const now = this._nowMonotonic()
+      if (!force && now - this._lastAuthTranscriptScanMs < this._authTranscriptScanMs) return false
+      this._lastAuthTranscriptScanMs = now
+      const count = this._scanTranscript()?.authFailureCount
+      if (typeof count !== 'number') return false
+      if (this._authFailureBaseline === null) {
+        this._authFailureBaseline = count
+        return false
+      }
+      return count > this._authFailureBaseline
+    } catch (err) {
+      ;(this._log || log).debug?.(`transcript auth-failure check failed: ${err?.message} — no fast path this pass`)
+      return false
+    }
+  }
+
+  /**
+   * #8223 — the transcript says this turn's API call failed authentication:
+   * tear the turn down now with AUTH_REQUIRED instead of letting it sit until the
+   * first-output watchdog. Same `_teardownTurn` shape as `_handleFirstOutputTimeout`
+   * (result before error, `stream_end` gated on messageId) with its own teardown
+   * reason, `'auth_required'`, so the post-mortem logs can tell the two apart.
+   */
+  _handleTranscriptAuthFailure() {
+    if (!this._isBusy) return
+    if (this._pendingUserAnswers.size > 0) return
+    this._assertBusyHasMessageId('_handleTranscriptAuthFailure')
+    ;(this._log || log).warn(
+      `transcript recorded a new authentication_failed entry (baseline ${this._authFailureBaseline}) before any output — ${AUTH_REQUIRED_CODE}`,
+    )
+    const duration = this._activeTurn
+      ? this._nowMonotonic() - this._activeTurn.startedAt
+      : 0
+    this._teardownTurn('auth_required', {
+      duration,
+      errorPayload: { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
     })

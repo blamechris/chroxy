@@ -347,12 +347,12 @@ describe('TranscriptTaskScanner — ScheduleWakeup', () => {
 describe('TranscriptTaskScanner — robustness', () => {
   it('returns the empty snapshot for a missing file (never throws)', () => {
     const scanner = new TranscriptTaskScanner(join(dir, 'does-not-exist.jsonl'))
-    assert.deepEqual(scanner.scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null })
+    assert.deepEqual(scanner.scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null, authFailureCount: 0 })
   })
 
   it('returns the empty snapshot for an empty file', () => {
     const p = writeTranscript([])
-    assert.deepEqual(new TranscriptTaskScanner(p).scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null })
+    assert.deepEqual(new TranscriptTaskScanner(p).scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null, authFailureCount: 0 })
   })
 
   it('skips malformed lines without losing surrounding entries', () => {
@@ -497,5 +497,112 @@ describe('TranscriptTaskScanner — observedModel (#7327)', () => {
     })
     const snap = new TranscriptTaskScanner(writeTranscript([main, sidechain])).scan()
     assert.equal(snap.observedModel, 'claude-sonnet-5', 'the sidechain entry\'s model must not overwrite the main session\'s observation')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8223 — authFailureCount: structured `authentication_failed` API errors
+// ---------------------------------------------------------------------------
+
+// The shape claude writes when an API call fails authentication (live capture,
+// claude 2.1.289): `isApiErrorMessage` + `error` on a synthetic assistant entry,
+// whatever the PTY's width — at a narrow PTY the banner is never painted.
+function authErrorLine({ ts = '2026-06-10T02:40:00.000Z', text = 'Please run /login · API Error: 401 OAuth access token is invalid.' } = {}) {
+  return JSON.stringify({
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error: 'authentication_failed',
+    timestamp: ts,
+    message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text }], usage: { output_tokens: 0 } },
+  })
+}
+
+describe('TranscriptTaskScanner — authFailureCount (#8223)', () => {
+  it('counts a structured authentication_failed API-error entry', () => {
+    const p = writeTranscript([userLine({ text: 'hi', ts: '2026-06-10T02:39:59.000Z' }), authErrorLine()])
+    assert.equal(new TranscriptTaskScanner(p).scan().authFailureCount, 1)
+  })
+
+  it('is 0 for an empty transcript and for a transcript with no auth failures', () => {
+    assert.equal(new TranscriptTaskScanner(writeTranscript([])).scan().authFailureCount, 0)
+    const p = writeTranscript([userLine({ text: 'hi' }), assistantTextLine({ model: 'claude-opus-5' })])
+    assert.equal(new TranscriptTaskScanner(p).scan().authFailureCount, 0)
+  })
+
+  it('does not count other API errors, a reply whose TEXT says "Please run /login", or non-assistant entries', () => {
+    const p = writeTranscript([
+      // other error classes use the same two fields with a different enum value
+      JSON.stringify({ type: 'assistant', isApiErrorMessage: true, error: 'rate_limit', message: { role: 'assistant', content: [{ type: 'text', text: 'rate limited' }] } }),
+      JSON.stringify({ type: 'assistant', isApiErrorMessage: true, error: 'billing_error', message: { role: 'assistant', content: [] } }),
+      // a model discussing /login carries the same words, with neither structured marker
+      assistantTextLine({ model: 'claude-opus-5', text: 'Please run /login · API Error: 401 OAuth access token is invalid.' }),
+      // `error` without the API-error marker, and the marker without `error`
+      JSON.stringify({ type: 'assistant', error: 'authentication_failed', message: { role: 'assistant', content: [] } }),
+      JSON.stringify({ type: 'assistant', isApiErrorMessage: true, message: { role: 'assistant', content: [] } }),
+      // loose truthiness is not the marker
+      JSON.stringify({ type: 'assistant', isApiErrorMessage: 'true', error: 'authentication_failed', message: { role: 'assistant', content: [] } }),
+      // a user entry (or any non-assistant entry) carrying the fields
+      JSON.stringify({ type: 'user', isApiErrorMessage: true, error: 'authentication_failed', message: { role: 'user', content: 'x' } }),
+      JSON.stringify({ type: 'system', isApiErrorMessage: true, error: 'authentication_failed' }),
+    ])
+    assert.equal(new TranscriptTaskScanner(p).scan().authFailureCount, 0)
+  })
+
+  it('counts incrementally across appends and never recounts an entry it has already read', () => {
+    const p = writeTranscript([userLine({ text: 'hi' })])
+    const scanner = new TranscriptTaskScanner(p)
+    assert.equal(scanner.scan().authFailureCount, 0)
+    assert.equal(scanner.scan().authFailureCount, 0)
+
+    appendFileSync(p, authErrorLine() + '\n')
+    assert.equal(scanner.scan().authFailureCount, 1)
+    assert.equal(scanner.scan().authFailureCount, 1, 'a rescan with no new bytes must not recount')
+
+    appendFileSync(p, assistantTextLine({ model: 'claude-opus-5' }) + '\n' + authErrorLine({ ts: '2026-06-10T02:41:00.000Z' }) + '\n')
+    assert.equal(scanner.scan().authFailureCount, 2)
+  })
+
+  it('buffers a half-written entry and counts it only once the line is complete', () => {
+    const full = authErrorLine()
+    const p = writeTranscript([])
+    const scanner = new TranscriptTaskScanner(p)
+    appendFileSync(p, full.slice(0, 60))
+    assert.equal(scanner.scan().authFailureCount, 0)
+    appendFileSync(p, full.slice(60) + '\n')
+    assert.equal(scanner.scan().authFailureCount, 1)
+  })
+
+  it('leaves the existing fields untouched by an auth-failure entry', () => {
+    const p = writeTranscript([launchLine({ id: 'toolu_bg', description: 'watching' }), authErrorLine()])
+    const snap = new TranscriptTaskScanner(p).scan()
+    assert.equal(snap.authFailureCount, 1)
+    assert.equal(snap.backgroundTasks.length, 1)
+    assert.equal(snap.backgroundTasks[0].toolUseId, 'toolu_bg')
+    assert.equal(snap.scheduledWakeup, null)
+    // The synthetic stand-in model is still not reported as an observation (#7327).
+    assert.equal(snap.observedModel, null)
+  })
+
+  it('reports a KNOWN 0 for a transcript that does not exist yet, and null when it cannot be read', () => {
+    // Not written yet: nothing in it can be an old failure, so a baseline of 0 is sound.
+    assert.equal(new TranscriptTaskScanner(join(dir, 'not-yet.jsonl')).scan().authFailureCount, 0)
+    // Present but unreadable (a directory here): "could not look" — never a count to baseline against.
+    const snap = new TranscriptTaskScanner(dir).scan()
+    assert.equal(snap.authFailureCount, null)
+    assert.deepEqual(snap.backgroundTasks, [])
+  })
+
+  it('recounts from the start when the transcript shrinks (rotation/truncation)', () => {
+    const p = writeTranscript([authErrorLine(), authErrorLine({ ts: '2026-06-10T02:41:00.000Z' }), userLine({ text: 'padding to make the first file larger' })])
+    const scanner = new TranscriptTaskScanner(p)
+    assert.equal(scanner.scan().authFailureCount, 2)
+    writeFileSync(p, authErrorLine() + '\n')
+    assert.equal(scanner.scan().authFailureCount, 1)
+  })
+
+  it('never throws, whatever the entry holds', () => {
+    const p = writeTranscript(['{"type":"assistant","isApiErrorMessage":true,"error":', 'null', '[]', '{"type":"assistant","isApiErrorMessage":true,"error":{"x":1}}'])
+    assert.doesNotThrow(() => new TranscriptTaskScanner(p).scan())
+    assert.equal(new TranscriptTaskScanner(p).scan().authFailureCount, 0)
   })
 })
