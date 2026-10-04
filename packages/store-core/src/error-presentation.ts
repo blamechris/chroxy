@@ -22,7 +22,7 @@ import { isRetryableAskUserQuestionError } from './ask-user-question-errors'
 
 /** Coarse classification of a recoverable chat error by what it represents.
  *  `generic` is the catch-all for an unrecognised / missing error code. */
-export type ErrorKind = 'stall' | 'question' | 'resume' | 'generic'
+export type ErrorKind = 'stall' | 'question' | 'resume' | 'auth' | 'generic'
 
 export interface ErrorPresentation {
   // Fields are `readonly`: getErrorPresentation returns shared module-level
@@ -46,6 +46,15 @@ const PRESENTATION_BY_CODE: Readonly<Record<string, ErrorPresentation>> = {
     kind: 'stall',
     role: 'status',
     headline: 'Stream stalled — retry?',
+  },
+  // #8223: the claude CLI is logged out or its login expired (claude-tui's
+  // scan / `claude auth status` probe, claude-sdk's authentication_failed).
+  // Retrying cannot help — the user has to sign in on the host — so this is
+  // assertive, and it is not a "retry?" headline like the stall family.
+  AUTH_REQUIRED: {
+    kind: 'auth',
+    role: 'alert',
+    headline: 'Claude is not signed in on this host',
   },
   // CliSession already auto-fell-back to a fresh conversation (#4944) — polite.
   resume_unknown: {

@@ -3209,6 +3209,59 @@ button.sidebar-token-view-session-row:hover {
   outline: none;
 }
 
+/* #8223: the claude CLI on the host needs signing in. A block card, not the
+   single-row pill the stall chips use, because the server's message wraps. */
+.auth-required-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: min(100%, 560px);
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--warning-bg-subtle);
+  color: var(--warning-fg);
+  border: 1px solid var(--warning-fg);
+  align-self: center;
+  font-size: var(--text-base);
+}
+.auth-required-chip-headline {
+  font-weight: 600;
+}
+.auth-required-chip-body {
+  font-size: var(--text-sm);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.auth-required-chip-command-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.auth-required-chip-command {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  user-select: all;
+}
+.auth-required-chip-copy {
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  border-radius: 12px;
+  padding: 2px 12px;
+  /* 44px tap-target floor (CLAUDE.md "Tap targets"). */
+  min-height: 44px;
+  min-width: 44px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.auth-required-chip-copy:hover,
+.auth-required-chip-copy:focus {
+  background: var(--warning-fg);
+  color: var(--bg-primary);
+  outline: none;
+}
+
 /* #4603: secondary affordance — visually de-emphasised vs Retry so the
    primary recovery path (resending the user input) stays the obvious
    target while still surfacing a triage shortcut for operators. */
@@ -4409,7 +4462,7 @@ button.sidebar-token-view-session-row:hover {
   border-radius: 3px;
   background: var(--bg-primary);
   color: var(--text-muted);
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--font-mono);
   font-size: 10px;
   line-height: 1.4;
 }
@@ -9642,7 +9695,7 @@ button.sidebar-token-view-session-row:hover {
 /* #6474 — Cmd+Shift+F find-in-project result row: the matched line as a preview,
    monospace + truncated, with the file:line pushed to the right by symbol-item-line. */
 .code-search-preview {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -149,6 +149,42 @@ describe('useMessageRenderer — retryable AskUserQuestion errors (#5793)', () =
   })
 })
 
+// #8223: AUTH_REQUIRED gets its own chip (no Retry), not the generic bubble.
+describe('useMessageRenderer — AUTH_REQUIRED routing (#8223)', () => {
+  function renderAuth(code: string, id = 'a1') {
+    const err = {
+      id,
+      type: 'error',
+      content: 'Claude is not logged in on this host, or its login expired.',
+      timestamp: 0,
+      code,
+    } as ChatMessage
+    const args = makeArgs({
+      storeMsgMap: new Map([[id, err]]),
+      chatTailMessageId: id,
+      storeMessages: [userInput('u1', 'hello'), err],
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    const node = result.current({ id, type: 'error', content: err.content, timestamp: 0, code } as ChatViewMessage)
+    render(<>{node}</>)
+  }
+
+  it('routes AUTH_REQUIRED to the AuthRequiredChip with the server message and the login command', () => {
+    renderAuth('AUTH_REQUIRED')
+    expect(screen.getByTestId('auth-required-chip')).toBeInTheDocument()
+    expect(screen.getByTestId('auth-required-chip-body').textContent).toMatch(/not logged in on this host/)
+    expect(screen.getByTestId('auth-required-chip-command').textContent).toBe('claude auth login')
+    // It is not one of the stall chips, and does not offer a retry.
+    expect(screen.queryByTestId('stream-stall-chip')).toBeNull()
+    expect(screen.queryByTestId('stream-stall-chip-retry')).toBeNull()
+  })
+
+  it('does not claim other error codes', () => {
+    renderAuth('SESSION_TOKEN_MISMATCH')
+    expect(screen.queryByTestId('auth-required-chip')).toBeNull()
+  })
+})
+
 // #8223: a stream_stall is worded from the window that actually fired. claude-tui's
 // first-output watchdog is 90s but auth_ok advertises the 5-minute mid-turn window,
 // so the message's own `timeoutMs` has to win.

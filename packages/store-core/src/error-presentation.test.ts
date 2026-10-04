@@ -7,6 +7,8 @@ describe('getErrorPresentation', () => {
     ['stream_stall', 'stall', 'status'],
     ['resume_unknown', 'resume', 'status'],
     ['resume_unknown_exhausted', 'resume', 'alert'],
+    // #8223: signing in is the only fix, so it is terminal (alert), not a retry.
+    ['AUTH_REQUIRED', 'auth', 'alert'],
   ]
   it.each(cases)('maps %s → kind %s / role %s with a headline', (code, kind, role) => {
     const p = getErrorPresentation(code)
@@ -30,6 +32,16 @@ describe('getErrorPresentation', () => {
     expect(getErrorPresentation('resume_unknown').role).toBe('status')
   })
 
+  it('words AUTH_REQUIRED as a sign-in problem, not a retry (#8223)', () => {
+    const p = getErrorPresentation('AUTH_REQUIRED')
+    expect(p.headline).toBe('Claude is not signed in on this host')
+    expect(p.headline).not.toMatch(/retry/i)
+  })
+
+  it('matches AUTH_REQUIRED case-sensitively, like every other code', () => {
+    expect(getErrorPresentation('auth_required').kind).toBe('generic')
+  })
+
   it('falls back to generic/alert for unknown, empty, null, undefined — never throws', () => {
     const fallbacks: Array<string | null | undefined> = ['totally_unknown_code', '', null, undefined]
     for (const code of fallbacks) {
@@ -45,6 +57,7 @@ describe('getErrorPresentation', () => {
       'stream_stall',
       'resume_unknown',
       'resume_unknown_exhausted',
+      'AUTH_REQUIRED',
       ...RETRYABLE_ASK_USER_QUESTION_ERROR_CODES,
     ]
     for (const code of known) {
