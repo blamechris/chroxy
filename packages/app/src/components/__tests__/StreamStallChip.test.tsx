@@ -62,6 +62,40 @@ describe('StreamStallChip (#4496)', () => {
     expect(text).toMatch(/retry/i);
   });
 
+  // #8223: the chip names the window that fired when the server tags it.
+  it('names a 90_000 ms stall "90 seconds" — not "2 minutes" or the 5-minute window', () => {
+    const tree = render(
+      <StreamStallChip errorText="No response from claude TUI within 90 seconds." timeoutMs={90_000} />,
+    );
+    const text = collectVisibleText(tree.root);
+    expect(text).toContain('No response for 90 seconds — retry?');
+    expect(text).not.toMatch(/2 minutes/);
+    expect(text).not.toMatch(/5 minutes/);
+    const chip = tree.root.findByProps({ testID: 'stream-stall-chip' });
+    expect(chip.props.accessibilityLabel).toBe('No response for 90 seconds — retry?');
+  });
+
+  it('names a 5-minute stall "5 minutes"', () => {
+    const tree = render(<StreamStallChip errorText="x" timeoutMs={300_000} />);
+    expect(collectVisibleText(tree.root)).toContain('No response for 5 minutes — retry?');
+  });
+
+  it('falls back to the registry phrase for a missing, zero or non-finite timeoutMs', () => {
+    for (const bad of [undefined, 0, -1, NaN, Infinity]) {
+      const tree = render(<StreamStallChip errorText="x" timeoutMs={bad as number | undefined} />);
+      expect(collectVisibleText(tree.root)).toContain('Stream stalled — retry?');
+      act(() => { tree.unmount(); });
+      activeTree = null;
+    }
+  });
+
+  it('keeps an explicit headline over timeoutMs (AskUserQuestion reuse)', () => {
+    const tree = render(<StreamStallChip errorText="x" headline="Question delivery failed — retry?" timeoutMs={90_000} />);
+    const text = collectVisibleText(tree.root);
+    expect(text).toContain('Question delivery failed — retry?');
+    expect(text).not.toMatch(/No response for/);
+  });
+
   it('preserves the raw server error text via the accessibilityHint', () => {
     // Operators investigating a stall pattern need the underlying server
     // message — the chip's prose is friendly, but the diagnostic detail

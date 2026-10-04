@@ -27,6 +27,7 @@ import { ThinkingIndicator } from './ThinkingIndicator';
 import { ToolBubble } from './ToolBubble';
 import { StreamStallChip } from '../StreamStallChip';
 import { ResumeUnknownChip } from '../ResumeUnknownChip';
+import { AuthRequiredChip } from '../AuthRequiredChip';
 import { MultiQuestionForm } from './MultiQuestionForm';
 import type { MultiQuestionAnswersMap } from './MultiQuestionForm';
 
@@ -433,6 +434,10 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
       <StreamStallChip
         errorText={message.content?.trim() || ''}
         onRetry={onRetryStreamStall}
+        // #8223: name the window that actually fired (claude-tui's first-output
+        // watchdog is 90s). Only on a real stall — the AskUserQuestion codes
+        // routed through this chip carry no window and keep their own headline.
+        timeoutMs={message.code === 'stream_stall' ? message.timeoutMs : undefined}
         // #5793 / #6392: the AskUserQuestion teardown codes are a question-
         // delivery failure, not a stream stall — source the copy from the shared
         // error-presentation registry (single source cross-surface). stream_stall
@@ -473,6 +478,14 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
         attemptedResumeId={message.attemptedResumeId}
       />
     );
+  }
+
+  // #8223: the claude CLI on the host is logged out or its login expired. No
+  // retry affordance — resending cannot help until someone signs in on the host —
+  // so a dedicated chip shows the headline, the server's message and the command
+  // that fixes it (selectable, to copy into a host terminal).
+  if (isError && message.code === 'AUTH_REQUIRED') {
+    return <AuthRequiredChip errorText={message.content ?? ''} />;
   }
 
   if (showAsPill) {

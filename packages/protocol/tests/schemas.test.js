@@ -936,6 +936,40 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!result.success, 'Should reject code longer than 64 chars')
   })
 
+  // #8223: zod strips unknown keys, so a field the schema omits is dropped on parse.
+  it('ServerMessageSchema keeps timeoutMs on a stream_stall error (#8223)', async () => {
+    const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+    const result = ServerMessageSchema.safeParse({
+      type: 'message',
+      messageType: 'error',
+      content: 'No response from claude TUI within 90 seconds. Try sending again.',
+      timestamp: Date.now(),
+      code: 'stream_stall',
+      timeoutMs: 90_000,
+    })
+    assert.ok(result.success, 'Should validate a message carrying timeoutMs')
+    assert.equal(result.data.timeoutMs, 90_000, 'timeoutMs must survive the parse')
+  })
+
+  it('ServerMessageSchema stays valid without timeoutMs (older servers)', async () => {
+    const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+    const result = ServerMessageSchema.safeParse({
+      type: 'message', messageType: 'error', content: 'stalled', timestamp: 1, code: 'stream_stall',
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.timeoutMs, undefined)
+  })
+
+  it('ServerMessageSchema rejects a non-positive or non-integer timeoutMs (#8223)', async () => {
+    const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+    for (const timeoutMs of [0, -1, 1.5, '90000']) {
+      const result = ServerMessageSchema.safeParse({
+        type: 'message', messageType: 'error', content: 'x', timestamp: 1, code: 'stream_stall', timeoutMs,
+      })
+      assert.ok(!result.success, `must reject timeoutMs=${JSON.stringify(timeoutMs)}`)
+    }
+  })
+
   it('validates ServerProviderListSchema with capabilities', async () => {
     const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
     const result = ServerProviderListSchema.safeParse({

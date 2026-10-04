@@ -16,6 +16,7 @@ import { McpPromptExpansionMarker } from '../components/McpPromptExpansionMarker
 import { StreamStallChip } from '../components/StreamStallChip'
 import { AskUserQuestionStallChip } from '../components/AskUserQuestionStallChip'
 import { ResumeUnknownChip } from '../components/ResumeUnknownChip'
+import { AuthRequiredChip } from '../components/AuthRequiredChip'
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary'
 
 export interface UseMessageRendererArgs {
@@ -318,7 +319,11 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
         <StreamStallChip
           errorText={storeMsg.content}
           onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
-          timeoutMs={streamStallTimeoutMs ?? undefined}
+          // #8223: prefer the window the server says actually fired (claude-tui's
+          // first-output watchdog is 90s; auth_ok advertises the 5-minute mid-turn
+          // one). Falls back to the connection-wide value for older servers and
+          // for providers that don't tag their stalls.
+          timeoutMs={storeMsg.timeoutMs ?? streamStallTimeoutMs ?? undefined}
           provider={activeSessionProvider ?? undefined}
           onViewLogs={isTail ? () => setViewMode('system') : undefined}
         />
@@ -375,6 +380,14 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           attemptedResumeId={storeMsg.attemptedResumeId}
         />
       )
+    }
+
+    // #8223: the claude CLI on the host is logged out or its login expired
+    // (claude-tui, claude-sdk). No Retry — resending cannot help until someone
+    // signs in on the host — so the chip shows the registry headline, the
+    // server's message, and the command that fixes it.
+    if (storeMsg.type === 'error' && storeMsg.code === 'AUTH_REQUIRED') {
+      return <AuthRequiredChip errorText={storeMsg.content} />
     }
 
     // Default rendering

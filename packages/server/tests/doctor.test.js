@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
-import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkTunnelRoutability } from '../src/doctor.js'
+import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkClaudeLogin, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 import { registerProvider, DEFAULT_PROVIDER } from '../src/providers.js'
 import { SdkSession } from '../src/sdk-session.js'
@@ -1223,6 +1223,161 @@ describe('checkClaudeTuiCliVersion', () => {
 
   it('the shipped baseline constant is a parseable semver', () => {
     assert.notEqual(parseLeadingSemver(TESTED_CLAUDE_TUI_CLI_VERSION), null)
+  })
+})
+
+// #8223 — the "Claude login" row: `claude auth status --json`, so a logged-out host
+// shows up in `chroxy doctor` instead of only when a session fails to start.
+describe('checkClaudeLogin (#8223)', () => {
+  // Every case injects the resolver, the health check and the exec, so no real
+  // `claude` is ever resolved or run.
+  const base = { resolveBinary: () => '/fixture/claude', candidates: [] }
+  const withStdout = (stdout) => ({ ...base, exec: () => stdout })
+  // `claude auth status` exits 1 when logged out and still prints its JSON.
+  const exitsWith = (status, stdout) => ({
+    ...base,
+    exec: () => { throw Object.assign(new Error(`Command failed (exit ${status})`), { status, stdout }) },
+  })
+
+  it('passes with the auth method and subscription type when logged in', () => {
+    const check = checkClaudeLogin(withStdout(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', subscriptionType: 'max' })))
+    assert.equal(check.name, 'Claude login')
+    assert.equal(check.status, 'pass')
+    assert.equal(check.message, 'Logged in (claude.ai, max)')
+  })
+
+  it('passes with just the auth method when there is no subscription type', () => {
+    assert.equal(checkClaudeLogin(withStdout(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))).message, 'Logged in (claude.ai)')
+  })
+
+  it('passes with a bare "Logged in" when claude names neither', () => {
+    assert.equal(checkClaudeLogin(withStdout(JSON.stringify({ loggedIn: true }))).message, 'Logged in')
+  })
+
+  it('warns on an explicit loggedIn:false, reading the JSON off a non-zero exit', () => {
+    const check = checkClaudeLogin(exitsWith(1, JSON.stringify({ loggedIn: false, authMethod: 'none' })))
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /^Not logged in — run `claude auth login` on this host\./)
+    assert.match(check.message, /claude-tui needs it; claude-sdk needs it unless ANTHROPIC_API_KEY is set\.$/)
+  })
+
+  it('warns on an explicit loggedIn:false even when claude exits 0', () => {
+    assert.equal(checkClaudeLogin(withStdout(JSON.stringify({ loggedIn: false }))).status, 'warn')
+  })
+
+  for (const [name, deps] of [
+    ['the probe times out (no exit status)', { ...base, exec: () => { throw Object.assign(new Error('spawnSync claude ETIMEDOUT'), { code: 'ETIMEDOUT' }) } }],
+    ['stdout is not JSON', withStdout('error: unknown command auth')],
+    ['stdout is empty', withStdout('')],
+    ['a non-zero exit carries no stdout', { ...base, exec: () => { throw Object.assign(new Error('boom'), { status: 2 }) } }],
+    ['the JSON has no loggedIn field', withStdout(JSON.stringify({ authMethod: 'none' }))],
+    ['loggedIn is not a boolean', withStdout(JSON.stringify({ loggedIn: 'yes' }))],
+  ]) {
+    it(`warns that the state cannot be read when ${name}`, () => {
+      const check = checkClaudeLogin(deps)
+      assert.equal(check.status, 'warn')
+      assert.match(check.message, /^Could not read the login state from `claude auth status --json`/)
+    })
+  }
+
+  it('returns no row when claude is not installed (the binary row covers it)', () => {
+    assert.equal(checkClaudeLogin({ ...base, exec: () => { throw Object.assign(new Error('spawnSync claude ENOENT'), { code: 'ENOENT' }) } }), null)
+  })
+
+  it('never reports a fail — a doctor failure would block `chroxy start`', () => {
+    const statuses = new Set()
+    for (const deps of [
+      withStdout(JSON.stringify({ loggedIn: true })), exitsWith(1, JSON.stringify({ loggedIn: false })),
+      withStdout('garbage'), { ...base, exec: () => { throw new Error('x') } },
+    ]) statuses.add(checkClaudeLogin(deps).status)
+    assert.ok(!statuses.has('fail'), [...statuses].join(','))
+  })
+
+  it('runs exactly `auth status --json` with ANTHROPIC_API_KEY removed, without touching the caller\'s env', () => {
+    const calls = []
+    const env = { PATH: '/usr/bin', ANTHROPIC_API_KEY: 'sk-test-not-real', CLAUDE_CODE_OAUTH_TOKEN: 'keep-me' }
+    checkClaudeLogin({ ...base, env, exec: (bin, args, opts) => { calls.push({ bin, args, opts }); return JSON.stringify({ loggedIn: true }) } })
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].bin, '/fixture/claude')
+    assert.deepEqual(calls[0].args, ['auth', 'status', '--json'])
+    assert.equal(calls[0].opts.env.ANTHROPIC_API_KEY, undefined, 'the API key must not reach the probe')
+    assert.equal(calls[0].opts.env.CLAUDE_CODE_OAUTH_TOKEN, 'keep-me', 'the rest of the env is untouched')
+    assert.equal(env.ANTHROPIC_API_KEY, 'sk-test-not-real', 'the caller\'s env object is not mutated')
+  })
+
+  it('returns no row, and never execs, when the provenance gate blocks the binary', () => {
+    let execed = false
+    const check = checkClaudeLogin({
+      ...base,
+      exec: () => { execed = true; return '{}' },
+      provenance: { mode: 'block', signatureGate: false, ledger: null },
+      verify: (p) => ({ ok: true, path: p }),
+      verifyProvenance: () => ({ blocked: true, status: 'hash_mismatch', message: 'changed' }),
+    })
+    assert.equal(check, null)
+    assert.equal(execed, false, 'a provenance-blocked claude is never exec\'d')
+  })
+
+  it('returns no row when the binary health check fails', () => {
+    let execed = false
+    const check = checkClaudeLogin({
+      ...base,
+      exec: () => { execed = true; return '{}' },
+      provenance: { mode: 'warn', signatureGate: false, ledger: null },
+      verify: () => ({ ok: false }),
+    })
+    assert.equal(check, null)
+    assert.equal(execed, false)
+  })
+})
+
+describe('runDoctorChecks — Claude login row (#8223)', () => {
+  const loggedOut = () => { throw Object.assign(new Error('exit 1'), { status: 1, stdout: JSON.stringify({ loggedIn: false }) }) }
+  const loggedIn = () => JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' })
+  const loginRow = async (providers, exec, env = {}) => {
+    const prev = process.env.ANTHROPIC_API_KEY
+    delete process.env.ANTHROPIC_API_KEY
+    if (env.ANTHROPIC_API_KEY) process.env.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY
+    try {
+      const { checks, passed } = await runDoctorChecks({
+        providers,
+        claudeLoginDeps: { exec, resolveBinary: () => '/fixture/claude', candidates: [] },
+      })
+      return { row: checks.find((c) => c.name === 'Claude login'), passed, checks }
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = prev
+    }
+  }
+
+  it('adds the row for claude-tui', async () => {
+    const { row } = await loginRow(['claude-tui'], loggedIn)
+    assert.equal(row.status, 'pass')
+    assert.match(row.message, /^Logged in \(claude\.ai, max\)$/)
+  })
+
+  it('adds a warn row for a logged-out claude-sdk host with no API key, and does not fail doctor on its own account', async () => {
+    const { row, checks } = await loginRow(['claude-sdk'], loggedOut)
+    assert.equal(row.status, 'warn')
+    assert.match(row.message, /claude auth login/)
+    assert.ok(checks.every((c) => c.name === 'Claude login' ? c.status !== 'fail' : true))
+  })
+
+  it('does not warn a claude-sdk host that authenticates with ANTHROPIC_API_KEY about a login it does not use', async () => {
+    const { row } = await loginRow(['claude-sdk'], loggedOut, { ANTHROPIC_API_KEY: 'sk-test-not-real' })
+    assert.equal(row, undefined)
+  })
+
+  it('still adds the row for claude-tui when ANTHROPIC_API_KEY is set (claude-tui never uses it)', async () => {
+    const { row } = await loginRow(['claude-tui'], loggedOut, { ANTHROPIC_API_KEY: 'sk-test-not-real' })
+    assert.equal(row.status, 'warn')
+  })
+
+  it('adds no row when no claude login provider is configured', async () => {
+    let execed = false
+    const { row } = await loginRow(['gemini'], () => { execed = true; return loggedIn() })
+    assert.equal(row, undefined)
+    assert.equal(execed, false, 'no claude is exec\'d for a Gemini-only install')
   })
 })
 

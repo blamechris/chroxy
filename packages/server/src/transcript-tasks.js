@@ -42,6 +42,21 @@
 // (the harness re-invoked the agent), a later user entry carries its prompt,
 // or a newer ScheduleWakeup supersedes it.
 //
+// #8223 — authentication failures. claude writes an API call that failed
+// authentication to the transcript as a STRUCTURED entry, regardless of the
+// PTY's width (at a narrow PTY it never paints the "Please run /login" banner
+// at all), with the same `error` enum the Agent SDK types as
+// `SDKAssistantMessageError`:
+//     { "type": "assistant", "isApiErrorMessage": true,
+//       "error": "authentication_failed",
+//       "message": { "role": "assistant", "content": [ { "type": "text",
+//         "text": "Please run /login · API Error: 401 OAuth access token is invalid." } ] } }
+// The scanner COUNTS those entries (`authFailureCount`, cumulative since the
+// scanner was last reset) and nothing else about them; a consumer compares the
+// count with a baseline it captured earlier. Only the two structured fields
+// count — never the entry's TEXT, because a model discussing `/login` in a
+// normal reply carries the same words.
+//
 // Robustness contract (#5431 success criterion — degrade silently):
 //   - The transcript format is the harness's INTERNAL representation, not a
 //     stable API. Every parse is defensive; an unparseable line is skipped.
@@ -64,6 +79,9 @@ export const EMPTY_TASK_SNAPSHOT = Object.freeze({
   backgroundTasks: Object.freeze([]),
   scheduledWakeup: null,
   observedModel: null,
+  // #8223: `null` = unknown (the transcript could not be read), as opposed to a
+  // known count of 0 — see `TranscriptTaskScanner.scan()`.
+  authFailureCount: null,
 })
 
 // #7327: the harness writes this literal `message.model` on synthetic
@@ -122,7 +140,15 @@ const TOOL_USE_ID_TAG = /<tool-use-id>\s*([^<\s]+)\s*<\/tool-use-id>/g
  *
  *   { backgroundTasks: [{ toolUseId, kind, description, startedAt }],
  *     scheduledWakeup: { at, reason } | null,
- *     observedModel: string | null }
+ *     observedModel: string | null,
+ *     authFailureCount: number | null }
+ *
+ * `authFailureCount` (#8223) is the cumulative number of structured
+ * `authentication_failed` API-error assistant entries seen, `0` for a
+ * transcript that does not exist yet or holds none, and `null` ONLY when the
+ * transcript could not be read for some other reason — so a consumer that
+ * needs a baseline can tell "known: none" from "unknown" and wait for a
+ * successful read rather than baseline against a guess.
  *
  * `observedModel` (#7327) is the most recent real `message.model` seen on an
  * `assistant` transcript entry — an OBSERVATION of what the session is
@@ -164,12 +190,16 @@ export class TranscriptTaskScanner {
     // transcript), so a transient parse miss can't blank out an already-
     // known model.
     this._observedModel = null
+    // #8223: cumulative count of `isApiErrorMessage` / `authentication_failed`
+    // assistant entries (see the header). Reset with the rest of the state, so a
+    // rotated or truncated transcript is recounted from its start.
+    this._authFailureCount = 0
   }
 
   /**
    * Read any new transcript bytes, fold them into the tracked state, and
    * return the outstanding-work snapshot. Never throws.
-   * @returns {{backgroundTasks: Array<{toolUseId:string,kind:string,description:string,startedAt:number}>, scheduledWakeup: {at:number,reason:string}|null}}
+   * @returns {{backgroundTasks: Array<{toolUseId:string,kind:string,description:string,startedAt:number}>, scheduledWakeup: {at:number,reason:string}|null, observedModel: string|null, authFailureCount: number|null}}
    */
   scan() {
     try {
@@ -180,14 +210,33 @@ export class TranscriptTaskScanner {
       // still debug-logged, but state is preserved so a later scan picks
       // up where it left off if the file appears.
       this._log.debug?.(`transcript scan failed for ${this.path}: ${err.message} — degrading to empty snapshot`)
-      return { backgroundTasks: [], scheduledWakeup: null, observedModel: null }
+      // #8223: a transcript that does not exist holds no auth failures — a KNOWN
+      // zero (or whatever was counted before the file went away). Any other
+      // failure is "could not look", reported as null so a consumer never
+      // baselines against it.
+      return {
+        backgroundTasks: [],
+        scheduledWakeup: null,
+        observedModel: null,
+        authFailureCount: err?.code === 'ENOENT' ? this._authFailureCount : null,
+      }
     }
   }
 
   _readNewBytes() {
     const fd = openSync(this.path, 'r')
     try {
-      const size = fstatSync(fd).size
+      const stat = fstatSync(fd)
+      // #8223: something other than a regular file at the transcript path is
+      // "could not look", not an empty transcript. POSIX refuses to read a
+      // directory (EISDIR); Windows opens it and reports size 0, which would
+      // otherwise read as a KNOWN zero auth-failure count.
+      if (!stat.isFile()) {
+        const err = new Error(`transcript path is not a regular file: ${this.path}`)
+        err.code = 'EISDIR'
+        throw err
+      }
+      const size = stat.size
       if (size < this._offset) {
         // Truncated / rotated — drop everything and re-read from the start.
         this._log.debug?.(`transcript ${this.path} shrank (${size} < ${this._offset}) — resetting scanner`)
@@ -262,6 +311,10 @@ export class TranscriptTaskScanner {
     }
 
     if (entry.type === 'assistant') {
+      // #8223: both structured markers, never the text (see the header).
+      if (entry.isApiErrorMessage === true && entry.error === 'authentication_failed') {
+        this._authFailureCount++
+      }
       // #7327: an OBSERVATION of the model this turn actually ran on — never
       // a stand-in for the requested/configured model. Excludes the
       // synthetic placeholder (see SYNTHETIC_MODEL), any non-string/empty
@@ -393,6 +446,7 @@ export class TranscriptTaskScanner {
       backgroundTasks: [...this._tasks.values()].map((t) => ({ ...t })),
       scheduledWakeup,
       observedModel: this._observedModel,
+      authFailureCount: this._authFailureCount,
     }
   }
 }

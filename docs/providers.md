@@ -27,7 +27,7 @@ The **primary** way to supply provider credentials is the **Settings → Provide
 - Supported keys: `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `GEMINI_API_KEY`, `OPENAI_API_KEY`.
 - Keys are saved to `~/.chroxy/credentials.json` (mode `0600`, owner-only) and are never shown again after saving — only a masked preview (a short leading prefix followed by `…[N chars redacted]`). Chroxy refuses to read the file unless its mode is exactly `0600`.
 - **Resolution order is env > store > unset.** An exported shell environment variable always wins over a stored value, so power users keep full control; the store fills the gap when no env var is exported.
-- OAuth status (`claude login`) is shown read-only — Chroxy does not manage the OAuth flow from the dashboard. Run `claude login` in a terminal for the subscription path.
+- OAuth status (`claude auth login`) is shown read-only — Chroxy does not manage the OAuth flow from the dashboard. Run `claude auth login` in a terminal for the subscription path.
 - This retires the macOS GUI-launch footgun below for most users: a Tauri/launchd-spawned server (`cwd=/`, minimal PATH, no shell rc sourced) can spawn a working session from stored credentials alone, because Chroxy injects them into the spawned child env when the shell hasn't exported them. (`ANTHROPIC_API_KEY` stays stripped for the Claude CLI/TUI providers so they keep using subscription/OAuth auth.)
 
 The registry lives in [`packages/server/src/providers.js`](../packages/server/src/providers.js) as a plain object literal mapping provider names to their session classes. To add a provider, edit that literal. Session classes must extend `EventEmitter` and expose `start`/`destroy`/`sendMessage`/`interrupt`/`setModel`/`setPermissionMode` plus a static `capabilities` getter — see [`sdk-session.js`](../packages/server/src/sdk-session.js) or [`cli-session.js`](../packages/server/src/cli-session.js) for a worked example.
@@ -36,7 +36,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 
 | Provider | Binary / SDK | Env vars | Default model | Auth | Notes |
 |----------|--------------|----------|---------------|------|-------|
-| `claude-sdk` | `@anthropic-ai/claude-agent-sdk` (npm) | `ANTHROPIC_API_KEY` (or inherits `claude` CLI login) | Deferred to SDK | Anthropic API key or subscription login | In-process, fastest startup, live model/mode switching, resume support. **Billing class (#5629):** explicit `ANTHROPIC_API_KEY` → raw API (per-token, api-key). OAuth/subscription login (`claude login`) → a flat Claude **subscription before 2026-06-15 UTC**, and Anthropic's monthly **programmatic credit pool on/after** that date. |
+| `claude-sdk` | `@anthropic-ai/claude-agent-sdk` (npm) | `ANTHROPIC_API_KEY` (or inherits `claude` CLI login) | Deferred to SDK | Anthropic API key or subscription login | In-process, fastest startup, live model/mode switching, resume support. **Billing class (#5629):** explicit `ANTHROPIC_API_KEY` → raw API (per-token, api-key). OAuth/subscription login (`claude auth login`) → a flat Claude **subscription before 2026-06-15 UTC**, and Anthropic's monthly **programmatic credit pool on/after** that date. |
 | `claude-cli` | `claude` (Claude Code CLI) | `ANTHROPIC_API_KEY` (or `claude` CLI login) | Deferred to `claude` CLI | Anthropic API key or subscription login | Subprocess; plan mode supported (also on `claude-sdk`, #8153); permission hook via HTTP. **Billing class (#5629):** the CLI strips `ANTHROPIC_API_KEY` before spawn, so it always auths via the host pool — a flat Claude **subscription before 2026-06-15 UTC**, and the monthly **programmatic credit pool on/after** that date. |
 | `claude-tui` *(default)* | `claude` (Claude Code CLI, interactive TUI) | `claude` CLI login (rejects `ANTHROPIC_API_KEY` — strips it from spawn env) | Deferred to `claude` TUI | Subscription login only | Persistent PTY, one warmup per session; permission hook via HTTP; deliver-on-complete (no live streaming); bills as interactive subscription. The zero-config default (see #5819), to keep setups off the metered programmatic-credit pool. |
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
@@ -76,12 +76,12 @@ The Claude Code providers are the primary, most-featured backends. All three use
 claude --version
 ```
 
-The SDK provider (`claude-sdk`) imports `@anthropic-ai/claude-agent-sdk` directly, but the SDK itself spawns your **installed** `claude` binary under the hood (`pathToClaudeCodeExecutable`, #7986) — the desktop app no longer bundles the SDK's own platform binary, and Chroxy points the SDK at your installed `claude` on every install, so `claude` must be installed and on one of the paths listed above regardless of which Claude Code provider you use. `chroxy doctor`'s preflight checks for it and enforces a **hard minimum version**, `CLAUDE_SDK_MIN_CLI_VERSION` (currently `2.1.141`) — a small, hand-raised constant, not the installed SDK's own version — below which it fails preflight with a `claude update` remediation instead of an opaque mid-turn spawn error (`PROVIDER_BINARY_VERSION`). Separately, it warns (`chroxy doctor` reports `warn`; the server logs a warning) when your `claude` is older than the SDK package's own `claudeCodeVersion` field — the CLI build the installed SDK was published alongside — without blocking anything: that field moves on every SDK bump and a CLI on a lagging release channel (e.g. npm `stable`, which trails `latest`) is expected to sit behind it for a while (#8031). On Windows the SDK spawns `claude` without a shell, so it needs the native `claude.exe` from the native installer; an npm `.cmd` shim is refused with `PROVIDER_BINARY_UNSUPPORTED`. Many users authenticate via `claude login`, which the SDK then inherits.
+The SDK provider (`claude-sdk`) imports `@anthropic-ai/claude-agent-sdk` directly, but the SDK itself spawns your **installed** `claude` binary under the hood (`pathToClaudeCodeExecutable`, #7986) — the desktop app no longer bundles the SDK's own platform binary, and Chroxy points the SDK at your installed `claude` on every install, so `claude` must be installed and on one of the paths listed above regardless of which Claude Code provider you use. `chroxy doctor`'s preflight checks for it and enforces a **hard minimum version**, `CLAUDE_SDK_MIN_CLI_VERSION` (currently `2.1.141`) — a small, hand-raised constant, not the installed SDK's own version — below which it fails preflight with a `claude update` remediation instead of an opaque mid-turn spawn error (`PROVIDER_BINARY_VERSION`). Separately, it warns (`chroxy doctor` reports `warn`; the server logs a warning) when your `claude` is older than the SDK package's own `claudeCodeVersion` field — the CLI build the installed SDK was published alongside — without blocking anything: that field moves on every SDK bump and a CLI on a lagging release channel (e.g. npm `stable`, which trails `latest`) is expected to sit behind it for a while (#8031). On Windows the SDK spawns `claude` without a shell, so it needs the native `claude.exe` from the native installer; an npm `.cmd` shim is refused with `PROVIDER_BINARY_UNSUPPORTED`. Many users authenticate via `claude auth login`, which the SDK then inherits.
 
 ### Where to get an API key
 
 - **Anthropic API key** (recommended for API-billed usage): https://console.anthropic.com/settings/keys — set `ANTHROPIC_API_KEY=sk-ant-...`
-- **Subscription login** (Claude.ai Pro / Max / Team plans): run `claude login` in a terminal. Both providers inherit the login session automatically.
+- **Subscription login** (Claude.ai Pro / Max / Team plans): run `claude auth login` in a terminal. Both providers inherit the login session automatically.
 
 ### Verify
 
@@ -107,7 +107,7 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 | Resume (`resumeSessionId`) | Yes | Yes (`--resume` on respawn/restore) | Yes (`--resume` on restore) |
 | Thinking level control | Yes | No | No |
 | Live streaming (`stream_delta`) | Yes | Yes | No (deliver-on-complete) |
-| Auth | API key or `claude login` | API key or `claude login` | `claude login` only (`ANTHROPIC_API_KEY` rejected) |
+| Auth | API key or `claude auth login` | API key or `claude auth login` | `claude auth login` only (`ANTHROPIC_API_KEY` rejected) |
 | Billing | Programmatic credits / API | Programmatic credits / API | **Subscription interactive allowance** (today; best-effort, not guaranteed) |
 | Startup overhead | None (in-process) | One `claude -p` spawn per session | One `claude` PTY warmup (~3.5s) per session |
 
@@ -161,7 +161,7 @@ dictionary (then reload the agent).
 
 ### Common pitfalls
 
-- **GUI launch on macOS**: Tauri-spawned servers start with `cwd=/` and a minimal PATH. Chroxy probes absolute paths, but custom install locations need credentials supplied out-of-band. The simplest fix is the **Settings → Provider Credentials** pane (see [Setting credentials from the dashboard](#setting-credentials-from-the-dashboard)) — the server reads from its own `~/.chroxy/credentials.json` store, so you no longer have to rely on shell rc files, `~/.zshenv`, or `launchctl setenv`. A working `claude login` also satisfies the Claude providers.
+- **GUI launch on macOS**: Tauri-spawned servers start with `cwd=/` and a minimal PATH. Chroxy probes absolute paths, but custom install locations need credentials supplied out-of-band. The simplest fix is the **Settings → Provider Credentials** pane (see [Setting credentials from the dashboard](#setting-credentials-from-the-dashboard)) — the server reads from its own `~/.chroxy/credentials.json` store, so you no longer have to rely on shell rc files, `~/.zshenv`, or `launchctl setenv`. A working `claude auth login` also satisfies the Claude providers.
 - **Model names**: pass short aliases (`sonnet`, `opus`, `haiku`) or full IDs (`claude-sonnet-4-6`). Aliases are resolved to their full ID by `resolveModelId()` in `models.js` — but note this only runs in `BaseSession.setModel()` (i.e. live `set_model` messages from the mobile app / dashboard). On initial session creation, whatever string you set via `--model` / config is forwarded to the provider verbatim. Both the SDK and the `claude` CLI accept aliases directly, so this is fine in practice — but if you're writing a custom provider that doesn't accept aliases, canonicalize in the constructor.
 - **Permission prompts never arrive (claude-cli only)**: the PreToolUse hook requires `CHROXY_PORT` and the per-session hook secret injected via `~/.claude/settings.json`. Restarting the server re-registers it.
 
@@ -219,7 +219,7 @@ It is **not a strict superset of `claude-tui`** — see [Known limits →
   channels are not on Anthropic's approved allowlist. The flag bypasses only the
   allowlist, not org policy. A marketplace-approved plugin removes the need for
   it: see [`PACKAGING.md`](../packages/server/src/channels/PACKAGING.md).
-- **Subscription login** (`claude login`); `ANTHROPIC_API_KEY` is not accepted.
+- **Subscription login** (`claude auth login`); `ANTHROPIC_API_KEY` is not accepted.
 - Channels are **not available on Bedrock / Vertex / Foundry**; Team/Enterprise
   orgs must enable `channelsEnabled`.
 
@@ -1040,7 +1040,7 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
 
 ### `claude-tui`
 
-- **Subscription only** — `ANTHROPIC_API_KEY` is explicitly stripped from the spawn env. Auth via `claude login`; no API-key fallback.
+- **Subscription only** — `ANTHROPIC_API_KEY` is explicitly stripped from the spawn env. Auth via `claude auth login`; no API-key fallback.
 - **No live streaming** — the response is delivered as one `stream_start` → `stream_delta` → `stream_end` burst when Claude's `Stop` hook fires. No incremental token streaming inside a turn.
 - **No live model switch, no plan mode, no thinking-level control, no attachments, no agent tracking, no cost reporting** — `result.cost` is emitted as `0` (a placeholder, not parsed from the Stop hook) and `result.usage` is `null` (the Stop hook payload doesn't expose either).
 - **The booted model IS reported, but only after the first completed turn of a NEW session** (#7327) — there is no structured init event to read it from (unlike `claude-sdk`/`claude-cli`), so it is observed from `message.model` on the session's own conversation transcript once an assistant entry has been written; a fresh session's dashboard/app model badge stays blank until then. A *restored* session (daemon restart / reconnect) is pre-seeded with its persisted `bootedModel` and shows it immediately, no turn required. A configured `--model` (when one was set at session create) still wins the display over the observation, matching every other provider's precedence. Model *switching* stays unavailable regardless (#7855); discovery is #7348.

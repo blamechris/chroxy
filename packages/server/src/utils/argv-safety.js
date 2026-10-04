@@ -267,8 +267,8 @@ export const AUDITED_SINKS = [
     // substring (#8112: those are no longer honoured). If this call site's
     // source text changes upstream of this cut point, this entry goes stale
     // and must be re-derived against the new truncation.
-    match: "execFile(binary, args, { cwd, env, encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024, windowsHide: true, }, (err, stdout) => { if (err && typeof err.code !== 'number') { reject(err) return } reso",
-    reason: "runClaudeAuthStatus's one call site passes a literal ['auth','status','--json','--settings', this._settingsPath] array; --settings is a daemon-generated absolute path (join(sinkDir, 'settings.json') under a random-UUID sink dir) — never client text.",
+    match: "execFile(binary, args, { cwd, env, encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024, windowsHide: true, }, (err, stdout, stderr) => { if (err && typeof err.code !== 'number') { reject(err) retur",
+    reason: "runClaudeAuthStatus's two call sites (_verifyNativeConnectionRoute, _probeLoginBeforeFirstSpawn) pass a literal ['auth','status','--json'(,'--settings', this._settingsPath)] array; --settings is a daemon-generated absolute path (join(sinkDir, 'settings.json') under a random-UUID sink dir) — never client text.",
   },
   // #7935 — `_spawnPty`'s node-pty `ptyMod.spawn(attemptedBinary, args, {...})`
   // became a scanned sink once the lint learned to recognise node-pty
@@ -465,6 +465,11 @@ export const AUDITED_SINKS = [
     file: 'doctor.js',
     match: "execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...s.options })",
     reason: "checkClaudeTuiCliVersion's default exec seam always receives the literal ['--version'] from its one call site; prepareSpawn only rewraps for a Windows .cmd shim. CLI-only (chroxy doctor).",
+  },
+  {
+    file: 'doctor.js',
+    match: "execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], env, ...s.options })",
+    reason: "checkClaudeLogin's default exec seam always receives the literal ['auth', 'status', '--json'] from its one call site; prepareSpawn only rewraps for a Windows .cmd shim. CLI-only (chroxy doctor / start preflight).",
   },
   {
     file: 'doctor.js',

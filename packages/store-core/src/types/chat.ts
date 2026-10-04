@@ -167,6 +167,16 @@ export interface ChatMessage {
    * pre-#4944 servers that don't emit the field.
    */
   attemptedResumeId?: string;
+  /**
+   * #8223: only set on `type: 'error'` bubbles whose `code` is `'stream_stall'`.
+   * The silence window, in ms, of the watchdog that actually fired — claude-tui
+   * has two that share the code (90s before the first output, 5 minutes
+   * mid-turn). Renderers prefer it over the connection-wide `streamStallTimeoutMs`
+   * from `auth_ok` (the mid-turn window) when wording the stall chip. Undefined
+   * for older servers and for the other providers' stalls, which fall back to
+   * the `auth_ok` value.
+   */
+  timeoutMs?: number;
   /** Base64 images from tool results (e.g. computer use screenshots) */
   toolResultImages?: ToolResultImage[];
   /**

@@ -198,6 +198,16 @@ export const ServerMessageSchema = z.object({
   // shape-compatible.
   stdout: z.string().max(8192).optional(),
   stderr: z.string().max(8192).optional(),
+  // #8223: the silence window that actually fired, in ms. Only set on
+  // `messageType: 'error'` envelopes whose `code` is `'stream_stall'`; by the same
+  // producer convention as `attemptedResumeId` above, this schema does not
+  // cross-validate that pairing. claude-tui has two watchdogs that share the code
+  // (90s before the first output, 5 minutes mid-turn), so the code alone cannot
+  // tell a client which window to name; without this field it falls back to the
+  // `auth_ok` stall window (5 minutes), which is wrong for the first-output one.
+  // zod strips unknown keys, so a schema that omits it would drop it silently.
+  // Optional so older servers' envelopes stay valid.
+  timeoutMs: z.number().int().positive().optional(),
   // #7454/#7458: present on REPLAYED frames only (both replay paths map the
   // server-internal `_seq` onto the wire; absent on live broadcasts). The
   // #5555.3 delta-replay cursor — and for user_question the #7420

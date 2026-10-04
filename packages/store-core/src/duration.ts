@@ -43,11 +43,18 @@ export function formatDurationTerse(ms: number): string {
  *     the helper owns its own contract.
  *   - `Math.max(1, seconds)` floors sub-500ms inputs to "1 second" rather than
  *     the meaningless "0 seconds" the original helper produced.
+ *   - Under an hour, a value that is not a whole number of minutes keeps its
+ *     seconds ("90 seconds", not "2 minutes") — the helper states a window as a
+ *     fact (#8223). Whole minutes and hours format as before.
  */
 export function formatDurationVerbose(ms: number): string {
   if (!Number.isFinite(ms)) return '1 second'
   const seconds = Math.max(1, Math.round(ms / 1000))
   if (seconds < 60) return `${seconds} ${seconds === 1 ? 'second' : 'seconds'}`
+  // #8223: between a minute and an hour, a value that is not a whole number of
+  // minutes keeps its seconds. Rounding 90s to "2 minutes" put a window 33% longer
+  // than the real one in the stall chip's headline.
+  if (seconds < 3600 && seconds % 60 !== 0) return `${seconds} seconds`
   const minutes = Math.round(seconds / 60)
   if (minutes < 60) return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
   const hours = Math.round(minutes / 60)

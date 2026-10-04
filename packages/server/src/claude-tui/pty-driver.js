@@ -17,6 +17,7 @@ import { fileURLToPath } from 'url'
 // others still import CLAUDE_BINARY_CANDIDATES/resolveClaudeBinary from here.
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from '../utils/claude-binary.js'
 import { createLogger } from '../logger.js'
+import { CLAUDE_LOGIN_COMMAND } from '../utils/claude-login-command.js'
 // #7002/#7046 — the ONE writer for `~/.claude.json`. Deliberately shared with the
 // BYOK MCP add/remove path rather than re-implemented here: a second hand-rolled
 // `writeFileSync(tmp)` → `renameSync(tmp, ~/.claude.json)` is exactly how the
@@ -132,15 +133,77 @@ export const CLAUDE = resolveClaudeBinary()
 // not in a model discussing auth. Matched on the whitespace-normalized tail so a
 // line-wrapped banner still matches. Best-effort pending a real logged-out
 // capture (scripts/tui-form-recorder.mjs) — tune the tokens, not loosen them.
+//
+// TURN-TIME lists (this one and the compact one below): matched against THIS
+// turn's output on a stall / first-output timeout. Warmup must NOT use them —
+// see AUTH_FAILURE_FOOTER_PATTERNS for why warmup is footer-only (#8223).
 export const AUTH_FAILURE_PATTERNS = [
   /please run `?\/login`?/i,            // claude's exact logged-out instruction
   /invalid api key.{0,60}\/login/i,     // full banner: "Invalid API key · Please run /login"
   /\brun `?\/login`?/i,                 // "run /login" / "run `/login`"
   /\brun `?claude login`?/i,            // CLI-command guidance: "run claude login"
 ]
+// #8223 — the same banner with EVERY whitespace character removed. `ANSI_STRIP`
+// deletes the CSI cursor moves claude uses to lay a row out (CHA `\x1b[<n>G`
+// between words, CUD `\x1b[1B` between wrapped rows) AND the `\r` that rides
+// with them, and it replaces them with nothing, not a space — so at a narrow PTY
+// (the dashboard Chat tab resizes it to 10 columns, #8254) a banner that renders
+// as "Please run /login" reaches the tail as "Pleaserun/login", and every
+// pattern above (each needs a literal space) misses it. Likewise the footer
+// status line claude paints from its FIRST frame whenever it is logged out or
+// its login expired: "Not logged in · Run /login" strips to "Notloggedin·Run/login".
+//
+// These are matched against the tail with ALL whitespace removed, and are held
+// to the same standard as the list above — each one still requires claude's own
+// `/login` command token, never a bare English phrase:
+//   - `pleaserun/login`: claude's remediation sentence, run together.
+//   - `<status phrase>·(please)run/login`: claude's own status phrase, then the
+//     `·` separator it prints, then the command. The phrase AND the separator
+//     are both required, so a model writing "if you are not logged in, run
+//     /login" (no `·`) and prose that merely contains "run/login" (a path) do not
+//     match.
+// A bare `run/login` is deliberately absent: it is exactly what the squeezed
+// text of "rerun /login" or a `run/login` route would produce.
+export const AUTH_FAILURE_COMPACT_PATTERNS = [
+  /pleaserun`?\/login/i,
+  /(?:notloggedin|loginexpired|invalidapikey)·(?:please)?run`?\/login/i,
+]
+// #8223 — what WARMUP may conclude from claude's output: its FOOTER status line
+// only, never a message banner.
+//
+// `claude --resume <id>` re-renders the conversation's history at startup, and a
+// past turn that hit an auth failure left a message banner in that history
+// ("Please run /login · API Error: 401…", "Login expired · Please run /login",
+// "Not logged in · Please run /login"). A user whose login expired, who then runs
+// `claude auth login` and restores the session, would have it refused as "not
+// logged in" on EVERY restore, forever, because the history always contains the
+// banner — measured: a PTY capture of `claude --resume` with no prompt sent holds
+// `Pleaserun/login·APIError` and not the live footer.
+//
+// On a fresh spawn no prompt has run yet, so a message banner during warmup can
+// only be re-rendered history; the live startup signal is the footer claude
+// paints from its first frame when it holds no credentials, "Not logged in · Run
+// /login" (no "Please" — that word is what marks the message banner). It is
+// measured to appear at ~0.2s with no credentials, and NOT at all for an expired
+// token, which claude only discovers on its first API call; that case is caught
+// at turn time from this turn's own output and from the transcript instead (see
+// `_scanTurnOutputForAuthFailure` / `_checkTranscriptForAuthFailure`). The
+// pre-spawn `claude auth status` probe already catches the no-credentials case,
+// so the warmup scan is a backstop.
+//
+// Two lists for the two renderings of the SAME footer, like the lists above: the
+// space-collapsed tail, and the whitespace-free tail (CHA-positioned words at a
+// narrow PTY). Neither accepts "Please run /login" or "Not logged in · Please
+// run /login" (the no-credentials TURN banner, which history can contain).
+export const AUTH_FAILURE_FOOTER_PATTERNS = [
+  /not logged in · run `?\/login/i,
+]
+export const AUTH_FAILURE_FOOTER_COMPACT_PATTERNS = [
+  /notloggedin·run`?\/login/i,
+]
 // Structured error surfaced when an auth failure is classified.
 export const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'
-export const AUTH_REQUIRED_MESSAGE = 'Claude is not logged in (or the subscription login expired). Run `claude login` in a terminal on the host, then retry. This provider uses the Claude subscription and does NOT accept ANTHROPIC_API_KEY.'
+export const AUTH_REQUIRED_MESSAGE = `Claude is not logged in on this host, or its login expired. Run \`${CLAUDE_LOGIN_COMMAND}\` in a terminal on the host (or \`/login\` inside claude), then retry. This provider uses the Claude subscription and does not accept ANTHROPIC_API_KEY.`
 
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
 // block headless spawn. The dialog is interactive-only — without this, the

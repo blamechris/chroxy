@@ -19,6 +19,26 @@ export function formatIdleDuration(ms) {
 }
 
 /**
+ * #8223: like `formatIdleDuration`, but for a duration a message states as a FACT
+ * ("no response within …") rather than a rough idle window. `formatIdleDuration`
+ * rounds to the nearest minute, so the 90s first-output watchdog read "2 minutes"
+ * — a 33% overstatement. Here a value between a minute and an hour that is not a
+ * whole number of minutes keeps its seconds ("90 seconds"); whole minutes ("5
+ * minutes"), sub-minute values and hours format exactly as `formatIdleDuration`
+ * does, so the two only disagree where the rounding was wrong.
+ *
+ * `formatIdleDuration` itself is left alone: it has ~20 call sites and
+ * session-manager.test.js pins 90000 -> "2 minutes" for the idle-timeout copy.
+ */
+export function formatWatchdogDuration(ms) {
+  const totalSeconds = Math.round(ms / 1000)
+  if (totalSeconds > 60 && totalSeconds < 3600 && totalSeconds % 60 !== 0) {
+    return `${totalSeconds} seconds`
+  }
+  return formatIdleDuration(ms)
+}
+
+/**
  * Manages session idle timeouts independently of session lifecycle.
  *
  * Events emitted:

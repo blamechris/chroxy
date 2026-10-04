@@ -940,6 +940,15 @@ Object.assign(EVENT_MAP, {
         msg.attemptedResumeId = trimmed.length > 256 ? trimmed.slice(0, 256) : trimmed
       }
     }
+    // #8223: forward the watchdog window that actually fired on a
+    // `stream_stall`, so the clients can say "No response for 90 seconds" for
+    // the first-output watchdog instead of the mid-turn window `auth_ok`
+    // advertises. Gated on the code like the two blocks around it, and held to
+    // the positive-finite-integer shape the wire schema declares; anything else
+    // is dropped so the clients fall back to their `auth_ok` value.
+    if (data.code === 'stream_stall' && Number.isInteger(data.timeoutMs) && data.timeoutMs > 0) {
+      msg.timeoutMs = data.timeoutMs
+    }
     // #5067: forward captured `stdout` / `stderr` on docker-byok
     // postCreateCommand failures so the operator can diagnose without
     // re-running the broken setup. The session layer

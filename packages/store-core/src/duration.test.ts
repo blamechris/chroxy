@@ -73,6 +73,15 @@ describe('formatDurationVerbose', () => {
     expect(formatDurationVerbose(59 * 60_000)).toBe('59 minutes')
   })
 
+  // #8223: 90s used to round to "2 minutes" — the stall chip then named a window
+  // 33% longer than the one that fired.
+  it('keeps seconds for a value between one minute and one hour that is not whole minutes', () => {
+    expect(formatDurationVerbose(90_000)).toBe('90 seconds')
+    expect(formatDurationVerbose(61_000)).toBe('61 seconds')
+    expect(formatDurationVerbose(150_000)).toBe('150 seconds')
+    expect(formatDurationVerbose(3_599_000)).toBe('3599 seconds')
+  })
+
   it('returns "1 hour" singular at exactly one hour', () => {
     expect(formatDurationVerbose(60 * 60_000)).toBe('1 hour')
   })

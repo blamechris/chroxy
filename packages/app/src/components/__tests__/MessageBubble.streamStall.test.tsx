@@ -56,6 +56,20 @@ describe('MessageBubble stream-stall handling (#4496)', () => {
     expect(chip).toBeDefined();
   });
 
+  // #8223: ChatMessage.timeoutMs (the window the server says fired) reaches the chip.
+  it('words the chip from the message timeoutMs: a 90_000 ms stall is "90 seconds"', () => {
+    const tree = render({ ...makeStallMessage(), content: 'No response from claude TUI within 90 seconds.', timeoutMs: 90_000 } as ChatMessage);
+    const chip = tree.root.findByProps({ testID: 'stream-stall-chip' });
+    expect(chip.props.accessibilityLabel).toBe('No response for 90 seconds — retry?');
+    expect(chip.props.accessibilityLabel).not.toMatch(/5 minutes|2 minutes/);
+  });
+
+  it('falls back to the registry phrase when the stall carries no timeoutMs (older server)', () => {
+    const tree = render(makeStallMessage());
+    const chip = tree.root.findByProps({ testID: 'stream-stall-chip' });
+    expect(chip.props.accessibilityLabel).toBe('Stream stalled — retry?');
+  });
+
   it('falls through to the generic error bubble when code is missing', () => {
     // Legacy / non-stall errors must still render through the red
     // bubble path — the chip is only for the structured stall signal.

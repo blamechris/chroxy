@@ -43,12 +43,13 @@ import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spa
 import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { nodePtyImportFailureError } from './utils/node-pty-support.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
-import { formatIdleDuration } from './session-timeout-manager.js'
+import { formatIdleDuration, formatWatchdogDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
+import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import {
   parseBackgroundShellId,
@@ -67,6 +68,9 @@ import {
   CLAUDE_BINARY_CANDIDATES,
   resolveClaudeBinary,
   AUTH_FAILURE_PATTERNS,
+  AUTH_FAILURE_COMPACT_PATTERNS,
+  AUTH_FAILURE_FOOTER_PATTERNS,
+  AUTH_FAILURE_FOOTER_COMPACT_PATTERNS,
   AUTH_REQUIRED_CODE,
   AUTH_REQUIRED_MESSAGE,
   ensureCwdTrusted,
@@ -118,15 +122,26 @@ function runClaudeAuthStatus({ binary, args, cwd, env }) {
       timeout: 5_000,
       maxBuffer: 64 * 1024,
       windowsHide: true,
-    }, (err, stdout) => {
+    }, (err, stdout, stderr) => {
       if (err && typeof err.code !== 'number') {
         reject(err)
         return
       }
-      resolve({ status: typeof err?.code === 'number' ? err.code : 0, stdout: stdout || '' })
+      // #8223: `stderr` rides along so the pre-spawn probe can say WHY it got no
+      // JSON (the `--settings` rejection printed "unknown option" there).
+      resolve({ status: typeof err?.code === 'number' ? err.code : 0, stdout: stdout || '', stderr: stderr || '' })
     })
   })
 }
+
+// #8223: the pre-spawn login probe warns ONCE per daemon process when `claude auth
+// status` exits non-zero without JSON (see `_probeLoginBeforeFirstSpawn`). A
+// module-level latch, not a per-session one: the cause (claude rejecting an
+// argument, or changing its output) is the same for every session on the host,
+// and a warn per session would be noise.
+let loginProbeBrokenWarned = false
+/** Test seam: re-arm the once-per-process warning. */
+export function _resetLoginProbeWarningForTests() { loginProbeBrokenWarned = false }
 
 // Re-export the public writeHookSettings helper so existing
 // `import { writeHookSettings } from './claude-tui-session.js'` callers (and the
@@ -287,7 +302,7 @@ export class ClaudeTuiSession extends BaseSession {
       },
       credentials: {
         envVars: [],
-        hint: 'run `claude login` (subscription required — this provider does NOT accept ANTHROPIC_API_KEY)',
+        hint: `run \`${CLAUDE_LOGIN_COMMAND}\` (subscription required — this provider does NOT accept ANTHROPIC_API_KEY)`,
         optional: true,
       },
     }
@@ -339,8 +354,8 @@ export class ClaudeTuiSession extends BaseSession {
       envVar: null,
       envVars,
       hint: keychainPossible
-        ? 'auth not verifiable on disk (macOS Keychain) — run `claude login` if a session reports AUTH_REQUIRED'
-        : 'run `claude login` — no Claude OAuth credentials found (subscription required; ANTHROPIC_API_KEY is not accepted)',
+        ? `auth not verifiable on disk (macOS Keychain) — run \`${CLAUDE_LOGIN_COMMAND}\` if a session reports AUTH_REQUIRED`
+        : `run \`${CLAUDE_LOGIN_COMMAND}\` — no Claude OAuth credentials found (subscription required; ANTHROPIC_API_KEY is not accepted)`,
       detail: keychainPossible
         ? 'Claude subscription (OAuth in macOS Keychain — not on-disk-verifiable; runtime AUTH_REQUIRED is authoritative)'
         : 'Claude subscription — no on-disk OAuth credentials found (logged out)',
@@ -401,6 +416,13 @@ export class ClaudeTuiSession extends BaseSession {
     this._nativeRouteVerifiedForSpawn = false
     this._connectionAuthStatusRunner = typeof opts.connectionAuthStatusRunner === 'function'
       ? opts.connectionAuthStatusRunner
+      : runClaudeAuthStatus
+    // #8223: the pre-spawn login probe (_probeLoginBeforeFirstSpawn) has its OWN
+    // runner rather than sharing the native route's. A native-route test that
+    // blocks `connectionAuthStatusRunner` to hold a respawn open would otherwise
+    // also block the probe on the FIRST spawn, which is a different step.
+    this._loginProbeRunner = typeof opts.loginProbeRunner === 'function'
+      ? opts.loginProbeRunner
       : runClaudeAuthStatus
 
     // #5332: monotonic clock for turn-duration logging and watchdog poll-loop
@@ -512,6 +534,15 @@ export class ClaudeTuiSession extends BaseSession {
     // #5321 (WP-4.1) — latched true when warmup classifies claude's output as a
     // logged-out / expired-login failure, so start() rejects with AUTH_REQUIRED.
     this._authFailureDetected = false
+    // #8223 — the pre-spawn `claude auth status` probe runs on this session's FIRST
+    // spawn only (see _probeLoginBeforeFirstSpawn); a respawn never re-asks.
+    this._loginProbeRan = false
+    // #8223: what the probe concluded, set once on the first spawn and KEPT across
+    // respawns: 'logged_in' (exit 0 AND JSON `loggedIn: true`), 'logged_out' (the
+    // explicit refusal), or 'unknown' — every fail-open path, the native-route skip,
+    // and probe-not-run. Only 'logged_in' changes behaviour: it switches the warmup
+    // footer scan off (see `_scanWarmupOutputForAuthFailure`).
+    this._loginProbeOutcome = 'unknown'
     // #5315 (WP-2.1) — bounded per-session PTY auto-respawn state, mirroring
     // CliSession (cli-session.js:351). WHY: when the persistent claude PTY dies
     // unexpectedly mid-session, `_onPtyGone` used to tear the session down into
@@ -545,6 +576,11 @@ export class ClaudeTuiSession extends BaseSession {
     // first-turn nudge can detect "output arrived since arm" even when the tail
     // is already at the cap (#5809 review).
     this._totalOutputBytes = 0
+    // #8223: `_totalOutputBytes` at the start of the current turn, so a turn-time
+    // auth scan can look at ONLY the bytes this turn produced (the 4KB tail, shortly
+    // after a `--resume`, still holds re-rendered history). 0 = "since construction"
+    // until the first turn marks it.
+    this._turnOutputStartBytes = 0
     // #4031 (review): _outputTail is ANSI-stripped for readability +
     // probe stability, so the hex-dump diagnostic sourced from it
     // could never surface the very escape/control bytes we wanted to
@@ -699,6 +735,15 @@ export class ClaudeTuiSession extends BaseSession {
     // (the TUI re-invokes itself on notifications — chroxy sees no turn).
     this._backgroundTaskPollTimer = null
     this._lastBackgroundTaskKey = null
+    // #8223: transcript-based fast path for an EXPIRED login (see
+    // _checkTranscriptForAuthFailure). `_authFailureBaseline` is the transcript's
+    // cumulative auth-failure count captured at turn start (null until a scan
+    // could read it); `_lastAuthTranscriptScanMs` throttles the poll-loop scan.
+    // `_authTranscriptScanMs` is an instance field, not only a static, so a test
+    // can shrink the ~1s cadence without sleeping.
+    this._authFailureBaseline = null
+    this._lastAuthTranscriptScanMs = 0
+    this._authTranscriptScanMs = ClaudeTuiSession.AUTH_TRANSCRIPT_SCAN_MS
   }
 
   /**
@@ -1850,6 +1895,12 @@ export class ClaudeTuiSession extends BaseSession {
   // stop-hook yet). Sized so healthy short turns (<5s end-to-end) emit
   // zero heartbeats but wedges produce a 5s-cadence trail of state.
   static get HOOK_HEARTBEAT_MS() { return 5_000 }
+  // #8223: how often the hook-poll loop re-reads the transcript for an
+  // authentication_failed entry while a turn has produced no output yet. The
+  // scan reads only the bytes appended since the last one, so ~1s is cheap and
+  // is what bounds how long an expired login takes to surface (vs the 90s
+  // first-output watchdog).
+  static get AUTH_TRANSCRIPT_SCAN_MS() { return 1_000 }
   // #6178: per-call timeout for the hot-path hook-drain fs ops (readdir/readFile/
   // unlink). A healthy sink read is sub-ms; this generous 2s bound only trips on
   // a genuinely stuck mount (FUSE/NFS freeze), letting the poll loop re-check its
@@ -2002,7 +2053,9 @@ export class ClaudeTuiSession extends BaseSession {
     // its login banner and sat there (_authFailureDetected, latched in
     // _spawnPty's warmup scan) AND claude printed it then exited (re-scan the
     // tail here, since the warmup loop returns on _ptyExited before scanning).
-    if (this._authFailureDetected || this._scanOutputForAuthFailure()) {
+    // #8223: warmup is FOOTER-ONLY (`_scanOutputForLoginFooter`) — a banner this
+    // early is resumed history, not a live failure.
+    if (this._authFailureDetected || this._scanWarmupOutputForAuthFailure()) {
       this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
       const err = new Error(AUTH_REQUIRED_MESSAGE)
       err.code = AUTH_REQUIRED_CODE
@@ -2163,7 +2216,11 @@ export class ClaudeTuiSession extends BaseSession {
       // banner in its tail, surface AUTH_REQUIRED (actionable) rather than a
       // bare exit code. The respawn below will keep failing the same way until
       // the operator re-logs in, so the categorized error is what matters.
-      if (this._scanOutputForAuthFailure()) {
+      // #8223: FOOTER-ONLY. No turn was in flight (`!hadActiveTurn`), so this is a
+      // death during warmup or at idle, and there a message banner in the tail is
+      // re-rendered history (a `--resume` replays it) or an earlier turn's failure
+      // that was already surfaced when it happened. The live signal is the footer.
+      if (this._scanWarmupOutputForAuthFailure()) {
         this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
       } else {
         const tail = this._outputTailDiagnostic()
@@ -2620,6 +2677,85 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  /**
+   * #8223 — ask `claude auth status --json` whether this host is logged in, once,
+   * before the session's first PTY spawn. Only an EXPLICIT logged-out answer
+   * (non-zero exit AND stdout that parses as JSON AND `loggedIn === false`) fails
+   * the start, with the same AUTH_REQUIRED error the warmup scan produces. Every
+   * other outcome — spawn error, ENOENT, the runner's 5s timeout, a claude too old
+   * to have the `auth` subcommand, unparseable output, `loggedIn` true or absent,
+   * exit 0 — proceeds exactly as before: this is a fast pre-check in front of the
+   * PTY scan, never a new way for a healthy session to be refused.
+   *
+   * What it can and cannot see: a logged-OUT host reports `loggedIn: false`, but an
+   * EXPIRED oauth token still reports `loggedIn: true`, so expiry is still caught
+   * only by the PTY scan (AUTH_FAILURE_PATTERNS). What it adds is the never-logged-
+   * in case, including claude's first-run onboarding screen, which prints no
+   * `/login` text for the scan to find.
+   *
+   * The native connection route is skipped: `_verifyNativeConnectionRoute` already
+   * runs the same command (and is strict where this is not). The runner is the
+   * injectable `_loginProbeRunner` (default: the same `runClaudeAuthStatus` the
+   * native route uses, so one execFile site and one 5s timeout).
+   */
+  async _probeLoginBeforeFirstSpawn({ binary, cwd, env }) {
+    if (this._loginProbeRan) return
+    this._loginProbeRan = true
+    if (this._connectionAuthRoute === 'native') return
+
+    // No `--settings`: `claude auth status` rejects it ("unknown option" on
+    // claude 2.1.289) with an empty stdout, which this probe reads as
+    // unparseable and fails open — so passing it made the probe a no-op.
+    const args = ['auth', 'status', '--json']
+    let result
+    try {
+      result = await this._loginProbeRunner({ binary, args, cwd, env })
+    } catch (err) {
+      ;(this._log || log).debug?.(`login probe could not run (${err?.code || err?.message || 'error'}) — proceeding to spawn`)
+      return
+    }
+    if (typeof result?.status !== 'number') return
+    let status
+    try {
+      status = JSON.parse(result.stdout || '')
+    } catch {
+      if (result.status !== 0) {
+        // Non-zero exit with no JSON is the signature of a BROKEN probe, not of a
+        // logged-out host (claude's own logged-out answer prints JSON): the
+        // `--settings` rejection looked exactly like this and silently disabled the
+        // probe on every real host while every unit test stayed green. Still fails
+        // open — but loudly, once per process, so the next claude change cannot do
+        // the same unseen. Every other inconclusive path stays at debug.
+        if (!loginProbeBrokenWarned) {
+          loginProbeBrokenWarned = true
+          const stderr = redactSensitive(String(result.stderr || '')).replace(/\s+/g, ' ').trim().slice(0, 200)
+          ;(this._log || log).warn(
+            `claude auth status exited ${result.status} without JSON${stderr ? ` (stderr: ${stderr})` : ''} — the pre-spawn login probe cannot tell whether this host is logged in, so it is failing open; ${AUTH_REQUIRED_CODE} for a logged-out host will only be caught at warmup/turn time (logged once per process)`,
+          )
+        }
+      } else {
+        ;(this._log || log).debug?.('login probe exited 0 without JSON — proceeding to spawn')
+      }
+      return
+    }
+    if (result.status === 0) {
+      // Only a positive, consistent answer counts: exit 0 AND `loggedIn: true`.
+      if (status?.loggedIn === true) this._loginProbeOutcome = 'logged_in'
+      return
+    }
+    if (status?.loggedIn !== false) return
+    // destroy() can land during the await above; a torn-down session has nothing
+    // left to refuse, and start()'s own `_destroying` guard resolves it quietly.
+    if (this._destroying) return
+
+    this._loginProbeOutcome = 'logged_out'
+    ;(this._log || log).warn(`claude auth status reports logged out — ${AUTH_REQUIRED_CODE} before spawning the PTY`)
+    this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
+    const err = new Error(AUTH_REQUIRED_MESSAGE)
+    err.code = AUTH_REQUIRED_CODE
+    throw err
+  }
+
   _beginNativeRouteVerification() {
     if (this._connectionAuthRoute !== 'native' || !this.agentConnection) return
     this.agentConnection.readiness = {
@@ -2750,6 +2886,18 @@ export class ClaudeTuiSession extends BaseSession {
       this._blockNativeRouteVerification(err)
       throw err
     }
+
+    // #8223: a host that is logged out would otherwise spawn a PTY that sits on
+    // claude's login screen (or first-run onboarding, which no output scan can
+    // classify) until the 90s first-output watchdog fires.
+    await this._probeLoginBeforeFirstSpawn({ binary: attemptedBinary, cwd: cwdReal, env })
+    // The probe can sit in its await for up to its 5s timeout, and destroy() may land
+    // in that window (a user deleting a session right after Create). Whatever the
+    // probe concluded, a torn-down session must not go on to launch claude for a
+    // sink dir that is already gone. Same shape as start()'s own `_destroying`
+    // guard after `_spawnPty`: return quietly; start() sees `_destroying` and
+    // resolves without emitting `ready`.
+    if (this._destroying) return
 
     let ptyMod
     // Test seam (#6417): a test may inject a capturing node-pty stand-in so the
@@ -3009,7 +3157,8 @@ export class ClaudeTuiSession extends BaseSession {
     // #5321 (WP-4.1) — also scan once on the timeout fallback (a logged-out
     // claude may print its login prompt and then sit there without ever exiting
     // or writing a `status`, so the in-loop scan above could miss a late banner).
-    if (!ready && !this._ptyExited && !this._authFailureDetected && this._scanOutputForAuthFailure()) {
+    // #8223: footer-only, like the in-loop scan (see _scanOutputForLoginFooter).
+    if (!ready && !this._ptyExited && !this._authFailureDetected && this._scanWarmupOutputForAuthFailure()) {
       this._authFailureDetected = true
     }
     if (this._authFailureDetected) {
@@ -3196,8 +3345,9 @@ export class ClaudeTuiSession extends BaseSession {
       // claude prints a logged-out / expired-login message, so start() can
       // surface AUTH_REQUIRED immediately instead of burning the full timeout
       // on a session that can never become ready. Warmup-only (opt-in) so
-      // normal per-turn output is never scanned.
-      if (detectAuthFailure && this._scanOutputForAuthFailure()) {
+      // normal per-turn output is never scanned. #8223: FOOTER-ONLY — see
+      // _scanOutputForLoginFooter for why a message banner here is history.
+      if (detectAuthFailure && this._scanWarmupOutputForAuthFailure()) {
         this._authFailureDetected = true
         this._lastProbeSawStatus = sawStatus
         return finish(false)
@@ -3479,19 +3629,115 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * #5321 (WP-4.1) — classify the ANSI-stripped PTY tail as a subscription-auth
    * failure (logged out / expired login). Returns true when claude's output
-   * matches an AUTH_FAILURE_PATTERNS entry. Called during warmup (before ready)
-   * and once a turn has stalled / the PTY exited — those tails CAN contain
-   * rendered response text, so the false-positive defence lives in the patterns
-   * themselves: each requires claude's `/login` / `claude login` remediation
+   * matches an AUTH_FAILURE_PATTERNS entry. TURN-time only: it takes the text to
+   * scan as a REQUIRED argument (#8223) — warmup uses `_scanOutputForLoginFooter`,
+   * and production passes THIS turn's output via `_scanTurnOutputForAuthFailure`.
+   * There is deliberately no whole-tail default: a bare call would scan the 4KB
+   * tail, which a `--resume` fills with re-rendered history, and a bare call now
+   * simply matches nothing. Those texts CAN contain rendered response text, so the
+   * false-positive defence lives in the patterns themselves: each requires claude's `/login` / `claude login` remediation
    * command token, which a model merely *discussing* authentication won't emit.
+   *
+   * #8223: also matches the SAME banner with all whitespace removed
+   * (AUTH_FAILURE_COMPACT_PATTERNS). `ANSI_STRIP` deletes the cursor-move
+   * sequences claude uses to space words and rows, and replaces them with
+   * nothing, so a banner or footer painted at a narrow PTY arrives as
+   * "Pleaserun/login" / "Notloggedin·Run/login" and the space-requiring
+   * patterns miss it.
    */
-  _scanOutputForAuthFailure() {
-    const tail = this._outputTail || ''
+  _scanOutputForAuthFailure(tail) {
     if (!tail) return false
     // Collapse whitespace (the TUI wraps/box-pads the banner with newlines +
     // spaces) so a line-wrapped "Please run\n  /login" still matches.
     const normalized = tail.replace(/\s+/g, ' ')
-    return AUTH_FAILURE_PATTERNS.some((re) => re.test(normalized))
+    if (AUTH_FAILURE_PATTERNS.some((re) => re.test(normalized))) return true
+    const compact = tail.replace(/\s+/g, '')
+    return AUTH_FAILURE_COMPACT_PATTERNS.some((re) => re.test(compact))
+  }
+
+  /**
+   * #8223 — the matcher WARMUP uses: claude's FOOTER status line ("Not logged
+   * in · Run /login") and nothing else. A message banner (`Please run /login`,
+   * `Login expired · …`, `Not logged in · Please run /login`) during warmup can
+   * only be history that `claude --resume` re-rendered — no prompt has run on a
+   * fresh spawn — so matching it refused every restore of a session whose last
+   * turn hit an auth failure, even after the user had logged in again. See
+   * AUTH_FAILURE_FOOTER_PATTERNS for the measurements and the full argument.
+   * Used by the warmup loop, the post-timeout fallback, start()'s post-warmup
+   * re-scan, and the no-turn PTY-death path in `_onPtyGone`; every TURN-time
+   * caller uses `_scanTurnOutputForAuthFailure` instead.
+   */
+  _scanOutputForLoginFooter(tail = this._outputTail || '') {
+    if (!tail) return false
+    const normalized = tail.replace(/\s+/g, ' ')
+    if (AUTH_FAILURE_FOOTER_PATTERNS.some((re) => re.test(normalized))) return true
+    const compact = tail.replace(/\s+/g, '')
+    return AUTH_FAILURE_FOOTER_COMPACT_PATTERNS.some((re) => re.test(compact))
+  }
+
+  /**
+   * #8223 — the warmup-phase auth check every pre-turn scan site goes through
+   * (`_waitForPrompt`'s detectAuthFailure loop, `_spawnPty`'s post-timeout
+   * fallback, `start()`'s post-warmup re-scan, `_onPtyGone`'s no-turn scan):
+   * `_scanOutputForLoginFooter`, UNLESS the pre-spawn probe positively answered
+   * `loggedIn: true`.
+   *
+   * Why skipping loses nothing there: claude paints the footer at startup only
+   * when it holds no usable credentials, and then `claude auth status` says
+   * `loggedIn: false` and the probe has already refused. For an EXPIRED token the
+   * probe says `true` but claude paints no footer at startup (measured: nothing in
+   * 12s). So after a positive probe a footer during warmup can only be re-rendered
+   * history — a resumed conversation that merely QUOTES "Not logged in · Run
+   * /login", as a session about this very issue would — and matching it would
+   * refuse every restore of that session. An inconclusive probe ('unknown': every
+   * fail-open path, the native route, probe not run) keeps the footer scan as the
+   * backstop. The outcome is recorded once and kept across respawns; a login state
+   * that changes later in the session's life is caught by the turn-time paths
+   * (`_scanTurnOutputForAuthFailure`, the transcript fast path), which this does
+   * not touch.
+   */
+  _scanWarmupOutputForAuthFailure() {
+    if (this._loginProbeOutcome === 'logged_in') return false
+    return this._scanOutputForLoginFooter()
+  }
+
+  /**
+   * #8223 — record where this turn's PTY output begins, so a turn-time scan can
+   * ignore everything older. Called at turn start, before the prompt is written.
+   */
+  _markTurnOutputStart() {
+    this._turnOutputStartBytes = this._totalOutputBytes
+  }
+
+  /**
+   * #8223 — ANSI-stripped text of ONLY the PTY bytes produced since the turn
+   * began: the last `min(_totalOutputBytes - start, _outputTailRaw.length)` bytes
+   * of the raw tail, stripped the same way `_appendToOutputTail` strips it. Zero
+   * new bytes is '' (no match). Slicing the raw bytes can start mid-escape-
+   * sequence or mid-character; that leaves a little junk at the very start of the
+   * slice, which cannot form a match, so it is accepted rather than avoided.
+   * `_totalOutputBytes` never resets (not even on a respawn, which does empty the
+   * tail), so a PTY replaced mid-turn only shortens the slice via the `min`.
+   */
+  _outputSinceTurnStart() {
+    const fresh = this._totalOutputBytes - this._turnOutputStartBytes
+    if (!(fresh > 0)) return ''
+    const raw = this._outputTailRaw
+    if (!raw || raw.length === 0) return ''
+    return raw
+      .subarray(-Math.min(fresh, raw.length))
+      .toString('utf8')
+      .replace(ANSI_STRIP, '')
+  }
+
+  /**
+   * #8223 — the TURN-time auth classifier: the full pattern set (banner, footer,
+   * compact forms) over only this turn's output. Used by the stall and
+   * first-output handlers so history re-rendered by a `--resume` — still in the
+   * 4KB tail shortly afterwards — cannot turn an ordinary stall into AUTH_REQUIRED.
+   */
+  _scanTurnOutputForAuthFailure() {
+    return this._scanOutputForAuthFailure(this._outputSinceTurnStart())
   }
 
   /**
@@ -3710,6 +3956,11 @@ export class ClaudeTuiSession extends BaseSession {
     // consumed its first hook). Must happen BEFORE `_armResultTimeout`
     // below — that helper checks the latch.
     this._resetFirstOutputWatchdogForTurn()
+    // #8223: baseline the transcript's auth-failure count BEFORE the prompt is
+    // written, so a failure the prompt itself causes is always newer than it.
+    this._beginAuthFailureWatchForTurn()
+    // #8223: and the PTY-output boundary the turn-time auth scans start from.
+    this._markTurnOutputStart()
 
     try {
       // #4269: claude TUI's paste detector triggers on byte-arrival rate,
@@ -3977,6 +4228,15 @@ export class ClaudeTuiSession extends BaseSession {
       // through an extra 150ms sleep before the loop notices; the `!_isBusy`
       // guard at the top of the loop would eventually catch it either way.
       if (!this._isBusy) break
+      // #8223: an EXPIRED login is invisible to the PTY scan — claude paints no
+      // footer at startup and, at a narrow PTY, never paints the banner either —
+      // but it writes the failed API call to the transcript as a structured
+      // entry. While the turn has produced nothing, look for it; the 90s
+      // first-output watchdog stays as the backstop for everything this misses.
+      if (!this._firstOutputDisarmed && this._checkTranscriptForAuthFailure()) {
+        this._handleTranscriptAuthFailure()
+        break
+      }
       // Wedge instrumentation (#4678 follow-up): if the loop has been
       // running >= HOOK_HEARTBEAT_MS since the last heartbeat with no
       // stop-hook, emit a progress line. Sized at 5s so a healthy
@@ -4838,7 +5098,11 @@ export class ClaudeTuiSession extends BaseSession {
     // (the suspend should already have cleared this timer).
     if (this._pendingUserAnswers.size > 0) return
     this._assertBusyHasMessageId('_handleStreamStall')
-    const friendly = formatIdleDuration(this._streamStallTimeoutMs)
+    // #8223: stated as a fact in the message below, so not rounded (see
+    // formatWatchdogDuration). `timeoutMs` rides in the payload so the clients
+    // can say how long THIS watchdog waited — the 5-minute mid-turn stall and
+    // the 90s first-output one share the `stream_stall` code.
+    const friendly = formatWatchdogDuration(this._streamStallTimeoutMs)
     const messageId = this._currentMessageId
     log.warn(
       `Stream stalled (${friendly}, messageId=${messageId}) — clearing busy state for retry`,
@@ -4851,7 +5115,8 @@ export class ClaudeTuiSession extends BaseSession {
     // still holds rendered RESPONSE text here, so false-positive safety rests on
     // the patterns requiring claude's `/login` / `claude login` command token
     // (see AUTH_FAILURE_PATTERNS) — a model merely DISCUSSING auth won't match.
-    const authFail = this._scanOutputForAuthFailure()
+    // #8223: scans only what THIS turn printed, never the older tail.
+    const authFail = this._scanTurnOutputForAuthFailure()
     // #4641: shared teardown helper. See companion call in _handleHardTimeout
     // for the meaning of the asymmetric flags — preserved here as-is so this
     // refactor introduces no behaviour change.
@@ -4862,7 +5127,92 @@ export class ClaudeTuiSession extends BaseSession {
         : {
           code: 'stream_stall',
           message: `Stream stalled — no response for ${friendly}. Try sending again.`,
+          timeoutMs: this._streamStallTimeoutMs,
         },
+      errorBeforeResult: false,
+      gateStreamEndOnMessageId: true,
+    })
+  }
+
+  /**
+   * #8223 — start of a turn: forget the previous turn's baseline and capture a
+   * fresh one. A resumed (or simply long) transcript can already hold an old
+   * `authentication_failed` entry, and only an entry NEWER than turn start may
+   * fire the fast path below.
+   */
+  _beginAuthFailureWatchForTurn() {
+    this._authFailureBaseline = null
+    this._lastAuthTranscriptScanMs = this._nowMonotonic()
+    this._checkTranscriptForAuthFailure({ force: true })
+  }
+
+  /**
+   * #8223 — has the transcript gained an `authentication_failed` API-error entry
+   * since this turn's baseline? Reads through `_scanTranscript()`: the SAME
+   * incremental scanner the background-task poll and the observed-model refresh
+   * share, and with none of `getBackgroundTaskSnapshot()`'s bookkeeping
+   * (`_lastBackgroundTaskKey` / the idle poll). Sharing is safe because the
+   * snapshot is cumulative — bytes consumed here still show in the next idle
+   * poll tick's snapshot, so the key changes there and nothing is lost.
+   *
+   * Throttled to `_authTranscriptScanMs` (~1s) so the 150ms poll loop does not
+   * stat the transcript on every pass; `force` bypasses it (baseline capture).
+   *
+   * The baseline is taken from the first scan that can READ the transcript
+   * (`authFailureCount` a number): a scan that cannot — no PTY pid or per-PID
+   * session file yet, or an unreadable transcript, `null` — leaves it unset
+   * rather than baselining against a guess, and a transcript that does not
+   * exist yet counts as a known 0. Trade-off: a failure written before the
+   * first scan that could read the transcript is folded into the baseline and
+   * missed; the 90s first-output watchdog (and its PTY scan) still covers that.
+   *
+   * Fails quiet: a missing scanner, a missing transcript, a scan error, or
+   * transcripts switched off all just mean "no fast path" — never a throw out
+   * of the poll loop.
+   * @returns {boolean} true when a NEW auth failure has appeared
+   */
+  _checkTranscriptForAuthFailure({ force = false } = {}) {
+    try {
+      const now = this._nowMonotonic()
+      if (!force && now - this._lastAuthTranscriptScanMs < this._authTranscriptScanMs) return false
+      this._lastAuthTranscriptScanMs = now
+      const count = this._scanTranscript()?.authFailureCount
+      if (typeof count !== 'number') return false
+      if (this._authFailureBaseline === null) {
+        this._authFailureBaseline = count
+        return false
+      }
+      return count > this._authFailureBaseline
+    } catch (err) {
+      ;(this._log || log).debug?.(`transcript auth-failure check failed: ${err?.message} — no fast path this pass`)
+      return false
+    }
+  }
+
+  /**
+   * #8223 — the transcript says this turn's API call failed authentication:
+   * tear the turn down now with AUTH_REQUIRED instead of letting it sit until the
+   * first-output watchdog. Same `_teardownTurn` shape as `_handleFirstOutputTimeout`
+   * (result before error, `stream_end` gated on messageId) with its own teardown
+   * reason, `'auth_required'`, so the post-mortem logs can tell the two apart.
+   */
+  _handleTranscriptAuthFailure() {
+    // No `_pendingUserAnswers` guard, unlike the watchdog handlers: this runs only
+    // while `!_firstOutputDisarmed`, and a pending AskUserQuestion implies a hook
+    // was already consumed, so the guard was unreachable — and the caller breaks out
+    // of the poll loop unconditionally, so a guard that DID return early would leave
+    // `_isBusy` true with nobody polling (and the turn ending as "Stop hook timeout").
+    if (!this._isBusy) return
+    this._assertBusyHasMessageId('_handleTranscriptAuthFailure')
+    ;(this._log || log).warn(
+      `transcript recorded a new authentication_failed entry (baseline ${this._authFailureBaseline}) before any output — ${AUTH_REQUIRED_CODE}`,
+    )
+    const duration = this._activeTurn
+      ? this._nowMonotonic() - this._activeTurn.startedAt
+      : 0
+    this._teardownTurn('auth_required', {
+      duration,
+      errorPayload: { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
     })
@@ -4902,7 +5252,8 @@ export class ClaudeTuiSession extends BaseSession {
     const elapsedMs = this._firstOutputArmedAt > 0
       ? this._nowMonotonic() - this._firstOutputArmedAt
       : this._firstOutputTimeoutMs
-    const friendly = formatIdleDuration(this._firstOutputTimeoutMs)
+    // #8223: 90s by default — formatIdleDuration read that as "2 minutes".
+    const friendly = formatWatchdogDuration(this._firstOutputTimeoutMs)
     log.warn(`first-output watchdog fired (elapsedMs=${elapsedMs}) — claude TUI did not respond`)
     const duration = this._activeTurn
       ? this._nowMonotonic() - this._activeTurn.startedAt
@@ -4911,8 +5262,9 @@ export class ClaudeTuiSession extends BaseSession {
     // silence came WITH a logged-out / expired-login banner (e.g. an expired
     // login on the very first turn after restore). False-positive safety rests
     // on the command-token patterns (see AUTH_FAILURE_PATTERNS), not on the turn
-    // having stalled.
-    const authFail = this._scanOutputForAuthFailure()
+    // having stalled. #8223: only what THIS turn printed — right after a
+    // `--resume` the tail still holds re-rendered history.
+    const authFail = this._scanTurnOutputForAuthFailure()
     // Mirrors _handleStreamStall's `_teardownTurn` call shape (result
     // before error, gate stream_end on messageId) so the dashboard sees
     // the same fan-out it already handles for the inter-stream stall.
@@ -4923,6 +5275,7 @@ export class ClaudeTuiSession extends BaseSession {
         : {
           code: 'stream_stall',
           message: `No response from claude TUI within ${friendly}. Try sending again.`,
+          timeoutMs: this._firstOutputTimeoutMs,
         },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
