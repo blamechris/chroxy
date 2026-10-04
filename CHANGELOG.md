@@ -59,9 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cannot read as logged out: at startup it matches only claude's live "Not
     logged in · Run /login" footer, never a banner, because `claude --resume`
     replays a past turn's "Please run /login" banner from history and would
-    otherwise refuse the session on every restore, even after logging in again;
-    on a stall or first-output timeout it matches the banner and the footer in
-    what that turn printed, never in older output;
+    otherwise refuse the session on every restore, even after logging in again
+    (and not at all when the pre-spawn `claude auth status` check answered
+    "logged in", so a resumed conversation that merely quotes the footer is not
+    refused either); on a stall or first-output timeout it matches the banner
+    and the footer in what that turn printed, never in older output;
   - claude-sdk reports `authentication_failed` and "Failed to authenticate…"
     errors with the same `AUTH_REQUIRED` code;
   - the dashboard and the app render `AUTH_REQUIRED` as a sign-in chip naming
