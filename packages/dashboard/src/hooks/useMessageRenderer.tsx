@@ -318,7 +318,11 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
         <StreamStallChip
           errorText={storeMsg.content}
           onRetry={lastUserInput ? () => sendInput(lastUserInput.content) : undefined}
-          timeoutMs={streamStallTimeoutMs ?? undefined}
+          // #8223: prefer the window the server says actually fired (claude-tui's
+          // first-output watchdog is 90s; auth_ok advertises the 5-minute mid-turn
+          // one). Falls back to the connection-wide value for older servers and
+          // for providers that don't tag their stalls.
+          timeoutMs={storeMsg.timeoutMs ?? streamStallTimeoutMs ?? undefined}
           provider={activeSessionProvider ?? undefined}
           onViewLogs={isTail ? () => setViewMode('system') : undefined}
         />

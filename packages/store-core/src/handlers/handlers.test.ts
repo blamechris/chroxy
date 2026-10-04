@@ -6766,6 +6766,47 @@ describe('handleMessage', () => {
   // field on the ChatMessage here, the chip would degrade to "headline
   // only" and the (Optional) acceptance-criterion subtext would never
   // render in practice.
+  // #8223: the server tags a stream_stall with the window that fired
+  // (`timeoutMs`); the stall chip words its headline from it. Without
+  // preserving it here the chip would fall back to the connection-wide
+  // auth_ok window, which is the 5-minute mid-turn one.
+  describe('timeoutMs preservation on stream_stall (#8223)', () => {
+    const stall = (extra: Record<string, unknown>, messageType = 'error', code: string | undefined = 'stream_stall') =>
+      handleMessage(
+        { messageType, content: 'No response from claude TUI within 90 seconds.', ...(code ? { code } : {}), timestamp: 100, ...extra },
+        'sess-active',
+        false,
+        [],
+      )
+
+    it('preserves a positive integer timeoutMs on a stream_stall error', () => {
+      const out = stall({ timeoutMs: 90_000 })
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) expect(out.chatMessage.timeoutMs).toBe(90_000)
+    })
+
+    it('leaves timeoutMs undefined when the wire field is missing (older servers)', () => {
+      const out = stall({})
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) expect(out.chatMessage.timeoutMs).toBeUndefined()
+    })
+
+    it.each([0, -1, 1.5, NaN, Infinity, '90000', null])('drops a malformed timeoutMs (%p)', (bad) => {
+      const out = stall({ timeoutMs: bad })
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) expect(out.chatMessage.timeoutMs).toBeUndefined()
+    })
+
+    it('drops timeoutMs on an error with another code, or on a non-error envelope', () => {
+      const other = stall({ timeoutMs: 90_000 }, 'error', 'AUTH_REQUIRED')
+      expect(other.shouldDispatch).toBe(true)
+      if (other.shouldDispatch) expect(other.chatMessage.timeoutMs).toBeUndefined()
+      const notError = stall({ timeoutMs: 90_000 }, 'response')
+      expect(notError.shouldDispatch).toBe(true)
+      if (notError.shouldDispatch) expect(notError.chatMessage.timeoutMs).toBeUndefined()
+    })
+  })
+
   describe('attemptedResumeId preservation (#4947)', () => {
     it('preserves a string attemptedResumeId on the ChatMessage', () => {
       const out = handleMessage(

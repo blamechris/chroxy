@@ -43,7 +43,7 @@ import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spa
 import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { nodePtyImportFailureError } from './utils/node-pty-support.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
-import { formatIdleDuration } from './session-timeout-manager.js'
+import { formatIdleDuration, formatWatchdogDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
@@ -4920,7 +4920,11 @@ export class ClaudeTuiSession extends BaseSession {
     // (the suspend should already have cleared this timer).
     if (this._pendingUserAnswers.size > 0) return
     this._assertBusyHasMessageId('_handleStreamStall')
-    const friendly = formatIdleDuration(this._streamStallTimeoutMs)
+    // #8223: stated as a fact in the message below, so not rounded (see
+    // formatWatchdogDuration). `timeoutMs` rides in the payload so the clients
+    // can say how long THIS watchdog waited — the 5-minute mid-turn stall and
+    // the 90s first-output one share the `stream_stall` code.
+    const friendly = formatWatchdogDuration(this._streamStallTimeoutMs)
     const messageId = this._currentMessageId
     log.warn(
       `Stream stalled (${friendly}, messageId=${messageId}) — clearing busy state for retry`,
@@ -4944,6 +4948,7 @@ export class ClaudeTuiSession extends BaseSession {
         : {
           code: 'stream_stall',
           message: `Stream stalled — no response for ${friendly}. Try sending again.`,
+          timeoutMs: this._streamStallTimeoutMs,
         },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
@@ -4984,7 +4989,8 @@ export class ClaudeTuiSession extends BaseSession {
     const elapsedMs = this._firstOutputArmedAt > 0
       ? this._nowMonotonic() - this._firstOutputArmedAt
       : this._firstOutputTimeoutMs
-    const friendly = formatIdleDuration(this._firstOutputTimeoutMs)
+    // #8223: 90s by default — formatIdleDuration read that as "2 minutes".
+    const friendly = formatWatchdogDuration(this._firstOutputTimeoutMs)
     log.warn(`first-output watchdog fired (elapsedMs=${elapsedMs}) — claude TUI did not respond`)
     const duration = this._activeTurn
       ? this._nowMonotonic() - this._activeTurn.startedAt
@@ -5005,6 +5011,7 @@ export class ClaudeTuiSession extends BaseSession {
         : {
           code: 'stream_stall',
           message: `No response from claude TUI within ${friendly}. Try sending again.`,
+          timeoutMs: this._firstOutputTimeoutMs,
         },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,

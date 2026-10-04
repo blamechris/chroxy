@@ -1,6 +1,27 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { SessionTimeoutManager, formatIdleDuration } from '../src/session-timeout-manager.js'
+import { SessionTimeoutManager, formatIdleDuration, formatWatchdogDuration } from '../src/session-timeout-manager.js'
+
+// #8223 — a watchdog message states its window as a fact, so it must not round.
+describe('formatWatchdogDuration', () => {
+  it('does not round a window between a minute and an hour that is not whole minutes', () => {
+    assert.equal(formatWatchdogDuration(90_000), '90 seconds')
+    assert.equal(formatWatchdogDuration(61_000), '61 seconds')
+    assert.equal(formatWatchdogDuration(150_000), '150 seconds')
+    assert.equal(formatWatchdogDuration(119_000), '119 seconds')
+  })
+
+  it('formats whole minutes, sub-minute values and hours exactly as formatIdleDuration does', () => {
+    for (const ms of [1000, 30_000, 59_000, 60_000, 120_000, 5 * 60_000, 59 * 60_000, 60 * 60_000, 90 * 60_000, 2 * 60 * 60_000]) {
+      assert.equal(formatWatchdogDuration(ms), formatIdleDuration(ms), `ms=${ms}`)
+    }
+    assert.equal(formatWatchdogDuration(5 * 60_000), '5 minutes')
+  })
+
+  it('leaves formatIdleDuration rounding alone (its callers and tests rely on it)', () => {
+    assert.equal(formatIdleDuration(90_000), '2 minutes')
+  })
+})
 
 describe('formatIdleDuration', () => {
   it('formats seconds', () => {

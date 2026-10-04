@@ -92,6 +92,16 @@ describe('StreamStallChip (#4476)', () => {
       expect(chip.textContent).toMatch(/No response for 1 minute — retry\?/)
     })
 
+    // #8223: the first-output watchdog is 90s. Rounding it to "2 minutes" put a
+    // window 33% longer than the real one in the headline.
+    it('renders "90 seconds" for a 90_000 ms stall — not "2 minutes", and not the 5-minute window', () => {
+      render(<StreamStallChip errorText="No response from claude TUI within 90 seconds." timeoutMs={90_000} />)
+      const chip = screen.getByTestId('stream-stall-chip')
+      expect(chip.textContent).toMatch(/No response for 90 seconds — retry\?/)
+      expect(chip.textContent).not.toMatch(/2 minutes/)
+      expect(chip.textContent).not.toMatch(/5 minutes/)
+    })
+
     it('renders hours for >= 1h timeouts', () => {
       render(<StreamStallChip errorText="raw" timeoutMs={2 * 60 * 60 * 1000} />)
       const chip = screen.getByTestId('stream-stall-chip')

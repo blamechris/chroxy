@@ -298,6 +298,19 @@ export function handleMessage(
           return { attemptedResumeId: trimmed.length > 256 ? trimmed.slice(0, 256) : trimmed }
         })()
       : {}),
+    // #8223: preserve the stall window that actually fired so the stall chip can
+    // name it ("No response for 90 seconds") instead of the connection-wide
+    // `auth_ok` window. Gated on `msgType === 'error'` + `stream_stall` like the
+    // resume gate above, and on the positive-integer shape the wire schema
+    // (`ServerMessageSchema.timeoutMs`) declares — anything else is dropped, so
+    // the renderer falls back to its `auth_ok` value rather than render garbage.
+    ...(msgType === 'error' &&
+    msg.code === 'stream_stall' &&
+    typeof msg.timeoutMs === 'number' &&
+    Number.isInteger(msg.timeoutMs) &&
+    msg.timeoutMs > 0
+      ? { timeoutMs: msg.timeoutMs }
+      : {}),
     // #6768: preserve the structured compaction-boundary marker so
     // renderers can show a distinct "Context compacted" callout instead of
     // the generic muted system bubble. Gated on `msgType === 'system'` +

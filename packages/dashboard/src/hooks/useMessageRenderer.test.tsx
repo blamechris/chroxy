@@ -149,6 +149,46 @@ describe('useMessageRenderer — retryable AskUserQuestion errors (#5793)', () =
   })
 })
 
+// #8223: a stream_stall is worded from the window that actually fired. claude-tui's
+// first-output watchdog is 90s but auth_ok advertises the 5-minute mid-turn window,
+// so the message's own `timeoutMs` has to win.
+describe('useMessageRenderer — stream_stall headline window (#8223)', () => {
+  function renderStall(msgTimeoutMs: number | undefined, authOkMs: number | null) {
+    const err = {
+      id: 's1',
+      type: 'error',
+      content: 'No response from claude TUI within 90 seconds. Try sending again.',
+      timestamp: 0,
+      code: 'stream_stall',
+      ...(msgTimeoutMs === undefined ? {} : { timeoutMs: msgTimeoutMs }),
+    } as ChatMessage
+    const args = makeArgs({
+      storeMsgMap: new Map([['s1', err]]),
+      chatTailMessageId: 's1',
+      storeMessages: [err],
+      streamStallTimeoutMs: authOkMs,
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    render(<>{result.current({ id: 's1', type: 'error', content: err.content, timestamp: 0, code: 'stream_stall' } as ChatViewMessage)}</>)
+    return screen.getByTestId('stream-stall-chip').textContent ?? ''
+  }
+
+  it("prefers the message's timeoutMs over the auth_ok window", () => {
+    const text = renderStall(90_000, 300_000)
+    expect(text).toMatch(/No response for 90 seconds — retry\?/)
+    expect(text).not.toMatch(/5 minutes/)
+    expect(text).not.toMatch(/2 minutes/)
+  })
+
+  it('falls back to the auth_ok window when the message carries none', () => {
+    expect(renderStall(undefined, 300_000)).toMatch(/No response for 5 minutes — retry\?/)
+  })
+
+  it('falls back to the static phrase when neither is known', () => {
+    expect(renderStall(undefined, null)).toMatch(/Stream stalled — retry\?/)
+  })
+})
+
 describe('permissionPromptDescription — strip the composed tool prefix (#6626)', () => {
   it('strips the redundant leading "<tool>: " so the raw description survives', () => {
     // message-handler composes content as `"${tool}: ${description}"`; the raw

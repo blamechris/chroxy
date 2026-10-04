@@ -433,6 +433,10 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
       <StreamStallChip
         errorText={message.content?.trim() || ''}
         onRetry={onRetryStreamStall}
+        // #8223: name the window that actually fired (claude-tui's first-output
+        // watchdog is 90s). Only on a real stall — the AskUserQuestion codes
+        // routed through this chip carry no window and keep their own headline.
+        timeoutMs={message.code === 'stream_stall' ? message.timeoutMs : undefined}
         // #5793 / #6392: the AskUserQuestion teardown codes are a question-
         // delivery failure, not a stream stall — source the copy from the shared
         // error-presentation registry (single source cross-surface). stream_stall

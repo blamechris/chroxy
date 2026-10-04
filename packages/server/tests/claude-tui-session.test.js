@@ -5181,6 +5181,29 @@ describe('ClaudeTuiSession', () => {
       assert.match(err.message, /Stream stalled/)
     })
 
+    // #8223 — the stall error says which window fired. The mid-turn stall and the
+    // first-output stall share the `stream_stall` code, so the clients cannot tell
+    // them apart without it (they used to label both with auth_ok's 5-minute window).
+    it('carries timeoutMs = the mid-turn stall window, and states it exactly (#8223)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        streamStallTimeoutMs: 5 * 60_000, firstOutputTimeoutMs: 90_000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-stall-ms'
+      session._activeTurn = { startedAt: session._nowMonotonic() - 10, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      session._handleStreamStall()
+
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'stream_stall')
+      assert.equal(errors[0].timeoutMs, 5 * 60_000, 'the stall window, not the first-output one')
+      assert.match(errors[0].message, /no response for 5 minutes\./)
+    })
+
     it('is a no-op when not busy (late fire after natural turn-end)', async () => {
       session = new ClaudeTuiSession({
         cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
@@ -5462,6 +5485,49 @@ describe('ClaudeTuiSession', () => {
       const err = events.find((e) => e.type === 'error')
       assert.equal(err.code, 'stream_stall', 'distinct code reuses dashboard chip wire')
       assert.match(err.message, /No response/i)
+    })
+
+    // #8223 — the default 90s window used to be worded "2 minutes" (formatIdleDuration
+    // rounds to the nearest minute) and the clients labelled it with the 5-minute
+    // mid-turn window from auth_ok.
+    it('carries timeoutMs = the first-output window and says "90 seconds", not "2 minutes" (#8223)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        streamStallTimeoutMs: 5 * 60_000, firstOutputTimeoutMs: 90_000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-first-output-ms'
+      session._activeTurn = { startedAt: session._nowMonotonic() - 10, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      session._handleFirstOutputTimeout()
+
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, 'stream_stall')
+      assert.equal(errors[0].timeoutMs, 90_000, 'the first-output window, not the 5-minute stall one')
+      assert.match(errors[0].message, /within 90 seconds\./)
+      assert.ok(!/minute/.test(errors[0].message), errors[0].message)
+    })
+
+    it('the AUTH_REQUIRED upgrade of a first-output stall carries no timeoutMs (#8223)', () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        firstOutputTimeoutMs: 90_000,
+      })
+      session._isBusy = true
+      session._currentMessageId = 'msg-first-output-auth'
+      session._activeTurn = { startedAt: session._nowMonotonic() - 10, aborted: false }
+      session._term = { write: () => {}, kill: () => {} }
+      session._appendToOutputTail('\x1b[93G\x1b[38;5;211mNot\x1b[97Glogged\x1b[104Gin\x1b[107G·\x1b[109GRun\x1b[113G/login\x1b[39m\r\r\n')
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      session._handleFirstOutputTimeout()
+
+      assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED'])
+      assert.equal(errors[0].timeoutMs, undefined)
     })
 
     it('is disarmed by the first consumed hook event (does not fire on healthy turn)', async () => {

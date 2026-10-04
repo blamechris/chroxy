@@ -19,7 +19,7 @@
  */
 import React, { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { getErrorPresentation } from '@chroxy/store-core';
+import { formatDurationVerbose, getErrorPresentation } from '@chroxy/store-core';
 import { COLORS } from '../constants/colors';
 
 export interface StreamStallChipProps {
@@ -42,15 +42,31 @@ export interface StreamStallChipProps {
    * headline to avoid duplicating the whole amber-chip layout).
    */
   headline?: string;
+  /**
+   * #8223 — the silence window, in ms, of the watchdog that fired (the server's
+   * `timeoutMs` on the stall error). When usable, the default headline names it —
+   * "No response for 90 seconds — retry?", the same copy as the dashboard chip —
+   * instead of the bare registry phrase. An explicit `headline` still wins, and a
+   * missing, zero or non-finite value falls back to the registry phrase (older
+   * servers omit the field).
+   */
+  timeoutMs?: number;
 }
 
 export function StreamStallChip({
   errorText,
   onRetry,
+  headline,
+  timeoutMs,
+}: StreamStallChipProps) {
   // #6392: the default stream-stall copy is single-sourced from the shared
   // error-presentation registry (callers override for the AskUserQuestion family).
-  headline = getErrorPresentation('stream_stall').headline,
-}: StreamStallChipProps) {
+  // #8223: a usable `timeoutMs` makes the default say how long this stall waited.
+  const resolvedHeadline = headline ?? (
+    typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? `No response for ${formatDurationVerbose(timeoutMs)} — retry?`
+      : getErrorPresentation('stream_stall').headline
+  );
   const [detailVisible, setDetailVisible] = useState(false);
 
   // #6429: politeness is derived from the registry role for parity with the
@@ -72,7 +88,7 @@ export function StreamStallChip({
       testID="stream-stall-chip"
       accessibilityRole="alert"
       accessibilityLiveRegion={liveRegion}
-      accessibilityLabel={headline}
+      accessibilityLabel={resolvedHeadline}
       accessibilityHint={errorText}
       // Long-press reveals the underlying server diagnostic text without
       // an always-on text wall on the chip — preserves the "raw error
@@ -81,7 +97,7 @@ export function StreamStallChip({
       style={styles.container}
     >
       <View style={styles.dot} />
-      <Text style={styles.label}>{headline}</Text>
+      <Text style={styles.label}>{resolvedHeadline}</Text>
       {onRetry && (
         <Pressable
           testID="stream-stall-chip-retry"

@@ -105,6 +105,7 @@ export declare const ServerMessageSchema: z.ZodObject<{
     attemptedResumeId: z.ZodOptional<z.ZodString>;
     stdout: z.ZodOptional<z.ZodString>;
     stderr: z.ZodOptional<z.ZodString>;
+    timeoutMs: z.ZodOptional<z.ZodNumber>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolStartSchema: z.ZodObject<{
