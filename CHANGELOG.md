@@ -40,6 +40,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A logged-out or expired `claude` login is now reported as such, instead of
+  as a generic stall (#8223).** Previously a claude-tui session on a host whose
+  `claude` login had expired took the prompt, showed "Agent is working…" for 90
+  seconds, then offered "No response for 5 minutes — retry?"; the cause was
+  visible only in the Terminal tab. The login detection already existed but
+  could not match: claude lays out words and wrapped rows with cursor moves,
+  chroxy strips those to nothing, and at the 10-column PTY the Chat tab uses
+  the banner arrived as "Pleaserun/login". Now:
+  - before its first spawn, a claude-tui session asks `claude auth status`
+    and refuses to start on an explicit logged-out answer, which also covers
+    claude's first-run onboarding screen. Any other answer proceeds as before;
+  - an expired login, which `claude auth status` still reports as logged in,
+    is caught on the first turn from the `authentication_failed` API-error
+    entry claude writes to its transcript, within seconds instead of after
+    the 90-second watchdog;
+  - the PTY scan matches the banner and claude's "Not logged in · Run /login"
+    footer with whitespace ignored;
+  - claude-sdk reports `authentication_failed` and "Failed to authenticate…"
+    errors with the same `AUTH_REQUIRED` code;
+  - the dashboard and the app render `AUTH_REQUIRED` as a sign-in chip naming
+    `claude auth login`, and `chroxy doctor` gains a "Claude login" row;
+  - the stall chip and message name the window that actually fired: the
+    first-output watchdog reads "90 seconds", not "2 minutes" (server) or
+    "5 minutes" (chip).
+
 - **Security: `chroxy agent-control` refuses a `ws://` URL to a non-loopback host
   unless `--allow-insecure-ws` is passed (#7969).** The daemon's bearer token is
   sent in the first `auth` frame, before any key exchange, so over plain `ws://`
