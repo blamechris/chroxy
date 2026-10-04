@@ -216,6 +216,71 @@ function provenanceBlockedCheck(name, resolved, verdict) {
 }
 
 /**
+ * #8223: the resolve -> health-check -> provenance-gate prelude shared by every
+ * doctor probe that EXECS `claude` (the claude-tui version pin and the login
+ * check), lifted out of `checkClaudeTuiCliVersion` unchanged so the two cannot
+ * drift on how the binary is vetted before it runs. Returns the path to exec and
+ * any pending warn-mode provenance advisory, or null when `claude` cannot be run
+ * (missing / quarantined / provenance-blocked) — the provider binary check
+ * already reports those, so a probe adds no second row for them.
+ *
+ * @param {object} deps - same shape as `checkClaudeTuiCliVersion`'s
+ * @param {string} probeLabel - names the probe in the provenance warn log
+ * @returns {{ execPath: string, provenanceAdvisory: string|null } | null}
+ */
+function resolveClaudeProbeBinary({ candidates, resolveBinary: resolveClaudeBinary, verify, provenance, verifyProvenance }, probeLabel) {
+  const resolved = resolveClaudeBinary('claude', candidates)
+  // #8074 review C2: `verifyProvenance` must never run on an unresolved/
+  // not-found path — a bare, unresolved name (`resolveBinary` returns the
+  // bare name itself when nothing matched) would get hashed relative to the
+  // CURRENT WORKING DIRECTORY, mislabeling a missing `claude` as a
+  // provenance failure. So the #6708 health check gates the probe too, but —
+  // "at minimum when a gate is on" — ONLY when `provenance` is supplied: this
+  // function had NO health check at all before #8041 (unlike checkBinary),
+  // and every existing caller with the gate off relies on `exec` alone
+  // deciding pass/fail/missing, exactly as it always has. `null` here (not a
+  // fail row) matches this function's own documented contract: the provider
+  // binary check already surfaces a missing/quarantined claude.
+  let execPath = resolved
+  let provenanceAdvisory = null
+  if (provenance) {
+    const health = verify(resolved)
+    if (!health.ok) {
+      return null
+    }
+    execPath = health.path
+    // #8041: route the probe through the opt-in provenance gate — a
+    // `block`-mode hash mismatch or failed signature gate refuses the probe
+    // outright, and the binary at `execPath` is NEVER exec'd.
+    const verdict = verifyProvenance({
+      resolvedPath: health.path,
+      mode: provenance.mode,
+      signatureGate: provenance.signatureGate === true,
+      ledger: provenance.ledger || null,
+    })
+    if (verdict.blocked) {
+      // #8074 review S3: return null, not a second `fail` row — the SAME
+      // `claude` binary's own provider-preflight row (checkProvider, via
+      // checkBinary against the identical provenance options) already
+      // reports this exact refusal. Two rows for one blocked binary is
+      // confusing, not informative, and this function's docblock already
+      // promises "null when claude can't be run".
+      return null
+    }
+    if (
+      verdict.status === PROVENANCE_STATUS.HASH_MISMATCH
+      || verdict.status === PROVENANCE_STATUS.SIGNATURE_INVALID
+      || verdict.status === PROVENANCE_STATUS.UNREADABLE
+    ) {
+      log.warn(`Binary "claude" (${probeLabel} probe) provenance ${verdict.status}: ${verdict.message || ''} (allowed — mode=${provenance.mode})`)
+      provenanceAdvisory = `provenance ${verdict.status}: ${verdict.message || 'unverifiable'}`
+        + `${verdict.remediation ? ` — ${verdict.remediation}` : ''} (allowed — mode=${provenance.mode})`
+    }
+  }
+  return { execPath, provenanceAdvisory }
+}
+
+/**
  * audit P1-3 / #5821: compare the installed claude CLI version against the
  * version chroxy's claude-tui form-driving was validated against
  * (TESTED_CLAUDE_TUI_CLI_VERSION). A major.minor drift is a `warn` — the
@@ -260,54 +325,9 @@ export function checkClaudeTuiCliVersion(deps = {}) {
     provenance = null,
     verifyProvenance = defaultVerifyProvenance,
   } = deps
-  const resolved = resolveClaudeBinary('claude', candidates)
-  // #8074 review C2: `verifyProvenance` must never run on an unresolved/
-  // not-found path — a bare, unresolved name (`resolveBinary` returns the
-  // bare name itself when nothing matched) would get hashed relative to the
-  // CURRENT WORKING DIRECTORY, mislabeling a missing `claude` as a
-  // provenance failure. So the #6708 health check gates the probe too, but —
-  // "at minimum when a gate is on" — ONLY when `provenance` is supplied: this
-  // function had NO health check at all before #8041 (unlike checkBinary),
-  // and every existing caller with the gate off relies on `exec` alone
-  // deciding pass/fail/missing, exactly as it always has. `null` here (not a
-  // fail row) matches this function's own documented contract: the provider
-  // binary check already surfaces a missing/quarantined claude.
-  let execPath = resolved
-  let provenanceAdvisory = null
-  if (provenance) {
-    const health = verify(resolved)
-    if (!health.ok) {
-      return null
-    }
-    execPath = health.path
-    // #8041: route the probe through the opt-in provenance gate — a
-    // `block`-mode hash mismatch or failed signature gate refuses the probe
-    // outright, and the binary at `execPath` is NEVER exec'd.
-    const verdict = verifyProvenance({
-      resolvedPath: health.path,
-      mode: provenance.mode,
-      signatureGate: provenance.signatureGate === true,
-      ledger: provenance.ledger || null,
-    })
-    if (verdict.blocked) {
-      // #8074 review S3: return null, not a second `fail` row — the SAME
-      // `claude` binary's own provider-preflight row (checkProvider, via
-      // checkBinary against the identical provenance options) already
-      // reports this exact refusal. Two rows for one blocked binary is
-      // confusing, not informative, and this function's docblock already
-      // promises "null when claude can't be run".
-      return null
-    }
-    if (
-      verdict.status === PROVENANCE_STATUS.HASH_MISMATCH
-      || verdict.status === PROVENANCE_STATUS.SIGNATURE_INVALID
-      || verdict.status === PROVENANCE_STATUS.UNREADABLE
-    ) {
-      log.warn(`Binary "claude" (claude-tui driving probe) provenance ${verdict.status}: ${verdict.message || ''} (allowed — mode=${provenance.mode})`)
-      provenanceAdvisory = `provenance ${verdict.status}: ${verdict.message || 'unverifiable'}`
-        + `${verdict.remediation ? ` — ${verdict.remediation}` : ''} (allowed — mode=${provenance.mode})`
-    }
-  }
+  const probe = resolveClaudeProbeBinary({ candidates, resolveBinary: resolveClaudeBinary, verify, provenance, verifyProvenance }, 'claude-tui driving')
+  if (!probe) return null
+  const { execPath, provenanceAdvisory } = probe
   // #8074 round-2 review: EVERY row this probe returns carries a pending
   // warn-mode advisory, not only the clean-baseline one — an earlier warn
   // (unparseable version, baseline drift) must not swallow it.
@@ -338,6 +358,89 @@ export function checkClaudeTuiCliVersion(deps = {}) {
     status: 'warn',
     message: withAdvisory(`claude ${foundStr} differs from the tested TUI-driving baseline (${tested}) — chroxy drives the TUI by screen-scraping pinned keystrokes, so a CLI UI change can mis-drive AskUserQuestion forms silently. If question prompts misbehave, report it; re-validation will bump the baseline.`),
   }
+}
+
+const CLAUDE_LOGIN_UNREADABLE_MESSAGE = "Could not read the login state from `claude auth status --json` — if a claude-tui session reports AUTH_REQUIRED, run `claude auth login` on this host."
+
+/**
+ * #8223: report whether the `claude` on this host is logged in, from
+ * `claude auth status --json` — the same question claude-tui asks before it
+ * spawns a PTY. A logged-out host is otherwise discovered only when a session
+ * fails to start. Never `fail`s: a doctor failure blocks `chroxy start`, and
+ * "not logged in" is a state the operator fixes in a terminal, not a broken
+ * install.
+ *
+ * Rows: `pass` "Logged in (<authMethod>[, <subscriptionType>])" for an explicit
+ * `loggedIn: true`; `warn` for an explicit `loggedIn: false`, and `warn` when
+ * the status cannot be read (timeout, unparseable output, no `loggedIn` field).
+ * Returns null — no row — when `claude` cannot be run at all (missing,
+ * quarantined, provenance-blocked): the provider binary row already says so.
+ *
+ * `claude auth status` exits 1 when logged out but still prints its JSON, so a
+ * non-zero exit that carries stdout is read, not treated as unreadable. The
+ * probe runs with ANTHROPIC_API_KEY removed from its env the way claude-tui
+ * removes it from the PTY's, so it reports the subscription login rather than
+ * an API key that claude-tui would never use. An EXPIRED oauth token still
+ * reports `loggedIn: true`; only a live session's PTY scan sees expiry.
+ *
+ * @param {object} [deps] - same seams as `checkClaudeTuiCliVersion`, plus:
+ * @param {(bin: string, args: string[], opts: { env: object }) => string} [deps.exec]
+ *   returns stdout; may throw an error carrying `status` + `stdout` (non-zero exit)
+ * @param {object} [deps.env] - environment the probe is derived from (default process.env)
+ * @returns {{ name: string, status: 'pass'|'warn', message: string } | null}
+ */
+export function checkClaudeLogin(deps = {}) {
+  const {
+    // Same prepareSpawn routing as the version probe's default (#6484). The args
+    // are always the literal ['auth', 'status', '--json'] from the one call below.
+    exec = (bin, args, { env }) => {
+      const s = prepareSpawn(bin, args)
+      return execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], env, ...s.options })
+    },
+    candidates = claudeTuiBinaryCandidates(),
+    resolveBinary: resolveClaudeBinary = resolveBinary,
+    verify = defaultVerifyBinary,
+    provenance = null,
+    verifyProvenance = defaultVerifyProvenance,
+    env = process.env,
+  } = deps
+  const probe = resolveClaudeProbeBinary({ candidates, resolveBinary: resolveClaudeBinary, verify, provenance, verifyProvenance }, 'claude login')
+  if (!probe) return null
+
+  const NAME = 'Claude login'
+  const probeEnv = { ...env }
+  delete probeEnv.ANTHROPIC_API_KEY
+
+  let stdout
+  try {
+    stdout = exec(probe.execPath, ['auth', 'status', '--json'], { env: probeEnv })
+  } catch (err) {
+    if (err?.code === 'ENOENT') return null // claude missing — the binary row says so
+    if (typeof err?.status === 'number' && typeof err.stdout === 'string') {
+      stdout = err.stdout // exit 1 = logged out, JSON still on stdout
+    } else {
+      return { name: NAME, status: 'warn', message: CLAUDE_LOGIN_UNREADABLE_MESSAGE }
+    }
+  }
+
+  let status
+  try {
+    status = JSON.parse(String(stdout || ''))
+  } catch {
+    return { name: NAME, status: 'warn', message: CLAUDE_LOGIN_UNREADABLE_MESSAGE }
+  }
+  if (status?.loggedIn === true) {
+    const how = [status.authMethod, status.subscriptionType].filter((v) => typeof v === 'string' && v.length > 0)
+    return { name: NAME, status: 'pass', message: how.length > 0 ? `Logged in (${how.join(', ')})` : 'Logged in' }
+  }
+  if (status?.loggedIn === false) {
+    return {
+      name: NAME,
+      status: 'warn',
+      message: 'Not logged in — run `claude auth login` on this host. claude-tui needs it; claude-sdk needs it unless ANTHROPIC_API_KEY is set.',
+    }
+  }
+  return { name: NAME, status: 'warn', message: CLAUDE_LOGIN_UNREADABLE_MESSAGE }
 }
 
 /**
@@ -482,6 +585,10 @@ export async function runDoctorChecks({
   // version-pin probe specifically (see the call site below) — undefined in
   // production, so `checkClaudeTuiCliVersion` uses its own real resolver.
   claudeTuiResolveBinary,
+  // #8223 test seam: overrides for the claude login probe (step 5.7) — `exec`,
+  // `resolveBinary`, `verify`, `env`. Undefined in production, which uses the real
+  // ones; without it a test would resolve and exec a REAL `claude` on the host.
+  claudeLoginDeps = {},
   // #8041 test seam: cloudflared's fallback candidate paths, so a test can
   // point resolution at a fixture without depending on whether a REAL
   // cloudflared happens to be installed at one of the fixed production
@@ -783,6 +890,21 @@ export async function runDoctorChecks({
       ...(claudeTuiResolveBinary ? { resolveBinary: claudeTuiResolveBinary } : {}),
     })
     if (tuiCheck) checks.push(tuiCheck)
+  }
+
+  // 5.7 Claude login (#8223). claude-tui always needs the subscription login;
+  // claude-sdk needs it unless ANTHROPIC_API_KEY supplies the credential, so a
+  // BYOK-key host is not warned about a login it does not use. `claudeLoginDeps`
+  // is the test seam (exec / resolver / env); production passes nothing.
+  const needsClaudeLogin = resolvedProviders.includes('claude-tui')
+    || (resolvedProviders.includes('claude-sdk') && !process.env.ANTHROPIC_API_KEY)
+  if (needsClaudeLogin) {
+    const loginCheck = checkClaudeLogin({
+      provenance: provenanceOptions,
+      verifyProvenance,
+      ...claudeLoginDeps,
+    })
+    if (loginCheck) checks.push(loginCheck)
   }
 
   // 6. Dependencies

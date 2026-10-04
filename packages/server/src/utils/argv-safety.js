@@ -468,6 +468,11 @@ export const AUDITED_SINKS = [
   },
   {
     file: 'doctor.js',
+    match: "execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], env, ...s.options })",
+    reason: "checkClaudeLogin's default exec seam always receives the literal ['auth', 'status', '--json'] from its one call site; prepareSpawn only rewraps for a Windows .cmd shim. CLI-only (chroxy doctor / start preflight).",
+  },
+  {
+    file: 'doctor.js',
     match: "execFileSync(spawnSpec.command, spawnSpec.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...spawnSpec.options, })",
     reason: "checkBinary's args are either the literal ['--version'] or a provider's static preflight.args declared in source (providers/*.js), never runtime/client data. CLI-only (chroxy doctor).",
   },
