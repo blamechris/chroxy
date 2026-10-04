@@ -49,6 +49,7 @@ import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
+import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import {
   parseBackgroundShellId,
@@ -121,15 +122,26 @@ function runClaudeAuthStatus({ binary, args, cwd, env }) {
       timeout: 5_000,
       maxBuffer: 64 * 1024,
       windowsHide: true,
-    }, (err, stdout) => {
+    }, (err, stdout, stderr) => {
       if (err && typeof err.code !== 'number') {
         reject(err)
         return
       }
-      resolve({ status: typeof err?.code === 'number' ? err.code : 0, stdout: stdout || '' })
+      // #8223: `stderr` rides along so the pre-spawn probe can say WHY it got no
+      // JSON (the `--settings` rejection printed "unknown option" there).
+      resolve({ status: typeof err?.code === 'number' ? err.code : 0, stdout: stdout || '', stderr: stderr || '' })
     })
   })
 }
+
+// #8223: the pre-spawn login probe warns ONCE per daemon process when `claude auth
+// status` exits non-zero without JSON (see `_probeLoginBeforeFirstSpawn`). A
+// module-level latch, not a per-session one: the cause (claude rejecting an
+// argument, or changing its output) is the same for every session on the host,
+// and a warn per session would be noise.
+let loginProbeBrokenWarned = false
+/** Test seam: re-arm the once-per-process warning. */
+export function _resetLoginProbeWarningForTests() { loginProbeBrokenWarned = false }
 
 // Re-export the public writeHookSettings helper so existing
 // `import { writeHookSettings } from './claude-tui-session.js'` callers (and the
@@ -290,7 +302,7 @@ export class ClaudeTuiSession extends BaseSession {
       },
       credentials: {
         envVars: [],
-        hint: 'run `claude login` (subscription required — this provider does NOT accept ANTHROPIC_API_KEY)',
+        hint: `run \`${CLAUDE_LOGIN_COMMAND}\` (subscription required — this provider does NOT accept ANTHROPIC_API_KEY)`,
         optional: true,
       },
     }
@@ -342,8 +354,8 @@ export class ClaudeTuiSession extends BaseSession {
       envVar: null,
       envVars,
       hint: keychainPossible
-        ? 'auth not verifiable on disk (macOS Keychain) — run `claude login` if a session reports AUTH_REQUIRED'
-        : 'run `claude login` — no Claude OAuth credentials found (subscription required; ANTHROPIC_API_KEY is not accepted)',
+        ? `auth not verifiable on disk (macOS Keychain) — run \`${CLAUDE_LOGIN_COMMAND}\` if a session reports AUTH_REQUIRED`
+        : `run \`${CLAUDE_LOGIN_COMMAND}\` — no Claude OAuth credentials found (subscription required; ANTHROPIC_API_KEY is not accepted)`,
       detail: keychainPossible
         ? 'Claude subscription (OAuth in macOS Keychain — not on-disk-verifiable; runtime AUTH_REQUIRED is authoritative)'
         : 'Claude subscription — no on-disk OAuth credentials found (logged out)',
@@ -525,6 +537,12 @@ export class ClaudeTuiSession extends BaseSession {
     // #8223 — the pre-spawn `claude auth status` probe runs on this session's FIRST
     // spawn only (see _probeLoginBeforeFirstSpawn); a respawn never re-asks.
     this._loginProbeRan = false
+    // #8223: what the probe concluded, set once on the first spawn and KEPT across
+    // respawns: 'logged_in' (exit 0 AND JSON `loggedIn: true`), 'logged_out' (the
+    // explicit refusal), or 'unknown' — every fail-open path, the native-route skip,
+    // and probe-not-run. Only 'logged_in' changes behaviour: it switches the warmup
+    // footer scan off (see `_scanWarmupOutputForAuthFailure`).
+    this._loginProbeOutcome = 'unknown'
     // #5315 (WP-2.1) — bounded per-session PTY auto-respawn state, mirroring
     // CliSession (cli-session.js:351). WHY: when the persistent claude PTY dies
     // unexpectedly mid-session, `_onPtyGone` used to tear the session down into
@@ -2037,7 +2055,7 @@ export class ClaudeTuiSession extends BaseSession {
     // tail here, since the warmup loop returns on _ptyExited before scanning).
     // #8223: warmup is FOOTER-ONLY (`_scanOutputForLoginFooter`) — a banner this
     // early is resumed history, not a live failure.
-    if (this._authFailureDetected || this._scanOutputForLoginFooter()) {
+    if (this._authFailureDetected || this._scanWarmupOutputForAuthFailure()) {
       this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
       const err = new Error(AUTH_REQUIRED_MESSAGE)
       err.code = AUTH_REQUIRED_CODE
@@ -2202,7 +2220,7 @@ export class ClaudeTuiSession extends BaseSession {
       // death during warmup or at idle, and there a message banner in the tail is
       // re-rendered history (a `--resume` replays it) or an earlier turn's failure
       // that was already surfaced when it happened. The live signal is the footer.
-      if (this._scanOutputForLoginFooter()) {
+      if (this._scanWarmupOutputForAuthFailure()) {
         this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
       } else {
         const tail = this._outputTailDiagnostic()
@@ -2696,12 +2714,33 @@ export class ClaudeTuiSession extends BaseSession {
       ;(this._log || log).debug?.(`login probe could not run (${err?.code || err?.message || 'error'}) — proceeding to spawn`)
       return
     }
-    if (typeof result?.status !== 'number' || result.status === 0) return
+    if (typeof result?.status !== 'number') return
     let status
     try {
       status = JSON.parse(result.stdout || '')
     } catch {
-      ;(this._log || log).debug?.(`login probe exited ${result.status} without JSON — proceeding to spawn`)
+      if (result.status !== 0) {
+        // Non-zero exit with no JSON is the signature of a BROKEN probe, not of a
+        // logged-out host (claude's own logged-out answer prints JSON): the
+        // `--settings` rejection looked exactly like this and silently disabled the
+        // probe on every real host while every unit test stayed green. Still fails
+        // open — but loudly, once per process, so the next claude change cannot do
+        // the same unseen. Every other inconclusive path stays at debug.
+        if (!loginProbeBrokenWarned) {
+          loginProbeBrokenWarned = true
+          const stderr = redactSensitive(String(result.stderr || '')).replace(/\s+/g, ' ').trim().slice(0, 200)
+          ;(this._log || log).warn(
+            `claude auth status exited ${result.status} without JSON${stderr ? ` (stderr: ${stderr})` : ''} — the pre-spawn login probe cannot tell whether this host is logged in, so it is failing open; ${AUTH_REQUIRED_CODE} for a logged-out host will only be caught at warmup/turn time (logged once per process)`,
+          )
+        }
+      } else {
+        ;(this._log || log).debug?.('login probe exited 0 without JSON — proceeding to spawn')
+      }
+      return
+    }
+    if (result.status === 0) {
+      // Only a positive, consistent answer counts: exit 0 AND `loggedIn: true`.
+      if (status?.loggedIn === true) this._loginProbeOutcome = 'logged_in'
       return
     }
     if (status?.loggedIn !== false) return
@@ -2709,6 +2748,7 @@ export class ClaudeTuiSession extends BaseSession {
     // left to refuse, and start()'s own `_destroying` guard resolves it quietly.
     if (this._destroying) return
 
+    this._loginProbeOutcome = 'logged_out'
     ;(this._log || log).warn(`claude auth status reports logged out — ${AUTH_REQUIRED_CODE} before spawning the PTY`)
     this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
     const err = new Error(AUTH_REQUIRED_MESSAGE)
@@ -2851,6 +2891,13 @@ export class ClaudeTuiSession extends BaseSession {
     // claude's login screen (or first-run onboarding, which no output scan can
     // classify) until the 90s first-output watchdog fires.
     await this._probeLoginBeforeFirstSpawn({ binary: attemptedBinary, cwd: cwdReal, env })
+    // The probe can sit in its await for up to its 5s timeout, and destroy() may land
+    // in that window (a user deleting a session right after Create). Whatever the
+    // probe concluded, a torn-down session must not go on to launch claude for a
+    // sink dir that is already gone. Same shape as start()'s own `_destroying`
+    // guard after `_spawnPty`: return quietly; start() sees `_destroying` and
+    // resolves without emitting `ready`.
+    if (this._destroying) return
 
     let ptyMod
     // Test seam (#6417): a test may inject a capturing node-pty stand-in so the
@@ -3111,7 +3158,7 @@ export class ClaudeTuiSession extends BaseSession {
     // claude may print its login prompt and then sit there without ever exiting
     // or writing a `status`, so the in-loop scan above could miss a late banner).
     // #8223: footer-only, like the in-loop scan (see _scanOutputForLoginFooter).
-    if (!ready && !this._ptyExited && !this._authFailureDetected && this._scanOutputForLoginFooter()) {
+    if (!ready && !this._ptyExited && !this._authFailureDetected && this._scanWarmupOutputForAuthFailure()) {
       this._authFailureDetected = true
     }
     if (this._authFailureDetected) {
@@ -3300,7 +3347,7 @@ export class ClaudeTuiSession extends BaseSession {
       // on a session that can never become ready. Warmup-only (opt-in) so
       // normal per-turn output is never scanned. #8223: FOOTER-ONLY — see
       // _scanOutputForLoginFooter for why a message banner here is history.
-      if (detectAuthFailure && this._scanOutputForLoginFooter()) {
+      if (detectAuthFailure && this._scanWarmupOutputForAuthFailure()) {
         this._authFailureDetected = true
         this._lastProbeSawStatus = sawStatus
         return finish(false)
@@ -3582,10 +3629,12 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * #5321 (WP-4.1) — classify the ANSI-stripped PTY tail as a subscription-auth
    * failure (logged out / expired login). Returns true when claude's output
-   * matches an AUTH_FAILURE_PATTERNS entry. TURN-time only (#8223: warmup uses
-   * `_scanOutputForLoginFooter`; production callers pass THIS turn's output via
-   * `_scanTurnOutputForAuthFailure` — the whole-tail default is what the pattern
-   * unit tests exercise). Those texts CAN contain rendered response text, so the
+   * matches an AUTH_FAILURE_PATTERNS entry. TURN-time only: it takes the text to
+   * scan as a REQUIRED argument (#8223) — warmup uses `_scanOutputForLoginFooter`,
+   * and production passes THIS turn's output via `_scanTurnOutputForAuthFailure`.
+   * There is deliberately no whole-tail default: a bare call would scan the 4KB
+   * tail, which a `--resume` fills with re-rendered history, and a bare call now
+   * simply matches nothing. Those texts CAN contain rendered response text, so the
    * false-positive defence lives in the patterns themselves: each requires claude's `/login` / `claude login` remediation
    * command token, which a model merely *discussing* authentication won't emit.
    *
@@ -3596,7 +3645,7 @@ export class ClaudeTuiSession extends BaseSession {
    * "Pleaserun/login" / "Notloggedin·Run/login" and the space-requiring
    * patterns miss it.
    */
-  _scanOutputForAuthFailure(tail = this._outputTail || '') {
+  _scanOutputForAuthFailure(tail) {
     if (!tail) return false
     // Collapse whitespace (the TUI wraps/box-pads the banner with newlines +
     // spaces) so a line-wrapped "Please run\n  /login" still matches.
@@ -3624,6 +3673,32 @@ export class ClaudeTuiSession extends BaseSession {
     if (AUTH_FAILURE_FOOTER_PATTERNS.some((re) => re.test(normalized))) return true
     const compact = tail.replace(/\s+/g, '')
     return AUTH_FAILURE_FOOTER_COMPACT_PATTERNS.some((re) => re.test(compact))
+  }
+
+  /**
+   * #8223 — the warmup-phase auth check every pre-turn scan site goes through
+   * (`_waitForPrompt`'s detectAuthFailure loop, `_spawnPty`'s post-timeout
+   * fallback, `start()`'s post-warmup re-scan, `_onPtyGone`'s no-turn scan):
+   * `_scanOutputForLoginFooter`, UNLESS the pre-spawn probe positively answered
+   * `loggedIn: true`.
+   *
+   * Why skipping loses nothing there: claude paints the footer at startup only
+   * when it holds no usable credentials, and then `claude auth status` says
+   * `loggedIn: false` and the probe has already refused. For an EXPIRED token the
+   * probe says `true` but claude paints no footer at startup (measured: nothing in
+   * 12s). So after a positive probe a footer during warmup can only be re-rendered
+   * history — a resumed conversation that merely QUOTES "Not logged in · Run
+   * /login", as a session about this very issue would — and matching it would
+   * refuse every restore of that session. An inconclusive probe ('unknown': every
+   * fail-open path, the native route, probe not run) keeps the footer scan as the
+   * backstop. The outcome is recorded once and kept across respawns; a login state
+   * that changes later in the session's life is caught by the turn-time paths
+   * (`_scanTurnOutputForAuthFailure`, the transcript fast path), which this does
+   * not touch.
+   */
+  _scanWarmupOutputForAuthFailure() {
+    if (this._loginProbeOutcome === 'logged_in') return false
+    return this._scanOutputForLoginFooter()
   }
 
   /**
@@ -5122,8 +5197,12 @@ export class ClaudeTuiSession extends BaseSession {
    * reason, `'auth_required'`, so the post-mortem logs can tell the two apart.
    */
   _handleTranscriptAuthFailure() {
+    // No `_pendingUserAnswers` guard, unlike the watchdog handlers: this runs only
+    // while `!_firstOutputDisarmed`, and a pending AskUserQuestion implies a hook
+    // was already consumed, so the guard was unreachable — and the caller breaks out
+    // of the poll loop unconditionally, so a guard that DID return early would leave
+    // `_isBusy` true with nobody polling (and the turn ending as "Stop hook timeout").
     if (!this._isBusy) return
-    if (this._pendingUserAnswers.size > 0) return
     this._assertBusyHasMessageId('_handleTranscriptAuthFailure')
     ;(this._log || log).warn(
       `transcript recorded a new authentication_failed entry (baseline ${this._authFailureBaseline}) before any output — ${AUTH_REQUIRED_CODE}`,

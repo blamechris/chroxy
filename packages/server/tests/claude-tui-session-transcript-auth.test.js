@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from 'fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, appendFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
@@ -120,7 +120,11 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
     s._waitForPrompt = async () => true
     s._authTranscriptScanMs = 0
     s._term = { pid: fakePid, write: () => {}, kill: () => {} }
-    const events = { errors: [], results: [], streamEnds: [], reasons: [], writes: [] }
+    const events = { errors: [], results: [], streamEnds: [], reasons: [], writes: [], scans: 0 }
+    // Counts every transcript read, so a negative test can wait for N poll passes
+    // to have happened instead of sleeping for a guessed time.
+    const realScan = s._scanTranscript.bind(s)
+    s._scanTranscript = () => { events.scans++; return realScan() }
     s.on('error', (e) => events.errors.push(e))
     s.on('result', (e) => events.results.push(e))
     s.on('stream_end', (e) => events.streamEnds.push(e))
@@ -130,7 +134,22 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
     return { s, events, sinkDir }
   }
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  // Poll a condition instead of sleeping a guessed time: CI load cannot make it
+  // flake early, and the happy path finishes as soon as the condition holds.
+  async function waitFor(predicate, what, { timeoutMs = 3000, intervalMs = 10 } = {}) {
+    const deadline = Date.now() + timeoutMs
+    while (!predicate()) {
+      if (Date.now() > deadline) assert.fail(`timed out after ${timeoutMs}ms waiting for ${what}`)
+      await new Promise((r) => setTimeout(r, intervalMs))
+    }
+  }
+  // The turn is busy and has captured its baseline: the poll loop is running.
+  const turnPolling = (s) => s._isBusy && s._authFailureBaseline !== null
+  // At least `n` more transcript reads (one per poll pass, with the throttle at 0).
+  async function afterScans(events, n, what) {
+    const target = events.scans + n
+    await waitFor(() => events.scans >= target, what)
+  }
   const finishTurn = (sinkDir, name = 'stop-done.json') =>
     writeFileSync(join(sinkDir, name), JSON.stringify({ last_assistant_message: 'ok' }))
 
@@ -143,7 +162,7 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
 
     const startedAt = Date.now()
     const turn = s.sendMessage('hi')
-    await sleep(300)
+    await waitFor(() => turnPolling(s), 'the turn to be busy with a baseline')
     assert.equal(s._isBusy, true, 'precondition: the turn is busy and has produced no output')
     assert.equal(s._firstOutputDisarmed, false, 'precondition: no first output yet')
     appendJournal(transcript, [authErrorLine()])
@@ -167,10 +186,27 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
     const sessFile = writeSessFile()
     const { s, events } = makeTurnSession()
     const turn = s.sendMessage('hi')
-    await sleep(300)
+    await waitFor(() => turnPolling(s), 'the turn to be busy with a baseline')
     assert.equal(s._authFailureBaseline, 0, 'a transcript that does not exist yet baselines at a known 0')
     writeJournal(sessFile, [userLine(), authErrorLine()])
     await turn
+    assert.deepEqual(events.errors.map((e) => e.code), ['AUTH_REQUIRED'])
+    assert.deepEqual(events.reasons, ['auth_required'])
+  })
+
+  // The poll loop breaks unconditionally after calling the handler, so the handler
+  // must always end the turn: a guard that returned early would strand `_isBusy`
+  // with nobody polling, and the turn would end as "Stop hook timeout". (An early
+  // return on `_pendingUserAnswers` used to sit here; it was unreachable behind the
+  // pre-first-output gate and is gone.)
+  it('_handleTranscriptAuthFailure always tears the turn down, even with an answer slot pending', () => {
+    const { s, events } = makeTurnSession()
+    s._isBusy = true
+    s._currentMessageId = 'msg-auth-direct'
+    s._activeTurn = { startedAt: s._nowMonotonic() - 5, aborted: false }
+    s._pendingUserAnswers.set('toolu_question', { toolUseId: 'toolu_question' })
+    s._handleTranscriptAuthFailure()
+    assert.equal(s._isBusy, false, 'the turn is over, so the caller\'s break leaves nothing stranded')
     assert.deepEqual(events.errors.map((e) => e.code), ['AUTH_REQUIRED'])
     assert.deepEqual(events.reasons, ['auth_required'])
   })
@@ -183,7 +219,8 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
     const { s, events, sinkDir } = makeTurnSession()
 
     const turn = s.sendMessage('hi')
-    await sleep(600) // several poll passes with the throttle at 0
+    await waitFor(() => turnPolling(s), 'the turn to be busy with a baseline')
+    await afterScans(events, 2, 'two poll passes to have re-read the transcript')
     assert.equal(s._authFailureBaseline, 1, 'the old entry is part of the baseline')
     assert.equal(s._isBusy, true, 'still waiting — the old failure did not tear the turn down')
     finishTurn(sinkDir)
@@ -200,13 +237,18 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
     const { s, events, sinkDir } = makeTurnSession()
 
     const turn = s.sendMessage('hi')
-    await sleep(200)
+    await waitFor(() => turnPolling(s), 'the turn to be busy with a baseline')
     // First output: a consumed hook file disarms the first-output latch.
-    writeFileSync(join(sinkDir, 'pre-a.json'), JSON.stringify({ tool_use_id: 'toolu_a', tool_name: 'Bash', tool_input: { command: 'ls' } }))
-    await sleep(400)
-    assert.equal(s._firstOutputDisarmed, true, 'precondition: first output was consumed')
+    const hook = (name) => writeFileSync(join(sinkDir, name), JSON.stringify({ tool_use_id: `toolu_${name}`, tool_name: 'Bash', tool_input: { command: 'ls' } }))
+    hook('pre-a.json')
+    await waitFor(() => s._firstOutputDisarmed === true, 'the first hook to be consumed (first output)')
     appendJournal(transcript, [authErrorLine()])
-    await sleep(600)
+    // Two more hooks consumed after the append: the second one proves the poll pass that
+    // consumed the first has fully finished (including its transcript check, were it ungated).
+    hook('pre-b.json')
+    await waitFor(() => !existsSync(join(sinkDir, 'pre-b.json')), 'a hook consumed after the append')
+    hook('pre-c.json')
+    await waitFor(() => !existsSync(join(sinkDir, 'pre-c.json')), 'a second hook consumed after the append')
     assert.equal(s._isBusy, true, 'the turn is untouched by a failure that arrives after first output')
     finishTurn(sinkDir)
     await turn
@@ -221,12 +263,12 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
     const { s, events, sinkDir } = makeTurnSession()
 
     const turn = s.sendMessage('hi')
-    await sleep(250)
+    await waitFor(() => turnPolling(s), 'the turn to be busy with a baseline')
     appendJournal(transcript, [
       assistantTextLine('If you see "Please run /login · API Error: 401 OAuth access token is invalid." re-authenticate.'),
       JSON.stringify({ type: 'assistant', isApiErrorMessage: true, error: 'rate_limit', message: { role: 'assistant', content: [{ type: 'text', text: 'slow down' }] } }),
     ])
-    await sleep(500)
+    await afterScans(events, 2, 'two poll passes to have read the appended entries')
     assert.equal(s._isBusy, true)
     finishTurn(sinkDir)
     await turn

@@ -25,6 +25,7 @@ import { formatBytes } from './utils/format-bytes.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { detectThinkingKeyword } from './detect-thinking-keyword.js'
 import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
+import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 
 const log = createLogger('sdk')
 
@@ -37,8 +38,8 @@ const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'
 // The SDK reads credentials from ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN or a
 // prior `claude auth login`, and nothing at the point of failure says which one
 // this host meant to use — so the message covers both.
-const AUTH_REQUIRED_MESSAGE = 'Claude authentication failed on this host. If you use a Claude subscription, run `claude auth login` in a terminal on the host; if you use an API key, check ANTHROPIC_API_KEY. Then retry.'
-// A containerised session has no `claude auth login` to run (see
+const AUTH_REQUIRED_MESSAGE = `Claude authentication failed on this host. If you use a Claude subscription, run \`${CLAUDE_LOGIN_COMMAND}\` in a terminal on the host; if you use an API key, check ANTHROPIC_API_KEY. Then retry.`
+// A containerised session has no login command to run (see
 // DockerSdkSession.preflight): its credentials are the container's env.
 const AUTH_REQUIRED_CONTAINER_MESSAGE = 'Claude authentication failed inside the session container. Check that ANTHROPIC_API_KEY is set for it, then retry.'
 
@@ -310,7 +311,7 @@ export class SdkSession extends BaseSession {
       },
       credentials: {
         envVars: ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'],
-        hint: 'run `claude login` or set ANTHROPIC_API_KEY',
+        hint: `run \`${CLAUDE_LOGIN_COMMAND}\` or set ANTHROPIC_API_KEY`,
         optional: true,
       },
     }
@@ -332,6 +333,11 @@ export class SdkSession extends BaseSession {
     const credSpec = this.preflight.credentials
     const envVars = credSpec.envVars
     const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+    // Built once rather than as a template nested inside the `detail` template below:
+    // scripts/lint-session-opt-forwarding.mjs finds class bodies with a bracket matcher
+    // that does not understand a template nested in a `${}`, and one went blind to this
+    // class (the session-subclass count dropped from 11 to 10) while that was written.
+    const fallbackHint = `run \`${CLAUDE_LOGIN_COMMAND}\` or set ANTHROPIC_API_KEY`
     // Era read at call time so a long-running daemon flips OAuth/credit-pool
     // copy at the 2026-06-15 boundary without a restart (#5629).
     const era = isProgrammaticCreditEra()
@@ -389,8 +395,8 @@ export class SdkSession extends BaseSession {
       source: 'none',
       envVar: null,
       envVars,
-      hint: hint || 'run `claude login` or set ANTHROPIC_API_KEY',
-      detail: `Not configured — ${hint || 'run \`claude login\` or set ANTHROPIC_API_KEY'}`,
+      hint: hint || fallbackHint,
+      detail: `Not configured — ${hint || fallbackHint}`,
       // Unconfigured: default to the era-gated credit-pool class (this is the
       // claude-sdk default auth path once configured via `claude login`).
       billingClass: era ? BILLING_CLASSES.PROGRAMMATIC_CREDIT : BILLING_CLASSES.SUBSCRIPTION,
@@ -438,7 +444,13 @@ export class SdkSession extends BaseSession {
     // `failed to authenticate` and `oauth session|token … expired|revoked|invalid`
     // are the OAuth-login wording ("Failed to authenticate: OAuth session expired
     // and could not be refreshed"), which the pre-existing alternatives missed.
-    { test: /authentication|invalid.api.key|401|unauthorized|failed to authenticate|oauth (?:session|token)\b[^.\n]{0,80}\b(?:expired|revoked|invalid)/i,
+    // `401` and `unauthorized` are bound, because a match now yields a no-retry
+    // sign-in card and these tokens turn up in unrelated text: a hex id
+    // (`container 7f3a4018c9e2…`), a request id (`req_011CTx401Qabc`), a port
+    // (`127.0.0.1:4010`) and a version path (`versions/2.1.401/claude`). The `401`
+    // bound is a lookaround rather than `\b401\b`, since `\b` still matches inside
+    // `2.1.401/`: not after a word char or `.`, not before a word char or `.digit`.
+    { test: /authentication|invalid.api.key|(?<![\w.])401(?!\w|\.\d)|\bunauthorized\b|failed to authenticate|oauth (?:session|token)\b[^.\n]{0,80}\b(?:expired|revoked|invalid)/i,
       msg: AUTH_REQUIRED_MESSAGE,
       code: AUTH_REQUIRED_CODE },
     { test: /overloaded|503|529|temporarily unavailable/i,

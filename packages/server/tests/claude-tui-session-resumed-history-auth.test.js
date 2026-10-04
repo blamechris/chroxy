@@ -17,6 +17,14 @@ import { AUTH_REQUIRED_MESSAGE } from '../src/claude-tui/pty-driver.js'
  * the banner. Warmup is now footer-only, and the turn-time scans (stall /
  * first-output timeout) look only at the bytes THIS turn produced.
  *
+ * Two warmup defences, tested separately. FOOTER-ONLY (round 3): the footer scan
+ * never matches a message banner. PROBE GATE (round 4): when the pre-spawn probe
+ * positively answered `loggedIn: true`, the footer scan is skipped altogether, so a
+ * resumed conversation that merely QUOTES "Not logged in · Run /login" is not
+ * refused either. The footer-only tests therefore run with an INCONCLUSIVE probe
+ * (the footer scan stays on, so only the footer-only restriction can save them);
+ * the gate tests run with a positive one.
+ *
  * The warmup tests run the REAL `start()` / `_respawnPty()` / `_spawnPty` /
  * `_waitForPrompt` against a fake node-pty (the `_ptyModOverride` seam) that
  * delivers its bytes the moment `onData` is registered — so they are in the tail
@@ -91,12 +99,19 @@ describe('ClaudeTuiSession — resumed history is not a login failure (#8223)', 
     return { spawn: () => term }
   }
 
-  function makeResumedSession({ bytes = '' } = {}) {
+  // The pre-spawn probe's answer: 'logged_in' (exit 0, loggedIn:true) or 'inconclusive'
+  // (the runner throws, the fail-open shape every non-answer takes).
+  function makeResumedSession({ bytes = '', probe = 'inconclusive' } = {}) {
+    const probeCalls = []
     const s = new ClaudeTuiSession({
       cwd: fakeCwd, skillsDir, repoSkillsDir: null, resumeSessionId: RESUME_ID,
-      // A healthy `claude auth status`: the pre-spawn probe is not what is under test.
-      loginProbeRunner: async () => ({ status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }) }),
+      loginProbeRunner: async (call) => {
+        probeCalls.push(call)
+        if (probe === 'logged_in') return { status: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }) }
+        throw new Error('probe could not run')
+      },
     })
+    s._probeCalls = probeCalls
     session = s
     s._ptyModOverride = fakePty(bytes)
     const events = { errors: [], readys: [], exhausted: [] }
@@ -175,6 +190,82 @@ describe('ClaudeTuiSession — resumed history is not a login failure (#8223)', 
     assert.equal(events.readys.length, 1, 'no second ready on a logged-out respawn')
   })
 
+  // --- the probe gate (round 4) ---------------------------------------------
+
+  // A resumed conversation that QUOTES the footer (a session about this very issue)
+  // re-renders it from history at warmup. After a positive probe that can only be
+  // history, so the footer scan is off.
+  const HISTORY_QUOTING_FOOTER = HISTORY_WITH_BANNERS + FOOTER_LOGGED_OUT
+
+  it('probe loggedIn:true + a footer re-rendered from history at warmup: start() resolves and nothing latches', async () => {
+    const { s, events } = makeResumedSession({ bytes: HISTORY_QUOTING_FOOTER, probe: 'logged_in' })
+    await s.start()
+    assert.equal(s._loginProbeOutcome, 'logged_in')
+    assert.equal(s._authFailureDetected, false)
+    assert.equal(events.readys.length, 1, 'the restored session became ready')
+    assert.deepEqual(events.errors, [])
+  })
+
+  it('probe inconclusive + the footer at warmup still rejects AUTH_REQUIRED (the backstop)', async () => {
+    const { s, events } = makeResumedSession({ bytes: HISTORY_QUOTING_FOOTER, probe: 'inconclusive' })
+    await assert.rejects(s.start(), (err) => err.code === 'AUTH_REQUIRED')
+    assert.equal(s._loginProbeOutcome, 'unknown')
+    assert.equal(events.readys.length, 0)
+  })
+
+  it('the native route skips the probe, so the outcome stays unknown and the footer backstop stays on', async () => {
+    const { s } = makeResumedSession({ bytes: FOOTER_LOGGED_OUT, probe: 'logged_in' })
+    s._connectionAuthRoute = 'native'
+    await s._probeLoginBeforeFirstSpawn({ binary: '/fixture/claude', cwd: fakeCwd, env: {} })
+    assert.equal(s._probeCalls.length, 0)
+    assert.equal(s._loginProbeOutcome, 'unknown')
+    s._appendToOutputTail(FOOTER_LOGGED_OUT)
+    assert.equal(s._scanWarmupOutputForAuthFailure(), true)
+  })
+
+  it('a respawn with the probe recorded as logged_in + the footer in history is marked ready', async () => {
+    const { s, events } = makeResumedSession({ probe: 'logged_in' })
+    await s.start()
+    assert.equal(s._loginProbeOutcome, 'logged_in')
+    assert.equal(events.readys.length, 1)
+
+    s._ptyExited = true
+    s._ptyModOverride = fakePty(HISTORY_QUOTING_FOOTER)
+    await s._respawnPty()
+
+    assert.equal(events.readys.length, 2)
+    assert.deepEqual(events.exhausted, [])
+    assert.deepEqual(events.errors.filter((e) => e.code === 'AUTH_REQUIRED'), [])
+    assert.equal(s._probeCalls.length, 1, 'the outcome is kept across respawns: the probe is not re-run')
+    assert.equal(s._loginProbeOutcome, 'logged_in')
+  })
+
+  it('a respawn after an INCONCLUSIVE probe still stops on the live footer', async () => {
+    const { s, events } = makeResumedSession({ probe: 'inconclusive' })
+    await s.start()
+    s._ptyExited = true
+    s._ptyModOverride = fakePty(FOOTER_LOGGED_OUT)
+    await s._respawnPty()
+    assert.deepEqual(events.exhausted.map((e) => e.reason), ['AUTH_REQUIRED'])
+  })
+
+  it('the no-turn PTY-death scan is gated too: a footer in history after a positive probe is just a PTY exit', () => {
+    const { s, events } = makeResumedSession({ probe: 'logged_in' })
+    s._loginProbeOutcome = 'logged_in'
+    s._appendToOutputTail(HISTORY_QUOTING_FOOTER)
+    s._onPtyGone({ exitCode: 1, signal: null }, 'exit') // no active turn
+    assert.equal(events.errors.some((e) => e.code === 'AUTH_REQUIRED'), false)
+    assert.ok(events.errors.some((e) => /Claude PTY exited/.test(e.message)))
+  })
+
+  it('the gate leaves the TURN-time scans alone: a live footer printed during a turn still reads as logged out', () => {
+    const { s } = makeResumedSession({ probe: 'logged_in' })
+    s._loginProbeOutcome = 'logged_in'
+    s._markTurnOutputStart()
+    s._appendToOutputTail(FOOTER_LOGGED_OUT)
+    assert.equal(s._scanTurnOutputForAuthFailure(), true)
+  })
+
   // --- turn time ------------------------------------------------------------
 
   describe('turn-time scans see only this turn\'s output', () => {
@@ -225,6 +316,15 @@ describe('ClaudeTuiSession — resumed history is not a login failure (#8223)', 
       const { s, errors, duringTurn } = makeTurnSession()
       s._appendToOutputTail(HISTORY_WITH_BANNERS)
       duringTurn(() => s._appendToOutputTail(BANNER_EXPIRED_10COL))
+      await s.sendMessage('hi')
+      assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED'])
+    })
+
+    it('...and a wrapped "Please run /login · API Error: 401" banner with no "Login expired" prefix (only `pleaserun/login` matches it)', async () => {
+      const { s, errors, duringTurn } = makeTurnSession()
+      duringTurn(() => s._appendToOutputTail(
+        ['⏺ Please', '\x1b[2Crun', '\x1b[2C/login ·', '\x1b[2CAPI Error:', '\x1b[2C401 OAuth', '\x1b[2Caccess token', '\x1b[2Cis invalid.'].join('\r\x1b[1B'),
+      ))
       await s.sendMessage('hi')
       assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED'])
     })

@@ -2679,6 +2679,10 @@ describe('SdkSession', () => {
         'authentication_error: invalid api key',
         'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
         'Request failed: Unauthorized',
+        '401 Unauthorized',
+        'Request failed with status code 401',
+        'HTTP 401: invalid credentials',
+        'API Error: 401. Please retry.',
       ]) {
         it(`a thrown ${JSON.stringify(raw)} is AUTH_REQUIRED`, async () => {
           const s = createSession()
@@ -2705,6 +2709,47 @@ describe('SdkSession', () => {
           assert.equal(errors[0].code, undefined)
         })
       }
+
+      // #8223 (review): the `401` / `unauthorized` tokens turn up in unrelated text, and a
+      // match now yields a no-retry sign-in card, so they are bound. Each of these used to
+      // match: a hex id, a request id, a port, and a version path (where `\b401\b` ALONE
+      // would still match, between `.` and `/`).
+      for (const raw of [
+        'docker: container 7f3a4018c9e2b1d0 is not running',
+        '/Users/someone/.local/share/claude/versions/2.1.401/claude ENOENT',
+        'connect ECONNREFUSED 127.0.0.1:4010',
+        'unauthorized_client is not a real token here',
+      ]) {
+        it(`a thrown ${JSON.stringify(raw)} is NOT AUTH_REQUIRED (word-bound 401 / unauthorized)`, async () => {
+          const s = createSession()
+          const { errors } = await runTurn(s, () => (async function* () { throw new Error(raw) })())
+          s.destroy()
+          assert.equal(errors.length, 1)
+          assert.equal(errors[0].code, undefined)
+          assert.equal(errors[0].message, raw, 'passes through unchanged')
+        })
+      }
+
+      it('a request id that merely contains 401 and is followed by an overload gets the OVERLOADED message, not a sign-in card', async () => {
+        const s = createSession()
+        const { errors } = await runTurn(s, () => (async function* () { throw new Error('request_id req_011CTx401Qabc failed: overloaded') })())
+        s.destroy()
+        assert.equal(errors.length, 1)
+        assert.equal(errors[0].code, undefined)
+        assert.match(errors[0].message, /temporarily overloaded/)
+      })
+
+      it('surfaces ONE AUTH_REQUIRED when two assistant messages in one turn both report authentication_failed (the assistant half of the latch)', async () => {
+        const s = createSession()
+        const { errors, messages } = await runTurn(s, () => (async function* () {
+          yield authAssistantMsg
+          yield authAssistantMsg
+          yield resultMsg
+        })())
+        s.destroy()
+        assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED'])
+        assert.deepEqual(messages.filter((m) => m.type === 'response'), [])
+      })
 
       it('surfaces ONE AUTH_REQUIRED when the assistant message AND the throw both report it', async () => {
         const s = createSession()

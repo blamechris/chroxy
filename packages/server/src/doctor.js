@@ -28,6 +28,7 @@ import {
 import { checkDependencies } from './utils/check-dependencies.js'
 import { configPath } from './config-dir.js'
 import { detectStrandedState } from './config-dir-migration.js'
+import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
 import { createLogger } from './logger.js'
 
@@ -360,7 +361,7 @@ export function checkClaudeTuiCliVersion(deps = {}) {
   }
 }
 
-const CLAUDE_LOGIN_UNREADABLE_MESSAGE = "Could not read the login state from `claude auth status --json` — if a claude-tui session reports AUTH_REQUIRED, run `claude auth login` on this host."
+const CLAUDE_LOGIN_UNREADABLE_MESSAGE = `Could not read the login state from \`claude auth status --json\` — if a claude-tui session reports AUTH_REQUIRED, run \`${CLAUDE_LOGIN_COMMAND}\` on this host.`
 
 /**
  * #8223: report whether the `claude` on this host is logged in, from
@@ -437,7 +438,7 @@ export function checkClaudeLogin(deps = {}) {
     return {
       name: NAME,
       status: 'warn',
-      message: 'Not logged in — run `claude auth login` on this host. claude-tui needs it; claude-sdk needs it unless ANTHROPIC_API_KEY is set.',
+      message: `Not logged in — run \`${CLAUDE_LOGIN_COMMAND}\` on this host. claude-tui needs it; claude-sdk needs it unless ANTHROPIC_API_KEY is set.`,
     }
   }
   return { name: NAME, status: 'warn', message: CLAUDE_LOGIN_UNREADABLE_MESSAGE }

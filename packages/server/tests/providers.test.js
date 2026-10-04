@@ -1156,7 +1156,7 @@ describe('Docker Provider Naming (#2475)', () => {
       const { DockerSession } = await import('../src/docker-session.js')
       const credSpec = DockerSession.preflight.credentials
       assert.ok(credSpec, 'docker-cli must declare a preflight credentials block')
-      assert.doesNotMatch(credSpec.hint, /claude login/i,
+      assert.doesNotMatch(credSpec.hint, /claude (?:auth )?login/i,
         `claude login is futile inside a container — hint was: ${credSpec.hint}`)
       assert.match(credSpec.hint, /ANTHROPIC_API_KEY/,
         'hint must point the user at the env var path')
@@ -1166,7 +1166,7 @@ describe('Docker Provider Naming (#2475)', () => {
       const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
       const credSpec = DockerSdkSession.preflight.credentials
       assert.ok(credSpec, 'docker-sdk must declare a preflight credentials block')
-      assert.doesNotMatch(credSpec.hint, /claude login/i,
+      assert.doesNotMatch(credSpec.hint, /claude (?:auth )?login/i,
         `claude login is futile inside a container — hint was: ${credSpec.hint}`)
       assert.match(credSpec.hint, /ANTHROPIC_API_KEY/,
         'hint must point the user at the env var path')
@@ -1178,9 +1178,9 @@ describe('Docker Provider Naming (#2475)', () => {
         const { DockerSession } = await import('../src/docker-session.js')
         const auth = DockerSession.resolveAuth(process.env)
         assert.equal(auth.ready, false)
-        assert.doesNotMatch(auth.hint, /claude login/i,
+        assert.doesNotMatch(auth.hint, /claude (?:auth )?login/i,
           `docker-cli hint must not tell users to claude login — got: ${auth.hint}`)
-        assert.doesNotMatch(auth.detail, /claude login/i,
+        assert.doesNotMatch(auth.detail, /claude (?:auth )?login/i,
           `docker-cli detail must not tell users to claude login — got: ${auth.detail}`)
       } finally {
         restoreKeys()
@@ -1193,9 +1193,9 @@ describe('Docker Provider Naming (#2475)', () => {
         const { DockerSdkSession } = await import('../src/docker-sdk-session.js')
         const auth = DockerSdkSession.resolveAuth(process.env, {})
         assert.equal(auth.ready, false)
-        assert.doesNotMatch(auth.hint, /claude login/i,
+        assert.doesNotMatch(auth.hint, /claude (?:auth )?login/i,
           `docker-sdk hint must not tell users to claude login — got: ${auth.hint}`)
-        assert.doesNotMatch(auth.detail, /claude login/i,
+        assert.doesNotMatch(auth.detail, /claude (?:auth )?login/i,
           `docker-sdk detail must not tell users to claude login — got: ${auth.detail}`)
       } finally {
         restoreKeys()
@@ -1263,10 +1263,10 @@ describe('Docker Provider Naming (#2475)', () => {
         'host CLI provider must still mention claude login — it works on the host')
     })
 
-    it('host SdkSession still uses the original `claude login` hint (regression guard)', () => {
+    it('host SdkSession still tells the user to log in on the host (regression guard) — with the current command (#8223)', () => {
       const credSpec = SdkSession.preflight.credentials
-      assert.match(credSpec.hint, /claude login/,
-        'host SDK provider must still mention claude login — it works on the host')
+      assert.match(credSpec.hint, /claude auth login/,
+        'host SDK provider must still mention claude auth login — it works on the host')
     })
   })
 })

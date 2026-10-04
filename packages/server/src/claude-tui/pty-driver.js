@@ -17,6 +17,7 @@ import { fileURLToPath } from 'url'
 // others still import CLAUDE_BINARY_CANDIDATES/resolveClaudeBinary from here.
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from '../utils/claude-binary.js'
 import { createLogger } from '../logger.js'
+import { CLAUDE_LOGIN_COMMAND } from '../utils/claude-login-command.js'
 // #7002/#7046 — the ONE writer for `~/.claude.json`. Deliberately shared with the
 // BYOK MCP add/remove path rather than re-implemented here: a second hand-rolled
 // `writeFileSync(tmp)` → `renameSync(tmp, ~/.claude.json)` is exactly how the
@@ -202,7 +203,7 @@ export const AUTH_FAILURE_FOOTER_COMPACT_PATTERNS = [
 ]
 // Structured error surfaced when an auth failure is classified.
 export const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'
-export const AUTH_REQUIRED_MESSAGE = 'Claude is not logged in on this host, or its login expired. Run `claude auth login` in a terminal on the host (or `/login` inside claude), then retry. This provider uses the Claude subscription and does not accept ANTHROPIC_API_KEY.'
+export const AUTH_REQUIRED_MESSAGE = `Claude is not logged in on this host, or its login expired. Run \`${CLAUDE_LOGIN_COMMAND}\` in a terminal on the host (or \`/login\` inside claude), then retry. This provider uses the Claude subscription and does not accept ANTHROPIC_API_KEY.`
 
 // Pre-trust the cwd in ~/.claude.json so the workspace-trust dialog doesn't
 // block headless spawn. The dialog is interactive-only — without this, the

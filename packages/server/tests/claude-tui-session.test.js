@@ -5,7 +5,8 @@ import { chmodSync, fstatSync, linkSync, mkdirSync, mkdtempSync, openSync, readd
 import { tmpdir } from 'os'
 import { join, sep } from 'path'
 import { fileURLToPath } from 'url'
-import { ClaudeTuiSession, SINK_BASE_UNTRUSTED_CODE, buildNativeRouteCheckHook, withHookFsTimeout } from '../src/claude-tui-session.js'
+import { ClaudeTuiSession, SINK_BASE_UNTRUSTED_CODE, buildNativeRouteCheckHook, withHookFsTimeout, _resetLoginProbeWarningForTests } from '../src/claude-tui-session.js'
+import { AUTH_FAILURE_PATTERNS, AUTH_FAILURE_COMPACT_PATTERNS } from '../src/claude-tui/pty-driver.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
@@ -315,6 +316,7 @@ describe('ClaudeTuiSession', () => {
         assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED'], 'exactly one AUTH_REQUIRED error event')
         assert.equal(errors[0].message, rejection.message, 'the emitted error and the rejection carry the same text')
         assert.ok(!s._term, 'no live PTY left behind')
+        assert.equal(s._loginProbeOutcome, 'logged_out')
       })
 
       it('start() rejects with AUTH_REQUIRED through the real start path', async () => {
@@ -333,6 +335,7 @@ describe('ClaudeTuiSession', () => {
         await s._spawnPty(true)
         assert.equal(calls.length, 1)
         assert.equal(spawns.length, 1, 'exit 0 + loggedIn:true must reach node-pty spawn')
+        assert.equal(s._loginProbeOutcome, 'logged_in', 'a positive answer is recorded (it switches the warmup footer scan off)')
       })
 
       for (const [name, runner] of [
@@ -354,6 +357,7 @@ describe('ClaudeTuiSession', () => {
           assert.equal(calls.length, 1, 'the probe ran')
           assert.equal(spawns.length, 1, 'and the spawn proceeded exactly as without a probe')
           assert.ok(!errors.some((e) => e.code === 'AUTH_REQUIRED'), 'no AUTH_REQUIRED from an inconclusive probe')
+          assert.equal(s._loginProbeOutcome, 'unknown', 'only a consistent exit-0 loggedIn:true is recorded as logged_in')
         })
       }
 
@@ -372,6 +376,119 @@ describe('ClaudeTuiSession', () => {
         s._connectionAuthRoute = 'native'
         await s._probeLoginBeforeFirstSpawn({ binary: '/fixture/claude', cwd: '/tmp', env: {} })
         assert.equal(calls.length, 0)
+      })
+
+      it('does not refuse (no throw, no error event) when destroy() landed during the probe await and the answer was logged-out', async () => {
+        const { s, errors } = probeSession(() => LOGGED_OUT)
+        session = s
+        s._destroying = true // destroy() ran while the runner was pending
+        await s._probeLoginBeforeFirstSpawn({ binary: '/fixture/claude', cwd: '/tmp', env: {} })
+        assert.deepEqual(errors, [], 'a torn-down session has nothing left to refuse')
+        assert.equal(s._loginProbeOutcome, 'unknown')
+      })
+
+      it('does not spawn the PTY when destroy() lands while the probe is pending, even though it then answers logged-in', async () => {
+        let release
+        const { s, calls, spawns } = probeSession(() => new Promise((resolve) => { release = () => resolve(LOGGED_IN) }))
+        session = s
+        const spawning = s._spawnPty(true)
+        for (let i = 0; i < 200 && calls.length === 0; i++) await new Promise((r) => setTimeout(r, 5))
+        assert.equal(calls.length, 1, 'precondition: the probe is pending')
+        await s.destroy()
+        release()
+        await spawning
+        assert.equal(spawns.length, 0, 'no claude is launched for a session that is already gone')
+        assert.ok(!s._term, 'and no PTY is left behind')
+      })
+
+      // #8223: the probe still FAILS OPEN on non-zero-exit-without-JSON, but it is the
+      // signature of a broken probe (the `--settings` rejection looked exactly like
+      // this and disabled it on every real host unseen), so it warns — once per process.
+      describe('a broken probe is visible', () => {
+        let warns
+        let listener
+        beforeEach(() => {
+          _resetLoginProbeWarningForTests()
+          warns = []
+          listener = (entry) => { if (entry.level === 'warn' && /claude auth status exited/.test(entry.message)) warns.push(entry.message) }
+          addLogListener(listener)
+        })
+        afterEach(() => { removeLogListener(listener); _resetLoginProbeWarningForTests() })
+
+        const BROKEN = { status: 1, stdout: '', stderr: "error: unknown option '--settings'" }
+
+        it('warns once per process, naming the exit status and the start of stderr, and still proceeds', async () => {
+          const first = probeSession(() => BROKEN)
+          session = first.s
+          await first.s._spawnPty(true)
+          assert.equal(first.spawns.length, 1, 'fail open: the spawn proceeded')
+          assert.equal(warns.length, 1)
+          assert.match(warns[0], /exited 1 without JSON/)
+          assert.match(warns[0], /unknown option '--settings'/)
+
+          const second = probeSession(() => BROKEN)
+          await second.s._spawnPty(true)
+          await second.s.destroy()
+          assert.equal(second.spawns.length, 1)
+          assert.equal(warns.length, 1, 'a second session in the same process does not warn again')
+        })
+
+        it('truncates stderr to ~200 characters and redacts token-shaped runs', async () => {
+          const { s } = probeSession(() => ({ status: 2, stdout: 'not json', stderr: `sk-ant-api03-${'A'.repeat(40)} ${'x'.repeat(500)}` }))
+          session = s
+          await s._spawnPty(true)
+          assert.equal(warns.length, 1)
+          assert.ok(!warns[0].includes('A'.repeat(20)), 'a token-shaped run must not reach the log')
+          assert.ok(warns[0].length < 600, `warn stays bounded (${warns[0].length} chars)`)
+        })
+
+        it('stays at debug for every other inconclusive path (no warn)', async () => {
+          for (const runner of [
+            () => { throw new Error('spawn claude ENOENT') },
+            () => ({ status: 0, stdout: 'garbage' }),
+            () => ({ status: 1, stdout: JSON.stringify({ authMethod: 'none' }) }),
+            () => ({ status: 1, stdout: JSON.stringify({ loggedIn: true }) }),
+            () => undefined,
+          ]) {
+            const { s } = probeSession(runner)
+            await s._spawnPty(true)
+            await s.destroy()
+          }
+          assert.deepEqual(warns, [])
+        })
+
+        it('does not warn for an explicit logged-out answer or a healthy one', async () => {
+          for (const answer of [LOGGED_OUT, LOGGED_IN]) {
+            const { s } = probeSession(() => answer)
+            await s._spawnPty(true).catch(() => {})
+            await s.destroy()
+          }
+          assert.deepEqual(warns, [])
+        })
+
+        it('the default runner reports a real child\'s stderr (it is what the warning quotes)', async () => {
+          // No injected runner: the REAL runClaudeAuthStatus runs `node auth status --json`,
+          // which exits 1 with "Cannot find module" on stderr and nothing on stdout.
+          const cwd = mkdtempSync(join(tmpdir(), 'chroxy-probe-cwd-'))
+          try {
+            const s = new ClaudeTuiSession({
+              cwd, port: 12361, skillsDir: emptySkillsDir, repoSkillsDir: null,
+              spawnPreflight: () => process.execPath,
+            })
+            session = s
+            s.on('error', () => {})
+            s._sessionId = 'probe-uuid-real-runner'
+            s._settingsPath = join(fakeHome, 'settings.json')
+            let spawned = 0
+            s._ptyModOverride = { spawn: () => { spawned++; throw new Error('captured-and-bail') } }
+            await s._spawnPty(true)
+            assert.equal(spawned, 1, 'fail open')
+            assert.equal(warns.length, 1)
+            assert.match(warns[0], /stderr: .*(Cannot find module|auth)/i)
+          } finally {
+            rmSync(cwd, { recursive: true, force: true })
+          }
+        })
       })
     })
 
@@ -1394,7 +1511,7 @@ describe('ClaudeTuiSession', () => {
         'Invalid API key ·\n   Please run\n   /login',
       ]) {
         s._outputTail = sample
-        assert.ok(s._scanOutputForAuthFailure(), `should match: ${JSON.stringify(sample)}`)
+        assert.ok(s._scanOutputForAuthFailure(s._outputTail), `should match: ${JSON.stringify(sample)}`)
       }
     })
 
@@ -1412,7 +1529,7 @@ describe('ClaudeTuiSession', () => {
         '',
       ]) {
         s._outputTail = sample
-        assert.ok(!s._scanOutputForAuthFailure(), `must NOT match: ${JSON.stringify(sample)}`)
+        assert.ok(!s._scanOutputForAuthFailure(s._outputTail), `must NOT match: ${JSON.stringify(sample)}`)
       }
     })
 
@@ -1459,7 +1576,7 @@ describe('ClaudeTuiSession', () => {
         ['footer status line alone', FOOTER_LOGGED_OUT],
       ]) {
         const tail = tailAfter(s, bytes)
-        assert.ok(s._scanOutputForAuthFailure(), `${name} must match; stripped tail was ${JSON.stringify(tail)}`)
+        assert.ok(s._scanOutputForAuthFailure(s._outputTail), `${name} must match; stripped tail was ${JSON.stringify(tail)}`)
       }
     })
 
@@ -1477,7 +1594,7 @@ describe('ClaudeTuiSession', () => {
       const s = makeSession()
       const cut = FOOTER_LOGGED_OUT.indexOf('Run') + 1
       tailAfter(s, FOOTER_LOGGED_OUT.slice(0, cut), FOOTER_LOGGED_OUT.slice(cut))
-      assert.ok(s._scanOutputForAuthFailure())
+      assert.ok(s._scanOutputForAuthFailure(s._outputTail))
     })
 
     it('_scanOutputForAuthFailure stays false for prose and near-misses, flat or wrapped (#8223)', () => {
@@ -1493,11 +1610,33 @@ describe('ClaudeTuiSession', () => {
       ]
       for (const sample of prose) {
         tailAfter(s, sample)
-        assert.ok(!s._scanOutputForAuthFailure(), `flat must NOT match: ${JSON.stringify(sample)}`)
+        assert.ok(!s._scanOutputForAuthFailure(s._outputTail), `flat must NOT match: ${JSON.stringify(sample)}`)
         // The same words wrapped one per row the way claude lays out a narrow pane.
         tailAfter(s, sample.split(' ').join(ROW_BREAK))
-        assert.ok(!s._scanOutputForAuthFailure(), `wrapped must NOT match: ${JSON.stringify(s._outputTail)}`)
+        assert.ok(!s._scanOutputForAuthFailure(s._outputTail), `wrapped must NOT match: ${JSON.stringify(s._outputTail)}`)
       }
+    })
+
+    // #8223 (review): the compact `pleaserun/login` pattern is the ONE the squeezed
+    // "Please run /login · API Error: 401 …" banner needs. Every other fixture here
+    // either keeps its spaces (the old patterns) or carries a "Login expired ·" /
+    // "Invalid API key ·" prefix (the second compact pattern), so deleting this
+    // pattern used to leave every test green. This banner has neither: wrapped at 10
+    // columns with CUD row breaks and CUF indents, claude's "Please run /login ·
+    // API Error: 401 OAuth access token is invalid." reaches the tail as
+    // "⏺ Pleaserun/login ·API Error:401 …".
+    it('the compact "pleaserun/login" pattern alone catches a wrapped banner with no status-phrase prefix, as this turn\'s output', () => {
+      const s = makeSession()
+      const BANNER_PLEASERUN_ONLY_10COL = [
+        '⏺ Please', '\x1b[2Crun', '\x1b[2C/login ·', '\x1b[2CAPI Error:', '\x1b[2C401 OAuth', '\x1b[2Caccess token', '\x1b[2Cis invalid.',
+      ].join(ROW_BREAK)
+      s._markTurnOutputStart()
+      const tail = tailAfter(s, BANNER_PLEASERUN_ONLY_10COL)
+      // Premise: no OTHER pattern can match this text, so the assertion below is about
+      // `pleaserun/login` and nothing else.
+      assert.equal(AUTH_FAILURE_PATTERNS.some((re) => re.test(tail.replace(/\s+/g, ' '))), false, JSON.stringify(tail))
+      assert.equal(AUTH_FAILURE_COMPACT_PATTERNS.filter((re) => re.test(tail.replace(/\s+/g, ''))).length, 1, JSON.stringify(tail))
+      assert.equal(s._scanTurnOutputForAuthFailure(), true, `the turn-time scan must match; stripped tail was ${JSON.stringify(tail)}`)
     })
 
     // #8223: what warmup may match. The footer — never a message banner, because
