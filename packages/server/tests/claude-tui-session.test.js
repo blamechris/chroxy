@@ -308,8 +308,8 @@ describe('ClaudeTuiSession', () => {
         assert.match(rejection.message, /claude auth login/)
         assert.equal(spawns.length, 0, 'the PTY must not be spawned for a logged-out host')
         assert.equal(calls.length, 1)
-        assert.deepEqual(calls[0].args, ['auth', 'status', '--json', '--settings', join(fakeHome, 'settings.json')],
-          'asks with the same --settings the spawn will use')
+        assert.deepEqual(calls[0].args, ['auth', 'status', '--json'],
+          'no --settings: `claude auth status` rejects it as an unknown option, which would make the probe fail open every time')
         assert.equal(typeof calls[0].binary, 'string')
         assert.equal(calls[0].env.ANTHROPIC_API_KEY, undefined, 'probed with the env the PTY gets: no API key')
         assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED'], 'exactly one AUTH_REQUIRED error event')

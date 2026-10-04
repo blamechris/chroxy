@@ -2657,10 +2657,10 @@ export class ClaudeTuiSession extends BaseSession {
     this._loginProbeRan = true
     if (this._connectionAuthRoute === 'native') return
 
+    // No `--settings`: `claude auth status` rejects it ("unknown option" on
+    // claude 2.1.289) with an empty stdout, which this probe reads as
+    // unparseable and fails open — so passing it made the probe a no-op.
     const args = ['auth', 'status', '--json']
-    if (typeof this._settingsPath === 'string' && this._settingsPath) {
-      args.push('--settings', this._settingsPath)
-    }
     let result
     try {
       result = await this._loginProbeRunner({ binary, args, cwd, env })
