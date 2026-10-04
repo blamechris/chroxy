@@ -1425,6 +1425,13 @@ describe('ClaudeTuiSession', () => {
     const FOOTER_LOGGED_OUT = '\x1b[93G\x1b[38;5;211mNot\x1b[97Glogged\x1b[104Gin\x1b[107G·\x1b[109GRun\x1b[113G/login\x1b[39m\r\r\n'
     const BANNER_EXPIRED_120COL = '\r\x1b[1B\x1b[38;5;220m⏺\x1b[39m \x1b[38;5;220mLogin expired · Please run /login\x1b[39m\x1b[K\r\x1b[2C\x1b[1B\x1b[K'
     const BANNER_NO_CREDS = '  ⎿  \x1b[38;5;211mNot logged in · Please run /login\r\x1b[1B'
+    // #8223: what `claude --resume` re-renders at startup for a conversation whose
+    // last turn hit an auth failure — message banners from HISTORY, with no live
+    // footer (measured on a PTY capture of `claude --resume`, no prompt sent).
+    const HISTORY_WITH_BANNERS = [
+      '\x1b[38;5;220m⏺\x1b[39m \x1b[38;5;220mPlease run /login · API Error: 401 OAuth access token is invalid.\x1b[39m\r\x1b[1B',
+      '\x1b[38;5;220m⏺\x1b[39m \x1b[38;5;220mLogin expired · Please run /login\x1b[39m\r\x1b[1B',
+    ].join('')
     // Continuation rows are indented with CUF (`\x1b[2C`), as the 120-column capture
     // above does, not with literal spaces — a literal indent would survive the strip
     // and let the old patterns match, which is not the failure being reproduced.
@@ -1493,6 +1500,39 @@ describe('ClaudeTuiSession', () => {
       }
     })
 
+    // #8223: what warmup may match. The footer — never a message banner, because
+    // `claude --resume` re-renders banners from history (see AUTH_FAILURE_FOOTER_PATTERNS).
+    it('_scanOutputForLoginFooter matches the footer in each rendering (spaced, positioned, wrapped)', () => {
+      const s = makeSession()
+      for (const [name, bytes] of [
+        ['spaced, wide PTY', 'Not logged in · Run /login'],
+        ['CHA-positioned words', FOOTER_LOGGED_OUT],
+        ['wrapped at 10 columns', ['Not logged', 'in · Run', '/login'].join(ROW_BREAK)],
+        ['behind resumed history', HISTORY_WITH_BANNERS + FOOTER_LOGGED_OUT],
+      ]) {
+        const tail = tailAfter(s, bytes)
+        assert.ok(s._scanOutputForLoginFooter(), `${name} must match; stripped tail was ${JSON.stringify(tail)}`)
+      }
+    })
+
+    it('_scanOutputForLoginFooter rejects every message banner, which a --resume replays from history', () => {
+      const s = makeSession()
+      for (const [name, bytes] of [
+        ['resumed history', HISTORY_WITH_BANNERS],
+        ['no-credentials TURN banner', BANNER_NO_CREDS],
+        ['expired banner, 120 columns', BANNER_EXPIRED_120COL],
+        ['expired banner, 10 columns', BANNER_EXPIRED_10COL],
+        ['plain "Please run /login"', 'Please run /login to continue'],
+        ['"Not logged in · Please run /login", spaced', 'Not logged in · Please run /login'],
+        ['"Invalid API key · Please run /login"', 'Invalid API key · Please run /login'],
+        ['prose', 'you are not logged in'],
+        ['"Not logged in · rerun /login"', 'Not logged in · rerun /login'],
+      ]) {
+        const tail = tailAfter(s, bytes)
+        assert.ok(!s._scanOutputForLoginFooter(), `${name} must NOT match; stripped tail was ${JSON.stringify(tail)}`)
+      }
+    })
+
     it('start() rejects with AUTH_REQUIRED when the footer appears during warmup (#8223)', async () => {
       const s = makeSession()
       // Live PTY, never ready; the only evidence is the footer status line claude
@@ -1546,13 +1586,18 @@ describe('ClaudeTuiSession', () => {
       await s.destroy() // start() created a sink dir under /tmp — clean it up
     })
 
+    // #8223: warmup is footer-only, so the post-warmup re-scan in start() — like
+    // every warmup scan — is satisfied by claude's footer, not by a message banner
+    // (that is re-rendered history on a resumed session; see the "resumed history"
+    // describe below). This test used to feed the banner `Invalid API key · Please
+    // run /login` and now feeds the footer through the real byte path instead.
     it('start() rejects with AUTH_REQUIRED when the warmup output (not the latch) shows logged-out', async () => {
       const s = makeSession()
-      // _spawnPty leaves a live PTY + the login banner in the tail, but does not
+      // _spawnPty leaves a live PTY + the login footer in the tail, but does not
       // set the latch (mimics the timeout-fallback path).
       s._spawnPty = async function () {
         this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {}, on: () => {} }
-        this._outputTail = 'Invalid API key · Please run /login'
+        this._appendToOutputTail(FOOTER_LOGGED_OUT)
       }
       const errors = []
       s.on('error', (e) => errors.push(e))
@@ -1561,24 +1606,44 @@ describe('ClaudeTuiSession', () => {
       await s.destroy() // start() created a sink dir under /tmp — clean it up
     })
 
-    it('_onPtyGone emits AUTH_REQUIRED when the PTY died with a logged-out banner', () => {
+    // #8223: a PTY death with no turn in flight (warmup or idle) is footer-only:
+    // a message banner in the tail there is re-rendered history or an earlier
+    // turn's failure that was already surfaced. This test used to set the banner
+    // `Invalid API key · Please run /login`; it now uses the footer.
+    it('_onPtyGone emits AUTH_REQUIRED when the PTY died showing the logged-out footer', () => {
       const s = makeSession()
       const errors = []
       s.on('error', (e) => errors.push(e))
-      s._outputTail = 'Invalid API key · Please run /login'
+      s._appendToOutputTail(FOOTER_LOGGED_OUT)
       s._onPtyGone({ exitCode: 1, signal: null }, 'exit') // no active turn
 
       const authErr = errors.find((e) => e.code === 'AUTH_REQUIRED')
       assert.ok(authErr, 'AUTH_REQUIRED surfaced on auth-related PTY death')
     })
 
-    it('_handleStreamStall upgrades a stall to AUTH_REQUIRED when the tail shows logged-out', () => {
+    it('_onPtyGone does NOT call a banner left by resumed history "logged out" (#8223)', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._appendToOutputTail(HISTORY_WITH_BANNERS)
+      s._onPtyGone({ exitCode: 1, signal: null }, 'exit') // no active turn
+
+      assert.equal(errors.some((e) => e.code === 'AUTH_REQUIRED'), false)
+      assert.ok(errors.some((e) => /Claude PTY exited/.test(e.message)), 'the generic exit error is surfaced instead')
+    })
+
+    // #8223: the turn-time scan reads only the bytes THIS turn printed, so the
+    // banner has to arrive after the turn started. This test used to assign the
+    // banner to `_outputTail` directly (there are no "bytes since turn start" in
+    // that shape); it now marks the turn start and feeds the banner as turn output.
+    it('_handleStreamStall upgrades a stall to AUTH_REQUIRED when this turn printed a logged-out banner', () => {
       const s = makeSession()
       s._isBusy = true
       s._currentMessageId = 'msg-auth'
       s._activeTurn = { startedAt: Date.now() - 100, synthSeq: 0 }
       s._term = { write: () => {}, kill: () => {} }
-      s._outputTail = 'Invalid API key · Please run /login'
+      s._markTurnOutputStart()
+      s._appendToOutputTail('Invalid API key · Please run /login')
       const errors = []
       s.on('error', (e) => errors.push(e))
 
@@ -1588,13 +1653,16 @@ describe('ClaudeTuiSession', () => {
       assert.equal(s._isBusy, false, 'turn torn down')
     })
 
-    it('_waitForPrompt short-circuits the warmup wait on a logged-out banner (#5355 m3 — no 90s hang)', async () => {
+    // #8223: the short-circuit is footer-only now. It used to key on the banner
+    // `Invalid API key · Please run /login`, which is also what a `--resume`
+    // re-renders from history; the live no-credentials signal is the footer.
+    it('_waitForPrompt short-circuits the warmup wait on the logged-out footer (#5355 m3 — no 90s hang)', async () => {
       const s = makeSession()
       // Real _waitForPrompt: a live pid + a never-ready session file, but the
-      // login banner already in the tail. With detectAuthFailure it must bail on
+      // login footer already in the tail. With detectAuthFailure it must bail on
       // the FIRST poll instead of burning the full timeout.
       s._term = { pid: 4242 }
-      s._outputTail = 'Invalid API key · Please run /login'
+      s._appendToOutputTail('Not logged in · Run /login')
       const origRead = ClaudeTuiSession.readSessionStatus
       ClaudeTuiSession.readSessionStatus = () => null // never reaches idle
       try {
@@ -5520,6 +5588,7 @@ describe('ClaudeTuiSession', () => {
       session._currentMessageId = 'msg-first-output-auth'
       session._activeTurn = { startedAt: session._nowMonotonic() - 10, aborted: false }
       session._term = { write: () => {}, kill: () => {} }
+      session._markTurnOutputStart() // sendMessage marks this before the prompt is written (#8223)
       session._appendToOutputTail('\x1b[93G\x1b[38;5;211mNot\x1b[97Glogged\x1b[104Gin\x1b[107G·\x1b[109GRun\x1b[113G/login\x1b[39m\r\r\n')
       const errors = []
       session.on('error', (e) => errors.push(e))

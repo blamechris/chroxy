@@ -132,6 +132,10 @@ export const CLAUDE = resolveClaudeBinary()
 // not in a model discussing auth. Matched on the whitespace-normalized tail so a
 // line-wrapped banner still matches. Best-effort pending a real logged-out
 // capture (scripts/tui-form-recorder.mjs) — tune the tokens, not loosen them.
+//
+// TURN-TIME lists (this one and the compact one below): matched against THIS
+// turn's output on a stall / first-output timeout. Warmup must NOT use them —
+// see AUTH_FAILURE_FOOTER_PATTERNS for why warmup is footer-only (#8223).
 export const AUTH_FAILURE_PATTERNS = [
   /please run `?\/login`?/i,            // claude's exact logged-out instruction
   /invalid api key.{0,60}\/login/i,     // full banner: "Invalid API key · Please run /login"
@@ -162,6 +166,39 @@ export const AUTH_FAILURE_PATTERNS = [
 export const AUTH_FAILURE_COMPACT_PATTERNS = [
   /pleaserun`?\/login/i,
   /(?:notloggedin|loginexpired|invalidapikey)·(?:please)?run`?\/login/i,
+]
+// #8223 — what WARMUP may conclude from claude's output: its FOOTER status line
+// only, never a message banner.
+//
+// `claude --resume <id>` re-renders the conversation's history at startup, and a
+// past turn that hit an auth failure left a message banner in that history
+// ("Please run /login · API Error: 401…", "Login expired · Please run /login",
+// "Not logged in · Please run /login"). A user whose login expired, who then runs
+// `claude auth login` and restores the session, would have it refused as "not
+// logged in" on EVERY restore, forever, because the history always contains the
+// banner — measured: a PTY capture of `claude --resume` with no prompt sent holds
+// `Pleaserun/login·APIError` and not the live footer.
+//
+// On a fresh spawn no prompt has run yet, so a message banner during warmup can
+// only be re-rendered history; the live startup signal is the footer claude
+// paints from its first frame when it holds no credentials, "Not logged in · Run
+// /login" (no "Please" — that word is what marks the message banner). It is
+// measured to appear at ~0.2s with no credentials, and NOT at all for an expired
+// token, which claude only discovers on its first API call; that case is caught
+// at turn time from this turn's own output and from the transcript instead (see
+// `_scanTurnOutputForAuthFailure` / `_checkTranscriptForAuthFailure`). The
+// pre-spawn `claude auth status` probe already catches the no-credentials case,
+// so the warmup scan is a backstop.
+//
+// Two lists for the two renderings of the SAME footer, like the lists above: the
+// space-collapsed tail, and the whitespace-free tail (CHA-positioned words at a
+// narrow PTY). Neither accepts "Please run /login" or "Not logged in · Please
+// run /login" (the no-credentials TURN banner, which history can contain).
+export const AUTH_FAILURE_FOOTER_PATTERNS = [
+  /not logged in · run `?\/login/i,
+]
+export const AUTH_FAILURE_FOOTER_COMPACT_PATTERNS = [
+  /notloggedin·run`?\/login/i,
 ]
 // Structured error surfaced when an auth failure is classified.
 export const AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'

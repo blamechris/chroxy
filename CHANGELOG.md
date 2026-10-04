@@ -55,8 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is caught on the first turn from the `authentication_failed` API-error
     entry claude writes to its transcript, within seconds instead of after
     the 90-second watchdog;
-  - the PTY scan matches the banner and claude's "Not logged in · Run /login"
-    footer with whitespace ignored;
+  - the PTY scan ignores whitespace, and is scoped so a resumed conversation
+    cannot read as logged out: at startup it matches only claude's live "Not
+    logged in · Run /login" footer, never a banner, because `claude --resume`
+    replays a past turn's "Please run /login" banner from history and would
+    otherwise refuse the session on every restore, even after logging in again;
+    on a stall or first-output timeout it matches the banner and the footer in
+    what that turn printed, never in older output;
   - claude-sdk reports `authentication_failed` and "Failed to authenticate…"
     errors with the same `AUTH_REQUIRED` code;
   - the dashboard and the app render `AUTH_REQUIRED` as a sign-in chip naming

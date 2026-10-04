@@ -68,6 +68,8 @@ import {
   resolveClaudeBinary,
   AUTH_FAILURE_PATTERNS,
   AUTH_FAILURE_COMPACT_PATTERNS,
+  AUTH_FAILURE_FOOTER_PATTERNS,
+  AUTH_FAILURE_FOOTER_COMPACT_PATTERNS,
   AUTH_REQUIRED_CODE,
   AUTH_REQUIRED_MESSAGE,
   ensureCwdTrusted,
@@ -556,6 +558,11 @@ export class ClaudeTuiSession extends BaseSession {
     // first-turn nudge can detect "output arrived since arm" even when the tail
     // is already at the cap (#5809 review).
     this._totalOutputBytes = 0
+    // #8223: `_totalOutputBytes` at the start of the current turn, so a turn-time
+    // auth scan can look at ONLY the bytes this turn produced (the 4KB tail, shortly
+    // after a `--resume`, still holds re-rendered history). 0 = "since construction"
+    // until the first turn marks it.
+    this._turnOutputStartBytes = 0
     // #4031 (review): _outputTail is ANSI-stripped for readability +
     // probe stability, so the hex-dump diagnostic sourced from it
     // could never surface the very escape/control bytes we wanted to
@@ -2028,7 +2035,9 @@ export class ClaudeTuiSession extends BaseSession {
     // its login banner and sat there (_authFailureDetected, latched in
     // _spawnPty's warmup scan) AND claude printed it then exited (re-scan the
     // tail here, since the warmup loop returns on _ptyExited before scanning).
-    if (this._authFailureDetected || this._scanOutputForAuthFailure()) {
+    // #8223: warmup is FOOTER-ONLY (`_scanOutputForLoginFooter`) — a banner this
+    // early is resumed history, not a live failure.
+    if (this._authFailureDetected || this._scanOutputForLoginFooter()) {
       this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
       const err = new Error(AUTH_REQUIRED_MESSAGE)
       err.code = AUTH_REQUIRED_CODE
@@ -2189,7 +2198,11 @@ export class ClaudeTuiSession extends BaseSession {
       // banner in its tail, surface AUTH_REQUIRED (actionable) rather than a
       // bare exit code. The respawn below will keep failing the same way until
       // the operator re-logs in, so the categorized error is what matters.
-      if (this._scanOutputForAuthFailure()) {
+      // #8223: FOOTER-ONLY. No turn was in flight (`!hadActiveTurn`), so this is a
+      // death during warmup or at idle, and there a message banner in the tail is
+      // re-rendered history (a `--resume` replays it) or an earlier turn's failure
+      // that was already surfaced when it happened. The live signal is the footer.
+      if (this._scanOutputForLoginFooter()) {
         this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
       } else {
         const tail = this._outputTailDiagnostic()
@@ -3097,7 +3110,8 @@ export class ClaudeTuiSession extends BaseSession {
     // #5321 (WP-4.1) — also scan once on the timeout fallback (a logged-out
     // claude may print its login prompt and then sit there without ever exiting
     // or writing a `status`, so the in-loop scan above could miss a late banner).
-    if (!ready && !this._ptyExited && !this._authFailureDetected && this._scanOutputForAuthFailure()) {
+    // #8223: footer-only, like the in-loop scan (see _scanOutputForLoginFooter).
+    if (!ready && !this._ptyExited && !this._authFailureDetected && this._scanOutputForLoginFooter()) {
       this._authFailureDetected = true
     }
     if (this._authFailureDetected) {
@@ -3284,8 +3298,9 @@ export class ClaudeTuiSession extends BaseSession {
       // claude prints a logged-out / expired-login message, so start() can
       // surface AUTH_REQUIRED immediately instead of burning the full timeout
       // on a session that can never become ready. Warmup-only (opt-in) so
-      // normal per-turn output is never scanned.
-      if (detectAuthFailure && this._scanOutputForAuthFailure()) {
+      // normal per-turn output is never scanned. #8223: FOOTER-ONLY — see
+      // _scanOutputForLoginFooter for why a message banner here is history.
+      if (detectAuthFailure && this._scanOutputForLoginFooter()) {
         this._authFailureDetected = true
         this._lastProbeSawStatus = sawStatus
         return finish(false)
@@ -3567,10 +3582,11 @@ export class ClaudeTuiSession extends BaseSession {
   /**
    * #5321 (WP-4.1) — classify the ANSI-stripped PTY tail as a subscription-auth
    * failure (logged out / expired login). Returns true when claude's output
-   * matches an AUTH_FAILURE_PATTERNS entry. Called during warmup (before ready)
-   * and once a turn has stalled / the PTY exited — those tails CAN contain
-   * rendered response text, so the false-positive defence lives in the patterns
-   * themselves: each requires claude's `/login` / `claude login` remediation
+   * matches an AUTH_FAILURE_PATTERNS entry. TURN-time only (#8223: warmup uses
+   * `_scanOutputForLoginFooter`; production callers pass THIS turn's output via
+   * `_scanTurnOutputForAuthFailure` — the whole-tail default is what the pattern
+   * unit tests exercise). Those texts CAN contain rendered response text, so the
+   * false-positive defence lives in the patterns themselves: each requires claude's `/login` / `claude login` remediation
    * command token, which a model merely *discussing* authentication won't emit.
    *
    * #8223: also matches the SAME banner with all whitespace removed
@@ -3580,8 +3596,7 @@ export class ClaudeTuiSession extends BaseSession {
    * "Pleaserun/login" / "Notloggedin·Run/login" and the space-requiring
    * patterns miss it.
    */
-  _scanOutputForAuthFailure() {
-    const tail = this._outputTail || ''
+  _scanOutputForAuthFailure(tail = this._outputTail || '') {
     if (!tail) return false
     // Collapse whitespace (the TUI wraps/box-pads the banner with newlines +
     // spaces) so a line-wrapped "Please run\n  /login" still matches.
@@ -3589,6 +3604,65 @@ export class ClaudeTuiSession extends BaseSession {
     if (AUTH_FAILURE_PATTERNS.some((re) => re.test(normalized))) return true
     const compact = tail.replace(/\s+/g, '')
     return AUTH_FAILURE_COMPACT_PATTERNS.some((re) => re.test(compact))
+  }
+
+  /**
+   * #8223 — the matcher WARMUP uses: claude's FOOTER status line ("Not logged
+   * in · Run /login") and nothing else. A message banner (`Please run /login`,
+   * `Login expired · …`, `Not logged in · Please run /login`) during warmup can
+   * only be history that `claude --resume` re-rendered — no prompt has run on a
+   * fresh spawn — so matching it refused every restore of a session whose last
+   * turn hit an auth failure, even after the user had logged in again. See
+   * AUTH_FAILURE_FOOTER_PATTERNS for the measurements and the full argument.
+   * Used by the warmup loop, the post-timeout fallback, start()'s post-warmup
+   * re-scan, and the no-turn PTY-death path in `_onPtyGone`; every TURN-time
+   * caller uses `_scanTurnOutputForAuthFailure` instead.
+   */
+  _scanOutputForLoginFooter(tail = this._outputTail || '') {
+    if (!tail) return false
+    const normalized = tail.replace(/\s+/g, ' ')
+    if (AUTH_FAILURE_FOOTER_PATTERNS.some((re) => re.test(normalized))) return true
+    const compact = tail.replace(/\s+/g, '')
+    return AUTH_FAILURE_FOOTER_COMPACT_PATTERNS.some((re) => re.test(compact))
+  }
+
+  /**
+   * #8223 — record where this turn's PTY output begins, so a turn-time scan can
+   * ignore everything older. Called at turn start, before the prompt is written.
+   */
+  _markTurnOutputStart() {
+    this._turnOutputStartBytes = this._totalOutputBytes
+  }
+
+  /**
+   * #8223 — ANSI-stripped text of ONLY the PTY bytes produced since the turn
+   * began: the last `min(_totalOutputBytes - start, _outputTailRaw.length)` bytes
+   * of the raw tail, stripped the same way `_appendToOutputTail` strips it. Zero
+   * new bytes is '' (no match). Slicing the raw bytes can start mid-escape-
+   * sequence or mid-character; that leaves a little junk at the very start of the
+   * slice, which cannot form a match, so it is accepted rather than avoided.
+   * `_totalOutputBytes` never resets (not even on a respawn, which does empty the
+   * tail), so a PTY replaced mid-turn only shortens the slice via the `min`.
+   */
+  _outputSinceTurnStart() {
+    const fresh = this._totalOutputBytes - this._turnOutputStartBytes
+    if (!(fresh > 0)) return ''
+    const raw = this._outputTailRaw
+    if (!raw || raw.length === 0) return ''
+    return raw
+      .subarray(-Math.min(fresh, raw.length))
+      .toString('utf8')
+      .replace(ANSI_STRIP, '')
+  }
+
+  /**
+   * #8223 — the TURN-time auth classifier: the full pattern set (banner, footer,
+   * compact forms) over only this turn's output. Used by the stall and
+   * first-output handlers so history re-rendered by a `--resume` — still in the
+   * 4KB tail shortly afterwards — cannot turn an ordinary stall into AUTH_REQUIRED.
+   */
+  _scanTurnOutputForAuthFailure() {
+    return this._scanOutputForAuthFailure(this._outputSinceTurnStart())
   }
 
   /**
@@ -3810,6 +3884,8 @@ export class ClaudeTuiSession extends BaseSession {
     // #8223: baseline the transcript's auth-failure count BEFORE the prompt is
     // written, so a failure the prompt itself causes is always newer than it.
     this._beginAuthFailureWatchForTurn()
+    // #8223: and the PTY-output boundary the turn-time auth scans start from.
+    this._markTurnOutputStart()
 
     try {
       // #4269: claude TUI's paste detector triggers on byte-arrival rate,
@@ -4964,7 +5040,8 @@ export class ClaudeTuiSession extends BaseSession {
     // still holds rendered RESPONSE text here, so false-positive safety rests on
     // the patterns requiring claude's `/login` / `claude login` command token
     // (see AUTH_FAILURE_PATTERNS) — a model merely DISCUSSING auth won't match.
-    const authFail = this._scanOutputForAuthFailure()
+    // #8223: scans only what THIS turn printed, never the older tail.
+    const authFail = this._scanTurnOutputForAuthFailure()
     // #4641: shared teardown helper. See companion call in _handleHardTimeout
     // for the meaning of the asymmetric flags — preserved here as-is so this
     // refactor introduces no behaviour change.
@@ -5106,8 +5183,9 @@ export class ClaudeTuiSession extends BaseSession {
     // silence came WITH a logged-out / expired-login banner (e.g. an expired
     // login on the very first turn after restore). False-positive safety rests
     // on the command-token patterns (see AUTH_FAILURE_PATTERNS), not on the turn
-    // having stalled.
-    const authFail = this._scanOutputForAuthFailure()
+    // having stalled. #8223: only what THIS turn printed — right after a
+    // `--resume` the tail still holds re-rendered history.
+    const authFail = this._scanTurnOutputForAuthFailure()
     // Mirrors _handleStreamStall's `_teardownTurn` call shape (result
     // before error, gate stream_end on messageId) so the dashboard sees
     // the same fan-out it already handles for the inter-stream stall.
