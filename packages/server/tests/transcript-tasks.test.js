@@ -592,6 +592,15 @@ describe('TranscriptTaskScanner — authFailureCount (#8223)', () => {
     assert.deepEqual(snap.backgroundTasks, [])
   })
 
+  // #8223: the shape Windows gives a directory — it OPENS, reports size 0, and is
+  // not a regular file. POSIX refuses to read a directory (EISDIR), so the test
+  // above never saw it here; a character device reproduces it on POSIX.
+  it('reports null, not a known 0, for a path that opens but is not a regular file', { skip: process.platform === 'win32' ? 'the directory case above covers win32' : false }, () => {
+    const snap = new TranscriptTaskScanner('/dev/null').scan()
+    assert.equal(snap.authFailureCount, null)
+    assert.deepEqual(snap.backgroundTasks, [])
+  })
+
   it('recounts from the start when the transcript shrinks (rotation/truncation)', () => {
     const p = writeTranscript([authErrorLine(), authErrorLine({ ts: '2026-06-10T02:41:00.000Z' }), userLine({ text: 'padding to make the first file larger' })])
     const scanner = new TranscriptTaskScanner(p)

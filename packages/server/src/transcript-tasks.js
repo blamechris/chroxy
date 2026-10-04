@@ -226,7 +226,17 @@ export class TranscriptTaskScanner {
   _readNewBytes() {
     const fd = openSync(this.path, 'r')
     try {
-      const size = fstatSync(fd).size
+      const stat = fstatSync(fd)
+      // #8223: something other than a regular file at the transcript path is
+      // "could not look", not an empty transcript. POSIX refuses to read a
+      // directory (EISDIR); Windows opens it and reports size 0, which would
+      // otherwise read as a KNOWN zero auth-failure count.
+      if (!stat.isFile()) {
+        const err = new Error(`transcript path is not a regular file: ${this.path}`)
+        err.code = 'EISDIR'
+        throw err
+      }
+      const size = stat.size
       if (size < this._offset) {
         // Truncated / rotated — drop everything and re-read from the start.
         this._log.debug?.(`transcript ${this.path} shrank (${size} < ${this._offset}) — resetting scanner`)
