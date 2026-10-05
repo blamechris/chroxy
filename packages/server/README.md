@@ -31,7 +31,7 @@ The server will print a QR code. Scan it with the Chroxy app.
 | `chroxy start --cwd /path` | Set working directory |
 | `chroxy start --model opus` | Use a specific Claude model |
 | `chroxy start --allowed-tools tool1,tool2` | Restrict exposed tools |
-| `chroxy start --provider name` | Use a specific session provider (default: `claude-tui`) |
+| `chroxy start --provider name` | Use a specific session provider (default: `claude-sdk`) |
 | `chroxy start --no-encrypt` | Disable end-to-end encryption |
 | `chroxy dev` | Development mode (supervisor + auto-restart) |
 | `chroxy deploy` | Validate and restart the running server |

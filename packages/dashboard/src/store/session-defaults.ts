@@ -34,12 +34,14 @@ const INHERITED_LEGACY_PROVIDERS: ReadonlySet<string> = new Set(['claude-cli', '
 
 /**
  * A Claude model id pinned to a version (`opus-4-6`, `claude-sonnet-4-6`,
- * `claude-opus-4-7[1m]`, `claude-sonnet-4-20250514`). Aliases (`opus`,
- * `sonnet`, `default`) follow the newest model and are not pins; non-Claude
- * ids (`gpt-5`, `gemini-2.5-pro`) are out of this check's reach.
+ * `claude-opus-4-7[1m]`, `claude-sonnet-4-20250514`), including the older
+ * version-first scheme (`claude-3-5-sonnet-20241022`, `claude-3-opus-20240229`,
+ * `claude-3-7-sonnet-latest`). Aliases (`opus`, `sonnet`, `default`) follow
+ * the newest model and are not pins; non-Claude ids (`gpt-5`,
+ * `gemini-2.5-pro`) are out of this check's reach.
  */
 export function isVersionedClaudeModelPin(model: string): boolean {
-  return /^(claude-)?(opus|sonnet|haiku|fable)-\d/.test(model.trim())
+  return /^(claude-)?(\d+(-\d+)?-)?(opus|sonnet|haiku|fable)(-\d|-latest)/i.test(model.trim())
 }
 
 export type SessionDefaultSource = 'user' | 'server' | 'builtin'
@@ -97,19 +99,25 @@ export function migrateSessionDefaults(storage: StorageLike | null = defaultStor
   try {
     if (storage.getItem(SESSION_DEFAULTS_SCHEMA_KEY) !== SESSION_DEFAULTS_SCHEMA_VERSION) {
       const notice: SessionDefaultsNotice = {}
+      const clear: string[] = []
       const legacyProvider = storage.getItem(DEFAULT_PROVIDER_KEY)
       if (legacyProvider !== null && (legacyProvider.trim() === '' || INHERITED_LEGACY_PROVIDERS.has(legacyProvider.trim()))) {
-        storage.removeItem(DEFAULT_PROVIDER_KEY)
+        clear.push(DEFAULT_PROVIDER_KEY)
         if (legacyProvider.trim()) notice.provider = legacyProvider.trim()
       }
       const legacyModel = storage.getItem(DEFAULT_MODEL_KEY)
       if (legacyModel !== null && (legacyModel.trim() === '' || isVersionedClaudeModelPin(legacyModel))) {
-        storage.removeItem(DEFAULT_MODEL_KEY)
+        clear.push(DEFAULT_MODEL_KEY)
         if (legacyModel.trim()) notice.model = legacyModel.trim()
       }
+      // Order matters when storage fails part-way (quota, storage denied):
+      // the notice is written before anything is removed, and the marker only
+      // after every removal, so a failure never loses a value silently and the
+      // next load simply re-runs the migration.
       if (notice.provider || notice.model) {
         storage.setItem(SESSION_DEFAULTS_NOTICE_KEY, JSON.stringify(notice))
       }
+      for (const key of clear) storage.removeItem(key)
       storage.setItem(SESSION_DEFAULTS_SCHEMA_KEY, SESSION_DEFAULTS_SCHEMA_VERSION)
     }
     const provider = storage.getItem(DEFAULT_PROVIDER_KEY)

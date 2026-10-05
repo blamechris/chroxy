@@ -97,9 +97,11 @@ Then open `http://localhost:8765/dashboard?token=<the token from the logs>`
 the full token is written to `~/.chroxy/config.json` inside the `chroxy-data`
 volume, or pass your own with `-e API_TOKEN=...`).
 
-The image sets `CHROXY_PROVIDER=claude-sdk` by default — without it, the
-daemon's own default provider (`claude-tui`, unsupported here — see above)
-would apply, and sessions would fail the moment they started. This is an
+The image sets `CHROXY_PROVIDER=claude-sdk` explicitly. That is also the
+daemon's own default since #8266, so the `ENV` now pins the image against a
+future default change rather than overriding one; before #8266 the built-in
+default was `claude-tui` (unsupported here — see above), and sessions would
+have failed the moment they started. This is an
 **image-level `ENV`, not a config-file value** — if you also mount a
 `config.json` with its own `"provider"` field, the baked-in `ENV` still wins
 (config precedence is CLI flag > env var > config file > default, and the

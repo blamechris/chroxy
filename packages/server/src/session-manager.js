@@ -486,7 +486,7 @@ export class SessionManager extends EventEmitter {
       // former is the createSession() option, the latter the ctor's). When only
       // `provider` was supplied as a usable string, map it onto `providerType`
       // so the caller gets the provider they intended rather than a silent
-      // DEFAULT_PROVIDER (claude-tui) PTY spawn. If `providerType` was ALSO set
+      // DEFAULT_PROVIDER spawn. If `providerType` was ALSO set
       // explicitly, or `provider` is not a usable string (undefined/null/''),
       // keep the resolved `providerType` and just warn that `provider` is
       // ignored — never overwrite a good default with a bad alias value.

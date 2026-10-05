@@ -28,10 +28,10 @@ function memoryStorage(initial: Record<string, string> = {}) {
 }
 
 describe('isVersionedClaudeModelPin', () => {
-  it.each(['opus-4-6', 'claude-opus-4-6', 'sonnet-4-6', 'claude-sonnet-4-20250514', 'claude-opus-4-7[1m]', 'opus-4-6[1m]', 'haiku-4-5', 'fable-5'])('%s is a pin', id => {
+  it.each(['opus-4-6', 'claude-opus-4-6', 'sonnet-4-6', 'claude-sonnet-4-20250514', 'claude-opus-4-7[1m]', 'opus-4-6[1m]', 'haiku-4-5', 'fable-5', 'claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-7-sonnet-latest', 'Claude-Opus-4-6'])('%s is a pin', id => {
     expect(isVersionedClaudeModelPin(id)).toBe(true)
   })
-  it.each(['default', 'opus', 'sonnet', 'haiku', 'fable', 'opus[1m]', 'gpt-5', 'gemini-2.5-pro', 'deepseek-chat', ''])('%s is not a pin', id => {
+  it.each(['default', 'opus', 'sonnet', 'haiku', 'fable', 'opus[1m]', 'gpt-5', 'gemini-2.5-pro', 'deepseek-chat', 'qwen3-coder', ''])('%s is not a pin', id => {
     expect(isVersionedClaudeModelPin(id)).toBe(false)
   })
 })
@@ -115,6 +115,19 @@ describe('migrateSessionDefaults', () => {
     }
     expect(migrateSessionDefaults(throwing)).toEqual({ provider: null, model: '', notice: null })
     expect(migrateSessionDefaults(null)).toEqual({ provider: null, model: '', notice: null })
+  })
+
+  it('a storage failure part-way never loses a value silently, and the migration retries', () => {
+    // removeItem is denied: the notice is already written, the marker is not,
+    // and the legacy keys are still there for the next load.
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    const failing = { ...s, removeItem: () => { throw new Error('denied') } }
+    expect(migrateSessionDefaults(failing)).toEqual({ provider: null, model: '', notice: null })
+    expect(s.data.get(DEFAULT_PROVIDER_KEY)).toBe('claude-cli')
+    expect(s.data.has(SESSION_DEFAULTS_SCHEMA_KEY)).toBe(false)
+    expect(JSON.parse(s.data.get(SESSION_DEFAULTS_NOTICE_KEY)!)).toEqual({ provider: 'claude-cli', model: 'opus-4-6' })
+    // Storage recovers: the retry completes and the notice survives.
+    expect(migrateSessionDefaults(s)).toEqual({ provider: null, model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
   })
 
   it('a corrupt notice is ignored', () => {

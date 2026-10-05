@@ -227,7 +227,16 @@ async function run() {
     }
 
     // ---- Test 6: Full-width layout ----
-    const chatArea = await page.$('.chat-messages, .chat-view, [class*="chat"], main')
+    // Most specific first, one selector at a time. A combined selector list
+    // returns the first match in DOCUMENT order, and `[class*="chat"]` also
+    // matches header controls such as the model picker button
+    // (`chat-settings-model-btn`, ~160px), which renders above the chat area
+    // whenever the default session can switch models (claude-sdk, #8266).
+    let chatArea = null
+    for (const sel of ['.chat-messages', '.chat-view', 'main']) {
+      chatArea = await page.$(sel)
+      if (chatArea) break
+    }
     if (chatArea) {
       const box = await chatArea.boundingBox()
       if (box && box.width > 960) {

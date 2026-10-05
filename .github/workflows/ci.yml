@@ -2148,16 +2148,25 @@ jobs:
           printf '{ "apiToken": "ci-smoke-token", "externalUrl": "http://localhost:8765", "tunnel": "quick", "cwd": "%s/packages/server/tests/fixtures/smoke-ide-workspace" }\n' "$GITHUB_WORKSPACE" > "$HOME/.chroxy/config.json"
 
       - name: Stub the `claude` binary
-        # The daemon auto-creates a default claude-tui session on boot, whose
-        # preflight requires a `claude` binary on PATH — which a hosted CI runner
-        # doesn't have. The smoke never drives a real turn, so a no-op stub that
-        # just stays alive in the PTY satisfies the existence check (preflight.js
-        # isExecutableFile) and lets the daemon start. ~/.local/bin is both a
-        # checked candidate path AND added to PATH for subsequent steps.
+        # The daemon auto-creates a default session on boot with the default
+        # provider (claude-sdk since #8266), whose preflight requires a `claude`
+        # binary on PATH — which a hosted CI runner doesn't have — AND probes
+        # `claude --version` against the installed Agent SDK's floor
+        # (`claudeCodeVersion`, utils/agent-sdk-version.js). A stub that cannot
+        # answer the probe boots the daemon with NO default session, and the
+        # dashboard smoke then finds no sidebar, tabs or input bar. The stub
+        # reports exactly that floor (read from the installed SDK, so an SDK
+        # bump cannot leave it behind) and otherwise stays alive and inert; the
+        # smoke never drives a real turn. ~/.local/bin is both a checked
+        # candidate path AND added to PATH for subsequent steps.
         run: |
           mkdir -p "$HOME/.local/bin"
-          printf '#!/usr/bin/env bash\nexec cat >/dev/null\n' > "$HOME/.local/bin/claude"
+          floor="$(node -p "require('./node_modules/@anthropic-ai/claude-agent-sdk/package.json').claudeCodeVersion")"
+          test -n "$floor"
+          # shellcheck disable=SC2016 # `$1` belongs to the generated stub, not this step
+          printf '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "%s (Claude Code)"; exit 0; fi\nexec cat >/dev/null\n' "$floor" > "$HOME/.local/bin/claude"
           chmod +x "$HOME/.local/bin/claude"
+          "$HOME/.local/bin/claude" --version
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Start chroxy server (background, no tunnel)
