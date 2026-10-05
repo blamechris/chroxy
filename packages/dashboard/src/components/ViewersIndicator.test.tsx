@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { ViewersIndicator, resolveActivePrimaryClientId } from './ViewersIndicator'
+import { ViewersIndicator, resolveActivePrimaryClientId, computeViewersPopoverPosition } from './ViewersIndicator'
 import type { ConnectedClient } from '../store/types'
 
 afterEach(cleanup)
@@ -288,5 +288,58 @@ describe('resolveActivePrimaryClientId', () => {
   it('falls back to the global primary only when there is no active session', () => {
     expect(resolveActivePrimaryClientId(null, {}, 'cGlobal')).toBe('cGlobal')
     expect(resolveActivePrimaryClientId(null, {}, null)).toBeNull()
+  })
+})
+
+// #8296 — the popover was anchored right:0 inside the overflow:hidden sidebar,
+// so in a narrow sidebar its left side was clipped. It is now fixed-positioned
+// and clamped to the viewport.
+describe('computeViewersPopoverPosition', () => {
+  const viewport = { width: 1200, height: 800 }
+
+  it('right-aligns to the trigger and sits just above it when there is room', () => {
+    expect(computeViewersPopoverPosition({ top: 760, right: 600 }, viewport))
+      .toEqual({ left: 360, bottom: 46, width: 240, maxHeight: 746 })
+  })
+
+  it('clamps to the left margin when the trigger is closer to the edge than the popover is wide', () => {
+    // The reported case: a ~170px sidebar, chip at its right edge.
+    const pos = computeViewersPopoverPosition({ top: 760, right: 170 }, viewport)
+    expect(pos.left).toBe(8)
+    expect(pos.width).toBe(240)
+  })
+
+  it('clamps to the right margin when the trigger is near the right edge', () => {
+    expect(computeViewersPopoverPosition({ top: 760, right: 1200 }, viewport).left).toBe(952)
+  })
+
+  it('shrinks to fit a viewport narrower than the popover', () => {
+    const pos = computeViewersPopoverPosition({ top: 760, right: 200 }, { width: 200, height: 800 })
+    expect(pos).toMatchObject({ left: 8, width: 184 })
+  })
+
+  it('caps the height to the space above the trigger', () => {
+    expect(computeViewersPopoverPosition({ top: 120, right: 600 }, viewport).maxHeight).toBe(106)
+  })
+
+  it('applies the clamped position to the rendered popover', () => {
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue({ top: 760, right: 170, bottom: 780, left: 100, width: 70, height: 20, x: 100, y: 760, toJSON: () => ({}) })
+    try {
+      render(
+        <ViewersIndicator
+          connected
+          clients={[client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1' })]}
+          primaryClientId={null}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('viewers-indicator-trigger'))
+      const popover = screen.getByTestId('viewers-popover')
+      expect(popover.style.left).toBe('8px')
+      expect(popover.style.width).toBe('240px')
+      expect(popover.style.bottom).toBe(`${window.innerHeight - 760 + 6}px`)
+    } finally {
+      rect.mockRestore()
+    }
   })
 })
