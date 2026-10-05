@@ -115,6 +115,14 @@ export function ViewersIndicator({ clients, primaryClientId, connected, sessionR
   const popoverRef = useRef<HTMLDivElement>(null)
   const popoverId = useId()
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties | undefined>(undefined)
+  // The trigger only exists while the session is shared. Close the popover
+  // when it goes away (a device drops, or the connection does), so `open`
+  // can't outlive the button the positioning effect below captured — a
+  // reconnect would otherwise re-show the popover tracking a detached node.
+  const shared = connected && clients.length > 1
+  useEffect(() => {
+    if (!shared) setOpen(false)
+  }, [shared])
 
   // Position the fixed popover from the trigger before paint, and follow the
   // trigger while it is open: on a window resize, and (#8298) when the chip or

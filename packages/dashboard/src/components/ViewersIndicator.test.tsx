@@ -441,6 +441,37 @@ describe('ViewersIndicator popover follows its trigger', () => {
     expect(popoverLeft()).toBe('60px')
   })
 
+  it('closes when the session stops being shared, so a reconnect re-measures the new trigger', () => {
+    const two = [client({ clientId: 'c0', isSelf: true }), client({ clientId: 'c1' })]
+    const ui = (clients: ConnectedClient[], connected = true) => (
+      <div data-testid="footer">
+        <ViewersIndicator connected={connected} clients={clients} primaryClientId={null} />
+      </div>
+    )
+    const { rerender } = render(ui(two))
+    fireEvent.click(screen.getByTestId('viewers-indicator-trigger'))
+    expect(observer(0).disconnected).toBe(false)
+
+    // A device drops: the trigger unmounts, and the popover must not stay open.
+    rerender(ui(two.slice(0, 1)))
+    expect(observer(0).disconnected).toBe(true)
+    rerender(ui(two))
+    expect(screen.queryByTestId('viewers-popover')).not.toBeInTheDocument()
+
+    // Same for a dropped connection.
+    fireEvent.click(screen.getByTestId('viewers-indicator-trigger'))
+    rerender(ui(two, false))
+    rerender(ui(two))
+    expect(screen.queryByTestId('viewers-popover')).not.toBeInTheDocument()
+
+    // Reopening tracks the NEW trigger.
+    fireEvent.click(screen.getByTestId('viewers-indicator-trigger'))
+    expect(observer(2).observed.includes(screen.getByTestId('viewers-indicator-trigger'))).toBe(true)
+    rect = { top: 760, right: 400 }
+    act(() => { window.dispatchEvent(new Event('resize')) })
+    expect(popoverLeft()).toBe('160px')
+  })
+
   it('still positions the popover where ResizeObserver is unavailable', () => {
     vi.stubGlobal('ResizeObserver', undefined)
     renderInFooter()
