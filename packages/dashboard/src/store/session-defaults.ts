@@ -169,26 +169,66 @@ export function migrateSessionDefaults(storage: StorageLike | null = defaultStor
   return { provider, model, notice: notice.provider || notice.model ? notice : null }
 }
 
+/**
+ * Finish a migration that a failed write left pending, so that a Settings write
+ * which follows lands under the schema marker as a deliberate choice.
+ *
+ * Every legacy-classified value is removed BEFORE the marker is stamped (the
+ * marker turns each present key into an override, so a stale claude-cli or
+ * opus-4-6 must never survive it). The notice is recorded first and, if that
+ * write fails (quota), once more after the removals have freed space.
+ * Returns false when a removal or the marker could not be written, i.e. the
+ * store is still unmigrated.
+ */
+function finishPendingMigration(storage: StorageLike): boolean {
+  let notice: SessionDefaultsNotice = {}
+  try { notice = { ...readNotice(storage) } } catch { /* no stored notice */ }
+  const legacy: Array<typeof DEFAULT_PROVIDER_KEY | typeof DEFAULT_MODEL_KEY> = []
+  for (const key of [DEFAULT_PROVIDER_KEY, DEFAULT_MODEL_KEY] as const) {
+    const value = storage.getItem(key)
+    if (!isLegacyInherited(key, value)) continue
+    legacy.push(key)
+    if (value!.trim()) notice[key === DEFAULT_PROVIDER_KEY ? 'provider' : 'model'] = value!.trim()
+  }
+  const writeNotice = (): boolean => {
+    if (!notice.provider && !notice.model) return true
+    try { storage.setItem(SESSION_DEFAULTS_NOTICE_KEY, JSON.stringify(notice)); return true } catch { return false }
+  }
+  const noticeWritten = writeNotice()
+  try {
+    for (const key of legacy) storage.removeItem(key)
+    if (!noticeWritten) writeNotice()
+    storage.setItem(SESSION_DEFAULTS_SCHEMA_KEY, SESSION_DEFAULTS_SCHEMA_VERSION)
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Persist (or, for '' / null, clear) a deliberate override. Best-effort. */
 export function persistSessionDefault(key: typeof DEFAULT_PROVIDER_KEY | typeof DEFAULT_MODEL_KEY, value: string | null, storage: StorageLike | null = defaultStorage()): void {
   if (!storage) return
+  // The choice is written LAST, after any pending migration has been finished
+  // and the marker stamped, so it is recorded as deliberate and a later load
+  // never re-classifies it (a deliberate claude-tui is also a legacy-looking
+  // value).
+  //
+  // If the migration cannot be finished (a removal or the marker write
+  // throws), the store stays unmigrated, and the next load would delete a
+  // legacy-LOOKING choice and name it as cleared. Such a choice is therefore
+  // not persisted: it holds for this session (the store keeps it in memory)
+  // and the next load inherits. Any other choice, and clearing to inherit,
+  // are still written.
+  const chosen = value && value.trim() ? value : null
+  let migrated = true
   try {
-    // Finish a migration a failed write left pending BEFORE stamping the
-    // marker: the marker turns every present key into a deliberate override,
-    // so stamping it over a legacy key that never got removed would apply
-    // that legacy value on the next load.
     if (storage.getItem(SESSION_DEFAULTS_SCHEMA_KEY) !== SESSION_DEFAULTS_SCHEMA_VERSION) {
-      migrateSessionDefaults(storage)
+      migrated = finishPendingMigration(storage)
     }
-    if (value && value.trim()) storage.setItem(key, value)
-    else storage.removeItem(key)
-    // An explicit write is a decision taken with the current schema in force —
-    // unless the OTHER key still holds a legacy value, in which case the next
-    // load's migration must still see it.
-    const other = key === DEFAULT_PROVIDER_KEY ? DEFAULT_MODEL_KEY : DEFAULT_PROVIDER_KEY
-    if (!isLegacyInherited(other, storage.getItem(other)) || storage.getItem(SESSION_DEFAULTS_SCHEMA_KEY) === SESSION_DEFAULTS_SCHEMA_VERSION) {
-      storage.setItem(SESSION_DEFAULTS_SCHEMA_KEY, SESSION_DEFAULTS_SCHEMA_VERSION)
-    }
+  } catch { migrated = false }
+  try {
+    if (!chosen) storage.removeItem(key)
+    else if (migrated || !isLegacyInherited(key, chosen)) storage.setItem(key, chosen)
   } catch { /* noop */ }
 }
 

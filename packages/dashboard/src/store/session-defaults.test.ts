@@ -197,6 +197,72 @@ describe('migrateSessionDefaults', () => {
     expect(migrateSessionDefaults(s)).toEqual({ provider: 'codex', model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
   })
 
+  // #8276 acceptance review (ac6b9600): only CREATING the notice fails
+  // (quota), overwriting an existing key succeeds, and the user then makes a
+  // deliberate Settings choice that itself looks legacy.
+  function noticeCreationFails(initial: Record<string, string>) {
+    const s = memoryStorage(initial)
+    const failing = {
+      ...s,
+      setItem: (k: string, v: string) => { if (k === SESSION_DEFAULTS_NOTICE_KEY) throw new Error('quota'); s.setItem(k, v) },
+    }
+    return { s, failing }
+  }
+
+  it('a deliberate claude-tui chosen during a pending migration survives the next load', () => {
+    const { s, failing } = noticeCreationFails({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    migrateSessionDefaults(failing)
+    persistSessionDefault(DEFAULT_PROVIDER_KEY, 'claude-tui', failing)
+    expect(s.data.get(SESSION_DEFAULTS_SCHEMA_KEY)).toBe('2')
+    const recovered = migrateSessionDefaults(s)
+    expect(recovered.provider).toBe('claude-tui')
+    expect(recovered.model).toBe('')
+    expect(s.data.has(DEFAULT_MODEL_KEY)).toBe(false)
+    // The notice could never be created here, so nothing is (mis)reported.
+    expect(recovered.notice).toBeNull()
+  })
+
+  it.each([
+    ['a removal throws', (k: string) => k === DEFAULT_MODEL_KEY ? 'remove' : null],
+    ['the marker write throws', (k: string) => k === SESSION_DEFAULTS_SCHEMA_KEY ? 'set' : null],
+  ])('when %s, a legacy-looking choice is not persisted unmarked (never deleted and named as cleared)', (_label, failOn) => {
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    const failing = {
+      ...s,
+      setItem: (k: string, v: string) => { if (failOn(k) === 'set') throw new Error('quota'); s.setItem(k, v) },
+      removeItem: (k: string) => { if (failOn(k) === 'remove') throw new Error('denied'); s.removeItem(k) },
+    }
+    persistSessionDefault(DEFAULT_PROVIDER_KEY, 'claude-tui', failing)
+    expect(s.data.get(DEFAULT_PROVIDER_KEY)).not.toBe('claude-tui')
+    const next = migrateSessionDefaults(s)
+    expect(next.provider).toBeNull()
+    expect(next.notice?.provider).not.toBe('claude-tui')
+    // A non-legacy choice under the same failure is still written and kept.
+    persistSessionDefault(DEFAULT_PROVIDER_KEY, 'codex', failing)
+    expect(migrateSessionDefaults(s).provider).toBe('codex')
+  })
+
+  it('a deliberate version-pinned model chosen during a pending migration survives the next load', () => {
+    const { s, failing } = noticeCreationFails({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    migrateSessionDefaults(failing)
+    persistSessionDefault(DEFAULT_MODEL_KEY, 'opus-4-7', failing)
+    const recovered = migrateSessionDefaults(s)
+    expect(recovered).toMatchObject({ provider: null, model: 'opus-4-7' })
+    expect(s.data.has(DEFAULT_PROVIDER_KEY)).toBe(false)
+  })
+
+  it('when storage recovers, a Settings write records the notice for what it cleared', () => {
+    // The notice failed during load, then space frees up (first write fails only).
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    let noticeFailures = 1
+    const flaky = {
+      ...s,
+      setItem: (k: string, v: string) => { if (k === SESSION_DEFAULTS_NOTICE_KEY && noticeFailures-- > 0) throw new Error('quota'); s.setItem(k, v) },
+    }
+    persistSessionDefault(DEFAULT_PROVIDER_KEY, 'claude-tui', flaky)
+    expect(migrateSessionDefaults(s)).toEqual({ provider: 'claude-tui', model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
+  })
+
   it('a failed READ is the only "nothing persisted"', () => {
     const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'codex' })
     const unreadable = { ...s, getItem: () => { throw new Error('denied') } }
