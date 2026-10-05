@@ -18,7 +18,7 @@
  * before this component existed — the interactive popover only appears once a
  * session is genuinely shared (≥2 devices).
  */
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import type { SessionRole } from '@chroxy/store-core'
 import type { ConnectedClient } from '../store/types'
 
@@ -81,11 +81,57 @@ export function resolveActivePrimaryClientId(
   return globalPrimaryClientId
 }
 
+/** Preferred popover width; shrinks to fit a narrower viewport. */
+export const VIEWERS_POPOVER_WIDTH = 240
+/** Minimum gap between the popover and the viewport edge. */
+export const VIEWERS_POPOVER_MARGIN = 8
+/** Gap between the trigger's top edge and the popover's bottom edge. */
+const VIEWERS_POPOVER_GAP = 6
+
+/**
+ * Place the popover above the trigger, right-aligned to it, clamped inside the
+ * viewport (#8296). It is `position: fixed` because the sidebar is
+ * `overflow: hidden`: anchored inside it, a 240px popover was clipped whenever
+ * the sidebar was narrower than that.
+ */
+export function computeViewersPopoverPosition(
+  trigger: Pick<DOMRect, 'top' | 'right'>,
+  viewport: { width: number, height: number },
+): { left: number, bottom: number, width: number, maxHeight: number } {
+  const width = Math.max(0, Math.min(VIEWERS_POPOVER_WIDTH, viewport.width - 2 * VIEWERS_POPOVER_MARGIN))
+  const maxLeft = viewport.width - VIEWERS_POPOVER_MARGIN - width
+  const left = Math.max(VIEWERS_POPOVER_MARGIN, Math.min(trigger.right - width, maxLeft))
+  return {
+    left,
+    bottom: viewport.height - trigger.top + VIEWERS_POPOVER_GAP,
+    width,
+    maxHeight: Math.max(0, trigger.top - VIEWERS_POPOVER_GAP - VIEWERS_POPOVER_MARGIN),
+  }
+}
+
 export function ViewersIndicator({ clients, primaryClientId, connected, sessionRole, onTakeOver }: ViewersIndicatorProps) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const popoverId = useId()
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties | undefined>(undefined)
+
+  // Position the fixed popover from the trigger before paint, and follow a
+  // window resize while it is open.
+  useLayoutEffect(() => {
+    if (!open) return
+    const place = () => {
+      const trigger = triggerRef.current
+      if (!trigger) return
+      setPopoverStyle(computeViewersPopoverPosition(
+        trigger.getBoundingClientRect(),
+        { width: window.innerWidth, height: window.innerHeight },
+      ))
+    }
+    place()
+    window.addEventListener('resize', place)
+    return () => window.removeEventListener('resize', place)
+  }, [open])
 
   // Dismiss the popover on outside-click (capturing mousedown, matching
   // HeaderOverflowMenu / SessionContextMenu), Escape, and window blur.
@@ -178,6 +224,7 @@ export function ViewersIndicator({ clients, primaryClientId, connected, sessionR
           ref={popoverRef}
           id={popoverId}
           className="viewers-popover"
+          style={popoverStyle}
           data-testid="viewers-popover"
           role="dialog"
           aria-modal="false"
