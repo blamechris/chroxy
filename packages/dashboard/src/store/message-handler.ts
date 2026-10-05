@@ -228,7 +228,6 @@ import {
   UPDATE_SESSION_MIRRORED_FIELDS,
 } from './utils';
 import { clearPersistedSession } from './persistence';
-import { DEFAULT_PROVIDER_KEY } from './session-defaults';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -1694,18 +1693,12 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   //
   // #8265: the daemon's value is always RECORDED (`serverDefaultProvider`, so
   // Settings can offer "Server default" and clearing an override has
-  // something to fall back to), and the persisted key still decides whether it
-  // APPLIES — after migrateSessionDefaults a present key is by construction a
-  // deliberate override, never a legacy pin.
+  // something to fall back to). Whether it APPLIES is decided by the store's
+  // own `defaultProviderSource`, the one classification migrateSessionDefaults
+  // made — not by re-reading storage, where a legacy key whose removal failed
+  // to write would still be present and would read as an override.
   applyServerDefaultProvider: (name) => {
-    let userOverride = false;
-    try {
-      userOverride = localStorage.getItem(DEFAULT_PROVIDER_KEY) != null;
-    } catch {
-      // localStorage unavailable (private-mode / storage-denied) — fall
-      // through and apply the server's default, matching this file's other
-      // localStorage reads' fail-open behaviour.
-    }
+    const userOverride = (getStore().getState() as ConnectionState).defaultProviderSource === 'user';
     getStore().setState((userOverride
       ? { serverDefaultProvider: name }
       : { serverDefaultProvider: name, defaultProvider: name, defaultProviderSource: 'server' }) as Partial<ConnectionState>);

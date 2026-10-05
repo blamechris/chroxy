@@ -95,56 +95,100 @@ function readNotice(storage: StorageLike): SessionDefaultsNotice | null {
 }
 
 /**
+ * True when a value found WITHOUT the schema marker cannot be told apart from
+ * an inherited default, so the migration clears it instead of honouring it.
+ */
+function isLegacyInherited(key: typeof DEFAULT_PROVIDER_KEY | typeof DEFAULT_MODEL_KEY, value: string | null): boolean {
+  if (value === null) return false
+  if (value.trim() === '') return true
+  return key === DEFAULT_PROVIDER_KEY
+    ? INHERITED_LEGACY_PROVIDERS.has(value.trim())
+    : isVersionedClaudeModelPin(value)
+}
+
+/**
  * Bring persisted session defaults to the current schema and return them.
  * Idempotent: a store already at the current schema is read, never rewritten.
- * Storage that throws (private mode, storage denied) reads as "nothing
- * persisted", like every other persisted dashboard setting.
+ *
+ * Reading and writing fail separately. Only a failed READ means "nothing
+ * persisted" (private mode, storage denied), like every other persisted
+ * dashboard setting. A failed WRITE (quota) never changes what this load
+ * returns: the values are classified from what was read, so a readable
+ * deliberate override is honoured and a legacy value is inherited even when
+ * its removal could not be written. The unfinished steps are retried on the
+ * next load, because the schema marker is only written after them.
  */
 export function migrateSessionDefaults(storage: StorageLike | null = defaultStorage()): MigratedSessionDefaults {
   if (!storage) return { provider: null, model: '', notice: null }
+  let marker: string | null
+  let rawProvider: string | null
+  let rawModel: string | null
   try {
-    if (storage.getItem(SESSION_DEFAULTS_SCHEMA_KEY) !== SESSION_DEFAULTS_SCHEMA_VERSION) {
-      const notice: SessionDefaultsNotice = {}
-      const clear: string[] = []
-      const legacyProvider = storage.getItem(DEFAULT_PROVIDER_KEY)
-      if (legacyProvider !== null && (legacyProvider.trim() === '' || INHERITED_LEGACY_PROVIDERS.has(legacyProvider.trim()))) {
-        clear.push(DEFAULT_PROVIDER_KEY)
-        if (legacyProvider.trim()) notice.provider = legacyProvider.trim()
-      }
-      const legacyModel = storage.getItem(DEFAULT_MODEL_KEY)
-      if (legacyModel !== null && (legacyModel.trim() === '' || isVersionedClaudeModelPin(legacyModel))) {
-        clear.push(DEFAULT_MODEL_KEY)
-        if (legacyModel.trim()) notice.model = legacyModel.trim()
-      }
-      // Order matters when storage fails part-way (quota, storage denied):
-      // the notice is written before anything is removed, and the marker only
-      // after every removal, so a failure never loses a value silently and the
-      // next load simply re-runs the migration.
+    marker = storage.getItem(SESSION_DEFAULTS_SCHEMA_KEY)
+    rawProvider = storage.getItem(DEFAULT_PROVIDER_KEY)
+    rawModel = storage.getItem(DEFAULT_MODEL_KEY)
+  } catch {
+    return { provider: null, model: '', notice: null }
+  }
+  // The notice is read on its own: an unreadable notice must not cost the
+  // user their readable defaults.
+  let storedNotice: SessionDefaultsNotice | null = null
+  try { storedNotice = readNotice(storage) } catch { /* treated as no notice */ }
+
+  let provider = rawProvider && rawProvider.trim() ? rawProvider : null
+  let model = rawModel ?? ''
+  // An undismissed notice from an earlier, partly failed run is MERGED, never
+  // replaced: a retry that only finds the model left must not drop the
+  // provider the first run already cleared.
+  const notice: SessionDefaultsNotice = { ...storedNotice }
+
+  if (marker !== SESSION_DEFAULTS_SCHEMA_VERSION) {
+    const clear: string[] = []
+    if (isLegacyInherited(DEFAULT_PROVIDER_KEY, rawProvider)) {
+      clear.push(DEFAULT_PROVIDER_KEY)
+      provider = null
+      if (rawProvider!.trim()) notice.provider = rawProvider!.trim()
+    }
+    if (isLegacyInherited(DEFAULT_MODEL_KEY, rawModel)) {
+      clear.push(DEFAULT_MODEL_KEY)
+      model = ''
+      if (rawModel!.trim()) notice.model = rawModel!.trim()
+    }
+    // Order matters when storage fails part-way: the notice is written before
+    // anything is removed, and the marker only after every removal, so a
+    // failure never loses a value silently and the next load re-runs this.
+    try {
       if (notice.provider || notice.model) {
         storage.setItem(SESSION_DEFAULTS_NOTICE_KEY, JSON.stringify(notice))
       }
       for (const key of clear) storage.removeItem(key)
       storage.setItem(SESSION_DEFAULTS_SCHEMA_KEY, SESSION_DEFAULTS_SCHEMA_VERSION)
-    }
-    const provider = storage.getItem(DEFAULT_PROVIDER_KEY)
-    return {
-      provider: provider && provider.trim() ? provider : null,
-      model: storage.getItem(DEFAULT_MODEL_KEY) ?? '',
-      notice: readNotice(storage),
-    }
-  } catch {
-    return { provider: null, model: '', notice: null }
+    } catch { /* retried on the next load */ }
   }
+
+  return { provider, model, notice: notice.provider || notice.model ? notice : null }
 }
 
 /** Persist (or, for '' / null, clear) a deliberate override. Best-effort. */
 export function persistSessionDefault(key: typeof DEFAULT_PROVIDER_KEY | typeof DEFAULT_MODEL_KEY, value: string | null, storage: StorageLike | null = defaultStorage()): void {
   if (!storage) return
   try {
+    // Finish a migration a failed write left pending BEFORE stamping the
+    // marker: the marker turns every present key into a deliberate override,
+    // so stamping it over a legacy key that never got removed would apply
+    // that legacy value on the next load.
+    if (storage.getItem(SESSION_DEFAULTS_SCHEMA_KEY) !== SESSION_DEFAULTS_SCHEMA_VERSION) {
+      migrateSessionDefaults(storage)
+    }
     if (value && value.trim()) storage.setItem(key, value)
     else storage.removeItem(key)
-    // An explicit write is a decision taken with the current schema in force.
-    storage.setItem(SESSION_DEFAULTS_SCHEMA_KEY, SESSION_DEFAULTS_SCHEMA_VERSION)
+    // An explicit write is a decision taken with the current schema in force —
+    // unless the OTHER key still holds a legacy value, in which case the next
+    // load's migration must still see it.
+    const other = key === DEFAULT_PROVIDER_KEY ? DEFAULT_MODEL_KEY : DEFAULT_PROVIDER_KEY
+    if (!isLegacyInherited(other, storage.getItem(other)) || storage.getItem(SESSION_DEFAULTS_SCHEMA_KEY) === SESSION_DEFAULTS_SCHEMA_VERSION) {
+      storage.setItem(SESSION_DEFAULTS_SCHEMA_KEY, SESSION_DEFAULTS_SCHEMA_VERSION)
+    }
   } catch { /* noop */ }
 }
 

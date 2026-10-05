@@ -119,15 +119,88 @@ describe('migrateSessionDefaults', () => {
 
   it('a storage failure part-way never loses a value silently, and the migration retries', () => {
     // removeItem is denied: the notice is already written, the marker is not,
-    // and the legacy keys are still there for the next load.
+    // and the legacy keys are still there for the next load. This load still
+    // inherits (claude-cli / opus-4-6 are never applied) and shows the notice.
     const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
     const failing = { ...s, removeItem: () => { throw new Error('denied') } }
-    expect(migrateSessionDefaults(failing)).toEqual({ provider: null, model: '', notice: null })
+    expect(migrateSessionDefaults(failing)).toEqual({ provider: null, model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
     expect(s.data.get(DEFAULT_PROVIDER_KEY)).toBe('claude-cli')
     expect(s.data.has(SESSION_DEFAULTS_SCHEMA_KEY)).toBe(false)
     expect(JSON.parse(s.data.get(SESSION_DEFAULTS_NOTICE_KEY)!)).toEqual({ provider: 'claude-cli', model: 'opus-4-6' })
     // Storage recovers: the retry completes and the notice survives.
     expect(migrateSessionDefaults(s)).toEqual({ provider: null, model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
+    expect(s.data.has(DEFAULT_PROVIDER_KEY)).toBe(false)
+    expect(s.data.get(SESSION_DEFAULTS_SCHEMA_KEY)).toBe('2')
+  })
+
+  // #8276 acceptance review P2 — reads work, every write throws (quota).
+  it('a failed migration WRITE keeps readable deliberate defaults (codex / gpt-5)', () => {
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'codex', [DEFAULT_MODEL_KEY]: 'gpt-5' })
+    const quota = () => { const e = new Error('quota'); e.name = 'QuotaExceededError'; throw e }
+    const failing = { ...s, setItem: quota }
+    expect(migrateSessionDefaults(failing)).toEqual({ provider: 'codex', model: 'gpt-5', notice: null })
+    expect(s.data.get(DEFAULT_PROVIDER_KEY)).toBe('codex')
+    expect(s.data.has(SESSION_DEFAULTS_SCHEMA_KEY)).toBe(false)
+  })
+
+  it('a failed migration WRITE still inherits legacy values and keeps the notice in memory', () => {
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    const failing = { ...s, setItem: () => { throw new Error('quota') } }
+    expect(migrateSessionDefaults(failing)).toEqual({ provider: null, model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
+    // Nothing was removed (the notice write failed first), so nothing is lost.
+    expect(s.data.get(DEFAULT_PROVIDER_KEY)).toBe('claude-cli')
+    expect(s.data.get(DEFAULT_MODEL_KEY)).toBe('opus-4-6')
+  })
+
+  // #8276 acceptance review P3 — the provider removal succeeds, the model
+  // removal fails, then the next load retries.
+  it('a retry MERGES the undismissed notice instead of replacing it', () => {
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    const failModelRemoval = {
+      ...s,
+      removeItem: (k: string) => { if (k === DEFAULT_MODEL_KEY) throw new Error('denied'); s.removeItem(k) },
+    }
+    expect(migrateSessionDefaults(failModelRemoval).notice).toEqual({ provider: 'claude-cli', model: 'opus-4-6' })
+    expect(s.data.has(DEFAULT_PROVIDER_KEY)).toBe(false)
+    expect(s.data.get(DEFAULT_MODEL_KEY)).toBe('opus-4-6')
+    const retry = migrateSessionDefaults(s)
+    expect(retry).toEqual({ provider: null, model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
+    expect(JSON.parse(s.data.get(SESSION_DEFAULTS_NOTICE_KEY)!)).toEqual({ provider: 'claude-cli', model: 'opus-4-6' })
+  })
+
+  it('an unreadable notice does not cost the readable defaults', () => {
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'codex', [DEFAULT_MODEL_KEY]: 'gpt-5' })
+    const noticeUnreadable = {
+      ...s,
+      getItem: (k: string) => { if (k === SESSION_DEFAULTS_NOTICE_KEY) throw new Error('denied'); return s.getItem(k) },
+    }
+    expect(migrateSessionDefaults(noticeUnreadable)).toEqual({ provider: 'codex', model: 'gpt-5', notice: null })
+  })
+
+  it('a Settings write never stamps the marker over a legacy key a failed migration left behind', () => {
+    // Legacy claude-cli + opus-4-6, and removals fail: the migration cannot
+    // finish. The user then picks codex in Settings.
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    const failingRemove = { ...s, removeItem: () => { throw new Error('denied') } }
+    migrateSessionDefaults(failingRemove)
+    persistSessionDefault(DEFAULT_PROVIDER_KEY, 'codex', failingRemove)
+    expect(s.data.get(DEFAULT_PROVIDER_KEY)).toBe('codex')
+    expect(s.data.get(DEFAULT_MODEL_KEY)).toBe('opus-4-6')
+    expect(s.data.has(SESSION_DEFAULTS_SCHEMA_KEY)).toBe(false)
+    // Storage recovers: the deliberate codex is kept, the stale pin is not applied.
+    expect(migrateSessionDefaults(s)).toEqual({ provider: 'codex', model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
+  })
+
+  it('a Settings write on an unmigrated store finishes the migration first', () => {
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'claude-cli', [DEFAULT_MODEL_KEY]: 'opus-4-6' })
+    persistSessionDefault(DEFAULT_PROVIDER_KEY, 'codex', s)
+    expect(migrateSessionDefaults(s)).toEqual({ provider: 'codex', model: '', notice: { provider: 'claude-cli', model: 'opus-4-6' } })
+  })
+
+  it('a failed READ is the only "nothing persisted"', () => {
+    const s = memoryStorage({ [DEFAULT_PROVIDER_KEY]: 'codex' })
+    const unreadable = { ...s, getItem: () => { throw new Error('denied') } }
+    expect(migrateSessionDefaults(unreadable)).toEqual({ provider: null, model: '', notice: null })
   })
 
   it('a corrupt notice is ignored', () => {
