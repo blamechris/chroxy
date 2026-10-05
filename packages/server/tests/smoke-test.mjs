@@ -243,11 +243,13 @@ async function run() {
         pass('Full-width layout', `${Math.round(box.width)}px`)
       } else if (box) {
         fail('Full-width layout', `${Math.round(box.width)}px (expected >960)`)
+      } else {
+        fail('Full-width layout', 'chat area is not rendered (no bounding box)')
       }
     } else {
-      // Measure the main content area
-      const bodyWidth = await page.evaluate(() => document.body.scrollWidth)
-      pass('Full-width layout', `body ${bodyWidth}px`)
+      // The daemon boots with a default session, so a missing chat container
+      // is a failure, not something to wave through on body width.
+      fail('Full-width layout', 'no .chat-messages / .chat-view / main element')
     }
 
     // ---- Test 7: Input bar ----

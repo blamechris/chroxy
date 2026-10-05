@@ -2151,14 +2151,16 @@ jobs:
         # The daemon auto-creates a default session on boot with the default
         # provider (claude-sdk since #8266), whose preflight requires a `claude`
         # binary on PATH — which a hosted CI runner doesn't have — AND probes
-        # `claude --version` against the installed Agent SDK's floor
-        # (`claudeCodeVersion`, utils/agent-sdk-version.js). A stub that cannot
-        # answer the probe boots the daemon with NO default session, and the
-        # dashboard smoke then finds no sidebar, tabs or input bar. The stub
-        # reports exactly that floor (read from the installed SDK, so an SDK
-        # bump cannot leave it behind) and otherwise stays alive and inert; the
-        # smoke never drives a real turn. ~/.local/bin is both a checked
-        # candidate path AND added to PATH for subsequent steps.
+        # `claude --version`: a hard floor (`CLAUDE_SDK_MIN_CLI_VERSION`,
+        # utils/agent-sdk-version.js) plus a soft recommended version (the
+        # installed Agent SDK's `claudeCodeVersion` pairing, #8031). A stub that
+        # cannot answer the probe boots the daemon with NO default session, and
+        # the dashboard smoke then finds no sidebar, tabs or input bar. The stub
+        # reports the SDK's pairing, read from the installed SDK so a bump cannot
+        # leave it behind; agent-sdk-version.test.js keeps the floor at or below
+        # that pairing, so it satisfies both checks. It otherwise stays alive and
+        # inert; the smoke never drives a real turn. ~/.local/bin is both a
+        # checked candidate path AND added to PATH for subsequent steps.
         run: |
           mkdir -p "$HOME/.local/bin"
           floor="$(node -p "require('./node_modules/@anthropic-ai/claude-agent-sdk/package.json').claudeCodeVersion")"

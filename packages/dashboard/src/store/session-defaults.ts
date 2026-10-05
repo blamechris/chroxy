@@ -41,7 +41,13 @@ const INHERITED_LEGACY_PROVIDERS: ReadonlySet<string> = new Set(['claude-cli', '
  * `gemini-2.5-pro`) are out of this check's reach.
  */
 export function isVersionedClaudeModelPin(model: string): boolean {
-  return /^(claude-)?(\d+(-\d+)?-)?(opus|sonnet|haiku|fable)(-\d|-latest)/i.test(model.trim())
+  const id = model.trim()
+  // family-first: opus-4-6, claude-sonnet-4-20250514, claude-opus-4-7[1m]
+  if (/^(claude-)?(opus|sonnet|haiku|fable)-\d/i.test(id)) return true
+  // version-first (claude-3 era): claude-3-opus, claude-3-5-sonnet-20241022,
+  // claude-3-7-sonnet-latest. A bare `sonnet-latest` names no version, so it
+  // is an alias, not a pin.
+  return /^(claude-)?\d+(-\d+)?-(opus|sonnet|haiku|fable)(-\d|-latest|$)/i.test(id)
 }
 
 export type SessionDefaultSource = 'user' | 'server' | 'builtin'
