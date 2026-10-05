@@ -116,13 +116,16 @@ export function ViewersIndicator({ clients, primaryClientId, connected, sessionR
   const popoverId = useId()
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties | undefined>(undefined)
 
-  // Position the fixed popover from the trigger before paint, and follow a
-  // window resize while it is open.
+  // Position the fixed popover from the trigger before paint, and follow the
+  // trigger while it is open: on a window resize, and (#8298) when the chip or
+  // the footer holding it changes size. The chip is pinned to the footer's
+  // right edge, so it only moves when one of those two resizes — a count going
+  // to two digits, the Observing badge appearing, the footer wrapping.
   useLayoutEffect(() => {
     if (!open) return
+    const trigger = triggerRef.current
+    if (!trigger) return
     const place = () => {
-      const trigger = triggerRef.current
-      if (!trigger) return
       setPopoverStyle(computeViewersPopoverPosition(
         trigger.getBoundingClientRect(),
         { width: window.innerWidth, height: window.innerHeight },
@@ -130,7 +133,18 @@ export function ViewersIndicator({ clients, primaryClientId, connected, sessionR
     }
     place()
     window.addEventListener('resize', place)
-    return () => window.removeEventListener('resize', place)
+    let ro: ResizeObserver | undefined
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(place)
+      ro.observe(trigger)
+      // trigger → .viewers-indicator → the footer it sits in.
+      const footer = trigger.parentElement?.parentElement
+      if (footer) ro.observe(footer)
+    }
+    return () => {
+      window.removeEventListener('resize', place)
+      ro?.disconnect()
+    }
   }, [open])
 
   // Dismiss the popover on outside-click (capturing mousedown, matching
