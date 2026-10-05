@@ -7441,6 +7441,26 @@ button.sidebar-token-view-session-row:hover {
   line-height: 1.45;
 }
 
+/* #8265: one-time notice that a legacy saved default was cleared. The
+   dismiss control keeps the 44px tap-target floor. */
+.session-defaults-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-defaults-notice-dismiss {
+  flex-shrink: 0;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  background: transparent;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
 .provider-fix-hint-label {
   font-weight: 600;
   color: var(--warning-fg, #fbbf24);

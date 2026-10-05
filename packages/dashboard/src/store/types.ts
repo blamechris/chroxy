@@ -22,6 +22,7 @@ import type { HeldRunDetail } from '@chroxy/store-core'
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
 import type { CostBadgeMode } from '../lib/cost-badge-mode'
+import type { SessionDefaultSource, SessionDefaultsNotice } from './session-defaults'
 
 // Re-export shared protocol types from store-core
 export type {
@@ -2202,11 +2203,21 @@ export interface ConnectionState {
   activeTheme: string;
   setTheme: (themeId: string) => void;
 
-  // Session defaults
+  // Session defaults (#8265). `defaultProvider` is the effective New Session
+  // provider; `defaultProviderSource` says whether it is the user's own
+  // Settings override, the daemon's default, or the built-in fallback.
   defaultProvider: string;
+  defaultProviderSource: SessionDefaultSource;
+  /** The connected daemon's resolved default provider, once it has said. */
+  serverDefaultProvider: string | null;
+  /** '' clears the override (inherit the daemon's default). */
   setDefaultProvider: (provider: string) => void;
+  /** '' inherits the provider's own default model. */
   defaultModel: string;
   setDefaultModel: (model: string) => void;
+  /** What the one-time legacy migration cleared, until dismissed. */
+  sessionDefaultsNotice: SessionDefaultsNotice | null;
+  dismissSessionDefaultsNotice: () => void;
 
   // #5184: header cost-badge display mode (provider-model | cost | tokens |
   // context-pct | session-type). Persisted to localStorage; defaults to

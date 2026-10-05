@@ -319,6 +319,9 @@ describe('dashboard message-handler dispatch', () => {
         ctx() as any,
       )
       expect((store.getState() as any).defaultProvider).toBe('claude-sdk')
+      // #8265: an inherited default is labelled as the server's.
+      expect((store.getState() as any).defaultProviderSource).toBe('server')
+      expect((store.getState() as any).serverDefaultProvider).toBe('claude-sdk')
     })
 
     it('provider_list: the store default stays the persisted (user-chosen) value when chroxy_default_provider exists', () => {
@@ -331,6 +334,9 @@ describe('dashboard message-handler dispatch', () => {
       )
       // The server's value must NOT overwrite the user's explicit choice.
       expect((store.getState() as any).defaultProvider).toBe('gemini')
+      // #8265: …but it is still recorded, so Settings can offer "Server
+      // default (claude-sdk)" and clearing the override has a target.
+      expect((store.getState() as any).serverDefaultProvider).toBe('claude-sdk')
     })
 
     it('auth_bootstrap: the store default becomes the server value when no chroxy_default_provider key is persisted', () => {

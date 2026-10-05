@@ -39,7 +39,7 @@ function makeEnv() {
 }
 
 describe('chroxy init provider picker', () => {
-  it('defaults to claude-tui provider when user accepts default (empty input) (#5819)', async () => {
+  it('defaults to claude-sdk provider when user accepts default (empty input) (#8266)', async () => {
     const mock = makePrompt(['', ''])
     const env = makeEnv()
 
@@ -59,15 +59,15 @@ describe('chroxy init provider picker', () => {
     const written = env.getWritten()
     assert.ok(written, 'config file should be written')
     const parsed = JSON.parse(written.contents)
-    assert.deepEqual(parsed.providers, ['claude-tui'])
+    assert.deepEqual(parsed.providers, ['claude-sdk'])
     assert.equal(parsed.port, 8765)
   })
 
   it('persists selected providers by number list', async () => {
     // Prompts: port, provider selection
-    // Accept default port, then "2,3,4" to select claude-sdk + codex + gemini
-    // (menu is 1=claude-tui, 2=claude-sdk, 3=codex, 4=gemini since #5819)
-    const mock = makePrompt(['', '2,3,4'])
+    // Accept default port, then "1,3,4" to select claude-sdk + codex + gemini
+    // (menu is 1=claude-sdk, 2=claude-tui, 3=codex, 4=gemini since #8266)
+    const mock = makePrompt(['', '1,3,4'])
     const env = makeEnv()
 
     await runInitCmd({
@@ -114,7 +114,7 @@ describe('chroxy init provider picker', () => {
   // #6565: the daemon's provider SELECTOR reads the singular `provider` key
   // (server-cli.js `config.provider || DEFAULT_PROVIDER`), NOT `providers[]`.
   // init must write `provider = providers[0]` so a picked provider actually runs.
-  it('#6565: writes the singular `provider` key = primary choice (default → claude-tui)', async () => {
+  it('#6565: writes the singular `provider` key = primary choice (default → claude-sdk)', async () => {
     const mock = makePrompt(['', ''])
     const env = makeEnv()
     await runInitCmd({
@@ -123,8 +123,8 @@ describe('chroxy init provider picker', () => {
       existsFn: () => false, isKeychainAvailableFn: () => false, setTokenFn: () => {},
     })
     const parsed = JSON.parse(env.getWritten().contents)
-    assert.equal(parsed.provider, 'claude-tui', 'singular `provider` written for the selector')
-    assert.deepEqual(parsed.providers, ['claude-tui'])
+    assert.equal(parsed.provider, 'claude-sdk', 'singular `provider` written for the selector')
+    assert.deepEqual(parsed.providers, ['claude-sdk'])
   })
 
   it('#6565: a non-default pick (codex) writes provider=codex → start resolves codex', async () => {
@@ -139,7 +139,7 @@ describe('chroxy init provider picker', () => {
     assert.equal(parsed.provider, 'codex')
     assert.deepEqual(parsed.providers, ['codex'])
     // Mirrors the selector in server-cli.js — the daemon would now run codex.
-    assert.equal(parsed.provider || 'claude-tui', 'codex')
+    assert.equal(parsed.provider || 'claude-sdk', 'codex')
   })
 
   it('shows next-step hint for codex (OPENAI_API_KEY)', async () => {
@@ -208,7 +208,7 @@ describe('chroxy init provider picker', () => {
     )
   })
 
-  it('falls back to claude-tui default when input is invalid (no valid numbers) (#5819)', async () => {
+  it('falls back to claude-sdk default when input is invalid (no valid numbers) (#8266)', async () => {
     const mock = makePrompt(['', 'xyz'])
     const env = makeEnv()
 
@@ -226,12 +226,12 @@ describe('chroxy init provider picker', () => {
     })
 
     const parsed = JSON.parse(env.getWritten().contents)
-    assert.deepEqual(parsed.providers, ['claude-tui'])
+    assert.deepEqual(parsed.providers, ['claude-sdk'])
   })
 
   it('ignores out-of-range numbers but keeps valid ones', async () => {
-    // menu since #5819: 1=claude-tui, 2=claude-sdk, 3=codex, 4=gemini
-    const mock = makePrompt(['', '2,9,4'])
+    // menu since #8266: 1=claude-sdk, 2=claude-tui, 3=codex, 4=gemini
+    const mock = makePrompt(['', '1,9,4'])
     const env = makeEnv()
 
     await runInitCmd({
@@ -253,11 +253,11 @@ describe('chroxy init provider picker', () => {
 
   it('drops tokens that mix digits and letters (e.g. "2abc")', () => {
     // "2abc" must be treated as invalid, not silently parsed as 2.
-    // Mixed-digit result should fall back to the default (claude-tui since #5819).
-    assert.deepEqual(parseProviderSelection('2abc'), ['claude-tui'])
+    // Mixed-digit result should fall back to the default (claude-sdk since #8266).
+    assert.deepEqual(parseProviderSelection('2abc'), ['claude-sdk'])
     // Mixed with valid tokens, only the valid ones survive.
-    // menu: 1=claude-tui, 2=claude-sdk, 3=codex, 4=gemini
-    assert.deepEqual(parseProviderSelection('2,3abc,4'), ['claude-sdk', 'gemini'])
+    // menu: 1=claude-sdk, 2=claude-tui, 3=codex, 4=gemini
+    assert.deepEqual(parseProviderSelection('1,3abc,4'), ['claude-sdk', 'gemini'])
   })
 
   it('writes the port provided by the user', async () => {

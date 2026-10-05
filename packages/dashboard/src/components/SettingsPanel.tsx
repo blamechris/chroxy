@@ -750,6 +750,8 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const activeTheme = useConnectionStore(s => s.activeTheme)
   const setTheme = useConnectionStore(s => s.setTheme)
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
+  const defaultProviderSource = useConnectionStore(s => s.defaultProviderSource)
+  const serverDefaultProvider = useConnectionStore(s => s.serverDefaultProvider)
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
   const defaultModel = useConnectionStore(s => s.defaultModel)
   const setDefaultModel = useConnectionStore(s => s.setDefaultModel)
@@ -1307,12 +1309,20 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
             <h3>Session Defaults</h3>
             <div className="settings-field">
               <label htmlFor="default-provider">Default provider</label>
+              {/* #8265: "Server default" (value '') clears the override so
+                  New Session follows the daemon's default again; any other
+                  value is a deliberate override that the daemon never beats. */}
               <select
                 id="default-provider"
                 aria-label="Default provider"
-                value={effectiveProvider}
+                value={defaultProviderSource === 'user' ? effectiveProvider : ''}
                 onChange={handleProviderChange}
               >
+                <option value="">
+                  {serverDefaultProvider
+                    ? `Server default (${PROVIDER_LABELS[serverDefaultProvider] || serverDefaultProvider})`
+                    : 'Server default'}
+                </option>
                 {availableProviders.length > 0
                   ? availableProviders.map(p => (
                       <option key={p.name} value={p.name}>

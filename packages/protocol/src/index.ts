@@ -48,17 +48,16 @@ export type {
  * re-exports this), the dashboard, and the mobile app, so the "which provider
  * is the default?" decision lives in exactly one place.
  *
- * Flipped from `claude-sdk` to `claude-tui` ahead of the 2026-06-15
- * programmatic-credit cutover (#5819): on/after that boundary the host
- * claude-sdk / claude-cli providers draw from Anthropic's metered
- * programmatic-credit pool, so a zero-config session would silently spend
- * metered credits. `claude-tui` bills against the flat Claude subscription
- * allowance today (a best-effort bet, not a sanctioned path — see the
- * provider docs). Clients suppress the per-session provider badge for this
- * value, so keeping it here means the next default flip doesn't reintroduce
- * the drift fixed in #5823.
+ * `claude-sdk` again since #8266. It was flipped to `claude-tui` ahead of a
+ * programmatic-credit billing change announced for 2026-06-15 (#5819); that
+ * change was paused the day it was due and never shipped (#7333,
+ * `billing-class.js`), so claude-sdk bills as the flat subscription and the
+ * reason for the detour is gone. claude-tui stays selectable.
+ *
+ * This constant names the DEFAULT, not claude-tui: code that means "is this
+ * the claude-tui provider" compares against the literal id.
  */
-export const DEFAULT_PROVIDER = 'claude-tui'
+export const DEFAULT_PROVIDER = 'claude-sdk'
 
 /**
  * #5986 (epic #5982): the embedded user-shell provider id. A user-shell session

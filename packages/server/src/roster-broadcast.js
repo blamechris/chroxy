@@ -148,7 +148,7 @@ export function broadcastRosterPerRecipient({ broadcast, sessionManager, default
   //
   // Only added when it NAMES the default registry — i.e. when this daemon's
   // own configured default is itself Claude-family (the ordinary case:
-  // DEFAULT_PROVIDER is 'claude-tui') or an unregistered/custom name (which
+  // DEFAULT_PROVIDER is 'claude-sdk') or an unregistered/custom name (which
   // `getRegistryForProvider` also falls back to the default registry for).
   // A daemon explicitly defaulted to a REAL non-Claude provider (`--provider
   // codex`) resolves this to `'codex'` — a REGISTERED tag with its OWN

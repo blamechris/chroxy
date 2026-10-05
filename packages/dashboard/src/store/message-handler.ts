@@ -228,6 +228,7 @@ import {
   UPDATE_SESSION_MIRRORED_FIELDS,
 } from './utils';
 import { clearPersistedSession } from './persistence';
+import { DEFAULT_PROVIDER_KEY } from './session-defaults';
 
 // ---------------------------------------------------------------------------
 // Protocol version — bumped when the WS message set changes
@@ -1683,22 +1684,31 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   },
   // #8151 (C3) — the server's resolved default provider (e.g. a Docker
   // image's ENV CHROXY_PROVIDER=claude-sdk) overrides the baked-in
-  // DEFAULT_PROVIDER fallback (claude-tui) for the New Session picker's
+  // DEFAULT_PROVIDER fallback (@chroxy/protocol) for the New Session picker's
   // initial selection — but ONLY when the user has not already made an
   // explicit choice (setDefaultProvider's persisted localStorage key). An
   // explicit choice must always win, and this is an in-memory-only apply:
   // it deliberately does NOT call setDefaultProvider / write localStorage,
   // since a server-supplied default is not the user's own choice and must
   // not stick if they later connect to a server with a different default.
+  //
+  // #8265: the daemon's value is always RECORDED (`serverDefaultProvider`, so
+  // Settings can offer "Server default" and clearing an override has
+  // something to fall back to), and the persisted key still decides whether it
+  // APPLIES — after migrateSessionDefaults a present key is by construction a
+  // deliberate override, never a legacy pin.
   applyServerDefaultProvider: (name) => {
+    let userOverride = false;
     try {
-      if (localStorage.getItem('chroxy_default_provider') != null) return;
+      userOverride = localStorage.getItem(DEFAULT_PROVIDER_KEY) != null;
     } catch {
       // localStorage unavailable (private-mode / storage-denied) — fall
       // through and apply the server's default, matching this file's other
       // localStorage reads' fail-open behaviour.
     }
-    getStore().setState({ defaultProvider: name } as Partial<ConnectionState>);
+    getStore().setState((userOverride
+      ? { serverDefaultProvider: name }
+      : { serverDefaultProvider: name, defaultProvider: name, defaultProviderSource: 'server' }) as Partial<ConnectionState>);
   },
 };
 

@@ -686,11 +686,12 @@ describe('#6865 SchedulerEngine', () => {
       return { sm, task, record: store.get(task.id), events }
     }
 
-    it('the daemon default provider is NOT schedulable (the premise of this whole block)', () => {
-      assert.equal(DEFAULT_PROVIDER, 'claude-tui')
-      assert.ok(scheduledProviderRefusalReason(DEFAULT_PROVIDER), 'the default provider must be refused')
+    it('the compiled-in default is schedulable; claude-tui (the default until #8266) is not', () => {
+      assert.equal(DEFAULT_PROVIDER, 'claude-sdk')
+      assert.equal(scheduledProviderRefusalReason(DEFAULT_PROVIDER), null, 'the default provider must be schedulable')
       const schedulable = listSchedulableProviders()
-      assert.ok(!schedulable.includes(DEFAULT_PROVIDER))
+      assert.ok(schedulable.includes(DEFAULT_PROVIDER))
+      assert.ok(!schedulable.includes('claude-tui'), 'a hook-routed provider must stay refused')
       assert.ok(schedulable.includes(SCHEDULABLE_PROVIDER), 'the fixture provider must be schedulable')
     })
 
@@ -708,18 +709,24 @@ describe('#6865 SchedulerEngine', () => {
       assert.deepEqual(events, [['end', REFUSED_STATUS]])
     })
 
-    it('refuses a task with NO explicit provider, because the default is hook-routed', async () => {
-      const { sm, record } = await fireTask({ target: { model: 'sonnet' } })
+    it('refuses a task with NO explicit provider when the daemon default is hook-routed', async () => {
+      const { sm, record } = await fireTask({ target: { model: 'sonnet' } }, { providerType: 'claude-tui' })
       assert.equal(sm.created.length, 0)
       assert.equal(record.lastRun.status, REFUSED_STATUS)
       assert.notEqual(record.lastRun.status, 'success')
-      assert.match(record.lastRun.error, /daemon DEFAULT/)
+      assert.match(record.lastRun.error, /claude-tui/)
     })
 
-    it('refuses a task with no target at all', async () => {
-      const { sm, record } = await fireTask({})
+    it('refuses a task with no target at all when the daemon default is hook-routed', async () => {
+      const { sm, record } = await fireTask({}, { providerType: 'claude-tui' })
       assert.equal(sm.created.length, 0)
       assert.equal(record.lastRun.status, REFUSED_STATUS)
+    })
+
+    it('fires a task with no target at all on the compiled-in default (claude-sdk, #8266)', async () => {
+      const { sm, record } = await fireTask({})
+      assert.equal(record.lastRun.status, 'success')
+      assert.equal(sm.created.length, 1)
     })
 
     it('refuses an unknown provider name rather than crashing', async () => {
@@ -781,7 +788,7 @@ describe('#6865 SchedulerEngine', () => {
     })
 
     it('the refusal reason fits the 500-char record cap, pointer and all', () => {
-      const reason = scheduledProviderRefusalReason(DEFAULT_PROVIDER)
+      const reason = scheduledProviderRefusalReason('claude-tui')
       assert.ok(reason.length <= 500, `refusal reason is ${reason.length} chars — it would be truncated`)
     })
   })

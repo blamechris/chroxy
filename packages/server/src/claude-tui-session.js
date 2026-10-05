@@ -213,7 +213,7 @@ export const SINK_BASE_UNTRUSTED_CODE = 'SINK_BASE_UNTRUSTED'
 export class ClaudeTuiSession extends BaseSession {
   static agentConnectionRoutes = ['native']
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
-  // This is the DEFAULT_PROVIDER, so its membership is load-bearing (#5855).
+  // It was the DEFAULT_PROVIDER when #5855 made this membership load-bearing.
   static claudeFamily = true
 
   // #5984 (epic #5982): this IS the claude-tui PTY mirror — the only legitimate

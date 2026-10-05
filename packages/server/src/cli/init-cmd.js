@@ -23,18 +23,17 @@ import { setToken, isKeychainAvailable } from '../keychain.js'
  */
 export const PROVIDER_CHOICES = [
   {
-    // #5819 — default. Bills against the flat Claude subscription allowance
-    // today (best-effort, not guaranteed), keeping a zero-config setup off the
-    // metered programmatic-credit pool that claude-sdk/-cli draw from on/after
-    // 2026-06-15. See providers.js DEFAULT_PROVIDER.
-    id: 'claude-tui',
-    label: 'Claude (TUI · subscription)',
-    hint: 'Drives the interactive CLI; bills against your Claude subscription today. Run \'claude login\' first.',
-  },
-  {
+    // #8266 — default again (providers.js DEFAULT_PROVIDER). Bills as the flat
+    // Claude subscription: the 2026-06-15 programmatic-credit change that
+    // motivated the claude-tui detour (#5819) was paused and never shipped (#7333).
     id: 'claude-sdk',
     label: 'Claude (Agent SDK)',
-    hint: 'On/after 2026-06-15 draws metered programmatic credits unless ANTHROPIC_API_KEY is set. Run \'claude login\' (or set the key) if not already authenticated.',
+    hint: 'Uses your Claude login. Run \'claude auth login\' (or set ANTHROPIC_API_KEY) if not already authenticated.',
+  },
+  {
+    id: 'claude-tui',
+    label: 'Claude (interactive TUI)',
+    hint: 'Drives the interactive claude TUI under a PTY: no plan mode or live streaming. Run \'claude auth login\' first.',
   },
   {
     id: 'codex',
@@ -52,7 +51,7 @@ export const PROVIDER_CHOICES = [
  * Parse a comma-separated provider selection answer from the init prompt.
  *
  * Accepted forms:
- *   - empty / whitespace     → default (claude-tui)
+ *   - empty / whitespace     → default (claude-sdk)
  *   - "all"                  → every known provider
  *   - "1", "2", "1,3", "1, 3" → numeric indices (1-based) into PROVIDER_CHOICES
  *
@@ -158,8 +157,8 @@ export async function runInitCmd(deps = {}) {
   // list — that array is informational only (providers-cmd.js). Write the primary
   // choice (providers[0]) as `provider` so the picker actually takes effect;
   // otherwise a non-default selection is silently ignored and the daemon falls
-  // back to DEFAULT_PROVIDER (claude-tui). PROVIDER_CHOICES ids are already valid
-  // selector ids ('claude-tui', 'codex', …), so no mapping is needed.
+  // back to DEFAULT_PROVIDER (claude-sdk). PROVIDER_CHOICES ids are already valid
+  // selector ids ('claude-sdk', 'codex', …), so no mapping is needed.
   const config = {
     port,
     ...(providers.length > 0 ? { provider: providers[0] } : {}),

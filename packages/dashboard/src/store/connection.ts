@@ -146,6 +146,13 @@ import type { EvaluatorResultPayload } from './types';
 import type { ScheduledTaskInput } from '@chroxy/protocol';
 import { CLIENT_CAPABILITIES, DEFAULT_PROVIDER } from '@chroxy/protocol';
 import {
+  migrateSessionDefaults,
+  persistSessionDefault,
+  clearSessionDefaultsNotice,
+  DEFAULT_PROVIDER_KEY,
+  DEFAULT_MODEL_KEY,
+} from './session-defaults';
+import {
   getWsCloseMessage,
   getHealthCheckErrorMessage,
   // #4853: runtime type-guard for `VoiceInputMode`. Used in
@@ -569,7 +576,7 @@ if (_initialServerId) setServerScope(_initialServerId);
 // suppressed (they'd inject a line at the altscreen cursor and corrupt the redraw).
 function activeSessionIsClaudeTui(get: () => ConnectionState): boolean {
   const s = get();
-  return s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider === DEFAULT_PROVIDER;
+  return s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider === 'claude-tui';
 }
 
 // #6939 — client-side timeout for the git one-shot request/reply callbacks
@@ -822,6 +829,11 @@ function isDifferentDaemonUrl(current: string | null, target: string): boolean {
   return current !== null && current !== target;
 }
 
+// #8265: bring the persisted New Session defaults to the current schema BEFORE
+// the store reads them, so a legacy pin the user never deliberately chose
+// (claude-cli / claude-tui / a versioned Claude model) is inherited instead.
+const _sessionDefaults = migrateSessionDefaults();
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionPhase: 'disconnected',
   wsUrl: null,
@@ -1016,13 +1028,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   primaryClientId: null,
   followMode: false,
   activeTheme: loadPersistedSetting('chroxy_persist_theme', 'default'),
-  // #5819 / #5823: pre-select the shared DEFAULT_PROVIDER (claude-tui) so the
-  // new-session picker doesn't default to a provider that silently draws
-  // metered programmatic credits at the 2026-06-15 cutover. Sourced from
-  // @chroxy/protocol so server + clients agree. Users who explicitly chose a
-  // provider keep their persisted value.
-  defaultProvider: loadPersistedSetting('chroxy_default_provider', DEFAULT_PROVIDER),
-  defaultModel: loadPersistedSetting('chroxy_default_model', ''),
+  // #8265: `defaultProvider` is the EFFECTIVE New Session provider and
+  // `defaultProviderSource` says where it came from — a deliberate Settings
+  // override ('user'), the connected daemon's default ('server', applied by
+  // applyServerDefaultProvider) or the shared @chroxy/protocol fallback
+  // ('builtin') until the daemon answers. `defaultModel` is '' to inherit the
+  // provider's own default.
+  defaultProvider: _sessionDefaults.provider ?? DEFAULT_PROVIDER,
+  defaultProviderSource: _sessionDefaults.provider ? 'user' : 'builtin',
+  serverDefaultProvider: null,
+  defaultModel: _sessionDefaults.model,
+  sessionDefaultsNotice: _sessionDefaults.notice,
   // #5184: header cost-badge display mode. Validated through the badge's
   // own `isCostBadgeMode` guard so a stale / corrupt localStorage value
   // falls back to the default instead of poisoning the union.
@@ -1296,14 +1312,31 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     try { localStorage.setItem('chroxy_persist_theme', themeId); } catch { /* noop */ }
   },
 
+  // #8265: '' clears the override and goes back to inheriting the daemon's
+  // default; any other value is a deliberate choice and is persisted.
   setDefaultProvider: (provider: string) => {
-    set({ defaultProvider: provider });
-    try { localStorage.setItem('chroxy_default_provider', provider); } catch { /* noop */ }
+    const chosen = provider.trim();
+    persistSessionDefault(DEFAULT_PROVIDER_KEY, chosen || null);
+    if (chosen) {
+      set({ defaultProvider: chosen, defaultProviderSource: 'user' });
+    } else {
+      const serverDefault = get().serverDefaultProvider;
+      set({
+        defaultProvider: serverDefault ?? DEFAULT_PROVIDER,
+        defaultProviderSource: serverDefault ? 'server' : 'builtin',
+      });
+    }
   },
 
   setDefaultModel: (model: string) => {
-    set({ defaultModel: model });
-    try { localStorage.setItem('chroxy_default_model', model); } catch { /* noop */ }
+    const chosen = model.trim();
+    set({ defaultModel: chosen });
+    persistSessionDefault(DEFAULT_MODEL_KEY, chosen || null);
+  },
+
+  dismissSessionDefaultsNotice: () => {
+    set({ sessionDefaultsNotice: null });
+    clearSessionDefaultsNotice();
   },
 
   // #5184: persist the header cost-badge display mode. Mirrors the

@@ -133,7 +133,7 @@ of `~/.chroxy/config.json` regardless of which group it appears in.
 
 | Key | Type | CLI Flag | Environment Variable | Description |
 |-----|------|----------|---------------------|-------------|
-| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-tui` (default, #5819), `claude-sdk`, `claude-cli`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection but not yet runnable (bridge lands in #3954). See [../../docs/providers.md](../../docs/providers.md) for per-provider setup, env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), and the capability matrix. |
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-sdk` (default, #8266), `claude-tui`, `claude-cli`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection but not yet runnable (bridge lands in #3954). See [../../docs/providers.md](../../docs/providers.md) for per-provider setup, env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, …), and the capability matrix. |
 | `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
 | `providers` | array \| object | - | `CHROXY_PROVIDERS` | Two forms. **Array** (legacy, written by `chroxy init`): informational list of provider ids the user opted into. **Object** (#5419): `providers.anthropicCompatible` is an array of config-driven Anthropic-compatible endpoint entries (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) — each entry `{ id, label?, baseUrl, apiKeyEnv?, credentialsKey?, defaultModel, models?, pricing?, contextWindow? }` registers a first-class provider at startup, selectable via `provider` / `--provider <id>`. API keys are **never** inlined: `apiKeyEnv` names an env var, `credentialsKey` names a `~/.chroxy/credentials.json` field (mode `0600`); entries carrying literal secrets are rejected. Invalid entries are warned about and skipped; valid siblings still register. The object form carries three more sub-blocks: `providers.openaiCompatible` — the identical entry shape for endpoints that speak the **OpenAI Chat Completions** API instead (OpenAI, OpenRouter, LM Studio, vLLM, llama.cpp, Together, Groq, DeepInfra, custom), where `baseUrl` is an OpenAI API base typically ending in `/v1`; `providers.acp` (#7319) — an array of config-driven **Agent Client Protocol** agents, each entry `{ id, label?, command, args?, env? }` spawning an arbitrary ACP-speaking agent over stdio, permissions **denied by default** (no bridge yet — #7320); and `providers.allowAnyModel`, see [Unrestricted provider models](#unrestricted-provider-models-providersallowanymodel). See [Anthropic-compatible endpoints](../../docs/providers.md#anthropic-compatible-endpoints-config-driven), [OpenAI-compatible endpoints](../../docs/providers.md#openai-compatible-endpoints-config-driven), and [ACP agents](../../docs/providers.md#acp-agents-config-driven). |
 | `agentConnections` | array | - | *(unmapped — see [note](#environment-variable-names))* | Explicit, non-secret agent routes shown in the existing session-creation provider picker. Each entry is `{ id, label, provider?, runtime, authRoute, accountRef?, credentialKey?, inferenceLocation? }`; see [Agent connections](#agent-connections). |
@@ -582,8 +582,8 @@ The `provider` key picks which AI CLI backs a session by default:
 
 | Value | Backing binary / SDK | Required env |
 |-------|----------------------|--------------|
-| `claude-tui` (default) | drives the interactive `claude` TUI under a PTY (#5819) | Claude Code subscription login |
-| `claude-sdk` | `@anthropic-ai/claude-agent-sdk` | Claude Code login or `ANTHROPIC_API_KEY` |
+| `claude-sdk` (default, #8266) | `@anthropic-ai/claude-agent-sdk` | Claude Code login or `ANTHROPIC_API_KEY` |
+| `claude-tui` | drives the interactive `claude` TUI under a PTY (the default from #5819 until #8266) | Claude Code subscription login |
 | `claude-cli` | `claude -p` (Claude Code CLI) | Claude Code login (CLI intentionally strips `ANTHROPIC_API_KEY` from its environment) |
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | Claude Code subscription login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 |
 | `gemini` | `gemini --prompt=<text>` CLI | `GEMINI_API_KEY` |
@@ -1043,13 +1043,12 @@ identical to a daemon without the feature.
 When on, at each task's due time the daemon spins up (or resumes) that task's
 session and runs its prompt with **no client connected**.
 
-##### Supported providers — hook-routed providers (including the default) are refused
+##### Supported providers — hook-routed providers are refused
 
 > **A scheduled task only fires on a provider that answers permission prompts
-> in-process.** Right now that is `claude-sdk`, `claude-byok`, `codex` (the
-> app-server driver), `deepseek`, and `ollama`. Every other provider — **including
-> the daemon default `claude-tui`**, plus `claude-cli`, `claude-channel`, and
-> `gemini` — is **refused**: the task does not fire, no session is created, and the
+> in-process.** Right now that is `claude-sdk` (the daemon default), `claude-byok`,
+> `codex` (the app-server driver), `deepseek`, and `ollama`. Every other provider —
+> `claude-tui`, `claude-cli`, `claude-channel`, and `gemini` — is **refused**: the task does not fire, no session is created, and the
 > run is recorded with status `refused` naming the provider.
 
 This is deliberate, not an oversight. The scheduler's whole safety story is that a

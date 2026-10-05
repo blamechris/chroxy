@@ -14,7 +14,7 @@
 
 Run a lightweight daemon on your dev machine and connect from your phone or desktop over a secure outbound tunnel. Chroxy turns long-running agent sessions into something you can actually supervise from anywhere: a chat view that parses the AI CLI's output into readable messages, a full terminal for the raw stream, push notifications when a session needs you, and permission prompts you can answer from your phone. Pluggable session providers cover Claude Code (Agent SDK, legacy CLI, or the interactive TUI), Google Gemini, OpenAI Codex, DeepSeek, local models via Ollama, your own Anthropic API key (BYOK), and any config-driven OpenAI- or Anthropic-compatible endpoint (LM Studio, OpenRouter, vLLM, …). See [docs/providers.md](docs/providers.md).
 
-> **Claude is the default, not a requirement.** The daemon defaults to the `claude-tui` provider out of the box, but a Codex-, Gemini-, Ollama-, or BYOK-only setup needs no `claude` binary at all — set `"provider"` in `~/.chroxy/config.json` (both the daemon **and** `chroxy doctor` honor it, so neither demands `claude`).
+> **Claude is the default, not a requirement.** The daemon defaults to the `claude-sdk` provider out of the box, but a Codex-, Gemini-, Ollama-, or BYOK-only setup needs no `claude` binary at all — set `"provider"` in `~/.chroxy/config.json` (both the daemon **and** `chroxy doctor` honor it, so neither demands `claude`).
 
 ## Why not just SSH?
 
@@ -41,7 +41,7 @@ When an agent wants something the session's rules don't already cover, Chroxy pa
 
 ### Beyond the shell
 
-- **Multi-provider, not Claude-only** — Pick `claude-tui` (default), `claude-sdk`, `claude-cli`, `claude-byok`, `gemini`, `codex`, `deepseek`, `ollama` (local models), or any config-driven OpenAI/Anthropic-compatible endpoint per session. See [docs/providers.md](docs/providers.md).
+- **Multi-provider, not Claude-only** — Pick `claude-sdk` (default), `claude-tui`, `claude-cli`, `claude-byok`, `gemini`, `codex`, `deepseek`, `ollama` (local models), or any config-driven OpenAI/Anthropic-compatible endpoint per session. See [docs/providers.md](docs/providers.md).
 - **Provider flexibility** — If you're hitting your Claude programmatic credit cap, swap providers per session with `--provider codex` or `CHROXY_PROVIDER=gemini`. Codex and Gemini bill separately from Anthropic. See [Billing & API usage](#billing--api-usage).
 - **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Discord notifications** — A live status embed per project that pings when a session is ready for input or needs approval — even for plain Claude Code sessions outside chroxy, via the `chroxy-hooks` installer. See [docs/guides/discord-notifications.md](docs/guides/discord-notifications.md).
@@ -114,7 +114,7 @@ Or pass them inline when starting the server:
 OPENAI_API_KEY=sk-... PATH="/opt/homebrew/opt/node@22/bin:$PATH" chroxy start
 ```
 
-**Running without Claude installed?** The daemon defaults to the `claude-tui` provider, so a bare `chroxy start` expects a `claude` binary. To run a Codex- or Gemini-only machine (no `claude` at all), make a non-Claude provider the default. The cleanest way is to set it in `~/.chroxy/config.json`, because both the daemon **and** `chroxy doctor` read `config.provider`:
+**Running without Claude installed?** The daemon defaults to the `claude-sdk` provider, so a bare `chroxy start` expects a `claude` binary. To run a Codex- or Gemini-only machine (no `claude` at all), make a non-Claude provider the default. The cleanest way is to set it in `~/.chroxy/config.json`, because both the daemon **and** `chroxy doctor` read `config.provider`:
 
 ```jsonc
 // ~/.chroxy/config.json
@@ -398,7 +398,7 @@ QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/termina
 
 ## Billing & API usage
 
-The default provider is `claude-tui` (see #5819), which drives the interactive `claude` TUI and bills against your subscription's interactive allowance today (a best-effort bet — see below). The Claude Agent SDK / `claude -p` providers (`claude-sdk`, `claude-cli`) instead use what Anthropic classifies as **programmatic usage**. Starting **June 15, 2026**, programmatic usage on Claude subscriptions draws from a separate monthly credit pool — not the interactive Claude Code allowance:
+The default provider is `claude-sdk` (the Claude Agent SDK, see #8266), which uses your Claude login and bills against your subscription today. Anthropic announced that, from **June 15, 2026**, programmatic usage on Claude subscriptions (the Agent SDK and `claude -p`, i.e. `claude-sdk` and `claude-cli`) would draw from a separate monthly credit pool. That change was **paused the day it was due and has not taken effect** (#7333); if it is ever revived, the server's provider `auth.detail` and `chroxy doctor`'s billing canary report it. The announced pool was:
 
 | Plan | Programmatic credit / month |
 |---|---|
@@ -414,7 +414,7 @@ Credits reset each billing cycle and don't roll over. When the credit is exhaust
 
 **For heavy users:** set `ANTHROPIC_API_KEY` to bypass the subscription credit pool entirely and bill the raw Anthropic API account directly. Same SDK, predictable per-token pricing.
 
-**The default stays on the subscription (best-effort):** the `claude-tui` provider — the zero-config default (see #5819) — drives the interactive `claude` TUI under a PTY instead of the SDK / `claude -p`, so each turn **currently** bills against your subscription's interactive allowance — the same pool `claude` uses when you run it locally — rather than the programmatic credit pool. This is an unguaranteed bet, not a sanctioned path: Anthropic may reclassify or enforce against third-party automation of a subscription login, so treat it as best-effort and keep BYOK (`ANTHROPIC_API_KEY`) as a fallback. Switch to the SDK explicitly with `--provider claude-sdk` (or back with `--provider claude-tui` / `CHROXY_PROVIDER=claude-tui`). Trade-off: `claude-tui` has no live token streaming, no live model switch, no plan mode, no resume — see [docs/providers.md#claude-tui](docs/providers.md#claude-tui).
+**`claude-tui` stays available:** it drives the interactive `claude` TUI under a PTY instead of the SDK, and was the default from #5819 until #8266 as a hedge against the credit pool above. Select it with `--provider claude-tui` / `CHROXY_PROVIDER=claude-tui`. Trade-off: no live token streaming, no live model switch, no plan mode — see [docs/providers.md#claude-tui](docs/providers.md#claude-tui).
 
 A second subscription-billed path, `claude-channel`, is in **research preview**: it will drive Claude through Anthropic's first-party channels MCP protocol (`claude --channels`) rather than scraping the TUI, and — once the backend lands — will add live streaming plus a first-party permission relay. It is currently a scaffold whose session backend isn't runnable yet (the bridge lands in a follow-up); when it does run it will require `claude` ≥ 2.1.80 and the `--dangerously-load-development-channels` flag — see [docs/providers.md#claude-channel-research-preview](docs/providers.md#claude-channel-research-preview).
 

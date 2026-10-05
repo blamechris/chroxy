@@ -38,6 +38,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per turn for the same event would be noise. Web dashboard only — the
   mobile app has no equivalent surface yet.
 
+### Changed
+
+- **The default provider is `claude-sdk` again (#8266).** `claude-tui` became
+  the default (#5819) as a hedge against a programmatic-credit billing change
+  announced for 2026-06-15; that change was paused and never shipped (#7333),
+  so `claude-sdk` bills as the subscription and brings plan mode, live
+  streaming and in-process permissions back to zero-config sessions.
+  `claude-tui` stays selectable. **Existing installs:** an explicit `provider`
+  in `config.json`, `--provider` or `CHROXY_PROVIDER` is untouched; a daemon
+  with none set now creates `claude-sdk` sessions, and `chroxy schedule`
+  follows the same default.
+- **Dashboard: a saved New Session default no longer silently beats the
+  daemon's (#8265).** The Settings → Session Defaults keys now mean a
+  deliberate choice. On first load, legacy values that cannot be told apart
+  from an inherited default are cleared once with a notice: a saved
+  `claude-cli` (which registers chroxy's hook in the user-level Claude
+  settings) or `claude-tui` provider, and a version-pinned Claude model such
+  as `opus-4-6`. Other saved values are kept as overrides. New Session says
+  where its provider came from ("Your default" or "Server default"), warns
+  when `claude-cli` is selected, and Settings offers "Server default" to go
+  back to inheriting. Delivered with the daemon's dashboard; the desktop app
+  picks it up without a release.
+
 ### Fixed
 
 - **A logged-out or expired `claude` login is now reported as such, instead of

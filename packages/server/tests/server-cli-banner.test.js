@@ -35,9 +35,9 @@ describe('buildServerBanner (#2953)', () => {
     assert.doesNotMatch(line, /\(gemini\)/)
   })
 
-  it('defaults to claude-tui when no provider is supplied (#5819)', () => {
+  it('defaults to claude-sdk when no provider is supplied (#8266)', () => {
     const line = buildServerBanner({ version: '1.2.3' })
-    assert.match(line, /Chroxy Server v1\.2\.3 \(Claude Code \(TUI · subscription\)\)/)
+    assert.match(line, /Chroxy Server v1\.2\.3 \(Claude Code \(SDK\)\)/)
   })
 
   it('falls back to the raw provider name for unknown providers', () => {
