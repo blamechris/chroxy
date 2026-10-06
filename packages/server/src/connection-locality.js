@@ -21,6 +21,7 @@
  * this classification — it's a pure transport-efficiency hint.
  */
 
+import { isIPv4 } from 'node:net'
 import { isLoopbackHost } from './bind-host.js'
 import { isPrivateOrSpecialIp } from './ssrf-guard.js'
 
@@ -52,4 +53,63 @@ export function isLocalOrLanPeer(req) {
   // Direct RFC1918 / link-local peer with no proxy in front — a LAN device.
   if (isPrivateOrSpecialIp(socketIp)) return true
   return false
+}
+
+/**
+ * Strict loopback parse for AUTHORIZATION use. Not `isLoopbackHost`, which is a
+ * bind-host helper that accepts anything starting `::ffff:7f` — so
+ * `::ffff:7f00:1:2`, which is not an address at all, would pass. Accepts exactly:
+ *   - a dotted IPv4 literal in 127.0.0.0/8,
+ *   - `::1`,
+ *   - an IPv4-mapped `::ffff:a.b.c.d` whose dotted part is in 127.0.0.0/8.
+ */
+function isStrictLoopbackAddress(ip) {
+  const addr = ip.toLowerCase()
+  if (isIPv4(addr)) return addr.split('.')[0] === '127'
+  if (addr === '::1') return true
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(addr)
+  return !!mapped && isIPv4(mapped[1]) && mapped[1].split('.')[0] === '127'
+}
+
+/**
+ * Any header a tunnel, CDN or reverse proxy leaves behind. Wider than
+ * `hasProxyHeaders` on purpose: Cloudflare can strip the visitor-IP headers
+ * (a managed transform), and then `cf-connecting-ip` is absent on a request
+ * that very much came through the tunnel. What survives is the rest of the
+ * family — `cf-ray`, `cf-visitor`, `cdn-loop`, `x-forwarded-proto`. Presence of
+ * the NAME is the test; the value is never trusted.
+ */
+function hasAnyProxyHint(headers) {
+  if (!headers) return false
+  for (const name of Object.keys(headers)) {
+    const n = name.toLowerCase()
+    if (n.startsWith('cf-') || n.startsWith('cdn-loop') || n.startsWith('forwarded') ||
+        n.startsWith('x-forwarded-') || n === 'x-real-ip') return true
+  }
+  return false
+}
+
+/**
+ * Is this request a loopback peer that carries no sign of a proxy? (#8324)
+ *
+ * It does NOT prove direct local origin. It rejects a request whose socket is
+ * not loopback, and any request carrying a proxy-family header (see
+ * `hasAnyProxyHint`); a proxy that strips EVERY such header, or a local process
+ * that forwards traffic for a remote party without adding one, passes it. So it
+ * is defence in depth for the local-only `/api/daemon/idle` probe, and the
+ * primary bearer token is the authority.
+ *
+ * Stricter than `isLocalOrLanPeer`, which is a transport-efficiency hint with
+ * no security property riding on it: the socket address is parsed strictly, and
+ * ANY proxy-family header disqualifies the request. cloudflared connects to the
+ * daemon from 127.0.0.1, so the socket address alone proves nothing.
+ *
+ * @param {object} req - Node IncomingMessage.
+ * @returns {boolean}
+ */
+export function isLoopbackPeer(req) {
+  const socketIp = req?.socket?.remoteAddress
+  if (typeof socketIp !== 'string' || socketIp.length === 0) return false
+  if (hasAnyProxyHint(req.headers)) return false
+  return isStrictLoopbackAddress(socketIp)
 }

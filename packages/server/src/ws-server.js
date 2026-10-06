@@ -3228,6 +3228,17 @@ export class WsServer {
   }
 
   /**
+   * How many hook-routed permission requests are parked on the daemon right now
+   * (POST /permission held open for a human). Read-only; the idle-only
+   * auto-deploy probe (GET /api/daemon/idle, #8324) reads it so http-routes
+   * never reaches into the private map.
+   * @returns {number}
+   */
+  getHookPendingPermissionCount() {
+    return this._pendingPermissions.size
+  }
+
+  /**
    * Clear all pending permission requests across both subsystems.
    *
    * Covers:

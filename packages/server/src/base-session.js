@@ -2044,6 +2044,47 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * How many permission requests are waiting on a human for this session,
+   * across both routes: the hook-routed ids (CLI / TUI, #2831) and the
+   * in-process PermissionManager's map that `wirePermissionManager` installs
+   * as `_pendingPermissions` (SDK / BYOK / Codex).
+   *
+   * A read-only count for callers outside the session — the idle-only
+   * auto-deploy probe (#8324) — so they never reach into either private field.
+   *
+   * @returns {number}
+   */
+  getPendingPermissionCount() {
+    const inProcess = this._pendingPermissions instanceof Map ? this._pendingPermissions.size : 0
+    return this._pendingPermissionIds.size + inProcess
+  }
+
+  /**
+   * Work a daemon restart would lose that `isBusy` does not report (#8324).
+   *
+   * `isBusy` is "a turn is running or a background shell is tracked". A restart
+   * can also cut off a background agent that outlived its turn (`_activeAgents`
+   * keeps it after `_clearMessageState({ turnEndedCleanly: true })`) and input
+   * the session has accepted but not yet dispatched (`_outgoingQueue`, which
+   * every provider shares for mid-turn sends). Subclasses with a queue or an
+   * input path of their own extend this list; they call `super` first.
+   *
+   * Fail-closed contract for callers: an empty array means nothing blocks a
+   * restart, so an override must never return `[]` merely because it could not
+   * check — throw instead.
+   *
+   * @returns {string[]} human-readable reasons; empty = nothing blocks a restart
+   */
+  getRestartBlockers() {
+    const reasons = []
+    const agents = this._activeAgents.size
+    if (agents > 0) reasons.push(`${agents} active background agent(s)`)
+    const queued = this._outgoingQueue.length
+    if (queued > 0) reasons.push(`${queued} queued message(s) not yet dispatched`)
+    return reasons
+  }
+
+  /**
    * A hook-routed permission request belonging to this session is outstanding.
    * Called by ws-permissions when the hook's POST /permission is parked (#2831).
    */
