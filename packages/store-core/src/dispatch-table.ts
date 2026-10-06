@@ -1116,7 +1116,17 @@ function dispatchAgentBusy<S extends DispatchSessionBase>(
 ): void {
   const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
   if (targetId && adapter.hasSession(targetId)) {
-    adapter.updateSession(targetId, () => handleAgentBusy() as Partial<S>)
+    adapter.updateSession(targetId, (ss) => {
+      const patch: Partial<DispatchSessionBase> = { ...handleAgentBusy() }
+      // #8302: a turn is starting, so the model is working — whatever the last
+      // snapshot said ('background-shells', or a positive null while idle). The
+      // server's own snapshot (it pushes a session_list on every turn start)
+      // overwrites this; until then the indicator must read "Working", not
+      // "Waiting on N background shells". `undefined` means the server never
+      // sent a reason: that stays unknown, we do not invent one.
+      if (ss.busyReason !== undefined && ss.busyReason !== 'turn') patch.busyReason = 'turn'
+      return patch as Partial<S>
+    })
   }
 }
 

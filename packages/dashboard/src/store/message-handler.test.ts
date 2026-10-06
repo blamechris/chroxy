@@ -9158,6 +9158,105 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.isIdle).toBe(false)
     })
 
+    // #8301 — `user_input` for a session that is NOT the one on screen, and the
+    // daemon-authored variant. `appendTerminalData` writes to the ACTIVE session's
+    // buffer, so the case must not call it for another session's turn.
+    describe('user_input routing and the daemon marker (#8301)', () => {
+      const clarify = { id: 'c1', question: 'which?' } as any
+      const setup = () => {
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          myClientId: 'me',
+          sessionStates: {
+            s1: { ...createEmptySessionState(), pendingEvaluatorClarify: clarify },
+            s2: { ...createEmptySessionState(), pendingEvaluatorClarify: clarify },
+          },
+        } as any))
+        setStore(store)
+      }
+      const send = (msg: Record<string, unknown>) =>
+        handleMessage({ type: 'user_input', timestamp: 1, ...msg } as any, ctx() as any)
+      const state = () => store.getState() as any
+
+      it('writes the terminal line for the ACTIVE session', () => {
+        setup()
+        send({ sessionId: 's1', clientId: 'other', text: 'hello', messageId: 'm1' })
+        expect(state()._terminalWrites.some((w: string) => w.includes('> hello'))).toBe(true)
+      })
+
+      it('does NOT write another session\'s input into the terminal on screen, but still appends it to that session', () => {
+        setup()
+        send({ sessionId: 's2', clientId: 'other', text: 'typed elsewhere', messageId: 'm2' })
+        expect(state()._terminalWrites.filter((w: string) => w.includes('typed elsewhere'))).toEqual([])
+        expect(state().sessionStates.s2.messages.some((m: any) => m.content === 'typed elsewhere')).toBe(true)
+        expect(state().sessionStates.s1.messages.some((m: any) => m.content === 'typed elsewhere')).toBe(false)
+      })
+
+      it('a daemon wake for a background session writes nothing to the terminal on screen', () => {
+        setup()
+        send({ sessionId: 's2', text: 'CI finished on PR #9', messageId: 'chroxy-ci-wake-a-1', source: 'daemon' })
+        expect(state()._terminalWrites.filter((w: string) => w.includes('CI finished'))).toEqual([])
+        expect(state().sessionStates.s2.messages.some((m: any) => m.content === 'CI finished on PR #9')).toBe(true)
+      })
+
+      it('a daemon turn does NOT clear a pending evaluator clarify card the server still holds', () => {
+        setup()
+        send({ sessionId: 's2', text: 'CI finished on PR #9', messageId: 'chroxy-ci-wake-a-2', source: 'daemon' })
+        expect(state().sessionStates.s2.pendingEvaluatorClarify).toEqual(clarify)
+      })
+
+      it('positive control: another client\'s typed input still clears it (#3188)', () => {
+        setup()
+        send({ sessionId: 's2', clientId: 'other', text: 'my answer', messageId: 'm3' })
+        expect(state().sessionStates.s2.pendingEvaluatorClarify).toBeNull()
+      })
+
+      it('this client\'s own echo is still skipped', () => {
+        setup()
+        send({ sessionId: 's1', clientId: 'me', text: 'mine', messageId: 'm4' })
+        expect(state().sessionStates.s1.messages.some((m: any) => m.content === 'mine')).toBe(false)
+      })
+    })
+
+    // #8302 E — a new turn reads "Working" until the next session_list.
+    describe('busyReason is cleared when a turn starts (#8302)', () => {
+      const seed = (reason: unknown) => {
+        store = createMockStore(baseState())
+        setStore(store)
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: reason !== null, busyReason: reason, backgroundShellCount: reason === 'background-shells' ? 1 : 0 }] } as any, ctx() as any)
+        expect((store.getState() as any).sessionStates.s1.busyReason).toBe(reason)
+      }
+
+      it('agent_busy (the stream_start companion) flips background-shells to turn', () => {
+        seed('background-shells')
+        handleMessage({ type: 'agent_busy', sessionId: 's1' } as any, ctx() as any)
+        const ss = (store.getState() as any).sessionStates.s1
+        expect(ss.busyReason).toBe('turn')
+        expect(ss.isIdle).toBe(false)
+      })
+
+      it('agent_busy also lifts a positive null (idle snapshot)', () => {
+        seed(null)
+        handleMessage({ type: 'agent_busy', sessionId: 's1' } as any, ctx() as any)
+        expect((store.getState() as any).sessionStates.s1.busyReason).toBe('turn')
+      })
+
+      it('agent_busy leaves an unknown reason unknown (an older server never sent one)', () => {
+        store = createMockStore(baseState())
+        setStore(store)
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: false }] } as any, ctx() as any)
+        handleMessage({ type: 'agent_busy', sessionId: 's1' } as any, ctx() as any)
+        expect('busyReason' in (store.getState() as any).sessionStates.s1 && (store.getState() as any).sessionStates.s1.busyReason !== undefined).toBe(false)
+      })
+
+      it('a later session_list is still authoritative', () => {
+        seed('background-shells')
+        handleMessage({ type: 'agent_busy', sessionId: 's1' } as any, ctx() as any)
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: true, busyReason: 'background-shells', backgroundShellCount: 1 }] } as any, ctx() as any)
+        expect((store.getState() as any).sessionStates.s1.busyReason).toBe('background-shells')
+      })
+    })
+
     // #8302 — why the session is busy rides beside isBusy, so the activity chip
     // can say "Waiting on N background shells" instead of "Working".
     it('session_list seeds busyReason + backgroundShellCount beside isBusy (#8302)', () => {

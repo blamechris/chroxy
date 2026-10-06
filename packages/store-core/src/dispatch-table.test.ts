@@ -1755,6 +1755,28 @@ describe('shared dispatch table', () => {
     })
   })
 
+  describe('agent_busy and busyReason (#8302)', () => {
+    const run = (busyReason: unknown) => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [], isIdle: true, ...(busyReason === undefined ? {} : { busyReason }) } } })
+      dispatch(env, { type: 'agent_busy', sessionId: 's1' })
+      return env.sessions.s1
+    }
+    it('a turn starting turns "background-shells" into "turn"', () => {
+      const ss = run('background-shells')
+      expect(ss.busyReason).toBe('turn')
+      expect(ss.isIdle).toBe(false)
+    })
+    it('and a positive null (idle snapshot) into "turn"', () => {
+      expect(run(null).busyReason).toBe('turn')
+    })
+    it('leaves "turn" as it is and never invents a reason the server did not send', () => {
+      expect(run('turn').busyReason).toBe('turn')
+      const ss = run(undefined)
+      expect(ss.isIdle).toBe(false)
+      expect(ss.busyReason).toBeUndefined()
+    })
+  })
+
   describe('background_work_changed', () => {
     it('replaces the pending-background-shells snapshot for the session', () => {
       const env = makeAdapter({
