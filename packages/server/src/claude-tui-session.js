@@ -597,6 +597,9 @@ export class ClaudeTuiSession extends BaseSession {
     // they detect a settled composer when no ~/.claude/sessions file exists.
     this._lastOutputMs = 0
     this._sawFirstOutput = false
+    // #8324: monotonic time of the last byte `writeTerminalInput` wrote (null =
+    // never). See getRestartBlockers.
+    this._lastTerminalInputMs = null
     // #5835 Phase 1: live remote-viewer mirror. PTY onData fires very frequently
     // during a TUI redraw, so coalesce bytes into a buffer and flush one
     // `terminal_output` event per tick (MIRROR_FLUSH_MS) — bounding the broadcast
@@ -838,6 +841,14 @@ export class ClaudeTuiSession extends BaseSession {
       const quietMs = this._nowMonotonic() - this._lastOutputMs
       if (quietMs < ClaudeTuiSession.RESTART_QUIESCENCE_MS) {
         reasons.push(`terminal output in the last ${Math.round(ClaudeTuiSession.RESTART_QUIESCENCE_MS / 1000)}s`)
+      }
+    }
+    // Output silence alone does not prove a terminal-typed turn is over, so a
+    // recent keystroke blocks too, however quiet the PTY has gone.
+    if (this._lastTerminalInputMs !== null) {
+      const sinceInputMs = this._nowMonotonic() - this._lastTerminalInputMs
+      if (sinceInputMs < ClaudeTuiSession.RESTART_INPUT_WINDOW_MS) {
+        reasons.push(`terminal input in the last ${Math.round(ClaudeTuiSession.RESTART_INPUT_WINDOW_MS / 60000)}m`)
       }
     }
     return reasons
@@ -1912,6 +1923,11 @@ export class ClaudeTuiSession extends BaseSession {
   // #8324 — how long the PTY must have been silent before the idle-only
   // auto-deploy treats the TUI as safe to restart (see getRestartBlockers).
   static get RESTART_QUIESCENCE_MS() { return 30_000 }
+  // #8324 — a terminal-typed turn never sets `_isBusy`, and 30s of PTY silence
+  // does not prove it finished. Any `writeTerminalInput` within this window also
+  // blocks. Residual: a turn whose last keystroke is older than this AND that has
+  // been silent for 30s reads as idle (the TUI animates a spinner while working).
+  static get RESTART_INPUT_WINDOW_MS() { return 10 * 60_000 }
   // #5359 review — grace window before the boot sweep reaps a PIDFILE-LESS sink
   // dir, so a dir caught between another process's mkdir and its owner.pid write
   // (a cross-process race) isn't deleted mid-creation. Dirs with a (dead) pid
@@ -3575,6 +3591,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._connectionAuthRoute === 'native' && !this._nativeRouteVerifiedForSpawn) return false
     try {
       this._term.write(data)
+      this._lastTerminalInputMs = this._nowMonotonic()
       return true
     } catch (err) {
       log.warn(`claude-tui terminal input write failed: ${err?.message || err}`)

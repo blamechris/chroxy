@@ -10,7 +10,9 @@ import { BaseSession } from '../src/base-session.js'
 import { CliSession } from '../src/cli-session.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { busyStateOf } from '../src/session-busy-state.js'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { DAEMON_COMMIT, resolveRepoCommit } from '../src/daemon-commit.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -237,6 +239,27 @@ describe('restart blockers: real session lifecycles (#8324)', () => {
       rmSync(skills, { recursive: true, force: true })
     })
 
+    it('terminal INPUT blocks for 10 minutes even after the PTY has been silent for over 30s', () => {
+      tui._term = { write: () => {} } // the narrowest real PTY: writeTerminalInput only needs write()
+      assert.equal(tui.writeTerminalInput('hello\r'), true)
+      assert.equal(tui.isRunning, false, 'premise: isBusy never saw this turn')
+      assert.equal(tui._sawFirstOutput, false, 'premise: no output stamp at all, so output silence cannot be what blocks')
+      let out = probe(tui)
+      assert.equal(out.idle, false)
+      assert.ok(out.reasons.some((r) => r.includes('terminal input in the last 10m')), out.reasons.join('|'))
+      clock += 5 * 60_000
+      assert.equal(probe(tui).idle, false, 'still inside the window after 5m')
+      clock += 5 * 60_000 - 1000
+      assert.equal(probe(tui).idle, false, '9m59s')
+      clock += 2000
+      assert.equal(probe(tui).idle, true, 'quiet and past 10m')
+    })
+
+    it('a REJECTED terminal write does not start the window', () => {
+      assert.equal(tui.writeTerminalInput('x'), false, 'no PTY')
+      assert.equal(probe(tui).idle, true)
+    })
+
     it('keeps the base blockers: a background agent on a TUI still blocks', () => {
       tui._trackAgent({ toolUseId: 'agent-t', background: true, authoritative: true })
       tui._clearMessageState({ turnEndedCleanly: true })
@@ -257,6 +280,80 @@ describe('restart blockers: real session lifecycles (#8324)', () => {
       clock += 2_000
       assert.equal(probe(tui).idle, true, 'quiet for 31s')
     })
+  })
+})
+
+describe('daemon commit (#8324)', () => {
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@x.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@x.invalid', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
+  for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE']) delete gitEnv[k]
+  const g = (cwd, ...a) => execFileSync('git', a, { cwd, env: gitEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  let dir
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'chroxy-commit-')) })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('a real checkout reports its HEAD', () => {
+    g(dir, 'init', '-q', '-b', 'main')
+    writeFileSync(join(dir, 'f'), 'x')
+    g(dir, 'add', 'f')
+    g(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'one')
+    const head = g(dir, 'rev-parse', 'HEAD')
+    assert.match(head, /^[0-9a-f]{40}$/)
+    assert.equal(resolveRepoCommit(dir), head)
+  })
+
+  it('a directory that is not a git checkout is null', () => {
+    assert.equal(resolveRepoCommit(dir), null)
+  })
+
+  it('a subdirectory of someone else\'s checkout is null, not that checkout\'s HEAD', () => {
+    g(dir, 'init', '-q', '-b', 'main')
+    writeFileSync(join(dir, 'f'), 'x')
+    g(dir, 'add', 'f')
+    g(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'one')
+    mkdirSync(join(dir, 'node_modules', 'pkg'), { recursive: true })
+    assert.equal(resolveRepoCommit(join(dir, 'node_modules', 'pkg')), null)
+  })
+
+  it('a checkout with no commit yet is null', () => {
+    g(dir, 'init', '-q', '-b', 'main')
+    assert.equal(resolveRepoCommit(dir), null)
+  })
+
+  it('every failure shape is null and never throws', () => {
+    const sha = 'a'.repeat(40)
+    const cases = {
+      'non-zero exit': () => ({ status: 128, stdout: '', error: null }),
+      'spawn error (git missing / timeout)': () => ({ status: null, stdout: '', error: new Error('ENOENT') }),
+      'throws': () => { throw new Error('boom') },
+      'no result': () => undefined,
+      'empty output': () => ({ status: 0, stdout: '' }),
+      'short sha': () => ({ status: 0, stdout: `${dir}\n${'a'.repeat(39)}\n` }),
+      'uppercase sha': () => ({ status: 0, stdout: `${dir}\n${'A'.repeat(40)}\n` }),
+      'extra output lines': () => ({ status: 0, stdout: `${dir}\n${sha}\nmore\n` }),
+      'only the sha (no toplevel)': () => ({ status: 0, stdout: `${sha}\n` }),
+      'toplevel is a different directory': () => ({ status: 0, stdout: `${tmpdir()}\n${sha}\n` }),
+      'toplevel does not exist': () => ({ status: 0, stdout: `/nonexistent-${process.pid}\n${sha}\n` }),
+      'non-string stdout': () => ({ status: 0, stdout: Buffer.from('x') }),
+    }
+    for (const [name, spawn] of Object.entries(cases)) {
+      assert.equal(resolveRepoCommit(dir, { spawn }), null, name)
+    }
+  })
+
+  it('/api/daemon/idle reports the daemon commit (a 40-hex sha or null)', async () => {
+    assert.ok(DAEMON_COMMIT === null || /^[0-9a-f]{40}$/.test(DAEMON_COMMIT), String(DAEMON_COMMIT))
+    const server = {
+      apiToken: 't', authRequired: true, _startedAt: Date.now(), sessionManager: fakeManager([row()]), getHookPendingPermissionCount: () => 0,
+      _validatePrimaryBearerAuth: () => true,
+    }
+    const srv = createServer(createHttpHandler(server))
+    srv.listen(0, '127.0.0.1')
+    await once(srv, 'listening')
+    try {
+      const body = await (await globalThis.fetch(`http://127.0.0.1:${srv.address().port}/api/daemon/idle`)).json()
+      assert.ok('commit' in body, 'the field is always present')
+      assert.equal(body.commit, DAEMON_COMMIT)
+    } finally { srv.close() }
   })
 })
 

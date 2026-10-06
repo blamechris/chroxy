@@ -5,6 +5,7 @@ import QRCode from 'qrcode'
 import { readConnectionInfo } from './connection-info.js'
 import { isLoopbackPeer } from './connection-locality.js'
 import { computeDaemonIdleState } from './daemon-idle-state.js'
+import { DAEMON_COMMIT } from './daemon-commit.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { buildDiagnosticsSnapshot } from './diagnostics.js'
@@ -438,6 +439,9 @@ export function createHttpHandler(server) {
       res.end(JSON.stringify({
         ...state,
         version: SERVER_VERSION,
+        // The commit this process started from (null when it cannot say). The
+        // auto-deploy certifies a restart only by reading this back (#8324).
+        commit: DAEMON_COMMIT,
         pid: process.pid,
         startedAt: Number.isFinite(server._startedAt) ? new Date(server._startedAt).toISOString() : null,
       }))

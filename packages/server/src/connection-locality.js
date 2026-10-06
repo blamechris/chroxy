@@ -90,20 +90,19 @@ function hasAnyProxyHint(headers) {
 }
 
 /**
- * True only when the request comes DIRECTLY from this machine over loopback —
- * no LAN peers, and nothing that arrived through the tunnel (#8324).
+ * Is this request a loopback peer that carries no sign of a proxy? (#8324)
  *
- * Stricter than `isLocalOrLanPeer`. That function is a transport-efficiency
- * hint with no security property riding on it; this one is an AUTHORIZATION
- * input (the local-only `/api/daemon/idle` probe), so it fails closed twice
- * over: the socket address is parsed strictly, and ANY proxy-family header
- * disqualifies the request.
+ * It does NOT prove direct local origin. It rejects a request whose socket is
+ * not loopback, and any request carrying a proxy-family header (see
+ * `hasAnyProxyHint`); a proxy that strips EVERY such header, or a local process
+ * that forwards traffic for a remote party without adding one, passes it. So it
+ * is defence in depth for the local-only `/api/daemon/idle` probe, and the
+ * primary bearer token is the authority.
  *
- * cloudflared connects to the daemon from 127.0.0.1, so the socket address
- * alone proves nothing. Headers can be forged by a remote caller only in the
- * direction that makes a request look remote; a request that merely OMITS them
- * is not made local by that, because the tunnel adds its own. This gate is
- * defence in depth — the primary bearer token is the authority.
+ * Stricter than `isLocalOrLanPeer`, which is a transport-efficiency hint with
+ * no security property riding on it: the socket address is parsed strictly, and
+ * ANY proxy-family header disqualifies the request. cloudflared connects to the
+ * daemon from 127.0.0.1, so the socket address alone proves nothing.
  *
  * @param {object} req - Node IncomingMessage.
  * @returns {boolean}
