@@ -733,13 +733,14 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(session._pendingBackgroundShells.has('sh-1'), false, 'the stopped shell no longer keeps the session busy')
     })
 
-    it('starts every turn with an empty live-task roster', async () => {
+    it('never reports a roster entry this turn did not see start', async () => {
       session._liveBackgroundTasks.set('stale', { taskId: 'stale', toolUseId: 'x', taskType: 'local_agent', description: 'old', background: true })
       const events = capture(session)
       wire(session, [init(), promptResult(1)], state)
       await session.sendMessage('hi')
       assert.equal(events.filter((e) => e.name === 'error').length, 0, 'a task from a previous process is not reported against this turn')
       assert.equal(state.closeCalls, undefined)
+      assert.equal(state.stopCalls, undefined)
     })
   })
 

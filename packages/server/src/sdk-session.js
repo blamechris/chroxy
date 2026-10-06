@@ -1124,6 +1124,10 @@ export class SdkSession extends BaseSession {
     // `this._query` when it still points here — a follow-up turn that started
     // while this one was draining must keep its handle.
     let turnQuery = null
+    // #8300: the task ids THIS turn saw start. The roster is shared per
+    // session, so a turn that finishes after a follow-up turn has started
+    // must only stop and report the tasks it owns, never the successor's.
+    const turnTaskIds = new Set()
     // #8300: true once a follow-up turn owns the session (it started while
     // this one was still draining or stopping work, after a hard timeout or
     // stream stall cleared busy). This turn then only reports and ends its
@@ -1216,9 +1220,9 @@ export class SdkSession extends BaseSession {
       // turn (every subagent should clear via task_notification, but a turn
       // aborted before its notifications would otherwise strand entries).
       this._taskIdByToolUseId.clear()
-      // #8300: same for the live-task roster — a task left here belonged to a
-      // process that is gone.
-      this._liveBackgroundTasks.clear()
+      // #8300: the live-task roster is NOT cleared here: a previous turn may
+      // still be finishing (stopping its own tasks) and reads its entries by
+      // the ids it saw start; a stale entry can never match a later turn.
 
       // _callQuery returned an iterable without throwing — the prepend
       // bucket is committed to this turn's prompt, so flip the flag (#3225).
@@ -1289,9 +1293,9 @@ export class SdkSession extends BaseSession {
         // Stops go to THIS turn's query (`turnQuery`), never `this._query`,
         // which a follow-up turn may own by now. Asked in parallel and
         // bounded, so N hung tasks cost one STOP_TASK_TIMEOUT_MS, not N.
-        const liveWork = this._liveBackgroundWork()
+        const liveWork = this._liveBackgroundWork().filter((task) => turnTaskIds.has(task.taskId))
         // Only this turn's own tasks leave the roster: a follow-up turn that
-        // took the session during the stops owns whatever else is in it.
+        // took the session owns whatever else is in it.
         for (const task of liveWork) this._liveBackgroundTasks.delete(task.taskId)
         const stopResults = await Promise.all(liveWork.map((task) => {
           const kind = task.taskType === 'local_bash' ? 'shell' : 'subagent'
@@ -1543,6 +1547,7 @@ export class SdkSession extends BaseSession {
               // backgrounding). `skip_transcript` marks ambient housekeeping
               // work the user never started; it is never reported as a loss.
               if (typeof msg.task_id === 'string' && msg.task_id && msg.skip_transcript !== true) {
+                turnTaskIds.add(msg.task_id)
                 this._liveBackgroundTasks.set(msg.task_id, {
                   taskId: msg.task_id,
                   toolUseId: typeof msg.tool_use_id === 'string' ? msg.tool_use_id : null,
@@ -2057,6 +2062,8 @@ export class SdkSession extends BaseSession {
       if (input) input.end()
       if (this._turnInput === input) this._turnInput = null
       if (this._query === turnQuery) this._query = null
+      // #8300: whatever this turn saw start is gone with its process.
+      for (const taskId of turnTaskIds) this._liveBackgroundTasks.delete(taskId)
       // #4881: safety-net clear of _intentionalStop. The catch block clears
       // it on the throw path (AbortError after interrupt()), but if
       // query.interrupt() races a `result` message arriving first, the
