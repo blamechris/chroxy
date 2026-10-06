@@ -108,6 +108,50 @@ export const STDIN_DROPPED_ESCALATION_EVERY_N = 10
 // stuck") with noise control.
 export const REFUSED_SENDMESSAGE_WARN_INTERVAL_MS = 30 * 1000
 
+// #8300: the text Claude Code writes into a tool_result when IT cancelled the
+// tool call — the turn had no permission/hook channel left — rather than
+// relaying a decision from this session's PermissionManager. A decision made
+// here always reaches the CLI with chroxy's own reason text, so a tool_result
+// that starts with one of these can only mean the control channel was gone
+// (stdin closed under the CLI, or its permission request stream aborted). The
+// second prefix is the Approve-mode spelling (`canUseTool` could not be asked:
+// "Tool permission request failed: AbortError: Stream closed"). Matched by
+// prefix; the CLI appends nothing stable after the sentence.
+export const SDK_TOOL_CANCELLED_PREFIXES = [
+  "The user doesn't want to take this action right now.",
+  'Tool permission request failed:',
+]
+
+/**
+ * #8300: does this tool_result text mean Claude Code cancelled the tool call
+ * itself, without consulting chroxy's permission pipeline?
+ * @param {unknown} text
+ * @returns {boolean}
+ */
+export function isSdkToolCancellationText(text) {
+  if (typeof text !== 'string') return false
+  const trimmed = text.trimStart()
+  return SDK_TOOL_CANCELLED_PREFIXES.some((prefix) => trimmed.startsWith(prefix))
+}
+
+/**
+ * Flatten a tool_result block's content to its text, the same way
+ * `emitToolResults` (tool-result.js) does, so a pattern match over the text
+ * sees the same string whether the CLI sent a string or a block array.
+ * @param {object} block - a `tool_result` content block
+ * @returns {string}
+ */
+function toolResultText(block) {
+  if (typeof block?.content === 'string') return block.content
+  if (Array.isArray(block?.content)) {
+    return block.content
+      .filter((b) => b?.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+  }
+  return ''
+}
+
 export class SdkSession extends BaseSession {
   // #5858: marks this as a Claude-family provider — the single source of truth
   // for `isClaudeProvider()` (drives the createSession soft-fallback for stale
@@ -119,6 +163,18 @@ export class SdkSession extends BaseSession {
   // alive; the cap only bites when the process is already shutting down —
   // in which case the snapshot is skipped and the result emits without it.
   static CONTEXT_USAGE_SNAPSHOT_TIMEOUT_MS = 2000
+
+  // #8300: how long a zero-turn `result` is held before it is taken as the
+  // prompt's own. On `--resume`, Claude Code first replays an orphaned
+  // background task (a shell or subagent that was still running when the
+  // previous turn's process exited) as its own zero-cost turn: `init` →
+  // `result` with `num_turns: 0` → a second `init` for the real prompt, about
+  // 20–80 ms later. That first result must not end the turn (ending the input
+  // there is exactly the lost-channel bug). A real prompt that produces no
+  // assistant turn is the other reading of the same message, and the CLI then
+  // just waits on stdin — so the held result is confirmed by the next `init`
+  // or, failing that, taken as the real one when this window elapses.
+  static ORPHAN_NOTICE_CONFIRM_MS = 2000
 
   /**
    * Human-readable label shown in the startup banner and anywhere else the
@@ -537,6 +593,20 @@ export class SdkSession extends BaseSession {
     // wholesale at the start of each new turn (after `_callQuery`) and in
     // destroy().
     this._taskIdByToolUseId = new Map()
+
+    // #8300: tasks the CLI reported with `task_started` and has not yet closed
+    // with `task_notification`, keyed by the SDK `task_id`. Read at the
+    // prompt's own `result`: a task still here then would outlive the turn's
+    // process, and the SDK provider cannot service it past the turn (its tool
+    // calls would be cancelled, see SDK_TOOL_CANCELLED_PREFIXES), so the turn
+    // end stops it and says so. Turn-local: cleared alongside
+    // `_taskIdByToolUseId` at the start of each turn.
+    this._liveBackgroundTasks = new Map()
+
+    // #8300: the current turn's streaming input handle (`_createTurnInput`),
+    // so destroy() can release the CLI's stdin without waiting for the
+    // message loop to observe `_destroying`. Null between turns.
+    this._turnInput = null
 
     // Permission handling — delegated to PermissionManager. The pause/resume
     // hooks keep the inactivity timer suspended while a permission is pending:
@@ -999,6 +1069,21 @@ export class SdkSession extends BaseSession {
     // throwing. Declared outside the try for the same reason as the flags above;
     // the first one to surface it wins, so a turn shows one AUTH_REQUIRED.
     let authRequiredEmitted = false
+    // #8300: the turn's streaming input handle (set once `_createTurnInput`
+    // runs inside the try); the `finally` ends it on every exit path.
+    let input = null
+    // #8300: a zero-turn `result` held back as a probable orphan-task notice
+    // (see ORPHAN_NOTICE_CONFIRM_MS), the timer that takes it as the real
+    // result if no `init` follows, and whether this turn has seen the prompt
+    // actually run (assistant output, stream events or tool results) — a
+    // result after that is the prompt's own whatever its num_turns says.
+    let heldNoticeResult = null
+    let noticeTimer = null
+    let promptActivitySeen = false
+    // #8300: set when `finishTurn` closed the query on purpose (background
+    // work still live at the prompt's result), so the abort the SDK then
+    // throws is logged, not surfaced as a turn error.
+    let closedAfterResult = false
 
     try {
       // #7986 / #8030: point the SDK at the installed `claude` binary on every
@@ -1055,16 +1140,38 @@ export class SdkSession extends BaseSession {
       const promptWithSkills = firstMessagePrefix
         ? `${firstMessagePrefix}${transformedPrompt}`
         : transformedPrompt
-      const queryArgs = { prompt: promptWithSkills, options }
-      if (attachments?.length) {
-        queryArgs.prompt = buildContentBlocks(promptWithSkills, attachments)
-      }
+      const promptContent = attachments?.length
+        ? buildContentBlocks(promptWithSkills, attachments)
+        : [{ type: 'text', text: typeof promptWithSkills === 'string' ? promptWithSkills : String(promptWithSkills ?? '') }]
+      // #8300: the prompt goes to query() as a STREAMING input (an async
+      // iterable of one user message), never as a plain string. With a string
+      // the Agent SDK marks the query single-turn and closes the CLI's stdin at
+      // the FIRST `result` it sees — and on `--resume` the first result can be
+      // the orphan-task notice turn, not the prompt's: the prompt then runs
+      // with no channel for `canUseTool`/PreToolUse, every tool call is
+      // cancelled with the generic "user doesn't want to take this action"
+      // text, and no permission_request ever reaches a client. With an
+      // iterable the SDK closes stdin only after the iterable ENDS, and this
+      // turn ends it in `finishTurn` — after the result that answers the
+      // prompt — or in the `finally` below, so stdin is never left open past
+      // the turn either.
+      input = this._createTurnInput({
+        type: 'user',
+        session_id: this._sdkSessionId || '',
+        message: { role: 'user', content: promptContent },
+        parent_tool_use_id: null,
+      })
+      this._turnInput = input
+      const queryArgs = { prompt: input.iterable, options }
       this._query = this._callQuery(queryArgs)
       reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
       // #5269: a fresh turn — drop any task_id mappings left over from a prior
       // turn (every subagent should clear via task_notification, but a turn
       // aborted before its notifications would otherwise strand entries).
       this._taskIdByToolUseId.clear()
+      // #8300: same for the live-task roster — a task left here belonged to a
+      // process that is gone.
+      this._liveBackgroundTasks.clear()
 
       // _callQuery returned an iterable without throwing — the prepend
       // bucket is committed to this turn's prompt, so flip the flag (#3225).
@@ -1075,6 +1182,162 @@ export class SdkSession extends BaseSession {
         this._skillsPrepended = true
       }
 
+      // #8300: the prompt's own result ends the turn. A closure rather than a
+      // `case` body so the held-notice fallback after the loop can run the
+      // identical turn end.
+      const finishTurn = async (msg) => {
+        // #8300: background work the CLI started this turn and has not
+        // closed. The turn's process cannot outlive the turn, and the SDK
+        // provider cannot service a task past the result (its tool calls
+        // would be cancelled and its notification turn left unserviced), so
+        // the work is stopped with the turn and each loss is said out loud —
+        // never a silent cancellation.
+        const liveWork = this._liveBackgroundWork()
+        for (const task of liveWork) {
+          const kind = task.taskType === 'local_bash' ? 'shell' : 'subagent'
+          ;(this._log || log).warn(`Background ${kind} "${task.description}" (${task.taskId}) was still running at the turn's result; stopping it with the turn`)
+          this.emit('error', {
+            code: 'background_task_ended_with_turn',
+            message: `Background ${kind} "${task.description}" was still running when the turn ended and was stopped with it; a claude-sdk session runs background work only within the turn that started it.`,
+            toolUseId: task.toolUseId,
+            taskId: task.taskId,
+            recoverable: true,
+          })
+        }
+        this._liveBackgroundTasks.clear()
+
+        if (streamState.hasStreamStarted) {
+          this.emit('stream_end', { messageId })
+        }
+
+        if (msg.session_id) {
+          this._sdkSessionId = msg.session_id
+          this._sessionId = msg.session_id
+        }
+
+        // Correct any static context-window guess using the SDK's
+        // authoritative per-model values. Only cache + broadcast when
+        // a value actually changed to avoid thrashy writes / UI churn.
+        let contextWindowChanged = false
+        if (msg.modelUsage && typeof msg.modelUsage === 'object') {
+          const missingIds = []
+          for (const [modelId, usage] of Object.entries(msg.modelUsage)) {
+            if (usage && typeof usage.contextWindow === 'number') {
+              if (updateContextWindow(modelId, usage.contextWindow)) {
+                contextWindowChanged = true
+              }
+            } else {
+              missingIds.push(modelId)
+            }
+          }
+          // Drift signal: at least one modelUsage entry was missing a
+          // numeric contextWindow. Catches both total drift (field renamed
+          // or removed upstream) and partial drift (schema updated for one
+          // model family before another). Log a redacted sample so a
+          // future regression is diagnosable without flooding info-level
+          // output.
+          if (missingIds.length > 0) {
+            const sampleId = missingIds[0]
+            const sampleKeys = Object.keys(msg.modelUsage[sampleId] || {})
+            // #4828: session-scoped (result handler runs strictly post-init).
+            ;(this._log || log).debug(
+              `modelUsage partial drift: contextWindow missing for modelIds=${JSON.stringify(missingIds)} sampleKeys=${JSON.stringify(sampleKeys)}`
+            )
+          }
+        }
+        if (contextWindowChanged) {
+          saveModelsCache()
+          // Notify connected clients so the picker / budget UI picks up
+          // the corrected window without waiting for the next refresh.
+          this.emit('models_updated', { models: getModels() })
+        }
+
+        // #6769: end-of-turn occupancy snapshot via the SDK's
+        // getContextUsage() control API — the same number Claude Code's
+        // own /context shows. Queried while `this._query` is still live
+        // (we're inside the for-await; the CLI process is alive until
+        // the generator completes). `msg.usage` below is the per-turn
+        // BILLING aggregate (summed across agent-loop rounds) and must
+        // never be read as occupancy — see context-window.ts (#6769).
+        // Null on timeout/old-CLI/error → field omitted → clients keep
+        // their previous snapshot (or the honest dash state).
+        const contextUsageSnapshot = await this._getContextUsageSnapshot()
+
+        // #8153: emit plan_ready before result — mirrors CliSession's
+        // "the turn that calls ExitPlanMode ends with a normal result
+        // event" ordering. `_planAllowedPrompts` is only non-null once
+        // ExitPlanMode's tool_use block has been parsed (see
+        // _handleToolUseBlock's 'exit_plan' branch above).
+        if (this._inPlanMode && this._planAllowedPrompts !== null) {
+          this.emit('plan_ready', { allowedPrompts: this._planAllowedPrompts })
+          this._inPlanMode = false
+          this._planAllowedPrompts = null
+        }
+
+        // #4628: sweep any orphan tool_starts before emitting result
+        // so the dashboard's activeTools clears as part of the same
+        // turn-end burst. _clearMessageState (called next) would also
+        // clear the in-flight map but without broadcasting synthetic
+        // tool_results to the dashboard.
+        this._emitResult({
+          sessionId: msg.session_id || this._sdkSessionId,
+          cost: msg.total_cost_usd,
+          duration: msg.duration_ms,
+          usage: msg.usage,
+          // #6692: surface the per-model split + turn metadata the SDK
+          // already reports instead of discarding them. Additive — every
+          // existing result consumer ignores unknown fields.
+          numTurns: Number.isFinite(msg.num_turns) ? msg.num_turns : null,
+          apiDurationMs: Number.isFinite(msg.duration_api_ms) ? msg.duration_api_ms : null,
+          modelUsage: normalizeSdkModelUsage(msg.modelUsage),
+          // #6769: occupancy snapshot (or absent when unavailable).
+          // Wire field is contextOccupancy — NOT contextUsage — so it can
+          // never be confused with the billing `usage` aggregate above.
+          ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
+        }, 'turn_ended_with_orphan_tool_start')
+
+        // #7340: NOT `{ turnEndedCleanly: true }`, however much this looks
+        // like CliSession's `result` branch -- and the difference is the
+        // whole reason that flag is opt-in.
+        //
+        // CliSession owns a PERSISTENT stream-json child that spans turns,
+        // so after its `result` a backgrounded subagent's
+        // `task_notification` still arrives. SdkSession creates one
+        // `query()` PER TURN (`sendMessage`: "Each call creates a new
+        // query() with resume"), and this turn ends it a few lines below:
+        // the streaming input is released, and with live background work
+        // the query is closed outright (#8300). No `task_notification` can
+        // arrive for an agent spared here -- and every recovery route is
+        // closed too: `_handleHardTimeout` / `_handleStreamStall`
+        // early-return on `!_isBusy`, `interrupt()` early-returns on a null
+        // `_query`, and `cancelActivity` answers `not-supported`. The agent
+        // would be stranded until `destroy()`, pinning the session as
+        // working -- the failure #7340 names as the worse one.
+        //
+        // The subagent dies with the query, so completing it here is not
+        // merely safe, it is accurate -- and #8300 says so to the client
+        // (the `background_task_ended_with_turn` error above) instead of
+        // leaving the loss silent. Exempting on this path needs the query
+        // kept alive past `result`, which is a much larger change.
+        this._clearMessageState()
+
+        // #8300: the prompt is answered — release the streaming input so the
+        // SDK closes the CLI's stdin and the process exits once idle. With
+        // live background work the process would NOT go idle (the task keeps
+        // it alive with its tools cancelled), so the query is closed outright;
+        // the abort that follows is expected (see `closedAfterResult`).
+        streamState.hasStreamStarted = false
+        if (input) input.end()
+        if (liveWork.length && this._query) {
+          closedAfterResult = true
+          try {
+            if (typeof this._query.close === 'function') this._query.close()
+          } catch (closeErr) {
+            ;(this._log || log).warn(`Query close after result failed: ${closeErr?.message || closeErr}`)
+          }
+        }
+      }
+
       for await (const msg of this._query) {
         if (this._destroying) break
         receivedAnyMessage = true // #8030: gates the spawn-failure backstop below
@@ -1083,6 +1346,24 @@ export class SdkSession extends BaseSession {
         switch (msg.type) {
           case 'system': {
             if (msg.subtype === 'init') {
+              // #8300: a second `init` right after a zero-turn `result` is the
+              // CLI starting the prompt's own turn in the same process — the
+              // held result was the orphan-task notice. Say so once and keep
+              // the turn open; the prompt's result is still to come.
+              if (heldNoticeResult !== null) {
+                heldNoticeResult = null
+                if (noticeTimer) {
+                  clearTimeout(noticeTimer)
+                  noticeTimer = null
+                }
+                ;(this._log || log).info('Claude Code replayed a background task left over from an earlier turn; the prompt runs next in the same process')
+                this.emit('message', {
+                  type: 'system',
+                  subtype: 'orphan_task_notice',
+                  content: 'A background task from an earlier turn ended with that turn; Claude Code noted it and is now running this prompt.',
+                  timestamp: Date.now(),
+                })
+              }
               this._sdkSessionId = msg.session_id
               this._sessionId = msg.session_id
               // #4828: bind the session-scoped logger now that session_id
@@ -1120,6 +1401,21 @@ export class SdkSession extends BaseSession {
               // activity id back to a stoppable task. No client-facing emit —
               // the agent node already exists via agent_spawned.
               this._captureTaskId(msg.tool_use_id, msg.task_id)
+              // #8300: remember the task until its `task_notification`. A
+              // backgrounded one (`is_backgrounded`, or a background Bash —
+              // `local_bash` is only ever reported for `run_in_background`)
+              // still here at the prompt's result would outlive the turn.
+              if (typeof msg.task_id === 'string' && msg.task_id) {
+                this._liveBackgroundTasks.set(msg.task_id, {
+                  taskId: msg.task_id,
+                  toolUseId: typeof msg.tool_use_id === 'string' ? msg.tool_use_id : null,
+                  taskType: typeof msg.task_type === 'string' ? msg.task_type : 'unknown',
+                  description: typeof msg.description === 'string' && msg.description
+                    ? msg.description
+                    : 'Background task',
+                  background: msg.is_backgrounded === true || msg.task_type === 'local_bash',
+                })
+              }
               // #7340: `task_started` is the provider's OWN lifecycle event and
               // carries `is_backgrounded` — authoritative where the tool input
               // is only the model's request. It also arrives regardless of what
@@ -1151,6 +1447,9 @@ export class SdkSession extends BaseSession {
               // cancel feels responsive instead of waiting for the turn-end
               // sweep. Idempotent (no-op if already finalized).
               this._finalizeAgentByToolUseId(msg.tool_use_id)
+              // #8300: the task is closed; it no longer counts as live work at
+              // the prompt's result.
+              if (typeof msg.task_id === 'string') this._liveBackgroundTasks.delete(msg.task_id)
               break
             } else if (msg.subtype === 'compact_boundary') {
               // #6768: the SDK compacted the conversation (auto-triggered
@@ -1208,6 +1507,7 @@ export class SdkSession extends BaseSession {
           }
 
           case 'stream_event': {
+            promptActivitySeen = true // #8300: the prompt is running
             // Handle partial message events (content_block_start/delta/stop)
             const event = msg.event
             if (!event) break
@@ -1354,6 +1654,7 @@ export class SdkSession extends BaseSession {
             // captures this as its boundary, so restoring that checkpoint can
             // fork the conversation truncated to exactly this point.
             this._captureBoundaryMessage(msg)
+            promptActivitySeen = true // #8300: the prompt is running
             // Full assistant message — process content blocks for tool detection
             const content = msg.message?.content
             if (!Array.isArray(content)) break
@@ -1390,6 +1691,34 @@ export class SdkSession extends BaseSession {
           }
 
           case 'user': {
+            promptActivitySeen = true // #8300: the prompt is running
+            // #8300: a tool_result carrying Claude Code's own cancellation text
+            // means the CLI dropped the call WITHOUT asking this session's
+            // PermissionManager — there was no channel to ask on. That is a
+            // runtime fault of the turn, not a decision anyone took, so it is
+            // surfaced as a session error naming the tool and its id (the
+            // tool_result still follows, flagged isError, so the tool_start
+            // it answers is closed). Read BEFORE emitToolResults, which drops
+            // the in-flight entry that carries the tool name.
+            if (Array.isArray(msg.message?.content)) {
+              for (const block of msg.message.content) {
+                if (block?.type !== 'tool_result' || !block.tool_use_id) continue
+                const text = toolResultText(block)
+                if (!isSdkToolCancellationText(text)) continue
+                const tool = this._inFlightToolStarts.get(block.tool_use_id)?.tool || 'unknown'
+                const firstLine = text.trim().split('\n')[0].slice(0, 200)
+                ;(this._log || log).error(
+                  `Claude Code cancelled the ${tool} tool call ${block.tool_use_id} without consulting the permission pipeline: ${firstLine}`,
+                )
+                this.emit('error', {
+                  code: 'tool_cancelled_by_provider',
+                  message: `Claude Code cancelled the ${tool} tool call (${block.tool_use_id}) before it reached the permission pipeline: ${firstLine}`,
+                  tool,
+                  toolUseId: block.tool_use_id,
+                  recoverable: true,
+                })
+              }
+            }
             // Tool result content blocks appear in user-role messages during the tool loop
             emitToolResults(msg.message?.content, this)
             // #4307: scan tool_result blocks for the canonical
@@ -1405,122 +1734,34 @@ export class SdkSession extends BaseSession {
           }
 
           case 'result': {
-            if (streamState.hasStreamStarted) {
-              this.emit('stream_end', { messageId })
+            // #8300: on `--resume` the CLI can run an orphan-task notice as its
+            // own zero-cost turn BEFORE the prompt: `init` → this result with
+            // `num_turns: 0` → a second `init`. Taking it as the prompt's
+            // result would end the turn (and the input) under the prompt.
+            // Hold it: the next `init` confirms the notice; if none comes
+            // within ORPHAN_NOTICE_CONFIRM_MS it was the prompt's own, the
+            // input is released so the CLI exits, and the loop's end finishes
+            // the held result below.
+            if (heldNoticeResult === null && msg.num_turns === 0 && msg.is_error !== true && !promptActivitySeen) {
+              heldNoticeResult = msg
+              ;(this._log || log).info(`Holding a zero-turn result (${msg.duration_ms ?? '?'}ms): probable orphan-task notice; waiting ${SdkSession.ORPHAN_NOTICE_CONFIRM_MS}ms for the prompt's own init`)
+              noticeTimer = setTimeout(() => {
+                noticeTimer = null
+                if (input) input.end()
+              }, SdkSession.ORPHAN_NOTICE_CONFIRM_MS)
+              break
             }
-
-            if (msg.session_id) {
-              this._sdkSessionId = msg.session_id
-              this._sessionId = msg.session_id
-            }
-
-            // Correct any static context-window guess using the SDK's
-            // authoritative per-model values. Only cache + broadcast when
-            // a value actually changed to avoid thrashy writes / UI churn.
-            let contextWindowChanged = false
-            if (msg.modelUsage && typeof msg.modelUsage === 'object') {
-              const missingIds = []
-              for (const [modelId, usage] of Object.entries(msg.modelUsage)) {
-                if (usage && typeof usage.contextWindow === 'number') {
-                  if (updateContextWindow(modelId, usage.contextWindow)) {
-                    contextWindowChanged = true
-                  }
-                } else {
-                  missingIds.push(modelId)
-                }
-              }
-              // Drift signal: at least one modelUsage entry was missing a
-              // numeric contextWindow. Catches both total drift (field renamed
-              // or removed upstream) and partial drift (schema updated for one
-              // model family before another). Log a redacted sample so a
-              // future regression is diagnosable without flooding info-level
-              // output.
-              if (missingIds.length > 0) {
-                const sampleId = missingIds[0]
-                const sampleKeys = Object.keys(msg.modelUsage[sampleId] || {})
-                // #4828: session-scoped (result handler runs strictly post-init).
-                ;(this._log || log).debug(
-                  `modelUsage partial drift: contextWindow missing for modelIds=${JSON.stringify(missingIds)} sampleKeys=${JSON.stringify(sampleKeys)}`
-                )
-              }
-            }
-            if (contextWindowChanged) {
-              saveModelsCache()
-              // Notify connected clients so the picker / budget UI picks up
-              // the corrected window without waiting for the next refresh.
-              this.emit('models_updated', { models: getModels() })
-            }
-
-            // #6769: end-of-turn occupancy snapshot via the SDK's
-            // getContextUsage() control API — the same number Claude Code's
-            // own /context shows. Queried while `this._query` is still live
-            // (we're inside the for-await; the CLI process is alive until
-            // the generator completes). `msg.usage` below is the per-turn
-            // BILLING aggregate (summed across agent-loop rounds) and must
-            // never be read as occupancy — see context-window.ts (#6769).
-            // Null on timeout/old-CLI/error → field omitted → clients keep
-            // their previous snapshot (or the honest dash state).
-            const contextUsageSnapshot = await this._getContextUsageSnapshot()
-
-            // #8153: emit plan_ready before result — mirrors CliSession's
-            // "the turn that calls ExitPlanMode ends with a normal result
-            // event" ordering. `_planAllowedPrompts` is only non-null once
-            // ExitPlanMode's tool_use block has been parsed (see
-            // _handleToolUseBlock's 'exit_plan' branch above).
-            if (this._inPlanMode && this._planAllowedPrompts !== null) {
-              this.emit('plan_ready', { allowedPrompts: this._planAllowedPrompts })
-              this._inPlanMode = false
-              this._planAllowedPrompts = null
-            }
-
-            // #4628: sweep any orphan tool_starts before emitting result
-            // so the dashboard's activeTools clears as part of the same
-            // turn-end burst. _clearMessageState (called next) would also
-            // clear the in-flight map but without broadcasting synthetic
-            // tool_results to the dashboard.
-            this._emitResult({
-              sessionId: msg.session_id || this._sdkSessionId,
-              cost: msg.total_cost_usd,
-              duration: msg.duration_ms,
-              usage: msg.usage,
-              // #6692: surface the per-model split + turn metadata the SDK
-              // already reports instead of discarding them. Additive — every
-              // existing result consumer ignores unknown fields.
-              numTurns: Number.isFinite(msg.num_turns) ? msg.num_turns : null,
-              apiDurationMs: Number.isFinite(msg.duration_api_ms) ? msg.duration_api_ms : null,
-              modelUsage: normalizeSdkModelUsage(msg.modelUsage),
-              // #6769: occupancy snapshot (or absent when unavailable).
-              // Wire field is contextOccupancy — NOT contextUsage — so it can
-              // never be confused with the billing `usage` aggregate above.
-              ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
-            }, 'turn_ended_with_orphan_tool_start')
-
-            // #7340: NOT `{ turnEndedCleanly: true }`, however much this looks
-            // like CliSession's `result` branch -- and the difference is the
-            // whole reason that flag is opt-in.
-            //
-            // CliSession owns a PERSISTENT stream-json child that spans turns,
-            // so after its `result` a backgrounded subagent's
-            // `task_notification` still arrives. SdkSession creates one
-            // `query()` PER TURN (`sendMessage`: "Each call creates a new
-            // query() with resume"), and the `break` on the next line ends the
-            // `for await` loop, after which the `finally` sets
-            // `this._query = null`. Chroxy stops reading the stream one
-            // statement from here, so no `task_notification` can ever be
-            // observed for an agent spared at this point -- and every recovery
-            // route is closed too: `_handleHardTimeout` / `_handleStreamStall`
-            // early-return on `!_isBusy`, `interrupt()` early-returns on a null
-            // `_query`, and `cancelActivity` answers `not-supported`. The agent
-            // would be stranded until `destroy()`, pinning the session as
-            // working -- the failure #7340 names as the worse one.
-            //
-            // The subagent dies with the query, so completing it here is not
-            // merely safe, it is accurate. Exempting on this path needs the
-            // query kept alive past `result`, which is a much larger change.
-            this._clearMessageState()
+            await finishTurn(msg)
             break
           }
         }
+      }
+      // #8300: the loop ended with a zero-turn result still held and no init
+      // after it — it was the prompt's own result after all.
+      if (heldNoticeResult !== null && !this._destroying) {
+        const held = heldNoticeResult
+        heldNoticeResult = null
+        await finishTurn(held)
       }
     } catch (err) {
       if (streamState.hasStreamStarted) {
@@ -1531,7 +1772,12 @@ export class SdkSession extends BaseSession {
       // Mirrors CliSession._handleChildClose (#4602).
       const wasIntentionalStop = this._consumeIntentionalStop()
       if (!this._destroying) {
-        if (wasIntentionalStop) {
+        if (closedAfterResult) {
+          // #8300: finishTurn already emitted this turn's result and closed
+          // the query on purpose (background work was still live); the abort
+          // the SDK throws for that is expected, not a turn failure.
+          ;(this._log || log).debug(`Query closed after the turn's result: ${err?.message || err}`)
+        } else if (wasIntentionalStop) {
           // #4881: user clicked Stop — interrupt() set the flag, the SDK
           // generator threw an AbortError as a result. Skip the loud "Query
           // error" surface and emit the quiet `stopped` event for parity
@@ -1609,6 +1855,17 @@ export class SdkSession extends BaseSession {
       }
       this._clearMessageState()
     } finally {
+      // #8300: whatever ended the loop — the prompt's result, a throw, a
+      // destroy() break — the streaming input is released here, so the SDK
+      // closes the CLI's stdin and the process can exit. Idempotent; the
+      // normal path already ended it in finishTurn. A still-pending notice
+      // timer is dropped with the turn.
+      if (noticeTimer) {
+        clearTimeout(noticeTimer)
+        noticeTimer = null
+      }
+      if (input) input.end()
+      if (this._turnInput === input) this._turnInput = null
       this._query = null
       // #4881: safety-net clear of _intentionalStop. The catch block clears
       // it on the throw path (AbortError after interrupt()), but if
@@ -1655,6 +1912,51 @@ export class SdkSession extends BaseSession {
    */
   _callQuery(queryArgs) {
     return query(queryArgs)
+  }
+
+  /**
+   * #8300: the turn's streaming input — an async iterable that yields the
+   * prompt's user message once and then stays open until `end()` is called.
+   *
+   * The Agent SDK decides when to close the CLI's stdin from the SHAPE of
+   * `prompt`: a string marks the query single-turn and stdin closes at the
+   * first `result`; an iterable keeps stdin open until the iterable ends. The
+   * turn therefore owns the close: `finishTurn` ends the iterable once the
+   * result that answers the prompt has been processed, and `sendMessage`'s
+   * `finally` ends it on every other exit so the CLI is never left waiting.
+   *
+   * @param {object} userMessage - the SDKUserMessage to send
+   * @returns {{ iterable: AsyncIterable<object>, end: () => void, readonly ended: boolean }}
+   */
+  _createTurnInput(userMessage) {
+    let release
+    const released = new Promise((resolve) => { release = resolve })
+    let ended = false
+    const end = () => {
+      if (ended) return
+      ended = true
+      release()
+    }
+    const iterable = (async function* () {
+      yield userMessage
+      await released
+    })()
+    return {
+      iterable,
+      end,
+      get ended() { return ended },
+    }
+  }
+
+  /**
+   * #8300: background work the CLI reported as started and never closed. Read
+   * at the prompt's result; anything still here would outlive the turn's
+   * process.
+   *
+   * @returns {Array<{taskId:string,toolUseId:string|null,taskType:string,description:string,background:boolean}>}
+   */
+  _liveBackgroundWork() {
+    return [...this._liveBackgroundTasks.values()].filter((task) => task.background === true)
   }
 
   /**
@@ -2571,6 +2873,14 @@ export class SdkSession extends BaseSession {
     if (this._streamStallTimeout) {
       clearTimeout(this._streamStallTimeout)
       this._streamStallTimeout = null
+    }
+
+    // #8300: release the turn's streaming input first, so the CLI's stdin
+    // closes even if the message loop never gets to observe `_destroying`
+    // (it is parked on the generator's next message).
+    if (this._turnInput) {
+      this._turnInput.end()
+      this._turnInput = null
     }
 
     // Interrupt active query

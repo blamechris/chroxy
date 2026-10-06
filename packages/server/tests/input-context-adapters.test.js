@@ -108,8 +108,13 @@ describe('selected context reaches concrete Claude/Codex adapters (#7822)', () =
     codex._client = { request: async (_method, params) => { codexParams = params; return { turn: { id: 'turn-1' } } } }
     await deliver(codex, 'codex-session', 'codex-request')
 
-    const claudeText = claudeArgs.prompt.find((item) => item.type === 'text').text
-    const claudeImage = claudeArgs.prompt.find((item) => item.type === 'image')
+    // #8300: SdkSession hands query() a streaming input — an async iterable
+    // whose first item is the prompt's user message — so the content blocks
+    // are read off that message rather than off `prompt` directly.
+    const { value: claudeUserMessage } = await claudeArgs.prompt[Symbol.asyncIterator]().next()
+    const claudeContent = claudeUserMessage.message.content
+    const claudeText = claudeContent.find((item) => item.type === 'text').text
+    const claudeImage = claudeContent.find((item) => item.type === 'image')
     const codexText = codexParams.input.find((item) => item.type === 'text').text
     const codexImage = codexParams.input.find((item) => item.type === 'localImage')
     assert.equal(claudeText, codexText, 'both adapters receive one canonical provenance-bearing prompt')

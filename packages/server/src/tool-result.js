@@ -70,6 +70,14 @@ export function emitToolResults(content, emitter, maxSize = MAX_TOOL_RESULT_SIZE
       truncated,
     }
 
+    // #8300: carry the block's own error flag to the wire (the schema already
+    // declares `isError`; the turn-end orphan sweep sets it on its synthetic
+    // results), so a client can tell a failed tool call from a result that
+    // merely reads like one. Only ever added, never defaulted to false.
+    if (block.is_error === true) {
+      event.isError = true
+    }
+
     if (images.length > 0) {
       event.images = images
     }
