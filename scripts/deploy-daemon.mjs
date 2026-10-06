@@ -34,7 +34,7 @@
 
 import { spawnSync } from 'node:child_process'
 import {
-  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync,
   statSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -161,7 +161,7 @@ export function defaultDeps() {
       }
     },
     fetch: globalThis.fetch,
-    fs: { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync },
+    fs: { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync },
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log: (line) => console.log(line),
@@ -179,9 +179,10 @@ const tail = (text, n = 12) => String(text || '').trim().split('\n').slice(-n).j
 /**
  * Run one deploy attempt.
  * @returns {Promise<{ exitCode: number, outcome: string }>}
- *   outcome is one of: up-to-date, deployed, dry-run, deferred-busy,
- *   deferred-unavailable, restart-deferred, locked, refused, fetch-failed,
- *   rolled-back-build, rolled-back-health, rollback-failed, failed.
+ *   outcome is one of: up-to-date, deployed, deployed-tunnel-unverified, dry-run,
+ *   deferred-busy, deferred-unavailable, deferred-busy-after-build,
+ *   skipped-failed-target, locked, refused, fetch-failed, rolled-back-build,
+ *   rolled-back-health, failed-restart, rollback-failed, failed.
  */
 export async function deploy(opts, deps = defaultDeps()) {
   const d = { ...defaultDeps(), ...deps }
@@ -194,6 +195,7 @@ export async function deploy(opts, deps = defaultDeps()) {
     // parking a built checkout). Only ever deleted.
     legacyPending: join(opts.configDir, 'deploy-pending-restart.json'),
     state: join(opts.configDir, 'deploy-state.json'),
+    reclaim: join(opts.configDir, 'deploy.lock.reclaim'),
     conn: join(opts.configDir, 'connection.json'),
   }
   const npmBin = opts.npm || 'npm'
@@ -209,15 +211,42 @@ export async function deploy(opts, deps = defaultDeps()) {
   const readJson = (file) => {
     try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null }
   }
+  // Atomic: a reader (or a crash) sees the old file or the new one, never half
+  // of either. The tmp name carries the pid so two writers cannot share one.
   const writeJson = (file, value) => {
     fs.mkdirSync(dirname(file), { recursive: true })
-    fs.writeFileSync(file, JSON.stringify(value, null, 2) + '\n')
+    const tmp = `${file}.tmp-${d.pid}`
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n')
+    fs.renameSync(tmp, file)
   }
 
   // deploy.log gets one line per EVENT. `key` dedupes a repeating event (the
   // same deferral on every ten-minute tick) against the previous logged key.
-  const state = readJson(p.state) || {}
-  const saveState = () => { if (!opts.dryRun) { try { writeJson(p.state, state) } catch { /* best effort */ } } }
+  //
+  // deploy-state.json is read and written ONLY while this process holds the
+  // lock: a run that lost the lock must not read a state another run is about
+  // to rewrite, nor save one over it. (A dry run takes no lock and reads only.)
+  let held = false
+  let state = {}
+  function loadState() {
+    let raw
+    try { raw = fs.readFileSync(p.state, 'utf8') } catch { return } // absent: empty state
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) { state = parsed; return }
+      throw new Error('not an object')
+    } catch {
+      const keep = `${p.state}.corrupt-${d.now()}`
+      if (opts.dryRun) {
+        d.log(`deploy-state.json unreadable; a real run would keep a copy at ${keep}`)
+        return
+      }
+      try { fs.renameSync(p.state, keep) } catch { /* best effort */ }
+      state = {}
+      event(`deploy-state.json unreadable; keeping a copy at ${keep}`)
+    }
+  }
+  const saveState = () => { if (held && !opts.dryRun) { try { writeJson(p.state, state) } catch { /* best effort */ } } }
   function event(msg, { range = null, key = null } = {}) {
     const line = range ? `${range} ${msg}` : msg
     d.log(line)
@@ -246,13 +275,34 @@ export async function deploy(opts, deps = defaultDeps()) {
       return Number.isInteger(n) && n > 0 ? n : null
     } catch { return null }
   }
-  // Not airtight: two processes both reclaiming the SAME stale lock can race
-  // between unlink and create. The agent ticks every ten minutes and the lock
-  // exists to stop an overlapping tick or a hand-run beside it, so the window
-  // is a pair of syscalls wide and the loser's `wx` open still fails.
+  // Reclaiming a stale lock is itself guarded by `deploy.lock.reclaim` (created
+  // `wx`). Without it: A reads a dead holder, B reclaims and creates a LIVE
+  // lock, A then unlinks B's live lock and both run. Only the holder of the
+  // reclaim lock may unlink the main lock, and it re-reads the main lock's
+  // holder AFTER acquiring the reclaim lock, unlinking only if that holder is
+  // still the dead one it saw. A reclaim lock is itself stale after 60s.
+  const RECLAIM_STALE_MS = 60_000
+  function takeReclaimLock() {
+    for (let i = 0; i < 2; i++) {
+      try {
+        const fd = fs.openSync(p.reclaim, 'wx')
+        fs.writeSync(fd, String(d.pid))
+        fs.closeSync(fd)
+        return true
+      } catch (e) {
+        if (e.code !== 'EEXIST') throw e
+      }
+      let ageMs = 0
+      try { ageMs = d.now() - fs.statSync(p.reclaim).mtimeMs } catch { continue } // vanished: retry
+      if (ageMs < RECLAIM_STALE_MS) return false
+      try { fs.unlinkSync(p.reclaim) } catch { /* someone else removed it */ }
+    }
+    return false
+  }
+  const isLiveForeignHolder = (pid) => pid !== null && pid !== d.pid && d.isPidAlive(pid)
   function acquireLock() {
     fs.mkdirSync(opts.configDir, { recursive: true })
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const fd = fs.openSync(p.lock, 'wx')
         fs.writeSync(fd, String(d.pid))
@@ -262,15 +312,23 @@ export async function deploy(opts, deps = defaultDeps()) {
         if (e.code !== 'EEXIST') throw e
       }
       const holder = readLockPid()
-      if (holder !== null) {
-        if (holder !== d.pid && d.isPidAlive(holder)) return { ok: false, holder }
-      } else {
+      if (isLiveForeignHolder(holder)) return { ok: false, holder }
+      if (holder === null) {
         // Empty/garbled lock: its owner may be between open() and write().
         let ageMs = Infinity
         try { ageMs = d.now() - fs.statSync(p.lock).mtimeMs } catch { /* gone: fall through */ }
         if (ageMs < 30_000) return { ok: false, holder: null }
       }
-      try { fs.unlinkSync(p.lock) } catch { /* someone else reclaimed it */ }
+      // Stale as far as we can tell. Prove it again while holding the reclaim lock.
+      if (!takeReclaimLock()) return { ok: false, holder: null }
+      try {
+        const again = readLockPid()
+        if (again !== holder) continue // changed under us (a live reclaimer won, or it vanished): re-evaluate
+        if (isLiveForeignHolder(again)) return { ok: false, holder: again }
+        try { fs.unlinkSync(p.lock) } catch { /* already gone */ }
+      } finally {
+        try { fs.unlinkSync(p.reclaim) } catch { /* already gone */ }
+      }
     }
     return { ok: false, holder: null }
   }
@@ -337,42 +395,23 @@ export async function deploy(opts, deps = defaultDeps()) {
   // The daemon is "back" only when connection.json names a DIFFERENT pid than
   // the one we signalled AND local /health answers 200: an old process that has
   // not exited yet can answer /health perfectly well, and that must not count.
-  async function waitForHealthOnce(oldPid) {
-    const timeoutMs = opts.healthTimeoutS * 1000
-    const deadline = d.now() + timeoutMs
-    let conn = null
+  // `oldPid === undefined` means "no new-pid requirement" (verifying a daemon we
+  // did not just signal).
+  async function waitForLocalHealth(oldPid) {
+    const deadline = d.now() + opts.healthTimeoutS * 1000
     let lastWhy = 'daemon did not restart'
     while (d.now() < deadline) {
-      conn = readConn()
-      if (conn?.pid && conn.pid !== oldPid) {
+      const conn = readConn()
+      if (conn?.pid && (oldPid === undefined || conn.pid !== oldPid)) {
         try {
           const r = await d.fetch(`http://127.0.0.1:${portOf(conn)}/health`, { signal: AbortSignal.timeout(5000) })
-          if (r.status === 200) break
+          if (r.status === 200) return { ok: true, pid: conn.pid, conn }
           lastWhy = `local /health answered HTTP ${r.status}`
         } catch (e) { lastWhy = `local /health: ${e?.message || e}` }
       } else {
         lastWhy = conn?.pid === oldPid ? `connection.json still names the old pid ${oldPid}` : 'connection.json not rewritten yet'
       }
-      conn = null
       await d.sleep(1000)
-    }
-    if (!conn) return { ok: false, reason: lastWhy }
-
-    const mode = conn.tunnelMode
-    let tunnelHost = null
-    try { tunnelHost = conn.httpUrl ? new URL(conn.httpUrl).hostname : null } catch { /* unparseable: skip */ }
-    const localHost = !tunnelHost || ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(tunnelHost)
-    if (!opts.tunnelCheck || !mode || mode === 'none' || localHost) return { ok: true, pid: conn.pid }
-    // The tunnel answers 530 for several seconds after a restart; retry through
-    // that and through connection errors until the same budget runs out again.
-    const tunnelDeadline = d.now() + timeoutMs
-    while (d.now() < tunnelDeadline) {
-      try {
-        const r = await d.fetch(`${conn.httpUrl.replace(/\/+$/, '')}/health`, { signal: AbortSignal.timeout(8000) })
-        if (r.status === 200) return { ok: true, pid: conn.pid }
-        lastWhy = `tunnel /health answered HTTP ${r.status}`
-      } catch (e) { lastWhy = `tunnel /health: ${e?.message || e}` }
-      await d.sleep(2000)
     }
     return { ok: false, reason: lastWhy }
   }
@@ -392,15 +431,62 @@ export async function deploy(opts, deps = defaultDeps()) {
     } catch (e) { return { ok: false, reason: `after settling ${opts.settleS}s local /health: ${e?.message || e}` } }
     return { ok: true }
   }
+
+  // The tunnel answers 530 for several seconds after a restart; retry through
+  // that and through connection errors until the budget runs out. A tunnel is
+  // not the daemon: a failure here is reported, never a reason to roll back.
+  async function checkTunnel(conn) {
+    const mode = conn.tunnelMode
+    let tunnelHost = null
+    try { tunnelHost = conn.httpUrl ? new URL(conn.httpUrl).hostname : null } catch { /* unparseable: skip */ }
+    const localHost = !tunnelHost || ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(tunnelHost)
+    if (!opts.tunnelCheck || !mode || mode === 'none' || localHost) return { ok: true }
+    const deadline = d.now() + opts.healthTimeoutS * 1000
+    let lastWhy = 'tunnel never answered'
+    while (d.now() < deadline) {
+      try {
+        const r = await d.fetch(`${conn.httpUrl.replace(/\/+$/, '')}/health`, { signal: AbortSignal.timeout(8000) })
+        if (r.status === 200) return { ok: true }
+        lastWhy = `tunnel /health answered HTTP ${r.status}`
+      } catch (e) { lastWhy = `tunnel /health: ${e?.message || e}` }
+      await d.sleep(2000)
+    }
+    return { ok: false, reason: lastWhy }
+  }
+
+  // local health -> settle (local) -> tunnel. The ORDER matters: the settle
+  // verdict is about the daemon and is decided before the tunnel is consulted,
+  // so a tunnel-only failure (`tunnelUnverified`) leaves a daemon that is
+  // serving locally alone instead of rolling it back.
   async function waitForHealth(oldPid) {
-    const up = await waitForHealthOnce(oldPid)
-    return up.ok ? settle(up.pid) : up
+    const up = await waitForLocalHealth(oldPid)
+    if (!up.ok) return up
+    const settled = await settle(up.pid)
+    if (!settled.ok) return settled
+    const tunnel = await checkTunnel(up.conn)
+    return tunnel.ok ? { ok: true, pid: up.pid } : { ok: true, pid: up.pid, tunnelUnverified: tunnel.reason }
   }
 
   // Remember a target that rolled back so later ticks do not retry it forever.
   function markFailed(target, outcome) {
     state.failedTarget = target
     state.failedOutcome = outcome
+  }
+
+  // An interrupted deploy (a kill, a crash, a power cut) must not become a
+  // permanent false "up to date": once the merge has moved HEAD, HEAD == target
+  // and nothing else would ever notice the build or restart never finished.
+  function setInProgress(from, to, phase, extra = {}) {
+    state.inProgress = { from, to, phase, ...extra }
+    saveState()
+  }
+  function clearInProgress() {
+    if (state.inProgress) { delete state.inProgress; saveState() }
+  }
+  // Every terminal outcome after the merge returns through here.
+  function done(result) {
+    clearInProgress()
+    return result
   }
 
   function recordResult(from, to, result) {
@@ -423,20 +509,111 @@ export async function deploy(opts, deps = defaultDeps()) {
     return buildDashboard()
   }
 
+  // The rollback restart is a SIGTERM too. The running code is known-bad, so it
+  // happens regardless — but if the daemon still answers the idle probe and is
+  // busy, give it up to --health-timeout to finish first.
+  async function waitIdleBeforeRollbackRestart(range) {
+    if (opts.force) return
+    const deadline = d.now() + opts.healthTimeoutS * 1000
+    const t0 = d.now()
+    let waited = false
+    for (;;) {
+      const idle = await checkIdle()
+      if (idle.kind !== 'busy') break // idle, or not answering: nothing left to protect
+      waited = true
+      if (d.now() >= deadline) {
+        event(`rollback restart: daemon still busy after ${Math.round((d.now() - t0) / 1000)}s (${idle.reasons.join('; ')}); restarting anyway, the running code is known-bad`, { range })
+        return
+      }
+      await d.sleep(5000)
+    }
+    if (waited) event(`rollback restart waited ${Math.round((d.now() - t0) / 1000)}s for the daemon to go idle`, { range })
+  }
+
+  // The health-failed path, shared by the live deploy and by recovery of an
+  // interrupted one: restore the previous build, restart onto it, and judge it.
+  async function rollbackAfterHealthFailure({ old, target, lockChanged, range, health }) {
+    const back = rollbackCheckout(old, lockChanged)
+    if (!back.ok) {
+      markFailed(target, 'rollback-failed')
+      recordResult(old, target, 'rollback-failed')
+      event(`ROLLBACK-FAILED (health failed: ${health.reason}; rollback error: ${back.reason}). The daemon may be down or on a half-built checkout.`, { range })
+      return done({ exitCode: 1, outcome: 'rollback-failed' })
+    }
+    const pidNow = readConn()?.pid ?? null
+    await waitIdleBeforeRollbackRestart(range)
+    // A failed kill here does not end it: if the new build crashed, launchd is
+    // already relaunching the service (now on the restored checkout) and there
+    // may be nothing left to signal. Wait for a pid that is not `pidNow` either way.
+    const again = restartDaemon()
+    const healthAgain = await waitForHealth(pidNow)
+    if (!healthAgain.ok && !again.ok) healthAgain.reason += ` (${again.reason})`
+    if (healthAgain.ok) {
+      markFailed(target, 'rolled-back-health')
+      recordResult(old, target, 'rolled-back-health')
+      event(`rolled-back (health failed: ${health.reason})${healthAgain.tunnelUnverified ? `; the tunnel is also unverified (${healthAgain.tunnelUnverified})` : ''}`, { range })
+      return done({ exitCode: 1, outcome: 'rolled-back-health' })
+    }
+    markFailed(target, 'rollback-failed')
+    recordResult(old, target, 'rollback-failed')
+    event(`ROLLBACK-FAILED (health failed: ${health.reason}; after rollback: ${healthAgain.reason}). The daemon is not healthy; check launchd and ${p.log}.`, { range })
+    return done({ exitCode: 1, outcome: 'rollback-failed' })
+  }
+
+  // Returns a terminal result, or null to carry on with the normal flow.
+  async function recoverInterrupted(ip) {
+    const range = rangeOf(ip.from, ip.to)
+    let lockChanged
+    try { lockChanged = lockfilesChanged(ip.from, ip.to) } catch { lockChanged = true } // cannot diff: an extra npm ci is the safe error
+    const resetToFrom = (why) => {
+      event(`recovering interrupted deploy (${why})`, { range })
+      const back = rollbackCheckout(ip.from, lockChanged)
+      if (!back.ok) {
+        // Leave the record in place so the next tick tries again.
+        event(`ROLLBACK-FAILED while recovering an interrupted deploy: ${back.reason}`, { range, key: `recover-failed:${ip.to}` })
+        return { exitCode: 1, outcome: 'rollback-failed' }
+      }
+      clearInProgress()
+      return null // the target is retried by the normal flow; it is not a failedTarget
+    }
+    if (ip.phase === 'building') return resetToFrom('it stopped while building')
+
+    // phase 'restarting': the SIGTERM may or may not have been sent.
+    const conn = readConn()
+    if (conn?.pid && ip.beforePid != null && conn.pid === ip.beforePid) {
+      return resetToFrom('it stopped before the daemon was signalled; the daemon still runs the old code')
+    }
+    event('recovering interrupted deploy (it stopped while restarting the daemon); verifying the running daemon', { range })
+    const up = await waitForLocalHealth(undefined)
+    const verdict = up.ok ? await settle(up.pid) : up
+    if (verdict.ok) {
+      recordResult(ip.from, ip.to, 'ok')
+      event('recovered interrupted deploy: the daemon is healthy on the new build', { range })
+      clearInProgress()
+      return null
+    }
+    return rollbackAfterHealthFailure({ old: ip.from, target: ip.to, lockChanged, range, health: verdict })
+  }
+
+  const lockfilesChanged = (from, to) =>
+    gitOut(['diff', '--name-only', from, to]).split('\n').filter(Boolean).some((f) => LOCKFILE.test(f))
+
   // ======================================================================
   // main flow
   // ======================================================================
   if (opts.dryRun) d.log('[dry-run] no merge, build, restart or log write will happen')
 
-  let held = false
   if (!opts.dryRun) {
     const lock = acquireLock()
     if (!lock.ok) {
-      event(`another deploy holds ${p.lock}${lock.holder ? ` (pid ${lock.holder})` : ''}; skipping this run`, { key: 'locked' })
+      // Console only: a run that lost the lock owns neither deploy-state.json
+      // nor the dedupe key, so it touches neither.
+      d.log(`another deploy holds ${p.lock}${lock.holder ? ` (pid ${lock.holder})` : ''}; skipping this run`)
       return { exitCode: 0, outcome: 'locked' }
     }
     held = true
   }
+  loadState()
 
   try {
     if (!opts.dryRun) { try { fs.unlinkSync(p.legacyPending) } catch { /* none */ } }
@@ -459,6 +636,23 @@ export async function deploy(opts, deps = defaultDeps()) {
     if (branchNow.status !== 0 || branchNow.stdout.trim() !== opts.branch) {
       event(`refused: checkout is on '${branchNow.stdout.trim() || '?'}', not '${opts.branch}'`, { key: `branch:${branchNow.stdout.trim()}` })
       return { exitCode: 1, outcome: 'refused' }
+    }
+
+    // -- 2b. an interrupted deploy ------------------------------------------------
+    // Before the HEAD == target shortcut below: once the merge has moved HEAD,
+    // an interrupted run would otherwise read as "up to date" for ever.
+    const ip = state.inProgress
+    if (ip) {
+      const valid = FULL_SHA.test(ip.from || '') && FULL_SHA.test(ip.to || '') && (ip.phase === 'building' || ip.phase === 'restarting')
+      if (opts.dryRun) {
+        d.log(`[dry-run] an interrupted deploy is recorded (${valid ? `${rangeOf(ip.from, ip.to)}, phase ${ip.phase}` : 'unreadable'}); a real run would recover it first`)
+      } else if (!valid) {
+        event('discarding an unreadable in-progress record')
+        clearInProgress()
+      } else {
+        const recovered = await recoverInterrupted(ip)
+        if (recovered) return recovered
+      }
     }
 
     // -- 3. fetch + compare -------------------------------------------------
@@ -502,8 +696,7 @@ export async function deploy(opts, deps = defaultDeps()) {
       return { exitCode: 0, outcome: 'skipped-failed-target' }
     }
     const range = rangeOf(old, target)
-    const changed = gitOut(['diff', '--name-only', old, target]).split('\n').filter(Boolean)
-    const lockChanged = changed.some((f) => LOCKFILE.test(f))
+    const lockChanged = lockfilesChanged(old, target)
 
     // -- dry run -------------------------------------------------------------
     if (opts.dryRun) {
@@ -544,10 +737,12 @@ export async function deploy(opts, deps = defaultDeps()) {
 
     // -- 5. merge, install, build ---------------------------------------------
     if (!isGitShaRef(target)) { event('refused: target is not a SHA', { key: 'bad-target' }); return { exitCode: 1, outcome: 'refused' } }
+    // Recorded BEFORE the merge moves HEAD, cleared on every terminal outcome.
+    setInProgress(old, target, 'building')
     const merged = git(['merge', '--ff-only', target])
     if (merged.status !== 0) {
       event(`merge --ff-only failed: ${tail(merged.stderr || merged.stdout || merged.error, 3)}`, { range })
-      return { exitCode: 1, outcome: 'failed' }
+      return done({ exitCode: 1, outcome: 'failed' })
     }
     let built = lockChanged ? npmCi() : { ok: true }
     if (built.ok) built = buildDashboard()
@@ -557,12 +752,12 @@ export async function deploy(opts, deps = defaultDeps()) {
         markFailed(target, 'rolled-back-build')
         recordResult(old, target, 'rolled-back-build')
         event(`rolled-back (build failed: ${built.reason})`, { range })
-        return { exitCode: 1, outcome: 'rolled-back-build' }
+        return done({ exitCode: 1, outcome: 'rolled-back-build' })
       }
       markFailed(target, 'rollback-failed')
       recordResult(old, target, 'rollback-failed')
       event(`ROLLBACK-FAILED after a failed build (${built.reason}); rollback error: ${back.reason}. The checkout may not match what the daemon is running; the daemon itself was not touched.`, { range })
-      return { exitCode: 1, outcome: 'rollback-failed' }
+      return done({ exitCode: 1, outcome: 'rollback-failed' })
     }
 
     // -- 6. idle again: the build took time ---------------------------------
@@ -577,14 +772,17 @@ export async function deploy(opts, deps = defaultDeps()) {
         markFailed(target, 'rollback-failed')
         recordResult(old, target, 'rollback-failed')
         event(`ROLLBACK-FAILED after the daemon turned ${why}; rollback error: ${back.reason}. The checkout is at the new commit and the daemon was not restarted.`, { range })
-        return { exitCode: 1, outcome: 'rollback-failed' }
+        return done({ exitCode: 1, outcome: 'rollback-failed' })
       }
       event(`deferred after build: ${why}`, { range, key: `busy-after-build:${target}` })
-      return { exitCode: 0, outcome: 'deferred-busy-after-build' }
+      return done({ exitCode: 0, outcome: 'deferred-busy-after-build' })
     }
 
     // -- 7-10. restart, verify, roll back on failure ---------------------------
     const beforePid = readConn()?.pid ?? null
+    // Set immediately before the SIGTERM: recovery then knows the signal may
+    // have been sent, and which pid it was aimed at.
+    setInProgress(old, target, 'restarting', { beforePid })
     const killed = restartDaemon()
     if (!killed.ok) {
       // Nothing was signalled, so the daemon still runs the OLD code. Put the
@@ -593,42 +791,27 @@ export async function deploy(opts, deps = defaultDeps()) {
       markFailed(target, back.ok ? 'failed-restart' : 'rollback-failed')
       recordResult(old, target, back.ok ? 'rolled-back-restart' : 'rollback-failed')
       event(`${back.ok ? 'rolled-back' : 'ROLLBACK-FAILED'} (restart failed: ${killed.reason}${back.ok ? '' : `; ${back.reason}`})`, { range })
-      return { exitCode: 1, outcome: back.ok ? 'failed-restart' : 'rollback-failed' }
+      return done({ exitCode: 1, outcome: back.ok ? 'failed-restart' : 'rollback-failed' })
     }
     const health = await waitForHealth(beforePid)
     if (health.ok) {
       delete state.failedTarget
       delete state.failedOutcome
+      if (health.tunnelUnverified) {
+        // The daemon is up and settled locally and may already hold new work; a
+        // rollback would not fix a tunnel. Report it loudly and leave it be.
+        recordResult(old, target, 'deployed-tunnel-unverified')
+        event(`DEPLOYED-TUNNEL-UNVERIFIED: the new daemon is healthy locally but the tunnel never answered 200 (${health.tunnelUnverified}). Not rolled back: the daemon is serving and a rollback would not fix a tunnel. Check the tunnel.`, { range })
+        return done({ exitCode: 1, outcome: 'deployed-tunnel-unverified' })
+      }
       recordResult(old, target, 'ok')
       event('ok', { range })
-      return { exitCode: 0, outcome: 'deployed' }
+      return done({ exitCode: 0, outcome: 'deployed' })
     }
 
-    // Health failed: restore the previous build and restart onto it.
-    const back = rollbackCheckout(old, lockChanged)
-    if (!back.ok) {
-      markFailed(target, 'rollback-failed')
-      recordResult(old, target, 'rollback-failed')
-      event(`ROLLBACK-FAILED (health failed: ${health.reason}; rollback error: ${back.reason}). The daemon may be down or on a half-built checkout.`, { range })
-      return { exitCode: 1, outcome: 'rollback-failed' }
-    }
-    const pidNow = readConn()?.pid ?? null
-    // A failed kill here does not end it: if the new build crashed, launchd is
-    // already relaunching the service (now on the restored checkout) and there
-    // may be nothing left to signal. Wait for a pid that is not `pidNow` either way.
-    const again = restartDaemon()
-    const healthAgain = await waitForHealth(pidNow)
-    if (!healthAgain.ok && !again.ok) healthAgain.reason += ` (${again.reason})`
-    if (healthAgain.ok) {
-      markFailed(target, 'rolled-back-health')
-      recordResult(old, target, 'rolled-back-health')
-      event(`rolled-back (health failed: ${health.reason})`, { range })
-      return { exitCode: 1, outcome: 'rolled-back-health' }
-    }
-    markFailed(target, 'rollback-failed')
-    recordResult(old, target, 'rollback-failed')
-    event(`ROLLBACK-FAILED (health failed: ${health.reason}; after rollback: ${healthAgain.reason}). The daemon is not healthy; check launchd and ${p.log}.`, { range })
-    return { exitCode: 1, outcome: 'rollback-failed' }
+    // Local health or the settle check failed: restore the previous build and
+    // restart onto it.
+    return await rollbackAfterHealthFailure({ old, target, lockChanged, range, health })
   } catch (e) {
     event(`failed: ${e?.message || e}`, { key: `error:${e?.message}` })
     return { exitCode: 1, outcome: 'failed' }

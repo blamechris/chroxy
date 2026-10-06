@@ -8,20 +8,29 @@ This guide is documentation only. The repository does not install the launchd ag
 
 Every run (the agent below runs it every ten minutes):
 
-1. Takes `<configDir>/deploy.lock` so two runs never overlap. A lock whose pid is dead is stale and is reclaimed.
+1. Takes `<configDir>/deploy.lock` so two runs never overlap. A lock whose pid is dead is stale and is reclaimed, but only through a second lock, `deploy.lock.reclaim` (created exclusively; itself stale after 60 s). The reclaimer re-reads the main lock's holder after taking the reclaim lock and unlinks only if that holder is still dead, so a slow reclaimer can never delete a live lock another run just took. `deploy-state.json` is read and written only while holding the lock, and `deploy-state.json` and `last-deploy.json` are written atomically (temp file plus rename). A run that loses the lock prints one console line and touches no state. A corrupt `deploy-state.json` is moved aside to `deploy-state.json.corrupt-<ts>`, logged, and treated as empty.
 2. Requires the daemon checkout to be a **clean** git tree on the followed branch. A dirty tree or the wrong branch is refused (exit 1) and logged; nothing is touched.
 3. `git fetch`es the remote. If `HEAD` already equals the remote branch it prints one console line, writes nothing to `deploy.log`, and exits 0. If `HEAD` is not an ancestor of the remote branch (diverged, or ahead) it refuses: this is fast-forward only. If the remote branch is a commit that already **rolled back** on this machine it is skipped (see "A target that already failed is not retried").
 4. Asks the running daemon whether it is idle (below). Busy, unreachable, a daemon that predates the route, or an unreadable answer all mean **do not deploy**; the run exits 0 and logs why, once per target commit rather than once per tick.
-5. `git merge --ff-only`, then `npm ci --no-audit --no-fund` **only if** a `package-lock.json` (root or `packages/*`) changed in the range, then `npm run build -w @chroxy/dashboard`.
+5. Records `inProgress: { from, to, phase: 'building' }` in `deploy-state.json`, then `git merge --ff-only`, then `npm ci --no-audit --no-fund` **only if** a `package-lock.json` (root or `packages/*`) changed in the range, then `npm run build -w @chroxy/dashboard`.
 6. If the install or build fails: `git reset --hard` back to the previous commit, redo `npm ci` if the lockfile had changed, rebuild, log `rolled-back (build failed: ...)`, exit 1. The running daemon was never signalled.
 7. Asks again whether the daemon is idle, because the build takes time. If it is busy (or cannot be confirmed idle) now, it **rolls back**: `git reset --hard` to the previous commit, `npm ci` again if the lockfile had changed, rebuild, log `deferred after build: busy (...)` (once per target) and exit 0. Nothing is left built-but-unrestarted: a turn that started during the build would otherwise run for hours under a daemon whose dashboard (served from disk) and source files no longer match it. The next tick tries again from scratch.
-8. Restarts with `launchctl kill SIGTERM gui/<uid>/<label>` (a graceful SIGTERM, never SIGKILL). launchd relaunches the daemon.
-9. Waits (default 90 s) until `connection.json` names a **different pid** than the one it signalled **and** the local `/health` answers 200, so an old process that has not exited yet cannot pass for the new one. Unless the tunnel is `none`/absent or `--no-tunnel-check` is set, it then requires the tunnel URL's `/health` to answer 200, retrying through the HTTP 530 a Cloudflare tunnel returns for several seconds after a restart.
+8. Sets the phase to `restarting` (with the pid it is about to signal) and restarts with `launchctl kill SIGTERM gui/<uid>/<label>` (a graceful SIGTERM, never SIGKILL). launchd relaunches the daemon.
+9. Waits (default 90 s) until `connection.json` names a **different pid** than the one it signalled **and** the local `/health` answers 200, so an old process that has not exited yet cannot pass for the new one. 
 10. **Settles.** A build that answers `/health` and then crashes seconds later is not a deploy. After health passes it waits `--settle <s>` (default 15) and re-confirms that `connection.json` still names the same new pid, that pid is alive, and local `/health` still answers 200. Failing that counts as a health failure.
-11. If health (or the settle check) fails: `git reset --hard` to the previous commit, rebuild, signal again, wait again. It logs `rolled-back (health failed: ...)` and exits 1, or `ROLLBACK-FAILED` loudly if the daemon still is not healthy.
-12. On success it appends `<utc iso> <old12>..<new12> ok` to `<configDir>/logs/deploy.log` and writes `<configDir>/last-deploy.json` (`{ from, to, at, result, subject }`).
+11. **Tunnel, last.** Unless the tunnel is `none`/absent or `--no-tunnel-check` is set, it then requires the tunnel URL's `/health` to answer 200, retrying through the HTTP 530 a Cloudflare tunnel returns for several seconds after a restart. This comes after the settle verdict on purpose. A **tunnel-only** failure (local health fine, settle passed, the tunnel never answered) is **not rolled back**: the new daemon is serving locally and may already hold new work, and a rollback would not fix a tunnel. The outcome is `deployed-tunnel-unverified`, exit 1, a loud `DEPLOYED-TUNNEL-UNVERIFIED` line in `deploy.log`, the same `result` in `last-deploy.json`, and the target is **not** recorded as failed.
+12. If local health or the settle check fails: `git reset --hard` to the previous commit, rebuild, signal again, wait again. Before that second SIGTERM, if the daemon still answers `/api/daemon/idle` and is busy, the script polls for idle for up to `--health-timeout` and logs that it waited; it then restarts regardless, because the running code is known-bad. It logs `rolled-back (health failed: ...)` and exits 1, or `ROLLBACK-FAILED` loudly if the daemon still is not healthy.
+13. On success it appends `<utc iso> <old12>..<new12> ok` to `<configDir>/logs/deploy.log` and writes `<configDir>/last-deploy.json` (`{ from, to, at, result, subject }`).
 
 It does **not** run the test suite (CI already did, on the commit that merged), does not touch the supervisor or `chroxy deploy` (those drive a supervisor over SIGUSR2 and do not apply to a `--no-supervisor` daemon), and does not install or remove the launchd agent.
+
+### An interrupted deploy is recovered
+
+The record in step 5 is cleared on every terminal outcome. If the process is killed (or the machine loses power) between the merge and the end, the record survives and the next run, under the lock and **before** the "already up to date" shortcut, recovers it. Without this, `HEAD` already equals `origin/main` after the merge and the interruption would read as "up to date" for ever.
+
+- Phase `building`: logs `recovering interrupted deploy`, resets to `from`, rebuilds (with `npm ci` if the lockfile differs), clears the record, and then continues the normal flow in the same run, so the target is retried. It is not recorded as a failed target.
+- Phase `restarting`: the SIGTERM may or may not have been sent. If `connection.json` still names the pid the script was aiming at, the daemon never restarted, so this is handled like `building`. Otherwise it verifies the running daemon (local `/health` plus the settle check, with no new-pid requirement): healthy means it records `ok` and carries on; unhealthy takes the ordinary health-failed rollback path.
+- If recovery itself fails the record is kept and the next tick tries again.
 
 ### A target that already failed is not retried
 
@@ -47,9 +56,14 @@ The daemon is idle only when **all** of these hold:
 - no session is busy: no turn is running, and no tracked background shell is holding a session busy (`isBusy` covers both);
 - no session has a permission request waiting on a human;
 - no session has an `AskUserQuestion` waiting on a human;
-- no hook-routed permission request is parked on the daemon.
+- no hook-routed permission request is parked on the daemon;
+- nothing in the session's `getRestartBlockers()`: work `isBusy` does not report. The base list is background agents that outlived their turn and input accepted into the outgoing queue but not yet dispatched. The Claude CLI session adds messages acknowledged as `queued` while the CLI warms up or respawns. The Claude TUI session adds recent terminal output (any PTY output in the last 30 s, on the same monotonic clock the #6601 readiness signal uses), because a turn typed straight into the terminal never sets `isBusy`. The other providers (SDK, Codex, BYOK, Gemini, ACP, claude-channel) queue only in the shared outgoing queue, so they need no override.
 
-The answer lists every session's state and a `reasons` array (for example `session "main" busy: turn`). If the daemon cannot compute the answer it answers `idle: false`. The route is loopback-only and primary-token-only; see [bearer-token-authority.md](../security/bearer-token-authority.md). The script reads the port from `connection.json` when `httpUrl` carries one, and otherwise uses 8765. Pass `--port` if your daemon listens elsewhere and is reached through a tunnel.
+The answer lists every session's state and a `reasons` array (for example `session "main" busy: turn`). If the daemon cannot compute any part of the answer, including a missing or throwing `getRestartBlockers()` or one that returns something other than an array of reasons, it answers `idle: false`. The route is loopback-only and primary-token-only; see [bearer-token-authority.md](../security/bearer-token-authority.md). The loopback gate parses the peer address strictly (127.0.0.0/8, `::1`, IPv4-mapped 127.x) and rejects any request carrying a `cf-*`, `cdn-loop`, `forwarded`, `x-forwarded-*` or `x-real-ip` header, because Cloudflare can strip the visitor-IP headers; it is defence in depth, and the primary token is the authority. The script reads the port from `connection.json` when `httpUrl` carries one, and otherwise uses 8765. Pass `--port` if your daemon listens elsewhere and is reached through a tunnel.
+
+### Known residual
+
+There is a sub-second window between the final idle check and the SIGTERM in which newly submitted work can be cut off. The probe is a snapshot, not a lock. A daemon-side maintenance lease, which would make the daemon refuse new work once the deploy has decided to restart, is tracked as a follow-up (issue to be filed).
 
 ## Running it by hand
 
@@ -124,11 +138,14 @@ Run one tick on demand: `launchctl kickstart gui/$UID/com.chroxy.deploy`.
 | `deferred after build: busy (...)` | The daemon turned busy during the build. The old commit was restored and rebuilt; retried next tick. Logged once per target. |
 | `skipped: <sha12> already rolled back (...)` | This target failed before; nothing runs until `main` moves or you pass `--retry`. Logged once per target. |
 | `rolled-back (build failed: ...)` | The install or build failed; the checkout is back on the old commit and the daemon was never touched. |
+| `DEPLOYED-TUNNEL-UNVERIFIED ...` | The new daemon is healthy and settled locally but the tunnel never answered 200. Not rolled back; check the tunnel. |
+| `recovering interrupted deploy ...` / `recovered interrupted deploy ...` | A previous run was killed mid-deploy; this run reset to the previous commit and retried, or verified the daemon. |
+| `rollback restart waited ...` / `rollback restart: daemon still busy ...` | A health rollback held its SIGTERM for a busy daemon (up to `--health-timeout`), then restarted anyway. |
 | `rolled-back (health failed: ...)` | The new daemon did not come back healthy, or did not stay healthy through the settle window; the old build was restored and the daemon restarted onto it. |
 | `ROLLBACK-FAILED ...` | The rollback itself failed. Go and look at launchd and the checkout. |
 | `refused: ...` | Dirty tree, wrong branch, or not a fast-forward. Fix the checkout; the script will not. |
 
-`~/.chroxy/last-deploy.json` holds the most recent result, `~/.chroxy/deploy-state.json` holds the log dedupe key and any `failedTarget`, and the launchd stdout/stderr logs above hold the one-line-per-tick console output.
+`~/.chroxy/last-deploy.json` holds the most recent result, `~/.chroxy/deploy-state.json` holds the log dedupe key, any `failedTarget` and any `inProgress` record, and the launchd stdout/stderr logs above hold the one-line-per-tick console output.
 
 ## Rolling back by hand
 

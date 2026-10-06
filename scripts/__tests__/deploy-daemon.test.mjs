@@ -24,8 +24,8 @@
 
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
-  appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync,
-  rmSync, statSync, unlinkSync, writeFileSync, writeSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync,
+  readdirSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -59,7 +59,7 @@ const eq = (a, b, msg) => {
 
 const A = 'a'.repeat(40) // the commit the daemon runs
 const B = 'b'.repeat(40) // origin/main
-const realFs = { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync, writeSync }
+const realFs = { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync }
 const roots = []
 
 const GIT_ENV = {
@@ -86,7 +86,7 @@ function makeEnv(o = {}) {
     root, checkout, configDir,
     calls: [],
     logs: [],
-    t: 1_000_000,
+    t: Date.now(), // real-time base: lock/reclaim ages are compared with real file mtimes
     git: {
       head: A, remote: B, branch: 'main', dirty: '', ancestor: true, fetchOk: true, mergeOk: true,
       files: ['packages/server/src/x.js'], subject: 'feat: x', log: 'bbbbbbb feat: x',
@@ -161,6 +161,8 @@ function makeEnv(o = {}) {
   const deps = {
     run(cmd, args, { cwd } = {}) {
       env.calls.push([cmd, ...args].join(' '))
+      if (env.onRun) env.onRun(cmd, args)
+      if (env.crashOn && env.crashOn(cmd, args)) { env.crashOn = null; throw new Error('simulated crash') }
       if (cmd === 'git') {
         if (o.realGit) {
           const r = spawnSync('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' })
@@ -216,6 +218,7 @@ function makeEnv(o = {}) {
     fs: realFs,
   }
   env.deps = deps
+  env.writeConn = writeConn
   env.opts = (extra = {}) => ({
     checkout, configDir, label: 'com.chroxy.server', branch: 'main', remote: 'origin', port: null,
     healthTimeoutS: 5, settleS: 15, retry: false, npm: null, dryRun: false, force: false, tunnelCheck: true, ...extra,
@@ -235,6 +238,7 @@ const significant = (env) => env.calls.filter((c) =>
 const mutating = (env) => env.calls.filter((c) => /^(git merge |git reset|npm |launchctl)/.test(c))
 const kills = (env) => env.calls.filter((c) => c.startsWith('launchctl'))
 
+const stateOf = (env) => JSON.parse(readFileSync(env.path('deploy-state.json'), 'utf8'))
 const KILL = 'launchctl kill SIGTERM gui/501/com.chroxy.server'
 const IDLE_URL = 'GET http://127.0.0.1:8765/api/daemon/idle'
 const BUILD = 'npm run build -w @chroxy/dashboard'
@@ -457,12 +461,27 @@ await test('--no-tunnel-check never asks the tunnel', async () => {
   eq(env.daemon.tunnelCalls, 0)
 })
 
-await test('a tunnel that never recovers is a failed deploy and rolls back', async () => {
+await test('a TUNNEL-only failure is not rolled back: deployed-tunnel-unverified, exit 1, loud, not a failed target', async () => {
   const env = makeEnv()
-  env.daemon.tunnel = (gen) => (gen === 1 ? 530 : 200)
+  env.daemon.tunnel = [530]
   const r = await env.run()
-  eq(r.outcome, 'rolled-back-health')
-  assert(env.readLog().includes('530'), 'the reason carries the status')
+  eq([r.exitCode, r.outcome], [1, 'deployed-tunnel-unverified'])
+  eq(kills(env).length, 1, 'no second restart: the daemon is serving locally')
+  eq(env.git.head, B, 'the new build stays')
+  assert(!env.calls.some((c) => c.startsWith('git reset')), 'no reset')
+  assert(env.readLog().includes('DEPLOYED-TUNNEL-UNVERIFIED') && env.readLog().includes('530'), 'loud, with the reason')
+  eq(env.last().result, 'deployed-tunnel-unverified')
+  eq(stateOf(env).failedTarget, undefined, 'not remembered as a failed target')
+  eq((await env.run()).outcome, 'up-to-date', 'and not retried or skipped')
+})
+
+await test('the settle verdict is reached BEFORE the tunnel is consulted', async () => {
+  const env = makeEnv()
+  env.daemon.crashGen = 1 // dies inside the settle window
+  env.daemon.tunnel = (gen) => { env.tunnelAsked = true; return 200 }
+  await env.run()
+  assert(!env.tunnelAsked || env.daemon.generation >= 2, 'a daemon that failed settle never reaches the tunnel check')
+  eq(env.daemon.tunnelCalls <= 1, true)
 })
 
 // ---------------------------------------------------------------------------
@@ -621,7 +640,6 @@ await test('a leftover deploy-pending-restart.json from the retired design is de
 // a target that already rolled back is not retried
 // ---------------------------------------------------------------------------
 
-const stateOf = (env) => JSON.parse(readFileSync(env.path('deploy-state.json'), 'utf8'))
 
 await test('after a build rollback the same target is SKIPPED on later ticks: no merge, no build, one log line', async () => {
   const env = makeEnv()
@@ -830,6 +848,245 @@ await test('the lock is released even when the deploy throws', async () => {
   const r = await env.run()
   eq(r.outcome, 'failed')
   assert(!existsSync(env.path('deploy.lock')), 'lock released after a throw')
+})
+
+// ---------------------------------------------------------------------------
+// a rollback restart does not cut off a busy daemon without waiting
+// ---------------------------------------------------------------------------
+
+const idleCalls = (env) => env.calls.filter((c) => c === IDLE_URL).length
+
+await test('a rollback restart waits for a busy daemon to go idle, then restarts', async () => {
+  const env = makeEnv({ brokenNewBuild: true })
+  env.daemon.idle = [IDLE, IDLE, BUSY, BUSY, IDLE]
+  const r = await env.run({ healthTimeoutS: 60 })
+  eq(r.outcome, 'rolled-back-health')
+  eq(idleCalls(env), 5, 'first check, re-check, then three polls')
+  const lastIdle = env.calls.lastIndexOf(IDLE_URL)
+  const secondKill = env.calls.lastIndexOf(KILL)
+  assert(lastIdle < secondKill, 'the second SIGTERM came after the polling')
+  assert(env.readLog().includes('rollback restart waited'), 'logged that it waited')
+})
+
+await test('a rollback restart that stays busy for the whole timeout restarts anyway and says so', async () => {
+  const env = makeEnv({ brokenNewBuild: true })
+  env.daemon.idle = [IDLE, IDLE, BUSY]
+  const r = await env.run({ healthTimeoutS: 12 })
+  eq(r.outcome, 'rolled-back-health')
+  eq(kills(env).length, 2, 'restarted regardless: the running code is known-bad')
+  assert(env.readLog().includes('still busy after') && env.readLog().includes('restarting anyway'), 'logged')
+})
+
+await test('a rollback restart does not wait when the daemon does not answer the idle probe, or under --force', async () => {
+  const a = makeEnv({ brokenNewBuild: true })
+  a.daemon.idle = [IDLE, IDLE, 'throw']
+  eq((await a.run()).outcome, 'rolled-back-health')
+  assert(!a.readLog().includes('waited'), 'no waiting on an unreachable daemon')
+  const b = makeEnv({ brokenNewBuild: true })
+  b.daemon.idle = [BUSY]
+  eq((await b.run({ force: true })).outcome, 'rolled-back-health')
+  eq(idleCalls(b), 0, '--force never asks')
+})
+
+// ---------------------------------------------------------------------------
+// an interrupted deploy is recovered, not mistaken for up-to-date
+// ---------------------------------------------------------------------------
+
+await test('in-progress is recorded before the merge, becomes "restarting" before the SIGTERM, and is cleared afterwards', async () => {
+  const env = makeEnv()
+  const seen = {}
+  env.onRun = (cmd, args) => {
+    const key = [cmd, ...args].join(' ')
+    if (key.startsWith('git merge --ff-only') || key === KILL) seen[`${cmd}:${args[0]}`] = stateOf(env).inProgress
+  }
+  await env.run()
+  eq(seen['git:merge'], { from: A, to: B, phase: 'building' }, 'recorded before HEAD moves')
+  eq(seen['launchctl:kill'], { from: A, to: B, phase: 'restarting', beforePid: 1000 }, 'restarting, with the pid aimed at')
+  eq(stateOf(env).inProgress, undefined, 'cleared on success')
+  for (const [name, setup] of [['a failed build', (e) => { e.build.buildOk = false }], ['a busy re-check', (e) => { e.daemon.idle = [IDLE, BUSY] }],
+    ['a failed restart', (e) => { e.daemon.killOk = false }], ['a health rollback', (e) => { e.daemon.health = (g) => (g === 1 ? 500 : 200) }]]) {
+    const e = makeEnv()
+    setup(e)
+    await e.run()
+    eq(stateOf(e).inProgress, undefined, `cleared after ${name}`)
+  }
+})
+
+await test('an interruption AFTER the merge (during the build) is recovered on the next run and the target is retried', async () => {
+  const env = makeEnv()
+  env.crashOn = (cmd, args) => cmd === 'npm' && args[0] === 'run'
+  const r1 = await env.run()
+  eq(r1.outcome, 'failed')
+  eq(env.git.head, B, 'premise: the merge had already moved HEAD')
+  eq(stateOf(env).inProgress.phase, 'building', 'premise: the record survived')
+  // Without recovery the next run reads HEAD == origin/main and says "up to date" for ever.
+  env.calls.length = 0
+  const r2 = await env.run()
+  eq([r2.exitCode, r2.outcome], [0, 'deployed'])
+  eq(mutating(env), [`git reset --hard ${A}`, BUILD, `git merge --ff-only ${B}`, BUILD, KILL], 'reset + rebuild, then the normal deploy')
+  assert(env.readLog().includes('recovering interrupted deploy'), 'logged')
+  eq([stateOf(env).failedTarget, stateOf(env).inProgress], [undefined, undefined], 'not a failed target, record cleared')
+})
+
+await test('an interruption while restarting: the daemon is healthy on the new build, so it is recorded ok and not restarted again', async () => {
+  const env = makeEnv()
+  env.crashOn = (cmd) => cmd === 'launchctl'
+  await env.run()
+  eq(stateOf(env).inProgress, { from: A, to: B, phase: 'restarting', beforePid: 1000 })
+  // The SIGTERM did land and the daemon came back on a new pid.
+  env.daemon.livePid = 2000
+  env.daemon.generation = 1
+  env.writeConn(2000)
+  env.calls.length = 0
+  const r = await env.run()
+  eq(r.outcome, 'up-to-date')
+  eq(mutating(env), [], 'no further restart')
+  eq(env.last().result, 'ok')
+  eq(stateOf(env).inProgress, undefined)
+  assert(env.readLog().includes('recovered interrupted deploy'), 'logged')
+})
+
+await test('an interruption while restarting: an unhealthy daemon takes the normal health-failed rollback path', async () => {
+  const env = makeEnv({ brokenNewBuild: true })
+  env.crashOn = (cmd) => cmd === 'launchctl'
+  await env.run()
+  env.daemon.livePid = 2000
+  env.daemon.generation = 1 // brokenNewBuild: generation 1 answers /health 500
+  env.daemon.nextPids = [3000, 4000]
+  env.writeConn(2000)
+  env.calls.length = 0
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [1, 'rolled-back-health'])
+  eq(env.git.head, A)
+  assert(env.calls.includes(`git reset --hard ${A}`), 'reset to the recorded from')
+  eq(stateOf(env).failedTarget, B)
+})
+
+await test('an interruption before the SIGTERM landed (pid unchanged) is treated as not deployed and retried', async () => {
+  const env = makeEnv()
+  env.crashOn = (cmd) => cmd === 'launchctl'
+  await env.run()
+  env.calls.length = 0
+  const r = await env.run() // connection.json still names the old pid 1000
+  eq(r.outcome, 'deployed')
+  eq(mutating(env), [`git reset --hard ${A}`, BUILD, `git merge --ff-only ${B}`, BUILD, KILL])
+})
+
+await test('--dry-run reports an interrupted deploy and recovers nothing', async () => {
+  const env = makeEnv()
+  env.crashOn = (cmd, args) => cmd === 'npm' && args[0] === 'run'
+  await env.run()
+  env.calls.length = 0
+  env.logs.length = 0
+  const before = readFileSync(env.path('deploy-state.json'), 'utf8')
+  const r = await env.run({ dryRun: true })
+  eq(r.outcome, 'up-to-date')
+  assert(env.logs.join('\n').includes('an interrupted deploy is recorded'), 'reported')
+  eq(mutating(env), [])
+  eq(readFileSync(env.path('deploy-state.json'), 'utf8'), before, 'state untouched')
+})
+
+// ---------------------------------------------------------------------------
+// the stale-lock reclaim race
+// ---------------------------------------------------------------------------
+
+await test('reclaim race: a live lock created by another reclaimer is NOT unlinked by a slower one', async () => {
+  const env = makeEnv()
+  env.git.remote = A
+  env.alive = [777]
+  const lock = env.path('deploy.lock')
+  writeFileSync(lock, '999999') // a dead holder
+  let raced = false
+  env.deps.fs = {
+    ...realFs,
+    readFileSync(f, ...rest) {
+      const out = realFs.readFileSync(f, ...rest)
+      if (f === lock && !raced) {
+        raced = true
+        // Between A's read of the dead holder and its unlink, B reclaims and
+        // takes a LIVE lock.
+        writeFileSync(lock, '777')
+      }
+      return out
+    },
+  }
+  const r = await env.run()
+  eq(r.outcome, 'locked', 'A backed off')
+  eq(readFileSync(lock, 'utf8'), '777', "B's live lock was left alone")
+  assert(!existsSync(env.path('deploy.lock.reclaim')), 'the reclaim lock is released')
+  eq(env.calls.filter((c) => c.startsWith('git')), [], 'A did not run')
+})
+
+await test('a stale lock is reclaimed through the reclaim lock, which is released afterwards', async () => {
+  const env = makeEnv()
+  env.git.remote = A
+  writeFileSync(env.path('deploy.lock'), '999999')
+  const r = await env.run()
+  eq(r.outcome, 'up-to-date')
+  assert(!existsSync(env.path('deploy.lock.reclaim')), 'reclaim lock released')
+})
+
+await test('a FRESH reclaim lock blocks a reclaim; one older than 60s is itself stale and cleared', async () => {
+  const env = makeEnv()
+  env.git.remote = A
+  writeFileSync(env.path('deploy.lock'), '999999')
+  writeFileSync(env.path('deploy.lock.reclaim'), '888')
+  eq((await env.run()).outcome, 'locked', 'someone is reclaiming right now')
+  const old = (Date.now() - 120_000) / 1000
+  utimesSync(env.path('deploy.lock.reclaim'), old, old)
+  eq((await env.run()).outcome, 'up-to-date', 'a stale reclaim lock does not wedge the deploy')
+  assert(!existsSync(env.path('deploy.lock.reclaim')))
+})
+
+await test('reclaim: a holder that is alive is never unlinked', async () => {
+  const env = makeEnv()
+  env.alive = [777]
+  writeFileSync(env.path('deploy.lock'), '777')
+  eq((await env.run()).outcome, 'locked')
+  eq(readFileSync(env.path('deploy.lock'), 'utf8'), '777')
+})
+
+// ---------------------------------------------------------------------------
+// state is only touched under the lock, and written atomically
+// ---------------------------------------------------------------------------
+
+await test('a run that loses the lock reads and writes NO state and writes no deploy.log line', async () => {
+  const env = makeEnv()
+  env.alive = [777]
+  writeFileSync(env.path('deploy.lock'), '777')
+  writeFileSync(env.path('deploy-state.json'), '{ not json')
+  const r = await env.run()
+  eq(r.outcome, 'locked')
+  eq(readFileSync(env.path('deploy-state.json'), 'utf8'), '{ not json', 'state file untouched, not even quarantined')
+  eq(env.readLog(), '')
+  assert(env.logs.some((l) => l.includes('skipping this run')), 'console says so')
+})
+
+await test('a corrupt deploy-state.json is quarantined with a log line and then treated as empty', async () => {
+  const env = makeEnv()
+  env.git.remote = A
+  writeFileSync(env.path('deploy-state.json'), '{ not json')
+  const r = await env.run()
+  eq(r.outcome, 'up-to-date', 'the run carried on')
+  const kept = readdirSync(env.configDir).filter((f) => f.startsWith('deploy-state.json.corrupt-'))
+  eq(kept.length, 1, 'a copy was kept')
+  eq(readFileSync(join(env.configDir, kept[0]), 'utf8'), '{ not json')
+  assert(env.readLog().includes('deploy-state.json unreadable; keeping a copy at'), 'logged')
+})
+
+await test('state and last-deploy.json are written by rename, never in place, and leave no tmp files', async () => {
+  const env = makeEnv()
+  const written = []
+  const renamed = []
+  env.deps.fs = {
+    ...realFs,
+    writeFileSync(f, ...rest) { written.push(f); return realFs.writeFileSync(f, ...rest) },
+    renameSync(from, to) { renamed.push(to); return realFs.renameSync(from, to) },
+  }
+  eq((await env.run()).outcome, 'deployed')
+  assert(renamed.includes(env.path('deploy-state.json')) && renamed.includes(env.path('last-deploy.json')), 'both renamed into place')
+  assert(!written.includes(env.path('deploy-state.json')) && !written.includes(env.path('last-deploy.json')), 'neither written in place')
+  eq(readdirSync(env.configDir).filter((f) => f.includes('.tmp-')), [], 'no tmp leftovers')
 })
 
 // ---------------------------------------------------------------------------
