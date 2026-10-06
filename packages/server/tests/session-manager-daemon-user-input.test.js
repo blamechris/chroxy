@@ -132,15 +132,36 @@ describe('SessionManager.daemonTurnRefusal — the one refusal seam (#8301)', ()
     assert.equal(mgr.daemonTurnRefusal('s1'), null)
   })
 
-  it('refuses after a user Stop, until the user next TYPES', () => {
+  it('refuses after a user Stop, until the user expresses intent (recordUserIntent)', () => {
     withSession()
     mgr.recordUserInterrupt('s1')
     assert.equal(mgr.daemonTurnRefusal('s1'), 'user-stopped')
-    mgr.recordUserInput('s1', 'carry on', 'uin-1')
-    assert.equal(mgr.daemonTurnRefusal('s1'), null, 'a typed input re-enables wakes')
+    mgr.recordUserIntent('s1')
+    assert.equal(mgr.daemonTurnRefusal('s1'), null, 'a person typing re-enables wakes')
   })
 
-  it('a DAEMON input does not clear the stopped state', () => {
+  it('recordUserInput (which runs at ADMISSION) does NOT clear a Stop: an input sent before the Stop must not undo it', () => {
+    withSession()
+    mgr.recordUserInterrupt('s1')
+    // A provider that admits after awaiting its transport records the input AFTER
+    // the Stop even though the person sent it BEFORE. That must not clear it.
+    mgr.recordUserInput('s1', 'sent before the stop, admitted after', 'uin-1')
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'user-stopped')
+  })
+
+  it('recordUserIntent is clear-only: no history, no activity touch, no event', () => {
+    withSession()
+    mgr.recordUserInterrupt('s1')
+    mgr._sessionLastActivityAt.set('s1', 1)
+    const seen = []
+    mgr.on('session_event', (e) => seen.push(e))
+    mgr.recordUserIntent('s1')
+    assert.deepEqual(mgr.getHistory('s1'), [])
+    assert.equal(mgr._sessionLastActivityAt.get('s1'), 1)
+    assert.deepEqual(seen, [])
+  })
+
+  it('a DAEMON input does not clear the stopped state (nor does the wake\'s own recording)', () => {
     withSession()
     mgr.recordUserInterrupt('s1')
     mgr.recordDaemonUserInput('s1', 'CI finished on PR #9', 'chroxy-ci-wake-abc-1')

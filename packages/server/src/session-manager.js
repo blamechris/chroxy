@@ -3961,12 +3961,26 @@ export class SessionManager extends EventEmitter {
    */
   recordUserInput(sessionId, text, messageId) {
     const entry = this._sessions.get(sessionId)
-    // #8301: a person typing is the one thing that ends the "user stopped this
-    // session" state (see `recordUserInterrupt`). This is the TYPED-input
-    // recorder; `recordDaemonUserInput` below deliberately does not come through
-    // here, so a wake can never re-enable wakes.
-    this._userStopped.delete(sessionId)
     this._history.recordUserInput(sessionId, text, entry || undefined, messageId)
+  }
+
+  /**
+   * #8301: a person expressed intent to work with this session — they typed a chat
+   * input or submitted a line in its terminal pane. Clears the "user stopped"
+   * state (see `recordUserInterrupt`) and does nothing else: no history, no
+   * activity touch, no label.
+   *
+   * Called at RECEIPT of the input, synchronously, by the input handlers — NOT
+   * from `recordUserInput`, which runs at admission. For correlated input that is
+   * later than the person's act: a provider that admits after awaiting its
+   * transport would let an input sent BEFORE a Stop clear that Stop when it was
+   * finally admitted. `recordDaemonUserInput` and the daemon's PTY wake never come
+   * through here, so a wake can never re-enable wakes.
+   *
+   * @param {string} sessionId
+   */
+  recordUserIntent(sessionId) {
+    this._userStopped.delete(sessionId)
   }
 
   /**
