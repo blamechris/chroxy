@@ -230,6 +230,24 @@ function setupSessionForwarding(normalizer, ctx) {
       return
     }
 
+    // #8301: a DAEMON-authored user turn (the CI-completion wake, recorded by
+    // SessionManager.recordDaemonUserInput). Same wire shape input-handlers.js
+    // broadcasts for a typed input, minus `clientId` — there is no sending
+    // client, so every viewer of the session renders it. Transient here: the
+    // history entry was recorded at the source, which is what a reconnecting
+    // client replays. Not routed through the normalizer — like terminal_output
+    // above, it is a straight relay with no per-provider shape to normalise.
+    if (event === 'user_input') {
+      broadcastToSession(sessionId, {
+        type: 'user_input',
+        sessionId,
+        text: typeof data?.text === 'string' ? data.text : '',
+        messageId: data?.messageId,
+        timestamp: typeof data?.timestamp === 'number' ? data.timestamp : Date.now(),
+      })
+      return
+    }
+
     // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
     if (event === 'stream_start') {
       broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })

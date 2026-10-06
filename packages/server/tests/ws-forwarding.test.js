@@ -1861,3 +1861,36 @@ describe('terminal_output forwarding (#5835)', () => {
     assert.equal(ctx.broadcast.mock.callCount(), 0) // not a global broadcast (no session_activity)
   })
 })
+
+describe('user_input forwarding for a daemon-authored turn (#8301)', () => {
+  it('relays a user_input session_event to the session with no clientId', () => {
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'user_input',
+      data: { text: 'CI finished on PR #9', messageId: 'chroxy-ci-wake-abc-1', timestamp: 1234 },
+    })
+    assert.equal(ctx.broadcastToSession.mock.callCount(), 1)
+    const [sid, msg, filter] = ctx.broadcastToSession.mock.calls[0].arguments
+    assert.equal(sid, 'sess-1')
+    assert.deepEqual(msg, {
+      type: 'user_input',
+      sessionId: 'sess-1',
+      text: 'CI finished on PR #9',
+      messageId: 'chroxy-ci-wake-abc-1',
+      timestamp: 1234,
+    })
+    assert.equal('clientId' in msg, false, 'no sender, so every viewer renders it')
+    assert.equal(filter, undefined, 'default session scoping, no custom recipient filter')
+  })
+
+  it('coerces a malformed payload rather than throwing', () => {
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+    ctx.sessionManager.emit('session_event', { sessionId: 'sess-1', event: 'user_input', data: {} })
+    const [, msg] = ctx.broadcastToSession.mock.calls[0].arguments
+    assert.equal(msg.text, '')
+    assert.equal(typeof msg.timestamp, 'number')
+  })
+})

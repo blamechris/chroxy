@@ -998,6 +998,7 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(capability)** Thinking level control | Yes | — | — | — | Yes (app-server, per-model) | — | — | — | — |
 | **(capability)** Thinking keyword escalation (`thinkingKeywords`) | Yes | — | — | — | — | — | — | — | — |
 | **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes | Yes | Yes |
+| **(capability)** Daemon turn input (`daemonTurnInput` — a daemon-authored line, e.g. the CI-completion wake, can travel `sendMessage` as a user turn: dispatched when idle, queued when busy) | Yes | Yes | — (PTY typing instead) | — | Yes (app-server) | — | — | — | — |
 | **(capability)** Skill toggle (`skillToggle` — live skill activate/deactivate) | Yes | — | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | Yes (app-server) | — | — | — | — |
 | **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — | Yes | Yes | Yes |

@@ -220,6 +220,13 @@ export class CodexAppServerSession extends BaseSession {
       // as an oversight: tracked by #6885 ("Codex deny reason either reaches the
       // model or is documented as unsupported"). Flip to true once that lands.
       denyReason: false,
+      // #8301: the provider-neutral turn-input seam. `sendMessage` dispatches when
+      // idle, queues via `enqueueOutgoingMessage` when busy (flushed at turn end,
+      // cleared by `interrupt()`), and reports admission through
+      // `onInputAdmission` — so a daemon-authored line (the CI-completion wake)
+      // can travel it as an ordinary user turn. session-wake.js gates on this with
+      // strict `=== true`; absent means NOT supported. Never duck-typed.
+      daemonTurnInput: true,
     }
   }
 

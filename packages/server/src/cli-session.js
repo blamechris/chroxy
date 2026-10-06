@@ -292,6 +292,13 @@ export class CliSession extends BaseSession {
       // #3932: declared explicitly so the capability matrix matches across
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,
+      // #8301: the provider-neutral turn-input seam. `sendMessage` dispatches when
+      // idle, queues via `enqueueOutgoingMessage` when busy (flushed at turn end,
+      // cleared by `interrupt()`), and reports admission through
+      // `onInputAdmission` — so a daemon-authored line (the CI-completion wake)
+      // can travel it as an ordinary user turn. session-wake.js gates on this with
+      // strict `=== true`; absent means NOT supported. Never duck-typed.
+      daemonTurnInput: true,
     }
   }
 

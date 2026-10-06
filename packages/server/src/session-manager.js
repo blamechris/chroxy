@@ -3954,6 +3954,41 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8301: make a DAEMON-authored turn visible the way a typed one is. The CI
+   * wake travels the provider's `sendMessage` seam as an ordinary user turn, but
+   * `input-handlers.js` is the only thing that records a user turn to history
+   * and echoes it to clients — and it only runs for a websocket `input`. So this
+   * is the non-ws equivalent of its `commitForwardedEffects`: the history entry
+   * (a reconnecting client replays it), `touchActivity`, and a `user_input`
+   * session event that `ws-forwarding.js` broadcasts to the session's viewers.
+   *
+   * Deliberately NOT `recordUserInput`'s auto-label path: the first input of a
+   * session names it, and a daemon line ("CI finished on PR #N…") must never be
+   * what a session is called. No `clientId` goes out — there is no sender, so
+   * every viewer renders it (a client skips only the `user_input` it sent).
+   *
+   * Call it only once the provider has ADMITTED the line (dispatched or queued).
+   * Nothing is recorded for a session that no longer exists.
+   *
+   * @param {string} sessionId
+   * @param {string} text - the exact line the provider was given.
+   * @param {string} messageId - stable id (matches the provider's queue mirror).
+   * @returns {boolean} true when recorded and broadcast.
+   */
+  recordDaemonUserInput(sessionId, text, messageId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying) return false
+    this._history.recordUserInput(sessionId, text, undefined, messageId)
+    this.touchActivity(sessionId)
+    this.emit('session_event', {
+      sessionId,
+      event: 'user_input',
+      data: { text, messageId, timestamp: Date.now() },
+    })
+    return true
+  }
+
+  /**
    * Record an event into the session's message history ring buffer.
    * Delegates to SessionMessageHistory and triggers persist when needed.
    */

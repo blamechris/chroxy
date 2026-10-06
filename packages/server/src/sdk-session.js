@@ -280,6 +280,13 @@ export class SdkSession extends BaseSession {
       // DockerSdkSession overrides this to false — see the instance-level
       // `supportsConversationFork` getter (transcript lives in-container).
       conversationFork: true,
+      // #8301: the provider-neutral turn-input seam. `sendMessage` dispatches when
+      // idle, queues via `enqueueOutgoingMessage` when busy (flushed at turn end,
+      // cleared by `interrupt()`), and reports admission through
+      // `onInputAdmission` — so a daemon-authored line (the CI-completion wake)
+      // can travel it as an ordinary user turn. session-wake.js gates on this with
+      // strict `=== true`; absent means NOT supported. Never duck-typed.
+      daemonTurnInput: true,
     }
   }
 
