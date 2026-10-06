@@ -1069,8 +1069,79 @@ describe('SdkSession turn input (#8300)', () => {
       assert.ok(order.includes('result'))
     })
 
+    // A shell no live task names is still a shell the CLI spawned, and a spawned
+    // shell can outlive the query. It must be STOPPED through the CLI and the
+    // loss reported like a rostered task's — not dropped from the tracker silently.
+    describe('a shell absent from the live roster is stopped and reported, not silently dropped', () => {
+      const announcedOnly = (id, ...more) => [
+        init(),
+        toolUseStart(`tu-${id}`, 'Bash'),
+        assistantToolUse(`tu-${id}`, 'Bash', { command: 'sleep 30', run_in_background: true }),
+        toolResult(`tu-${id}`, `Command running in background with ID: ${id}`),
+        ...more,
+      ]
+
+      it('asks the CLI to stop it (stopTask), reports it as stopped, closes the query, then releases it', async () => {
+        const events = capture(session)
+        wire(session, announcedOnly('sh-z', assistantText('started'), promptResult(2), { __parkUntilClosed: true }), state)
+        await session.sendMessage('run it')
+        assert.deepEqual(state.stopCalls.map((c) => c.taskId), ['sh-z'], 'a stop request went to the CLI for the shell-only id')
+        assert.equal(state.stopCalls[0].closedBefore, false, 'asked while the control channel was still open')
+        const loss = events.filter((e) => e.name === 'error')
+        assert.equal(loss.length, 1)
+        assert.equal(loss[0].code, 'background_task_ended_with_turn')
+        assert.equal(loss[0].taskId, 'sh-z')
+        assert.equal(loss[0].stopped, true)
+        assert.match(loss[0].message, /^Background shell "sleep 30" was still running when the turn ended and was stopped with it/)
+        assert.equal(state.closeCalls, 1, 'the turn\'s process is ended')
+        assert.equal(session._pendingBackgroundShells.has('sh-z'), false, 'released afterwards')
+        assert.equal(session.isRunning, false)
+      })
+
+      it('says so when the CLI could not stop it, and still releases the tracker entry', async () => {
+        const events = capture(session)
+        state.stopTaskFails = true
+        wire(session, announcedOnly('sh-y', promptResult(2), { __parkUntilClosed: true }), state)
+        await session.sendMessage('run it')
+        const loss = events.filter((e) => e.name === 'error')
+        assert.equal(loss.length, 1)
+        assert.equal(loss[0].stopped, false)
+        assert.match(loss[0].message, /could not be stopped; it may still be running/)
+        assert.equal(session._pendingBackgroundShells.has('sh-y'), false)
+      })
+
+      it('covers a skip_transcript shell the roster never held', async () => {
+        const events = capture(session)
+        wire(session, announcedOnly('sh-q',
+          { type: 'system', subtype: 'task_started', task_id: 'sh-q', tool_use_id: 'tu-sh-q', task_type: 'local_bash', is_backgrounded: true, skip_transcript: true, description: 'tail' },
+          promptResult(2), { __parkUntilClosed: true }), state)
+        await session.sendMessage('run it')
+        assert.deepEqual(state.stopCalls.map((c) => c.taskId), ['sh-q'])
+        assert.equal(events.filter((e) => e.name === 'error' && e.taskId === 'sh-q').length, 1)
+      })
+
+      it('does not stop a shell a notification already closed, nor one rostered (no double stop)', async () => {
+        const events = capture(session)
+        wire(session, shellScript('sh-r',
+          { type: 'system', subtype: 'task_notification', task_id: 'sh-r', tool_use_id: 'tu-sh-r', status: 'completed', output_file: '/tmp/o', summary: 'done' },
+          promptResult(2)), state)
+        await session.sendMessage('run it')
+        assert.equal(state.stopCalls, undefined)
+        assert.equal(events.filter((e) => e.name === 'error').length, 0)
+        const state2 = {}
+        const s2 = createSession()
+        const events2 = capture(s2)
+        wire(s2, shellScript('sh-live', promptResult(2), { __parkUntilClosed: true }), state2)
+        await s2.sendMessage('run it')
+        assert.deepEqual(state2.stopCalls.map((c) => c.taskId), ['sh-live'], 'a rostered shell is stopped exactly once')
+        assert.equal(events2.filter((e) => e.name === 'error').length, 1)
+        s2.destroy()
+      })
+    })
+
     it('releases it before the turn\'s result is emitted, so the result snapshot carries no shell', async () => {
       let atResult = null
+      capture(session) // the shell is stopped with the turn: its loss is reported as an error event
       session.on('result', () => { atResult = session._pendingBackgroundShells.size })
       // No task_started names the shell, so no live task reaches the stop pass:
       // only the turn-end release can have cleared it by the time `result` fires.
@@ -1111,30 +1182,49 @@ describe('SdkSession turn input (#8300)', () => {
     })
 
     it('does not reap a shell belonging to the turn that is still running', async () => {
-      // Turn A ends while turn B (started in A's drain) has a shell tracked.
+      // Turn A ends while turn B (started inside A's drain) holds a tracked shell.
+      // Explicit barriers make the ORDER the claim, not a timing hope:
+      //   1. B starts and tracks its shell, then is HELD (gate `releaseB`)
+      //   2. A is held until B has tracked it, then runs to its very end, its
+      //      `finally` included (we await A's sendMessage)
+      //   3. only then do we look: B must still be active with its shell tracked
+      //   4. B is released and ends normally
+      // A reaper that clears every shell (not just the ending turn's own) clears
+      // sh-b in step 2 and fails step 3.
       const bState = {}
       let bPromise = null
-      const bSawShell = []
+      let markBTracked
+      const bTracked = new Promise((resolve) => { markBTracked = resolve })
+      let releaseB
+      const bGate = new Promise((resolve) => { releaseB = resolve })
+      let bBusyAtHold = null
       capture(session)
       wire(session, [
         init(),
         promptResult(1),
-        () => {
+        async () => {
           session._callQuery = (bArgs) => {
             consumeInput(bArgs.prompt, bState)
             return fakeQuery(shellScript('sh-b',
-              { __delayMs: 60 },
-              () => bSawShell.push(session._pendingBackgroundShells.has('sh-b')),
+              () => { bBusyAtHold = session._pendingBackgroundShells.has('sh-b'); markBTracked() },
+              async () => { await bGate },
               promptResult(2),
               { __parkUntilClosed: true }), bState)
           }
           bPromise = session.sendMessage('B')
+          await bTracked // A does not finish until B has its shell tracked
         },
-        { __delayMs: 100 },
       ], state)
-      await session.sendMessage('A')
+
+      await session.sendMessage('A') // A is now fully done, `finally` included
+      assert.equal(bBusyAtHold, true, 'precondition: B tracked its shell before A ended')
+      assert.equal(session._pendingBackgroundShells.has('sh-b'), true, 'A\'s end did not release B\'s shell')
+      assert.equal(session._isBusy, true, 'B is still the active turn')
+      assert.equal(bState.closeCalls, undefined, 'and was not closed by A')
+
+      releaseB()
       await bPromise
-      assert.deepEqual(bSawShell, [true], 'A\'s end did not release B\'s shell while B was running')
+      assert.equal(session._pendingBackgroundShells.has('sh-b'), false, 'B releases its own shell when B ends')
     })
   })
 

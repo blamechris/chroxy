@@ -1330,7 +1330,25 @@ export class SdkSession extends BaseSession {
         // Only this turn's own tasks leave the roster: a follow-up turn that
         // took the session owns whatever else is in it.
         for (const task of liveWork) this._liveBackgroundTasks.delete(task.taskId)
-        const stopResults = await Promise.all(liveWork.map((task) => {
+        // #8302: a shell this turn's tool_result announced that no live task
+        // names (no `task_started`, or a `skip_transcript` one) is still a shell
+        // the CLI spawned, and a spawned shell can outlive the query (verified
+        // live, above). Releasing it silently would leave it running, unreported.
+        // So it goes through the SAME bounded stop pass and the SAME report as a
+        // rostered task, and is released afterwards. Only shells still tracked:
+        // one a notification already closed is gone from the tracker.
+        const rosteredIds = new Set(liveWork.map((task) => task.taskId))
+        const shellOnlyWork = [...turnShellIds]
+          .filter((shellId) => !rosteredIds.has(shellId) && this._pendingBackgroundShells.has(shellId))
+          .map((shellId) => ({
+            taskId: shellId,
+            toolUseId: null,
+            taskType: 'local_bash',
+            description: this._pendingBackgroundShells.get(shellId)?.command || shellId,
+            background: true,
+          }))
+        const stopWork = [...liveWork, ...shellOnlyWork]
+        const stopResults = await Promise.all(stopWork.map((task) => {
           const kind = task.taskType === 'local_bash' ? 'shell' : 'subagent'
           ;(this._log || log).warn(`Background ${kind} "${task.description}" (${task.taskId}) was still running at the turn's result; stopping it with the turn`)
           // Ask the CLI to stop the task while the control channel is still
@@ -1504,7 +1522,7 @@ export class SdkSession extends BaseSession {
         // the abort that follows is expected (see `closedAfterResult`).
         streamState.hasStreamStarted = false
         if (input) input.end()
-        if (liveWork.length) closeTurnQuery()
+        if (stopWork.length) closeTurnQuery()
       }
 
       for await (const msg of this._query) {
