@@ -33,7 +33,7 @@ import { deploy, parseArgs } from '../deploy-daemon.mjs'
 
 // Every case in this file. Bump it when you add one: a case that vanishes
 // should break the run rather than quietly shrink it.
-const MIN_CASES = 42
+const MIN_CASES = 56
 
 let pass = 0
 let fail = 0
@@ -108,6 +108,11 @@ function makeEnv(o = {}) {
       tunnel: [200], // statuses in order (last repeats), or (generation, call) => status
       tunnelCalls: 0,
       pendingRestart: null,
+      // After a restart into generation `crashGen`, the process dies this long after coming up.
+      crashGen: null,
+      crashAfterMs: 5000,
+      dead: false,
+      crashKeepsHealth: false, // the pid is gone but something still answers /health
     },
     ...o.override,
   }
@@ -123,8 +128,14 @@ function makeEnv(o = {}) {
     if (d.pendingRestart && env.t >= d.pendingRestart.at) {
       d.livePid = d.pendingRestart.pid
       d.generation++
+      d.dead = false
+      d.cameUpAt = d.pendingRestart.at
       writeConn(d.livePid)
       d.pendingRestart = null
+    }
+    if (d.crashGen === d.generation && !d.dead && d.cameUpAt != null && env.t >= d.cameUpAt + d.crashAfterMs) {
+      d.dead = !d.crashKeepsHealth // a crashed process normally refuses connections
+      d.livePid = null
     }
   }
 
@@ -186,7 +197,10 @@ function makeEnv(o = {}) {
         if (r === 'throw') throw new Error('ECONNREFUSED')
         return resp(r.status, r.body)
       }
-      if (url === 'http://127.0.0.1:8765/health') return resp(d.health(d.generation), { status: 'ok' })
+      if (url === 'http://127.0.0.1:8765/health') {
+        if (d.dead) throw new Error('ECONNREFUSED')
+        return resp(d.health(d.generation), { status: 'ok' })
+      }
       if (url === 'https://tunnel.example/health') {
         const n = d.tunnelCalls++
         return resp(typeof d.tunnel === 'function' ? d.tunnel(d.generation, n) : d.tunnel[Math.min(n, d.tunnel.length - 1)], {})
@@ -204,7 +218,7 @@ function makeEnv(o = {}) {
   env.deps = deps
   env.opts = (extra = {}) => ({
     checkout, configDir, label: 'com.chroxy.server', branch: 'main', remote: 'origin', port: null,
-    healthTimeoutS: 5, npm: null, dryRun: false, force: false, tunnelCheck: true, ...extra,
+    healthTimeoutS: 5, settleS: 15, retry: false, npm: null, dryRun: false, force: false, tunnelCheck: true, ...extra,
   })
   env.run = (extra) => deploy(env.opts(extra), deps)
   env.path = (f) => join(configDir, f)
@@ -234,14 +248,14 @@ await test('parseArgs: defaults and every flag', () => {
   const o = parseArgs([], {}, '/home/u')
   eq(o.checkout, '/home/u/Projects/chroxy-daemon')
   eq(o.configDir, '/home/u/.chroxy')
-  eq([o.label, o.branch, o.remote, o.healthTimeoutS, o.dryRun, o.force, o.tunnelCheck],
-    ['com.chroxy.server', 'main', 'origin', 90, false, false, true])
+  eq([o.label, o.branch, o.remote, o.healthTimeoutS, o.dryRun, o.force, o.tunnelCheck, o.settleS, o.retry],
+    ['com.chroxy.server', 'main', 'origin', 90, false, false, true, 15, false])
   const e = parseArgs([], { CHROXY_CONFIG_DIR: '/x/cfg' }, '/home/u')
   eq(e.configDir, '/x/cfg', 'CHROXY_CONFIG_DIR is honoured')
   const f = parseArgs(['--checkout', '/c', '--config-dir', '/d', '--label', 'l.x', '--branch', 'rel/1', '--remote', 'up',
-    '--port', '9000', '--health-timeout', '30', '--npm', '/n/npm', '--dry-run', '--force', '--no-tunnel-check'], {}, '/h')
-  eq([f.checkout, f.configDir, f.label, f.branch, f.remote, f.port, f.healthTimeoutS, f.npm, f.dryRun, f.force, f.tunnelCheck],
-    ['/c', '/d', 'l.x', 'rel/1', 'up', 9000, 30, '/n/npm', true, true, false])
+    '--port', '9000', '--health-timeout', '30', '--npm', '/n/npm', '--dry-run', '--force', '--no-tunnel-check', '--settle', '0', '--retry'], {}, '/h')
+  eq([f.checkout, f.configDir, f.label, f.branch, f.remote, f.port, f.healthTimeoutS, f.npm, f.dryRun, f.force, f.tunnelCheck, f.settleS, f.retry],
+    ['/c', '/d', 'l.x', 'rel/1', 'up', 9000, 30, '/n/npm', true, true, false, 0, true])
 })
 
 await test('parseArgs: refuses a branch/remote/label git or launchctl would read as an option', () => {
@@ -254,7 +268,7 @@ await test('parseArgs: refuses a branch/remote/label git or launchctl would read
 })
 
 await test('parseArgs: unknown flag, missing value and bad numbers are errors', () => {
-  for (const bad of [['--nope'], ['--checkout'], ['--port', 'x'], ['--port', '70000'], ['--health-timeout', '0']]) {
+  for (const bad of [['--nope'], ['--checkout'], ['--port', 'x'], ['--port', '70000'], ['--health-timeout', '0'], ['--settle', '-1'], ['--settle', 'x']]) {
     let threw = false
     try { parseArgs(bad, {}, '/h') } catch { threw = true }
     assert(threw, `${bad.join(' ')} must be an error`)
@@ -519,7 +533,7 @@ await test('a failed launchctl kill rolls the checkout back without waiting on h
   const env = makeEnv()
   env.daemon.killOk = false
   const r = await env.run()
-  eq([r.exitCode, r.outcome], [1, 'failed'])
+  eq([r.exitCode, r.outcome], [1, 'failed-restart'])
   eq(env.git.head, A)
   eq(kills(env).length, 1, 'one attempt, no second kill')
 })
@@ -528,50 +542,228 @@ await test('a failed launchctl kill rolls the checkout back without waiting on h
 // busy after the build
 // ---------------------------------------------------------------------------
 
-await test('busy at the re-check leaves the build in place and a pending marker; the next run restarts', async () => {
-  const env = makeEnv()
-  env.daemon.idle = [
-    { status: 200, body: { idle: true, reasons: [] } },
-    { status: 200, body: { idle: false, reasons: ['session "a" busy: turn'] } },
-    { status: 200, body: { idle: true, reasons: [] } },
-  ]
-  const r1 = await env.run()
-  eq([r1.exitCode, r1.outcome], [0, 'restart-deferred'])
-  eq(kills(env), [], 'not restarted while busy')
-  eq(env.git.head, B, 'left at the target, NOT reset')
-  eq(JSON.parse(readFileSync(env.path('deploy-pending-restart.json'), 'utf8')), { from: A, to: B })
-  assert(env.readLog().includes('restart deferred'), 'logged')
+const BUSY = { status: 200, body: { idle: false, reasons: ['session "a" busy: turn'] } }
+const IDLE = { status: 200, body: { idle: true, reasons: [] } }
 
+await test('busy at the re-check ROLLS BACK: old commit, old build, no restart, exit 0', async () => {
+  const env = makeEnv()
+  env.daemon.idle = [IDLE, BUSY]
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [0, 'deferred-busy-after-build'])
+  eq(mutating(env), [`git merge --ff-only ${B}`, BUILD, `git reset --hard ${A}`, BUILD], 'merged, built, then put the old tree back and rebuilt it')
+  eq(env.git.head, A, 'not left at the new commit')
+  eq(kills(env), [], 'never restarted')
+  assert(env.readLog().includes('deferred after build: busy (session "a" busy: turn)'), 'logged')
+  assert(!existsSync(env.path('deploy-pending-restart.json')), 'no pending marker is written any more')
+})
+
+await test('busy at the re-check after a lockfile change re-runs npm ci on the way back', async () => {
+  const env = makeEnv()
+  env.git.files = ['package-lock.json']
+  env.daemon.idle = [IDLE, BUSY]
+  const r = await env.run()
+  eq(r.outcome, 'deferred-busy-after-build')
+  eq(mutating(env), [`git merge --ff-only ${B}`, CI, BUILD, `git reset --hard ${A}`, CI, BUILD])
+})
+
+await test('"cannot confirm idle" at the re-check also rolls back', async () => {
+  const env = makeEnv()
+  env.daemon.idle = [IDLE, 'throw']
+  const r = await env.run()
+  eq(r.outcome, 'deferred-busy-after-build')
+  eq(env.git.head, A)
+  eq(kills(env), [])
+})
+
+await test('the busy-after-build deferral is deduped per target and is NOT remembered as a failed target', async () => {
+  const env = makeEnv()
+  env.daemon.idle = [IDLE, BUSY, IDLE, BUSY]
+  await env.run()
   env.calls.length = 0
   const r2 = await env.run()
-  eq([r2.exitCode, r2.outcome], [0, 'deployed'])
-  eq(mutating(env), [KILL], 'only the restart: no second merge, no second build')
-  eq([env.last().from, env.last().to], [A, B], 'from comes from the marker')
-  assert(!existsSync(env.path('deploy-pending-restart.json')), 'marker removed on success')
+  eq(r2.outcome, 'deferred-busy-after-build', 'a busy daemon is not a bad target: the next tick tries again')
+  assert(env.calls.includes(`git merge --ff-only ${B}`), 'retried')
+  eq(env.readLog().trim().split('\n').length, 1, 'one log line for two ticks')
 })
 
-await test('a resumed restart that fails health rolls back to the MARKER\'s from, not HEAD', async () => {
-  const env = makeEnv({ brokenNewBuild: true })
-  env.git.head = B
-  writeFileSync(env.path('deploy-pending-restart.json'), JSON.stringify({ from: A, to: B }))
+await test('a rollback that fails after a busy re-check is ROLLBACK-FAILED', async () => {
+  const env = makeEnv()
+  env.daemon.idle = [IDLE, BUSY]
+  env.build.buildOkAfterRollback = false
   const r = await env.run()
-  eq(r.outcome, 'rolled-back-health')
-  assert(env.calls.includes(`git reset --hard ${A}`), 'reset to the marker\'s from')
-  eq(env.git.head, A)
+  eq([r.exitCode, r.outcome], [1, 'rollback-failed'])
+  assert(env.readLog().includes('ROLLBACK-FAILED'), 'loud')
+  eq(kills(env), [])
 })
 
-await test('a marker that no longer matches HEAD, or carries a non-SHA, is discarded and never reaches git', async () => {
+await test('a leftover deploy-pending-restart.json from the retired design is deleted, and never acted on', async () => {
   const env = makeEnv()
   writeFileSync(env.path('deploy-pending-restart.json'), JSON.stringify({ from: '--hard', to: A }))
   env.git.remote = A
+  const r = await env.run()
+  eq(r.outcome, 'up-to-date')
+  assert(!existsSync(env.path('deploy-pending-restart.json')), 'deleted')
+  assert(!env.calls.some((c) => c.includes('--hard')), 'never reached an argv')
+})
+
+// ---------------------------------------------------------------------------
+// a target that already rolled back is not retried
+// ---------------------------------------------------------------------------
+
+const stateOf = (env) => JSON.parse(readFileSync(env.path('deploy-state.json'), 'utf8'))
+
+await test('after a build rollback the same target is SKIPPED on later ticks: no merge, no build, one log line', async () => {
+  const env = makeEnv()
+  env.build.buildOk = false
   await env.run()
-  assert(!existsSync(env.path('deploy-pending-restart.json')), 'discarded')
-  assert(!env.calls.some((c) => c.includes('--hard')), 'the bad value never reached an argv')
+  eq([stateOf(env).failedTarget, stateOf(env).failedOutcome], [B, 'rolled-back-build'])
+  env.calls.length = 0
+  const r2 = await env.run()
+  const r3 = await env.run()
+  eq([r2.exitCode, r2.outcome, r3.outcome], [0, 'skipped-failed-target', 'skipped-failed-target'])
+  eq(mutating(env), [], 'nothing ran')
+  assert(!env.calls.includes(IDLE_URL), 'the daemon was not even asked')
+  const lines = env.readLog().trim().split('\n')
+  eq(lines.length, 2, 'the rollback line plus ONE skip line')
+  assert(lines[1].includes(`skipped: ${B.slice(0, 12)} already rolled back (rolled-back-build); waiting for a newer main or --retry`), 'exact wording')
+})
+
+await test('a health rollback (e.g. a tunnel outage) is remembered too, so the daemon is not restarted twice every tick', async () => {
+  const env = makeEnv({ brokenNewBuild: true })
+  await env.run()
+  eq(stateOf(env).failedOutcome, 'rolled-back-health')
+  env.calls.length = 0
+  const r = await env.run()
+  eq(r.outcome, 'skipped-failed-target')
+  eq(kills(env), [])
+})
+
+await test('a failed restart and a failed rollback are remembered too', async () => {
+  const a = makeEnv()
+  a.daemon.killOk = false
+  await a.run()
+  eq(stateOf(a).failedOutcome, 'failed-restart')
+  const b = makeEnv()
+  b.build.buildOk = false
+  b.build.buildOkAfterRollback = false
+  await b.run()
+  eq(stateOf(b).failedOutcome, 'rollback-failed')
+  eq((await b.run()).outcome, 'skipped-failed-target')
+})
+
+await test('a newer origin/main clears the remembered failure and is deployed', async () => {
+  const env = makeEnv()
+  env.build.buildOk = false
+  await env.run()
+  env.git.head = A
+  env.git.remote = 'c'.repeat(40)
+  env.build.buildOk = true
+  env.calls.length = 0
+  const r = await env.run()
+  eq(r.outcome, 'deployed')
+  eq(stateOf(env).failedTarget, undefined, 'cleared')
+
+  // The clearing must not depend on the new target SUCCEEDING: a newer main
+  // that merely defers (busy) has to forget the old failure too.
   const env2 = makeEnv()
-  writeFileSync(env2.path('deploy-pending-restart.json'), JSON.stringify({ from: A, to: 'c'.repeat(40) }))
-  env2.git.remote = A
+  env2.build.buildOk = false
   await env2.run()
-  assert(!existsSync(env2.path('deploy-pending-restart.json')), 'a marker for some other commit is discarded')
+  eq(stateOf(env2).failedTarget, B)
+  env2.git.head = A
+  env2.git.remote = 'c'.repeat(40)
+  env2.daemon.idle = [BUSY]
+  const r2 = await env2.run()
+  eq(r2.outcome, 'deferred-busy')
+  eq(stateOf(env2).failedTarget, undefined, 'a newer main clears it even when nothing deploys')
+})
+
+await test('--retry tries the failed target once and clears the memory on success; --force does not imply it', async () => {
+  const env = makeEnv()
+  env.build.buildOk = false
+  await env.run()
+  env.git.head = A
+  env.build.buildOk = true
+  const forced = await env.run({ force: true })
+  eq(forced.outcome, 'skipped-failed-target', '--force alone still skips')
+  const r = await env.run({ retry: true })
+  eq(r.outcome, 'deployed')
+  eq(stateOf(env).failedTarget, undefined, 'a successful retry clears it')
+})
+
+await test('--retry that fails again re-records the failure', async () => {
+  const env = makeEnv()
+  env.build.buildOk = false
+  await env.run()
+  env.git.head = A
+  env.calls.length = 0 // the fake build keys 'after rollback' off the call log
+  const r = await env.run({ retry: true })
+  eq(r.outcome, 'rolled-back-build')
+  eq(stateOf(env).failedTarget, B)
+  eq((await env.run()).outcome, 'skipped-failed-target')
+})
+
+await test('--dry-run reports a remembered failure and changes nothing', async () => {
+  const env = makeEnv()
+  env.build.buildOk = false
+  await env.run()
+  env.git.head = A
+  env.calls.length = 0
+  env.logs.length = 0
+  const before = readFileSync(env.path('deploy-state.json'), 'utf8')
+  const r = await env.run({ dryRun: true })
+  eq(r.outcome, 'dry-run')
+  assert(env.logs.join('\n').includes('would SKIP this target'), 'says a real run would skip')
+  eq(mutating(env), [])
+  eq(readFileSync(env.path('deploy-state.json'), 'utf8'), before, 'state untouched')
+})
+
+// ---------------------------------------------------------------------------
+// settle window after health
+// ---------------------------------------------------------------------------
+
+await test('a build that answers /health and then dies inside the settle window is rolled back', async () => {
+  const env = makeEnv()
+  env.daemon.crashGen = 1
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [1, 'rolled-back-health'])
+  assert(env.readLog().includes('no longer running') || env.readLog().includes('ECONNREFUSED'), 'says why')
+  eq(env.git.head, A)
+  eq(kills(env).length, 2, 'restarted onto the old build')
+})
+
+await test('settle checks the pid is alive, not only that /health answers', async () => {
+  const env = makeEnv()
+  env.daemon.crashGen = 1
+  env.daemon.crashKeepsHealth = true
+  const r = await env.run()
+  eq(r.outcome, 'rolled-back-health')
+  assert(env.readLog().includes('no longer running'), 'caught by the liveness check')
+})
+
+await test('the settle window is waited out before the deploy is called good', async () => {
+  const env = makeEnv()
+  const t0 = env.t
+  const r = await env.run({ settleS: 40 })
+  eq(r.outcome, 'deployed')
+  assert(env.t - t0 >= 3000 + 40000, `only ${env.t - t0}ms elapsed: the settle sleep was skipped`)
+})
+
+await test('a daemon that is relaunched under a different pid during the settle window is not accepted', async () => {
+  const env = makeEnv()
+  const origSleep = env.deps.sleep
+  let relaunched = false
+  env.deps.sleep = async (ms) => {
+    await origSleep(ms)
+    // launchd relaunches a crashing service: connection.json now names yet another pid.
+    if (!relaunched && env.daemon.generation === 1 && ms === 15000) {
+      relaunched = true
+      writeFileSync(env.path('connection.json'), JSON.stringify({ httpUrl: 'https://tunnel.example', wsUrl: 'wss://tunnel.example', apiToken: 'tok', tunnelMode: 'cloudflare:named', pid: 5555 }))
+      env.daemon.livePid = 5555
+    }
+  }
+  const r = await env.run()
+  eq(r.outcome, 'rolled-back-health')
+  assert(env.readLog().includes('5555'), 'names the unexpected pid')
 })
 
 // ---------------------------------------------------------------------------

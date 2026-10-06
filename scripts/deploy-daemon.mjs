@@ -15,8 +15,10 @@
  *      uncertainty — daemon unreachable, route missing, bad JSON — is "do not
  *      deploy", never "probably fine".
  *   2. It never leaves the checkout in a state the daemon was not started from
- *      without telling you. A failed build or a failed health check resets to
- *      the previous commit, rebuilds, and (for health) restarts again.
+ *      without telling you. A failed build, a daemon that turns busy during the
+ *      build, or a failed health check resets to the previous commit and
+ *      rebuilds (and, for health, restarts again). A target that has already
+ *      rolled back is not retried until main moves or --retry is passed.
  *   3. It is quiet. A tick with nothing to do prints one console line and
  *      writes nothing to deploy.log; a deferral is logged once per target, not
  *      once per tick.
@@ -62,6 +64,9 @@ export const USAGE = `Usage: node scripts/deploy-daemon.mjs [options]
   --dry-run              fetch, then report what would happen; change nothing
   --force                skip the idle checks (still does everything else)
   --no-tunnel-check      do not require the tunnel URL to answer /health
+  --settle <s>           seconds to wait after health passes, then re-confirm the same pid
+                         is alive and healthy (default 15)
+  --retry                try a target that already rolled back (it is skipped otherwise)
   --help
 `
 
@@ -80,6 +85,8 @@ export function parseArgs(argv, env = process.env, home = homedir()) {
     remote: 'origin',
     port: null,
     healthTimeoutS: 90,
+    settleS: 15,
+    retry: false,
     npm: null,
     dryRun: false,
     force: false,
@@ -115,6 +122,13 @@ export function parseArgs(argv, env = process.env, home = homedir()) {
       case '--dry-run': opts.dryRun = true; break
       case '--force': opts.force = true; break
       case '--no-tunnel-check': opts.tunnelCheck = false; break
+      case '--retry': opts.retry = true; break
+      case '--settle': {
+        const n = Number(valueOf(i++, a))
+        if (!Number.isFinite(n) || n < 0) throw new Error('--settle must be a non-negative number of seconds')
+        opts.settleS = n
+        break
+      }
       case '--help': case '-h': opts.help = true; break
       default: throw new Error(`unknown option: ${a}`)
     }
@@ -176,7 +190,9 @@ export async function deploy(opts, deps = defaultDeps()) {
     lock: join(opts.configDir, 'deploy.lock'),
     log: join(opts.configDir, 'logs', 'deploy.log'),
     last: join(opts.configDir, 'last-deploy.json'),
-    pending: join(opts.configDir, 'deploy-pending-restart.json'),
+    // Retired marker (a busy daemon after the build now rolls back instead of
+    // parking a built checkout). Only ever deleted.
+    legacyPending: join(opts.configDir, 'deploy-pending-restart.json'),
     state: join(opts.configDir, 'deploy-state.json'),
     conn: join(opts.configDir, 'connection.json'),
   }
@@ -318,7 +334,7 @@ export async function deploy(opts, deps = defaultDeps()) {
   // The daemon is "back" only when connection.json names a DIFFERENT pid than
   // the one we signalled AND local /health answers 200: an old process that has
   // not exited yet can answer /health perfectly well, and that must not count.
-  async function waitForHealth(oldPid) {
+  async function waitForHealthOnce(oldPid) {
     const timeoutMs = opts.healthTimeoutS * 1000
     const deadline = d.now() + timeoutMs
     let conn = null
@@ -343,19 +359,45 @@ export async function deploy(opts, deps = defaultDeps()) {
     let tunnelHost = null
     try { tunnelHost = conn.httpUrl ? new URL(conn.httpUrl).hostname : null } catch { /* unparseable: skip */ }
     const localHost = !tunnelHost || ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(tunnelHost)
-    if (!opts.tunnelCheck || !mode || mode === 'none' || localHost) return { ok: true }
+    if (!opts.tunnelCheck || !mode || mode === 'none' || localHost) return { ok: true, pid: conn.pid }
     // The tunnel answers 530 for several seconds after a restart; retry through
     // that and through connection errors until the same budget runs out again.
     const tunnelDeadline = d.now() + timeoutMs
     while (d.now() < tunnelDeadline) {
       try {
         const r = await d.fetch(`${conn.httpUrl.replace(/\/+$/, '')}/health`, { signal: AbortSignal.timeout(8000) })
-        if (r.status === 200) return { ok: true }
+        if (r.status === 200) return { ok: true, pid: conn.pid }
         lastWhy = `tunnel /health answered HTTP ${r.status}`
       } catch (e) { lastWhy = `tunnel /health: ${e?.message || e}` }
       await d.sleep(2000)
     }
     return { ok: false, reason: lastWhy }
+  }
+
+  // A build that answers /health and then dies seconds later must not count as
+  // deployed. After health passes, wait out the settle window and re-confirm
+  // that connection.json still names the SAME pid, that pid is alive, and local
+  // /health still answers 200.
+  async function settle(pid) {
+    await d.sleep(opts.settleS * 1000)
+    const conn = readConn()
+    if (!conn?.pid || conn.pid !== pid) return { ok: false, reason: `after settling ${opts.settleS}s connection.json names pid ${conn?.pid ?? 'none'}, not ${pid} (the daemon restarted or exited)` }
+    if (!d.isPidAlive(pid)) return { ok: false, reason: `after settling ${opts.settleS}s pid ${pid} is no longer running` }
+    try {
+      const r = await d.fetch(`http://127.0.0.1:${portOf(conn)}/health`, { signal: AbortSignal.timeout(5000) })
+      if (r.status !== 200) return { ok: false, reason: `after settling ${opts.settleS}s local /health answered HTTP ${r.status}` }
+    } catch (e) { return { ok: false, reason: `after settling ${opts.settleS}s local /health: ${e?.message || e}` } }
+    return { ok: true }
+  }
+  async function waitForHealth(oldPid) {
+    const up = await waitForHealthOnce(oldPid)
+    return up.ok ? settle(up.pid) : up
+  }
+
+  // Remember a target that rolled back so later ticks do not retry it forever.
+  function markFailed(target, outcome) {
+    state.failedTarget = target
+    state.failedOutcome = outcome
   }
 
   function recordResult(from, to, result) {
@@ -365,7 +407,6 @@ export async function deploy(opts, deps = defaultDeps()) {
       try { writeJson(p.last, { from, to, at: iso(), result, subject }) } catch { /* best effort */ }
     }
   }
-  function clearPending() { try { fs.unlinkSync(p.pending) } catch { /* none */ } }
 
   // Put the checkout (and its build) back to `old`. Used by both rollbacks.
   function rollbackCheckout(old, lockChanged) {
@@ -395,6 +436,7 @@ export async function deploy(opts, deps = defaultDeps()) {
   }
 
   try {
+    if (!opts.dryRun) { try { fs.unlinkSync(p.legacyPending) } catch { /* none */ } }
     // -- 2. clean tree on the branch ---------------------------------------
     if (!d.fs.existsSync(join(opts.checkout, '.git'))) {
       event(`refused: ${opts.checkout} is not a git checkout`, { key: 'not-a-checkout' })
@@ -429,41 +471,32 @@ export async function deploy(opts, deps = defaultDeps()) {
       return { exitCode: 1, outcome: 'refused' }
     }
 
-    // A built-but-not-restarted checkout from an earlier tick takes priority
-    // over anything newer on the remote: it is already built, and the newer
-    // commits deploy on the next tick.
-    let marker = readJson(p.pending)
-    if (marker) {
-      const valid = FULL_SHA.test(marker.from || '') && FULL_SHA.test(marker.to || '') && marker.to === head
-      if (!valid) {
-        event('discarding a stale deploy-pending-restart marker (HEAD no longer matches it)')
-        if (!opts.dryRun) clearPending()
-        marker = null
-      }
+    const old = head
+    const target = remoteSha
+    // A newer main clears a remembered failure.
+    if (state.failedTarget && state.failedTarget !== target) {
+      delete state.failedTarget
+      delete state.failedOutcome
+      saveState()
     }
-
-    let old, target, resume
-    if (marker) {
-      old = marker.from
-      target = marker.to
-      resume = true
-    } else {
-      old = head
-      target = remoteSha
-      resume = false
-      if (old === target) {
-        d.log(`up to date at ${short(old)}`)
-        return { exitCode: 0, outcome: 'up-to-date' }
-      }
-      const anc = git(['merge-base', '--is-ancestor', old, target])
-      if (anc.status === 1) {
-        event(`refused: local ${short(old)} is not an ancestor of ${opts.remote}/${opts.branch} ${short(target)} (diverged or ahead); fast-forward only`, { range: rangeOf(old, target), key: `non-ff:${old}:${target}` })
-        return { exitCode: 1, outcome: 'refused' }
-      }
-      if (anc.status !== 0) {
-        event(`refused: git merge-base failed: ${tail(anc.stderr || anc.error)}`, { key: 'merge-base-failed' })
-        return { exitCode: 1, outcome: 'refused' }
-      }
+    if (old === target) {
+      d.log(`up to date at ${short(old)}`)
+      return { exitCode: 0, outcome: 'up-to-date' }
+    }
+    const anc = git(['merge-base', '--is-ancestor', old, target])
+    if (anc.status === 1) {
+      event(`refused: local ${short(old)} is not an ancestor of ${opts.remote}/${opts.branch} ${short(target)} (diverged or ahead); fast-forward only`, { range: rangeOf(old, target), key: `non-ff:${old}:${target}` })
+      return { exitCode: 1, outcome: 'refused' }
+    }
+    if (anc.status !== 0) {
+      event(`refused: git merge-base failed: ${tail(anc.stderr || anc.error)}`, { key: 'merge-base-failed' })
+      return { exitCode: 1, outcome: 'refused' }
+    }
+    const knownBad = state.failedTarget === target && !opts.retry
+    const skipMsg = `skipped: ${short(target)} already rolled back (${state.failedOutcome || 'unknown'}); waiting for a newer main or --retry`
+    if (knownBad && !opts.dryRun) {
+      event(skipMsg, { range: rangeOf(old, target), key: `skipped:${target}` })
+      return { exitCode: 0, outcome: 'skipped-failed-target' }
     }
     const range = rangeOf(old, target)
     const changed = gitOut(['diff', '--name-only', old, target]).split('\n').filter(Boolean)
@@ -471,19 +504,21 @@ export async function deploy(opts, deps = defaultDeps()) {
 
     // -- dry run -------------------------------------------------------------
     if (opts.dryRun) {
-      const commits = resume ? '' : gitOut(['log', '--format=%h %s', `${old}..${target}`])
+      const commits = gitOut(['log', '--format=%h %s', `${old}..${target}`])
       const idle = opts.force ? { kind: 'idle', reasons: ['--force'] } : await checkIdle()
-      d.log(resume ? `[dry-run] would resume a pending restart of ${range}` : `[dry-run] ${commits.split('\n').filter(Boolean).length} commit(s) ahead (${range}):`)
+      if (knownBad) d.log(`[dry-run] a real run would SKIP this target: ${skipMsg}`)
+      d.log(`[dry-run] ${commits.split('\n').filter(Boolean).length} commit(s) ahead (${range}):`)
       if (commits) d.log(commits.split('\n').map((l) => `  ${l}`).join('\n'))
       d.log(`[dry-run] package-lock.json changed: ${lockChanged ? 'yes (npm ci will run)' : 'no'}`)
       d.log(`[dry-run] idle verdict: ${idle.kind}${idle.reasons.length ? ` (${idle.reasons.join('; ')})` : ''}`)
       d.log('[dry-run] commands, in order:')
       const steps = []
-      if (!resume) steps.push(`git -C ${opts.checkout} merge --ff-only ${target}`)
-      if (!resume && lockChanged) steps.push(`${npmBin} ci --no-audit --no-fund   (cwd ${opts.checkout})`)
-      if (!resume) steps.push(`${npmBin} run build -w @chroxy/dashboard   (cwd ${opts.checkout})`)
+      steps.push(`git -C ${opts.checkout} merge --ff-only ${target}`)
+      if (lockChanged) steps.push(`${npmBin} ci --no-audit --no-fund   (cwd ${opts.checkout})`)
+      steps.push(`${npmBin} run build -w @chroxy/dashboard   (cwd ${opts.checkout})`)
+      steps.push('idle check again; if busy now: reset to the old commit, rebuild, defer')
       steps.push(`launchctl kill SIGTERM gui/${d.uid}/${opts.label}`)
-      steps.push(`wait for a NEW pid in ${p.conn} + GET /health${opts.tunnelCheck ? ' + tunnel /health' : ''} (${opts.healthTimeoutS}s)`)
+      steps.push(`wait for a NEW pid in ${p.conn} + GET /health${opts.tunnelCheck ? ' + tunnel /health' : ''} (${opts.healthTimeoutS}s), then settle ${opts.settleS}s and re-confirm the same pid`)
       for (const s of steps) d.log(`  ${s}`)
       return { exitCode: 0, outcome: 'dry-run' }
     }
@@ -505,33 +540,44 @@ export async function deploy(opts, deps = defaultDeps()) {
     }
 
     // -- 5. merge, install, build ---------------------------------------------
-    if (!resume) {
-      if (!isGitShaRef(target)) { event('refused: target is not a SHA', { key: 'bad-target' }); return { exitCode: 1, outcome: 'refused' } }
-      const merged = git(['merge', '--ff-only', target])
-      if (merged.status !== 0) {
-        event(`merge --ff-only failed: ${tail(merged.stderr || merged.stdout || merged.error, 3)}`, { range })
-        return { exitCode: 1, outcome: 'failed' }
-      }
-      let built = lockChanged ? npmCi() : { ok: true }
-      if (built.ok) built = buildDashboard()
-      if (!built.ok) {
-        const back = rollbackCheckout(old, lockChanged)
+    if (!isGitShaRef(target)) { event('refused: target is not a SHA', { key: 'bad-target' }); return { exitCode: 1, outcome: 'refused' } }
+    const merged = git(['merge', '--ff-only', target])
+    if (merged.status !== 0) {
+      event(`merge --ff-only failed: ${tail(merged.stderr || merged.stdout || merged.error, 3)}`, { range })
+      return { exitCode: 1, outcome: 'failed' }
+    }
+    let built = lockChanged ? npmCi() : { ok: true }
+    if (built.ok) built = buildDashboard()
+    if (!built.ok) {
+      const back = rollbackCheckout(old, lockChanged)
+      if (back.ok) {
+        markFailed(target, 'rolled-back-build')
         recordResult(old, target, 'rolled-back-build')
-        if (back.ok) {
-          event(`rolled-back (build failed: ${built.reason})`, { range })
-          return { exitCode: 1, outcome: 'rolled-back-build' }
-        }
-        event(`ROLLBACK-FAILED after a failed build (${built.reason}); rollback error: ${back.reason}. The checkout may not match what the daemon is running; the daemon itself was not touched.`, { range })
+        event(`rolled-back (build failed: ${built.reason})`, { range })
+        return { exitCode: 1, outcome: 'rolled-back-build' }
+      }
+      markFailed(target, 'rollback-failed')
+      recordResult(old, target, 'rollback-failed')
+      event(`ROLLBACK-FAILED after a failed build (${built.reason}); rollback error: ${back.reason}. The checkout may not match what the daemon is running; the daemon itself was not touched.`, { range })
+      return { exitCode: 1, outcome: 'rollback-failed' }
+    }
+
+    // -- 6. idle again: the build took time ---------------------------------
+    // A turn that started during the build must not be left running under a
+    // daemon whose dashboard dist (served from disk) and files no longer match
+    // it, possibly for hours. Put the old tree back and try again next tick.
+    const second = await gateOnIdle()
+    if (second) {
+      const why = `${second.idle.kind === 'busy' ? 'busy' : 'cannot confirm idle'} (${second.idle.reasons.join('; ')})`
+      const back = rollbackCheckout(old, lockChanged)
+      if (!back.ok) {
+        markFailed(target, 'rollback-failed')
+        recordResult(old, target, 'rollback-failed')
+        event(`ROLLBACK-FAILED after the daemon turned ${why}; rollback error: ${back.reason}. The checkout is at the new commit and the daemon was not restarted.`, { range })
         return { exitCode: 1, outcome: 'rollback-failed' }
       }
-
-      // -- 6. idle again: the build took time ---------------------------------
-      const second = await gateOnIdle()
-      if (second) {
-        writeJson(p.pending, { from: old, to: target })
-        event(`built ${short(target)}, restart deferred: ${second.idle.kind === 'busy' ? 'busy' : 'cannot confirm idle'} (${second.idle.reasons.join('; ')})`, { range, key: `restart-deferred:${target}` })
-        return { exitCode: 0, outcome: 'restart-deferred' }
-      }
+      event(`deferred after build: ${why}`, { range, key: `busy-after-build:${target}` })
+      return { exitCode: 0, outcome: 'deferred-busy-after-build' }
     }
 
     // -- 7-10. restart, verify, roll back on failure ---------------------------
@@ -541,14 +587,15 @@ export async function deploy(opts, deps = defaultDeps()) {
       // Nothing was signalled, so the daemon still runs the OLD code. Put the
       // disk back to match it rather than leave a checkout the daemon is not on.
       const back = rollbackCheckout(old, lockChanged)
-      clearPending()
+      markFailed(target, back.ok ? 'failed-restart' : 'rollback-failed')
       recordResult(old, target, back.ok ? 'rolled-back-restart' : 'rollback-failed')
       event(`${back.ok ? 'rolled-back' : 'ROLLBACK-FAILED'} (restart failed: ${killed.reason}${back.ok ? '' : `; ${back.reason}`})`, { range })
-      return { exitCode: 1, outcome: back.ok ? 'failed' : 'rollback-failed' }
+      return { exitCode: 1, outcome: back.ok ? 'failed-restart' : 'rollback-failed' }
     }
     const health = await waitForHealth(beforePid)
     if (health.ok) {
-      clearPending()
+      delete state.failedTarget
+      delete state.failedOutcome
       recordResult(old, target, 'ok')
       event('ok', { range })
       return { exitCode: 0, outcome: 'deployed' }
@@ -557,7 +604,7 @@ export async function deploy(opts, deps = defaultDeps()) {
     // Health failed: restore the previous build and restart onto it.
     const back = rollbackCheckout(old, lockChanged)
     if (!back.ok) {
-      clearPending()
+      markFailed(target, 'rollback-failed')
       recordResult(old, target, 'rollback-failed')
       event(`ROLLBACK-FAILED (health failed: ${health.reason}; rollback error: ${back.reason}). The daemon may be down or on a half-built checkout.`, { range })
       return { exitCode: 1, outcome: 'rollback-failed' }
@@ -569,12 +616,13 @@ export async function deploy(opts, deps = defaultDeps()) {
     const again = restartDaemon()
     const healthAgain = await waitForHealth(pidNow)
     if (!healthAgain.ok && !again.ok) healthAgain.reason += ` (${again.reason})`
-    clearPending()
     if (healthAgain.ok) {
+      markFailed(target, 'rolled-back-health')
       recordResult(old, target, 'rolled-back-health')
       event(`rolled-back (health failed: ${health.reason})`, { range })
       return { exitCode: 1, outcome: 'rolled-back-health' }
     }
+    markFailed(target, 'rollback-failed')
     recordResult(old, target, 'rollback-failed')
     event(`ROLLBACK-FAILED (health failed: ${health.reason}; after rollback: ${healthAgain.reason}). The daemon is not healthy; check launchd and ${p.log}.`, { range })
     return { exitCode: 1, outcome: 'rollback-failed' }
