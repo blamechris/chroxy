@@ -147,9 +147,11 @@ function isQueryCloseError(err) {
   if (!err) return false
   if (err.name === 'AbortError') return true
   const text = typeof err.message === 'string' ? err.message : String(err)
-  // The SDK's own shapes: "Query was aborted" from the abort controller, and
-  // the transport's "terminated by signal" / "process exited" after the kill.
-  return /\baborted?\b|terminated by signal|process exited/i.test(text)
+  // The SDK's own shapes for a close: "… aborted …" from the abort controller,
+  // and the transport's "terminated by signal SIGTERM/SIGKILL" from the kill
+  // close() sends. A nonzero "process exited with code N" is a crash, never a
+  // close, and stays surfaced even after a deliberate close.
+  return /\baborted?\b|terminated by signal SIG(TERM|KILL)\b/i.test(text)
 }
 
 /**
@@ -1117,6 +1119,12 @@ export class SdkSession extends BaseSession {
     // `this._query` when it still points here — a follow-up turn that started
     // while this one was draining must keep its handle.
     let turnQuery = null
+    // #8300: true once a follow-up turn owns the session (it started while
+    // this one was still draining or stopping work, after a hard timeout or
+    // stream stall cleared busy). This turn then only reports and ends its
+    // own process; it must not clear busy state or flush the queue, which
+    // belong to the newer turn.
+    const supersededByNewerTurn = () => this._query !== null && this._query !== turnQuery
 
     try {
       // #7986 / #8030: point the SDK at the installed `claude` binary on every
@@ -1244,6 +1252,20 @@ export class SdkSession extends BaseSession {
       // this is a held zero-turn result taken as the prompt's own (the CLI is
       // idle or already gone), so no context-usage snapshot is requested.
       let turnFinished = false
+      // #8300: end this turn's own process, once. Used when live work would
+      // keep it alive past the result, when a finished turn keeps receiving
+      // messages (the process lingered), and when destroy() lands mid-stop.
+      let queryClosed = false
+      const closeTurnQuery = () => {
+        if (queryClosed || !turnQuery) return
+        queryClosed = true
+        closedAfterResult = true
+        try {
+          if (typeof turnQuery.close === 'function') turnQuery.close()
+        } catch (closeErr) {
+          ;(this._log || log).warn(`Query close after result failed: ${closeErr?.message || closeErr}`)
+        }
+      }
       const finishTurn = async (msg, { heldPath = false } = {}) => {
         if (turnFinished) return
         turnFinished = true
@@ -1267,9 +1289,19 @@ export class SdkSession extends BaseSession {
           // says which of the two happened.
           return this._stopLiveTask(turnQuery, task.taskId).then((stopped) => ({ task, kind, stopped }))
         }))
-        // destroy() may have landed during the stops; it owns the UX from here
-        // and has removed every listener.
-        if (this._destroying) return
+        // destroy() may have landed during the stops: it owns the UX from here
+        // and has removed every listener, so nothing is emitted — but the
+        // process is still ended, or a live task would keep it (and this
+        // parked loop) alive for good.
+        if (this._destroying) {
+          if (input) input.end()
+          closeTurnQuery()
+          return
+        }
+        // A hard timeout or stream stall during the stops may have cleared
+        // busy and let a follow-up turn start: the session's state is then
+        // that turn's, and this one only reports and ends its own process.
+        const superseded = supersededByNewerTurn()
         for (const { task, kind, stopped } of stopResults) {
           this.emit('error', {
             code: 'background_task_ended_with_turn',
@@ -1404,7 +1436,7 @@ export class SdkSession extends BaseSession {
         // (the `background_task_ended_with_turn` error above) instead of
         // leaving the loss silent. Exempting on this path needs the query
         // kept alive past `result`, which is a much larger change.
-        this._clearMessageState()
+        if (!superseded) this._clearMessageState()
 
         // #8300: the prompt is answered — release the streaming input so the
         // SDK closes the CLI's stdin and the process exits once idle. With
@@ -1413,18 +1445,22 @@ export class SdkSession extends BaseSession {
         // the abort that follows is expected (see `closedAfterResult`).
         streamState.hasStreamStarted = false
         if (input) input.end()
-        if (liveWork.length && turnQuery) {
-          closedAfterResult = true
-          try {
-            if (typeof turnQuery.close === 'function') turnQuery.close()
-          } catch (closeErr) {
-            ;(this._log || log).warn(`Query close after result failed: ${closeErr?.message || closeErr}`)
-          }
-        }
+        if (liveWork.length) closeTurnQuery()
       }
 
       for await (const msg of this._query) {
         if (this._destroying) break
+        // #8300: a finished turn expects nothing more; a message after the
+        // finish means the process lingered (work this turn could not see
+        // kept it alive). It is not relayed into a turn that is over — the
+        // process is ended instead, and the first such message is logged.
+        if (turnFinished) {
+          if (!queryClosed) {
+            ;(this._log || log).warn(`SDK message after the turn's result (${msg?.type}/${msg?.subtype || ''}); ending the lingering process`)
+            closeTurnQuery()
+          }
+          continue
+        }
         receivedAnyMessage = true // #8030: gates the spawn-failure backstop below
         resetResultTimeout() // Any SDK event = activity, reset inactivity timer
 
@@ -1971,7 +2007,7 @@ export class SdkSession extends BaseSession {
           }
         }
       }
-      this._clearMessageState()
+      if (!supersededByNewerTurn()) this._clearMessageState()
     } finally {
       // #8300: whatever ended the loop — the prompt's result, a throw, a
       // destroy() break — the streaming input is released here, so the SDK
@@ -2000,7 +2036,7 @@ export class SdkSession extends BaseSession {
       // shared `_outgoingQueue`; flush one item via dequeueNextOutgoing, whose
       // re-dispatched sendMessage re-sets _isBusy so the next `result` drains
       // the following item — FIFO, one turn at a time).
-      if (this._outgoingQueue.length && !this._destroying) {
+      if (this._outgoingQueue.length && !this._destroying && !supersededByNewerTurn()) {
         // #3562: if the SidecarProcess latched stdin_disabled mid-turn (e.g.
         // the PassThrough closed while _callQuery was still streaming), the
         // entry-gate at the top of sendMessage has already been bypassed
@@ -3045,13 +3081,21 @@ export class SdkSession extends BaseSession {
       this._turnInput = null
     }
 
-    // Interrupt active query
+    // Interrupt active query, then close it: with the input released an idle
+    // CLI exits on its own, but one kept alive by background work would not,
+    // and the parked message loop would never end (#8300).
     if (this._query) {
-      this._query.interrupt().catch((err) => {
+      const q = this._query
+      this._query = null
+      q.interrupt().catch((err) => {
         // #4828: session-scoped when init has fired.
         ;(this._log || log).warn(`Failed to interrupt active query: ${err.message} (non-critical, session destroying)`)
       })
-      this._query = null
+      try {
+        if (typeof q.close === 'function') q.close()
+      } catch (err) {
+        ;(this._log || log).warn(`Failed to close query on destroy: ${err?.message || err}`)
+      }
     }
 
     // Emit completions for any tracked agents and clear busy state

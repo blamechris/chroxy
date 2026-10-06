@@ -83,13 +83,18 @@ function fakeQuery(script, state) {
         if (closed) throw abortError()
         // Bounded: a session that never closes the query would otherwise park
         // this generator forever and the test would hang instead of failing.
-        await new Promise((_, reject) => {
-          rejectParked = reject
-          setTimeout(() => {
-            state.parkTimedOut = true
-            reject(new Error('fake query: the session never closed the query, the process would have lingered'))
-          }, 300)
-        })
+        try {
+          await new Promise((_, reject) => {
+            rejectParked = reject
+            setTimeout(() => {
+              state.parkTimedOut = true
+              reject(new Error('fake query: the session never closed the query, the process would have lingered'))
+            }, 300)
+          })
+        } catch (e) {
+          if (e && e.__eof) return // the real SDK's close can also just end the generator
+          throw e
+        }
         continue
       }
       if (step && step.__throw) throw step.__throw
@@ -109,7 +114,7 @@ function fakeQuery(script, state) {
       state.closeCalls = (state.closeCalls || 0) + 1
       if (state.closeIneffective) return
       closed = true
-      if (rejectParked) rejectParked(abortError())
+      if (rejectParked) rejectParked(state.closeEndsQuietly ? { __eof: true } : abortError())
     },
   }
   return query
@@ -457,6 +462,71 @@ describe('SdkSession turn input (#8300)', () => {
       assert.notEqual(state.parkTimedOut, true, 'the close actually ended the generator; nothing timed out')
     })
 
+    it('ends the turn cleanly when the close simply ends the generator (no abort thrown)', async () => {
+      const events = capture(session)
+      state.closeEndsQuietly = true
+      wire(session, launchScript(), state)
+      await session.sendMessage('start a background count')
+      assert.equal(events.filter((e) => e.name === 'result').length, 1)
+      assert.deepEqual(events.filter((e) => e.name === 'error').map((e) => e.code), ['background_task_ended_with_turn'])
+      assert.equal(session._isBusy, false)
+    })
+
+    it('surfaces a nonzero process exit buffered behind the result, even after the deliberate close', async () => {
+      const events = capture(session)
+      wire(session, [
+        ...launchScript().filter((s) => !s?.__parkUntilClosed),
+        { __throw: new Error('Claude Code process exited with code 1') },
+      ], state)
+      await session.sendMessage('start a background count')
+      const codes = events.filter((e) => e.name === 'error').map((e) => e.code)
+      assert.deepEqual(codes, ['background_task_ended_with_turn', undefined], 'the crash is not mistaken for the close')
+      assert.match(events.filter((e) => e.name === 'error')[1].message, /exited with code 1/)
+    })
+
+    it('ends the lingering process when a finished turn keeps receiving messages', async () => {
+      const events = capture(session)
+      wire(session, [
+        init(),
+        assistantText('started'),
+        promptResult(2),
+        // Work this turn could not see kept the process alive: a notification turn starts.
+        init(),
+        toolUseStart('tu-late', 'Read'),
+        toolResult('tu-late', CANCELLED_TEXT, true),
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('hi')
+      assert.equal(state.closeCalls, 1, 'the lingering process is closed on the first late message')
+      assert.equal(events.filter((e) => e.name === 'result').length, 1)
+      assert.equal(events.filter((e) => e.name === 'ready').length, 1, 'the late init is not relayed into a finished turn')
+      assert.equal(events.filter((e) => e.name === 'error').length, 0)
+      assert.notEqual(state.parkTimedOut, true)
+    })
+
+    it('destroy() during the stops still ends the process, without emitting on the dead session', async () => {
+      // Through the timer path, where the finish runs while the loop is
+      // parked: the window expires, the stop is slow, destroy() lands mid-stop.
+      SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
+      state.stopDelayMs = 80
+      const events = capture(session)
+      wire(session, [
+        init(),
+        { type: 'system', subtype: 'task_started', task_id: 't-d', tool_use_id: 'tu-d', task_type: 'local_agent', is_backgrounded: true, description: 'slow' },
+        orphanNotice,
+        { __delayMs: 60 },
+        () => { session.destroy() },
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('/x')
+      await new Promise((r) => setTimeout(r, 120))
+      assert.deepEqual(state.stopCalls.map((c) => c.taskId), ['t-d'], 'the stop was in flight when destroy() landed')
+      assert.ok(state.closeCalls >= 1, 'the query was closed')
+      assert.notEqual(state.parkTimedOut, true, 'the parked generator was released by a close, not by the fake\'s deadline')
+      assert.equal(events.filter((e) => e.name === 'error' || e.name === 'result').length, 0, 'nothing was emitted on the destroyed session')
+      assert.equal(session._turnInput, null)
+    })
+
     it('still surfaces an error after the close when it is not the close\'s own abort', async () => {
       const events = capture(session)
       state.closeIneffective = true
@@ -719,6 +789,42 @@ describe('SdkSession turn input (#8300)', () => {
       await settled(state)
       assert.equal(state.inputEnded, true, 'destroy() released the input directly')
       assert.equal(session._turnInput, null)
+    })
+  })
+
+  describe('a turn superseded during its stops', () => {
+    it('reports its own loss and result but leaves the newer turn\'s busy state alone', async () => {
+      SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
+      state.stopDelayMs = 80
+      const events = capture(session)
+      const bState = {}
+      let bQuery = null
+      let bBusyAfterA = null
+      let bPromise = null
+      wire(session, [
+        init(),
+        { type: 'system', subtype: 'task_started', task_id: 't-x', tool_use_id: 'tu-x', task_type: 'local_agent', is_backgrounded: true, description: 'x' },
+        orphanNotice,
+        // Past the window: the timer's finish is awaiting the slow stop. A
+        // hard timeout clears busy and a follow-up turn starts meanwhile.
+        { __delayMs: 50 },
+        () => {
+          session._handleHardTimeout(session._currentMessageId, false)
+          session._callQuery = (bArgs) => {
+            consumeInput(bArgs.prompt, bState)
+            bQuery = fakeQuery([init('sdk-2'), { __delayMs: 120 }, () => { bBusyAfterA = session._isBusy }, promptResult(1)], bState)
+            return bQuery
+          }
+          bPromise = session.sendMessage('B')
+        },
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('A')
+      await bPromise
+      assert.equal(bBusyAfterA, true, 'A\'s finish did not clear B\'s busy state')
+      assert.equal(state.closeCalls, 1, 'A closed its own query')
+      assert.equal(bState.closeCalls, undefined, 'and never B\'s')
+      assert.ok(events.some((e) => e.name === 'error' && e.code === 'background_task_ended_with_turn'))
     })
   })
 
