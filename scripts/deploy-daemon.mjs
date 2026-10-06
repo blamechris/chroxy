@@ -231,7 +231,10 @@ export async function deploy(opts, deps = defaultDeps()) {
     saveState()
     try {
       fs.mkdirSync(dirname(p.log), { recursive: true })
-      fs.appendFileSync(p.log, `${iso()} ${range || '-'} ${msg}\n`)
+      // One event per line: a multi-line reason (an npm error tail) is folded
+      // so deploy.log stays greppable by timestamp.
+      const flat = String(msg).trim().split(/\s*\n\s*/).filter(Boolean).join(' | ')
+      fs.appendFileSync(p.log, `${iso()} ${range || '-'} ${flat}\n`)
     } catch { /* a log that cannot be written must not abort a deploy */ }
   }
   const rangeOf = (a, b) => `${short(a)}..${short(b)}`

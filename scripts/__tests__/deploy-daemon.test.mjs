@@ -33,7 +33,7 @@ import { deploy, parseArgs } from '../deploy-daemon.mjs'
 
 // Every case in this file. Bump it when you add one: a case that vanishes
 // should break the run rather than quietly shrink it.
-const MIN_CASES = 56
+const MIN_CASES = 57
 
 let pass = 0
 let fail = 0
@@ -173,7 +173,7 @@ function makeEnv(o = {}) {
       if (cmd === 'npm' && args[0] === 'run') {
         const rolledBack = env.calls.some((c) => c.startsWith('git reset'))
         const okNow = rolledBack ? env.build.buildOkAfterRollback : env.build.buildOk
-        return okNow ? res(0) : res(1, 'vite exploded')
+        return okNow ? res(0) : res(1, env.build.buildStderr || 'vite exploded')
       }
       if (cmd === 'launchctl') {
         if (!env.daemon.killOk) return res(113, 'Could not find service')
@@ -479,6 +479,17 @@ await test('a failed build rolls back to the old commit and NEVER restarts the d
   eq(mutating(env), [`git merge --ff-only ${B}`, BUILD, `git reset --hard ${A}`, BUILD], 'rebuilt the old tree')
   assert(env.readLog().includes('rolled-back (build failed'), 'logged')
   eq(env.last().result, 'rolled-back-build')
+})
+
+await test('a multi-line build error is ONE deploy.log line (one entry per line, greppable by date)', async () => {
+  const env = makeEnv()
+  env.build.buildOk = false
+  env.build.buildStderr = 'npm error code 1\nnpm error command failed\n\nnpm error command sh -c vite build'
+  const r = await env.run()
+  eq(r.outcome, 'rolled-back-build')
+  const lines = env.readLog().trim().split('\n')
+  eq(lines.length, 1, 'one event, one line')
+  assert(lines[0].includes('npm error code 1 | npm error command failed | npm error command sh -c vite build'), 'error text kept, newlines folded')
 })
 
 await test('a failed build after a lockfile change re-runs npm ci on the way back', async () => {
