@@ -370,12 +370,14 @@ describe('SdkSession turn input (#8300)', () => {
 
     it('counts a background shell (local_bash) as live work and names it a shell', async () => {
       const events = capture(session)
+      let trackedMidTurn = null
       wire(session, [
         init(),
         toolUseStart('tu-sh', 'Bash'),
         assistantToolUse('tu-sh', 'Bash', { command: 'sleep 30; echo done', run_in_background: true }),
         { type: 'system', subtype: 'task_started', task_id: 'sh-1', tool_use_id: 'tu-sh', task_type: 'local_bash', description: 'sleep 30; echo done' },
         toolResult('tu-sh', 'Command running in background with ID: sh-1'),
+        () => { trackedMidTurn = session._pendingBackgroundShells.has('sh-1') },
         assistantText('started'),
         promptResult(2),
         { __parkUntilClosed: true },
@@ -386,6 +388,8 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(loss[0].code, 'background_task_ended_with_turn')
       assert.match(loss[0].message, /^Background shell "sleep 30; echo done"/)
       assert.equal(state.closeCalls, 1)
+      assert.equal(trackedMidTurn, true, 'the shell was tracked as pending work while the turn ran')
+      assert.equal(session._pendingBackgroundShells.has('sh-1'), false, 'the stopped shell no longer keeps the session busy')
     })
 
     it('starts every turn with an empty live-task roster', async () => {

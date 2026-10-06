@@ -1211,6 +1211,13 @@ export class SdkSession extends BaseSession {
             taskId: task.taskId,
             recoverable: true,
           })
+          // A background shell's `task_id` is the shell id the tool_result
+          // announced ("Command running in background with ID: <id>"), which
+          // `_recordBackgroundShellsFromToolResults` tracked as pending work
+          // (#4307). The shell dies with the turn's process, so drop it now:
+          // left in place it keeps the roster busy ("waiting on background
+          // work") for a shell nothing will ever read (#8302's shape).
+          if (task.taskType === 'local_bash') this.clearBackgroundShell(task.taskId)
         }
         this._liveBackgroundTasks.clear()
 
