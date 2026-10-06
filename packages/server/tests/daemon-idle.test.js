@@ -334,7 +334,8 @@ describe('daemon commit (#8324)', () => {
       assert.ok(!k.toUpperCase().startsWith('GIT_'), `${k} must not reach git`)
       assert.ok(!['API_TOKEN', 'CHROXY_HOOK_SECRET', 'CHROXY_PORT', 'CHROXY_INGEST_SECRET'].includes(k.toUpperCase()), `${k} must not reach git`)
     }
-    assert.ok('PATH' in seen, 'but the rest of the environment is intact')
+    // Windows spells it `Path`; a plain-object copy keeps that spelling.
+    assert.ok(Object.keys(seen).some((k) => k.toUpperCase() === 'PATH'), 'but the rest of the environment is intact')
   })
 
   it('isSameDirectory: Windows-shaped inputs (forward vs back slashes, drive-letter case, 8.3 short names)', () => {
