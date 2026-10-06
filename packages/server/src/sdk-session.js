@@ -1173,6 +1173,62 @@ export class SdkSession extends BaseSession {
     const reapTurnShells = () => {
       for (const shellId of turnShellIds) this.clearBackgroundShell(shellId)
     }
+    // #8302: set when the turn's query threw. Its control channel is then gone,
+    // so a stop request cannot be made (and must not be pretended to have been).
+    let queryFailed = false
+    let queryClosed = false
+    // #8302: THE routine that asks the CLI to stop the turn's still-tracked
+    // shells and turns the answers into reports. Used by the prompt's own result
+    // (`finishTurn`, for shells no live task names) AND by the `finally` (every
+    // other exit: a throw, an abort), so an abnormal exit cannot drop a spawned
+    // shell silently. Idempotent: it only sees shells still tracked, and a shell
+    // it handled is released by the caller, so the second call finds nothing.
+    //
+    // `outcome` per shell:
+    //   'stopped'     the CLI acknowledged the stop
+    //   'unconfirmed' it did not — rejected (a shell-only id the CLI never
+    //                 named, a task already gone), timed out, or the channel was
+    //                 not usable to ask at all. Termination is UNKNOWN, and is
+    //                 worded that way: "it may still be running" would claim more
+    //                 than we know, "could not be stopped" more than we tried.
+    const turnShellsToStop = () => [...turnShellIds]
+      .filter((shellId) => this._pendingBackgroundShells.has(shellId))
+      .filter((shellId) => !reportedShellIds.has(shellId))
+      .map((shellId) => ({
+        taskId: shellId,
+        toolUseId: null,
+        taskType: 'local_bash',
+        description: this._pendingBackgroundShells.get(shellId)?.command || shellId,
+        background: true,
+      }))
+    const reportedShellIds = new Set()
+    const stopTurnShells = (shells, channelUsable) => Promise.all(shells.map(async (task) => {
+      if (channelUsable) {
+        ;(this._log || log).warn(`Background shell "${task.description}" (${task.taskId}) was still running at the turn's end; stopping it with the turn`)
+      }
+      const stopped = channelUsable ? await this._stopLiveTask(turnQuery, task.taskId) : false
+      return { task, outcome: stopped ? 'stopped' : 'unconfirmed', asked: channelUsable }
+    }))
+    const reportTurnShells = (results) => {
+      for (const { task, outcome, asked } of results) {
+        if (reportedShellIds.has(task.taskId)) continue
+        reportedShellIds.add(task.taskId)
+        const tail = 'A claude-sdk session runs background work only within the turn that started it.'
+        this.emit('error', {
+          code: 'background_task_ended_with_turn',
+          message: outcome === 'stopped'
+            ? `Background shell "${task.description}" was still running when the turn ended and was stopped with it; ${tail}`
+            : asked
+              ? `Background shell "${task.description}" was still running when the turn ended; the CLI did not acknowledge a stop request, so its termination is UNCONFIRMED. ${tail}`
+              : `Background shell "${task.description}" was still tracked when the turn ended abnormally; the turn's query was no longer usable, so it could not be asked to stop and its termination is UNCONFIRMED. ${tail}`,
+          toolUseId: null,
+          taskId: task.taskId,
+          stopped: outcome === 'stopped',
+          unconfirmed: outcome !== 'stopped',
+          recoverable: true,
+        })
+      }
+    }
     // #8300: true once a follow-up turn owns the session (it started while
     // this one was still draining or stopping work, after a hard timeout or
     // stream stall cleared busy). This turn then only reports and ends its
@@ -1309,7 +1365,8 @@ export class SdkSession extends BaseSession {
       // #8300: end this turn's own process, once. Used when live work would
       // keep it alive past the result, when a finished turn keeps receiving
       // messages (the process lingered), and when destroy() lands mid-stop.
-      let queryClosed = false
+      // (`queryClosed` itself is declared with the turn's other flags, above the
+      // try, because the `finally` reads it too — #8302.)
       // #8300: set once finishTurn's stop requests have been answered (or
       // timed out). A message that lands during the stops must not close the
       // query first: the real SDK rejects pending control requests on close,
@@ -1350,17 +1407,9 @@ export class SdkSession extends BaseSession {
         // rostered task, and is released afterwards. Only shells still tracked:
         // one a notification already closed is gone from the tracker.
         const rosteredIds = new Set(liveWork.map((task) => task.taskId))
-        const shellOnlyWork = [...turnShellIds]
-          .filter((shellId) => !rosteredIds.has(shellId) && this._pendingBackgroundShells.has(shellId))
-          .map((shellId) => ({
-            taskId: shellId,
-            toolUseId: null,
-            taskType: 'local_bash',
-            description: this._pendingBackgroundShells.get(shellId)?.command || shellId,
-            background: true,
-          }))
+        const shellOnlyWork = turnShellsToStop().filter((task) => !rosteredIds.has(task.taskId))
         const stopWork = [...liveWork, ...shellOnlyWork]
-        const stopResults = await Promise.all(stopWork.map((task) => {
+        const [stopResults, shellOnlyResults] = await Promise.all([Promise.all(liveWork.map((task) => {
           const kind = task.taskType === 'local_bash' ? 'shell' : 'subagent'
           ;(this._log || log).warn(`Background ${kind} "${task.description}" (${task.taskId}) was still running at the turn's result; stopping it with the turn`)
           // Ask the CLI to stop the task while the control channel is still
@@ -1368,7 +1417,7 @@ export class SdkSession extends BaseSession {
           // (verified live: the shell outlived `close()`), so the report below
           // says which of the two happened.
           return this._stopLiveTask(turnQuery, task.taskId).then((stopped) => ({ task, kind, stopped }))
-        }))
+        })), stopTurnShells(shellOnlyWork, true)])
         // destroy() may have landed during the stops: it owns the UX from here
         // and has removed every listener, so nothing is emitted — but the
         // process is still ended, or a live task would keep it (and this
@@ -1403,9 +1452,11 @@ export class SdkSession extends BaseSession {
           if (task.taskType === 'local_bash') this.clearBackgroundShell(task.taskId)
         }
         // #8302: and any shell this turn tracked that no live task named (see
-        // `turnShellIds`): the process that could report on it ends with the
-        // turn. Before the result is emitted, so the idle snapshot a client
-        // takes at the result already reads idle.
+        // `turnShellIds`), reported through the same routine the abnormal-exit
+        // path uses. The process that could report on it ends with the turn.
+        // Before the result is emitted, so the idle snapshot a client takes at
+        // the result already reads idle.
+        reportTurnShells(shellOnlyResults)
         reapTurnShells()
 
         if (streamState.hasStreamStarted) {
@@ -2024,6 +2075,8 @@ export class SdkSession extends BaseSession {
         await finishTurn(held, { heldPath: true })
       }
     } catch (err) {
+      // #8302: the query threw; its control channel is gone (see `queryFailed`).
+      queryFailed = true
       // #8300: a held zero-turn result dies with the loop — its timer must
       // not finish a turn that is being reported as failed below.
       if (noticeTimer) {
@@ -2151,6 +2204,20 @@ export class SdkSession extends BaseSession {
       // throw, a destroy, a result with no live task to report). Without this a
       // shell that died or was never acknowledged left the session reading busy
       // forever on a provider that has no `BashOutput` to clear it.
+      //
+      // On the normal path `finishTurn` has already stopped, reported and
+      // released them. What reaches here are the abnormal exits (an AbortError, a
+      // crash): ask the CLI to stop each still-tracked shell while the channel is
+      // still usable, and where it is not, SAY each one is unconfirmed instead of
+      // forgetting it. destroy() owns its own UX and reports nothing.
+      if (!this._destroying) {
+        const leftover = turnShellsToStop()
+        if (leftover.length > 0) {
+          const channelUsable = !queryFailed && !queryClosed && !!turnQuery
+          const results = await stopTurnShells(leftover, channelUsable)
+          if (!this._destroying) reportTurnShells(results)
+        }
+      }
       reapTurnShells()
       // #4881: safety-net clear of _intentionalStop. The catch block clears
       // it on the throw path (AbortError after interrupt()), but if

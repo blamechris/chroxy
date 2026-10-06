@@ -265,6 +265,11 @@ describe('SdkSession turn input (#8300)', () => {
       // here the provider-level answer is the claim.
       assert.equal(session.outgoingQueueLength, 1)
       assert.equal(events.filter((e) => e.name === 'error').length, 0)
+      // POSITIVE CONTROL: had the wake reached sendMessage in this state, it would
+      // have emitted the user-visible error AND discarded the user's follow-up.
+      await session.sendMessage('a wake that was not refused')
+      assert.equal(events.filter((e) => e.name === 'error' && e.code === 'stdin_disabled').length, 1)
+      assert.equal(session.outgoingQueueLength, 0)
     })
   })
 
@@ -1153,16 +1158,63 @@ describe('SdkSession turn input (#8300)', () => {
         assert.equal(session.isRunning, false)
       })
 
-      it('says so when the CLI could not stop it, and still releases the tracker entry', async () => {
+      it('a stopTask rejection (the CLI never named this id) is reported as UNCONFIRMED, not as "could not be stopped", and the entry is still released', async () => {
         const events = capture(session)
         state.stopTaskFails = true
         wire(session, announcedOnly('sh-y', promptResult(2), { __parkUntilClosed: true }), state)
         await session.sendMessage('run it')
+        assert.equal(state.stopCalls.length, 1, 'the CLI WAS asked')
         const loss = events.filter((e) => e.name === 'error')
         assert.equal(loss.length, 1)
         assert.equal(loss[0].stopped, false)
-        assert.match(loss[0].message, /could not be stopped; it may still be running/)
+        assert.equal(loss[0].unconfirmed, true)
+        assert.match(loss[0].message, /did not acknowledge a stop request, so its termination is UNCONFIRMED/)
+        assert.doesNotMatch(loss[0].message, /could not be stopped|may still be running/)
         assert.equal(session._pendingBackgroundShells.has('sh-y'), false)
+      })
+
+      describe('an abnormal exit (the query throws) does not drop the shell silently', () => {
+        const abort = () => { const e = new Error('Query was aborted'); e.name = 'AbortError'; return e }
+
+        it('reports a shell-only id as UNCONFIRMED, says it could not be asked, and releases it', async () => {
+          const events = capture(session)
+          wire(session, announcedOnly('sh-a', { __throw: abort() }), state)
+          await session.sendMessage('run it')
+          assert.equal(state.stopCalls, undefined, 'the channel was gone: no stop request was pretended')
+          const loss = events.filter((e) => e.name === 'error' && e.code === 'background_task_ended_with_turn')
+          assert.equal(loss.length, 1, 'exactly one report')
+          assert.equal(loss[0].taskId, 'sh-a')
+          assert.equal(loss[0].stopped, false)
+          assert.equal(loss[0].unconfirmed, true)
+          assert.match(loss[0].message, /ended abnormally/)
+          assert.match(loss[0].message, /no longer usable, so it could not be asked to stop and its termination is UNCONFIRMED/)
+          assert.doesNotMatch(loss[0].message, /could not be stopped; it may still be running/)
+          assert.equal(session._pendingBackgroundShells.size, 0)
+          assert.equal(session.isRunning, false)
+        })
+
+        it('also reports a ROSTERED shell on an abnormal exit (it never reached the stop pass)', async () => {
+          const events = capture(session)
+          wire(session, [...shellScript('sh-b'), { __throw: new Error('process exited with code 1') }], state)
+          await session.sendMessage('run it')
+          const loss = events.filter((e) => e.code === 'background_task_ended_with_turn')
+          assert.deepEqual(loss.map((e) => e.taskId), ['sh-b'])
+          assert.equal(loss[0].unconfirmed, true)
+        })
+
+        it('does not report a shell twice when the turn finished normally first', async () => {
+          const events = capture(session)
+          wire(session, announcedOnly('sh-c', promptResult(2), { __parkUntilClosed: true }), state)
+          await session.sendMessage('run it')
+          assert.equal(events.filter((e) => e.code === 'background_task_ended_with_turn').length, 1)
+        })
+
+        it('says nothing when destroy() owns the teardown', async () => {
+          const events = capture(session)
+          wire(session, announcedOnly('sh-d', () => { session.destroy() }, { __throw: abort() }), state)
+          await session.sendMessage('run it').catch(() => {})
+          assert.equal(events.filter((e) => e.code === 'background_task_ended_with_turn').length, 0)
+        })
       })
 
       it('covers a skip_transcript shell the roster never held', async () => {
