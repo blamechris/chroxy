@@ -26,6 +26,7 @@ import { formatIdleDuration } from './session-timeout-manager.js'
 import { detectThinkingKeyword } from './detect-thinking-keyword.js'
 import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
+import { buildSpawnEnv } from './utils/spawn-env.js'
 
 const log = createLogger('sdk')
 
@@ -921,6 +922,13 @@ export class SdkSession extends BaseSession {
       settingSources: ['user', 'project', 'local'],
       systemPrompt,
       tools: { type: 'preset', preset: 'claude_code' },
+      // The environment for the `claude` child query() spawns, built per turn
+      // by the same spawn-env builder every other provider child goes
+      // through: the full parent env minus the daemon-owned secrets and any
+      // ambiently inherited per-session chroxy values, plus the host
+      // identity. A containerised subclass receives it through
+      // spawnClaudeCodeProcess's `env` and applies its own allowlist.
+      env: buildSpawnEnv('claude-sdk'),
     }
 
     // SDK requires this flag when using bypassPermissions

@@ -425,4 +425,39 @@ describe('buildSpawnEnv', () => {
       })
     })
   })
+
+  describe('claude-sdk provider (denylist; the env SdkSession passes to query())', () => {
+    it('strips the daemon-owned secrets while forwarding arbitrary keys', () => {
+      withEnv({ API_TOKEN: 'primary-bearer-token', CHROXY_INGEST_SECRET: 'ingest', CHROXY_TEST_PASSTHROUGH: 'ok' }, () => {
+        const env = buildSpawnEnv('claude-sdk')
+        assert.equal(env.API_TOKEN, undefined, 'the primary API_TOKEN never reaches the SDK child')
+        assert.equal(env.CHROXY_INGEST_SECRET, undefined, 'nor the ingest secret')
+        assert.equal(env.CHROXY_TEST_PASSTHROUGH, 'ok', 'everything else passes through (denylist mode)')
+      })
+    })
+
+    it('strips an ambiently-inherited CHROXY_PORT / CHROXY_HOOK_SECRET (#7360)', () => {
+      withEnv({ CHROXY_PORT: '9999', CHROXY_HOOK_SECRET: 'foreign-session-secret' }, () => {
+        const env = buildSpawnEnv('claude-sdk')
+        assert.equal(env.CHROXY_PORT, undefined)
+        assert.equal(env.CHROXY_HOOK_SECRET, undefined)
+      })
+    })
+
+    it('keeps ANTHROPIC_API_KEY (the SDK provider accepts it as an auth source)', () => {
+      withEnv({ ANTHROPIC_API_KEY: 'sk-ant' }, () => {
+        const env = buildSpawnEnv('claude-sdk')
+        assert.equal(env.ANTHROPIC_API_KEY, 'sk-ant')
+      })
+    })
+
+    it('preserves PATH and HOME and adds the host identity', () => {
+      withEnv({ PATH: '/usr/bin', HOME: '/home/x' }, () => {
+        const env = buildSpawnEnv('claude-sdk')
+        assert.equal(env.PATH, '/usr/bin')
+        assert.equal(env.HOME, '/home/x')
+        assert.equal(env.CHROXY_HOST_APP, 'Chroxy')
+      })
+    })
+  })
 })
