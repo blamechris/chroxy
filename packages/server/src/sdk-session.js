@@ -136,6 +136,23 @@ export function isSdkToolCancellationText(text) {
 }
 
 /**
+ * #8300: is this the error the SDK's generator throws after the session
+ * itself closed the query (`Query.close()` aborts the transport and kills the
+ * CLI)? Only these are swallowed after a deliberate close; anything else is
+ * still a turn failure and is surfaced.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isQueryCloseError(err) {
+  if (!err) return false
+  if (err.name === 'AbortError') return true
+  const text = typeof err.message === 'string' ? err.message : String(err)
+  // The SDK's own shapes: "Query was aborted" from the abort controller, and
+  // the transport's "terminated by signal" / "process exited" after the kill.
+  return /\baborted?\b|terminated by signal|process exited/i.test(text)
+}
+
+/**
  * Flatten a tool_result block's content to its text, the same way
  * `emitToolResults` (tool-result.js) does, so a pattern match over the text
  * sees the same string whether the CLI sent a string or a block array.
@@ -1092,6 +1109,14 @@ export class SdkSession extends BaseSession {
     // work still live at the prompt's result), so the abort the SDK then
     // throws is logged, not surfaced as a turn error.
     let closedAfterResult = false
+    // #8300: the held-result window finalizes the turn itself (see the
+    // timer in `case 'result'`); the loop awaits that work before its finally
+    // runs, so the two can never finish the same turn twice.
+    let timerFinish = null
+    // #8300: this turn's own query handle, so the `finally` only clears
+    // `this._query` when it still points here — a follow-up turn that started
+    // while this one was draining must keep its handle.
+    let turnQuery = null
 
     try {
       // #7986 / #8030: point the SDK at the installed `claude` binary on every
@@ -1172,6 +1197,7 @@ export class SdkSession extends BaseSession {
       this._turnInput = input
       const queryArgs = { prompt: input.iterable, options }
       this._query = this._callQuery(queryArgs)
+      turnQuery = this._query
       reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
       // #5269: a fresh turn — drop any task_id mappings left over from a prior
       // turn (every subagent should clear via task_notification, but a turn
@@ -1805,9 +1831,20 @@ export class SdkSession extends BaseSession {
             if (msg.num_turns === 0 && msg.is_error !== true && !promptActivitySeen) {
               heldNoticeResult = msg
               ;(this._log || log).info(`Holding a zero-turn result (${msg.duration_ms ?? '?'}ms): probable orphan-task notice; waiting ${SdkSession.ORPHAN_NOTICE_CONFIRM_MS}ms for the prompt's own init`)
+              // On expiry the held result is finished HERE, while the loop is
+              // parked on the generator and the query is still live: finishTurn
+              // releases the input and, if background work is keeping the
+              // process alive, stops it and closes the query — so the turn can
+              // never depend on an EOF that such work would withhold.
               noticeTimer = setTimeout(() => {
                 noticeTimer = null
-                if (input) input.end()
+                if (heldNoticeResult === null || this._destroying) return
+                const held = heldNoticeResult
+                heldNoticeResult = null
+                ;(this._log || log).info('No init followed the zero-turn result within the window; taking it as the prompt\'s own')
+                timerFinish = finishTurn(held, { heldPath: true }).catch((err) => {
+                  ;(this._log || log).warn(`Finishing the held result failed: ${err?.message || err}`)
+                })
               }, SdkSession.ORPHAN_NOTICE_CONFIRM_MS)
               break
             }
@@ -1816,8 +1853,9 @@ export class SdkSession extends BaseSession {
           }
         }
       }
-      // #8300: the loop ended with a zero-turn result still held and no init
-      // after it — it was the prompt's own result after all.
+      // #8300: the loop ended (the CLI exited on its own) with a zero-turn
+      // result still held and no init after it — it was the prompt's own.
+      if (timerFinish) await timerFinish
       if (heldNoticeResult !== null && !this._destroying) {
         const held = heldNoticeResult
         heldNoticeResult = null
@@ -1832,10 +1870,11 @@ export class SdkSession extends BaseSession {
       // Mirrors CliSession._handleChildClose (#4602).
       const wasIntentionalStop = this._consumeIntentionalStop()
       if (!this._destroying) {
-        if (closedAfterResult) {
+        if (closedAfterResult && isQueryCloseError(err)) {
           // #8300: finishTurn already emitted this turn's result and closed
           // the query on purpose (background work was still live); the abort
-          // the SDK throws for that is expected, not a turn failure.
+          // the SDK throws for that is expected, not a turn failure. Any
+          // OTHER error after the close is still surfaced below.
           ;(this._log || log).debug(`Query closed after the turn's result: ${err?.message || err}`)
         } else if (wasIntentionalStop) {
           // #4881: user clicked Stop — interrupt() set the flag, the SDK
@@ -1924,9 +1963,12 @@ export class SdkSession extends BaseSession {
         clearTimeout(noticeTimer)
         noticeTimer = null
       }
+      if (timerFinish) {
+        try { await timerFinish } catch { /* logged where it was started */ }
+      }
       if (input) input.end()
       if (this._turnInput === input) this._turnInput = null
-      this._query = null
+      if (this._query === turnQuery) this._query = null
       // #4881: safety-net clear of _intentionalStop. The catch block clears
       // it on the throw path (AbortError after interrupt()), but if
       // query.interrupt() races a `result` message arriving first, the

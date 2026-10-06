@@ -85,7 +85,10 @@ function fakeQuery(script, state) {
         // this generator forever and the test would hang instead of failing.
         await new Promise((_, reject) => {
           rejectParked = reject
-          setTimeout(() => reject(new Error('fake query: the session never closed the query, the process would have lingered')), 300)
+          setTimeout(() => {
+            state.parkTimedOut = true
+            reject(new Error('fake query: the session never closed the query, the process would have lingered'))
+          }, 300)
         })
         continue
       }
@@ -102,6 +105,7 @@ function fakeQuery(script, state) {
     },
     close: () => {
       state.closeCalls = (state.closeCalls || 0) + 1
+      if (state.closeIneffective) return
       closed = true
       if (rejectParked) rejectParked(abortError())
     },
@@ -320,6 +324,30 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(state.inputEnded, true)
     })
 
+    it('finalizes a held zero-turn result on expiry even when background work keeps the process alive', async () => {
+      SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
+      const events = capture(session)
+      wire(session, [
+        init(),
+        // A task the CLI reports without any assistant activity in this turn.
+        { type: 'system', subtype: 'task_started', task_id: 't-amb', tool_use_id: 'tu-amb', task_type: 'local_agent', is_backgrounded: true, description: 'still running' },
+        orphanNotice,
+        // The real generator would stay open: the live task keeps the process alive.
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('/nothing')
+      const results = events.filter((e) => e.name === 'result')
+      assert.equal(results.length, 1, 'the held result is finished by the window, not by an EOF the task withholds')
+      assert.equal(results[0].numTurns, 0)
+      const loss = events.filter((e) => e.name === 'error')
+      assert.deepEqual(loss.map((e) => e.code), ['background_task_ended_with_turn'])
+      assert.deepEqual(state.stopCalls.map((c) => c.taskId), ['t-amb'])
+      assert.equal(state.closeCalls, 1)
+      assert.notEqual(state.parkTimedOut, true)
+      assert.equal(state.inputEnded, true)
+      assert.equal(session._isBusy, false)
+    })
+
     it('judges a further zero-turn result afresh instead of emitting the held one twice', async () => {
       SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
       const events = capture(session)
@@ -402,6 +430,19 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(state.inputEnded, true)
       assert.equal(session._isBusy, false)
       assert.equal(session._liveBackgroundTasks.size, 0)
+      assert.notEqual(state.parkTimedOut, true, 'the close actually ended the generator; nothing timed out')
+    })
+
+    it('still surfaces an error after the close when it is not the close\'s own abort', async () => {
+      const events = capture(session)
+      state.closeIneffective = true
+      wire(session, launchScript(), state)
+      await session.sendMessage('start a background count')
+      assert.equal(state.closeCalls, 1)
+      assert.equal(state.parkTimedOut, true)
+      const errs = events.filter((e) => e.name === 'error')
+      assert.deepEqual(errs.map((e) => e.code), ['background_task_ended_with_turn', undefined], 'the background loss, then the real failure — not swallowed as a close abort')
+      assert.match(errs[1].message, /never closed the query/)
     })
 
     it('says so when the CLI could not stop the task', async () => {
@@ -616,6 +657,45 @@ describe('SdkSession turn input (#8300)', () => {
       await settled(state)
       assert.equal(state.inputEnded, true, 'destroy() released the input directly')
       assert.equal(session._turnInput, null)
+    })
+  })
+
+  describe('a follow-up turn while the previous query drains', () => {
+    it('keeps its own query handle when the previous turn\'s finally runs', async () => {
+      const aState = state
+      const bState = {}
+      let bQuery = null
+      let handleDuringB = 'unset'
+      let bPromise = null
+      // Turn A: result, then the generator lingers (draining) for a moment.
+      session._callQuery = (args) => {
+        aState.args = args
+        consumeInput(args.prompt, aState)
+        return fakeQuery([
+          init(),
+          promptResult(1),
+          () => {
+            // A's result cleared busy; a follow-up starts while A still drains.
+            session._callQuery = (bArgs) => {
+              consumeInput(bArgs.prompt, bState)
+              bQuery = fakeQuery([
+                init(),
+                { __delayMs: 60 },
+                () => { handleDuringB = session._query === bQuery ? 'own' : (session._query === null ? 'null' : 'other') },
+                promptResult(1),
+              ], bState)
+              return bQuery
+            }
+            bPromise = session.sendMessage('B')
+          },
+          { __delayMs: 20 },
+        ], aState)
+      }
+      await session.sendMessage('A')
+      await bPromise
+      assert.equal(handleDuringB, 'own', 'A\'s finally must not erase B\'s query handle')
+      assert.equal(session._query, null, 'B\'s own finally clears it at the end')
+      assert.equal(bState.inputEnded, true)
     })
   })
 
