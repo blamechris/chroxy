@@ -884,7 +884,9 @@ describe('SdkSession turn input (#8300)', () => {
         init(),
         { type: 'system', subtype: 'task_started', task_id: 't-x', tool_use_id: 'tu-x', task_type: 'local_agent', is_backgrounded: true, description: 'x' },
         orphanNotice,
-        { __delayMs: 50 },
+        // The successor starts INSIDE the hold window (a hard timeout cleared
+        // busy), so its roster entry exists when A's finish runs at expiry.
+        { __delayMs: 10 },
         () => {
           session._handleHardTimeout(session._currentMessageId, false)
           session._callQuery = (bArgs) => {
@@ -893,7 +895,7 @@ describe('SdkSession turn input (#8300)', () => {
               init('sdk-2'),
               toolUseStart('tu-B', 'Read'),
               { type: 'system', subtype: 'task_started', task_id: 't-B', tool_use_id: 'tu-B2', task_type: 'local_agent', is_backgrounded: true, description: 'B work' },
-              { __delayMs: 120 },
+              { __delayMs: 160 },
               () => { rosterDuringB = [...session._liveBackgroundTasks.keys()] },
               toolResult('tu-B', 'ok'),
               { type: 'system', subtype: 'task_notification', task_id: 't-B', status: 'completed', output_file: '/tmp/o', summary: 'done' },
