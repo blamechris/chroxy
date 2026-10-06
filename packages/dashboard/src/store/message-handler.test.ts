@@ -9176,6 +9176,7 @@ describe('dashboard message-handler dispatch', () => {
       }
       const send = (msg: Record<string, unknown>) =>
         handleMessage({ type: 'user_input', timestamp: 1, ...msg } as any, ctx() as any)
+      const send2 = (msg: Record<string, unknown>) => handleMessage(msg as any, ctx() as any)
       const state = () => store.getState() as any
 
       it('writes the terminal line for the ACTIVE session', () => {
@@ -9209,6 +9210,31 @@ describe('dashboard message-handler dispatch', () => {
         setup()
         send({ sessionId: 's2', clientId: 'other', text: 'my answer', messageId: 'm3' })
         expect(state().sessionStates.s2.pendingEvaluatorClarify).toBeNull()
+      })
+
+      // The server records a wake at DISPATCH, not enqueue. Meanwhile the provider's
+      // own queue mirror shows it in the queued strip (queuedMessages, NOT a chat
+      // bubble) and then removes it, so a flushed wake ends as exactly one chat
+      // bubble (the user_input at dispatch) and a cancelled one as none.
+      it('a queued wake that FLUSHES ends as exactly one chat bubble and an empty queued strip', () => {
+        setup()
+        const id = 'chroxy-ci-wake-a-9'
+        send2({ type: 'message_queued', sessionId: 's2', clientMessageId: id, text: 'CI finished on PR #9', queueLength: 1 })
+        expect(state().sessionStates.s2.queuedMessages.map((q: any) => q.clientMessageId)).toEqual([id])
+        expect(state().sessionStates.s2.messages.filter((m: any) => m.content === 'CI finished on PR #9')).toHaveLength(0)
+        send2({ type: 'message_dequeued', sessionId: 's2', clientMessageId: id, queueLength: 0, reason: 'flush' })
+        send({ sessionId: 's2', text: 'CI finished on PR #9', messageId: id, source: 'daemon' })
+        expect(state().sessionStates.s2.queuedMessages).toEqual([])
+        expect(state().sessionStates.s2.messages.filter((m: any) => m.content === 'CI finished on PR #9')).toHaveLength(1)
+      })
+
+      it('a queued wake that is CANCELLED at flush leaves no chat bubble and no queued entry', () => {
+        setup()
+        const id = 'chroxy-ci-wake-a-10'
+        send2({ type: 'message_queued', sessionId: 's2', clientMessageId: id, text: 'CI finished on PR #9', queueLength: 1 })
+        send2({ type: 'message_dequeued', sessionId: 's2', clientMessageId: id, queueLength: 0, reason: 'cancelled' })
+        expect(state().sessionStates.s2.queuedMessages).toEqual([])
+        expect(state().sessionStates.s2.messages.filter((m: any) => m.content === 'CI finished on PR #9')).toHaveLength(0)
       })
 
       it('this client\'s own echo is still skipped', () => {

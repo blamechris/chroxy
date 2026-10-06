@@ -316,10 +316,15 @@ export class SessionCiWatcher {
    * @param {boolean} [opts.wakeAgent] - when false, completions notify the user
    *   but never wake a session (neither the PTY route nor the turn-input route).
    * @param {(wake: {sessionId: string, text: string, messageId: string}) => void} [opts.recordWakeInput]
-   *   - called once the provider has ADMITTED a turn-input wake (dispatched or
-   *   queued), never for a rejected one and never for the PTY route. The caller
-   *   records the line to history and broadcasts it (#8301) so the wake is
-   *   visible like a typed turn. Absent = the wake still reaches the agent but
+   *   - called once the wake has actually been DISPATCHED to the model — at the
+   *   moment of dispatch, which for a wake that queued behind a running turn is
+   *   the later flush, not the enqueue. Never for a rejected wake, never for one
+   *   cancelled at flush, never for the PTY route. The caller records the line to
+   *   history and broadcasts it (#8301), so a history entry or a `user_input`
+   *   exists only for a turn that really ran. A queued wake is visible to clients
+   *   meanwhile through the provider's own `message_queued`/`message_dequeued`
+   *   mirror, which shows and then removes it from the queued strip: the flushed
+   *   wake therefore ends as exactly one chat bubble, a cancelled one as none. Absent = the wake still reaches the agent but
    *   clients do not see it.
    * @param {number} [opts.tickIntervalMs]
    * @param {number} [opts.discoveryIntervalMs]
@@ -663,9 +668,13 @@ export class SessionCiWatcher {
           clientMessageId: messageId,
           admitAtFlush: () => this._wakeRefusal(sessionId) === null,
           onAdmission: ({ outcome, line }) => {
-            // Visible like a typed turn — but only once ADMITTED. A rejected
-            // wake never reached the model, so it is not in anyone's history.
-            if (outcome === 'injected' || outcome === 'queued') this._recordWake(sessionId, line, messageId)
+            // Visible like a typed turn — but only once it has actually been
+            // DISPATCHED. A rejected wake never reached the model, and a queued
+            // one may yet be cancelled at flush (budget paused, user Stop,
+            // interrupt): recording it at enqueue left a phantom user turn in
+            // history that no model ever saw. `injected` arrives immediately for
+            // an idle session and at flush for a queued one.
+            if (outcome === 'injected') this._recordWake(sessionId, line, messageId)
             if (!firing) {
               this._log?.info?.(`ci-watch: #${event.prNumber} wake for session ${sessionId} admitted late (wake: ${outcome})`)
             }

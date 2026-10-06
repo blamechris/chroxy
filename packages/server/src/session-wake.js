@@ -131,20 +131,41 @@ function wakeViaTurnInput(session, text, { clientMessageId, admitAtFlush, onAdmi
   if (line.length === 0) return 'empty-text'
 
   let outcome = null
-  // A queued item is re-dispatched at turn end with the SAME sendOptions, so the
-  // provider reports admission a second time (`accepted`). The first final
-  // report is the one that counts — `queued` already told the caller it landed.
+  let dispatchNotified = false
+  const notify = (mapped, admission) => {
+    if (typeof onAdmission !== 'function') return
+    try {
+      onAdmission({ outcome: mapped, line, clientMessageId, admission })
+    } catch (err) {
+      log.warn(`wake onAdmission callback threw: ${err?.message || err}`)
+    }
+  }
+  // Two notifications at most, and the distinction is the point.
+  //
+  // The FIRST final report decides `outcome` (what `wakeSession` returns and what
+  // the caller logs): `queued` means "it landed in the provider's queue", and a
+  // later report never rewrites that.
+  //
+  // But `queued` is not DISPATCHED. A queued item is re-dispatched at turn end
+  // with the SAME sendOptions, so the provider reports admission a second time,
+  // `accepted`, if and only if the item actually went out — it may instead be
+  // cancelled at flush (`admitAtFlush` refused, an interrupt cleared the queue)
+  // and never report again. That second report is the moment the line became a
+  // turn, so it is delivered ONCE more, as `injected`, and a caller that records
+  // "this turn happened" (history, the `user_input` broadcast) should key off
+  // `injected`, never off `queued`.
   const onInputAdmission = (admission) => {
-    if (outcome !== null) return
     const mapped = outcomeForAdmission(admission)
     if (mapped === null) return
-    outcome = mapped
-    if (typeof onAdmission === 'function') {
-      try {
-        onAdmission({ outcome: mapped, line, clientMessageId, admission })
-      } catch (err) {
-        log.warn(`wake onAdmission callback threw: ${err?.message || err}`)
-      }
+    if (outcome === null) {
+      outcome = mapped
+      if (mapped === 'injected') dispatchNotified = true
+      notify(mapped, admission)
+      return
+    }
+    if (outcome === 'queued' && !dispatchNotified && mapped !== 'queued') {
+      dispatchNotified = true
+      notify(mapped, admission)
     }
   }
 

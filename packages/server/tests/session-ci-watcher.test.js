@@ -1153,7 +1153,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
     assert.equal(h.recorded[0].messageId, session.sent[0].sendOptions.clientMessageId)
   })
 
-  it('QUEUES a wake behind a busy turn, logs wake: queued, records it, and the real queue flushes it', async () => {
+  it('QUEUES a wake behind a busy turn, logs wake: queued, records it ONLY when the flush dispatches it', async () => {
     const session = new SdkLikeSession()
     session.sendMessage('a user turn is running')
     const h = turnHarness({ session })
@@ -1161,13 +1161,15 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
     assert.equal(session.sent.length, 1, 'nothing is written into a running turn')
     assert.equal(session.outgoingQueueLength, 1)
     assert.ok(h.logs.includes('ci-watch: #7422 settled success for session s1 (wake: queued)'), JSON.stringify(h.logs))
-    assert.equal(h.recorded.length, 1, 'a queued wake is admitted, so it is recorded')
+    assert.equal(h.recorded.length, 0, 'queued is not dispatched: nothing is recorded yet')
 
     session.completeTurn()
     await new Promise((resolve) => process.nextTick(resolve))
     assert.equal(session.sent.length, 2, 'the wake is delivered once the turn ends')
     assert.match(session.sent[1].prompt, /CI finished on PR #7422/)
-    assert.equal(h.recorded.length, 1, 'the flush does not record it a second time')
+    assert.equal(h.recorded.length, 1, 'recorded exactly once, at dispatch')
+    assert.equal(h.recorded[0].text, session.sent[1].prompt)
+    assert.equal(h.recorded[0].messageId, session.sent[1].sendOptions.clientMessageId)
     assert.equal(h.events.length, 1)
   })
 

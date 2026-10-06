@@ -190,8 +190,10 @@ describe('wakeSession — turn-input route (#8301)', () => {
     assert.equal(s.sent[1].prompt, 'CI finished on PR #2')
     assert.equal(s.sent[1].sendOptions.clientMessageId, 'chroxy-ci-wake-2')
     // The flush re-dispatches with the SAME sendOptions, so the provider reports
-    // `accepted` a second time. The caller must hear about the wake once.
-    assert.deepEqual(admitted, ['queued'])
+    // `accepted` a second time: that is the moment the line became a turn. The
+    // caller hears `queued` first (the synchronous outcome), then `injected` ONCE
+    // at dispatch, so it can record a turn that really ran and only that.
+    assert.deepEqual(admitted, ['queued', 'injected'])
   })
 
   it('forwards admitAtFlush to sendMessage only when it is a function (#8301)', () => {
@@ -205,6 +207,32 @@ describe('wakeSession — turn-input route (#8301)', () => {
     const s3 = new FakeTurnSession()
     wakeSession(s3, 'a', { turnInput: true })
     assert.equal('admitAtFlush' in s3.sent[0].sendOptions, false)
+  })
+
+  it('a queued wake CANCELLED at flush is never reported as dispatched (#8301)', async () => {
+    const s = new FakeTurnSession()
+    s.sendMessage('the user turn')
+    const admitted = []
+    const out = wakeSession(s, 'CI finished on PR #3', {
+      turnInput: true, clientMessageId: 'chroxy-ci-wake-3', admitAtFlush: () => false, onAdmission: (a) => admitted.push(a.outcome),
+    })
+    assert.equal(out, 'queued')
+    s.completeTurn()
+    await nextTick()
+    assert.equal(s.sent.length, 1, 'never dispatched')
+    assert.deepEqual(admitted, ['queued'], 'no dispatch notification for a wake that never went out')
+  })
+
+  it('an idle-dispatched wake is reported injected exactly once (a repeat admission is ignored)', () => {
+    class Twice extends FakeTurnSession {
+      sendMessage(prompt, attachments, sendOptions = {}) {
+        super.sendMessage(prompt, attachments, sendOptions)
+        reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
+      }
+    }
+    const admitted = []
+    wakeSession(new Twice(), 'x', { turnInput: true, onAdmission: (a) => admitted.push(a.outcome) })
+    assert.deepEqual(admitted, ['injected'])
   })
 
   it('does not consult isRunning: a busy turn is queued, not refused', () => {
