@@ -168,6 +168,8 @@ export type {
   // whole point of #4307); clears when the agent calls BashOutput or
   // the session is destroyed.
   PendingBackgroundShell,
+  // #8302: why a session reads busy ('turn' | 'background-shells').
+  BusyReason,
   ConnectedClient,
   SessionHealth,
   SessionContext,
@@ -586,6 +588,8 @@ export type {
   PendingBackgroundShellsBuilder,
   // #4767 — centralised session_list dispatch (GC + cumulativeUsage + pendingShells seeding)
   SessionListPatches,
+  // #8302 — validated busyReason / backgroundShellCount a message carried.
+  BusyStatePatch,
   ServerMode,
   AuthOkPayload,
   AuthOkWebFeatures,
@@ -734,6 +738,9 @@ export {
   // #4767 — centralised session_list dispatch helpers (used by both app + dashboard)
   buildSessionListPatches,
   cumulativeUsageEquals,
+  // #8302 — busyReason / backgroundShellCount parse + no-op gate (both clients).
+  parseBusyState,
+  busyStateDiffers,
   chunkSubscribeSessionIds,
   SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionContext,

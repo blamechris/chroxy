@@ -53,6 +53,7 @@ import type {
   AgentInfo,
   DevPreview,
   PendingBackgroundShell,
+  BusyReason,
   QueuedSessionMessage,
   SessionIntervention,
   ServerErrorCategory,
@@ -82,6 +83,8 @@ import {
   handleAgentCompleted,
   handleAgentEvent,
   handleBackgroundWorkChanged,
+  parseBusyState,
+  busyStateDiffers,
   handlePlanStarted,
   handleInactivityWarning,
   handleMcpServers,
@@ -221,6 +224,11 @@ export interface DispatchSessionBase {
   // Both clients' real `SessionState` carry these exact arrays.
   activeAgents?: AgentInfo[]
   pendingBackgroundShells?: PendingBackgroundShell[]
+  // #8302 — `busyReason` / `backgroundShellCount` — written by
+  // background_work_changed (and seeded from session_list by the consumer).
+  // Optional: absent until a #8302-aware server sends them.
+  busyReason?: BusyReason | null
+  backgroundShellCount?: number
   devPreviews?: DevPreview[]
   // --- outgoing-message queue mirror (#5937) ---
   // `queuedMessages` — read+rewritten by message_queued / message_dequeued.
@@ -1489,7 +1497,12 @@ function dispatchAgentEvent<S extends DispatchSessionBase>(
   }
 }
 
-/** `background_work_changed` — replace the session's pending-shells snapshot. */
+/**
+ * `background_work_changed` — replace the session's pending-shells snapshot and,
+ * when the message carries them (#8302), the busy reason + shell count. Each
+ * half is skipped on its own no-op, so a message that changes only the reason
+ * (a shell hidden by the advisory sweep, `pending` unchanged) still lands.
+ */
 function dispatchBackgroundWorkChanged<S extends DispatchSessionBase>(
   msg: DispatchMessageMap['background_work_changed'],
   adapter: ClientStoreAdapter<S>,
@@ -1498,12 +1511,14 @@ function dispatchBackgroundWorkChanged<S extends DispatchSessionBase>(
     msg as Record<string, unknown>,
     adapter.getActiveSessionId(),
   )
+  const busy = parseBusyState(msg as Record<string, unknown>)
   if (builder.sessionId && adapter.hasSession(builder.sessionId)) {
     adapter.updateSession(builder.sessionId, (ss) => {
+      const patch: Partial<DispatchSessionBase> = {}
       const next = builder.applyTo(ss.pendingBackgroundShells ?? [])
-      return next === ss.pendingBackgroundShells
-        ? ({} as Partial<S>)
-        : ({ pendingBackgroundShells: next } as Partial<S>)
+      if (next !== ss.pendingBackgroundShells) patch.pendingBackgroundShells = next
+      if (busy && busyStateDiffers(ss, busy)) Object.assign(patch, busy)
+      return patch as Partial<S>
     })
   }
 }

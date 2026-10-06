@@ -9158,6 +9158,57 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.isIdle).toBe(false)
     })
 
+    // #8302 — why the session is busy rides beside isBusy, so the activity chip
+    // can say "Waiting on N background shells" instead of "Working".
+    it('session_list seeds busyReason + backgroundShellCount beside isBusy (#8302)', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [
+            { sessionId: 's1', name: 'S1', isBusy: true, busyReason: 'background-shells', backgroundShellCount: 2, pendingBackgroundShells: [] } as any,
+          ],
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(false)
+      expect(ss.busyReason).toBe('background-shells')
+      expect(ss.backgroundShellCount).toBe(2)
+    })
+
+    it('a later session_list clears the reason with the positive null once the session is idle (#8302)', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      const send = (entry: any) => handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', ...entry }] } as any, ctx() as any)
+      send({ isBusy: true, busyReason: 'background-shells', backgroundShellCount: 1 })
+      send({ isBusy: false, busyReason: null, backgroundShellCount: 0 })
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(true)
+      expect(ss.busyReason).toBeNull()
+      expect(ss.backgroundShellCount).toBe(0)
+    })
+
+    it('a session_list entry WITHOUT the fields (an older server) leaves an earlier reason alone (#8302)', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      const send = (entry: any) => handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', ...entry }] } as any, ctx() as any)
+      send({ isBusy: true, busyReason: 'turn', backgroundShellCount: 0 })
+      send({ isBusy: true })
+      expect((store.getState() as any).sessionStates.s1.busyReason).toBe('turn')
+    })
+
+    it('background_work_changed updates the reason live, including a reason-only change (#8302)', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: true, busyReason: 'turn', backgroundShellCount: 1 }] } as any, ctx() as any)
+      handleMessage({ type: 'background_work_changed', sessionId: 's1', pending: [], busyReason: 'background-shells', backgroundShellCount: 1 } as any, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.busyReason).toBe('background-shells')
+      expect(ss.pendingBackgroundShells).toEqual([])
+    })
+
     it('session_list seeds isIdle: true for an idle session', () => {
       store = createMockStore(baseState())
       setStore(store)

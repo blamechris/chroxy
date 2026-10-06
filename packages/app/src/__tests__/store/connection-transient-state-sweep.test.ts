@@ -211,6 +211,9 @@ const ALL_BASE_SESSION_STATE_KEYS = {
   activeAgents: true,
   activeTools: true,
   pendingBackgroundShells: true,
+  // #8302 (shared store-core type): server busy reason + tracker size; not transient-swept.
+  busyReason: true,
+  backgroundShellCount: true,
   transcriptBackgroundTasks: true,
   scheduledWakeup: true,
   isPlanPending: true,

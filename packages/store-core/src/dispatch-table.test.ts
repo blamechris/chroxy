@@ -1769,6 +1769,64 @@ describe('shared dispatch table', () => {
         { shellId: 'sh-1', command: 'npm test', startedAt: 1000 },
       ])
     })
+
+    // #8302 — the message now also carries WHY the session is busy.
+    describe('busyReason + backgroundShellCount (#8302)', () => {
+      const base = () => makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], pendingBackgroundShells: [] } },
+      })
+
+      it('stores the reason and the tracker count beside the pending list', () => {
+        const env = base()
+        dispatch(env, {
+          type: 'background_work_changed', sessionId: 's1',
+          pending: [{ shellId: 'sh-1', command: 'npm test', startedAt: 1000 }],
+          busyReason: 'background-shells', backgroundShellCount: 1,
+        })
+        expect(env.sessions.s1.busyReason).toBe('background-shells')
+        expect(env.sessions.s1.backgroundShellCount).toBe(1)
+        expect(env.sessions.s1.pendingBackgroundShells).toHaveLength(1)
+      })
+
+      it('lands a reason-only change when pending is unchanged (an advisory-quiesced shell hides from the list)', () => {
+        const env = base()
+        dispatch(env, {
+          type: 'background_work_changed', sessionId: 's1', pending: [],
+          busyReason: 'background-shells', backgroundShellCount: 2,
+        })
+        expect(env.sessions.s1.pendingBackgroundShells).toEqual([])
+        expect(env.sessions.s1.busyReason).toBe('background-shells')
+        expect(env.sessions.s1.backgroundShellCount).toBe(2)
+      })
+
+      it('applies the positive null ("not busy") — it is a value, not an absence', () => {
+        const env = makeAdapter({
+          sessions: { s1: { sessionId: 's1', messages: [], pendingBackgroundShells: [], busyReason: 'background-shells', backgroundShellCount: 1 } },
+        })
+        dispatch(env, { type: 'background_work_changed', sessionId: 's1', pending: [], busyReason: null, backgroundShellCount: 0 })
+        expect(env.sessions.s1.busyReason).toBeNull()
+        expect(env.sessions.s1.backgroundShellCount).toBe(0)
+      })
+
+      it('leaves the stored reason alone when the message omits it (an older server)', () => {
+        const env = makeAdapter({
+          sessions: { s1: { sessionId: 's1', messages: [], pendingBackgroundShells: [], busyReason: 'background-shells', backgroundShellCount: 3 } },
+        })
+        dispatch(env, { type: 'background_work_changed', sessionId: 's1', pending: [{ shellId: 'a', command: 'c', startedAt: 1 }] })
+        expect(env.sessions.s1.busyReason).toBe('background-shells')
+        expect(env.sessions.s1.backgroundShellCount).toBe(3)
+      })
+
+      it('drops an unknown reason or a malformed count instead of storing it', () => {
+        const env = base()
+        dispatch(env, {
+          type: 'background_work_changed', sessionId: 's1', pending: [],
+          busyReason: 'banana', backgroundShellCount: -4,
+        })
+        expect(env.sessions.s1.busyReason).toBeUndefined()
+        expect(env.sessions.s1.backgroundShellCount).toBeUndefined()
+      })
+    })
   })
 
   describe('message_queued / message_dequeued (#5937)', () => {

@@ -107,6 +107,7 @@ import {
   handleFileContent as sharedFileContent,
   buildSessionListPatches as sharedBuildSessionListPatches,
   cumulativeUsageEquals as sharedCumulativeUsageEquals,
+  busyStateDiffers as sharedBusyStateDiffers,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
@@ -4986,6 +4987,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         conversationIdPatches,
         cumulativeUsagePatches,
         backgroundShellBuilders,
+        busyStatePatches,
       } = patches;
       // GC persisted messages for sessions that dropped out of the list
       for (const prevId of removedIds) {
@@ -5265,6 +5267,17 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             ? {}
             : { pendingBackgroundShells: next };
         });
+      }
+      // #8302: seed WHY the session is busy beside `isBusy`. `isBusy` merges
+      // "mid-turn" with "idle but a background shell is still tracked", and the
+      // activity chip needs the difference to say "Waiting on N background
+      // shell(s)" instead of "Working". A session from an older server has no
+      // patch here, so its current value is left alone (never overwritten with
+      // a guess); `busyStateDiffers` is the no-op gate so a repeat snapshot does
+      // not re-render.
+      for (const [sid, patch] of busyStatePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) => (sharedBusyStateDiffers(ss, patch) ? { ...patch } : {}));
       }
       break;
     }
