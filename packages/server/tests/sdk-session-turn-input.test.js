@@ -77,6 +77,7 @@ function fakeQuery(script, state) {
   const gen = (async function* () {
     for (const step of script) {
       if (typeof step === 'function') { await step(); continue }
+      if (step && typeof step.__delayMs === 'number') { await new Promise((r) => setTimeout(r, step.__delayMs)); continue }
       if (step && step.__waitInputEnd) { await state.inputDone; continue }
       if (step && step.__parkUntilClosed) {
         if (closed) throw abortError()
@@ -95,6 +96,10 @@ function fakeQuery(script, state) {
   const query = {
     [Symbol.asyncIterator]() { return gen },
     interrupt: async () => { state.interrupts = (state.interrupts || 0) + 1 },
+    stopTask: async (taskId) => {
+      state.stopCalls = [...(state.stopCalls || []), { taskId, closedBefore: closed }]
+      if (state.stopTaskFails) throw new Error('control channel gone')
+    },
     close: () => {
       state.closeCalls = (state.closeCalls || 0) + 1
       closed = true
@@ -289,6 +294,62 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(session._isBusy, false)
     })
 
+    it('releases the hold when prompt activity follows the notice with no second init', async () => {
+      // A short window the running prompt must OUTLAST: with the hold still
+      // armed, the timer would end the input under the prompt.
+      SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
+      const events = capture(session)
+      const seen = []
+      wire(session, [
+        init(),
+        orphanNotice,
+        () => seen.push(['after orphan result', state.inputEnded, events.filter((e) => e.name === 'result').length]),
+        toolUseStart('tu-1', 'Read'),
+        { __delayMs: 80 },
+        () => seen.push(['after activity', state.inputEnded, session._liveBackgroundTasks.size]),
+        toolResult('tu-1', 'contents'),
+        assistantText('done'),
+        promptResult(2),
+      ], state)
+      await session.sendMessage('read')
+      assert.deepEqual(seen.map((x) => x.slice(0, 2)), [['after orphan result', false], ['after activity', false]])
+      const results = events.filter((e) => e.name === 'result')
+      assert.equal(results.length, 1, 'the held notice is not emitted a second time after the loop')
+      assert.equal(results[0].numTurns, 2)
+      assert.ok(events.some((e) => e.name === 'message' && e.subtype === 'orphan_task_notice'))
+      assert.equal(state.inputEnded, true)
+    })
+
+    it('judges a further zero-turn result afresh instead of emitting the held one twice', async () => {
+      SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
+      const events = capture(session)
+      wire(session, [
+        init(),
+        orphanNotice,
+        { ...orphanNotice, duration_ms: 20 },
+        { __waitInputEnd: true },
+      ], state)
+      await session.sendMessage('/nothing')
+      const results = events.filter((e) => e.name === 'result')
+      assert.equal(results.length, 1, 'one result for the prompt, never one per held notice')
+      assert.equal(events.filter((e) => e.name === 'message' && e.subtype === 'orphan_task_notice').length, 1)
+      assert.equal(state.inputEnded, true)
+    })
+
+    it('a held notice never outlives the turn: destroy() during the window releases the input', async () => {
+      wire(session, [
+        init(),
+        orphanNotice,
+        () => { session.destroy() },
+        { __waitInputEnd: true },
+        init(),
+      ], state)
+      await session.sendMessage('hi')
+      await settled(state)
+      assert.equal(state.inputEnded, true)
+      assert.equal(session._turnInput, null)
+    })
+
     it('treats a zero-turn result after prompt activity as the prompt\'s own result', async () => {
       const events = capture(session)
       wire(session, [
@@ -331,6 +392,8 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(loss[0].taskId, 't-1')
       assert.match(loss[0].message, /subagent "count lines"/)
       assert.equal(state.closeCalls, 1, 'the query is closed so no unserviced notification turn runs')
+      assert.deepEqual(state.stopCalls, [{ taskId: 't-1', closedBefore: false }], 'the CLI was asked to stop the task while the channel was still open, before the close')
+      assert.equal(loss[0].stopped, true)
       assert.ok(events.some((e) => e.name === 'agent_completed' && e.toolUseId === 'tu-agent'), 'the agent node is closed')
       assert.equal(events.filter((e) => e.name === 'result').length, 1)
       assert.ok(!events.some((e) => e.name === 'stopped'), 'the close is not reported as a user stop')
@@ -339,6 +402,18 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(state.inputEnded, true)
       assert.equal(session._isBusy, false)
       assert.equal(session._liveBackgroundTasks.size, 0)
+    })
+
+    it('says so when the CLI could not stop the task', async () => {
+      const events = capture(session)
+      state.stopTaskFails = true
+      wire(session, launchScript(), state)
+      await session.sendMessage('start a background count')
+      const loss = events.filter((e) => e.name === 'error')
+      assert.equal(loss.length, 1)
+      assert.equal(loss[0].stopped, false)
+      assert.match(loss[0].message, /could not be stopped; it may still be running/)
+      assert.equal(state.closeCalls, 1, 'the query is still closed')
     })
 
     it('is not reported when the task finished before the result', async () => {
@@ -368,6 +443,53 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(state.closeCalls, undefined)
     })
 
+    it('does not count a foreground Bash, which the CLI also reports as a local_bash task', async () => {
+      const events = capture(session)
+      wire(session, [
+        init(),
+        toolUseStart('tu-fg', 'Bash'),
+        { type: 'system', subtype: 'task_started', task_id: 'sh-fg', tool_use_id: 'tu-fg', task_type: 'local_bash', is_backgrounded: false, description: 'sleep 5' },
+        toolResult('tu-fg', 'done-fg'),
+        promptResult(2),
+      ], state)
+      await session.sendMessage('foreground sleep')
+      assert.equal(events.filter((e) => e.name === 'error').length, 0)
+      assert.equal(state.closeCalls, undefined)
+      assert.equal(state.stopCalls, undefined)
+    })
+
+    it('counts a task backgrounded later by a task_updated patch, and drops one the patch closes', async () => {
+      const events = capture(session)
+      wire(session, [
+        init(),
+        toolUseStart('tu-a', 'Agent'),
+        { type: 'system', subtype: 'task_started', task_id: 't-a', tool_use_id: 'tu-a', task_type: 'local_agent', description: 'later backgrounded' },
+        { type: 'system', subtype: 'task_updated', task_id: 't-a', patch: { is_backgrounded: true } },
+        toolUseStart('tu-b', 'Agent'),
+        { type: 'system', subtype: 'task_started', task_id: 't-b', tool_use_id: 'tu-b', task_type: 'local_agent', is_backgrounded: true, description: 'closed by patch' },
+        { type: 'system', subtype: 'task_updated', task_id: 't-b', patch: { status: 'completed' } },
+        promptResult(2),
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('agents')
+      const loss = events.filter((e) => e.name === 'error')
+      assert.deepEqual(loss.map((e) => e.taskId), ['t-a'])
+      assert.deepEqual(state.stopCalls.map((c) => c.taskId), ['t-a'])
+    })
+
+    it('never reports ambient skip_transcript work the user did not start', async () => {
+      const events = capture(session)
+      wire(session, [
+        init(),
+        { type: 'system', subtype: 'task_started', task_id: 't-ambient', task_type: 'local_agent', is_backgrounded: true, skip_transcript: true, description: 'housekeeping' },
+        assistantText('ok'),
+        promptResult(1),
+      ], state)
+      await session.sendMessage('hi')
+      assert.equal(events.filter((e) => e.name === 'error').length, 0)
+      assert.equal(state.closeCalls, undefined)
+    })
+
     it('counts a background shell (local_bash) as live work and names it a shell', async () => {
       const events = capture(session)
       let trackedMidTurn = null
@@ -375,7 +497,7 @@ describe('SdkSession turn input (#8300)', () => {
         init(),
         toolUseStart('tu-sh', 'Bash'),
         assistantToolUse('tu-sh', 'Bash', { command: 'sleep 30; echo done', run_in_background: true }),
-        { type: 'system', subtype: 'task_started', task_id: 'sh-1', tool_use_id: 'tu-sh', task_type: 'local_bash', description: 'sleep 30; echo done' },
+        { type: 'system', subtype: 'task_started', task_id: 'sh-1', tool_use_id: 'tu-sh', task_type: 'local_bash', is_backgrounded: true, description: 'sleep 30; echo done' },
         toolResult('tu-sh', 'Command running in background with ID: sh-1'),
         () => { trackedMidTurn = session._pendingBackgroundShells.has('sh-1') },
         assistantText('started'),
@@ -442,6 +564,20 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(events.filter((e) => e.name === 'error').length, 0)
       const tr = events.find((e) => e.name === 'tool_result')
       assert.equal(tr.isError, true)
+    })
+
+    it('ignores a tool\'s own output that merely starts with the sentence (no is_error)', async () => {
+      const events = capture(session)
+      wire(session, [
+        init(),
+        toolUseStart('tu-1', 'Bash'),
+        toolResult('tu-1', `${CANCELLED_TEXT}\n(echoed by the command)`),
+        promptResult(2),
+      ], state)
+      await session.sendMessage('echo it')
+      assert.equal(events.filter((e) => e.name === 'error').length, 0)
+      const tr = events.find((e) => e.name === 'tool_result')
+      assert.equal(tr.isError, undefined)
     })
 
     it('matches on the content-block spelling too', async () => {

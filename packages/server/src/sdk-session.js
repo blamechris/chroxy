@@ -1190,10 +1190,33 @@ export class SdkSession extends BaseSession {
         this._skillsPrepended = true
       }
 
+      // #8300: a held zero-turn result turned out to be the orphan-task
+      // notice — the CLI went on with the prompt in the same process. Called
+      // from the next `init` (the usual confirmation), from any prompt
+      // activity, and from a further result; each is stronger evidence than
+      // the 2 s window, which must never fire under a running prompt.
+      const confirmHeldNotice = (how) => {
+        if (heldNoticeResult === null) return
+        heldNoticeResult = null
+        if (noticeTimer) {
+          clearTimeout(noticeTimer)
+          noticeTimer = null
+        }
+        ;(this._log || log).info(`Claude Code replayed a background task left over from an earlier turn (${how}); the prompt runs in the same process`)
+        this.emit('message', {
+          type: 'system',
+          subtype: 'orphan_task_notice',
+          content: 'A background task from an earlier turn ended with that turn; Claude Code noted it and is now running this prompt.',
+          timestamp: Date.now(),
+        })
+      }
+
       // #8300: the prompt's own result ends the turn. A closure rather than a
       // `case` body so the held-notice fallback after the loop can run the
-      // identical turn end.
-      const finishTurn = async (msg) => {
+      // identical turn end. `heldPath` says the loop already ended (the CLI
+      // exited after a genuine zero-turn result), so there is no live process
+      // to ask for a context-usage snapshot.
+      const finishTurn = async (msg, { heldPath = false } = {}) => {
         // #8300: background work the CLI started this turn and has not
         // closed. The turn's process cannot outlive the turn, and the SDK
         // provider cannot service a task past the result (its tool calls
@@ -1204,11 +1227,19 @@ export class SdkSession extends BaseSession {
         for (const task of liveWork) {
           const kind = task.taskType === 'local_bash' ? 'shell' : 'subagent'
           ;(this._log || log).warn(`Background ${kind} "${task.description}" (${task.taskId}) was still running at the turn's result; stopping it with the turn`)
+          // Ask the CLI to stop the task while the control channel is still
+          // open: closing the query alone ends the CLI, not a shell it spawned
+          // (verified live: the shell outlived `close()`), so the report below
+          // says which of the two happened.
+          const stopped = await this._stopLiveTask(task.taskId)
           this.emit('error', {
             code: 'background_task_ended_with_turn',
-            message: `Background ${kind} "${task.description}" was still running when the turn ended and was stopped with it; a claude-sdk session runs background work only within the turn that started it.`,
+            message: stopped
+              ? `Background ${kind} "${task.description}" was still running when the turn ended and was stopped with it; a claude-sdk session runs background work only within the turn that started it.`
+              : `Background ${kind} "${task.description}" was still running when the turn ended and could not be stopped; it may still be running. A claude-sdk session runs background work only within the turn that started it.`,
             toolUseId: task.toolUseId,
             taskId: task.taskId,
+            stopped,
             recoverable: true,
           })
           // A background shell's `task_id` is the shell id the tool_result
@@ -1276,7 +1307,7 @@ export class SdkSession extends BaseSession {
         // never be read as occupancy — see context-window.ts (#6769).
         // Null on timeout/old-CLI/error → field omitted → clients keep
         // their previous snapshot (or the honest dash state).
-        const contextUsageSnapshot = await this._getContextUsageSnapshot()
+        const contextUsageSnapshot = heldPath ? null : await this._getContextUsageSnapshot()
 
         // #8153: emit plan_ready before result — mirrors CliSession's
         // "the turn that calls ExitPlanMode ends with a normal result
@@ -1365,20 +1396,7 @@ export class SdkSession extends BaseSession {
               // CLI starting the prompt's own turn in the same process — the
               // held result was the orphan-task notice. Say so once and keep
               // the turn open; the prompt's result is still to come.
-              if (heldNoticeResult !== null) {
-                heldNoticeResult = null
-                if (noticeTimer) {
-                  clearTimeout(noticeTimer)
-                  noticeTimer = null
-                }
-                ;(this._log || log).info('Claude Code replayed a background task left over from an earlier turn; the prompt runs next in the same process')
-                this.emit('message', {
-                  type: 'system',
-                  subtype: 'orphan_task_notice',
-                  content: 'A background task from an earlier turn ended with that turn; Claude Code noted it and is now running this prompt.',
-                  timestamp: Date.now(),
-                })
-              }
+              confirmHeldNotice('a second init followed it')
               this._sdkSessionId = msg.session_id
               this._sessionId = msg.session_id
               // #4828: bind the session-scoped logger now that session_id
@@ -1416,11 +1434,15 @@ export class SdkSession extends BaseSession {
               // activity id back to a stoppable task. No client-facing emit —
               // the agent node already exists via agent_spawned.
               this._captureTaskId(msg.tool_use_id, msg.task_id)
-              // #8300: remember the task until its `task_notification`. A
-              // backgrounded one (`is_backgrounded`, or a background Bash —
-              // `local_bash` is only ever reported for `run_in_background`)
-              // still here at the prompt's result would outlive the turn.
-              if (typeof msg.task_id === 'string' && msg.task_id) {
+              // #8300: remember the task until its `task_notification`. Only a
+              // task the CLI itself flags `is_backgrounded` counts as live work
+              // at the prompt's result: a foreground Bash is ALSO reported as a
+              // `local_bash` task (with `is_backgrounded: false`) and settles
+              // before the result, so the task type alone says nothing. A
+              // `task_updated` patch can flip the flag later (Ctrl+B-style
+              // backgrounding). `skip_transcript` marks ambient housekeeping
+              // work the user never started; it is never reported as a loss.
+              if (typeof msg.task_id === 'string' && msg.task_id && msg.skip_transcript !== true) {
                 this._liveBackgroundTasks.set(msg.task_id, {
                   taskId: msg.task_id,
                   toolUseId: typeof msg.tool_use_id === 'string' ? msg.tool_use_id : null,
@@ -1428,7 +1450,7 @@ export class SdkSession extends BaseSession {
                   description: typeof msg.description === 'string' && msg.description
                     ? msg.description
                     : 'Background task',
-                  background: msg.is_backgrounded === true || msg.task_type === 'local_bash',
+                  background: msg.is_backgrounded === true,
                 })
               }
               // #7340: `task_started` is the provider's OWN lifecycle event and
@@ -1465,6 +1487,19 @@ export class SdkSession extends BaseSession {
               // #8300: the task is closed; it no longer counts as live work at
               // the prompt's result.
               if (typeof msg.task_id === 'string') this._liveBackgroundTasks.delete(msg.task_id)
+              break
+            } else if (msg.subtype === 'task_updated') {
+              // #8300: a task backgrounded after it started (`patch.is_backgrounded`)
+              // becomes live work; a terminal `patch.status` closes it.
+              const live = typeof msg.task_id === 'string' ? this._liveBackgroundTasks.get(msg.task_id) : null
+              const patch = msg.patch && typeof msg.patch === 'object' ? msg.patch : null
+              if (live && patch) {
+                if (patch.is_backgrounded === true) live.background = true
+                if (typeof patch.description === 'string' && patch.description) live.description = patch.description
+                if (patch.status === 'completed' || patch.status === 'failed' || patch.status === 'killed') {
+                  this._liveBackgroundTasks.delete(msg.task_id)
+                }
+              }
               break
             } else if (msg.subtype === 'compact_boundary') {
               // #6768: the SDK compacted the conversation (auto-triggered
@@ -1523,6 +1558,7 @@ export class SdkSession extends BaseSession {
 
           case 'stream_event': {
             promptActivitySeen = true // #8300: the prompt is running
+            confirmHeldNotice('stream events followed it')
             // Handle partial message events (content_block_start/delta/stop)
             const event = msg.event
             if (!event) break
@@ -1670,6 +1706,7 @@ export class SdkSession extends BaseSession {
             // fork the conversation truncated to exactly this point.
             this._captureBoundaryMessage(msg)
             promptActivitySeen = true // #8300: the prompt is running
+            confirmHeldNotice('assistant output followed it')
             // Full assistant message — process content blocks for tool detection
             const content = msg.message?.content
             if (!Array.isArray(content)) break
@@ -1707,6 +1744,7 @@ export class SdkSession extends BaseSession {
 
           case 'user': {
             promptActivitySeen = true // #8300: the prompt is running
+            confirmHeldNotice('tool results followed it')
             // #8300: a tool_result carrying Claude Code's own cancellation text
             // means the CLI dropped the call WITHOUT asking this session's
             // PermissionManager — there was no channel to ask on. That is a
@@ -1718,6 +1756,10 @@ export class SdkSession extends BaseSession {
             if (Array.isArray(msg.message?.content)) {
               for (const block of msg.message.content) {
                 if (block?.type !== 'tool_result' || !block.tool_use_id) continue
+                // The CLI's cancellation block is always `is_error: true`; a
+                // tool's OWN output that happens to start with the sentence (a
+                // fetched page, a file, an echo) is not an error block.
+                if (block.is_error !== true) continue
                 const text = toolResultText(block)
                 if (!isSdkToolCancellationText(text)) continue
                 const tool = this._inFlightToolStarts.get(block.tool_use_id)?.tool || 'unknown'
@@ -1757,7 +1799,10 @@ export class SdkSession extends BaseSession {
             // within ORPHAN_NOTICE_CONFIRM_MS it was the prompt's own, the
             // input is released so the CLI exits, and the loop's end finishes
             // the held result below.
-            if (heldNoticeResult === null && msg.num_turns === 0 && msg.is_error !== true && !promptActivitySeen) {
+            // A further result while one is held: the held one was the notice
+            // (the CLI ran another turn after it); this one is judged afresh.
+            confirmHeldNotice('a further result followed it')
+            if (msg.num_turns === 0 && msg.is_error !== true && !promptActivitySeen) {
               heldNoticeResult = msg
               ;(this._log || log).info(`Holding a zero-turn result (${msg.duration_ms ?? '?'}ms): probable orphan-task notice; waiting ${SdkSession.ORPHAN_NOTICE_CONFIRM_MS}ms for the prompt's own init`)
               noticeTimer = setTimeout(() => {
@@ -1776,7 +1821,7 @@ export class SdkSession extends BaseSession {
       if (heldNoticeResult !== null && !this._destroying) {
         const held = heldNoticeResult
         heldNoticeResult = null
-        await finishTurn(held)
+        await finishTurn(held, { heldPath: true })
       }
     } catch (err) {
       if (streamState.hasStreamStarted) {
@@ -1972,6 +2017,39 @@ export class SdkSession extends BaseSession {
    */
   _liveBackgroundWork() {
     return [...this._liveBackgroundTasks.values()].filter((task) => task.background === true)
+  }
+
+  // #8300: bound on `Query.stopTask()` at the turn's result. The CLI answers
+  // the control request in milliseconds when alive; the cap only bites when
+  // it is already gone, in which case the task is reported as not stopped.
+  static STOP_TASK_TIMEOUT_MS = 3000
+
+  /**
+   * #8300: ask the CLI to stop a task that would outlive the turn, via the
+   * SDK's `stopTask` control request. Resolves true when the CLI acknowledged
+   * the stop, false when the query has no `stopTask`, it threw, or it did not
+   * answer within STOP_TASK_TIMEOUT_MS. Never throws.
+   *
+   * @param {string} taskId
+   * @returns {Promise<boolean>}
+   */
+  async _stopLiveTask(taskId) {
+    const q = this._query
+    if (!q || typeof q.stopTask !== 'function') return false
+    let timer = null
+    try {
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), SdkSession.STOP_TASK_TIMEOUT_MS)
+      })
+      const ok = await Promise.race([q.stopTask(taskId).then(() => true), timeout])
+      if (!ok) (this._log || log).warn(`stopTask(${taskId}) did not answer within ${SdkSession.STOP_TASK_TIMEOUT_MS}ms`)
+      return ok === true
+    } catch (err) {
+      ;(this._log || log).warn(`stopTask(${taskId}) failed: ${err?.message || err}`)
+      return false
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 
   /**
