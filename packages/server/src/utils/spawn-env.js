@@ -119,10 +119,12 @@ export const STANDARD_ALLOWLIST = [
 // it either.
 //
 // Allowlist-mode providers (codex, gemini) already exclude these by omission;
-// this set is the belt-and-braces guarantee for denylist-mode providers (claude)
-// and is re-used by the claude-tui PTY spawn path (claude-tui-session.js), the
-// BYOK in-process Bash/Grep tool shell (byok-tool-executor.js, #8113), the
-// user-shell PTY, and the MCP-server/statusline child-env builders.
+// this set is the belt-and-braces guarantee for denylist-mode providers (claude,
+// and claude-sdk — the env SdkSession hands the Agent SDK's `query()` for the
+// `claude` child it spawns) and is re-used by the claude-tui PTY spawn path
+// (claude-tui-session.js), the BYOK in-process Bash/Grep tool shell
+// (byok-tool-executor.js, #8113), the user-shell PTY, and the
+// MCP-server/statusline child-env builders.
 export const CHROXY_SECRET_DENYLIST = [
   'API_TOKEN',
   'CHROXY_INGEST_SECRET',
@@ -216,6 +218,20 @@ const PROVIDERS = {
     storeInjectKeys: [
       'CLAUDE_CODE_OAUTH_TOKEN',
     ],
+  },
+  'claude-sdk': {
+    mode: 'denylist',
+    // The Agent SDK child: `query()` spawns `claude` itself and takes this
+    // object as its `env` option. The SDK's own default is the full parent
+    // env, and that is kept — everything the user's shell exports is
+    // available to Claude Code's tools — minus the chroxy-owned daemon
+    // secrets every denylist-mode provider strips (CHROXY_SECRET_DENYLIST,
+    // applied below). No ANTHROPIC_API_KEY strip: unlike the stream-json CLI
+    // provider, SdkSession accepts an API key as one of its auth sources
+    // (SdkSession.resolveAuth), and no credential-store injection either —
+    // the SDK child authenticates from the user's own `claude` login.
+    denylist: [],
+    storeInjectKeys: [],
   },
 }
 
