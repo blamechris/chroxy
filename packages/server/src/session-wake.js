@@ -121,10 +121,10 @@ function outcomeForAdmission(admission) {
  *
  * @param {object} session
  * @param {string} text
- * @param {{ clientMessageId?: string, onAdmission?: (result: {outcome: 'injected'|'queued'|'rejected', line: string, clientMessageId: string|undefined, admission: object}) => void }} opts
+ * @param {{ clientMessageId?: string, admitAtFlush?: () => boolean, onAdmission?: (result: {outcome: 'injected'|'queued'|'rejected', line: string, clientMessageId: string|undefined, admission: object}) => void }} opts
  * @returns {WakeOutcome}
  */
-function wakeViaTurnInput(session, text, { clientMessageId, onAdmission } = {}) {
+function wakeViaTurnInput(session, text, { clientMessageId, admitAtFlush, onAdmission } = {}) {
   if (!supportsDaemonTurnInput(session)) return 'not-tui'
   if (typeof session.sendMessage !== 'function') return 'not-tui'
   const line = sanitizeWakeText(text)
@@ -152,6 +152,10 @@ function wakeViaTurnInput(session, text, { clientMessageId, onAdmission } = {}) 
   try {
     result = session.sendMessage(line, [], {
       ...(typeof clientMessageId === 'string' ? { clientMessageId } : {}),
+      // A wake that QUEUES behind a running turn is dispatched later, by the
+      // provider's queue, with no caller on the stack. The caller's flush-time
+      // admission check rides with the item so the queue can re-ask then.
+      ...(typeof admitAtFlush === 'function' ? { admitAtFlush } : {}),
       onInputAdmission,
     })
   } catch (err) {
@@ -184,6 +188,9 @@ function wakeViaTurnInput(session, text, { clientMessageId, onAdmission } = {}) 
  *   unchanged. Strict `=== true`.
  * @param {string} [opts.clientMessageId] - turn-input route: the stable daemon
  *   id the provider's queue mirror and history carry.
+ * @param {() => boolean} [opts.admitAtFlush] - turn-input route: re-asked by the
+ *   provider's queue (BaseSession `dequeueNextOutgoing`) when a QUEUED wake is
+ *   about to be dispatched; anything but `true` (or a throw) drops it.
  * @param {Function} [opts.onAdmission] - turn-input route: called once with the
  *   final admission outcome (see `wakeViaTurnInput`).
  * @returns {WakeOutcome}

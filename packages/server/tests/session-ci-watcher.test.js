@@ -1105,7 +1105,7 @@ class SdkLikeSession extends BaseSession {
 }
 
 describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)', () => {
-  function turnHarness({ session, queue = [pending(), green()], wakeAgent = true } = {}) {
+  function turnHarness({ session, queue = [pending(), green()], wakeAgent = true, isWakeBlocked } = {}) {
     const logs = []
     const recorded = []
     const events = []
@@ -1117,6 +1117,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
       survey: async () => (q.length > 1 ? q.shift() : q[0]),
       notify: (e) => events.push(e),
       recordWakeInput: (w) => recorded.push(w),
+      ...(isWakeBlocked ? { isWakeBlocked } : {}),
       discoveryIntervalMs: 0,
       logger: { debug() {}, info: (m) => logs.push(m), warn: (m) => logs.push(`WARN ${m}`) },
     })
@@ -1261,6 +1262,82 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
     assert.equal(h.recorded[0].text.includes('curl'), false, 'nor the history entry clients see')
     // The prompt is exactly the daemon template: a PR number, integer counts, a merge-state enum.
     assert.match(prompt, /^CI finished on PR #7422: \d+ of \d+ checks passed\.( Merge state: [A-Z_]+\.)? You did not need to poll for this\.$/)
+  })
+
+  // The cost-budget pause refuses TYPED input (input-handlers). A daemon-authored
+  // turn must not be a way around it: the user is still told, the agent is not.
+  describe('cost-budget pause (the wake is not a way around it)', () => {
+    it('does not wake a budget-paused session: nothing sent, nothing recorded, outcome budget-paused, user still notified', async () => {
+      const session = new SdkLikeSession()
+      const h = turnHarness({ session, isWakeBlocked: () => true })
+      await settle(h)
+      assert.deepEqual(session.sent, [], 'sendMessage was never called')
+      assert.equal(session.outgoingQueueLength, 0, 'and nothing was queued')
+      assert.deepEqual(h.recorded, [])
+      assert.equal(h.events.length, 1, 'the push notification still goes out')
+      assert.ok(h.logs.includes('ci-watch: #7422 settled success for session s1 (wake: budget-paused)'), JSON.stringify(h.logs))
+    })
+
+    it('also withholds the PTY wake from a paused claude-tui session', async () => {
+      const session = tuiSession()
+      const h = turnHarness({ session, isWakeBlocked: () => true })
+      await settle(h)
+      assert.deepEqual(session.writes, [])
+      assert.equal(h.events.length, 1)
+    })
+
+    it('asks about THIS session', async () => {
+      const asked = []
+      const h = turnHarness({ session: new SdkLikeSession(), isWakeBlocked: (id) => { asked.push(id); return false } })
+      await settle(h)
+      assert.ok(asked.includes('s1'))
+    })
+
+    it('a wake QUEUED while busy is re-checked at flush: the turn\'s result trips the pause, so it is not dispatched', async () => {
+      const session = new SdkLikeSession()
+      session.sendMessage('a user turn is running')
+      let paused = false
+      const h = turnHarness({ session, isWakeBlocked: () => paused })
+      const dequeued = []
+      session.on('message_dequeued', (e) => dequeued.push(e.reason))
+      await settle(h)
+      assert.equal(session.outgoingQueueLength, 1, 'unpaused at wake time, so it queued')
+      assert.ok(h.logs.includes('ci-watch: #7422 settled success for session s1 (wake: queued)'))
+
+      paused = true // the running turn's result pushes the session over its budget
+      session.completeTurn()
+      await new Promise((resolve) => process.nextTick(resolve))
+      assert.equal(session.sent.length, 1, 'the wake was NOT dispatched at flush')
+      assert.deepEqual(dequeued, ['cancelled'])
+      assert.equal(session.outgoingQueueLength, 0)
+    })
+
+    it('a queued wake that is still allowed at flush is dispatched', async () => {
+      const session = new SdkLikeSession()
+      session.sendMessage('a user turn is running')
+      const h = turnHarness({ session, isWakeBlocked: () => false })
+      await settle(h)
+      session.completeTurn()
+      await new Promise((resolve) => process.nextTick(resolve))
+      assert.equal(session.sent.length, 2)
+      assert.match(session.sent[1].prompt, /CI finished on PR #7422/)
+    })
+
+    it('a throwing gate withholds the wake rather than waking a possibly-paused session', async () => {
+      const session = new SdkLikeSession()
+      const h = turnHarness({ session, isWakeBlocked: () => { throw new Error('manager gone') } })
+      await settle(h)
+      assert.deepEqual(session.sent, [])
+      assert.ok(h.logs.some((l) => /wake gate threw/.test(l)))
+      assert.equal(h.events.length, 1)
+    })
+
+    it('with no gate configured the wake is unchanged', async () => {
+      const session = new SdkLikeSession()
+      const h = turnHarness({ session })
+      await settle(h)
+      assert.equal(session.sent.length, 1)
+    })
   })
 
   it('survives a throwing recorder and a throwing provider without losing the notification', async () => {
@@ -1441,6 +1518,42 @@ describe('buildSessionCiWatcher — the daemon wiring', () => {
     assert.equal(recorded[0][0], 's1')
     assert.equal(recorded[0][1], session.sent[0].prompt)
     assert.equal(recorded[0][2], session.sent[0].sendOptions.clientMessageId)
+  })
+
+  it('wires the wake gate to sessionManager.isBudgetPaused, at wake time and again at flush (#8301)', async () => {
+    const paused = new Set()
+    const asked = []
+    const session = new SdkLikeSession()
+    session.sendMessage('a user turn is running')
+    const q = [pending(), green()]
+    const watcher = buildSessionCiWatcher({
+      config: {},
+      sessionManager: { ...fakeManager({ session }), isBudgetPaused: (id) => { asked.push(id); return paused.has(id) } },
+      logger: { debug() {}, info() {}, warn() {} },
+      survey: async () => (q.length > 1 ? q.shift() : q[0]),
+    })
+    await watcher.tick()
+    await watcher.tick()
+    assert.equal(session.outgoingQueueLength, 1, 'unpaused: queued behind the running turn')
+    paused.add('s1')
+    session.completeTurn()
+    await new Promise((resolve) => process.nextTick(resolve))
+    assert.equal(session.sent.length, 1, 'paused by flush time: never dispatched')
+    assert.ok(asked.length >= 2 && asked.every((id) => id === 's1'))
+
+    // and a session that is paused when CI settles is never even queued
+    const session2 = new SdkLikeSession()
+    const q2 = [pending(), green()]
+    const w2 = buildSessionCiWatcher({
+      config: {},
+      sessionManager: { ...fakeManager({ session: session2 }), isBudgetPaused: () => true },
+      logger: { debug() {}, info() {}, warn() {} },
+      survey: async () => (q2.length > 1 ? q2.shift() : q2[0]),
+    })
+    await w2.tick()
+    await w2.tick()
+    assert.deepEqual(session2.sent, [])
+    assert.equal(session2.outgoingQueueLength, 0)
   })
 
   it('a session manager without recordDaemonUserInput still delivers the wake', async () => {

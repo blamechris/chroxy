@@ -304,6 +304,115 @@ describe('outgoing-message queue (#5936)', () => {
     })
   })
 
+  // #8301 — a queued item can carry `sendOptions.admitAtFlush`, a LOCAL callback
+  // the queue re-asks at the moment it would dispatch the item. The daemon's CI
+  // wake uses it so a wake queued behind a turn does not run if that turn's own
+  // result trips the cost-budget pause. Typed input never sets it.
+  describe('flush-time admission (admitAtFlush, #8301)', () => {
+    const collect = (s) => {
+      const dequeued = []
+      s.on('message_dequeued', (e) => dequeued.push({ id: e.clientMessageId, reason: e.reason, queueLength: e.queueLength }))
+      return dequeued
+    }
+
+    it('dispatches an item whose predicate returns true, exactly like an unconditioned one', async () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('wake', undefined, { clientMessageId: 'w1', admitAtFlush: () => true })
+      const dequeued = collect(s)
+      s.completeTurn()
+      await tick()
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn', 'wake'])
+      assert.deepEqual(dequeued.map((d) => d.reason), ['flush'])
+    })
+
+    it('drops an item whose predicate returns false: not dispatched, dequeued as cancelled', async () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('wake', undefined, { clientMessageId: 'w1', admitAtFlush: () => false })
+      const dequeued = collect(s)
+      s.completeTurn()
+      await tick()
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn'], 'the refused item was never sent')
+      assert.deepEqual(dequeued, [{ id: 'w1', reason: 'cancelled', queueLength: 0 }])
+      assert.equal(s.outgoingQueueLength, 0)
+    })
+
+    it('evaluates the predicate at FLUSH time, not at enqueue time', async () => {
+      const s = new FakeSession()
+      let allowed = true
+      s.sendMessage('turn')
+      s.sendMessage('wake', undefined, { clientMessageId: 'w1', admitAtFlush: () => allowed })
+      allowed = false // the turn's result trips the pause AFTER the wake was queued
+      s.completeTurn()
+      await tick()
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn'])
+    })
+
+    it('treats a throwing predicate as a refusal (fail safe)', async () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('wake', undefined, { clientMessageId: 'w1', admitAtFlush: () => { throw new Error('boom') } })
+      const dequeued = collect(s)
+      s.completeTurn()
+      await tick()
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn'])
+      assert.deepEqual(dequeued.map((d) => d.reason), ['cancelled'])
+    })
+
+    it('accepts only a literal true — a truthy non-boolean is a refusal', async () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('wake', undefined, { admitAtFlush: () => 1 })
+      s.completeTurn()
+      await tick()
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn'])
+    })
+
+    it('keeps draining: after a refused item the NEXT queued item is considered and sent', async () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('wake', undefined, { clientMessageId: 'w1', admitAtFlush: () => false })
+      s.sendMessage('typed follow-up', undefined, { clientMessageId: 'u1' })
+      const dequeued = collect(s)
+      s.completeTurn()
+      await tick(); await tick()
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn', 'typed follow-up'])
+      assert.deepEqual(dequeued.map((d) => [d.id, d.reason]), [['w1', 'cancelled'], ['u1', 'flush']])
+    })
+
+    it('an item without a predicate (typed input) is unaffected', async () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('typed', undefined, { clientMessageId: 'u1' })
+      s.completeTurn()
+      await tick()
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn', 'typed'])
+    })
+
+    it('never puts the predicate on the wire: message_queued carries only id, text and length', () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      const queued = []
+      s.on('message_queued', (e) => queued.push(e))
+      s.sendMessage('wake', undefined, { clientMessageId: 'w1', admitAtFlush: () => true })
+      assert.deepEqual(queued, [{ clientMessageId: 'w1', text: 'wake', queueLength: 1 }])
+      assert.equal(JSON.stringify(queued[0]).includes('admitAtFlush'), false)
+    })
+
+    it('a destroy landing before the flush tick drops the item without evaluating the predicate', async () => {
+      const s = new FakeSession()
+      let asked = 0
+      s.sendMessage('turn')
+      s.sendMessage('wake', undefined, { admitAtFlush: () => { asked++; return true } })
+      s.completeTurn()
+      s._destroying = true
+      await tick()
+      assert.equal(asked, 0)
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn'])
+    })
+  })
+
   describe('normalizer → wire mapping injects sessionId', () => {
     const norm = new EventNormalizer()
 

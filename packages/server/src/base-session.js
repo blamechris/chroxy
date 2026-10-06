@@ -1026,11 +1026,45 @@ export class BaseSession extends EventEmitter {
     const remaining = this._outgoingQueue.length
     process.nextTick(() => {
       if (this._destroying) return
+      // #8301: an item that carries `sendOptions.admitAtFlush` is re-checked HERE,
+      // at the moment it would be dispatched — after the preceding turn's
+      // `result` has been broadcast and processed on every turn-end path. Its
+      // admission at enqueue time can be stale by then (the result can trip the
+      // cost-budget pause). The predicate is a LOCAL callback: it is never put on
+      // the wire (`message_queued` carries only id/text/length) and the queue is
+      // not persisted. Typed input does not set it, so its behaviour is unchanged.
+      // A refusal — or a throwing predicate, which fails safe — cancels just this
+      // item and goes on to consider the next, so the queue keeps draining.
+      if (!this._admitQueuedItem(item)) {
+        this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'cancelled' })
+        ;(this._log || log).warn(`Dropped queued follow-up at flush: admission refused (${remaining} remaining)`)
+        if (this._outgoingQueue.length && !this._destroying) this.dequeueNextOutgoing()
+        return
+      }
       this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'flush' })
       ;(this._log || log).info(`Dequeuing follow-up message (${remaining} remaining)`)
       this.sendMessage(item.prompt, item.attachments, item.sendOptions)
     })
     return item
+  }
+
+  /**
+   * #8301: evaluate a queued item's optional flush-time admission predicate.
+   * No predicate means admitted (every typed input). A predicate that returns
+   * anything but `true`, or throws, means NOT admitted.
+   *
+   * @param {{ sendOptions?: { admitAtFlush?: () => boolean } }} item
+   * @returns {boolean}
+   */
+  _admitQueuedItem(item) {
+    const predicate = item?.sendOptions?.admitAtFlush
+    if (typeof predicate !== 'function') return true
+    try {
+      return predicate() === true
+    } catch (err) {
+      ;(this._log || log).warn(`Queued follow-up admission check threw; dropping it: ${err?.message || err}`)
+      return false
+    }
   }
 
   /**

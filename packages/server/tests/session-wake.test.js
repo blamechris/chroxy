@@ -194,6 +194,19 @@ describe('wakeSession — turn-input route (#8301)', () => {
     assert.deepEqual(admitted, ['queued'])
   })
 
+  it('forwards admitAtFlush to sendMessage only when it is a function (#8301)', () => {
+    const s = new FakeTurnSession()
+    const gate = () => true
+    wakeSession(s, 'a', { turnInput: true, admitAtFlush: gate })
+    assert.equal(s.sent[0].sendOptions.admitAtFlush, gate)
+    const s2 = new FakeTurnSession()
+    wakeSession(s2, 'a', { turnInput: true, admitAtFlush: 'yes' })
+    assert.equal('admitAtFlush' in s2.sent[0].sendOptions, false)
+    const s3 = new FakeTurnSession()
+    wakeSession(s3, 'a', { turnInput: true })
+    assert.equal('admitAtFlush' in s3.sent[0].sendOptions, false)
+  })
+
   it('does not consult isRunning: a busy turn is queued, not refused', () => {
     const s = new FakeTurnSession()
     s._isBusy = true
