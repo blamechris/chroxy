@@ -70,7 +70,9 @@ describe('SdkSession query() environment', () => {
     assert.equal(env.CHROXY_HOOK_SECRET, undefined, 'an ambiently inherited hook secret is dropped')
     assert.equal(env.CHROXY_TEST_PASSTHROUGH, 'still-here', 'the user\'s own environment still reaches the child')
     assert.equal(env.CHROXY_HOST_APP, 'Chroxy', 'the host identity is present, as for every other provider child')
-    assert.equal(env.PATH, process.env.PATH)
+    // Windows spells the key `Path`; compare whichever casing the host uses.
+    const pathKey = (o) => Object.keys(o).find((k) => k.toLowerCase() === 'path')
+    assert.equal(env[pathKey(env)], process.env[pathKey(process.env)], 'the search path reaches the child unchanged')
   })
 
   it('keeps ANTHROPIC_API_KEY, which the SDK provider accepts as an auth source', async () => {
