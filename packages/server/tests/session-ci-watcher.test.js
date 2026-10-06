@@ -1105,7 +1105,7 @@ class SdkLikeSession extends BaseSession {
 }
 
 describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)', () => {
-  function turnHarness({ session, queue = [pending(), green()], wakeAgent = true, isWakeBlocked } = {}) {
+  function turnHarness({ session, queue = [pending(), green()], wakeAgent = true, daemonTurnRefusal } = {}) {
     const logs = []
     const recorded = []
     const events = []
@@ -1117,7 +1117,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
       survey: async () => (q.length > 1 ? q.shift() : q[0]),
       notify: (e) => events.push(e),
       recordWakeInput: (w) => recorded.push(w),
-      ...(isWakeBlocked ? { isWakeBlocked } : {}),
+      ...(daemonTurnRefusal ? { daemonTurnRefusal } : {}),
       discoveryIntervalMs: 0,
       logger: { debug() {}, info: (m) => logs.push(m), warn: (m) => logs.push(`WARN ${m}`) },
     })
@@ -1269,7 +1269,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
   describe('cost-budget pause (the wake is not a way around it)', () => {
     it('does not wake a budget-paused session: nothing sent, nothing recorded, outcome budget-paused, user still notified', async () => {
       const session = new SdkLikeSession()
-      const h = turnHarness({ session, isWakeBlocked: () => true })
+      const h = turnHarness({ session, daemonTurnRefusal: () => 'budget-paused' })
       await settle(h)
       assert.deepEqual(session.sent, [], 'sendMessage was never called')
       assert.equal(session.outgoingQueueLength, 0, 'and nothing was queued')
@@ -1280,7 +1280,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
 
     it('also withholds the PTY wake from a paused claude-tui session', async () => {
       const session = tuiSession()
-      const h = turnHarness({ session, isWakeBlocked: () => true })
+      const h = turnHarness({ session, daemonTurnRefusal: () => 'budget-paused' })
       await settle(h)
       assert.deepEqual(session.writes, [])
       assert.equal(h.events.length, 1)
@@ -1288,7 +1288,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
 
     it('asks about THIS session', async () => {
       const asked = []
-      const h = turnHarness({ session: new SdkLikeSession(), isWakeBlocked: (id) => { asked.push(id); return false } })
+      const h = turnHarness({ session: new SdkLikeSession(), daemonTurnRefusal: (id) => { asked.push(id); return null } })
       await settle(h)
       assert.ok(asked.includes('s1'))
     })
@@ -1297,7 +1297,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
       const session = new SdkLikeSession()
       session.sendMessage('a user turn is running')
       let paused = false
-      const h = turnHarness({ session, isWakeBlocked: () => paused })
+      const h = turnHarness({ session, daemonTurnRefusal: () => (paused ? 'budget-paused' : null) })
       const dequeued = []
       session.on('message_dequeued', (e) => dequeued.push(e.reason))
       await settle(h)
@@ -1315,7 +1315,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
     it('a queued wake that is still allowed at flush is dispatched', async () => {
       const session = new SdkLikeSession()
       session.sendMessage('a user turn is running')
-      const h = turnHarness({ session, isWakeBlocked: () => false })
+      const h = turnHarness({ session, daemonTurnRefusal: () => null })
       await settle(h)
       session.completeTurn()
       await new Promise((resolve) => process.nextTick(resolve))
@@ -1325,7 +1325,7 @@ describe('SessionCiWatcher — the turn-input wake for non-tui providers (#8301)
 
     it('a throwing gate withholds the wake rather than waking a possibly-paused session', async () => {
       const session = new SdkLikeSession()
-      const h = turnHarness({ session, isWakeBlocked: () => { throw new Error('manager gone') } })
+      const h = turnHarness({ session, daemonTurnRefusal: () => { throw new Error('manager gone') } })
       await settle(h)
       assert.deepEqual(session.sent, [])
       assert.ok(h.logs.some((l) => /wake gate threw/.test(l)))
@@ -1520,7 +1520,7 @@ describe('buildSessionCiWatcher — the daemon wiring', () => {
     assert.equal(recorded[0][2], session.sent[0].sendOptions.clientMessageId)
   })
 
-  it('wires the wake gate to sessionManager.isBudgetPaused, at wake time and again at flush (#8301)', async () => {
+  it('wires the wake gate to sessionManager.daemonTurnRefusal, at wake time and again at flush (#8301)', async () => {
     const paused = new Set()
     const asked = []
     const session = new SdkLikeSession()
@@ -1528,7 +1528,7 @@ describe('buildSessionCiWatcher — the daemon wiring', () => {
     const q = [pending(), green()]
     const watcher = buildSessionCiWatcher({
       config: {},
-      sessionManager: { ...fakeManager({ session }), isBudgetPaused: (id) => { asked.push(id); return paused.has(id) } },
+      sessionManager: { ...fakeManager({ session }), daemonTurnRefusal: (id) => { asked.push(id); return paused.has(id) ? 'budget-paused' : null } },
       logger: { debug() {}, info() {}, warn() {} },
       survey: async () => (q.length > 1 ? q.shift() : q[0]),
     })
@@ -1546,7 +1546,7 @@ describe('buildSessionCiWatcher — the daemon wiring', () => {
     const q2 = [pending(), green()]
     const w2 = buildSessionCiWatcher({
       config: {},
-      sessionManager: { ...fakeManager({ session: session2 }), isBudgetPaused: () => true },
+      sessionManager: { ...fakeManager({ session: session2 }), daemonTurnRefusal: () => 'user-stopped' },
       logger: { debug() {}, info() {}, warn() {} },
       survey: async () => (q2.length > 1 ? q2.shift() : q2[0]),
     })

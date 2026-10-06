@@ -804,6 +804,20 @@ export class CliSession extends BaseSession {
   }
 
   /**
+   * #8301: a daemon wake must never revive a session the user stopped, nor sit
+   * behind a latched binary-gate refusal. `sendMessage` on a not-ready process
+   * calls `_restartAfterStop()` — a respawn — which is right for typed input and
+   * wrong for a wake. `_processReady` guards it: a live process that merely
+   * carries the latch (it cannot, once restarted) is not refused.
+   *
+   * @returns {string|null}
+   */
+  daemonTurnRefusal() {
+    if (!this._processReady && (this._stoppedByUser || this._spawnRefusal)) return 'stopped'
+    return null
+  }
+
+  /**
    * Send a message to Claude via stdin NDJSON.
    */
   async sendMessage(prompt, attachments, options = {}) {

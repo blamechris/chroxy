@@ -76,3 +76,110 @@ describe('SessionManager.recordDaemonUserInput (#8301)', () => {
     assert.deepEqual(mgr.getHistory('s1').filter((e) => e.messageType === 'user_input'), [])
   })
 })
+
+describe('SessionManager daemon-turn marker (#8301)', () => {
+  let mgr
+  beforeEach(() => {
+    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    mgr._sessions.set('s1', { session: mockSession(), name: 'Session 1', cwd: '/tmp' })
+  })
+
+  it('marks the history entry and the broadcast source: "daemon"', () => {
+    const seen = []
+    mgr.on('session_event', (e) => seen.push(e))
+    mgr.recordDaemonUserInput('s1', 'CI finished on PR #9', 'chroxy-ci-wake-abc-1')
+    const entry = mgr.getHistory('s1').find((e) => e.messageType === 'user_input')
+    assert.equal(entry.source, 'daemon')
+    assert.equal(seen.find((e) => e.event === 'user_input').data.source, 'daemon')
+  })
+
+  it('leaves a typed input unmarked (the field is absent, not "user")', () => {
+    mgr.recordUserInput('s1', 'hello', 'uin-1')
+    const entry = mgr.getHistory('s1').find((e) => e.messageType === 'user_input')
+    assert.equal('source' in entry, false)
+  })
+})
+
+describe('SessionManager.daemonTurnRefusal — the one refusal seam (#8301)', () => {
+  let mgr
+  const withSession = (extra = {}) => {
+    const session = Object.assign(mockSession(), extra)
+    mgr._sessions.set('s1', { session, name: 'Session 1', cwd: '/tmp' })
+    return session
+  }
+  beforeEach(() => {
+    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costBudget: 1 })
+  })
+
+  it('is null for a healthy session', () => {
+    withSession()
+    assert.equal(mgr.daemonTurnRefusal('s1'), null)
+  })
+
+  it('refuses a session that is gone or being torn down', () => {
+    assert.equal(mgr.daemonTurnRefusal('nope'), 'no-session')
+    withSession()
+    mgr._sessions.get('s1')._destroying = true
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'no-session')
+  })
+
+  it('refuses a budget-paused session, and lifts when the budget is resumed', () => {
+    withSession()
+    mgr._costBudget.trackCost('s1', 5)
+    assert.equal(mgr.isBudgetPaused('s1'), true, 'precondition: really paused by the real budget manager')
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'budget-paused')
+    mgr._costBudget.resume('s1')
+    assert.equal(mgr.daemonTurnRefusal('s1'), null)
+  })
+
+  it('refuses after a user Stop, until the user next TYPES', () => {
+    withSession()
+    mgr.recordUserInterrupt('s1')
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'user-stopped')
+    mgr.recordUserInput('s1', 'carry on', 'uin-1')
+    assert.equal(mgr.daemonTurnRefusal('s1'), null, 'a typed input re-enables wakes')
+  })
+
+  it('a DAEMON input does not clear the stopped state', () => {
+    withSession()
+    mgr.recordUserInterrupt('s1')
+    mgr.recordDaemonUserInput('s1', 'CI finished on PR #9', 'chroxy-ci-wake-abc-1')
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'user-stopped')
+  })
+
+  it('a Stop on one session does not refuse another', () => {
+    withSession()
+    mgr._sessions.set('s2', { session: mockSession(), name: 'S2', cwd: '/tmp' })
+    mgr.recordUserInterrupt('s1')
+    assert.equal(mgr.daemonTurnRefusal('s2'), null)
+  })
+
+  it('ignores a Stop for an unknown session and forgets it when the session goes', () => {
+    mgr.recordUserInterrupt('ghost')
+    assert.equal(mgr._userStopped.has('ghost'), false)
+    withSession()
+    mgr.recordUserInterrupt('s1')
+    mgr._cleanupSessionMaps('s1')
+    assert.equal(mgr._userStopped.has('s1'), false, 'no leak after the session is removed')
+  })
+
+  it('surfaces the provider\'s own reason', () => {
+    withSession({ daemonTurnRefusal: () => 'stdin-disabled' })
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'stdin-disabled')
+  })
+
+  it('treats a provider hook that throws as a refusal (fail safe), and a non-string as no refusal', () => {
+    withSession({ daemonTurnRefusal: () => { throw new Error('boom') } })
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'refusal-check-failed')
+    mgr._sessions.get('s1').session.daemonTurnRefusal = () => 42
+    assert.equal(mgr.daemonTurnRefusal('s1'), null)
+  })
+
+  it('checks budget before the user-stopped state before the provider (stable precedence)', () => {
+    withSession({ daemonTurnRefusal: () => 'not-started' })
+    mgr.recordUserInterrupt('s1')
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'user-stopped')
+    mgr._costBudget.trackCost('s1', 5)
+    assert.equal(mgr.daemonTurnRefusal('s1'), 'budget-paused')
+  })
+})

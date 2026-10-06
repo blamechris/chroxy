@@ -202,6 +202,24 @@ describe('handleSessionMessage', () => {
       assert.equal(entry.session.interrupt.callCount, 1)
     })
 
+    // #8301: a user Stop is the user's word, and it ends daemon wakes for that session.
+    it('records the user Stop with the session manager so daemon wakes are refused (#8301)', async () => {
+      const recordUserInterrupt = mock.fn()
+      const ctx = makeCtx({ sessionManager: { recordUserInterrupt } })
+      const client = makeClient({ activeSessionId: 'sess-1' })
+      addSession(ctx, 'sess-1')
+      await handleSessionMessage(WS, client, { type: 'interrupt' }, ctx)
+      assert.equal(recordUserInterrupt.mock.callCount(), 1)
+      assert.equal(recordUserInterrupt.mock.calls[0].arguments[0], 'sess-1')
+    })
+
+    it('does not record a Stop that resolves to no session (#8301)', async () => {
+      const recordUserInterrupt = mock.fn()
+      const ctx = makeCtx({ sessionManager: { recordUserInterrupt } })
+      await handleSessionMessage(WS, makeClient(), { type: 'interrupt' }, ctx)
+      assert.equal(recordUserInterrupt.mock.callCount(), 0)
+    })
+
     it('does nothing when no active session', async () => {
       const ctx = makeCtx()
       const client = makeClient()

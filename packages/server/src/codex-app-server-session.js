@@ -854,6 +854,15 @@ export class CodexAppServerSession extends BaseSession {
     }
   }
 
+  /**
+   * #8301: `sendMessage` on a session whose app-server is not up emits a
+   * user-visible "not started" error. A daemon wake must not cause one.
+   * @returns {string|null}
+   */
+  daemonTurnRefusal() {
+    return (!this._processReady || !this._client) ? 'not-started' : null
+  }
+
   async sendMessage(prompt, attachments, sendOptions = {}) {
     if (this._isBusy) {
       const queued = this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })

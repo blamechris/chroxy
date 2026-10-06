@@ -333,6 +333,18 @@ export class SdkSession extends BaseSession {
   }
 
   /**
+   * #8301: with stdin forwarding latched off, `sendMessage` emits a
+   * user-visible `stdin_disabled` error AND silently discards the user's own
+   * queued follow-ups (`clearOutgoingQueue({ emit: false })`). A daemon wake
+   * must not trigger either.
+   *
+   * @returns {string|null}
+   */
+  daemonTurnRefusal() {
+    return this._stdinForwardingDisabled ? 'stdin-disabled' : null
+  }
+
+  /**
    * #3209: SDK is the only provider that rebuilds the system prompt
    * each turn, so manual-skill toggles propagate to the wire here.
    * Subprocess providers (CliSession, CodexSession, GeminiSession)

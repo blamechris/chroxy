@@ -1068,6 +1068,25 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #8301: why a DAEMON-authored turn (the CI wake) must not be handed to this
+   * session right now, or `null` when it may. The provider's half of the one
+   * refusal seam `SessionManager.daemonTurnRefusal` asks — before dispatch and
+   * again when a queued wake is about to flush.
+   *
+   * This is a stricter question than "can the user type here": a typed input
+   * may legitimately revive a stopped session or surface an error, but a
+   * daemon wake that does so is a side effect nobody asked for. A provider
+   * overrides it for the states in which `sendMessage` would do that (respawn,
+   * discard the queue, report a user-visible error). The default is `null`: a
+   * provider that has no such state is always willing.
+   *
+   * @returns {string|null} a short reason, or null
+   */
+  daemonTurnRefusal() {
+    return null
+  }
+
+  /**
    * #5936: drop every queued outgoing message. Called by `interrupt()` so a
    * deliberate Stop cancels the owner's pending follow-ups rather than letting
    * them auto-fire after the turn the user just halted — the canonical interrupt

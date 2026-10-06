@@ -914,6 +914,8 @@ function handleInterrupt(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
   if (entry) {
     log.info(`Interrupt from ${client.id} to session ${interruptSessionId}`)
+    // #8301: a user Stop ends daemon wakes for this session until they next type.
+    ctx.sessions.sessionManager?.recordUserInterrupt?.(interruptSessionId)
     entry.session.interrupt()
     return
   }

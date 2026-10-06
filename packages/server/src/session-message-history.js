@@ -265,8 +265,9 @@ export class SessionMessageHistory extends EventEmitter {
    *   `handlers/input-handlers.js::resolveUserInputId`) always resolves one
    *   before calling in, so replayed entries always carry an id in practice.
    *   See issue #2902.
+   * @param {'daemon'} [source] - #8301: marks a daemon-authored turn (the CI wake).
    */
-  recordUserInput(sessionId, text, sessionEntry, messageId) {
+  recordUserInput(sessionId, text, sessionEntry, messageId, source) {
     if (sessionEntry) {
       this._autoLabelSession(sessionId, text, sessionEntry)
     }
@@ -278,6 +279,10 @@ export class SessionMessageHistory extends EventEmitter {
     if (typeof messageId === 'string' && messageId.length > 0) {
       entry.messageId = messageId
     }
+    // #8301: `source: 'daemon'` marks a turn the daemon wrote (the CI wake), so a
+    // replaying client can tell it from something a person typed. Absent for
+    // typed input — an older client ignores the field either way.
+    if (source === 'daemon') entry.source = 'daemon'
     this.recordHistory(sessionId, 'message', entry)
   }
 
@@ -353,6 +358,7 @@ export class SessionMessageHistory extends EventEmitter {
           // clients can dedup rehydrated prompts against their own
           // optimistic/live-echo copies (issue #2902).
           ...(data.messageId ? { messageId: data.messageId } : {}),
+          ...(data.source === 'daemon' ? { source: 'daemon' } : {}),
           timestamp: data.timestamp,
         }, sessionId)
         persistNeeded = true

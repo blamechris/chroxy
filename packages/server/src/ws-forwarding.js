@@ -244,6 +244,9 @@ function setupSessionForwarding(normalizer, ctx) {
         text: typeof data?.text === 'string' ? data.text : '',
         messageId: data?.messageId,
         timestamp: typeof data?.timestamp === 'number' ? data.timestamp : Date.now(),
+        // The daemon wrote this turn, not a person. Optional and additive: an
+        // older client ignores it and renders the bubble as it always did.
+        ...(data?.source === 'daemon' ? { source: 'daemon' } : {}),
       })
       return
     }

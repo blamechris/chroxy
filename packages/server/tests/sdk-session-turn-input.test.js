@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { SdkSession, isSdkToolCancellationText, SDK_TOOL_CANCELLED_PREFIXES } from '../src/sdk-session.js'
+import { wakeSession } from '../src/session-wake.js'
 
 /**
  * #8300 — a claude-sdk turn keeps its permission/hook channel for the whole
@@ -211,6 +212,60 @@ describe('SdkSession turn input (#8300)', () => {
     assert.equal(content[0].type, 'text')
     assert.equal(content[0].text, 'look')
     assert.ok(content.some((b) => b.type === 'image'), 'the image rides on the same user message')
+  })
+
+  // #8301 — the CI wake against the REAL SdkSession, not a stand-in: an idle
+  // session takes the wake line as the streamed user turn, and a busy one queues it.
+  describe('a daemon wake (#8301)', () => {
+    it('reaches an idle SdkSession as the turn\'s own user message and reports injected', async () => {
+      wire(session, [init(), assistantText('on it'), promptResult(1)], state)
+      const resultSeen = new Promise((resolve) => session.once('result', resolve))
+      const admitted = []
+      const out = wakeSession(session, 'CI finished on PR #7: 3 of 3 checks passed.', {
+        turnInput: true, clientMessageId: 'chroxy-ci-wake-t-1', onAdmission: (a) => admitted.push(a.outcome),
+      })
+      assert.equal(out, 'injected', 'admission was reported synchronously by the real sendMessage')
+      assert.deepEqual(admitted, ['injected'])
+      await resultSeen
+      assert.equal(state.items.length, 1)
+      assert.deepEqual(state.items[0].message.content, [{ type: 'text', text: 'CI finished on PR #7: 3 of 3 checks passed.' }])
+    })
+
+    it('queues behind a running turn, and the real queue flushes it as its own turn afterwards', async () => {
+      const turns = []
+      let release
+      const gate = new Promise((resolve) => { release = resolve })
+      session._callQuery = (args) => {
+        const st = {}
+        consumeInput(args.prompt, st)
+        turns.push(st)
+        return fakeQuery(turns.length === 1
+          ? [init(), async () => { await gate }, promptResult(1)]
+          : [init(), promptResult(1)], st)
+      }
+      const first = session.sendMessage('the user turn')
+      const out = wakeSession(session, 'CI finished on PR #7: 3 of 3 checks passed.', { turnInput: true, clientMessageId: 'chroxy-ci-wake-t-2' })
+      assert.equal(out, 'queued')
+      assert.equal(session.outgoingQueueLength, 1)
+      release()
+      await first
+      for (let i = 0; i < 50 && turns.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10))
+      assert.equal(turns.length, 2, 'the wake became its own turn after the first ended')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      assert.equal(turns[1].items[0].message.content[0].text, 'CI finished on PR #7: 3 of 3 checks passed.')
+    })
+
+    it('a session with stdin forwarding disabled refuses the wake without discarding the user\'s queue or emitting an error', async () => {
+      const events = capture(session)
+      session._stdinForwardingDisabled = true
+      session._isBusy = true
+      session.enqueueOutgoingMessage({ prompt: 'typed follow-up', sendOptions: { clientMessageId: 'u1' } })
+      assert.equal(session.daemonTurnRefusal(), 'stdin-disabled')
+      // The manager-level seam is what keeps a wake from reaching sendMessage;
+      // here the provider-level answer is the claim.
+      assert.equal(session.outgoingQueueLength, 1)
+      assert.equal(events.filter((e) => e.name === 'error').length, 0)
+    })
   })
 
   describe('an orphan-task notice before the prompt', () => {

@@ -396,6 +396,15 @@ export function createAcpSessionClass(rawEntry) {
       this.emit('ready', { model: this.model })
     }
 
+    /**
+     * #8301: `sendMessage` on a session whose agent connection is not up emits a
+     * user-visible "not started" error. A daemon wake must not cause one.
+     * @returns {string|null}
+     */
+    daemonTurnRefusal() {
+      return (!this._processReady || !this._connection) ? 'not-started' : null
+    }
+
     async sendMessage(prompt, attachments, sendOptions = {}) {
       if (this._isBusy) {
         const queued = this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })

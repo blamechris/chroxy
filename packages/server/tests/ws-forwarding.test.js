@@ -1869,7 +1869,7 @@ describe('user_input forwarding for a daemon-authored turn (#8301)', () => {
     ctx.sessionManager.emit('session_event', {
       sessionId: 'sess-1',
       event: 'user_input',
-      data: { text: 'CI finished on PR #9', messageId: 'chroxy-ci-wake-abc-1', timestamp: 1234 },
+      data: { text: 'CI finished on PR #9', messageId: 'chroxy-ci-wake-abc-1', timestamp: 1234, source: 'daemon' },
     })
     assert.equal(ctx.broadcastToSession.mock.callCount(), 1)
     const [sid, msg, filter] = ctx.broadcastToSession.mock.calls[0].arguments
@@ -1880,9 +1880,18 @@ describe('user_input forwarding for a daemon-authored turn (#8301)', () => {
       text: 'CI finished on PR #9',
       messageId: 'chroxy-ci-wake-abc-1',
       timestamp: 1234,
+      source: 'daemon',
     })
     assert.equal('clientId' in msg, false, 'no sender, so every viewer renders it')
     assert.equal(filter, undefined, 'default session scoping, no custom recipient filter')
+  })
+
+  it('omits source for anything but "daemon" (additive, never a guess)', () => {
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+    ctx.sessionManager.emit('session_event', { sessionId: 'sess-1', event: 'user_input', data: { text: 'x', source: 'user' } })
+    const [, msg] = ctx.broadcastToSession.mock.calls[0].arguments
+    assert.equal('source' in msg, false)
   })
 
   it('coerces a malformed payload rather than throwing', () => {
