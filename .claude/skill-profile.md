@@ -172,6 +172,8 @@ Mindset: "Will this code work reliably over a cellular connection through a tunn
 
 ## smoke-test Customizations
 
+> **2026-10-05:** for a package in `/prime-directive`'s "Smoke the path the owner would take" step, that step supersedes the port probe, the `~/.chroxy` token source and the auto-start below: those target the daily daemon (#8225). The step carries an isolated-daemon recipe until `scripts/preview-daemon.sh` lands (#8305).
+
 ### Application
 - **Type:** Web dashboard served by Node.js server
 - **Start:** `npx chroxy start` (or server may already be running)
