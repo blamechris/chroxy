@@ -21,6 +21,7 @@
  * this classification — it's a pure transport-efficiency hint.
  */
 
+import { isIPv4 } from 'node:net'
 import { isLoopbackHost } from './bind-host.js'
 import { isPrivateOrSpecialIp } from './ssrf-guard.js'
 
@@ -55,18 +56,54 @@ export function isLocalOrLanPeer(req) {
 }
 
 /**
+ * Strict loopback parse for AUTHORIZATION use. Not `isLoopbackHost`, which is a
+ * bind-host helper that accepts anything starting `::ffff:7f` — so
+ * `::ffff:7f00:1:2`, which is not an address at all, would pass. Accepts exactly:
+ *   - a dotted IPv4 literal in 127.0.0.0/8,
+ *   - `::1`,
+ *   - an IPv4-mapped `::ffff:a.b.c.d` whose dotted part is in 127.0.0.0/8.
+ */
+function isStrictLoopbackAddress(ip) {
+  const addr = ip.toLowerCase()
+  if (isIPv4(addr)) return addr.split('.')[0] === '127'
+  if (addr === '::1') return true
+  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(addr)
+  return !!mapped && isIPv4(mapped[1]) && mapped[1].split('.')[0] === '127'
+}
+
+/**
+ * Any header a tunnel, CDN or reverse proxy leaves behind. Wider than
+ * `hasProxyHeaders` on purpose: Cloudflare can strip the visitor-IP headers
+ * (a managed transform), and then `cf-connecting-ip` is absent on a request
+ * that very much came through the tunnel. What survives is the rest of the
+ * family — `cf-ray`, `cf-visitor`, `cdn-loop`, `x-forwarded-proto`. Presence of
+ * the NAME is the test; the value is never trusted.
+ */
+function hasAnyProxyHint(headers) {
+  if (!headers) return false
+  for (const name of Object.keys(headers)) {
+    const n = name.toLowerCase()
+    if (n.startsWith('cf-') || n.startsWith('cdn-loop') || n.startsWith('forwarded') ||
+        n.startsWith('x-forwarded-') || n === 'x-real-ip') return true
+  }
+  return false
+}
+
+/**
  * True only when the request comes DIRECTLY from this machine over loopback —
  * no LAN peers, and nothing that arrived through the tunnel (#8324).
  *
  * Stricter than `isLocalOrLanPeer`. That function is a transport-efficiency
- * hint with no security property riding on it; this one is used as an
- * AUTHORIZATION input (the local-only `/api/daemon/idle` probe), so it must
- * fail closed. cloudflared connects to the daemon from 127.0.0.1, so the socket
- * address alone proves nothing: a tunnelled request is loopback at the socket
- * and is told apart only by the proxy headers the tunnel stamps. Those headers
- * can be forged by a remote caller only in the direction that makes the
- * request look REMOTE (a request that omits them is not thereby made local,
- * because cloudflared always adds them) — the same trust model as above.
+ * hint with no security property riding on it; this one is an AUTHORIZATION
+ * input (the local-only `/api/daemon/idle` probe), so it fails closed twice
+ * over: the socket address is parsed strictly, and ANY proxy-family header
+ * disqualifies the request.
+ *
+ * cloudflared connects to the daemon from 127.0.0.1, so the socket address
+ * alone proves nothing. Headers can be forged by a remote caller only in the
+ * direction that makes a request look remote; a request that merely OMITS them
+ * is not made local by that, because the tunnel adds its own. This gate is
+ * defence in depth — the primary bearer token is the authority.
  *
  * @param {object} req - Node IncomingMessage.
  * @returns {boolean}
@@ -74,6 +111,6 @@ export function isLocalOrLanPeer(req) {
 export function isLoopbackPeer(req) {
   const socketIp = req?.socket?.remoteAddress
   if (typeof socketIp !== 'string' || socketIp.length === 0) return false
-  if (hasProxyHeaders(req.headers)) return false
-  return isLoopbackHost(socketIp)
+  if (hasAnyProxyHint(req.headers)) return false
+  return isStrictLoopbackAddress(socketIp)
 }

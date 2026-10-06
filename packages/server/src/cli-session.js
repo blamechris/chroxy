@@ -2172,6 +2172,16 @@ export class CliSession extends BaseSession {
     this._killAndRespawn()
   }
 
+  getRestartBlockers() {
+    const reasons = super.getRestartBlockers()
+    // Messages acknowledged as `queued` while the CLI child warms up or
+    // respawns live here, NOT in `_outgoingQueue` (see sendMessage's
+    // `!_processReady` branch) — a restart would drop them (#8324).
+    const pending = this._pendingQueue.length
+    if (pending > 0) reasons.push(`${pending} message(s) queued while the CLI is not ready`)
+    return reasons
+  }
+
   /**
    * #7457 -- the AskUserQuestion this child is parked on stdin for, if any.
    *

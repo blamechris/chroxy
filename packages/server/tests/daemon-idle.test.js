@@ -1,4 +1,4 @@
-import { describe, it, afterEach } from 'node:test'
+import { describe, it, afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
@@ -7,6 +7,12 @@ import { createHttpHandler } from '../src/http-routes.js'
 import { WsServer } from '../src/ws-server.js'
 import { PairingManager } from '../src/pairing.js'
 import { BaseSession } from '../src/base-session.js'
+import { CliSession } from '../src/cli-session.js'
+import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { busyStateOf } from '../src/session-busy-state.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 // #8324 — GET /api/daemon/idle, the probe the idle-only auto-deploy asks before
 // it restarts the daily daemon. The verdict must be "idle" ONLY when nothing
@@ -30,6 +36,7 @@ function fakeManager(rows, sessionById = {}) {
       session: {
         getPendingPermissionCount: () => 0,
         getPendingQuestions: () => [],
+        getRestartBlockers: () => [],
         ...(sessionById[r.sessionId] || {}),
       },
     })
@@ -57,7 +64,7 @@ describe('computeDaemonIdleState (#8324)', () => {
     assert.equal(out.idle, true)
     assert.equal(out.sessions.length, 2)
     assert.deepEqual(Object.keys(out.sessions[0]).sort(), [
-      'backgroundShellCount', 'busyReason', 'isBusy', 'name', 'pendingPermissions', 'pendingQuestions', 'sessionId',
+      'backgroundShellCount', 'busyReason', 'isBusy', 'name', 'pendingPermissions', 'pendingQuestions', 'restartBlockers', 'sessionId',
     ])
   })
 
@@ -149,6 +156,136 @@ describe('computeDaemonIdleState (#8324)', () => {
       const out = computeDaemonIdleState({ sessionManager: fakeManager([row()]), getHookPendingPermissionCount: fn })
       assert.equal(out.idle, false)
     }
+  })
+})
+
+// A manager over ONE real session. `isBusy` / `busyReason` come from the real
+// session through the same `busyStateOf` the real listSessions() uses, so these
+// cases cannot be satisfied by hand-setting a flag the probe reads.
+function realManager(session) {
+  return {
+    listSessions: () => [{ sessionId: 'r1', name: 'real', isBusy: !!session.isRunning, ...busyStateOf(session) }],
+    getSession: (id) => (id === 'r1' ? { session } : null),
+  }
+}
+const probe = (session) => computeDaemonIdleState({ sessionManager: realManager(session), getHookPendingPermissionCount: () => 0 })
+
+describe('restart blockers: real session lifecycles (#8324)', () => {
+  it('a background agent that outlives a cleanly ended turn blocks the restart while isBusy reads idle', () => {
+    const s = new BaseSession()
+    assert.equal(probe(s).idle, true, 'a fresh session is idle')
+    s._trackAgent({ toolUseId: 'agent-1', description: 'research', background: true, authoritative: true })
+    s._clearMessageState({ turnEndedCleanly: true })
+    assert.equal(s.isRunning, false, 'premise: the turn is over and isBusy is false')
+    assert.equal(s._activeAgents.size, 1, 'premise: the agent survived the turn end')
+    const out = probe(s)
+    assert.equal(out.idle, false)
+    assert.ok(out.reasons.some((r) => r.includes('restart blocked') && r.includes('background agent')), out.reasons.join('|'))
+    s._activeAgents.clear()
+    assert.equal(probe(s).idle, true, 'idle again once the agent is gone')
+  })
+
+  it('input accepted into the outgoing queue but not yet dispatched blocks the restart', () => {
+    const s = new BaseSession()
+    assert.ok(s.enqueueOutgoingMessage({ prompt: 'follow-up' }))
+    const out = probe(s)
+    assert.equal(out.idle, false)
+    assert.ok(out.reasons.some((r) => r.includes('queued message')))
+    s.clearOutgoingQueue({ emit: false })
+    assert.equal(probe(s).idle, true)
+  })
+
+  describe('CliSession', () => {
+    const made = []
+    afterEach(() => {
+      for (const c of made) { c._child = null; try { const r = c.destroy(); if (r?.catch) r.catch(() => {}) } catch {} }
+      made.length = 0
+    })
+
+    it('a message acknowledged as queued while the CLI is not ready blocks the restart', () => {
+      const c = new CliSession({ cwd: '/tmp' })
+      made.push(c)
+      c._processReady = false
+      c.sendMessage('hello while warming up')
+      assert.equal(c._pendingQueue.length, 1, 'premise: it landed in _pendingQueue')
+      assert.equal(c.isRunning, false, 'premise: not busy')
+      assert.equal(c._outgoingQueue.length, 0, 'premise: NOT in the base queue the base blocker reads')
+      const out = probe(c)
+      assert.equal(out.idle, false)
+      assert.ok(out.reasons.some((r) => r.includes('queued while the CLI is not ready')), out.reasons.join('|'))
+    })
+
+    it('an empty CliSession is idle', () => {
+      const c = new CliSession({ cwd: '/tmp' })
+      made.push(c)
+      assert.equal(probe(c).idle, true)
+    })
+  })
+
+  describe('ClaudeTuiSession', () => {
+    let skills
+    let tui
+    let clock
+    beforeEach(() => {
+      skills = mkdtempSync(join(tmpdir(), 'chroxy-idle-skills-'))
+      clock = 1_000_000
+      tui = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: skills, repoSkillsDir: null, monotonicNow: () => clock })
+      tui.on('error', () => {})
+    })
+    afterEach(async () => {
+      try { await tui.destroy() } catch { /* ignore */ }
+      rmSync(skills, { recursive: true, force: true })
+    })
+
+    it('keeps the base blockers: a background agent on a TUI still blocks', () => {
+      tui._trackAgent({ toolUseId: 'agent-t', background: true, authoritative: true })
+      tui._clearMessageState({ turnEndedCleanly: true })
+      const out = probe(tui)
+      assert.equal(out.idle, false)
+      assert.ok(out.reasons.some((r) => r.includes('background agent')), out.reasons.join('|'))
+    })
+
+    it('recent terminal output (a turn typed straight into the PTY) blocks the restart; 30s of quiet clears it', () => {
+      assert.equal(probe(tui).idle, true, 'no output yet: nothing to lose')
+      tui._appendToOutputTail('\x1b[2K working...\r\n') // the real PTY-output hook, stamps _lastOutputMs
+      assert.equal(tui.isRunning, false, 'premise: isBusy never saw this turn')
+      const out = probe(tui)
+      assert.equal(out.idle, false)
+      assert.ok(out.reasons.some((r) => r.includes('terminal output in the last 30s')), out.reasons.join('|'))
+      clock += 29_000
+      assert.equal(probe(tui).idle, false, 'still inside the window')
+      clock += 2_000
+      assert.equal(probe(tui).idle, true, 'quiet for 31s')
+    })
+  })
+})
+
+describe('restart blockers fail closed (#8324)', () => {
+  const withSession = (session) => computeDaemonIdleState({
+    sessionManager: { listSessions: () => [row()], getSession: () => ({ session }) },
+    getHookPendingPermissionCount: () => 0,
+  })
+  const base = { getPendingPermissionCount: () => 0, getPendingQuestions: () => [] }
+
+  it('a missing accessor is not idle', () => {
+    assert.equal(withSession({ ...base }).idle, false)
+  })
+  it('a throwing accessor is not idle', () => {
+    const out = withSession({ ...base, getRestartBlockers: () => { throw new Error('rb-broke') } })
+    assert.equal(out.idle, false)
+    assert.ok(out.reasons.some((r) => r.includes('rb-broke')))
+  })
+  it('a non-array or malformed result is not idle', () => {
+    for (const v of [undefined, null, 'none', 0, {}, [''], [1], [null]]) {
+      assert.equal(withSession({ ...base, getRestartBlockers: () => v }).idle, false, JSON.stringify(v))
+    }
+  })
+  it('an empty array is idle and a non-empty one is not, with the reasons relayed', () => {
+    assert.equal(withSession({ ...base, getRestartBlockers: () => [] }).idle, true)
+    const out = withSession({ ...base, getRestartBlockers: () => ['thing A', 'thing B'] })
+    assert.equal(out.idle, false)
+    assert.deepEqual(out.sessions[0].restartBlockers, ['thing A', 'thing B'])
+    assert.ok(out.reasons.includes('session "main" restart blocked: thing A'))
   })
 })
 

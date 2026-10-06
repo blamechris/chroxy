@@ -820,6 +820,30 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * A restart-unsafe TUI is one whose PTY is still producing output (#8324).
+   *
+   * A turn typed straight into the terminal (`writeTerminalInput`, the user
+   * attached to the PTY) never goes through `sendMessage`, so it never sets
+   * `_isBusy` and the busy probe reads idle while claude is mid-turn. What it
+   * does leave is output: the same #6601 recency stamp readiness uses
+   * (`_lastOutputMs` / `_sawFirstOutput`, on the monotonic `_nowMonotonic`
+   * clock) is fresh for as long as claude is rendering. A TUI that has never
+   * produced output has nothing to lose.
+   *
+   * @returns {string[]}
+   */
+  getRestartBlockers() {
+    const reasons = super.getRestartBlockers()
+    if (this._sawFirstOutput) {
+      const quietMs = this._nowMonotonic() - this._lastOutputMs
+      if (quietMs < ClaudeTuiSession.RESTART_QUIESCENCE_MS) {
+        reasons.push(`terminal output in the last ${Math.round(ClaudeTuiSession.RESTART_QUIESCENCE_MS / 1000)}s`)
+      }
+    }
+    return reasons
+  }
+
+  /**
    * #7457 -- the AskUserQuestion prompts this TUI turn is still blocked on.
    *
    * A read-through of `_pendingUserAnswers`, which is the map claude TUI's own
@@ -1885,6 +1909,9 @@ export class ClaudeTuiSession extends BaseSession {
   // tool children on a clean SIGTERM, short enough that a hung claude (or a
   // child holding the PTY open) can't orphan past it.
   static get DESTROY_GRACE_MS() { return 3_000 }
+  // #8324 — how long the PTY must have been silent before the idle-only
+  // auto-deploy treats the TUI as safe to restart (see getRestartBlockers).
+  static get RESTART_QUIESCENCE_MS() { return 30_000 }
   // #5359 review — grace window before the boot sweep reaps a PIDFILE-LESS sink
   // dir, so a dir caught between another process's mkdir and its owner.pid write
   // (a cross-process race) isn't deleted mid-creation. Dirs with a (dead) pid

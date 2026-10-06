@@ -10,6 +10,9 @@
  *   - no session has a permission request waiting on a human
  *   - no session has an AskUserQuestion waiting on a human
  *   - no hook-routed permission request is parked on the daemon
+ *   - nothing `getRestartBlockers()` names: work `isBusy` does not report, such
+ *     as a background agent that outlived its turn, input accepted but not yet
+ *     dispatched, or a TUI whose terminal is still producing output
  *
  * FAIL SAFE. Every uncertainty reads as NOT idle. "Could not check" must never
  * be the same observable outcome as "nothing to check" (docs/false-safety-guards.md):
@@ -50,6 +53,7 @@ export function computeDaemonIdleState({ sessionManager, getHookPendingPermissio
     const label = row?.name ? `"${row.name}"` : String(sessionId)
     let pendingPermissions = 0
     let pendingQuestions = 0
+    let restartBlockers = []
     try {
       const entrySession = sessionManager.getSession?.(sessionId)?.session
       if (!entrySession) {
@@ -58,10 +62,12 @@ export function computeDaemonIdleState({ sessionManager, getHookPendingPermissio
       }
       pendingPermissions = countPending(entrySession, 'pending permission count', () => entrySession.getPendingPermissionCount())
       pendingQuestions = countPending(entrySession, 'pending question count', () => entrySession.getPendingQuestions().length)
+      restartBlockers = readBlockers(entrySession)
     } catch (err) {
       reasons.push(`idle state unavailable for session ${label}: ${err?.message || String(err)}`)
       pendingPermissions = 0
       pendingQuestions = 0
+      restartBlockers = []
     }
     const isBusy = row?.isBusy === true
     sessions.push({
@@ -72,10 +78,12 @@ export function computeDaemonIdleState({ sessionManager, getHookPendingPermissio
       backgroundShellCount: Number.isSafeInteger(row?.backgroundShellCount) ? row.backgroundShellCount : 0,
       pendingPermissions,
       pendingQuestions,
+      restartBlockers,
     })
     if (isBusy) reasons.push(`session ${label} busy: ${row?.busyReason || 'turn'}`)
     if (pendingPermissions > 0) reasons.push(`session ${label} has ${pendingPermissions} pending permission(s)`)
     if (pendingQuestions > 0) reasons.push(`session ${label} has ${pendingQuestions} pending question(s)`)
+    for (const b of restartBlockers) reasons.push(`session ${label} restart blocked: ${b}`)
   }
 
   try {
@@ -102,4 +110,24 @@ function countPending(session, what, read) {
   }
   if (!Number.isSafeInteger(n) || n < 0) throw new Error(`${what} is not a count`)
   return n
+}
+
+// `getRestartBlockers()` is the one accessor whose EMPTY result means "safe", so
+// every shape that is not a clean array of strings is "cannot say" (fail
+// closed), exactly like the counts above: a missing method, a throw, a
+// non-array, or an entry that is not a non-empty string.
+function readBlockers(session) {
+  if (typeof session.getRestartBlockers !== 'function') {
+    throw new Error('restart blockers unavailable (no getRestartBlockers)')
+  }
+  let out
+  try {
+    out = session.getRestartBlockers()
+  } catch (err) {
+    throw new Error(`restart blockers unavailable (${err?.message || String(err)})`)
+  }
+  if (!Array.isArray(out) || out.some((r) => typeof r !== 'string' || r.length === 0)) {
+    throw new Error('restart blockers is not an array of reasons')
+  }
+  return out
 }
