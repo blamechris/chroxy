@@ -473,6 +473,7 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
       'byok-mcp-client.js',
       'byok-tool-executor.js',
       'claude-tui-session.js',
+      'daemon-commit.js', // #8324 — the git spawn that reads the commit the daemon started from
       'statusline.js',
       'supervisor.js',
       'user-shell-session.js',

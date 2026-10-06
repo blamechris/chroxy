@@ -14,8 +14,9 @@
  */
 import { spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import path, { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 
 const FULL_SHA = /^[0-9a-f]{40}$/
 
@@ -25,16 +26,58 @@ const FULL_SHA = /^[0-9a-f]{40}$/
  * @returns {string|null} 40-hex HEAD, or null
  */
 export function resolveRepoCommit(dir, { spawn = spawnSync } = {}) {
+  // One retry: a CPU spike at restart can time a single attempt out, and a good
+  // build that reports `commit: null` is judged unverified and rolled back.
+  return attempt(dir, spawn) ?? attempt(dir, spawn)
+}
+
+/**
+ * Are these two paths the same directory? `git rev-parse --show-toplevel` prints
+ * forward slashes even on Windows (`A:/runners/x`), and a CI runner's temp path
+ * can be an 8.3 short name, so a string compare of the two is wrong there.
+ * Both sides go through `realpath.native` (which expands short names) and the
+ * platform's own `resolve` (which normalises the separators), then compare
+ * case-insensitively on Windows only. Pure: the platform, `path` module and
+ * realpath are parameters so Windows-shaped inputs are testable anywhere.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @param {{ path?: typeof path, realpath?: (p: string) => string, windows?: boolean }} [deps]
+ */
+export function isSameDirectory(a, b, { path: p = path, realpath = realpathSync.native, windows = process.platform === 'win32' } = {}) {
   try {
-    const env = { ...process.env }
-    for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY']) delete env[k]
+    const norm = (x) => {
+      const r = p.resolve(realpath(p.resolve(x)))
+      return windows ? r.toLowerCase() : r
+    }
+    return norm(a) === norm(b)
+  } catch {
+    return false
+  }
+}
+
+// The environment git is spawned with. EVERY GIT_* variable goes, not a
+// hand-picked few: GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_CEILING_DIRECTORIES,
+// GIT_CONFIG_* ... each can point git at some other repository or change what it
+// prints. And git has no use for the daemon's own secrets (API_TOKEN, the hook
+// and ingest secrets), so those are stripped too.
+function buildGitEnv() {
+  const env = {}
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v
+  stripInheritedChroxySecrets(env)
+  for (const k of CHROXY_SECRET_DENYLIST) delete env[k]
+  return env
+}
+
+function attempt(dir, spawn) {
+  try {
     const r = spawn('git', ['rev-parse', '--show-toplevel', 'HEAD'], {
-      cwd: dir, encoding: 'utf8', timeout: 2000, env, stdio: ['ignore', 'pipe', 'ignore'],
+      cwd: dir, encoding: 'utf8', timeout: 5000, env: buildGitEnv(), stdio: ['ignore', 'pipe', 'ignore'],
     })
     if (!r || r.error || r.status !== 0 || typeof r.stdout !== 'string') return null
     const [top, sha, ...extra] = r.stdout.trim().split('\n')
     if (extra.length > 0 || !FULL_SHA.test(sha ?? '')) return null
-    if (realpathSync(top) !== realpathSync(dir)) return null
+    if (!isSameDirectory(top, dir)) return null
     return sha
   } catch {
     return null

@@ -114,8 +114,10 @@ function countPending(session, what, read) {
 
 // `getRestartBlockers()` is the one accessor whose EMPTY result means "safe", so
 // every shape that is not a clean array of strings is "cannot say" (fail
-// closed), exactly like the counts above: a missing method, a throw, a
-// non-array, or an entry that is not a non-empty string.
+// closed), exactly like the counts above: a missing method, a throw, or a
+// non-array. Entries are not shape-checked: any entry at all becomes a pushed
+// reason string, which already forces `idle: false`, so such a check could not
+// change a verdict.
 function readBlockers(session) {
   if (typeof session.getRestartBlockers !== 'function') {
     throw new Error('restart blockers unavailable (no getRestartBlockers)')
@@ -126,8 +128,6 @@ function readBlockers(session) {
   } catch (err) {
     throw new Error(`restart blockers unavailable (${err?.message || String(err)})`)
   }
-  if (!Array.isArray(out) || out.some((r) => typeof r !== 'string' || r.length === 0)) {
-    throw new Error('restart blockers is not an array of reasons')
-  }
-  return out
+  if (!Array.isArray(out)) throw new Error('restart blockers is not an array')
+  return out.map(String)
 }

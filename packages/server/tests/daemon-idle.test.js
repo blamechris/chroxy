@@ -10,9 +10,10 @@ import { BaseSession } from '../src/base-session.js'
 import { CliSession } from '../src/cli-session.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { busyStateOf } from '../src/session-busy-state.js'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { DAEMON_COMMIT, resolveRepoCommit } from '../src/daemon-commit.js'
+import path from 'node:path'
+import { DAEMON_COMMIT, isSameDirectory, resolveRepoCommit } from '../src/daemon-commit.js'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -319,6 +320,93 @@ describe('daemon commit (#8324)', () => {
     assert.equal(resolveRepoCommit(dir), null)
   })
 
+  it('the git environment carries no GIT_* variable and none of the daemon\'s own secrets', () => {
+    const saved = { API_TOKEN: process.env.API_TOKEN, CHROXY_HOOK_SECRET: process.env.CHROXY_HOOK_SECRET, CHROXY_PORT: process.env.CHROXY_PORT }
+    process.env.API_TOKEN = 'primary-token'
+    process.env.CHROXY_HOOK_SECRET = 'hook-secret'
+    process.env.CHROXY_PORT = '8765'
+    let seen
+    try {
+      resolveRepoCommit(dir, { spawn: (c, a, o) => { seen = o.env; return { status: 1, stdout: '' } } })
+    } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+    }
+    for (const k of ['API_TOKEN', 'CHROXY_HOOK_SECRET', 'CHROXY_PORT']) assert.ok(!(k in seen), `${k} must not reach git`)
+    assert.ok('PATH' in seen, 'but the rest of the environment is intact')
+  })
+
+  it('isSameDirectory: Windows-shaped inputs (forward vs back slashes, drive-letter case, 8.3 short names)', () => {
+    const win = { path: path.win32, windows: true }
+    const longOf = (p) => p.replace(/RUNNER~1/i, 'runners') // a stand-in for realpath.native expanding a short name
+    const same = (a, b, extra = {}) => isSameDirectory(a, b, { ...win, realpath: longOf, ...extra })
+    assert.equal(same('A:/runners/_work/repo', 'A:\\runners\\_work\\repo'), true, 'git prints / and the runner has \\')
+    assert.equal(same('a:/runners/_work/repo', 'A:\\runners\\_work\\repo'), true, 'drive-letter case')
+    assert.equal(same('A:/Runners/_Work/Repo', 'a:\\runners\\_work\\repo'), true, 'case-insensitive on Windows')
+    assert.equal(same('A:/runners/_work/repo', 'A:\\RUNNER~1\\_work\\repo'), true, '8.3 short name vs long name')
+    assert.equal(same('A:/runners/_work/repo/', 'A:\\runners\\_work\\repo'), true, 'trailing slash')
+    assert.equal(same('A:/runners/_work/repo', 'A:\\runners\\_work\\repo\\sub'), false, 'a subdirectory is NOT the same directory')
+    assert.equal(same('A:/runners/_work/other', 'A:\\runners\\_work\\repo'), false, 'a different directory')
+    assert.equal(same('B:/runners/_work/repo', 'A:\\runners\\_work\\repo'), false, 'a different drive')
+    // POSIX: exact, and case-SENSITIVE.
+    const posix = { path: path.posix, windows: false, realpath: (p) => p }
+    assert.equal(isSameDirectory('/a/b', '/a/b/', posix), true)
+    assert.equal(isSameDirectory('/a/B', '/a/b', posix), false, 'case matters off Windows')
+    assert.equal(isSameDirectory('/a/b/c', '/a/b', posix), false)
+    // A path that cannot be resolved is simply "not the same", never a throw.
+    assert.equal(isSameDirectory('/x', '/y', { ...posix, realpath: () => { throw new Error('ENOENT') } }), false)
+  })
+
+  it('retries once: a first attempt that fails (a CPU-starved timeout) does not make a good build report null', () => {
+    g(dir, 'init', '-q', '-b', 'main')
+    writeFileSync(join(dir, 'f'), 'x')
+    g(dir, 'add', 'f')
+    g(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'one')
+    const head = g(dir, 'rev-parse', 'HEAD')
+    let calls = 0
+    const spawn = (cmd, args, opts) => {
+      calls++
+      if (calls === 1) return { status: null, stdout: '', error: new Error('ETIMEDOUT') }
+      return spawnSync(cmd, args, opts)
+    }
+    assert.equal(resolveRepoCommit(dir, { spawn }), head)
+    assert.equal(calls, 2)
+    let seen
+    resolveRepoCommit(dir, { spawn: (c, a, o) => { seen = o; return spawnSync(c, a, o) } })
+    assert.equal(seen.timeout, 5000, 'a 5s timeout per attempt')
+    let n = 0
+    assert.equal(resolveRepoCommit(dir, { spawn: () => { n++; return { status: 1, stdout: '' } } }), null)
+    assert.equal(n, 2, 'one retry, not an endless loop')
+  })
+
+  it('no GIT_* variable reaches git: GIT_DIR pointing at ANOTHER repo cannot change the answer', () => {
+    const other = mkdtempSync(join(tmpdir(), 'chroxy-commit-other-'))
+    try {
+      g(other, 'init', '-q', '-b', 'main')
+      writeFileSync(join(other, 'f'), 'y')
+      g(other, 'add', 'f')
+      g(other, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'other')
+      const otherHead = g(other, 'rev-parse', 'HEAD')
+      g(dir, 'init', '-q', '-b', 'main')
+      writeFileSync(join(dir, 'f'), 'x')
+      g(dir, 'add', 'f')
+      g(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'one')
+      const mine = g(dir, 'rev-parse', 'HEAD')
+      assert.notEqual(otherHead, mine)
+      const saved = { GIT_DIR: process.env.GIT_DIR, GIT_COMMON_DIR: process.env.GIT_COMMON_DIR, GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES }
+      process.env.GIT_DIR = join(other, '.git')
+      process.env.GIT_COMMON_DIR = join(other, '.git')
+      process.env.GIT_CEILING_DIRECTORIES = dir
+      let seenEnv
+      try {
+        const got = resolveRepoCommit(dir, { spawn: (c, a, o) => { seenEnv = o.env; return spawnSync(c, a, o) } })
+        assert.equal(got, mine, 'this repo\'s sha, never the other repo\'s')
+      } finally {
+        for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
+      }
+      assert.deepEqual(Object.keys(seenEnv).filter((k) => k.startsWith('GIT_')), [], 'not one GIT_* key was passed through')
+    } finally { rmSync(other, { recursive: true, force: true }) }
+  })
+
   it('every failure shape is null and never throws', () => {
     const sha = 'a'.repeat(40)
     const cases = {
@@ -372,7 +460,7 @@ describe('restart blockers fail closed (#8324)', () => {
     assert.equal(out.idle, false)
     assert.ok(out.reasons.some((r) => r.includes('rb-broke')))
   })
-  it('a non-array or malformed result is not idle', () => {
+  it('a non-array result is not idle; any entry at all is a reason and blocks too', () => {
     for (const v of [undefined, null, 'none', 0, {}, [''], [1], [null]]) {
       assert.equal(withSession({ ...base, getRestartBlockers: () => v }).idle, false, JSON.stringify(v))
     }
