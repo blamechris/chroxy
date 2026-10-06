@@ -3892,6 +3892,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // which stays attributed to the live turn — so it reads as "queued
           // behind" rather than "now processing".
           messages: [...ss.messages, userMsg],
+          // #8302: this path is taken whenever the session reads busy, which
+          // includes "idle model held busy only by a background shell". There the
+          // server dispatches the message at once (nothing to queue behind), so a
+          // turn starts: stop saying "Waiting on N background shells". A genuine
+          // mid-turn send ('turn') is already right and is left alone.
+          ...(ss.busyReason === 'background-shells' ? { busyReason: 'turn' as const } : {}),
           queuedMessages: enqueueOptimisticQueuedMessage(ss.queuedMessages, {
             clientMessageId: messageId,
             text,
@@ -3923,6 +3929,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       updateActiveSession((ss) => ({
         messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
         streamingMessageId: 'pending',
+        // #8302: sending starts a turn, so the model is working. Without this an
+        // idle session held busy by a background shell kept reading "Waiting on N
+        // background shells" until the next session_list. Only when the server has
+        // told us a reason at all (undefined = unknown, left unknown).
+        ...(ss.busyReason !== undefined ? { busyReason: 'turn' as const } : {}),
         // #6302 — record WHICH send owns this 'pending' optimistic turn so a later
         // message_queued only retires it when its clientMessageId matches (the
         // owner check that protects this turn from another client's broadcast

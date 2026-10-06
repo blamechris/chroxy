@@ -9158,6 +9158,182 @@ describe('dashboard message-handler dispatch', () => {
       expect(ss.isIdle).toBe(false)
     })
 
+    // #8301 — `user_input` for a session that is NOT the one on screen, and the
+    // daemon-authored variant. `appendTerminalData` writes to the ACTIVE session's
+    // buffer, so the case must not call it for another session's turn.
+    describe('user_input routing and the daemon marker (#8301)', () => {
+      const clarify = { id: 'c1', question: 'which?' } as any
+      const setup = () => {
+        store = createMockStore(baseState({
+          activeSessionId: 's1',
+          myClientId: 'me',
+          sessionStates: {
+            s1: { ...createEmptySessionState(), pendingEvaluatorClarify: clarify },
+            s2: { ...createEmptySessionState(), pendingEvaluatorClarify: clarify },
+          },
+        } as any))
+        setStore(store)
+      }
+      const send = (msg: Record<string, unknown>) =>
+        handleMessage({ type: 'user_input', timestamp: 1, ...msg } as any, ctx() as any)
+      const send2 = (msg: Record<string, unknown>) => handleMessage(msg as any, ctx() as any)
+      const state = () => store.getState() as any
+
+      it('writes the terminal line for the ACTIVE session', () => {
+        setup()
+        send({ sessionId: 's1', clientId: 'other', text: 'hello', messageId: 'm1' })
+        expect(state()._terminalWrites.some((w: string) => w.includes('> hello'))).toBe(true)
+      })
+
+      it('does NOT write another session\'s input into the terminal on screen, but still appends it to that session', () => {
+        setup()
+        send({ sessionId: 's2', clientId: 'other', text: 'typed elsewhere', messageId: 'm2' })
+        expect(state()._terminalWrites.filter((w: string) => w.includes('typed elsewhere'))).toEqual([])
+        expect(state().sessionStates.s2.messages.some((m: any) => m.content === 'typed elsewhere')).toBe(true)
+        expect(state().sessionStates.s1.messages.some((m: any) => m.content === 'typed elsewhere')).toBe(false)
+      })
+
+      it('a daemon wake for a background session writes nothing to the terminal on screen', () => {
+        setup()
+        send({ sessionId: 's2', text: 'CI finished on PR #9', messageId: 'chroxy-ci-wake-a-1', source: 'daemon' })
+        expect(state()._terminalWrites.filter((w: string) => w.includes('CI finished'))).toEqual([])
+        expect(state().sessionStates.s2.messages.some((m: any) => m.content === 'CI finished on PR #9')).toBe(true)
+      })
+
+      it('a daemon turn does NOT clear a pending evaluator clarify card the server still holds', () => {
+        setup()
+        send({ sessionId: 's2', text: 'CI finished on PR #9', messageId: 'chroxy-ci-wake-a-2', source: 'daemon' })
+        expect(state().sessionStates.s2.pendingEvaluatorClarify).toEqual(clarify)
+      })
+
+      it('positive control: another client\'s typed input still clears it (#3188)', () => {
+        setup()
+        send({ sessionId: 's2', clientId: 'other', text: 'my answer', messageId: 'm3' })
+        expect(state().sessionStates.s2.pendingEvaluatorClarify).toBeNull()
+      })
+
+      // The server records a wake at DISPATCH, not enqueue. Meanwhile the provider's
+      // own queue mirror shows it in the queued strip (queuedMessages, NOT a chat
+      // bubble) and then removes it, so a flushed wake ends as exactly one chat
+      // bubble (the user_input at dispatch) and a cancelled one as none.
+      it('a queued wake that FLUSHES ends as exactly one chat bubble and an empty queued strip', () => {
+        setup()
+        const id = 'chroxy-ci-wake-a-9'
+        send2({ type: 'message_queued', sessionId: 's2', clientMessageId: id, text: 'CI finished on PR #9', queueLength: 1 })
+        expect(state().sessionStates.s2.queuedMessages.map((q: any) => q.clientMessageId)).toEqual([id])
+        expect(state().sessionStates.s2.messages.filter((m: any) => m.content === 'CI finished on PR #9')).toHaveLength(0)
+        send2({ type: 'message_dequeued', sessionId: 's2', clientMessageId: id, queueLength: 0, reason: 'flush' })
+        send({ sessionId: 's2', text: 'CI finished on PR #9', messageId: id, source: 'daemon' })
+        expect(state().sessionStates.s2.queuedMessages).toEqual([])
+        expect(state().sessionStates.s2.messages.filter((m: any) => m.content === 'CI finished on PR #9')).toHaveLength(1)
+      })
+
+      it('a queued wake that is CANCELLED at flush leaves no chat bubble and no queued entry', () => {
+        setup()
+        const id = 'chroxy-ci-wake-a-10'
+        send2({ type: 'message_queued', sessionId: 's2', clientMessageId: id, text: 'CI finished on PR #9', queueLength: 1 })
+        send2({ type: 'message_dequeued', sessionId: 's2', clientMessageId: id, queueLength: 0, reason: 'cancelled' })
+        expect(state().sessionStates.s2.queuedMessages).toEqual([])
+        expect(state().sessionStates.s2.messages.filter((m: any) => m.content === 'CI finished on PR #9')).toHaveLength(0)
+      })
+
+      it('this client\'s own echo is still skipped', () => {
+        setup()
+        send({ sessionId: 's1', clientId: 'me', text: 'mine', messageId: 'm4' })
+        expect(state().sessionStates.s1.messages.some((m: any) => m.content === 'mine')).toBe(false)
+      })
+    })
+
+    // #8302 E — a new turn reads "Working" until the next session_list.
+    describe('busyReason is cleared when a turn starts (#8302)', () => {
+      const seed = (reason: unknown) => {
+        store = createMockStore(baseState())
+        setStore(store)
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: reason !== null, busyReason: reason, backgroundShellCount: reason === 'background-shells' ? 1 : 0 }] } as any, ctx() as any)
+        expect((store.getState() as any).sessionStates.s1.busyReason).toBe(reason)
+      }
+
+      it('agent_busy (the stream_start companion) flips background-shells to turn', () => {
+        seed('background-shells')
+        handleMessage({ type: 'agent_busy', sessionId: 's1' } as any, ctx() as any)
+        const ss = (store.getState() as any).sessionStates.s1
+        expect(ss.busyReason).toBe('turn')
+        expect(ss.isIdle).toBe(false)
+      })
+
+      it('agent_busy also lifts a positive null (idle snapshot)', () => {
+        seed(null)
+        handleMessage({ type: 'agent_busy', sessionId: 's1' } as any, ctx() as any)
+        expect((store.getState() as any).sessionStates.s1.busyReason).toBe('turn')
+      })
+
+      it('agent_busy leaves an unknown reason unknown (an older server never sent one)', () => {
+        store = createMockStore(baseState())
+        setStore(store)
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: false }] } as any, ctx() as any)
+        handleMessage({ type: 'agent_busy', sessionId: 's1' } as any, ctx() as any)
+        expect('busyReason' in (store.getState() as any).sessionStates.s1 && (store.getState() as any).sessionStates.s1.busyReason !== undefined).toBe(false)
+      })
+
+      it('a later session_list is still authoritative', () => {
+        seed('background-shells')
+        handleMessage({ type: 'agent_busy', sessionId: 's1' } as any, ctx() as any)
+        handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: true, busyReason: 'background-shells', backgroundShellCount: 1 }] } as any, ctx() as any)
+        expect((store.getState() as any).sessionStates.s1.busyReason).toBe('background-shells')
+      })
+    })
+
+    // #8302 — why the session is busy rides beside isBusy, so the activity chip
+    // can say "Waiting on N background shells" instead of "Working".
+    it('session_list seeds busyReason + backgroundShellCount beside isBusy (#8302)', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      handleMessage(
+        {
+          type: 'session_list',
+          sessions: [
+            { sessionId: 's1', name: 'S1', isBusy: true, busyReason: 'background-shells', backgroundShellCount: 2, pendingBackgroundShells: [] } as any,
+          ],
+        },
+        ctx() as any,
+      )
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(false)
+      expect(ss.busyReason).toBe('background-shells')
+      expect(ss.backgroundShellCount).toBe(2)
+    })
+
+    it('a later session_list clears the reason with the positive null once the session is idle (#8302)', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      const send = (entry: any) => handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', ...entry }] } as any, ctx() as any)
+      send({ isBusy: true, busyReason: 'background-shells', backgroundShellCount: 1 })
+      send({ isBusy: false, busyReason: null, backgroundShellCount: 0 })
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.isIdle).toBe(true)
+      expect(ss.busyReason).toBeNull()
+      expect(ss.backgroundShellCount).toBe(0)
+    })
+
+    it('a session_list entry WITHOUT the fields (an older server) leaves an earlier reason alone (#8302)', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      const send = (entry: any) => handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', ...entry }] } as any, ctx() as any)
+      send({ isBusy: true, busyReason: 'turn', backgroundShellCount: 0 })
+      send({ isBusy: true })
+      expect((store.getState() as any).sessionStates.s1.busyReason).toBe('turn')
+    })
+
+    it('background_work_changed updates the reason live, including a reason-only change (#8302)', () => {
+      store = createMockStore(baseState())
+      setStore(store)
+      handleMessage({ type: 'session_list', sessions: [{ sessionId: 's1', name: 'S1', isBusy: true, busyReason: 'turn', backgroundShellCount: 1 }] } as any, ctx() as any)
+      handleMessage({ type: 'background_work_changed', sessionId: 's1', pending: [], busyReason: 'background-shells', backgroundShellCount: 1 } as any, ctx() as any)
+      const ss = (store.getState() as any).sessionStates.s1
+      expect(ss.busyReason).toBe('background-shells')
+      expect(ss.pendingBackgroundShells).toEqual([])
+    })
+
     it('session_list seeds isIdle: true for an idle session', () => {
       store = createMockStore(baseState())
       setStore(store)

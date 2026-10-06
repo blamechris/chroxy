@@ -292,6 +292,13 @@ export class CliSession extends BaseSession {
       // #3932: declared explicitly so the capability matrix matches across
       // providers — claude-tui is the only one that sets this to false.
       streaming: true,
+      // #8301: the provider-neutral turn-input seam. `sendMessage` dispatches when
+      // idle, queues via `enqueueOutgoingMessage` when busy (flushed at turn end,
+      // cleared by `interrupt()`), and reports admission through
+      // `onInputAdmission` — so a daemon-authored line (the CI-completion wake)
+      // can travel it as an ordinary user turn. session-wake.js gates on this with
+      // strict `=== true`; absent means NOT supported. Never duck-typed.
+      daemonTurnInput: true,
     }
   }
 
@@ -794,6 +801,65 @@ export class CliSession extends BaseSession {
         this.start()
       }
     }, delay)
+  }
+
+  /**
+   * #8301: a daemon wake is handed to a session that is READY, or not at all.
+   *
+   * `sendMessage` on a process that is not ready either respawns it
+   * (`_restartAfterStop()`, right for typed input, wrong for a wake) or parks the
+   * message in `_pendingQueue`. That queue is drained by `sendMessage` directly
+   * from three places (the warmup drain, the post-result drain, and
+   * DockerSession's start), none of which consults `admitAtFlush`, so a wake
+   * parked there would reach the child after a budget pause or a user Stop had
+   * been decided. The only way to keep the flush-time check meaningful is to
+   * never let a wake in: any not-ready state refuses. A wake that finds the
+   * session still starting is simply dropped; CI completion is not replayed, and
+   * the user was notified.
+   *
+   * `'stopped'` is kept for the two latches because it is the more useful
+   * answer (the user, or the binary gate, did this); everything else is
+   * `'not-ready'` (pre-init, mid-respawn, crashed).
+   *
+   * @returns {string|null}
+   */
+  daemonTurnRefusal() {
+    if (this._processReady) return null
+    return (this._stoppedByUser || this._spawnRefusal) ? 'stopped' : 'not-ready'
+  }
+
+  /**
+   * #8301: a queued daemon item was refused at flush. The base hook just keeps
+   * draining `_outgoingQueue`; CliSession has a SECOND queue behind it, and the
+   * refused item's slot must not strand it. `_clearMessageState` hands the turn
+   * to `_outgoingQueue` first and to `_pendingQueue` only when the former is
+   * empty, so a refusal that empties the former has to fall through to the
+   * latter exactly as `_clearMessageState` would have.
+   */
+  _continueDrainAfterRefusal() {
+    if (this._destroying) return
+    if (this._outgoingQueue.length > 0) {
+      this.dequeueNextOutgoing()
+    } else {
+      this._drainNextPendingAfterResult()
+    }
+  }
+
+  /**
+   * Dispatch the next message parked while the child was not ready, on the next
+   * tick (so synchronous `result` listeners finish first). Shared by the
+   * post-result drain in `_clearMessageState` and `_continueDrainAfterRefusal`.
+   */
+  _drainNextPendingAfterResult() {
+    if (!this._processReady || this._pendingQueue.length === 0) return
+    process.nextTick(() => {
+      if (this._destroying) return
+      if (!this._processReady || this._pendingQueue.length === 0) return
+      const pending = this._pendingQueue.shift()
+      // #4828: session-scoped (post-result, post-init).
+      ;(this._log || log).info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
+      this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+    })
   }
 
   /**
@@ -1797,14 +1863,7 @@ export class CliSession extends BaseSession {
       if (this._outgoingQueue.length > 0) {
         this.dequeueNextOutgoing()
       } else if (this._pendingQueue.length > 0) {
-        process.nextTick(() => {
-          if (this._destroying) return
-          if (!this._processReady || this._pendingQueue.length === 0) return
-          const pending = this._pendingQueue.shift()
-          // #4828: session-scoped (post-result, post-init).
-          ;(this._log || log).info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
-          this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
-        })
+        this._drainNextPendingAfterResult()
       }
     }
   }

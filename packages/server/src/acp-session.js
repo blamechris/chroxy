@@ -235,6 +235,13 @@ export function createAcpSessionClass(rawEntry) {
         // Chroxy never scans the prompt for the Claude magic keywords.
         thinkingKeywords: false,
         streaming: true,
+        // #8301: the provider-neutral turn-input seam. `sendMessage` dispatches when
+        // idle, queues via `enqueueOutgoingMessage` when busy (flushed at turn end,
+        // cleared by `interrupt()`), and reports admission through
+        // `onInputAdmission` — so a daemon-authored line (the CI-completion wake)
+        // can travel it as an ordinary user turn. session-wake.js gates on this with
+        // strict `=== true`; absent means NOT supported. Never duck-typed.
+        daemonTurnInput: true,
       }
     }
 
@@ -387,6 +394,15 @@ export function createAcpSessionClass(rawEntry) {
       this._log = loggerForSession('acp', this._sessionId || entryRef.id)
       ;(this._log || log).info(`ACP agent ready (id=${entryRef.id} pid=${child.pid} session=${this._sessionId})`)
       this.emit('ready', { model: this.model })
+    }
+
+    /**
+     * #8301: `sendMessage` on a session whose agent connection is not up emits a
+     * user-visible "not started" error. A daemon wake must not cause one.
+     * @returns {string|null}
+     */
+    daemonTurnRefusal() {
+      return (!this._processReady || !this._connection) ? 'not-started' : null
     }
 
     async sendMessage(prompt, attachments, sendOptions = {}) {

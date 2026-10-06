@@ -94,7 +94,7 @@ const TOOLS = {
   },
 
   chroxy_list_sessions: {
-    description: "List the daemon's ordinary chroxy sessions. Each row carries `modelStatus: { requested, observed, unknown, mismatch }` — `observed` is what the daemon actually reports (null means the daemon has not resolved/exposed a model, reported as `unknown: true`, never guessed); `requested` is populated only for sessions this same MCP process created.",
+    description: "List the daemon's ordinary chroxy sessions. Each row carries `modelStatus: { requested, observed, unknown, mismatch }` — `observed` is what the daemon actually reports (null means the daemon has not resolved/exposed a model, reported as `unknown: true`, never guessed); `requested` is populated only for sessions this same MCP process created. A busy row (`isBusy: true`) also carries `busyReason`: `'turn'` (the model is working) or `'background-shells'` (the model is idle and only a tracked background shell keeps the row busy; `backgroundShellCount` says how many) — absent on an older daemon.",
     argsSchema: z.object({}).strict(),
     async handler(client) {
       const result = await client.listSessions()

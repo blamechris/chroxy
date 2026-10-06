@@ -200,10 +200,12 @@ const CONFIG_SCHEMA = {
   // boolean, intervalMs?: number, discoveryIntervalMs?: number,
   // maxSurveysPerTick?: number }` (#7436 added the per-tick cap). `watch`
   // defaults ON — the daemon periodically surveys each session's PR through the
-  // user's own `gh` and, when a run settles, notifies (`ci_complete`) and types
-  // one line into the session's prompt. Set `watch: false` on a host that should
-  // make no background GitHub calls; `wakeAgent: false` keeps the notification
-  // but never types into a session.
+  // user's own `gh` and, when a run settles, notifies (`ci_complete`) and wakes
+  // the agent with one daemon-authored line: typed into a claude-tui prompt, or
+  // delivered as a user turn (queued when busy) to a provider that declares
+  // `capabilities.daemonTurnInput` — claude-sdk included (#8301). Set
+  // `watch: false` on a host that should make no background GitHub calls;
+  // `wakeAgent: false` keeps the notification but never wakes a session.
   sessionCi: 'object',
   sandbox: 'object',
   // Optional allowlist of absolute directory paths that sessions may use

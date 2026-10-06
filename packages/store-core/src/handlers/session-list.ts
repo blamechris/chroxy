@@ -15,6 +15,7 @@
  */
 
 import type {
+  BusyReason,
   CumulativeUsage,
   PendingBackgroundShell,
   SessionInfo,
@@ -68,6 +69,48 @@ export const SESSION_LIST_SUBSCRIBE_CHUNK_SIZE = 20
  * {@link buildSessionListPatches}. See that function's doc-comment for the
  * full call-site recipe.
  */
+/**
+ * #8302 — the busy-state fields a message carried, validated. A field the
+ * message did not carry (or carried malformed) is ABSENT here, so a consumer
+ * applying the patch leaves its current value alone — "unknown" must never be
+ * written as the positive `null` ("not busy").
+ */
+export interface BusyStatePatch {
+  busyReason?: BusyReason | null
+  backgroundShellCount?: number
+}
+
+/**
+ * Pull the validated #8302 busy-state fields out of a `session_list` entry or a
+ * `background_work_changed` message. Returns `null` when neither field is
+ * present and valid, so callers can skip the write entirely. A reason the client
+ * does not know (a future server's new value) is dropped like a malformed one:
+ * the field stays unknown rather than being guessed at.
+ */
+export function parseBusyState(raw: Record<string, unknown> | null | undefined): BusyStatePatch | null {
+  if (!raw || typeof raw !== 'object') return null
+  const patch: BusyStatePatch = {}
+  const reason = raw.busyReason
+  if (reason === null || reason === 'turn' || reason === 'background-shells') patch.busyReason = reason
+  const count = raw.backgroundShellCount
+  if (typeof count === 'number' && Number.isSafeInteger(count) && count >= 0) patch.backgroundShellCount = count
+  return 'busyReason' in patch || 'backgroundShellCount' in patch ? patch : null
+}
+
+/**
+ * Whether applying `patch` would change `current` — the equality half of the
+ * `updateSession` no-op short-circuit, shared so the two call sites cannot
+ * disagree about what "unchanged" means.
+ */
+export function busyStateDiffers(
+  current: { busyReason?: BusyReason | null; backgroundShellCount?: number },
+  patch: BusyStatePatch,
+): boolean {
+  if ('busyReason' in patch && current.busyReason !== patch.busyReason) return true
+  if ('backgroundShellCount' in patch && current.backgroundShellCount !== patch.backgroundShellCount) return true
+  return false
+}
+
 export interface SessionListPatches {
   /** Parsed sessions array (same reference returned by {@link handleSessionList}). */
   sessionList: SessionInfo[]
@@ -141,6 +184,13 @@ export interface SessionListPatches {
    * short-circuit suppresses no-op re-renders.
    */
   backgroundShellBuilders: Map<string, PendingBackgroundShellsBuilder>
+  /**
+   * #8302 — `sessionId → { busyReason?, backgroundShellCount? }` for every
+   * session whose snapshot entry carries at least one valid busy-state field.
+   * Absent for entries from a pre-#8302 server, so the consumer's existing
+   * value is left alone. Apply with {@link busyStateDiffers} as the no-op gate.
+   */
+  busyStatePatches: Map<string, BusyStatePatch>
   /**
    * Non-active session ids chunked into `subscribe_sessions` payloads. Each
    * chunk's length <= `SESSION_LIST_SUBSCRIBE_CHUNK_SIZE` (default 20 — the
@@ -216,6 +266,10 @@ export function cumulativeUsageEquals(
  *   `if (s.cumulativeUsage && ...)` (app L1258 / dashboard L2246). Use
  *   {@link cumulativeUsageEquals} at the call site for the six-field
  *   no-op short-circuit (centralised here per #4767 AC).
+ * - `busyStatePatches` (#8302) includes a session only when its entry carries a
+ *   valid `busyReason` and/or `backgroundShellCount` — an entry from an older
+ *   server is absent, so the consumer's current value is left alone rather than
+ *   overwritten with a guess.
  * - `backgroundShellBuilders` always includes every session (per the
  *   #4307 wire contract: omitted = []); each builder's `applyTo` does the
  *   per-shell reference-equality short-circuit. The consumer still gates
@@ -268,6 +322,7 @@ export function buildSessionListPatches(
   const conversationIdPatches = new Map<string, string>()
   const cumulativeUsagePatches = new Map<string, CumulativeUsage>()
   const backgroundShellBuilders = new Map<string, PendingBackgroundShellsBuilder>()
+  const busyStatePatches = new Map<string, BusyStatePatch>()
 
   for (const s of sessionList) {
     if (!s || typeof s.sessionId !== 'string') continue
@@ -279,6 +334,9 @@ export function buildSessionListPatches(
     if (typeof s.isBusy === 'boolean') isIdlePatches.set(sid, !s.isBusy)
     if (s.conversationId) conversationIdPatches.set(sid, s.conversationId)
     if (s.cumulativeUsage) cumulativeUsagePatches.set(sid, s.cumulativeUsage)
+    // #8302 — the busy reason rides beside `isBusy`; only a valid field is an opinion.
+    const busy = parseBusyState(s as unknown as Record<string, unknown>)
+    if (busy) busyStatePatches.set(sid, busy)
     backgroundShellBuilders.set(
       sid,
       handleBackgroundWorkChanged(
@@ -298,6 +356,7 @@ export function buildSessionListPatches(
     conversationIdPatches,
     cumulativeUsagePatches,
     backgroundShellBuilders,
+    busyStatePatches,
     subscribeChunks,
   }
 }

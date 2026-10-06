@@ -371,6 +371,17 @@ async function handleInput(ws, client, msg, ctx) {
     return
   }
 
+  // #8301: a person just typed into this session. Record the INTENT here, at
+  // receipt: synchronously, before any await or dispatch, and whether or not the
+  // input is later rejected, queued or deduped. It must not wait for admission
+  // (`recordUserInput` runs at admission for correlated input, which a provider
+  // may reach only after awaiting its transport): input sent BEFORE a Stop could
+  // otherwise be admitted after it and silently undo it. An empty send is not
+  // intent.
+  if ((typeof text === 'string' && text.trim().length > 0) || attachments?.length) {
+    ctx.sessions.sessionManager?.recordUserIntent?.(targetSessionId)
+  }
+
   // Only negotiated clients receive the new acknowledgement/dedup behavior.
   // An explicit context envelope also opts in by construction. This keeps the
   // observable plain-input behavior unchanged for deployed older clients.
@@ -914,6 +925,8 @@ function handleInterrupt(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
   if (entry) {
     log.info(`Interrupt from ${client.id} to session ${interruptSessionId}`)
+    // #8301: a user Stop ends daemon wakes for this session until they next type.
+    ctx.sessions.sessionManager?.recordUserInterrupt?.(interruptSessionId)
     entry.session.interrupt()
     return
   }
@@ -1408,6 +1421,16 @@ function handleTerminalInput(ws, client, msg, ctx) {
       'Another device is driving this session. Take over from the session menu to type into the terminal.',
     ))
     return
+  }
+  // #8301: a human submitting a line in the terminal pane is the same intent as a
+  // typed chat input (a TUI user who Stops and keeps working in the pane would
+  // otherwise have wakes refused forever). Only a submission counts — a bare
+  // keystroke stream without a newline is not "I want the agent to work" — and
+  // only after the primary/viewer/claim checks above, so a refused observer's
+  // keystroke does not. The daemon's own PTY wake never comes through this
+  // handler (it calls `writeTerminalInput` directly).
+  if (msg.data.includes('\r') || msg.data.includes('\n')) {
+    ctx.sessions.sessionManager?.recordUserIntent?.(sid)
   }
   entry.session.writeTerminalInput(msg.data)
 }

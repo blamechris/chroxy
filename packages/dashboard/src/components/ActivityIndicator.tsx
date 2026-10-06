@@ -142,6 +142,8 @@ export function ActivityIndicator() {
     agentDescription,
     agentStartedAt,
     pendingShells,
+    busyReason,
+    backgroundShellCount,
     transcriptTasks,
     scheduledWakeup,
   } = useConnectionStore(
@@ -181,6 +183,11 @@ export function ActivityIndicator() {
         agentDescription: mostRecentAgent?.description ?? null,
         agentStartedAt: mostRecentAgent?.startedAt ?? null,
         pendingShells: ss?.pendingBackgroundShells ?? null,
+        // #8302 — WHY the server says the session is busy. `undefined` (an
+        // older server) is kept distinct from `null` ("not busy") and from
+        // `'turn'`; only an explicit `'background-shells'` changes what is shown.
+        busyReason: ss?.busyReason,
+        backgroundShellCount: ss?.backgroundShellCount,
         // #5431 — transcript-derived outstanding work + pending wakeup, the
         // idle-state fallbacks when the PTY shell tracker has nothing (or
         // falsely reaped a silent watcher via the mtime-quiescence sweep).
@@ -274,16 +281,28 @@ export function ActivityIndicator() {
     (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
   )
 
+  // #8302 — the model is idle and ONLY a tracked background shell keeps the
+  // session busy. `isBusy` is the same boolean in this state and mid-turn, so
+  // without this the chip read "Working… last activity 45s ago" on an idle
+  // session whose shell had died. Opt-in on an explicit server statement: an
+  // older server (`busyReason === undefined`) keeps the pre-#8302 chip. The
+  // in-flight guard is belt and braces for the instant between a new turn
+  // starting and the list snapshot that says so: a live tool or sub-agent is
+  // proof the model is working, whatever a stale reason says.
+  const shellHeld =
+    busyReason === 'background-shells' && agentDescription == null && inFlightTool == null
+
   // Tick once per second so the elapsed text updates live. The setState
   // here is a `now` clock — we recompute elapsed from lastActivityAt on
   // each render rather than caching elapsed-as-state, so the displayed
   // value stays accurate even if React batches/skips renders.
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    if (isIdle) return
+    // The shell-held chip shows no elapsed value, so it needs no clock.
+    if (isIdle || shellHeld) return
     const id = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(id)
-  }, [isIdle])
+  }, [isIdle, shellHeld])
 
   if (isIdle) {
     // #4418 — when the turn ends but the agent backgrounded a Bash shell, the
@@ -436,6 +455,37 @@ export function ActivityIndicator() {
       )
     }
     return null
+  }
+  if (shellHeld) {
+    // #8302 — "Waiting on N background shell(s)", not "Working". The count is the
+    // server's tracker size: it can exceed the visible list because the advisory
+    // quiescence sweep hides a shell that still holds the session busy. Falls back
+    // to the list length, then to a count-less sentence, so the chip never claims
+    // a number it does not have.
+    const count = typeof backgroundShellCount === 'number' && backgroundShellCount > 0
+      ? backgroundShellCount
+      : (pendingShells?.length ?? 0)
+    const headline = headlineShell
+      ? truncatePendingShellCommand(
+          headlineShell.command && headlineShell.command.length > 0 ? headlineShell.command : headlineShell.shellId,
+        )
+      : null
+    const base = count > 0
+      ? `Waiting on ${count} background shell${count === 1 ? '' : 's'}`
+      : 'Waiting on background shells'
+    return (
+      <div
+        className="activity-indicator activity-indicator--green"
+        aria-label="Waiting on background shells"
+        data-testid="activity-indicator-shell-held"
+        title={headlineShell ? (headlineShell.command || headlineShell.shellId) : undefined}
+      >
+        <span className="activity-indicator__dot" aria-hidden="true" />
+        <span className="activity-indicator__label" data-testid="activity-indicator-label">
+          {headline ? `${base} · ${headline}` : base}
+        </span>
+      </div>
+    )
   }
   if (lastActivityAt == null) {
     // Busy but we haven't seen an activity event yet (race on connect).

@@ -25,11 +25,43 @@
  * The session lookup deliberately stays with the caller: "which session" is a
  * routing question (a mailbox id, a session id) and the two callers answer it
  * differently. This module only answers "may I, and did it land".
+ *
+ * ## The second route: the provider-neutral turn-input seam (#8301)
+ *
+ * PTY typing reaches claude-tui only, so a claude-sdk session (the default
+ * provider) never learned that CI finished (`wake: not-tui`). A caller that
+ * opts in with `{ turnInput: true }` also reaches every provider whose
+ * `sendMessage` is a real turn-input seam: it dispatches when idle, QUEUES when
+ * busy (`enqueueOutgoingMessage`, flushed at turn end, cleared by `interrupt()`)
+ * and reports admission through `onInputAdmission`. Those providers declare it
+ * with the static capability `daemonTurnInput: true`.
+ *
+ * - **Positive discriminator, strict `=== true`** — the same reasoning as rule 1:
+ *   a duck-typed `typeof session.sendMessage === 'function'` is true of EVERY
+ *   session, the user shell included, and a user shell executes the lines it is
+ *   given. `UserShellSession` must never declare the flag; `isUserShell` is
+ *   refused here as well, so one wrong flag cannot reach it.
+ * - **Opt-in per caller.** The mailbox wake does NOT pass `turnInput` — #7437
+ *   owns that caller and its PTY-only gate stays as it is. A claude-tui session
+ *   keeps the PTY route whatever the caller passes.
+ * - **Busy is fine here.** The queue absorbs it; `isRunning` is not consulted
+ *   (a background shell does not corrupt SDK input the way it corrupts PTY
+ *   typing).
+ * - **The outcome is the provider's admission, not our hope.** `accepted` →
+ *   `injected`, `queued` → `queued`, `rejected` → `rejected`. Admission may land
+ *   after `sendMessage` returns, in which case the synchronous result is
+ *   `pending` and `onAdmission` is the one place the final outcome is delivered.
  */
+
+import { createLogger } from './logger.js'
+
+const log = createLogger('session-wake')
 
 /**
  * Outcome of a wake attempt.
- * @typedef {'injected'|'busy'|'not-tui'|'no-session'|'pty-dead'|'empty-text'} WakeOutcome
+ * @typedef {'injected'|'busy'|'not-tui'|'no-session'|'pty-dead'|'empty-text'|'queued'|'rejected'|'pending'|'error'} WakeOutcome
+ *   `queued`, `rejected`, `pending` and `error` belong to the turn-input route
+ *   (#8301) only; the PTY route never returns them.
  */
 
 /** Cap on injected text — one prompt line, not a payload. */
@@ -53,6 +85,115 @@ export function sanitizeWakeText(text) {
 }
 
 /**
+ * Does this session class declare the provider-neutral turn-input seam?
+ * Strict `=== true` on the CLASS, never the instance and never truthiness. A
+ * throwing `capabilities` getter reads as "no" — an unreadable declaration is
+ * not a declaration.
+ *
+ * @param {object} session
+ * @returns {boolean}
+ */
+export function supportsDaemonTurnInput(session) {
+  try {
+    const Klass = session?.constructor
+    if (Klass?.isUserShell === true) return false
+    return Klass?.capabilities?.daemonTurnInput === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Map a provider admission report to a wake outcome, or null when the report is
+ * not final (an unrecognised shape must not be read as success).
+ */
+function outcomeForAdmission(admission) {
+  if (!admission || typeof admission !== 'object') return null
+  const { status, delivery } = admission
+  if (status === 'accepted' && delivery === 'dispatch_started') return 'injected'
+  if (status === 'queued' && delivery === 'queued') return 'queued'
+  if (status === 'rejected' && delivery === 'not_dispatched') return 'rejected'
+  return null
+}
+
+/**
+ * The turn-input route (#8301). See the module header.
+ *
+ * @param {object} session
+ * @param {string} text
+ * @param {{ clientMessageId?: string, admitAtFlush?: () => boolean, onAdmission?: (result: {outcome: 'injected'|'queued'|'rejected', line: string, clientMessageId: string|undefined, admission: object}) => void }} opts
+ * @returns {WakeOutcome}
+ */
+function wakeViaTurnInput(session, text, { clientMessageId, admitAtFlush, onAdmission } = {}) {
+  if (!supportsDaemonTurnInput(session)) return 'not-tui'
+  if (typeof session.sendMessage !== 'function') return 'not-tui'
+  const line = sanitizeWakeText(text)
+  if (line.length === 0) return 'empty-text'
+
+  let outcome = null
+  let dispatchNotified = false
+  const notify = (mapped, admission) => {
+    if (typeof onAdmission !== 'function') return
+    try {
+      onAdmission({ outcome: mapped, line, clientMessageId, admission })
+    } catch (err) {
+      log.warn(`wake onAdmission callback threw: ${err?.message || err}`)
+    }
+  }
+  // Two notifications at most, and the distinction is the point.
+  //
+  // The FIRST final report decides `outcome` (what `wakeSession` returns and what
+  // the caller logs): `queued` means "it landed in the provider's queue", and a
+  // later report never rewrites that.
+  //
+  // But `queued` is not DISPATCHED. A queued item is re-dispatched at turn end
+  // with the SAME sendOptions, so the provider reports admission a second time,
+  // `accepted`, if and only if the item actually went out — it may instead be
+  // cancelled at flush (`admitAtFlush` refused, an interrupt cleared the queue)
+  // and never report again. That second report is the moment the line became a
+  // turn, so it is delivered ONCE more, as `injected`, and a caller that records
+  // "this turn happened" (history, the `user_input` broadcast) should key off
+  // `injected`, never off `queued`.
+  const onInputAdmission = (admission) => {
+    const mapped = outcomeForAdmission(admission)
+    if (mapped === null) return
+    if (outcome === null) {
+      outcome = mapped
+      if (mapped === 'injected') dispatchNotified = true
+      notify(mapped, admission)
+      return
+    }
+    if (outcome === 'queued' && !dispatchNotified && mapped !== 'queued') {
+      dispatchNotified = true
+      notify(mapped, admission)
+    }
+  }
+
+  let result
+  try {
+    result = session.sendMessage(line, [], {
+      ...(typeof clientMessageId === 'string' ? { clientMessageId } : {}),
+      // A wake that QUEUES behind a running turn is dispatched later, by the
+      // provider's queue, with no caller on the stack. The caller's flush-time
+      // admission check rides with the item so the queue can re-ask then.
+      ...(typeof admitAtFlush === 'function' ? { admitAtFlush } : {}),
+      onInputAdmission,
+    })
+  } catch (err) {
+    log.warn(`wake sendMessage threw: ${err?.message || err}`)
+    return outcome ?? 'error'
+  }
+  // #5313: a rejecting promise must never escape to process-level
+  // unhandledRejection (which exits the daemon over one session's fault).
+  if (result && typeof result.catch === 'function') {
+    result.catch((err) => {
+      log.error(`wake sendMessage rejected: ${err?.message || err}`)
+    })
+  }
+  return outcome ?? 'pending'
+}
+
+/**
  * Type `text` into a live session's prompt when it is safe to do so.
  *
  * Never throws: a session whose `writeTerminalInput` throws reports `pty-dead`
@@ -62,11 +203,25 @@ export function sanitizeWakeText(text) {
  * @param {object|null|undefined} session - the live provider session object.
  * @param {string} text - the line to type. A trailing return is appended here;
  *   callers must NOT include one (it would be scrubbed anyway).
+ * @param {object} [opts]
+ * @param {boolean} [opts.turnInput] - also reach non-tui providers through the
+ *   `sendMessage`/queue seam (#8301). Absent/false = the claude-tui-only gate,
+ *   unchanged. Strict `=== true`.
+ * @param {string} [opts.clientMessageId] - turn-input route: the stable daemon
+ *   id the provider's queue mirror and history carry.
+ * @param {() => boolean} [opts.admitAtFlush] - turn-input route: re-asked by the
+ *   provider's queue (BaseSession `dequeueNextOutgoing`) when a QUEUED wake is
+ *   about to be dispatched; anything but `true` (or a throw) drops it.
+ * @param {Function} [opts.onAdmission] - turn-input route: called once with the
+ *   final admission outcome (see `wakeViaTurnInput`).
  * @returns {WakeOutcome}
  */
-export function wakeSession(session, text) {
+export function wakeSession(session, text, opts = {}) {
   if (!session) return 'no-session'
-  if (session.constructor?.isClaudeTui !== true) return 'not-tui'
+  if (session.constructor?.isClaudeTui !== true) {
+    if (opts?.turnInput === true) return wakeViaTurnInput(session, text, opts)
+    return 'not-tui'
+  }
   // Defence in depth: isClaudeTui === true implies writeTerminalInput exists
   // today (only ClaudeTuiSession sets the marker AND defines the method), so
   // this is unreachable in practice — but it guards a future class that sets

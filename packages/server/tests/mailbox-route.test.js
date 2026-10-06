@@ -190,6 +190,26 @@ describe('POST /api/mailbox — ping behavior', () => {
     assert.equal(shellWrites.length, 0, 'must NEVER write into a non-claude-tui PTY')
   })
 
+  // #8301: the CI watcher's turn-input route is opt-in per caller. The mailbox
+  // wake keeps its PTY-only gate (#7437 owns changing that), so a session that
+  // DOES declare `daemonTurnInput` must still read not-tui here and must never
+  // be sent a turn by a mailbox ping.
+  it('reports not-tui for a daemonTurnInput-capable session (the mailbox wake is PTY-only)', async () => {
+    const sent = []
+    const session = {
+      isRunning: false,
+      constructor: { capabilities: { daemonTurnInput: true } },
+      sendMessage(...args) { sent.push(args) },
+    }
+    const res = await invoke(handleMailboxPing, makeServer({ coder: session }), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'coder', unread_count: 1 }),
+    })
+    assert.equal(res.body.reason, 'not-tui')
+    assert.equal(res.body.injected, false)
+    assert.equal(sent.length, 0, 'a mailbox ping must never become a user turn')
+  })
+
   it('reports no-session for an unregistered recipient', async () => {
     const res = await invoke(handleMailboxPing, makeServer(), {
       headers: bearer(SECRET),

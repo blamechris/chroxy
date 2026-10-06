@@ -628,6 +628,11 @@ export declare const ServerBackgroundWorkChangedSchema: z.ZodObject<{
         command: z.ZodString;
         startedAt: z.ZodNumber;
     }, z.core.$strip>>;
+    busyReason: z.ZodOptional<z.ZodNullable<z.ZodEnum<{
+        turn: "turn";
+        "background-shells": "background-shells";
+    }>>>;
+    backgroundShellCount: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerShellPendingApprovalSchema: z.ZodObject<{
     type: z.ZodLiteral<"shell_pending_approval">;

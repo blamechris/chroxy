@@ -107,6 +107,7 @@ import {
   handleFileContent as sharedFileContent,
   buildSessionListPatches as sharedBuildSessionListPatches,
   cumulativeUsageEquals as sharedCumulativeUsageEquals,
+  busyStateDiffers as sharedBusyStateDiffers,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
@@ -4986,6 +4987,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         conversationIdPatches,
         cumulativeUsagePatches,
         backgroundShellBuilders,
+        busyStatePatches,
       } = patches;
       // GC persisted messages for sessions that dropped out of the list
       for (const prevId of removedIds) {
@@ -5265,6 +5267,17 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             ? {}
             : { pendingBackgroundShells: next };
         });
+      }
+      // #8302: seed WHY the session is busy beside `isBusy`. `isBusy` merges
+      // "mid-turn" with "idle but a background shell is still tracked", and the
+      // activity chip needs the difference to say "Waiting on N background
+      // shell(s)" instead of "Working". A session from an older server has no
+      // patch here, so its current value is left alone (never overwritten with
+      // a guess); `busyStateDiffers` is the no-op gate so a repeat snapshot does
+      // not re-render.
+      for (const [sid, patch] of busyStatePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) => (sharedBusyStateDiffers(ss, patch) ? { ...patch } : {}));
       }
       break;
     }
@@ -5776,8 +5789,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // Skip if it came from this client (we already show it via optimistic UI).
       const userInput = sharedUserInput(msg, get().myClientId, get().activeSessionId);
       if (!userInput) break;
-      // Write user message to terminal buffer for Output view
-      if (userInput.content) {
+      // #8301: the daemon wrote this turn (the CI wake), not a person. Optional on
+      // the wire: absent for typed input and for an older server.
+      const fromDaemon = msg.source === 'daemon';
+      // Write user message to terminal buffer for Output view. `appendTerminalData`
+      // writes to the ACTIVE session's buffer whatever session the input belongs
+      // to, so a turn for a background session (a wake, or another client typing
+      // there) must not put "> ..." into the session being looked at.
+      if (userInput.content && userInput.sessionId === get().activeSessionId) {
         get().appendTerminalData(`\r\n\x1b[33m> ${userInput.content}\x1b[0m\r\n\r\n`);
       }
       // #3188: a remote client just answered (or otherwise sent a fresh
@@ -5788,7 +5807,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         const patch: Partial<SessionState> = {
           messages: [...ss.messages, userInput.chatMessage],
         };
-        if (ss.pendingEvaluatorClarify) patch.pendingEvaluatorClarify = null;
+        // A daemon turn answers nothing: the server still holds the clarify
+        // question, so the card must stay until a person responds to it.
+        if (ss.pendingEvaluatorClarify && !fromDaemon) patch.pendingEvaluatorClarify = null;
         return patch;
       });
       break;

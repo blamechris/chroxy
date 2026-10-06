@@ -15,6 +15,7 @@ import {
 } from './skills-loader.js'
 import { SkillsManager } from './skills-manager.js'
 import { BackgroundShellTracker } from './background-shell-tracker.js'
+import { deriveBusyReason } from './session-busy-state.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { createLogger } from './logger.js'
 import { ActivityRegistry } from './activity-registry.js'
@@ -886,6 +887,36 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #8302: the model is mid-turn. The first half of `isRunning`, exposed alone
+   * so a publisher can tell "working" from "held busy by a background shell".
+   * @returns {boolean}
+   */
+  get turnActive() {
+    return !!this._isBusy
+  }
+
+  /**
+   * #8302: how many background shells the tracker holds. The tracker's `size`,
+   * which counts shells the advisory mtime sweep has hidden from
+   * `getPendingBackgroundShells()` (they still hold `isRunning` true).
+   * @returns {number}
+   */
+  get backgroundShellCount() {
+    return this._backgroundShellTracker.size
+  }
+
+  /**
+   * #8302: why `isRunning` is true — `'turn'`, `'background-shells'` (idle model,
+   * tracked shells only), or `null` when the session is not busy. Derived from
+   * `isRunning` itself so a subclass that overrides it (the user shell's PTY
+   * liveness) keeps `busyReason === null <=> !isRunning`.
+   * @returns {'turn'|'background-shells'|null}
+   */
+  get busyReason() {
+    return deriveBusyReason(this.isRunning, this.turnActive, this.backgroundShellCount)
+  }
+
+  /**
    * #4307: read-only snapshot of pending background shells.
    * #5376: delegates to BackgroundShellTracker.
    */
@@ -995,11 +1026,74 @@ export class BaseSession extends EventEmitter {
     const remaining = this._outgoingQueue.length
     process.nextTick(() => {
       if (this._destroying) return
+      // #8301: an item that carries `sendOptions.admitAtFlush` is re-checked HERE,
+      // at the moment it would be dispatched — after the preceding turn's
+      // `result` has been broadcast and processed on every turn-end path. Its
+      // admission at enqueue time can be stale by then (the result can trip the
+      // cost-budget pause). The predicate is a LOCAL callback: it is never put on
+      // the wire (`message_queued` carries only id/text/length) and the queue is
+      // not persisted. Typed input does not set it, so its behaviour is unchanged.
+      // A refusal — or a throwing predicate, which fails safe — cancels just this
+      // item and goes on to consider the next, so the queue keeps draining.
+      if (!this._admitQueuedItem(item)) {
+        this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'cancelled' })
+        ;(this._log || log).warn(`Dropped queued follow-up at flush: admission refused (${remaining} remaining)`)
+        this._continueDrainAfterRefusal()
+        return
+      }
       this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'flush' })
       ;(this._log || log).info(`Dequeuing follow-up message (${remaining} remaining)`)
       this.sendMessage(item.prompt, item.attachments, item.sendOptions)
     })
     return item
+  }
+
+  /**
+   * #8301: the refused item held this turn's drain slot, so keep draining. The
+   * default continues with the next outgoing item. A provider with a second
+   * queue behind `_outgoingQueue` (CliSession's startup queue) overrides this to
+   * fall through to it, exactly as its own turn-end drain would have.
+   */
+  _continueDrainAfterRefusal() {
+    if (this._outgoingQueue.length && !this._destroying) this.dequeueNextOutgoing()
+  }
+
+  /**
+   * #8301: evaluate a queued item's optional flush-time admission predicate.
+   * No predicate means admitted (every typed input). A predicate that returns
+   * anything but `true`, or throws, means NOT admitted.
+   *
+   * @param {{ sendOptions?: { admitAtFlush?: () => boolean } }} item
+   * @returns {boolean}
+   */
+  _admitQueuedItem(item) {
+    const predicate = item?.sendOptions?.admitAtFlush
+    if (typeof predicate !== 'function') return true
+    try {
+      return predicate() === true
+    } catch (err) {
+      ;(this._log || log).warn(`Queued follow-up admission check threw; dropping it: ${err?.message || err}`)
+      return false
+    }
+  }
+
+  /**
+   * #8301: why a DAEMON-authored turn (the CI wake) must not be handed to this
+   * session right now, or `null` when it may. The provider's half of the one
+   * refusal seam `SessionManager.daemonTurnRefusal` asks — before dispatch and
+   * again when a queued wake is about to flush.
+   *
+   * This is a stricter question than "can the user type here": a typed input
+   * may legitimately revive a stopped session or surface an error, but a
+   * daemon wake that does so is a side effect nobody asked for. A provider
+   * overrides it for the states in which `sendMessage` would do that (respawn,
+   * discard the queue, report a user-visible error). The default is `null`: a
+   * provider that has no such state is always willing.
+   *
+   * @returns {string|null} a short reason, or null
+   */
+  daemonTurnRefusal() {
+    return null
   }
 
   /**

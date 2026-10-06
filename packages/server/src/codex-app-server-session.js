@@ -220,6 +220,13 @@ export class CodexAppServerSession extends BaseSession {
       // as an oversight: tracked by #6885 ("Codex deny reason either reaches the
       // model or is documented as unsupported"). Flip to true once that lands.
       denyReason: false,
+      // #8301: the provider-neutral turn-input seam. `sendMessage` dispatches when
+      // idle, queues via `enqueueOutgoingMessage` when busy (flushed at turn end,
+      // cleared by `interrupt()`), and reports admission through
+      // `onInputAdmission` — so a daemon-authored line (the CI-completion wake)
+      // can travel it as an ordinary user turn. session-wake.js gates on this with
+      // strict `=== true`; absent means NOT supported. Never duck-typed.
+      daemonTurnInput: true,
     }
   }
 
@@ -845,6 +852,15 @@ export class CodexAppServerSession extends BaseSession {
       // unavailable and load-bearing features must be probed at runtime.
       ;(this._log || log).warn(`codex app-server handshake carried no parseable version (userAgent=${raw === null ? 'absent' : String(raw).slice(0, 200)}); capabilities fall through to runtime probes`)
     }
+  }
+
+  /**
+   * #8301: `sendMessage` on a session whose app-server is not up emits a
+   * user-visible "not started" error. A daemon wake must not cause one.
+   * @returns {string|null}
+   */
+  daemonTurnRefusal() {
+    return (!this._processReady || !this._client) ? 'not-started' : null
   }
 
   async sendMessage(prompt, attachments, sendOptions = {}) {

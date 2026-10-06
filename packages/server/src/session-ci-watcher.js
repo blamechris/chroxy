@@ -16,9 +16,13 @@
  *     `ci_complete` on purpose: it is not a session state, and folding it in
  *     would repaint whatever the session's actual status is with a stale CI
  *     verdict;
- *   - the **agent**, by typing one line into the session's own prompt when it
- *     is idle, so the model learns CI settled instead of spending a turn (and a
- *     whole cached-context re-read) polling `gh pr checks`.
+ *   - the **agent**, by delivering one line to the session so the model learns
+ *     CI settled instead of spending a turn (and a whole cached-context
+ *     re-read) polling `gh pr checks`. Two routes, both behind `session-wake.js`:
+ *     claude-tui gets it typed into its PTY when idle; every provider that
+ *     declares `capabilities.daemonTurnInput` (claude-sdk, the default, among
+ *     them — #8301) gets it as an ordinary user turn through `sendMessage`,
+ *     dispatched when idle and QUEUED when busy.
  *
  * ## Completion is a TRANSITION, not a state
  *
@@ -302,8 +306,26 @@ export class SessionCiWatcher {
    *   - the PR/CI survey seam (defaults to `surveySessionPrStatus`).
    * @param {(event: object) => void} [opts.notify] - fired once per completion,
    *   with the event. The caller routes it to PushManager.
+   * @param {(sessionId: string) => string|null} [opts.daemonTurnRefusal] - the ONE
+   *   refusal seam for a daemon-authored turn (#8301): a short reason the session
+   *   must not be handed a wake ('budget-paused', 'user-stopped', a provider
+   *   state, ...) or null. The reason becomes the wake outcome. Asked before
+   *   dispatch AND again when a queued wake is about to flush, since the
+   *   preceding turn's result can trip the budget pause after the wake queued.
+   *   A throw reads as a refusal. Absent = never refused.
    * @param {boolean} [opts.wakeAgent] - when false, completions notify the user
-   *   but never type into a session.
+   *   but never wake a session (neither the PTY route nor the turn-input route).
+   * @param {(wake: {sessionId: string, text: string, messageId: string}) => void} [opts.recordWakeInput]
+   *   - called once the wake has actually been DISPATCHED to the model — at the
+   *   moment of dispatch, which for a wake that queued behind a running turn is
+   *   the later flush, not the enqueue. Never for a rejected wake, never for one
+   *   cancelled at flush, never for the PTY route. The caller records the line to
+   *   history and broadcasts it (#8301), so a history entry or a `user_input`
+   *   exists only for a turn that really ran. A queued wake is visible to clients
+   *   meanwhile through the provider's own `message_queued`/`message_dequeued`
+   *   mirror, which shows and then removes it from the queued strip: the flushed
+   *   wake therefore ends as exactly one chat bubble, a cancelled one as none. Absent = the wake still reaches the agent but
+   *   clients do not see it.
    * @param {number} [opts.tickIntervalMs]
    * @param {number} [opts.discoveryIntervalMs]
    * @param {number} [opts.maxSurveysPerTick]
@@ -315,6 +337,8 @@ export class SessionCiWatcher {
     resolveSession,
     survey = surveySessionPrStatus,
     notify,
+    recordWakeInput,
+    daemonTurnRefusal,
     wakeAgent = true,
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     discoveryIntervalMs = DEFAULT_DISCOVERY_INTERVAL_MS,
@@ -326,6 +350,9 @@ export class SessionCiWatcher {
     this._resolveSession = typeof resolveSession === 'function' ? resolveSession : null
     this._survey = survey
     this._notify = typeof notify === 'function' ? notify : null
+    this._recordWakeInput = typeof recordWakeInput === 'function' ? recordWakeInput : null
+    this._daemonTurnRefusal = typeof daemonTurnRefusal === 'function' ? daemonTurnRefusal : null
+    this._wakeSeq = 0
     this._wakeAgent = wakeAgent !== false
     this._tickIntervalMs = tickIntervalMs
     this._discoveryIntervalMs = discoveryIntervalMs
@@ -620,15 +647,74 @@ export class SessionCiWatcher {
     }
 
     let wakeOutcome = 'disabled'
-    if (this._wakeAgent && this._resolveSession) {
+    const refusal = this._wakeAgent && this._resolveSession ? this._wakeRefusal(sessionId) : null
+    if (refusal !== null) {
+      // The user is still notified above; only the agent half is withheld, and
+      // nothing is sent, queued or recorded.
+      wakeOutcome = refusal
+    } else if (this._wakeAgent && this._resolveSession) {
+      // Stable, daemon-authored id for the turn-input route: the provider's
+      // queue mirror and the history entry carry it. The time prefix keeps ids
+      // unique across daemon restarts (history is persisted, a bare counter
+      // would repeat). Charset/length satisfy input-handlers' id grammar.
+      const messageId = `chroxy-ci-wake-${this._now().toString(36)}-${++this._wakeSeq}`
+      // Admission can land AFTER wakeSession returns (an async provider). The
+      // flag lets the late callback say so in its own log line instead of the
+      // outcome in the line below being silently stale.
+      let firing = true
       try {
-        wakeOutcome = wakeSession(this._resolveSession(sessionId), buildAgentWakeText(event))
+        wakeOutcome = wakeSession(this._resolveSession(sessionId), buildAgentWakeText(event), {
+          turnInput: true,
+          clientMessageId: messageId,
+          admitAtFlush: () => this._wakeRefusal(sessionId) === null,
+          onAdmission: ({ outcome, line }) => {
+            // Visible like a typed turn — but only once it has actually been
+            // DISPATCHED. A rejected wake never reached the model, and a queued
+            // one may yet be cancelled at flush (budget paused, user Stop,
+            // interrupt): recording it at enqueue left a phantom user turn in
+            // history that no model ever saw. `injected` arrives immediately for
+            // an idle session and at flush for a queued one.
+            if (outcome === 'injected') this._recordWake(sessionId, line, messageId)
+            if (!firing) {
+              this._log?.info?.(`ci-watch: #${event.prNumber} wake for session ${sessionId} admitted late (wake: ${outcome})`)
+            }
+          },
+        })
       } catch (err) {
         wakeOutcome = 'error'
         this._log?.warn?.(`ci-watch: agent wake failed for ${sessionId}: ${getErrorMessage(err, 'unknown error')}`)
+      } finally {
+        firing = false
       }
     }
     this._log?.info?.(`ci-watch: #${event.prNumber} settled ${verdict} for session ${sessionId} (wake: ${wakeOutcome})`)
+  }
+
+  /**
+   * Why this session must not be handed a wake right now, or null. A throwing
+   * gate refuses, and so does a non-string, non-null answer: only a literal null
+   * means "go ahead".
+   */
+  _wakeRefusal(sessionId) {
+    if (!this._daemonTurnRefusal) return null
+    try {
+      const reason = this._daemonTurnRefusal(sessionId)
+      if (reason === null) return null
+      return typeof reason === 'string' && reason.length > 0 ? reason : 'refused'
+    } catch (err) {
+      this._log?.warn?.(`ci-watch: wake gate threw for ${sessionId}; withholding the wake: ${getErrorMessage(err, 'unknown error')}`)
+      return 'refusal-check-failed'
+    }
+  }
+
+  /** Record + broadcast an admitted wake; isolated so a failure costs nothing else. */
+  _recordWake(sessionId, text, messageId) {
+    if (!this._recordWakeInput) return
+    try {
+      this._recordWakeInput({ sessionId, text, messageId })
+    } catch (err) {
+      this._log?.warn?.(`ci-watch: recording the wake for ${sessionId} failed: ${getErrorMessage(err, 'unknown error')}`)
+    }
   }
 
   /** Start the periodic sweep. The first tick runs immediately. Idempotent. */
@@ -719,6 +805,15 @@ export function buildSessionCiWatcher({ config, sessionManager, pushManager = nu
     // review, measured: 0.5 -> 0 surveys per tick).
     ...(positive(sessionCi.maxSurveysPerTick) ? { maxSurveysPerTick: Math.max(1, Math.floor(sessionCi.maxSurveysPerTick)) } : {}),
     ...(survey ? { survey } : {}),
+    // #8301: a turn-input wake is a user turn the provider ADMITTED — put it in
+    // history and on the wire the way a typed input is. The manager method is the
+    // seam: this module never imports a transport.
+    // One refusal seam on the manager: the cost-budget pause (which refuses typed
+    // input), a user Stop, and the provider's own unwilling states.
+    daemonTurnRefusal: (sessionId) => sessionManager?.daemonTurnRefusal?.(sessionId) ?? null,
+    recordWakeInput: ({ sessionId, text, messageId }) => {
+      sessionManager?.recordDaemonUserInput?.(sessionId, text, messageId)
+    },
     notify: (event) => {
       if (!pushManager) return
       const { category, title, body, data } = ciCompletionPush(event)

@@ -61,6 +61,30 @@ describe('AgentControlClient against a real encrypted WsServer', () => {
     assert.ok(events.events.some((e) => JSON.stringify(e.data).includes('fixture evidence')))
   })
 
+  // #8302: the agent-control roster is the daemon's own `session_list` rows with a
+  // `modelStatus` added, so the busy reason an agent reads must be exactly the one
+  // the daemon published — an agent that sees only `isBusy` cannot tell a working
+  // session from one held busy by a shell, and would wait on it forever.
+  it('lists sessions with busyReason and backgroundShellCount intact', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'probe-a', name: 'Probe A', cwd: '/tmp', provider: 'claude-sdk' },
+    ])
+    manager.listSessions = () => [...sessionsMap.entries()].map(([sessionId, entry]) => ({
+      sessionId, name: entry.name, cwd: entry.cwd, model: 'claude-x',
+      isBusy: true, busyReason: 'background-shells', backgroundShellCount: 2, pendingBackgroundShells: [],
+    }))
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const port = await startServerAndGetPort(server)
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', connectTimeoutMs: 2500, requestTimeoutMs: 1000, silent: true })
+    await client.connect()
+    const { sessions } = await client.listSessions()
+    assert.equal(sessions.length, 1)
+    assert.equal(sessions[0].isBusy, true)
+    assert.equal(sessions[0].busyReason, 'background-shells')
+    assert.equal(sessions[0].backgroundShellCount, 2)
+    assert.ok(sessions[0].modelStatus, 'the roster still carries its own modelStatus annotation')
+  })
+
   it('rejects a concurrent duplicate clientMessageId before send, without dropping the original caller', async () => {
     const { manager } = createMockSessionManager([{ id: 'probe-a', name: 'Probe A', cwd: '/tmp', provider: 'claude-cli' }])
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })

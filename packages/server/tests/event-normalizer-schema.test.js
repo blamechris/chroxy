@@ -191,6 +191,23 @@ const FIXTURES = [
   ['agent_completed', { toolUseId: 'tu_task' }, makeCtx()],
   ['agent_event', { parentToolUseId: 'tu_task', type: 'tool_start', payload: { toolUseId: 'tu_child', tool: 'Read' } }, makeCtx()],
   ['background_work_changed', { pending: [{ shellId: 'brk57kt6pm', command: 'npm test', startedAt: 1781068000000 }] }, makeCtx()],
+  // #8302 — the same emitter with a session in each busy state, so the new
+  // `busyReason` / `backgroundShellCount` fields are driven through the schema
+  // rather than only asserted by direct property read. The default ctx above has
+  // a session stub that is not busy, so without these rows the 'turn' and
+  // 'background-shells' values would never reach `validateMessage`.
+  [
+    'background_work_changed',
+    { pending: [] },
+    makeCtx({ getSessionEntry: () => ({ session: { isRunning: true, busyReason: 'background-shells', backgroundShellCount: 2 }, name: 'S', cwd: '/tmp/test' }) }),
+    'background_work_changed (idle model, shells only — advisory-quiesced, so pending is empty)',
+  ],
+  [
+    'background_work_changed',
+    { pending: [{ shellId: 'brk57kt6pm', command: 'npm test', startedAt: 1781068000000 }] },
+    makeCtx({ getSessionEntry: () => ({ session: { isRunning: true, busyReason: 'turn', backgroundShellCount: 1 }, name: 'S', cwd: '/tmp/test' }) }),
+    'background_work_changed (mid-turn)',
+  ],
   ['activity_delta', { schemaVersion: 1, op: 'started', entry: activityEntry }, makeCtx()],
   ['activity_snapshot', { schemaVersion: 1, entries: [activityEntry] }, makeCtx()],
   ['mcp_servers', { servers: [{ name: 'filesystem', status: 'connected', enabled: true, canToggle: true }] }, makeCtx()],

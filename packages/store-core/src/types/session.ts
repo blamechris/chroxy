@@ -162,6 +162,19 @@ export interface SessionInfo {
    */
   pendingBackgroundShells?: PendingBackgroundShell[];
   /**
+   * #8302: WHY the session is busy, beside the unchanged `isBusy` — see
+   * {@link BusyReason}. `null` is a positive "not busy"; `undefined` means the
+   * server predates the field and the client must fall back to `isBusy` alone.
+   */
+  busyReason?: BusyReason | null;
+  /**
+   * #8302: the server's background-shell tracker size. NOT
+   * `pendingBackgroundShells.length` — the advisory mtime sweep hides a quiesced
+   * shell from that list while it still holds the session busy, which is the
+   * exact case where this is > 0 and the list is empty.
+   */
+  backgroundShellCount?: number;
+  /**
    * #6901: the active/resolved Codex sandbox mode for a running codex session
    * (`read-only` | `workspace-write` | `danger-full-access`). Present ONLY for
    * codex-provider sessions — every other provider omits it, and older servers
@@ -234,6 +247,15 @@ export interface PendingBackgroundShell {
   command: string;
   startedAt: number;
 }
+
+/**
+ * #8302 — why a session reads busy. `isBusy` merges two facts the UI must tell
+ * apart: the model is mid-turn (`'turn'`, "Working") versus the model is idle
+ * and only a tracked background shell keeps the session busy
+ * (`'background-shells'`, "Waiting on N background shell(s)"). `null` on the
+ * wire means "not busy".
+ */
+export type BusyReason = 'turn' | 'background-shells';
 
 /**
  * #5431 — one outstanding background task derived from the session
@@ -556,6 +578,16 @@ export interface BaseSessionState {
    * state the activity indicator surfaces.
    */
   pendingBackgroundShells: PendingBackgroundShell[];
+  /**
+   * #8302 — why the server says this session is busy (see {@link BusyReason}).
+   * Seeded from `session_list` and refreshed by `background_work_changed`.
+   * Optional and `undefined` until a #8302-aware server sends it, so every
+   * reader must treat `undefined` as "unknown" and keep its pre-#8302
+   * behaviour. `null` is a positive "not busy".
+   */
+  busyReason?: BusyReason | null;
+  /** #8302 — the server's background-shell tracker size; see `SessionInfo.backgroundShellCount`. */
+  backgroundShellCount?: number;
   /**
    * #5431 — outstanding background work derived from the session
    * TRANSCRIPT (run_in_background Bash/Agent calls and Monitor streams

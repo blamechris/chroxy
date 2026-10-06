@@ -998,12 +998,15 @@ Rows marked **(capability)** come directly from each session class's `static get
 | **(capability)** Thinking level control | Yes | — | — | — | Yes (app-server, per-model) | — | — | — | — |
 | **(capability)** Thinking keyword escalation (`thinkingKeywords`) | Yes | — | — | — | — | — | — | — | — |
 | **(capability)** Live streaming (`stream_delta`) | Yes | Yes | **No** (deliver-on-complete) | **Yes** | Yes | Yes | Yes | Yes | Yes |
+| **(capability)** Daemon turn input (`daemonTurnInput` — a daemon-authored line, e.g. the CI-completion wake, can travel `sendMessage` as a user turn: dispatched when idle, queued when busy) | Yes | Yes | — (PTY typing instead) | — | Yes (app-server) | — | — | — | — |
 | **(capability)** Skill toggle (`skillToggle` — live skill activate/deactivate) | Yes | — | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Attachments (images, files) | Yes | Yes | — | — | Yes (app-server) | — | — | — | — |
 | **(behavioural)** Agent tracking (spawned/completed) | Yes | Yes | — | — | — | — | Yes | Yes | Yes |
 | **(behavioural)** Cost reporting (`result.cost`) | Yes | Yes | — | — | — | — | Yes (per-token API) | Yes (per-token API) | Yes (always $0) |
 | **(behavioural)** Multi-session (SessionManager) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | **(behavioural)** Conversation continuity across messages | Yes (SDK state) | Yes (persistent process) | Yes (persistent PTY) | Yes (persistent session) | Yes (persistent thread) | **No** | Yes (in-memory history) | Yes (in-memory history) | Yes (in-memory history) |
+
+Classes declaring `daemonTurnInput` (#8301) — the session classes whose `sendMessage` is a real turn-input seam (dispatch when idle, queue when busy, report admission), so a daemon-authored line such as the CI-completion wake can reach them as a user turn: `SdkSession`, `CliSession`, `CodexAppServerSession`, `AcpSession` (every config-driven ACP agent), and the Docker subclasses `DockerSdkSession` and `DockerSession`. `tests/daemon-turn-input-roster.test.js` derives this set from the code and fails if it and this line disagree in either direction.
 
 > **The `codex` column is the DEFAULT app-server driver** (`CodexAppServerSession`), the class `getProvider('codex')` returns unless `CHROXY_CODEX_APPSERVER=0` opts out (#6616). Cells marked *(app-server)* are exactly the ones the legacy `codex exec` driver (`CodexSession`) does not have: `permissions`, `inProcessPermissions`, `permissionModeSwitch` and `thinkingLevel` are all `false` in its capability object, and attachments — a **(behavioural)** row, not a capability key on either class — are rejected with a session-level error on that path. Everything else in the column is identical on both drivers — including **conversation continuity**, which the exec driver keeps by resuming its own thread on every turn (`codex exec resume <id>`, #3865) rather than by holding a process open.
 

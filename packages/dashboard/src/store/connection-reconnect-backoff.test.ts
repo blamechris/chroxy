@@ -455,6 +455,11 @@ const ALL_SESSION_STATE_KEYS = {
   activeAgents: true,
   activeTools: true,
   pendingBackgroundShells: true,
+  // #8302: the server's busy reason + tracker size. Not transient-swept —
+  // like pendingBackgroundShells they describe server state, and the post-auth
+  // session_list re-seeds them on reconnect.
+  busyReason: true,
+  backgroundShellCount: true,
   transcriptBackgroundTasks: true,
   scheduledWakeup: true,
   isPlanPending: true,

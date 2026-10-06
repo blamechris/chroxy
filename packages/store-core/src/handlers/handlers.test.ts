@@ -54,6 +54,8 @@ import {
   handlePermissionRulesUpdated,
   handleSessionList,
   buildSessionListPatches,
+  parseBusyState,
+  busyStateDiffers,
   cumulativeUsageEquals,
   chunkSubscribeSessionIds,
   SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
@@ -2522,6 +2524,72 @@ describe('buildSessionListPatches', () => {
     createdAt: 1000,
     conversationId: null,
     ...overrides,
+  })
+
+  // -------------------------------------------------------------------------
+  // busyStatePatches (#8302) — busyReason / backgroundShellCount ride beside isBusy
+  // -------------------------------------------------------------------------
+  describe('parseBusyState / busyStateDiffers (#8302)', () => {
+    it('returns null when neither field is present and valid', () => {
+      expect(parseBusyState({})).toBeNull()
+      expect(parseBusyState(null)).toBeNull()
+      expect(parseBusyState({ busyReason: 'banana', backgroundShellCount: 1.5 })).toBeNull()
+    })
+
+    it('keeps only the valid half', () => {
+      expect(parseBusyState({ busyReason: 'turn', backgroundShellCount: 'x' })).toEqual({ busyReason: 'turn' })
+      expect(parseBusyState({ busyReason: 'banana', backgroundShellCount: 3 })).toEqual({ backgroundShellCount: 3 })
+    })
+
+    it('treats null as a valid reason', () => {
+      expect(parseBusyState({ busyReason: null })).toEqual({ busyReason: null })
+    })
+
+    it('busyStateDiffers compares only the fields the patch carries', () => {
+      expect(busyStateDiffers({ busyReason: 'turn', backgroundShellCount: 1 }, { busyReason: 'turn' })).toBe(false)
+      expect(busyStateDiffers({ busyReason: 'turn' }, { busyReason: 'background-shells' })).toBe(true)
+      expect(busyStateDiffers({}, { busyReason: null })).toBe(true)
+      expect(busyStateDiffers({ backgroundShellCount: 2 }, { backgroundShellCount: 2 })).toBe(false)
+      expect(busyStateDiffers({ busyReason: 'turn' }, {})).toBe(false)
+    })
+  })
+
+  describe('busyStatePatches (#8302)', () => {
+    it('carries the reason and count for a session that reports them', () => {
+      const sessions = [
+        makeSession('s1', { isBusy: true, busyReason: 'background-shells', backgroundShellCount: 2 } as Partial<SessionInfo>),
+        makeSession('s2', { isBusy: true, busyReason: 'turn', backgroundShellCount: 0 } as Partial<SessionInfo>),
+      ]
+      const out = buildSessionListPatches({ sessions }, [], null)!
+      expect(out.busyStatePatches.get('s1')).toEqual({ busyReason: 'background-shells', backgroundShellCount: 2 })
+      expect(out.busyStatePatches.get('s2')).toEqual({ busyReason: 'turn', backgroundShellCount: 0 })
+    })
+
+    it('carries the positive null for an idle session (a value, not an absence)', () => {
+      const out = buildSessionListPatches({ sessions: [makeSession('s1', { busyReason: null, backgroundShellCount: 0 } as Partial<SessionInfo>)] }, [], null)!
+      expect(out.busyStatePatches.has('s1')).toBe(true)
+      expect(out.busyStatePatches.get('s1')!.busyReason).toBeNull()
+    })
+
+    it('has NO entry for a pre-#8302 session, so its current value is left alone', () => {
+      const out = buildSessionListPatches({ sessions: [makeSession('s1', { isBusy: true })] }, [], null)!
+      expect(out.busyStatePatches.has('s1')).toBe(false)
+    })
+
+    it('drops an unknown reason and a malformed count rather than guessing', () => {
+      const sessions = [
+        makeSession('s1', { busyReason: 'banana', backgroundShellCount: -1 } as unknown as Partial<SessionInfo>),
+        makeSession('s2', { busyReason: 'turn', backgroundShellCount: 'two' } as unknown as Partial<SessionInfo>),
+      ]
+      const out = buildSessionListPatches({ sessions }, [], null)!
+      expect(out.busyStatePatches.has('s1')).toBe(false)
+      expect(out.busyStatePatches.get('s2')).toEqual({ busyReason: 'turn' })
+    })
+
+    it('leaves isIdlePatches untouched — isBusy remains the authority for idle', () => {
+      const out = buildSessionListPatches({ sessions: [makeSession('s1', { isBusy: true, busyReason: 'background-shells', backgroundShellCount: 1 } as Partial<SessionInfo>)] }, [], null)!
+      expect(out.isIdlePatches.get('s1')).toBe(false)
+    })
   })
 
   it('returns null when handleSessionList rejects the message', () => {

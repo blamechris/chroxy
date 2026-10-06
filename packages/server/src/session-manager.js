@@ -48,6 +48,7 @@ import {
 } from './per-session-settings.js'
 import { AgentConnectionRegistry, createLegacyAgentConnection } from './agent-connections.js'
 import { forgetSurveyKey } from './handlers/survey-throttle.js'
+import { busyStateOf } from './session-busy-state.js'
 
 const log = createLogger('session-manager')
 /**
@@ -800,6 +801,8 @@ export class SessionManager extends EventEmitter {
     this._mailboxEvents = [] // bounded ring buffer of recent mailbox deliveries (Control Room observability)
     this._externalSessions = new ExternalSessionRegistry() // #5969 — live external (/api/events) sessions for mission control
     this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
+    // #8301: sessions whose user pressed Stop and has not typed since — daemon turns are refused (see daemonTurnRefusal).
+    this._userStopped = new Set()
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
 
@@ -902,6 +905,7 @@ export class SessionManager extends EventEmitter {
     this._timeoutManager.removeSession(sessionId)
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
+    this._userStopped.delete(sessionId)
     // #8092: prune this session's survey-throttle record(s) for the SAME
     // reason the environment untag above lives here rather than on
     // `session_destroyed` — the restore-rebind branch of
@@ -2234,7 +2238,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * List all sessions with summary info.
-   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
+   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, busyReason, backgroundShellCount, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
    */
   listSessions() {
     const list = []
@@ -2287,6 +2291,12 @@ export class SessionManager extends EventEmitter {
         model: entry.session.model || entry.session.bootedModel || null,
         permissionMode: entry.session.permissionMode || 'approve',
         isBusy: entry.session.isRunning,
+        // #8302: WHY it is busy, beside the unchanged boolean. `isBusy` merges
+        // "mid-turn" with "idle but a background shell is still tracked"; a
+        // client needs to tell them apart to say "waiting on N shells" instead
+        // of "Working". `backgroundShellCount` is the tracker's size (quiesced
+        // shells included), so it can be > 0 while pendingBackgroundShells is [].
+        ...busyStateOf(entry.session),
         createdAt: entry.createdAt,
         lastActivityAt: this._sessionLastActivityAt.get(sessionId) || entry.createdAt,
         conversationId: entry.session.resumeSessionId || null,
@@ -2750,6 +2760,7 @@ export class SessionManager extends EventEmitter {
     this._containerLivenessMonitor?.destroy()
     this._history.clear()
     this._costBudget.clear()
+    this._userStopped.clear()
     // #5554: persist any pending usage records on shutdown (best-effort).
     try { this.skillsUsageRecorder?.flush() } catch { /* non-fatal */ }
   }
@@ -3951,6 +3962,111 @@ export class SessionManager extends EventEmitter {
   recordUserInput(sessionId, text, messageId) {
     const entry = this._sessions.get(sessionId)
     this._history.recordUserInput(sessionId, text, entry || undefined, messageId)
+  }
+
+  /**
+   * #8301: a person expressed intent to work with this session — they typed a chat
+   * input or submitted a line in its terminal pane. Clears the "user stopped"
+   * state (see `recordUserInterrupt`) and does nothing else: no history, no
+   * activity touch, no label.
+   *
+   * Called at RECEIPT of the input, synchronously, by the input handlers — NOT
+   * from `recordUserInput`, which runs at admission. For correlated input that is
+   * later than the person's act: a provider that admits after awaiting its
+   * transport would let an input sent BEFORE a Stop clear that Stop when it was
+   * finally admitted. `recordDaemonUserInput` and the daemon's PTY wake never come
+   * through here, so a wake can never re-enable wakes.
+   *
+   * @param {string} sessionId
+   */
+  recordUserIntent(sessionId) {
+    this._userStopped.delete(sessionId)
+  }
+
+  /**
+   * #8301: the user pressed Stop on this session. Until they next type into it,
+   * daemon-authored turns (the CI wake) are refused: a Stop is the user saying
+   * "stop", and a wake that lands right after it would start the very work they
+   * just halted. Called from the interrupt handler; not from scheduler/orchestration
+   * interrupts, which are not the user's word.
+   *
+   * @param {string} sessionId
+   */
+  recordUserInterrupt(sessionId) {
+    if (this._sessions.has(sessionId)) this._userStopped.add(sessionId)
+  }
+
+  /**
+   * #8301: THE refusal seam for a daemon-authored turn — one answer, asked both
+   * before dispatch and again when a queued wake is about to flush. Returns why
+   * the session must not be handed one right now, or `null` when it may.
+   *
+   *   - `'no-session'`    the session is gone or being torn down
+   *   - `'budget-paused'` the cost budget pause (typed input is refused for this)
+   *   - `'user-stopped'`  the user pressed Stop and has not typed since
+   *   - otherwise the provider's own reason (`session.daemonTurnRefusal()`): a
+   *     state in which its `sendMessage` would respawn, error, or discard the
+   *     user's queued follow-ups
+   *
+   * A provider hook that throws refuses (fail safe): not being able to tell is
+   * not a reason to wake.
+   *
+   * NOT covered: a session another driver occupies (orchestration TurnDriver /
+   * scheduler). Each driver keeps its occupancy in its own private set, so there
+   * is nothing cheap to ask here; building a registry for it is its own change.
+   *
+   * @param {string} sessionId
+   * @returns {string|null}
+   */
+  daemonTurnRefusal(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying) return 'no-session'
+    if (this._costBudget.isPaused(sessionId)) return 'budget-paused'
+    if (this._userStopped.has(sessionId)) return 'user-stopped'
+    try {
+      const reason = entry.session?.daemonTurnRefusal?.()
+      return typeof reason === 'string' && reason.length > 0 ? reason : null
+    } catch (err) {
+      log.warn(`daemonTurnRefusal threw for session ${sessionId}; refusing: ${err?.message || err}`)
+      return 'refusal-check-failed'
+    }
+  }
+
+  /**
+   * #8301: make a DAEMON-authored turn visible the way a typed one is. The CI
+   * wake travels the provider's `sendMessage` seam as an ordinary user turn, but
+   * `input-handlers.js` is the only thing that records a user turn to history
+   * and echoes it to clients — and it only runs for a websocket `input`. So this
+   * is the non-ws equivalent of its `commitForwardedEffects`: the history entry
+   * (a reconnecting client replays it), `touchActivity`, and a `user_input`
+   * session event that `ws-forwarding.js` broadcasts to the session's viewers.
+   *
+   * Deliberately NOT `recordUserInput`'s auto-label path: the first input of a
+   * session names it, and a daemon line ("CI finished on PR #N…") must never be
+   * what a session is called. No `clientId` goes out — there is no sender, so
+   * every viewer renders it (a client skips only the `user_input` it sent).
+   *
+   * Call it only once the provider has ADMITTED the line (dispatched or queued).
+   * Nothing is recorded for a session that no longer exists.
+   *
+   * @param {string} sessionId
+   * @param {string} text - the exact line the provider was given.
+   * @param {string} messageId - stable id (matches the provider's queue mirror).
+   * @returns {boolean} true when recorded and broadcast.
+   */
+  recordDaemonUserInput(sessionId, text, messageId) {
+    const entry = this._sessions.get(sessionId)
+    if (!entry || entry._destroying) return false
+    // `source: 'daemon'` rides on the history entry and the broadcast so a client
+    // can tell this from something a person typed.
+    this._history.recordUserInput(sessionId, text, undefined, messageId, 'daemon')
+    this.touchActivity(sessionId)
+    this.emit('session_event', {
+      sessionId,
+      event: 'user_input',
+      data: { text, messageId, timestamp: Date.now(), source: 'daemon' },
+    })
+    return true
   }
 
   /**
