@@ -45,6 +45,7 @@ When an agent wants something the session's rules don't already cover, Chroxy pa
 - **Provider flexibility** — If you're hitting your Claude programmatic credit cap, swap providers per session with `--provider codex` or `CHROXY_PROVIDER=gemini`. Codex and Gemini bill separately from Anthropic. See [Billing & API usage](#billing--api-usage).
 - **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Discord notifications** — A live status embed per project that pings when a session is ready for input or needs approval — even for plain Claude Code sessions outside chroxy, via the `chroxy-hooks` installer. See [docs/guides/discord-notifications.md](docs/guides/discord-notifications.md).
+- **Idle-only daemon auto-deploy** — `scripts/deploy-daemon.mjs` fast-forwards a launchd-managed daemon to the latest `main`, builds, restarts and rolls back on failure, but only while no session is busy or waiting on you. See [docs/guides/daemon-auto-deploy.md](docs/guides/daemon-auto-deploy.md).
 - **Multi-agent orchestration (opt-in)** — An architect model decomposes an epic into subtasks and worker sessions execute them, with a durable run ledger, budget gates, and a dashboard Runs view. Off by default (`features.orchestration`); see [docs/design/orchestration/](docs/design/orchestration/README.md).
 - **Voice input** — Dictate messages with speech-to-text on mobile and macOS desktop.
 - **Docker isolation** — Run sessions in Docker containers with resource limits and security guards.

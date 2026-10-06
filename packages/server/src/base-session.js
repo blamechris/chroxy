@@ -2044,6 +2044,22 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * How many permission requests are waiting on a human for this session,
+   * across both routes: the hook-routed ids (CLI / TUI, #2831) and the
+   * in-process PermissionManager's map that `wirePermissionManager` installs
+   * as `_pendingPermissions` (SDK / BYOK / Codex).
+   *
+   * A read-only count for callers outside the session — the idle-only
+   * auto-deploy probe (#8324) — so they never reach into either private field.
+   *
+   * @returns {number}
+   */
+  getPendingPermissionCount() {
+    const inProcess = this._pendingPermissions instanceof Map ? this._pendingPermissions.size : 0
+    return this._pendingPermissionIds.size + inProcess
+  }
+
+  /**
    * A hook-routed permission request belonging to this session is outstanding.
    * Called by ws-permissions when the hook's POST /permission is parked (#2831).
    */

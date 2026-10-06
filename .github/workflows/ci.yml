@@ -1814,6 +1814,15 @@ jobs:
         # (scripts/lib, packages/server/src/utils, sidecar/agent.js) — #7222.
         run: node scripts/__tests__/is-entry-point.test.mjs
 
+      - name: Run deploy-daemon.mjs tests
+        # #8324 — the idle-only auto-deploy of main to the daily daemon. The
+        # cases that matter are the ones where it must NOT restart (busy,
+        # unreachable, route missing, dirty or diverged tree, failed build) and
+        # the rollback paths; the last group runs the script's real git
+        # commands against temp repositories. Fakes cover everything else, so
+        # nothing here touches launchd or ~/.chroxy.
+        run: node scripts/__tests__/deploy-daemon.test.mjs
+
       - name: Run assert-test-count.mjs tests
         # #7447 — `node --test` exits 0 on zero discovered tests, so a suite
         # that stops being discovered and a passing suite are the same

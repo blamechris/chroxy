@@ -53,3 +53,27 @@ export function isLocalOrLanPeer(req) {
   if (isPrivateOrSpecialIp(socketIp)) return true
   return false
 }
+
+/**
+ * True only when the request comes DIRECTLY from this machine over loopback —
+ * no LAN peers, and nothing that arrived through the tunnel (#8324).
+ *
+ * Stricter than `isLocalOrLanPeer`. That function is a transport-efficiency
+ * hint with no security property riding on it; this one is used as an
+ * AUTHORIZATION input (the local-only `/api/daemon/idle` probe), so it must
+ * fail closed. cloudflared connects to the daemon from 127.0.0.1, so the socket
+ * address alone proves nothing: a tunnelled request is loopback at the socket
+ * and is told apart only by the proxy headers the tunnel stamps. Those headers
+ * can be forged by a remote caller only in the direction that makes the
+ * request look REMOTE (a request that omits them is not thereby made local,
+ * because cloudflared always adds them) — the same trust model as above.
+ *
+ * @param {object} req - Node IncomingMessage.
+ * @returns {boolean}
+ */
+export function isLoopbackPeer(req) {
+  const socketIp = req?.socket?.remoteAddress
+  if (typeof socketIp !== 'string' || socketIp.length === 0) return false
+  if (hasProxyHeaders(req.headers)) return false
+  return isLoopbackHost(socketIp)
+}

@@ -3,6 +3,8 @@ import { join, resolve, dirname, relative, sep, isAbsolute } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
 import { readConnectionInfo } from './connection-info.js'
+import { isLoopbackPeer } from './connection-locality.js'
+import { computeDaemonIdleState } from './daemon-idle-state.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { buildDiagnosticsSnapshot } from './diagnostics.js'
@@ -398,6 +400,46 @@ export function createHttpHandler(server) {
         gitCommit: server._gitInfo.commit,
         gitBranch: server._gitInfo.branch,
         uptime: Math.round((Date.now() - server._startedAt) / 1000),
+      }))
+      return
+    }
+
+    // Idle probe for the idle-only auto-deploy (#8324). `scripts/deploy-daemon.mjs`
+    // asks this before restarting the daemon, which would kill every live
+    // session. Two gates, LOCALITY FIRST: a request that did not arrive directly
+    // over loopback (a LAN peer, or anything through the tunnel — cloudflared
+    // connects from 127.0.0.1, so the socket address alone proves nothing and
+    // the proxy headers must be absent too) gets a bare 403 that says nothing
+    // about whether the token was right. Then the PRIMARY token: the answer
+    // enumerates session names, so a pairing-bound token must not reach it.
+    // Fail safe: any inability to compute is `idle: false`, never `true`.
+    if (req.method === 'GET' && (req.url ?? '').split('?')[0] === '/api/daemon/idle') {
+      if (!isLoopbackPeer(req)) {
+        res.writeHead(403, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ error: 'forbidden' }))
+        return
+      }
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      let state
+      try {
+        state = computeDaemonIdleState({
+          sessionManager: server.sessionManager,
+          getHookPendingPermissionCount: () => server.getHookPendingPermissionCount(),
+        })
+      } catch (err) {
+        state = {
+          idle: false,
+          reasons: [`idle state unavailable: ${err?.message || String(err)}`],
+          sessions: [],
+          hookPendingPermissions: 0,
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({
+        ...state,
+        version: SERVER_VERSION,
+        pid: process.pid,
+        startedAt: Number.isFinite(server._startedAt) ? new Date(server._startedAt).toISOString() : null,
       }))
       return
     }

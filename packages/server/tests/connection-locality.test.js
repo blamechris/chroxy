@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { isLocalOrLanPeer } from '../src/connection-locality.js'
+import { isLocalOrLanPeer, isLoopbackPeer } from '../src/connection-locality.js'
 
 function req({ remoteAddress, headers = {} } = {}) {
   return { socket: { remoteAddress }, headers }
@@ -53,5 +53,31 @@ describe('isLocalOrLanPeer (#5516)', () => {
     assert.equal(isLocalOrLanPeer(req({ remoteAddress: undefined })), false)
     assert.equal(isLocalOrLanPeer({}), false)
     assert.equal(isLocalOrLanPeer(undefined), false)
+  })
+})
+
+describe('isLoopbackPeer (#8324)', () => {
+  it('accepts a direct loopback peer only', () => {
+    assert.equal(isLoopbackPeer(req({ remoteAddress: '127.0.0.1' })), true)
+    assert.equal(isLoopbackPeer(req({ remoteAddress: '::1' })), true)
+    assert.equal(isLoopbackPeer(req({ remoteAddress: '::ffff:127.0.0.1' })), true)
+  })
+
+  it('refuses a LAN peer (unlike isLocalOrLanPeer)', () => {
+    assert.equal(isLoopbackPeer(req({ remoteAddress: '192.168.1.50' })), false)
+    assert.equal(isLoopbackPeer(req({ remoteAddress: '10.0.0.4' })), false)
+  })
+
+  it('refuses a tunnelled request: loopback socket plus a proxy header', () => {
+    assert.equal(isLoopbackPeer(req({ remoteAddress: '127.0.0.1', headers: { 'cf-connecting-ip': '203.0.113.7' } })), false)
+    assert.equal(isLoopbackPeer(req({ remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': '203.0.113.7' } })), false)
+    // PRESENCE, not truthiness: an empty value still means a proxy is in front.
+    assert.equal(isLoopbackPeer(req({ remoteAddress: '127.0.0.1', headers: { 'cf-connecting-ip': '' } })), false)
+  })
+
+  it('fails closed when the socket address is missing', () => {
+    assert.equal(isLoopbackPeer(req({ remoteAddress: undefined })), false)
+    assert.equal(isLoopbackPeer({}), false)
+    assert.equal(isLoopbackPeer(undefined), false)
   })
 })
