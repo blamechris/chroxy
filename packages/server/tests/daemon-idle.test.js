@@ -320,18 +320,20 @@ describe('daemon commit (#8324)', () => {
     assert.equal(resolveRepoCommit(dir), null)
   })
 
-  it('the git environment carries no GIT_* variable and none of the daemon\'s own secrets', () => {
-    const saved = { API_TOKEN: process.env.API_TOKEN, CHROXY_HOOK_SECRET: process.env.CHROXY_HOOK_SECRET, CHROXY_PORT: process.env.CHROXY_PORT }
-    process.env.API_TOKEN = 'primary-token'
-    process.env.CHROXY_HOOK_SECRET = 'hook-secret'
-    process.env.CHROXY_PORT = '8765'
+  it('the git environment carries no GIT_* variable (any case) and none of the daemon\'s own secrets (any case)', () => {
+    const secrets = ['API_TOKEN', 'CHROXY_HOOK_SECRET', 'CHROXY_PORT', 'CHROXY_INGEST_SECRET', 'Api_Token', 'chroxy_ingest_secret', 'Git_Work_Tree', 'git_config_count']
+    const saved = Object.fromEntries(secrets.map((k) => [k, process.env[k]]))
+    for (const k of secrets) process.env[k] = 'x'
     let seen
     try {
       resolveRepoCommit(dir, { spawn: (c, a, o) => { seen = o.env; return { status: 1, stdout: '' } } })
     } finally {
       for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v }
     }
-    for (const k of ['API_TOKEN', 'CHROXY_HOOK_SECRET', 'CHROXY_PORT']) assert.ok(!(k in seen), `${k} must not reach git`)
+    for (const k of Object.keys(seen)) {
+      assert.ok(!k.toUpperCase().startsWith('GIT_'), `${k} must not reach git`)
+      assert.ok(!['API_TOKEN', 'CHROXY_HOOK_SECRET', 'CHROXY_PORT', 'CHROXY_INGEST_SECRET'].includes(k.toUpperCase()), `${k} must not reach git`)
+    }
     assert.ok('PATH' in seen, 'but the rest of the environment is intact')
   })
 

@@ -16,7 +16,7 @@ import { spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
 import path, { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
+import { CHROXY_INHERITED_SESSION_ENV, CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 
 const FULL_SHA = /^[0-9a-f]{40}$/
 
@@ -62,10 +62,12 @@ export function isSameDirectory(a, b, { path: p = path, realpath = realpathSync.
 // prints. And git has no use for the daemon's own secrets (API_TOKEN, the hook
 // and ingest secrets), so those are stripped too.
 function buildGitEnv() {
+  // Keys are compared case-INSENSITIVELY: Windows treats `Git_Dir` as `GIT_DIR`.
   const env = {}
-  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_')) env[k] = v
+  for (const [k, v] of Object.entries(process.env)) if (!k.toUpperCase().startsWith('GIT_')) env[k] = v
   stripInheritedChroxySecrets(env)
-  for (const k of CHROXY_SECRET_DENYLIST) delete env[k]
+  const secret = new Set([...CHROXY_SECRET_DENYLIST, ...CHROXY_INHERITED_SESSION_ENV].map((k) => k.toUpperCase()))
+  for (const k of Object.keys(env)) if (secret.has(k.toUpperCase())) delete env[k]
   return env
 }
 

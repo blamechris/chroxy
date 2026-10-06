@@ -228,7 +228,9 @@ const tail = (text, n = 12) => String(text || '').trim().split('\n').slice(-n).j
 const explain = (r, n = 4) => {
   const text = `${r.stderr || ''}\n${r.stdout || ''}`
   const hits = text.split('\n').map((l) => l.trim()).filter((l) => /error/i.test(l) && !/^at\s/.test(l))
-  return hits.length ? hits.slice(0, n).join('\n') : tail(r.stderr || r.stdout || r.error)
+  const body = hits.length ? hits.slice(0, n).join('\n') : tail(r.stderr || r.stdout)
+  // A timeout or a spawn error has no output of its own: say it.
+  return r.error ? `(${r.error}) ${body}`.trim() : body
 }
 
 // Thrown wherever a write or delete carries SAFETY (rollbackTo, failedTarget,
@@ -242,7 +244,7 @@ class StateWriteError extends Error {}
  *   outcome is one of: up-to-date, repaired, deployed, deployed-tunnel-unverified,
  *   dry-run, deferred-busy, deferred-unavailable, deferred-busy-after-build,
  *   skipped-failed-target, locked, refused, fetch-failed, rolled-back-build,
- *   rolled-back-health, rollback-completed, rollback-owed, rollback-failed,
+ *   rolled-back-health, rollback-completed, rollback-manual-restart, rollback-owed, rollback-failed,
  *   failed-restart, repair-failed, state-write-failed, failed.
  */
 export async function deploy(opts, deps = defaultDeps()) {
@@ -360,9 +362,11 @@ export async function deploy(opts, deps = defaultDeps()) {
   // wrong. It is remembered from its first tick, and once it has lasted more
   // than 24h it logs again, once per 24h, bypassing the dedupe.
   const DAY_MS = 24 * 60 * 60 * 1000
-  let deferredThisTick = false
+  // Set only on outcomes that mean the deferred condition is GONE (up to date,
+  // deployed, repaired, rollback completed). A tick that failed for some other
+  // reason (fetch-failed, refused, failed) says nothing about it.
+  let deferralOver = false
   function deferral(msg, { range = null, key, reasons }) {
-    deferredThisTick = true
     if (!state.deferredSince) { state.deferredSince = iso(); persist({ mandatory: false }) }
     const since = Date.parse(state.deferredSince)
     const lastLogged = state.deferredLoggedAt ?? since
@@ -436,10 +440,14 @@ export async function deploy(opts, deps = defaultDeps()) {
     } catch { return false }
   }
 
+  // Only a REFUSED connection proves nothing is listening. A reset, a timeout or
+  // any answer at all means something is there.
+  const isRefused = (e) => /ECONNREFUSED/.test(`${e?.cause?.code || ''} ${e?.code || ''} ${e?.message || ''}`)
   // -> { kind, reasons, commit, pid, noRoute }
   //   idle / busy  the daemon answered and said so
-  //   down         NOTHING is listening: no connection.json, a dead pid, or a refused/reset
-  //                loopback connection. The only kind that has nothing to lose.
+  //   down         NOTHING is listening: the daemon's port REFUSED a connection (also
+  //                checked when connection.json is missing or stale). The only kind
+  //                that has nothing to lose.
   //   unknown      something may be listening but cannot answer: a 404 (the route is
   //                missing), any other non-200, a timeout, an unreadable body. It may well
   //                be busy, so everywhere it is treated like busy.
@@ -447,15 +455,29 @@ export async function deploy(opts, deps = defaultDeps()) {
   async function probe() {
     const conn = readConn()
     const make = (kind, why, extra = {}) => ({ kind, reasons: [why], commit: null, pid: null, noRoute: false, ...extra })
-    if (!conn) return make('down', 'no connection.json (daemon not running?)')
-    if (conn.pid && !d.isPidAlive(conn.pid)) return make('down', `connection.json names pid ${conn.pid}, which is not running`)
+    // `down` is PROOF that nothing is listening: the daemon's port refused a
+    // connection. connection.json is NOT that proof. A second chroxy process
+    // sharing the config dir deletes or overwrites it on exit, and a stale or
+    // unreadable one says nothing about whether the real launchd daemon is alive
+    // and busy on its port. So a missing, stale or unreadable connection.json
+    // sends us to the port, and can be at most `unknown` unless the port refuses.
+    if (!conn || (conn.pid && !d.isPidAlive(conn.pid))) {
+      const why = !conn ? 'no (or unreadable) connection.json' : `connection.json names pid ${conn.pid}, which is not running`
+      const port = portOf(conn)
+      try {
+        await d.fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(3000) })
+      } catch (e) {
+        if (isRefused(e)) return make('down', `${why}, and nothing is listening on port ${port}`)
+        return make('unknown', `${why}, and port ${port} did not answer cleanly: ${e?.message || e}`)
+      }
+      return make('unknown', `${why}, but something answers on port ${port}: it may be the daemon, busy`)
+    }
     if (!conn.apiToken) return make('unknown', 'connection.json has no apiToken')
     let r
     try {
       r = await getJson(`http://127.0.0.1:${portOf(conn)}/api/daemon/idle`, { Authorization: `Bearer ${conn.apiToken}` })
     } catch (e) {
-      const refused = /ECONNREFUSED|ECONNRESET/.test(`${e?.cause?.code || ''} ${e?.code || ''} ${e?.message || ''}`)
-      return make(refused ? 'down' : 'unknown', `daemon unreachable: ${e?.message || e}`)
+      return make(isRefused(e) ? 'down' : 'unknown', `daemon unreachable: ${e?.message || e}`)
     }
     if (r.status === 404) return make('unknown', 'daemon has no /api/daemon/idle (it predates the route; deploy once by hand or with --force)', { noRoute: true })
     if (r.status !== 200) return make('unknown', `/api/daemon/idle answered HTTP ${r.status}`)
@@ -731,6 +753,7 @@ export async function deploy(opts, deps = defaultDeps()) {
         if (state.lastKey) { state.lastKey = null; persist({ mandatory: false }) }
       }
       d.log(`up to date at ${short(desired)}`)
+      deferralOver = true
       return { exitCode: 0, outcome: skippedOutcome('up-to-date') }
     }
 
@@ -756,6 +779,7 @@ export async function deploy(opts, deps = defaultDeps()) {
       }
       if (owed) clearRollbackTo()
       event(`repaired checkout to ${short(desired)} (no restart needed)`, { range: rangeOf(head, desired) })
+      deferralOver = true
       return { exitCode: 0, outcome: skippedOutcome('repaired') }
     }
 
@@ -768,8 +792,11 @@ export async function deploy(opts, deps = defaultDeps()) {
       const fix = convergeTree(desired, { allowReset: true })
       if (!fix.ok) { event(`ROLLBACK-FAILED: ${fix.reason}`, { range: rangeOf(head, desired) }); return { exitCode: 1, outcome: 'rollback-failed' } }
       clearRollbackTo()
+      // NOT a success: the checkout is restored, but the daemon may still be
+      // running the bad build and a human has to restart it.
+      recordResult(pr.commit ?? head, desired, 'rollback-manual-restart')
       event(`restored the checkout to ${short(desired)}; the daemon ${owedNoRoute ? 'has no /api/daemon/idle route' : 'reports no commit'}, so a restart could not be certified and was NOT attempted. The running daemon may still be on the bad build: restart it by hand (or run once with --force).`, { range: rangeOf(head, desired) })
-      return { exitCode: 0, outcome: 'rollback-completed' }
+      return { exitCode: 1, outcome: 'rollback-manual-restart' }
     }
 
     return await converge({ desired, kind: owed ? 'rollback' : 'forward', old: oldForRollback, pr, initiator: owed ? 'tick' : 'forward', target: owed ? null : target })
@@ -851,10 +878,12 @@ export async function deploy(opts, deps = defaultDeps()) {
           }
           recordResult(old, want, 'ok')
           event(`ok${v.tunnelSkipped ? ` (tunnel not checked: ${v.tunnelSkipped})` : ''}`, { range })
+          deferralOver = true
           return { exitCode: 0, outcome: 'deployed' }
         }
         recordResult(fwdTarget || pre.commit || head, want, 'rolled-back')
         event(`${initiator === 'forward' ? 'rolled-back' : 'rollback completed'} to ${short(want)}${v.tunnelUnverified ? `; the tunnel is unverified (${v.tunnelUnverified})` : v.tunnelSkipped ? ` (tunnel not checked: ${v.tunnelSkipped})` : ''}`, { range })
+        if (initiator !== 'forward') deferralOver = true
         return { exitCode: initiator === 'forward' ? 1 : 0, outcome: initiator === 'forward' ? 'rolled-back-health' : 'rollback-completed' }
       }
 
@@ -916,8 +945,7 @@ export async function deploy(opts, deps = defaultDeps()) {
     event(`failed: ${e?.message || e}`, { key: `error:${e?.message}` })
     return { exitCode: 1, outcome: 'failed' }
   } finally {
-    // A tick that did not defer ends the deferral streak (S8).
-    if (held && !deferredThisTick && (state.deferredSince || state.deferredLoggedAt)) {
+    if (held && deferralOver && (state.deferredSince || state.deferredLoggedAt)) {
       delete state.deferredSince
       delete state.deferredLoggedAt
       try { persist({ mandatory: false }) } catch { /* best effort */ }
