@@ -23,12 +23,15 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import childProcess from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { BaseSession } from '../src/base-session.js'
 import { getRegisteredProviderNames, getProvider } from '../src/providers.js'
 import { createAcpSessionClass } from '../src/acp-session.js'
+import { buildSessionCiWatcher } from '../src/session-ci-watcher.js'
+import { Writable, Readable } from 'node:stream'
+import { EventEmitter } from 'node:events'
 import { wakeSession, supportsDaemonTurnInput } from '../src/session-wake.js'
 import { SessionManager } from '../src/session-manager.js'
 
@@ -36,8 +39,20 @@ const SRC = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const DOCS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'docs', 'providers.md')
 
 let scratch
+const created = []
 before(() => { scratch = mkdtempSync(join(tmpdir(), 'daemon-turn-roster-')) })
-after(() => { if (scratch) rmSync(scratch, { recursive: true, force: true }) })
+after(() => {
+  // A session that was handed a message arms hard-timeout/stall timers that would
+  // otherwise keep the runner alive (and `--test-force-exit` is refused, #7400).
+  // Null any mock child first: destroy() otherwise arms a kill timer only a real
+  // child's 'close' clears.
+  for (const s of created) {
+    try { s._child = null } catch { /* ignore */ }
+    try { const r = s.destroy?.(); if (r && typeof r.catch === 'function') r.catch(() => {}) } catch { /* ignore */ }
+    try { s._backgroundShellTracker?.destroy?.() } catch { /* ignore */ }
+  }
+  if (scratch) rmSync(scratch, { recursive: true, force: true })
+})
 
 const flagged = (Klass) => {
   try { return Klass.capabilities?.daemonTurnInput === true } catch { return false }
@@ -47,7 +62,9 @@ const flagged = (Klass) => {
 async function deriveSessionClasses() {
   const classes = new Set()
   for (const file of readdirSync(SRC).filter((f) => f.endsWith('-session.js'))) {
-    const mod = await import(join(SRC, file))
+    // A bare absolute path is not a valid ESM specifier on Windows (the drive
+    // letter parses as a URL scheme: ERR_UNSUPPORTED_ESM_URL_SCHEME).
+    const mod = await import(pathToFileURL(join(SRC, file)).href)
     for (const value of Object.values(mod)) {
       if (typeof value === 'function' && value.prototype instanceof BaseSession) classes.add(value)
     }
@@ -58,7 +75,11 @@ async function deriveSessionClasses() {
 }
 
 /** Minimal construction. `skillsDir`/`repoSkillsDir` keep skill loading off the developer's real ~/.claude. */
-const make = (Klass, extra = {}) => new Klass({ cwd: '/tmp', skillsDir: join(scratch, 'skills'), repoSkillsDir: null, stateFilePath: join(scratch, 'state.json'), ...extra })
+const make = (Klass, extra = {}) => {
+  const s = new Klass({ cwd: '/tmp', skillsDir: join(scratch, 'skills'), repoSkillsDir: null, stateFilePath: join(scratch, 'state.json'), ...extra })
+  created.push(s)
+  return s
+}
 
 /** The "started/ready" state each class's sendMessage requires before it will accept or queue input. */
 const markStarted = (s) => {
@@ -164,10 +185,10 @@ describe('daemonTurnInput roster (#8301)', () => {
       assert.equal(make(BaseSession).daemonTurnRefusal(), null)
     })
 
-    it('CliSession: stopped by the user, or a latched spawn refusal, while not ready', () => {
+    it('CliSession: any not-ready state refuses; the two latches keep their more useful name', () => {
       const s = make(byName('CliSession'))
       s._processReady = false
-      assert.equal(s.daemonTurnRefusal(), null, 'not ready but not stopped (still starting): not refused')
+      assert.equal(s.daemonTurnRefusal(), 'not-ready', 'still starting / mid-respawn: a wake must not enter _pendingQueue')
       s._stoppedByUser = true
       assert.equal(s.daemonTurnRefusal(), 'stopped')
       s._stoppedByUser = false
@@ -186,7 +207,11 @@ describe('daemonTurnInput roster (#8301)', () => {
       const mgr = new SessionManager({ skipPreflight: true, maxSessions: 2, stateFilePath: join(scratch, 'mgr.json') })
       mgr._sessions.set('s1', { session: s, name: 'S', cwd: '/tmp' })
       assert.equal(mgr.daemonTurnRefusal('s1'), 'stopped')
-      assert.equal(restarts, 0)
+      assert.equal(restarts, 0, 'asking the seam respawned nothing')
+      // POSITIVE CONTROL: the same state, handed the message anyway, DOES respawn.
+      // Without this the assertion above would pass for a session that never would.
+      s.sendMessage('x')
+      assert.equal(restarts, 1, 'sendMessage in this state respawns — so the refusal is what protects it')
     })
 
     it('SdkSession (and its Docker subclass): stdin forwarding disabled', () => {
@@ -198,15 +223,26 @@ describe('daemonTurnInput roster (#8301)', () => {
       }
     })
 
-    it('SdkSession with stdin disabled: a refused wake leaves the user\'s own queued follow-ups alone', () => {
-      const s = make(byName('SdkSession'))
-      s._stdinForwardingDisabled = true
-      s._isBusy = true
-      s.enqueueOutgoingMessage({ prompt: 'the user typed this', sendOptions: { clientMessageId: 'u1' } })
+    it('SdkSession with stdin disabled: the refusal is what keeps the user\'s queued follow-ups from being discarded', () => {
+      const build = () => {
+        const s = make(byName('SdkSession'))
+        s._stdinForwardingDisabled = true
+        s._isBusy = true
+        s.on('error', () => {}) // sendMessage in this state emits a user-visible error
+        s.enqueueOutgoingMessage({ prompt: 'the user typed this', sendOptions: { clientMessageId: 'u1' } })
+        return s
+      }
+      // POSITIVE CONTROL first: handing a message to the session in this state
+      // really does discard the user's queue. This is the harm being prevented.
+      const control = build()
+      control.sendMessage('a daemon wake would do this')
+      assert.equal(control.outgoingQueueLength, 0, 'sendMessage with stdin disabled silently clears the queue')
+
+      const s = build()
       const mgr = new SessionManager({ skipPreflight: true, maxSessions: 2, stateFilePath: join(scratch, 'mgr2.json') })
       mgr._sessions.set('s1', { session: s, name: 'S', cwd: '/tmp' })
       assert.equal(mgr.daemonTurnRefusal('s1'), 'stdin-disabled')
-      assert.equal(s.outgoingQueueLength, 1, 'asking did not discard anything')
+      assert.equal(s.outgoingQueueLength, 1, 'refused, so sendMessage was never called and nothing was discarded')
     })
 
     it('CodexAppServerSession and AcpSession: not started', () => {
@@ -219,6 +255,116 @@ describe('daemonTurnInput roster (#8301)', () => {
         s._connection = null
         assert.equal(s.daemonTurnRefusal(), 'not-started', `${n}: ready flag but no transport`)
       }
+    })
+  })
+
+  // The CLI family keeps a SECOND queue, `_pendingQueue`, for input that arrives
+  // while the child is not ready. Its drains call sendMessage directly and never
+  // consult a queued item's flush-time admission, so a wake parked there would
+  // reach the child after a budget pause had been decided (reproduced). The fix is
+  // refusal, not more plumbing: a wake is never handed to a session that is not
+  // ready. Driven through the real watcher, the real manager and the real class.
+  describe('the CLI startup queue (#8301)', () => {
+    const SHA = 'a'.repeat(40)
+    const snap = (state, counts) => ({
+      sessionId: 's1', generatedAt: 't', branch: 'b', repo: { owner: 'o', name: 'r' },
+      pr: { number: 7, title: 't', url: 'u', headRefOid: SHA, isDraft: false },
+      checks: { state, counts }, merge: { mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: null }, reason: null,
+    })
+    const pending = () => snap('pending', { total: 2, passed: 1, failed: 0, pending: 1, skipped: 0, unknown: 0 })
+    const green = () => snap('success', { total: 2, passed: 2, failed: 0, pending: 0, skipped: 0, unknown: 0 })
+    const mockChild = () => {
+      const child = new EventEmitter()
+      child.writes = []
+      child.stdin = new Writable({ write(chunk, enc, cb) { child.writes.push(String(chunk)); cb() } })
+      child.stdout = new Readable({ read() {} })
+      child.stderr = new Readable({ read() {} })
+      child.pid = 4242
+      child.kill = () => true
+      child.killed = false
+      return child
+    }
+    const byName = (n) => classes.find((K) => K.name === n)
+    const run = async (Klass, prepare) => {
+      const session = make(Klass)
+      prepare(session)
+      const mgr = new SessionManager({ skipPreflight: true, maxSessions: 2, stateFilePath: join(scratch, `cli-${Math.random().toString(36).slice(2)}.json`), costBudget: 1 })
+      mgr._sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const logs = []
+      const q = [pending(), green()]
+      const watcher = buildSessionCiWatcher({
+        config: {},
+        sessionManager: { listSessions: () => [{ sessionId: 's1', cwd: '/tmp' }], getSession: () => ({ session }), daemonTurnRefusal: (id) => mgr.daemonTurnRefusal(id), recordDaemonUserInput: () => {} },
+        logger: { debug() {}, info: (m) => logs.push(m), warn() {} },
+        survey: async () => (q.length > 1 ? q.shift() : q[0]),
+      })
+      await watcher.tick()
+      await watcher.tick()
+      return { session, mgr, logs }
+    }
+
+    for (const name of ['CliSession', 'DockerSession']) {
+      it(`${name}: a wake while the process is STARTING is refused not-ready and queued nowhere`, async () => {
+        const { session, logs } = await run(byName(name), (s) => { s._processReady = false })
+        assert.ok(logs.some((l) => /\(wake: not-ready\)$/.test(l)), JSON.stringify(logs))
+        assert.equal(session._pendingQueue.length, 0, 'not in the startup queue')
+        assert.equal(session.outgoingQueueLength, 0, 'nor in the outgoing queue')
+      })
+
+      it(`${name}: a ready, busy session queues the wake in _outgoingQueue (never _pendingQueue)`, async () => {
+        const { session, logs } = await run(byName(name), (s) => { s._processReady = true; s._child = mockChild(); s._isBusy = true })
+        assert.ok(logs.some((l) => /\(wake: queued\)$/.test(l)), JSON.stringify(logs))
+        assert.equal(session.outgoingQueueLength, 1)
+        assert.equal(session._pendingQueue.length, 0)
+        session._child = null
+      })
+    }
+
+    it('budget paused while the process is starting: the wake never reaches the child (the reproduced bypass)', async () => {
+      const { session, mgr } = await run(byName('CliSession'), (s) => { s._processReady = false })
+      mgr._costBudget.trackCost('s1', 5)
+      session._child = mockChild()
+      session._processReady = true
+      session._drainPendingQueue() // the warmup drain
+      assert.deepEqual(session._child.writes, [], 'nothing was parked, so nothing is drained to stdin')
+      session._child = null
+    })
+
+    it('a refused outgoing item does not strand the startup queue: A runs, the wake is cancelled at A\'s result, and B is dispatched', async () => {
+      const session = make(byName('CliSession'))
+      const child = mockChild()
+      session._child = child
+      session._processReady = false
+      session.sendMessage('A')
+      session.sendMessage('B')
+      assert.equal(session._pendingQueue.length, 2, 'precondition: both parked while starting')
+      // The process comes up; the warmup drain dispatches A (and only A: it is busy now).
+      session._processReady = true
+      session._drainPendingQueue()
+      assert.equal(session._isBusy, true)
+      assert.equal(child.writes.length, 1)
+      assert.match(child.writes[0], /"A"|\bA\b/)
+
+      let paused = false
+      const out = wakeSession(session, 'CI finished on PR #7', { turnInput: true, clientMessageId: 'chroxy-ci-wake-x-1', admitAtFlush: () => !paused })
+      assert.equal(out, 'queued')
+      assert.equal(session.outgoingQueueLength, 1)
+      assert.equal(session._pendingQueue.length, 1, 'B is still waiting behind A')
+      const dequeued = []
+      session.on('message_dequeued', (e) => dequeued.push(e.reason))
+
+      paused = true // A's result trips the budget pause
+      session._clearMessageState() // A's turn ends
+      await new Promise((resolve) => process.nextTick(resolve))
+      await new Promise((resolve) => process.nextTick(resolve))
+      await new Promise((resolve) => process.nextTick(resolve))
+
+      assert.deepEqual(dequeued, ['cancelled'], 'the wake was cancelled at flush')
+      assert.equal(child.writes.length, 2, 'and B was dispatched in its place')
+      assert.match(child.writes[1], /"B"|\bB\b/)
+      assert.ok(!child.writes.some((w) => w.includes('CI finished')), 'the wake never reached stdin')
+      assert.equal(session._pendingQueue.length, 0)
+      session._child = null
     })
   })
 })

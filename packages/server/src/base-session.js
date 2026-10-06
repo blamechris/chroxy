@@ -1038,7 +1038,7 @@ export class BaseSession extends EventEmitter {
       if (!this._admitQueuedItem(item)) {
         this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'cancelled' })
         ;(this._log || log).warn(`Dropped queued follow-up at flush: admission refused (${remaining} remaining)`)
-        if (this._outgoingQueue.length && !this._destroying) this.dequeueNextOutgoing()
+        this._continueDrainAfterRefusal()
         return
       }
       this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'flush' })
@@ -1046,6 +1046,16 @@ export class BaseSession extends EventEmitter {
       this.sendMessage(item.prompt, item.attachments, item.sendOptions)
     })
     return item
+  }
+
+  /**
+   * #8301: the refused item held this turn's drain slot, so keep draining. The
+   * default continues with the next outgoing item. A provider with a second
+   * queue behind `_outgoingQueue` (CliSession's startup queue) overrides this to
+   * fall through to it, exactly as its own turn-end drain would have.
+   */
+  _continueDrainAfterRefusal() {
+    if (this._outgoingQueue.length && !this._destroying) this.dequeueNextOutgoing()
   }
 
   /**

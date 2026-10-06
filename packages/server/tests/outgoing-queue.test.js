@@ -397,7 +397,10 @@ describe('outgoing-message queue (#5936)', () => {
       s.on('message_queued', (e) => queued.push(e))
       s.sendMessage('wake', undefined, { clientMessageId: 'w1', admitAtFlush: () => true })
       assert.deepEqual(queued, [{ clientMessageId: 'w1', text: 'wake', queueLength: 1 }])
-      assert.equal(JSON.stringify(queued[0]).includes('admitAtFlush'), false)
+      // `deepEqual` above is the real check: it fails if any extra key — the
+      // predicate included — rides on the event. (A JSON.stringify scan cannot:
+      // JSON silently drops function values.)
+      assert.deepEqual(Object.keys(queued[0]).sort(), ['clientMessageId', 'queueLength', 'text'])
     })
 
     it('a destroy landing before the flush tick drops the item without evaluating the predicate', async () => {
