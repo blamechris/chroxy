@@ -153,7 +153,7 @@ Per-provider feature support. Capability-contract rows (Permission handling, Liv
 
 > **The `codex` column describes the DEFAULT driver** — `CodexAppServerSession` (`codex-app-server-session.js`), which `getProvider('codex')` returns unless `CHROXY_CODEX_APPSERVER=0` opts out (#6616). The legacy `codex exec` driver (`codex-session.js`) is a separate capability object and does not match this column; the note under the table is the roster of what differs.
 
-> The zero-config default provider is `claude-tui` (see #5819), chosen to keep out-of-the-box setups off the metered programmatic-credit pool at the 2026-06-15 cutover. The columns below cover the feature-richer providers; see [docs/providers.md](providers.md#claude-tui) for `claude-tui`'s capabilities and trade-offs.
+> The zero-config default provider is `claude-sdk` (#8266). `claude-tui` was the default from #5819 until then, as a hedge against a programmatic-credit billing change that never shipped (#7333). The columns below cover the feature-richer providers; see [docs/providers.md](providers.md#claude-tui) for `claude-tui`'s capabilities and trade-offs.
 
 | Capability | `claude-sdk` | `claude-cli` | `gemini` | `codex` (app-server, default) |
 |------------|------------------------|--------------|----------|---------|

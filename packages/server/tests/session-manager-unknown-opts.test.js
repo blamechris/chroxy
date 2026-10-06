@@ -105,22 +105,22 @@ describe('SessionManager unknown/misnamed ctor opts (#6944)', () => {
     // Regression guard: explicitness used to be inferred as
     // `providerType !== DEFAULT_PROVIDER`, so a caller passing BOTH `provider`
     // and a `providerType` that happened to equal the default value
-    // (DEFAULT_PROVIDER === 'claude-tui') was indistinguishable from having
+    // (DEFAULT_PROVIDER, e.g. 'claude-sdk') was indistinguishable from having
     // omitted providerType — the `provider` alias would incorrectly clobber
     // it. The fix reads explicitness off the original opts object
     // (`'providerType' in opts`) instead of comparing the resolved value.
-    assert.equal(DEFAULT_PROVIDER, 'claude-tui', 'precondition: this test only proves the fix when providerType === DEFAULT_PROVIDER')
+    assert.equal(typeof DEFAULT_PROVIDER, 'string', 'precondition: providerType below is passed as exactly DEFAULT_PROVIDER')
     let mgr
     const warnings = captureWarnings(() => {
       mgr = new SessionManager({
         skipPreflight: true,
         provider: 'x',
-        providerType: 'claude-tui', // explicit, but == DEFAULT_PROVIDER
+        providerType: DEFAULT_PROVIDER, // explicit, but == DEFAULT_PROVIDER
         stateFilePath: tmpStateFile(),
       })
     })
 
-    assert.equal(mgr._providerType, 'claude-tui')
+    assert.equal(mgr._providerType, DEFAULT_PROVIDER)
     const surfaced = warnings.find((w) => w.includes("ignoring constructor option 'provider'"))
     assert.ok(surfaced, `expected an "ignoring provider" warning; got: ${JSON.stringify(warnings)}`)
   })

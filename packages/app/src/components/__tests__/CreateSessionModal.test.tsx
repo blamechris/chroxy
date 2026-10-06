@@ -4,6 +4,7 @@ import renderer from 'react-test-renderer';
 import { StyleSheet } from 'react-native';
 import { CreateSessionModal } from '../CreateSessionModal';
 import { useConnectionStore } from '../../store/connection';
+import { DEFAULT_PROVIDER } from '@chroxy/protocol';
 
 jest.mock('../../store/connection', () => ({
   useConnectionStore: jest.fn(),
@@ -333,11 +334,12 @@ describe('CreateSessionModal agent connections', () => {
 });
 
 describe('CreateSessionModal — #6312/#6352 provider capability-limitation note', () => {
-  it('surfaces a limitation note for the default reduced-capability provider (claude-tui)', () => {
-    // The empty Default chip resolves to DEFAULT_PROVIDER (claude-tui); seed it with
-    // the degraded caps the server reports for claude-tui.
+  it('surfaces a limitation note when the default provider reports reduced capabilities', () => {
+    // The empty Default chip resolves to DEFAULT_PROVIDER (claude-sdk since
+    // #8266); seed it with degraded caps (claude-tui's shape) so the note is
+    // proven to follow whatever the default provider reports.
     setupStore([
-      { name: 'claude-tui', capabilities: { planMode: false, streaming: false, modelSwitch: false }, auth: { ready: true } },
+      { name: DEFAULT_PROVIDER, capabilities: { planMode: false, streaming: false, modelSwitch: false }, auth: { ready: true } },
     ]);
 
     let component: renderer.ReactTestRenderer;
@@ -351,7 +353,7 @@ describe('CreateSessionModal — #6312/#6352 provider capability-limitation note
 
   it('shows no limitation note for a fully-capable provider', () => {
     setupStore([
-      { name: 'claude-tui', capabilities: { planMode: true, streaming: true, modelSwitch: true }, auth: { ready: true } },
+      { name: DEFAULT_PROVIDER, capabilities: { planMode: true, streaming: true, modelSwitch: true }, auth: { ready: true } },
     ]);
 
     let component: renderer.ReactTestRenderer;

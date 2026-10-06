@@ -215,6 +215,46 @@ describe('SettingsPanel', () => {
   // call site with no guard: a mutation to `selectModelsForProvider(map, null)`
   // survived the whole dashboard suite, because nothing here rendered the field
   // at all. These four pin what it must offer.
+  describe('Default provider: deliberate override vs inherited server default (#8265)', () => {
+    it('shows "Server default (<label>)" selected while the default is inherited', () => {
+      setMockState({
+        defaultProvider: 'claude-sdk',
+        defaultProviderSource: 'server',
+        serverDefaultProvider: 'claude-sdk',
+        availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+      expect(select.value).toBe('')
+      expect(select.options[0]!.textContent).toBe('Server default (Claude Code (SDK))')
+    })
+
+    it('shows the override selected when the user chose one', () => {
+      setMockState({
+        defaultProvider: 'claude-cli',
+        defaultProviderSource: 'user',
+        serverDefaultProvider: 'claude-sdk',
+        availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('claude-cli')
+    })
+
+    it('choosing "Server default" clears the override (setDefaultProvider(""))', () => {
+      const setDefaultProvider = vi.fn()
+      setMockState({
+        defaultProvider: 'claude-cli',
+        defaultProviderSource: 'user',
+        serverDefaultProvider: 'claude-sdk',
+        setDefaultProvider,
+        availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: '' } })
+      expect(setDefaultProvider).toHaveBeenCalledWith('')
+    })
+  })
+
   describe('Default model select reads the default provider OWN roster (#7728)', () => {
     const opus = { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }
     const gpt = { id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5-2026-01' }
@@ -257,6 +297,7 @@ describe('SettingsPanel', () => {
       // construction can never have broadcast one, and the field vanished.
       setMockState({
         defaultProvider: 'gemini',
+        defaultProviderSource: 'user',
         defaultModel: '',
         availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },

@@ -1683,22 +1683,25 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   },
   // #8151 (C3) — the server's resolved default provider (e.g. a Docker
   // image's ENV CHROXY_PROVIDER=claude-sdk) overrides the baked-in
-  // DEFAULT_PROVIDER fallback (claude-tui) for the New Session picker's
+  // DEFAULT_PROVIDER fallback (@chroxy/protocol) for the New Session picker's
   // initial selection — but ONLY when the user has not already made an
   // explicit choice (setDefaultProvider's persisted localStorage key). An
   // explicit choice must always win, and this is an in-memory-only apply:
   // it deliberately does NOT call setDefaultProvider / write localStorage,
   // since a server-supplied default is not the user's own choice and must
   // not stick if they later connect to a server with a different default.
+  //
+  // #8265: the daemon's value is always RECORDED (`serverDefaultProvider`, so
+  // Settings can offer "Server default" and clearing an override has
+  // something to fall back to). Whether it APPLIES is decided by the store's
+  // own `defaultProviderSource`, the one classification migrateSessionDefaults
+  // made — not by re-reading storage, where a legacy key whose removal failed
+  // to write would still be present and would read as an override.
   applyServerDefaultProvider: (name) => {
-    try {
-      if (localStorage.getItem('chroxy_default_provider') != null) return;
-    } catch {
-      // localStorage unavailable (private-mode / storage-denied) — fall
-      // through and apply the server's default, matching this file's other
-      // localStorage reads' fail-open behaviour.
-    }
-    getStore().setState({ defaultProvider: name } as Partial<ConnectionState>);
+    const userOverride = (getStore().getState() as ConnectionState).defaultProviderSource === 'user';
+    getStore().setState((userOverride
+      ? { serverDefaultProvider: name }
+      : { serverDefaultProvider: name, defaultProvider: name, defaultProviderSource: 'server' }) as Partial<ConnectionState>);
   },
 };
 

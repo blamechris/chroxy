@@ -64,8 +64,9 @@ describe('Provider picker in session creation (#1366)', () => {
     // there so a default flip never needs a modal edit.
     expect(modalSrc).toMatch(/useConnectionStore\(\s*s\s*=>\s*s\.defaultProvider\s*\)/)
     expect(modalSrc).toMatch(/useState\(\s*defaultProvider\s*\)/)
-    // And the store seeds defaultProvider from the protocol constant.
-    expect(connectionSrc).toMatch(/loadPersistedSetting\(\s*'chroxy_default_provider',\s*DEFAULT_PROVIDER\s*\)/)
+    // And the store seeds defaultProvider from the user's override, else the
+    // protocol constant (#8265: the override is read after the legacy migration).
+    expect(connectionSrc).toMatch(/defaultProvider:\s*_sessionDefaults\.provider\s*\?\?\s*DEFAULT_PROVIDER/)
   })
 
   // --- New tests for dynamic provider list ---

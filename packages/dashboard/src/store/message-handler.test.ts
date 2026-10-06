@@ -319,11 +319,14 @@ describe('dashboard message-handler dispatch', () => {
         ctx() as any,
       )
       expect((store.getState() as any).defaultProvider).toBe('claude-sdk')
+      // #8265: an inherited default is labelled as the server's.
+      expect((store.getState() as any).defaultProviderSource).toBe('server')
+      expect((store.getState() as any).serverDefaultProvider).toBe('claude-sdk')
     })
 
-    it('provider_list: the store default stays the persisted (user-chosen) value when chroxy_default_provider exists', () => {
+    it('provider_list: the store default stays the user-chosen value (defaultProviderSource "user")', () => {
       localStorage.setItem('chroxy_default_provider', 'gemini')
-      store = createMockStore(baseState({ defaultProvider: 'gemini' } as Partial<ConnectionState>))
+      store = createMockStore(baseState({ defaultProvider: 'gemini', defaultProviderSource: 'user' } as Partial<ConnectionState>))
       setStore(store)
       handleMessage(
         { type: 'provider_list', providers: [{ name: 'claude-sdk' }], defaultProvider: 'claude-sdk' },
@@ -331,6 +334,24 @@ describe('dashboard message-handler dispatch', () => {
       )
       // The server's value must NOT overwrite the user's explicit choice.
       expect((store.getState() as any).defaultProvider).toBe('gemini')
+      // #8265: …but it is still recorded, so Settings can offer "Server
+      // default (claude-sdk)" and clearing the override has a target.
+      expect((store.getState() as any).serverDefaultProvider).toBe('claude-sdk')
+    })
+
+    it('#8276 P2: a legacy key the migration could not remove does NOT block the server default', () => {
+      // migrateSessionDefaults classified the leftover claude-cli as inherited
+      // (source 'builtin'); the key is still in storage because its removal
+      // failed to write. The store's classification decides, not the raw key.
+      localStorage.setItem('chroxy_default_provider', 'claude-cli')
+      store = createMockStore(baseState({ defaultProvider: 'claude-sdk', defaultProviderSource: 'builtin' } as Partial<ConnectionState>))
+      setStore(store)
+      handleMessage(
+        { type: 'provider_list', providers: [{ name: 'gemini' }], defaultProvider: 'gemini' },
+        ctx() as any,
+      )
+      expect((store.getState() as any).defaultProvider).toBe('gemini')
+      expect((store.getState() as any).defaultProviderSource).toBe('server')
     })
 
     it('auth_bootstrap: the store default becomes the server value when no chroxy_default_provider key is persisted', () => {
@@ -347,9 +368,9 @@ describe('dashboard message-handler dispatch', () => {
       expect((store.getState() as any).defaultProvider).toBe('claude-sdk')
     })
 
-    it('auth_bootstrap: the store default stays the persisted (user-chosen) value when chroxy_default_provider exists', () => {
+    it('auth_bootstrap: the store default stays the user-chosen value (defaultProviderSource "user")', () => {
       localStorage.setItem('chroxy_default_provider', 'gemini')
-      store = createMockStore(baseState({ defaultProvider: 'gemini' } as Partial<ConnectionState>))
+      store = createMockStore(baseState({ defaultProvider: 'gemini', defaultProviderSource: 'user' } as Partial<ConnectionState>))
       setStore(store)
       handleMessage(
         {

@@ -98,7 +98,7 @@ import { useControlRoomState } from './hooks/useControlRoomState'
 import { useMessageRenderer } from './hooks/useMessageRenderer'
 import { SplitPane } from './components/SplitPane'
 import { ViewSwitcher } from './components/ViewSwitcher'
-import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER, thinkingLevelOptions } from '@chroxy/protocol'
+import { USER_SHELL_PROVIDER, thinkingLevelOptions } from '@chroxy/protocol'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, persistTurnCompleteNotification, loadPersistedTurnCompleteNotification, persistCompactChatFilter, loadPersistedCompactChatFilter, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { repoDisplayName, sessionGroupKey } from './utils/repoLabel'
@@ -216,7 +216,7 @@ export function App() {
   // mirrors its TUI PTY alongside the parsed Chat view; user-shell is
   // terminal-ONLY — a raw $SHELL with no Claude chat/tools/permissions
   // semantics, so its session renders the terminal and hides the Chat tab.
-  const isTui = activeSessionProvider === DEFAULT_PROVIDER
+  const isTui = activeSessionProvider === 'claude-tui'
   const isUserShell = activeSessionProvider === USER_SHELL_PROVIDER
   const isPtyProvider = isTui || isUserShell
   const defaultCwd = useConnectionStore(s => s.defaultCwd)

@@ -1087,7 +1087,7 @@ export class WsServer {
       // handler (settings-handlers.js). Before this getter existed,
       // `_historyCtx` had no `config`/`services` key at all, so
       // `auth_bootstrap.defaultProvider` was unconditionally
-      // `DEFAULT_PROVIDER` (claude-tui) in every real connection — the C3
+      // `DEFAULT_PROVIDER` (then claude-tui) in every real connection — the C3
       // fix's own test only ever built its ctx by hand and never caught
       // this, because a hand-built ctx is exactly the shape the fix
       // assumed, not the shape the real server actually produces. Both

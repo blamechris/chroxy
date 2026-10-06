@@ -468,7 +468,7 @@ export class BaseSession extends EventEmitter {
     this._processReady = false
     // #7382: outstanding hook-routed permission prompts, by requestId. Hoisted
     // from CliSession, where it was written for #2831 and stayed provider-local
-    // through #7375/#7379 — so claude-tui, which is DEFAULT_PROVIDER and routes
+    // through #7375/#7379 — so claude-tui, then DEFAULT_PROVIDER, which routes
     // its prompts through the SAME permission-hook.sh into the SAME daemon map,
     // silently had none of it. `ws-permissions` guards its calls with
     // `typeof ownerSession.notifyPermissionPending === 'function'`, so the

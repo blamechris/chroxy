@@ -423,7 +423,7 @@ export const ServerProviderListSchema = z.object({
   // #8151 (C3) — the daemon's OWN resolved default provider
   // (resolveDaemonDefaultProvider(config): CLI > env > config file > the
   // shared DEFAULT_PROVIDER constant), so a client can override its baked-in
-  // DEFAULT_PROVIDER fallback (claude-tui) with what this specific server
+  // DEFAULT_PROVIDER fallback with what this specific server
   // actually runs by default — e.g. the Docker image's `ENV
   // CHROXY_PROVIDER=claude-sdk`. Optional/nullable so an older server that
   // omits it still parses; mirrors `available_models`'s `defaultModel` field

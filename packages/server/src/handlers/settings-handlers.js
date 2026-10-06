@@ -641,7 +641,7 @@ function handleListProviders(ws, client, msg, ctx) {
     providers: listProviders({ agentConnections: ctx.services?.config?.agentConnections }),
     // #8151 (C3) — this daemon's own resolved default (CLI > env > config file
     // > DEFAULT_PROVIDER), so a client can override its baked-in
-    // DEFAULT_PROVIDER fallback (claude-tui) with what actually works here —
+    // DEFAULT_PROVIDER fallback with what actually works here —
     // e.g. the Docker image's ENV CHROXY_PROVIDER=claude-sdk.
     defaultProvider: resolveDaemonDefaultProvider(ctx.services?.config),
   })

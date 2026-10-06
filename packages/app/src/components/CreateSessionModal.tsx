@@ -156,8 +156,8 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   const selectedConnectionUnavailable = selectedConnection?.readiness.state === 'blocked' || selectedConnection?.readiness.state === 'unsupported';
 
   // #6312 / #6352 — mobile parity with the dashboard's session-creation limitation
-  // note. When the selected provider reports a capability as `false` (notably the
-  // default claude-tui: no plan mode / streaming / model switch), surface a concise
+  // note. When the selected provider reports a capability as `false` (notably
+  // claude-tui: no plan mode / streaming / model switch), surface a concise
   // non-blocking note rather than leaving the user to infer the gap from an absent
   // control. The empty `provider` chip means "server default", so resolve it to
   // DEFAULT_PROVIDER for the capability lookup.

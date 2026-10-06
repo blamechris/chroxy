@@ -562,7 +562,7 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   /**
    * Apply the server's resolved default provider (#8151 C3) — e.g. a Docker
    * image's `ENV CHROXY_PROVIDER=claude-sdk` overriding the protocol's
-   * `DEFAULT_PROVIDER` constant (claude-tui) every client bakes in. Carried
+   * `DEFAULT_PROVIDER` constant every client bakes in. Carried
    * on `provider_list` and the `auth_bootstrap` connect-time burst as an
    * optional `defaultProvider` field; both dispatch handlers call this
    * best-effort (optional-chained), only when the server actually sent a
@@ -586,8 +586,8 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * this field is cosmetic: its own capability lookups that fall back to
    * the baked-in `DEFAULT_PROVIDER` constant (e.g. `provider ||
    * DEFAULT_PROVIDER` in CreateSessionModal) can describe the wrong
-   * provider's capabilities for a "Default" selection on a non-claude-tui
-   * -default server, until a session actually exists and reports its own
+   * provider's capabilities for a "Default" selection on a server whose
+   * default differs from that constant, until a session actually exists and reports its own
    * real provider. Wiring this hook into the app's own persisted-settings
    * store would close that cosmetic gap; it is tracked as a follow-up
    * rather than folded in here.

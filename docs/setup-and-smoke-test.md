@@ -21,7 +21,7 @@ setup yourself.
 |-----------|-----|-----------------|
 | **Node.js ≥ 22** | Runs the daemon | `brew install node@22` |
 | **cloudflared** | Secure tunnel (only if you use `--tunnel quick`/`named`) | `brew install cloudflared` |
-| **An AI CLI** | The session backend. Default is `claude-tui` (the interactive `claude` TUI). | `claude` (Claude Code), or `gemini` / `codex` for those providers |
+| **An AI CLI** | The session backend. Default is `claude-sdk` (Claude Code through the Agent SDK, which runs the `claude` binary). | `claude` (Claude Code), or `gemini` / `codex` for those providers |
 
 `chroxy doctor` (step 4) checks all of these for you.
 
@@ -80,7 +80,7 @@ Chroxy Doctor
   [ OK ] cloudflared        cloudflared version 2026.x
   [ OK ] Config             /Users/you/.chroxy/config.json
   [ OK ] Credential storage OS keychain
-  [ OK ] Billing            Default provider 'claude-tui' — Included (subscription)
+  [ OK ] Billing            Default provider 'claude-sdk' — Included (subscription)
   [ OK ] claude-tui driving claude 2.1.x
   [ OK ] Port               8765 is available
 
@@ -121,7 +121,7 @@ under a **supervisor** that auto-restarts it on crash whenever a tunnel is activ
 | Flag | Purpose |
 |------|---------|
 | `--tunnel <mode>` | `quick` (default), `named`, `none`, or `cloudflare:named` |
-| `--provider <name>` | `claude-tui` (default), `claude-sdk`, `claude-cli`, `gemini`, `codex`, … |
+| `--provider <name>` | `claude-sdk` (default), `claude-tui`, `claude-cli`, `gemini`, `codex`, … |
 | `--host 127.0.0.1` | Loopback-only bind (auth stays on) |
 | `--cwd <path>` | Working directory for the AI session |
 | `--port <n>` (via `PORT` env / config) | Change the default 8765 |
@@ -262,7 +262,7 @@ started with `SIGTERM` (8s grace) so the session-state flush isn't lost.
 Open the dashboard URL from step 6, then:
 
 - [ ] The dashboard connects (status dot goes green) after you paste the URL with `?token=`.
-- [ ] Creating a new session shows the provider (default `claude-tui`) and a live terminal + chat view.
+- [ ] Creating a new session preselects the provider (default `claude-sdk`, labelled "Server default" under the picker) and opens a chat view; a `claude-tui` session additionally shows a live terminal.
 - [ ] Sending a message produces a response (the AI CLI is wired up correctly).
 
 If 7a–7c pass but 7d doesn't, it's almost always the **AI CLI**, not chroxy — run

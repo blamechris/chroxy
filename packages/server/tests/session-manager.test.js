@@ -1538,9 +1538,9 @@ describe('SessionManager.listSessions includes pendingBackgroundShells (#4307)',
 })
 
 describe('SessionManager provider support', () => {
-  it('defaults to the shared DEFAULT_PROVIDER (claude-tui since #5819)', () => {
+  it('defaults to the shared DEFAULT_PROVIDER (claude-sdk since #8266)', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
-    assert.equal(mgr._providerType, 'claude-tui')
+    assert.equal(mgr._providerType, 'claude-sdk')
   })
 
   it('accepts providerType parameter', () => {

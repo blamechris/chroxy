@@ -50,7 +50,7 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
     const { home, cleanup } = makeTempHome()
     after(cleanup)
 
-    it('create persists a task and reports the default-off scheduler + provider-refusal warnings', async () => {
+    it('create persists a task and reports the default-off scheduler warning (default provider is schedulable, #8266)', async () => {
       const r = await runCli(
         ['schedule', 'create', '--prompt', 'say hi', '--cron', '0 9 * * *', '--name', 'Morning'],
         { home },
@@ -60,8 +60,9 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
       // No config.json / CHROXY_ENABLE_SCHEDULER in this temp HOME -> gate closed.
       assert.match(r.stdout, /WARNING:.*DISABLED/)
       // No target.provider given -> falls back to the daemon default
-      // (claude-tui), which the engine refuses (no in-process permissions).
-      assert.match(r.stdout, /WARNING:.*will be REFUSED/)
+      // (claude-sdk since #8266), which has in-process permissions, so no
+      // refusal warning. The hook-routed case is pinned in the #7014 block.
+      assert.doesNotMatch(r.stdout, /will be REFUSED/)
     })
 
     it('list shows the task as [NEVER RUN], never healthy-looking', async () => {
@@ -113,10 +114,10 @@ describe('chroxy schedule — CLI wiring (#6868)', () => {
   // resolution of "the effective default provider" (config.provider ||
   // DEFAULT_PROVIDER, mirroring server-cli.js), not a hardcoded
   // DEFAULT_PROVIDER constant. These two cases prove the warning tracks
-  // config.json rather than the constant: a configured provider that IS
-  // schedulable (in-process permissions) must NOT warn even though
-  // DEFAULT_PROVIDER (claude-tui) would; a configured provider that is
-  // hook-routed must warn even without any --provider flag.
+  // config.json rather than the constant: a configured provider that is
+  // hook-routed must warn even without any --provider flag, although
+  // DEFAULT_PROVIDER (claude-sdk since #8266) would not; a configured
+  // provider that IS schedulable (in-process permissions) must not warn.
   describe('provider-refusal warning follows config.provider, not the DEFAULT_PROVIDER constant (#7014)', () => {
     it('does not warn when config.provider is a schedulable (in-process-permissions) provider', async () => {
       const { home, cleanup } = makeTempHome()

@@ -19,6 +19,7 @@ import {
 } from '@chroxy/protocol'
 import type { DirectoryListing, DirectoryEntry } from '../store/types'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
+import type { SessionDefaultsNotice } from '../store/session-defaults'
 import { isImeComposing } from '../utils/ime'
 
 export interface CreateSessionData {
@@ -247,6 +248,20 @@ export function renderHintWithCode(hint: string): Array<string | { code: string 
   return out
 }
 
+/**
+ * #8265: the one-time notice shown after migrateSessionDefaults cleared a
+ * legacy saved default. A pure helper so the copy is unit-testable.
+ */
+export function sessionDefaultsNoticeText(notice: SessionDefaultsNotice): string {
+  const parts: string[] = []
+  if (notice.provider) parts.push(`provider ${PROVIDER_LABELS[notice.provider] || notice.provider}`)
+  if (notice.model) parts.push(`model ${notice.model}`)
+  const follows: string[] = []
+  if (notice.provider) follows.push("the server's default provider")
+  if (notice.model) follows.push("the provider's own default model")
+  return `A saved default from an older version was cleared (${parts.join(', ')}). New sessions now use ${follows.join(' and ')}. To keep the old choice, pick it again in Settings → Session Defaults.`
+}
+
 export function resolveCreateSessionModel(
   provider: string,
   defaultModel: string | null | undefined,
@@ -269,6 +284,9 @@ export function resolveCreateSessionModel(
 
 export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownCwds = EMPTY_STRINGS, existingNames = EMPTY_STRINGS, serverError, isCreating }: CreateSessionModalProps) {
   const defaultProvider = useConnectionStore(s => s.defaultProvider)
+  const defaultProviderSource = useConnectionStore(s => s.defaultProviderSource)
+  const sessionDefaultsNotice = useConnectionStore(s => s.sessionDefaultsNotice)
+  const dismissSessionDefaultsNotice = useConnectionStore(s => s.dismissSessionDefaultsNotice)
   const defaultModel = useConnectionStore(s => s.defaultModel)
   const modelsByProvider = useConnectionStore(s => s.modelsByProvider) || EMPTY_MODELS_BY_PROVIDER
   const availableProviders = useConnectionStore(s => s.availableProviders)
@@ -850,6 +868,36 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 </>
             }
           </select>
+          {/* #8265: say where the preselection came from, so a saved
+              override is never mistaken for the daemon's default. */}
+          {provider === defaultProvider && defaultProviderSource !== 'builtin' ? (
+            <span className="provider-billing-hint" data-testid="provider-default-source">
+              {defaultProviderSource === 'user'
+                ? 'Your default, from Settings → Session Defaults'
+                : 'Server default'}
+            </span>
+          ) : null}
+          {provider === 'claude-cli' ? (
+            <span className="provider-fix-hint" data-testid="provider-user-settings-warning">
+              <span className="provider-fix-hint-body">
+                Registers Chroxy's permission hook in your user-level Claude settings
+                (<code>~/.claude/settings.json</code>), which affects Claude sessions outside Chroxy too.
+              </span>
+            </span>
+          ) : null}
+          {sessionDefaultsNotice ? (
+            <div className="provider-fix-hint session-defaults-notice" role="status" data-testid="session-defaults-notice">
+              <span className="provider-fix-hint-body">{sessionDefaultsNoticeText(sessionDefaultsNotice)}</span>
+              <button
+                type="button"
+                className="session-defaults-notice-dismiss"
+                onClick={dismissSessionDefaultsNotice}
+                data-testid="session-defaults-notice-dismiss"
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
 
           {selectedProviderInfo?.connections?.length ? (
             <div className="form-group" data-testid="agent-connection-field">
