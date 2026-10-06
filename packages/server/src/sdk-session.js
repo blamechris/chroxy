@@ -155,6 +155,17 @@ function isQueryCloseError(err) {
 }
 
 /**
+ * #8300/#8302: is this a `task_updated` `patch.status` that closes the task?
+ * One predicate for the two sites that care (the live roster and the shell
+ * tracker), so they cannot disagree about which statuses are terminal.
+ * @param {unknown} status
+ * @returns {boolean}
+ */
+function isTerminalTaskStatus(status) {
+  return status === 'completed' || status === 'failed' || status === 'killed'
+}
+
+/**
  * Flatten a tool_result block's content to its text, the same way
  * `emitToolResults` (tool-result.js) does, so a pattern match over the text
  * sees the same string whether the CLI sent a string or a block array.
@@ -1135,6 +1146,21 @@ export class SdkSession extends BaseSession {
     // session, so a turn that finishes after a follow-up turn has started
     // must only stop and report the tasks it owns, never the successor's.
     const turnTaskIds = new Set()
+    // #8302: the background SHELL ids this turn's tool_results announced. A shell
+    // is owned by the process that started it, and on this provider that is the
+    // turn's own per-turn process: once the turn's query is closed nothing can
+    // ever read the shell's output or hear its completion, so it must not keep
+    // the session "running". Kept apart from `turnTaskIds` because a shell can
+    // be tracked without a `task_started` ever naming it (an older CLI build,
+    // `skip_transcript`), and that is exactly the shell no other path releases.
+    const turnShellIds = new Set()
+    // #8302: release every shell this turn started. `clearBackgroundShell` is a
+    // no-op for an id that is not tracked, so this is idempotent and is called
+    // from both the normal turn end and the `finally`. It never touches a shell
+    // another turn tracked: a follow-up turn that took the session owns its own.
+    const reapTurnShells = () => {
+      for (const shellId of turnShellIds) this.clearBackgroundShell(shellId)
+    }
     // #8300: true once a follow-up turn owns the session (it started while
     // this one was still draining or stopping work, after a hard timeout or
     // stream stall cleared busy). This turn then only reports and ends its
@@ -1346,6 +1372,11 @@ export class SdkSession extends BaseSession {
           // work") for a shell nothing will ever read (#8302's shape).
           if (task.taskType === 'local_bash') this.clearBackgroundShell(task.taskId)
         }
+        // #8302: and any shell this turn tracked that no live task named (see
+        // `turnShellIds`): the process that could report on it ends with the
+        // turn. Before the result is emitted, so the idle snapshot a client
+        // takes at the result already reads idle.
+        reapTurnShells()
 
         if (streamState.hasStreamStarted) {
           this.emit('stream_end', { messageId })
@@ -1598,7 +1629,15 @@ export class SdkSession extends BaseSession {
               this._finalizeAgentByToolUseId(msg.tool_use_id)
               // #8300: the task is closed; it no longer counts as live work at
               // the prompt's result.
-              if (typeof msg.task_id === 'string') this._liveBackgroundTasks.delete(msg.task_id)
+              if (typeof msg.task_id === 'string') {
+                this._liveBackgroundTasks.delete(msg.task_id)
+                // #8302: a background shell's `task_id` IS the shell id its
+                // tool_result announced, and a terminal notification is the
+                // only completion signal that still exists (current Claude Code
+                // has no `BashOutput` tool, so the acknowledgement clear can
+                // never fire). Untracked ids are a no-op.
+                this.clearBackgroundShell(msg.task_id)
+              }
               break
             } else if (msg.subtype === 'task_updated') {
               // #8300: a task backgrounded after it started (`patch.is_backgrounded`)
@@ -1608,9 +1647,16 @@ export class SdkSession extends BaseSession {
               if (live && patch) {
                 if (patch.is_backgrounded === true) live.background = true
                 if (typeof patch.description === 'string' && patch.description) live.description = patch.description
-                if (patch.status === 'completed' || patch.status === 'failed' || patch.status === 'killed') {
+                if (isTerminalTaskStatus(patch.status)) {
                   this._liveBackgroundTasks.delete(msg.task_id)
                 }
+              }
+              // #8302: a terminal status closes the task's shell too — whether
+              // or not the roster holds the task (a `skip_transcript` task is
+              // never on it, yet its shell may still be tracked). Same id
+              // equality and same no-op as the `task_notification` branch.
+              if (patch && typeof msg.task_id === 'string' && isTerminalTaskStatus(patch.status)) {
+                this.clearBackgroundShell(msg.task_id)
               }
               break
             } else if (msg.subtype === 'compact_boundary') {
@@ -1898,7 +1944,7 @@ export class SdkSession extends BaseSession {
             // truncation surface (tool-result.js is also used by
             // CliSession + GeminiSession, which don't share this
             // BaseSession path).
-            this._recordBackgroundShellsFromToolResults(msg.message?.content)
+            this._recordBackgroundShellsFromToolResults(msg.message?.content, turnShellIds)
             break
           }
 
@@ -2071,6 +2117,11 @@ export class SdkSession extends BaseSession {
       if (this._query === turnQuery) this._query = null
       // #8300: whatever this turn saw start is gone with its process.
       for (const taskId of turnTaskIds) this._liveBackgroundTasks.delete(taskId)
+      // #8302: ...and so is every shell it started, whatever ended the loop (a
+      // throw, a destroy, a result with no live task to report). Without this a
+      // shell that died or was never acknowledged left the session reading busy
+      // forever on a provider that has no `BashOutput` to clear it.
+      reapTurnShells()
       // #4881: safety-net clear of _intentionalStop. The catch block clears
       // it on the throw path (AbortError after interrupt()), but if
       // query.interrupt() races a `result` message arriving first, the
@@ -2560,9 +2611,11 @@ export class SdkSession extends BaseSession {
    * (no-op) — the standard tool-loop flow always populates both.
    *
    * @param {unknown} content
+   * @param {Set<string>|null} [ownedShellIds] - #8302: the calling turn's set;
+   *   every shell newly tracked here is added to it.
    * @private
    */
-  _recordBackgroundShellsFromToolResults(content) {
+  _recordBackgroundShellsFromToolResults(content, ownedShellIds = null) {
     if (!Array.isArray(content)) return
     for (const block of content) {
       if (block?.type !== 'tool_result' || !block.tool_use_id) continue
@@ -2584,7 +2637,8 @@ export class SdkSession extends BaseSession {
       // #5177: capture the output file path from the same tool_result so the
       // completion sweep can reap the shell on quiescence without a poll.
       const outputPath = parseBackgroundShellOutputPath(text)
-      this.trackBackgroundShell({ shellId, command, outputPath })
+      // #8302: remember which turn started it, so that turn's end can release it.
+      if (this.trackBackgroundShell({ shellId, command, outputPath })) ownedShellIds?.add(shellId)
     }
   }
 
