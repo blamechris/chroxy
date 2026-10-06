@@ -41,7 +41,7 @@ import { defaultDeps, deploy, parseArgs } from '../deploy-daemon.mjs'
 
 // Every case in this file. Bump it when you add one: a case that vanishes
 // should break the run rather than quietly shrink it.
-const MIN_CASES = 68
+const MIN_CASES = 81
 
 let pass = 0
 let fail = 0
@@ -145,9 +145,10 @@ function makeEnv(o = {}) {
   const headNow = () => (o.realGit ? g(checkout, 'rev-parse', 'HEAD') : env.git.head)
   env.headNow = headNow
 
+  env.conn = {} // overrides for connection.json (e.g. { tunnelMode: undefined })
   const writeConn = (pid) => writeFileSync(join(configDir, 'connection.json'), JSON.stringify({
     wsUrl: 'wss://tunnel.example', httpUrl: 'https://tunnel.example', apiToken: 'tok',
-    tunnelMode: 'cloudflare:named', startedAt: '2026-10-06T00:00:00Z', pid,
+    tunnelMode: 'cloudflare:named', startedAt: '2026-10-06T00:00:00Z', pid, ...env.conn,
   }))
   env.writeConn = writeConn
 
@@ -222,7 +223,7 @@ function makeEnv(o = {}) {
       }
       const res = (status, stderr = '') => ({ status, stdout: '', stderr, error: null })
       if (cmd === 'npm' && args[0] === 'ci') return env.build.ciFailures-- > 0 ? res(1, 'ci exploded') : res(0)
-      if (cmd === 'npm' && args[0] === 'run') return env.build.failShas.has(headNow()) ? res(1, 'vite exploded') : res(0)
+      if (cmd === 'npm' && args[0] === 'run') return env.build.failShas.has(headNow()) ? res(1, env.build.stderr || 'vite exploded') : res(0)
       if (cmd === 'launchctl') {
         if (!env.daemon.killOk) return res(113, 'Could not find service')
         if (env.daemon.ignoreKills > 0) env.daemon.ignoreKills--
@@ -242,6 +243,8 @@ function makeEnv(o = {}) {
         const n = d.idleCalls++
         const r = d.idleFn(n, env)
         if (r === 'throw') throw new Error('ECONNREFUSED')
+        if (r === 'timeout') throw Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })
+        if (r.throwErr) throw r.throwErr
         if (r.body && typeof r.body === 'object' && !('commit' in r.body)) {
           return resp(r.status, { ...r.body, commit: d.noCommitCommits.has(d.commit) ? null : d.commit, pid: d.livePid })
         }
@@ -902,6 +905,188 @@ await test('a repeated failure is logged again after a healthy tick in between',
 })
 
 // ---------------------------------------------------------------------------
+// down vs unknown: only a daemon with NOTHING listening has nothing to lose
+// ---------------------------------------------------------------------------
+
+const oweA = (env, extra = {}) => {
+  writeFileSync(env.path('deploy-state.json'), JSON.stringify({ rollbackTo: A, ...extra }))
+  env.git.head = B
+  env.daemon.commit = B
+  env.seedStamp(B)
+}
+
+await test('an owed rollback against an alive daemon that answers 404 is NEVER signalled, over five ticks, and cannot loop', async () => {
+  const env = makeEnv()
+  oweA(env)
+  env.daemon.idleFn = () => ({ status: 404, body: { error: 'not found' } })
+  const first = await env.run()
+  eq([first.exitCode, first.outcome], [0, 'rollback-completed'], 'the tree is restored once')
+  eq([env.git.head, env.stamp().sha, env.state().rollbackTo], [A, A, undefined], 'and the owed rollback is cleared')
+  assert(env.readLog().includes('restart it by hand'), 'tells the operator a manual restart is needed')
+  for (let i = 0; i < 4; i++) eq((await env.run()).outcome, 'deferred-unavailable', `tick ${i + 2}: not owed any more, so it only defers`)
+  eq(kills(env), [], 'no SIGTERM, ever')
+})
+
+await test('a --force bootstrap onto a daemon that never answers the route kills at most on that tick, then never again', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => ({ status: 404, body: {} })
+  const forced = await env.run({ force: true })
+  assert(forced.outcome !== 'deployed', 'the restarted daemon cannot be certified without a commit')
+  const killsAfterFirst = kills(env).length
+  for (let i = 0; i < 4; i++) await env.run()
+  eq(kills(env).length, killsAfterFirst, 'ticks 2-5 never signal the daemon')
+  eq(env.state().rollbackTo, undefined, 'and no rollback is left owed to loop on')
+})
+
+await test('an owed rollback against a daemon that answers 500, or times out, is not signalled and not touched', async () => {
+  for (const [name, fn] of [['500', () => ({ status: 500, body: {} })], ['timeout', () => 'timeout']]) {
+    const env = makeEnv()
+    oweA(env)
+    env.daemon.idleFn = fn
+    const r = await env.run()
+    eq([r.exitCode, r.outcome], [0, 'deferred-busy'], name)
+    eq(mutating(env), [], `${name}: nothing mutated, 0 kills`)
+    eq(env.state().rollbackTo, A, `${name}: still owed`)
+    assert(env.readLog().includes('cannot confirm idle'), `${name}: says why`)
+  }
+})
+
+await test('a health-failure rollback against a daemon whose probe TIMES OUT does not restart it: the rollback stays owed', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = (n, e) => (e.daemon.commit === B ? 'timeout' : IDLE)
+  const r = await env.run({ healthTimeoutS: 12 })
+  eq([r.exitCode, r.outcome], [1, 'rollback-owed'])
+  eq(kills(env).length, 1, 'only the forward signal; no rollback SIGTERM into a daemon that may be busy')
+  eq(env.git.head, B, 'the tree is untouched too')
+  eq(env.state().rollbackTo, A)
+  assert(env.readLog().includes('ROLLBACK-OWED'), 'loud')
+})
+
+await test('down when the tick began, relaunched and BUSY during the build: the rollback re-probes and does not signal it', async () => {
+  const env = makeEnv()
+  oweA(env)
+  env.daemon.dead = true
+  env.daemon.livePid = null
+  env.onRun = (cmd, args) => {
+    if (cmd === 'npm' && args[0] === 'run' && env.daemon.dead) {
+      // launchd's KeepAlive brings it back during the build, with a turn already running.
+      env.daemon.dead = false
+      env.daemon.livePid = 2000
+      env.writeConn(2000)
+      env.daemon.idleFn = () => BUSY
+    }
+  }
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [0, 'deferred-busy'])
+  eq(kills(env), [], 'a busy daemon was not signalled')
+  eq(env.state().rollbackTo, A, 'still owed')
+  assert(env.readLog().includes('rollback restart deferred'), 'logged')
+})
+
+await test('a refused/reset loopback connection is DOWN (real fetch error shape), and an owed rollback proceeds against it', async () => {
+  for (const code of ['ECONNREFUSED', 'ECONNRESET']) {
+    const env = makeEnv()
+    oweA(env)
+    env.daemon.idleFn = (n) => (n === 0 ? { throwErr: Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(code), { code }) }) } : IDLE)
+    const r = await env.run()
+    eq(r.outcome, 'rollback-completed', code)
+    assert(kills(env).length === 1, `${code}: restarted`)
+  }
+})
+
+await test('a connection.json that names a dead pid is DOWN: an owed rollback proceeds', async () => {
+  const env = makeEnv()
+  oweA(env)
+  env.daemon.livePid = null // isPidAlive(1000) is now false
+  const r = await env.run()
+  eq(r.outcome, 'rollback-completed')
+})
+
+await test('confirmLocal checks the pid: a daemon relaunched during settle under a NEW pid, same commit, healthy, is not certified', async () => {
+  const env = makeEnv()
+  const orig = env.deps.sleep
+  let done = false
+  env.deps.sleep = async (ms) => {
+    await orig(ms)
+    if (!done && ms === 15000 && env.daemon.commit === B) {
+      done = true
+      env.daemon.livePid = 5555 // launchd relaunched it: same commit, healthy
+      env.writeConn(5555)
+    }
+  }
+  const r = await env.run()
+  eq(r.outcome, 'rolled-back-health')
+  assert(env.readLog().includes('daemon pid is 5555'), 'the pid mismatch is what failed it')
+})
+
+// ---------------------------------------------------------------------------
+// log lines
+// ---------------------------------------------------------------------------
+
+await test('a success line says when the tunnel was NOT checked, and why', async () => {
+  const cases = {
+    '--no-tunnel-check': [(e) => {}, { tunnelCheck: false }],
+    'connection.json has no tunnelMode': [(e) => { e.conn = { tunnelMode: undefined }; e.writeConn(1000) }, {}],
+    'tunnel mode is none': [(e) => { e.conn = { tunnelMode: 'none' }; e.writeConn(1000) }, {}],
+    'a local URL': [(e) => { e.conn = { httpUrl: 'http://127.0.0.1:8765' }; e.writeConn(1000) }, {}],
+  }
+  for (const [reason, [setup, extra]] of Object.entries(cases)) {
+    const env = makeEnv()
+    setup(env)
+    eq((await env.run(extra)).outcome, 'deployed', reason)
+    assert(env.readLog().includes('ok (tunnel not checked:') && env.readLog().includes(reason.replace('a local URL', 'a local URL')), `${reason}: ${env.readLog().trim()}`)
+  }
+  const checked = makeEnv()
+  await checked.run()
+  assert(/ ok\n$/.test(checked.readLog()), 'a checked tunnel stays a plain "ok"')
+})
+
+await test('a deferral that lasts over 24h re-logs once per 24h, and a healthy tick ends the streak', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  const lines = () => env.readLog().trim().split('\n')
+  await env.run()
+  eq(lines().length, 1)
+  env.t += 12 * 3600_000
+  await env.run()
+  eq(lines().length, 1, 'still deduped inside 24h')
+  env.t += 13 * 3600_000
+  await env.run()
+  eq(lines().length, 2)
+  assert(lines()[1].includes('still deferred since') && lines()[1].includes('busy'), lines()[1])
+  await env.run()
+  eq(lines().length, 2, 'once per 24h, not once per tick')
+  env.t += 25 * 3600_000
+  await env.run()
+  eq(lines().length, 3, 'and again after another day')
+  env.daemon.idleFn = () => IDLE
+  env.git.remote = A
+  await env.run()
+  eq(env.state().deferredSince, undefined, 'a tick that does not defer ends the streak')
+})
+
+await test('a failed build line carries the ERROR, not the stack frames that follow it', async () => {
+  const env = makeEnv()
+  env.build.failShas.add(B)
+  env.build.stderr = 'vite v5\n    at Socket.emit (node:events:518:28)\nError: Could not resolve "./missing" from "src/main.tsx"\n    at async build (file:///x.js:1:1)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)'
+  await env.run()
+  const log = env.readLog()
+  assert(log.includes('Could not resolve "./missing"'), log)
+  assert(!log.includes('Socket.emit'), 'the stack frames are not what is reported')
+})
+
+await test('a rollback line reads bad..good, never good..good', async () => {
+  const env = makeEnv()
+  env.daemon.brokenCommits.add(B)
+  await env.run()
+  assert(env.readLog().includes(`${B.slice(0, 12)}..${A.slice(0, 12)} rolled-back to ${A.slice(0, 12)}`), env.readLog())
+  const owed = makeEnv()
+  oweA(owed)
+  await owed.run()
+  assert(owed.readLog().includes(`${B.slice(0, 12)}..${A.slice(0, 12)} rollback completed to ${A.slice(0, 12)}`), owed.readLog())
+})
+
+// ---------------------------------------------------------------------------
 // state is safety-critical: a write that cannot be kept aborts the run
 // ---------------------------------------------------------------------------
 
@@ -942,6 +1127,18 @@ await test('an unreadable (not absent) deploy-state.json aborts: rollbackTo migh
   const r = await env.run()
   eq([r.exitCode, r.outcome], [1, 'state-write-failed'])
   untouched(env)
+})
+
+await test('a state file that PARSES but has a malformed rollbackTo or failedTarget aborts instead of becoming "empty"', async () => {
+  for (const bad of [{ rollbackTo: 'not-a-sha' }, { failedTarget: 'abc' }, { rollbackTo: 12345 }, { rollbackTo: '' }]) {
+    const env = makeEnv()
+    writeFileSync(env.path('deploy-state.json'), JSON.stringify(bad))
+    const r = await env.run()
+    eq([r.exitCode, r.outcome], [1, 'state-write-failed'], JSON.stringify(bad))
+    untouched(env)
+    eq(JSON.parse(readFileSync(env.path('deploy-state.json'), 'utf8')), bad, 'left for the operator, not quarantined')
+    assert(env.logs.some((l) => l.includes('ABORTED') && l.includes('malformed')), 'loud')
+  }
 })
 
 await test('if the stale build stamp cannot be deleted, the run aborts before changing the tree', async () => {

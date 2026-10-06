@@ -21,9 +21,14 @@
  *                                deleted before any change to the tree
  *
  * `desired` is the owed rollback if there is one (`rollbackTo` in
- * deploy-state.json, set before every restart and cleared only when a restart is
- * VERIFIED), else the remote branch tip, except a tip that already failed is
- * skipped until main moves or --retry.
+ * deploy-state.json), else the remote branch tip, except a tip that already
+ * failed is skipped until main moves or --retry. `rollbackTo` is set before
+ * every forward restart and cleared only (a) when a restart is verified,
+ * (b) when the tree is converged back WITHOUT a restart because the signal never
+ * went out (failed-restart), (c) when the daemon already runs it and the tree is
+ * repaired, or the owed rollback is found already satisfied, and (d) when the
+ * daemon cannot report a commit, so a restart could never be certified: the tree
+ * is restored and a manual restart is requested.
  *
  * Three promises:
  *   1. Nothing is mutated (tree, build, daemon) while the daemon is busy,
@@ -217,6 +222,14 @@ export function defaultDeps() {
 
 const short = (sha) => (typeof sha === 'string' ? sha.slice(0, 12) : '?')
 const tail = (text, n = 12) => String(text || '').trim().split('\n').slice(-n).join('\n')
+// What a failed command says, for deploy.log: the first few lines that look like
+// an error (vite and npm end with stack frames, which say where, not what), else
+// the tail.
+const explain = (r, n = 4) => {
+  const text = `${r.stderr || ''}\n${r.stdout || ''}`
+  const hits = text.split('\n').map((l) => l.trim()).filter((l) => /error/i.test(l) && !/^at\s/.test(l))
+  return hits.length ? hits.slice(0, n).join('\n') : tail(r.stderr || r.stdout || r.error)
+}
 
 // Thrown wherever a write or delete carries SAFETY (rollbackTo, failedTarget,
 // the build stamp): the run aborts before its next mutation rather than carry
@@ -284,11 +297,15 @@ export async function deploy(opts, deps = defaultDeps()) {
     try {
       const parsed = JSON.parse(raw)
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
+      // A file that PARSES but whose safety fields are malformed is not "corrupt,
+      // start empty": an owed rollback must not silently become up-to-date.
       for (const k of ['failedTarget', 'rollbackTo']) {
-        if (parsed[k] !== undefined && !FULL_SHA.test(parsed[k])) throw new Error(`${k} is not a commit`)
+        if (parsed[k] !== undefined && !(typeof parsed[k] === 'string' && FULL_SHA.test(parsed[k]))) {
+          return { ok: false, reason: `deploy-state.json is malformed (${k} is not a commit); fix or delete it by hand` }
+        }
       }
       state = {}
-      for (const k of ['failedTarget', 'failedOutcome', 'rollbackTo', 'lastKey']) {
+      for (const k of ['failedTarget', 'failedOutcome', 'rollbackTo', 'lastKey', 'deferredSince', 'deferredLoggedAt']) {
         if (parsed[k] !== undefined) state[k] = parsed[k]
       }
       return { ok: true }
@@ -319,12 +336,12 @@ export async function deploy(opts, deps = defaultDeps()) {
 
   // deploy.log gets one line per EVENT. `key` dedupes a repeating event (the
   // same deferral on every ten-minute tick) against the previous logged key.
-  function event(msg, { range = null, key = null } = {}) {
+  function event(msg, { range = null, key = null, force = false } = {}) {
     const line = range ? `${range} ${msg}` : msg
     d.log(line)
     if (opts.dryRun) return
     if (key) {
-      if (state.lastKey === key) return
+      if (state.lastKey === key && !force) return
       state.lastKey = key
     } else {
       state.lastKey = null
@@ -337,6 +354,24 @@ export async function deploy(opts, deps = defaultDeps()) {
       const flat = String(msg).trim().split(/\s*\n\s*/).filter(Boolean).join(' | ')
       fs.appendFileSync(p.log, `${iso()} ${range || '-'} ${flat}\n`)
     } catch { /* a log that cannot be written must not abort a deploy */ }
+  }
+  // A deferral that never ends (a leaked background agent, an always-open shell
+  // PTY) would otherwise be one log line for ever and look like nothing is
+  // wrong. It is remembered from its first tick, and once it has lasted more
+  // than 24h it logs again, once per 24h, bypassing the dedupe.
+  const DAY_MS = 24 * 60 * 60 * 1000
+  let deferredThisTick = false
+  function deferral(msg, { range = null, key, reasons }) {
+    deferredThisTick = true
+    if (!state.deferredSince) { state.deferredSince = iso(); persist({ mandatory: false }) }
+    const since = Date.parse(state.deferredSince)
+    const lastLogged = state.deferredLoggedAt ?? since
+    if (Number.isFinite(since) && d.now() - since > DAY_MS && d.now() - lastLogged > DAY_MS) {
+      state.deferredLoggedAt = d.now()
+      event(`still deferred since ${state.deferredSince}: ${reasons}`, { range, key, force: true })
+      return
+    }
+    event(msg, { range, key })
   }
   function recordResult(from, to, result) {
     if (opts.dryRun) return
@@ -401,26 +436,34 @@ export async function deploy(opts, deps = defaultDeps()) {
     } catch { return false }
   }
 
-  // -> { kind: 'idle' | 'busy' | 'unavailable', reasons, commit, pid }
+  // -> { kind, reasons, commit, pid, noRoute }
+  //   idle / busy  the daemon answered and said so
+  //   down         NOTHING is listening: no connection.json, a dead pid, or a refused/reset
+  //                loopback connection. The only kind that has nothing to lose.
+  //   unknown      something may be listening but cannot answer: a 404 (the route is
+  //                missing), any other non-200, a timeout, an unreadable body. It may well
+  //                be busy, so everywhere it is treated like busy.
   // `commit` is what the DAEMON says it started from (null when it cannot say).
   async function probe() {
     const conn = readConn()
-    const down = (why) => ({ kind: 'unavailable', reasons: [why], commit: null, pid: null })
-    if (!conn || !conn.apiToken) return down('no connection.json (daemon not running?)')
-    if (conn.pid && !d.isPidAlive(conn.pid)) return down(`connection.json names pid ${conn.pid}, which is not running`)
+    const make = (kind, why, extra = {}) => ({ kind, reasons: [why], commit: null, pid: null, noRoute: false, ...extra })
+    if (!conn) return make('down', 'no connection.json (daemon not running?)')
+    if (conn.pid && !d.isPidAlive(conn.pid)) return make('down', `connection.json names pid ${conn.pid}, which is not running`)
+    if (!conn.apiToken) return make('unknown', 'connection.json has no apiToken')
     let r
     try {
       r = await getJson(`http://127.0.0.1:${portOf(conn)}/api/daemon/idle`, { Authorization: `Bearer ${conn.apiToken}` })
     } catch (e) {
-      return down(`daemon unreachable: ${e?.message || e}`)
+      const refused = /ECONNREFUSED|ECONNRESET/.test(`${e?.cause?.code || ''} ${e?.code || ''} ${e?.message || ''}`)
+      return make(refused ? 'down' : 'unknown', `daemon unreachable: ${e?.message || e}`)
     }
-    if (r.status === 404) return down('daemon has no /api/daemon/idle (it predates the route; deploy once by hand or with --force)')
-    if (r.status !== 200) return down(`/api/daemon/idle answered HTTP ${r.status}`)
-    if (!r.body || typeof r.body !== 'object' || typeof r.body.idle !== 'boolean') return down('/api/daemon/idle returned an unreadable body')
+    if (r.status === 404) return make('unknown', 'daemon has no /api/daemon/idle (it predates the route; deploy once by hand or with --force)', { noRoute: true })
+    if (r.status !== 200) return make('unknown', `/api/daemon/idle answered HTTP ${r.status}`)
+    if (!r.body || typeof r.body !== 'object' || typeof r.body.idle !== 'boolean') return make('unknown', '/api/daemon/idle returned an unreadable body')
     const reasons = Array.isArray(r.body.reasons) ? r.body.reasons.map(String) : []
     const commit = typeof r.body.commit === 'string' && FULL_SHA.test(r.body.commit) ? r.body.commit.toLowerCase() : null
     const pid = Number.isInteger(r.body.pid) ? r.body.pid : null
-    return { kind: r.body.idle === true ? 'idle' : 'busy', reasons: r.body.idle === true ? reasons : (reasons.length ? reasons : ['busy']), commit, pid }
+    return { kind: r.body.idle === true ? 'idle' : 'busy', reasons: r.body.idle === true ? reasons : (reasons.length ? reasons : ['busy']), commit, pid, noRoute: false }
   }
   const describe = (pr) => `${pr.kind}${pr.reasons.length ? ` (${pr.reasons.join('; ')})` : ''}`
 
@@ -428,11 +471,11 @@ export async function deploy(opts, deps = defaultDeps()) {
   const LONG = 20 * 60 * 1000
   function npmCi() {
     const r = d.run(npmBin, ['ci', '--no-audit', '--no-fund'], { cwd: opts.checkout, timeoutMs: LONG })
-    return r.status === 0 ? { ok: true } : { ok: false, reason: `npm ci failed: ${tail(r.stderr || r.stdout || r.error)}` }
+    return r.status === 0 ? { ok: true } : { ok: false, reason: `npm ci failed: ${explain(r)}` }
   }
   function buildDashboard() {
     const r = d.run(npmBin, ['run', 'build', '-w', '@chroxy/dashboard'], { cwd: opts.checkout, timeoutMs: LONG })
-    return r.status === 0 ? { ok: true } : { ok: false, reason: `dashboard build failed: ${tail(r.stderr || r.stdout || r.error)}` }
+    return r.status === 0 ? { ok: true } : { ok: false, reason: `dashboard build failed: ${explain(r)}` }
   }
   // git merge-base --is-ancestor: true / false, anything else is an error.
   function isAncestor(a, b) {
@@ -486,7 +529,7 @@ export async function deploy(opts, deps = defaultDeps()) {
   // we expect, alive, and answering /health. Never inferred from a pid alone.
   async function confirmLocal(desired, pid) {
     const pr = await probe()
-    if (pr.kind === 'unavailable') return { ok: false, reason: `daemon not answering: ${pr.reasons.join('; ')}` }
+    if (pr.kind === 'down' || pr.kind === 'unknown') return { ok: false, reason: `daemon not answering: ${pr.reasons.join('; ')}` }
     if (pr.commit !== desired) return { ok: false, reason: `daemon reports commit ${pr.commit ? short(pr.commit) : 'none'}, expected ${short(desired)}` }
     if (pid != null && pr.pid !== pid) return { ok: false, reason: `daemon pid is ${pr.pid}, expected ${pid} (it restarted or exited)` }
     if (pr.pid != null && !d.isPidAlive(pr.pid)) return { ok: false, reason: `pid ${pr.pid} is no longer running` }
@@ -496,14 +539,18 @@ export async function deploy(opts, deps = defaultDeps()) {
   // The tunnel answers 530 for several seconds after a restart; retry through
   // that and through connection errors until the budget runs out. A tunnel is
   // not the daemon: a failure here is reported, never a reason to roll back.
+  // -> { ok: true, skipped?: why } | { ok: false, reason }. A skipped check says
+  // so, so a success line can admit the tunnel was never looked at.
   async function checkTunnel() {
+    if (!opts.tunnelCheck) return { ok: true, skipped: '--no-tunnel-check' }
     const conn = readConn()
-    if (!conn) return { ok: true }
+    if (!conn) return { ok: true, skipped: 'no connection.json' }
     const mode = conn.tunnelMode
+    if (!mode) return { ok: true, skipped: 'connection.json has no tunnelMode' }
+    if (mode === 'none') return { ok: true, skipped: 'tunnel mode is none' }
     let host = null
     try { host = conn.httpUrl ? new URL(conn.httpUrl).hostname : null } catch { /* unparseable: skip */ }
-    const localHost = !host || ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host)
-    if (!opts.tunnelCheck || !mode || mode === 'none' || localHost) return { ok: true }
+    if (!host || ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(host)) return { ok: true, skipped: 'connection.json has no tunnel URL (a local URL)' }
     const deadline = d.now() + opts.healthTimeoutS * 1000
     let lastWhy = 'tunnel never answered'
     while (d.now() < deadline) {
@@ -530,7 +577,7 @@ export async function deploy(opts, deps = defaultDeps()) {
     let up = null
     while (d.now() < deadline) {
       const pr = await probe()
-      if (pr.kind === 'unavailable') why = `daemon not answering: ${pr.reasons.join('; ')}`
+      if (pr.kind === 'down' || pr.kind === 'unknown') why = `daemon not answering: ${pr.reasons.join('; ')}`
       else if (pr.commit !== desired) why = `daemon reports commit ${pr.commit ? short(pr.commit) : 'none'}, expected ${short(desired)}`
       else if (prevPid != null && pr.pid === prevPid) why = `daemon still has the pre-signal pid ${prevPid}`
       else if (!(await localHealthy(readConn()))) why = 'local /health is not 200'
@@ -548,7 +595,8 @@ export async function deploy(opts, deps = defaultDeps()) {
     // verdict is only ever reported on top of a CURRENT local one.
     const after = await confirmLocal(desired, up.pid)
     if (!after.ok) return { ok: false, signalled: true, reason: `after the tunnel check: ${after.reason}` }
-    return tunnel.ok ? { ok: true, signalled: true } : { ok: true, signalled: true, tunnelUnverified: tunnel.reason }
+    if (!tunnel.ok) return { ok: true, signalled: true, tunnelUnverified: tunnel.reason }
+    return { ok: true, signalled: true, tunnelSkipped: tunnel.skipped }
   }
 
   // ======================================================================
@@ -616,7 +664,7 @@ export async function deploy(opts, deps = defaultDeps()) {
 
     // -- 2. what is, and what should be ------------------------------------------
     const pr = await probe()
-    const reachable = pr.kind !== 'unavailable'
+    const reachable = pr.kind === 'idle' || pr.kind === 'busy'
     const running = reachable ? pr.commit : null // what the DAEMON says; null = cannot say
     const stamp = readStamp()
     const owed = state.rollbackTo || null
@@ -661,14 +709,14 @@ export async function deploy(opts, deps = defaultDeps()) {
 
     // -- 3. can anything be done at all -------------------------------------------
     if (!owed) {
-      // An owed rollback against an UNAVAILABLE daemon proceeds (it is down:
+      // An owed rollback against a DOWN daemon proceeds (nothing is listening:
       // nothing to lose). Everything else needs a daemon that can say what it runs.
-      if (!opts.force && pr.kind === 'unavailable') {
-        event(`deferred: cannot confirm idle (${pr.reasons.join('; ')})`, { range: rangeOf(head, target), key: `unavailable:${target}` })
+      if (!opts.force && (pr.kind === 'down' || pr.kind === 'unknown')) {
+        deferral(`deferred: cannot confirm idle (${pr.reasons.join('; ')})`, { range: rangeOf(head, target), key: `unavailable:${target}`, reasons: pr.reasons.join('; ') })
         return { exitCode: 0, outcome: 'deferred-unavailable' }
       }
       if (!opts.force && reachable && pr.commit === null) {
-        event('deferred: the daemon does not report the commit it runs (it predates the commit field; bootstrap once with --force)', { range: rangeOf(head, target), key: `no-commit:${target}` })
+        deferral('deferred: the daemon does not report the commit it runs (it predates the commit field; bootstrap once with --force)', { range: rangeOf(head, target), key: `no-commit:${target}`, reasons: 'no commit reported' })
         return { exitCode: 0, outcome: 'deferred-unavailable' }
       }
     }
@@ -687,8 +735,15 @@ export async function deploy(opts, deps = defaultDeps()) {
     }
 
     // -- 5. the busy gate, before ANY mutation ------------------------------------
-    if (pr.kind === 'busy' && !opts.force) {
-      event(`deferred${owed ? ` (rollback to ${short(owed)} is owed)` : ''}: busy (${pr.reasons.join('; ')})`, { range: rangeOf(head, desired), key: `busy:${desired}` })
+    // `unknown` (a timeout, a 500, an unreadable body) may well be busy and is
+    // treated exactly like busy; only `down` has nothing to lose. A 404 on an
+    // owed rollback is the one exception: that daemon cannot report a commit at
+    // all, and is handled below by restoring the tree without touching it.
+    const owedNoRoute = owed && pr.noRoute
+    if ((pr.kind === 'busy' || (pr.kind === 'unknown' && !owedNoRoute)) && !opts.force) {
+      const owedNote = owed ? ` (rollback to ${short(owed)} is owed)` : ''
+      deferral(pr.kind === 'busy' ? `deferred${owedNote}: busy (${pr.reasons.join('; ')})` : `deferred${owedNote}: cannot confirm idle (${pr.reasons.join('; ')})`,
+        { range: rangeOf(head, desired), key: `busy:${desired}`, reasons: pr.reasons.join('; ') })
       return { exitCode: 0, outcome: skippedOutcome('deferred-busy') }
     }
 
@@ -704,17 +759,20 @@ export async function deploy(opts, deps = defaultDeps()) {
       return { exitCode: 0, outcome: skippedOutcome('repaired') }
     }
 
-    // An owed rollback to a daemon that reports no commit (it predates the field):
-    // the tree can be restored but a restart could never be certified.
-    if (owed && reachable && pr.commit === null && !opts.force) {
+    // An owed rollback to a daemon that cannot report a commit (it answers 404, or
+    // says commit: null — it predates the field): the tree can be restored, but a
+    // restart could never be certified, so none is attempted. `rollbackTo` is
+    // cleared, which is what stops this from looping: the next tick is not owed,
+    // sees the same daemon, and only defers.
+    if (owed && (owedNoRoute || (reachable && pr.commit === null)) && !opts.force) {
       const fix = convergeTree(desired, { allowReset: true })
       if (!fix.ok) { event(`ROLLBACK-FAILED: ${fix.reason}`, { range: rangeOf(head, desired) }); return { exitCode: 1, outcome: 'rollback-failed' } }
       clearRollbackTo()
-      event(`restored the checkout to ${short(desired)}; the daemon reports no commit so a restart could not be certified and was not attempted`, { range: rangeOf(head, desired) })
+      event(`restored the checkout to ${short(desired)}; the daemon ${owedNoRoute ? 'has no /api/daemon/idle route' : 'reports no commit'}, so a restart could not be certified and was NOT attempted. The running daemon may still be on the bad build: restart it by hand (or run once with --force).`, { range: rangeOf(head, desired) })
       return { exitCode: 0, outcome: 'rollback-completed' }
     }
 
-    return await converge({ desired, kind: owed ? 'rollback' : 'forward', old: oldForRollback, pr, initiator: owed ? 'tick' : 'forward', target })
+    return await converge({ desired, kind: owed ? 'rollback' : 'forward', old: oldForRollback, pr, initiator: owed ? 'tick' : 'forward', target: owed ? null : target })
 
     // ---------------------------------------------------------------------
     // The one path that moves the daemon to `desired`: tree, re-check, restart,
@@ -722,8 +780,9 @@ export async function deploy(opts, deps = defaultDeps()) {
     // rollback on a later tick all run THIS code.
     // ---------------------------------------------------------------------
     async function converge({ desired: want, kind, old, pr: pre, initiator, target: fwdTarget }) {
-      const range = rangeOf(head, want)
       const isForward = kind === 'forward'
+      // A rollback's range reads bad..good, not good..good.
+      const range = isForward ? rangeOf(head, want) : rangeOf(fwdTarget || pre.commit || head, want)
 
       const built = convergeTree(want, { allowReset: !isForward })
       if (!built.ok) {
@@ -752,10 +811,13 @@ export async function deploy(opts, deps = defaultDeps()) {
 
       // The build took time: the daemon may have turned busy.
       let prevPid = pre.pid ?? null
-      const downNow = !isForward && pre.kind === 'unavailable'
-      if (!opts.force && !downNow) {
+      // ALWAYS re-probe after the build. A daemon that was down when the tick
+      // began may have been relaunched by launchd and be busy by now; only a
+      // rollback that finds it STILL down may go ahead without an idle verdict.
+      if (!opts.force) {
         const again = await probe()
-        if (again.kind !== 'idle') {
+        const stillDown = !isForward && again.kind === 'down'
+        if (!stillDown && again.kind !== 'idle') {
           const why = `${again.kind === 'busy' ? 'busy' : 'cannot confirm idle'} (${again.reasons.join('; ')})`
           if (isForward) {
             const back = convergeTree(old, { allowReset: true })
@@ -764,10 +826,10 @@ export async function deploy(opts, deps = defaultDeps()) {
               event(`ROLLBACK-FAILED after the daemon turned ${why}; restoring the checkout failed (${back.reason}). Rollback to ${short(old)} is owed.`, { range })
               return { exitCode: 1, outcome: 'rollback-failed' }
             }
-            event(`deferred after build: ${why}`, { range, key: `busy-after-build:${want}` })
+            deferral(`deferred after build: ${why}`, { range, key: `busy-after-build:${want}`, reasons: why })
             return { exitCode: 0, outcome: 'deferred-busy-after-build' }
           }
-          event(`rollback restart deferred: ${why}; the checkout is already at ${short(want)} and the rollback stays owed`, { range, key: `rollback-busy:${want}` })
+          deferral(`rollback restart deferred: ${why}; the checkout is already at ${short(want)} and the rollback stays owed`, { range, key: `rollback-busy:${want}`, reasons: why })
           return { exitCode: 0, outcome: 'deferred-busy' }
         }
         prevPid = again.pid
@@ -788,11 +850,11 @@ export async function deploy(opts, deps = defaultDeps()) {
             return { exitCode: 1, outcome: 'deployed-tunnel-unverified' }
           }
           recordResult(old, want, 'ok')
-          event('ok', { range })
+          event(`ok${v.tunnelSkipped ? ` (tunnel not checked: ${v.tunnelSkipped})` : ''}`, { range })
           return { exitCode: 0, outcome: 'deployed' }
         }
-        recordResult(pre.commit ?? head, want, 'rolled-back')
-        event(`${initiator === 'forward' ? 'rolled-back' : 'rollback completed'} to ${short(want)}${v.tunnelUnverified ? `; the tunnel is unverified (${v.tunnelUnverified})` : ''}`, { range })
+        recordResult(fwdTarget || pre.commit || head, want, 'rolled-back')
+        event(`${initiator === 'forward' ? 'rolled-back' : 'rollback completed'} to ${short(want)}${v.tunnelUnverified ? `; the tunnel is unverified (${v.tunnelUnverified})` : v.tunnelSkipped ? ` (tunnel not checked: ${v.tunnelSkipped})` : ''}`, { range })
         return { exitCode: initiator === 'forward' ? 1 : 0, outcome: initiator === 'forward' ? 'rolled-back-health' : 'rollback-completed' }
       }
 
@@ -821,7 +883,7 @@ export async function deploy(opts, deps = defaultDeps()) {
       // idle, and if it never is, leave the rollback owed for a later tick.
       const left = await waitForIdleOrGiveUp()
       if (left.busy) {
-        event(`ROLLBACK-OWED to ${short(old)}: the daemon is still busy after ${opts.healthTimeoutS}s (${left.reasons.join('; ')}); the next idle tick completes it`, { range })
+        event(`ROLLBACK-OWED to ${short(old)}: the daemon is still not idle after ${opts.healthTimeoutS}s (${left.reasons.join('; ')}); the next idle tick completes it`, { range })
         return { exitCode: 1, outcome: 'rollback-owed' }
       }
       const rb = await converge({ desired: old, kind: 'rollback', old: null, pr: left.pr, initiator: 'forward', target: fwdTarget })
@@ -835,7 +897,9 @@ export async function deploy(opts, deps = defaultDeps()) {
       let waited = false
       for (;;) {
         const now = await probe()
-        if (now.kind !== 'busy') {
+        // Only an IDLE answer, or nothing listening at all, lets the rollback
+        // restart. busy and unknown (a timeout, a 500, ...) both wait.
+        if (now.kind === 'idle' || now.kind === 'down') {
           if (waited) event(`rollback waited ${Math.round((d.now() - t0) / 1000)}s for the daemon to go idle`)
           return { busy: false, pr: now }
         }
@@ -852,6 +916,12 @@ export async function deploy(opts, deps = defaultDeps()) {
     event(`failed: ${e?.message || e}`, { key: `error:${e?.message}` })
     return { exitCode: 1, outcome: 'failed' }
   } finally {
+    // A tick that did not defer ends the deferral streak (S8).
+    if (held && !deferredThisTick && (state.deferredSince || state.deferredLoggedAt)) {
+      delete state.deferredSince
+      delete state.deferredLoggedAt
+      try { persist({ mandatory: false }) } catch { /* best effort */ }
+    }
     if (lock?.ok) { try { await lock.release() } catch { /* process exit frees it */ } }
   }
 }
