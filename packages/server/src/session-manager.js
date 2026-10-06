@@ -48,6 +48,7 @@ import {
 } from './per-session-settings.js'
 import { AgentConnectionRegistry, createLegacyAgentConnection } from './agent-connections.js'
 import { forgetSurveyKey } from './handlers/survey-throttle.js'
+import { busyStateOf } from './session-busy-state.js'
 
 const log = createLogger('session-manager')
 /**
@@ -2234,7 +2235,7 @@ export class SessionManager extends EventEmitter {
 
   /**
    * List all sessions with summary info.
-   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
+   * @returns {Array<{ sessionId, name, cwd, model, permissionMode, isBusy, busyReason, backgroundShellCount, createdAt, lastActivityAt, stdinForwardingDisabled, stdinDroppedBytes, stdinDroppedCount }>}
    */
   listSessions() {
     const list = []
@@ -2287,6 +2288,12 @@ export class SessionManager extends EventEmitter {
         model: entry.session.model || entry.session.bootedModel || null,
         permissionMode: entry.session.permissionMode || 'approve',
         isBusy: entry.session.isRunning,
+        // #8302: WHY it is busy, beside the unchanged boolean. `isBusy` merges
+        // "mid-turn" with "idle but a background shell is still tracked"; a
+        // client needs to tell them apart to say "waiting on N shells" instead
+        // of "Working". `backgroundShellCount` is the tracker's size (quiesced
+        // shells included), so it can be > 0 while pendingBackgroundShells is [].
+        ...busyStateOf(entry.session),
         createdAt: entry.createdAt,
         lastActivityAt: this._sessionLastActivityAt.get(sessionId) || entry.createdAt,
         conversationId: entry.session.resumeSessionId || null,

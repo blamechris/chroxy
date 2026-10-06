@@ -79,6 +79,11 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
     model: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     permissionMode: z.ZodOptional<z.ZodString>;
     isBusy: z.ZodOptional<z.ZodBoolean>;
+    busyReason: z.ZodOptional<z.ZodNullable<z.ZodEnum<{
+        turn: "turn";
+        "background-shells": "background-shells";
+    }>>>;
+    backgroundShellCount: z.ZodOptional<z.ZodNumber>;
     createdAt: z.ZodOptional<z.ZodNumber>;
     lastActivityAt: z.ZodOptional<z.ZodNumber>;
     conversationId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
@@ -205,6 +210,11 @@ export declare const ServerSessionListSchema: z.ZodObject<{
         model: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         permissionMode: z.ZodOptional<z.ZodString>;
         isBusy: z.ZodOptional<z.ZodBoolean>;
+        busyReason: z.ZodOptional<z.ZodNullable<z.ZodEnum<{
+            turn: "turn";
+            "background-shells": "background-shells";
+        }>>>;
+        backgroundShellCount: z.ZodOptional<z.ZodNumber>;
         createdAt: z.ZodOptional<z.ZodNumber>;
         lastActivityAt: z.ZodOptional<z.ZodNumber>;
         conversationId: z.ZodOptional<z.ZodNullable<z.ZodString>>;

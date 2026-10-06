@@ -1104,6 +1104,39 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(omitted.success, 'per-session billingClass is optional')
   })
 
+  // #8302: `busyReason` / `backgroundShellCount` ride beside the unchanged `isBusy`.
+  describe('busyReason + backgroundShellCount (#8302)', () => {
+    it('session_list entry accepts every reason, including the positive null, and omits cleanly', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      for (const busyReason of ['turn', 'background-shells', null]) {
+        const r = ServerSessionListEntrySchema.safeParse({ sessionId: 's1', name: 'A', isBusy: busyReason !== null, busyReason, backgroundShellCount: 2 })
+        assert.ok(r.success, `busyReason ${String(busyReason)} should parse`)
+        assert.equal(r.data.busyReason, busyReason, 'the field survives parsing (not stripped)')
+        assert.equal(r.data.backgroundShellCount, 2)
+      }
+      const old = ServerSessionListEntrySchema.safeParse({ sessionId: 's1', name: 'A', isBusy: true })
+      assert.ok(old.success, 'a pre-#8302 server omits both fields')
+      assert.equal(old.data.busyReason, undefined, 'absent stays absent, never defaulted to a reason')
+    })
+
+    it('session_list entry rejects an undeclared reason or a malformed count', async () => {
+      const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+      assert.equal(ServerSessionListEntrySchema.safeParse({ sessionId: 's1', name: 'A', busyReason: 'banana' }).success, false)
+      for (const bad of [-1, 1.5, '2']) {
+        assert.equal(ServerSessionListEntrySchema.safeParse({ sessionId: 's1', name: 'A', backgroundShellCount: bad }).success, false, String(bad))
+      }
+    })
+
+    it('background_work_changed carries both, and an old-shape message still parses', async () => {
+      const { ServerBackgroundWorkChangedSchema } = await import('../src/schemas/server.ts')
+      const withReason = ServerBackgroundWorkChangedSchema.safeParse({ type: 'background_work_changed', sessionId: 's1', pending: [], busyReason: 'background-shells', backgroundShellCount: 1 })
+      assert.ok(withReason.success)
+      assert.equal(withReason.data.busyReason, 'background-shells')
+      assert.ok(ServerBackgroundWorkChangedSchema.safeParse({ type: 'background_work_changed', sessionId: 's1', pending: [] }).success)
+      assert.equal(ServerBackgroundWorkChangedSchema.safeParse({ type: 'background_work_changed', sessionId: 's1', pending: [], busyReason: 'banana' }).success, false)
+    })
+  })
+
   it('validates ServerSkillsListSchema with description', async () => {
     const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
     const result = ServerSkillsListSchema.safeParse({

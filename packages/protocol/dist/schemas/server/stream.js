@@ -920,6 +920,13 @@ export const ServerBackgroundWorkChangedSchema = z.object({
     type: z.literal('background_work_changed'),
     sessionId: z.string(),
     pending: z.array(ServerPendingBackgroundShellSchema),
+    // #8302: why the session is busy right now, and the tracker's shell count
+    // (advisory-quiesced shells included — `pending` hides those). Same meaning
+    // and invariants as the `session_list` entry fields of the same name.
+    // Optional: pre-#8302 servers omit them, and the daemon omits them (rather
+    // than sending `null`) when it cannot resolve the session — `null` is "idle".
+    busyReason: z.enum(['turn', 'background-shells']).nullable().optional(),
+    backgroundShellCount: z.number().int().nonnegative().optional(),
 });
 // #6277 — host-local user-shell approval. Sent to the REQUESTING client when a
 // user-shell spawn is HELD pending the host operator's out-of-band approval

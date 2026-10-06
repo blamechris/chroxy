@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import { toShortModelId } from './models.js'
 import { createLogger } from './logger.js'
+import { busyStateOf } from './session-busy-state.js'
 import { buildPermissionRequestMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
 const log = createLogger('event-normalizer')
@@ -516,16 +517,27 @@ Object.assign(EVENT_MAP, {
   // path. Also pushes a session_list side effect so the SessionInfo
   // entry's `pendingBackgroundShells` slot refreshes for clients that
   // render off the list rather than subscribing to the event directly.
-  background_work_changed: (data, ctx) => ({
-    messages: [{
-      msg: {
-        type: 'background_work_changed',
-        sessionId: ctx.sessionId,
-        pending: Array.isArray(data?.pending) ? data.pending : [],
-      },
-    }],
-    sideEffects: [{ type: 'session_list' }],
-  }),
+  //
+  // #8302: also carries WHY the session is busy right now (`busyReason`) and the
+  // tracker's shell count, read live off the session at emit time. The `pending`
+  // list alone cannot say it: it hides advisory-quiesced shells that still hold
+  // the session busy, so `pending: []` next to a busy session was ambiguous. The
+  // fields are OMITTED (not null) when the session cannot be resolved — null
+  // means "idle", and "unknown" must not read as that.
+  background_work_changed: (data, ctx) => {
+    const session = ctx?.getSessionEntry?.()?.session
+    return {
+      messages: [{
+        msg: {
+          type: 'background_work_changed',
+          sessionId: ctx.sessionId,
+          pending: Array.isArray(data?.pending) ? data.pending : [],
+          ...(session ? busyStateOf(session) : {}),
+        },
+      }],
+      sideEffects: [{ type: 'session_list' }],
+    }
+  },
 
   // #5160: Control Room activity tree. The ActivityRegistry (owned by
   // BaseSession) maps the existing in-flight signals (tool_start /

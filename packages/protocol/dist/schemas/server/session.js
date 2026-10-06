@@ -162,6 +162,20 @@ export const ServerSessionListEntrySchema = z.object({
     model: z.string().nullable().optional(),
     permissionMode: z.string().optional(),
     isBusy: z.boolean().optional(),
+    // #8302: WHY the session is busy, beside the unchanged `isBusy`. `isBusy`
+    // merges "the model is mid-turn" with "the model is idle but a background
+    // shell is still tracked"; `busyReason` separates them so a client can say
+    // "waiting on N background shell(s)" instead of "Working". `null` <=> not
+    // busy; `'background-shells'` implies no turn is active and
+    // `backgroundShellCount > 0`. Optional because pre-#8302 servers omit it —
+    // consumers treat `undefined` as "unknown, fall back to isBusy". Nullable
+    // (not just optional) because `null` is a real, positive "idle".
+    busyReason: z.enum(['turn', 'background-shells']).nullable().optional(),
+    // #8302: the background-shell tracker's size. NOT
+    // `pendingBackgroundShells.length`: the advisory mtime sweep hides a quiesced
+    // shell from that list while it still holds the session busy, which is the
+    // exact case where this is > 0 and the list is `[]`.
+    backgroundShellCount: z.number().int().nonnegative().optional(),
     createdAt: z.number().optional(),
     lastActivityAt: z.number().optional(),
     conversationId: z.string().nullable().optional(),

@@ -15,6 +15,7 @@ import {
 } from './skills-loader.js'
 import { SkillsManager } from './skills-manager.js'
 import { BackgroundShellTracker } from './background-shell-tracker.js'
+import { deriveBusyReason } from './session-busy-state.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { createLogger } from './logger.js'
 import { ActivityRegistry } from './activity-registry.js'
@@ -883,6 +884,36 @@ export class BaseSession extends EventEmitter {
   get isRunning() {
     if (this._isBusy) return true
     return this._backgroundShellTracker.size > 0
+  }
+
+  /**
+   * #8302: the model is mid-turn. The first half of `isRunning`, exposed alone
+   * so a publisher can tell "working" from "held busy by a background shell".
+   * @returns {boolean}
+   */
+  get turnActive() {
+    return !!this._isBusy
+  }
+
+  /**
+   * #8302: how many background shells the tracker holds. The tracker's `size`,
+   * which counts shells the advisory mtime sweep has hidden from
+   * `getPendingBackgroundShells()` (they still hold `isRunning` true).
+   * @returns {number}
+   */
+  get backgroundShellCount() {
+    return this._backgroundShellTracker.size
+  }
+
+  /**
+   * #8302: why `isRunning` is true — `'turn'`, `'background-shells'` (idle model,
+   * tracked shells only), or `null` when the session is not busy. Derived from
+   * `isRunning` itself so a subclass that overrides it (the user shell's PTY
+   * liveness) keeps `busyReason === null <=> !isRunning`.
+   * @returns {'turn'|'background-shells'|null}
+   */
+  get busyReason() {
+    return deriveBusyReason(this.isRunning, this.turnActive, this.backgroundShellCount)
   }
 
   /**
