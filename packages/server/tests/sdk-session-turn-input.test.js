@@ -102,6 +102,8 @@ function fakeQuery(script, state) {
     stopTask: async (taskId) => {
       state.stopCalls = [...(state.stopCalls || []), { taskId, closedBefore: closed }]
       if (state.stopTaskFails) throw new Error('control channel gone')
+      if (typeof state.stopDelayMs === 'number') await new Promise((r) => setTimeout(r, state.stopDelayMs))
+      if (state.stopTaskHangs) await new Promise(() => {})
     },
     close: () => {
       state.closeCalls = (state.closeCalls || 0) + 1
@@ -348,6 +350,28 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(session._isBusy, false)
     })
 
+    it('finishes a turn once when the prompt\'s own result lands while the expiry finish is still stopping work', async () => {
+      SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
+      state.stopDelayMs = 120
+      const events = capture(session)
+      wire(session, [
+        init(),
+        { type: 'system', subtype: 'task_started', task_id: 't-slow', tool_use_id: 'tu-slow', task_type: 'local_agent', is_backgrounded: true, description: 'slow to stop' },
+        orphanNotice,
+        // Past the window: the timer's finish is now awaiting stopTask.
+        { __delayMs: 70 },
+        assistantText('late output'),
+        promptResult(2),
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('/late')
+      const results = events.filter((e) => e.name === 'result')
+      assert.equal(results.length, 1, 'one turn end, whichever caller got there first')
+      assert.equal(events.filter((e) => e.name === 'error' && e.code === 'background_task_ended_with_turn').length, 1)
+      assert.equal(state.closeCalls, 1)
+      assert.equal(session._isBusy, false)
+    })
+
     it('judges a further zero-turn result afresh instead of emitting the held one twice', async () => {
       SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
       const events = capture(session)
@@ -455,6 +479,44 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(loss[0].stopped, false)
       assert.match(loss[0].message, /could not be stopped; it may still be running/)
       assert.equal(state.closeCalls, 1, 'the query is still closed')
+    })
+
+    // A node:test timeout, so an UNBOUNDED stop fails this test instead of
+    // hanging the runner (the hung fake stopTask never resolves).
+    it('reports a task the CLI never answered the stop for, within the bounded wait', { timeout: 3000 }, async () => {
+      const defaultStop = SdkSession.STOP_TASK_TIMEOUT_MS
+      SdkSession.STOP_TASK_TIMEOUT_MS = 40
+      try {
+        const events = capture(session)
+        state.stopTaskHangs = true
+        wire(session, launchScript(), state)
+        const t0 = Date.now()
+        await session.sendMessage('start a background count')
+        assert.ok(Date.now() - t0 < 2000, 'the hung stop did not hold the turn past the bound')
+        const loss = events.filter((e) => e.name === 'error')
+        assert.equal(loss.length, 1)
+        assert.equal(loss[0].stopped, false)
+        assert.equal(state.closeCalls, 1)
+      } finally {
+        SdkSession.STOP_TASK_TIMEOUT_MS = defaultStop
+      }
+    })
+
+    it('counts a local_bash task as live when the tool_result announced its shell, even without the backgrounded flag', async () => {
+      const events = capture(session)
+      wire(session, [
+        init(),
+        toolUseStart('tu-sh', 'Bash'),
+        assistantToolUse('tu-sh', 'Bash', { command: 'sleep 30', run_in_background: true }),
+        { type: 'system', subtype: 'task_started', task_id: 'sh-2', tool_use_id: 'tu-sh', task_type: 'local_bash', description: 'sleep 30' },
+        toolResult('tu-sh', 'Command running in background with ID: sh-2'),
+        promptResult(2),
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('bg without the flag')
+      assert.deepEqual(events.filter((e) => e.name === 'error').map((e) => e.taskId), ['sh-2'])
+      assert.equal(state.closeCalls, 1)
+      assert.equal(session._pendingBackgroundShells.has('sh-2'), false)
     })
 
     it('is not reported when the task finished before the result', async () => {

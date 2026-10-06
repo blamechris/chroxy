@@ -1238,26 +1238,39 @@ export class SdkSession extends BaseSession {
       }
 
       // #8300: the prompt's own result ends the turn. A closure rather than a
-      // `case` body so the held-notice fallback after the loop can run the
-      // identical turn end. `heldPath` says the loop already ended (the CLI
-      // exited after a genuine zero-turn result), so there is no live process
-      // to ask for a context-usage snapshot.
+      // `case` body so the held-notice timer and the post-loop fallback can
+      // run the identical turn end. Idempotent: whichever of the three callers
+      // gets here first finishes the turn, the others return. `heldPath` says
+      // this is a held zero-turn result taken as the prompt's own (the CLI is
+      // idle or already gone), so no context-usage snapshot is requested.
+      let turnFinished = false
       const finishTurn = async (msg, { heldPath = false } = {}) => {
+        if (turnFinished) return
+        turnFinished = true
         // #8300: background work the CLI started this turn and has not
         // closed. The turn's process cannot outlive the turn, and the SDK
         // provider cannot service a task past the result (its tool calls
         // would be cancelled and its notification turn left unserviced), so
         // the work is stopped with the turn and each loss is said out loud —
         // never a silent cancellation.
+        //
+        // Stops go to THIS turn's query (`turnQuery`), never `this._query`,
+        // which a follow-up turn may own by now. Asked in parallel and
+        // bounded, so N hung tasks cost one STOP_TASK_TIMEOUT_MS, not N.
         const liveWork = this._liveBackgroundWork()
-        for (const task of liveWork) {
+        const stopResults = await Promise.all(liveWork.map((task) => {
           const kind = task.taskType === 'local_bash' ? 'shell' : 'subagent'
           ;(this._log || log).warn(`Background ${kind} "${task.description}" (${task.taskId}) was still running at the turn's result; stopping it with the turn`)
           // Ask the CLI to stop the task while the control channel is still
           // open: closing the query alone ends the CLI, not a shell it spawned
           // (verified live: the shell outlived `close()`), so the report below
           // says which of the two happened.
-          const stopped = await this._stopLiveTask(task.taskId)
+          return this._stopLiveTask(turnQuery, task.taskId).then((stopped) => ({ task, kind, stopped }))
+        }))
+        // destroy() may have landed during the stops; it owns the UX from here
+        // and has removed every listener.
+        if (this._destroying) return
+        for (const { task, kind, stopped } of stopResults) {
           this.emit('error', {
             code: 'background_task_ended_with_turn',
             message: stopped
@@ -1400,10 +1413,10 @@ export class SdkSession extends BaseSession {
         // the abort that follows is expected (see `closedAfterResult`).
         streamState.hasStreamStarted = false
         if (input) input.end()
-        if (liveWork.length && this._query) {
+        if (liveWork.length && turnQuery) {
           closedAfterResult = true
           try {
-            if (typeof this._query.close === 'function') this._query.close()
+            if (typeof turnQuery.close === 'function') turnQuery.close()
           } catch (closeErr) {
             ;(this._log || log).warn(`Query close after result failed: ${closeErr?.message || closeErr}`)
           }
@@ -1862,6 +1875,12 @@ export class SdkSession extends BaseSession {
         await finishTurn(held, { heldPath: true })
       }
     } catch (err) {
+      // #8300: a timer-driven finish may be mid-flight (stopping live work);
+      // let it complete so its result precedes any error surfaced below and
+      // nothing it emits lands after `_clearMessageState`.
+      if (timerFinish) {
+        try { await timerFinish } catch { /* logged where it was started */ }
+      }
       if (streamState.hasStreamStarted) {
         this.emit('stream_end', { messageId })
       }
@@ -2058,7 +2077,15 @@ export class SdkSession extends BaseSession {
    * @returns {Array<{taskId:string,toolUseId:string|null,taskType:string,description:string,background:boolean}>}
    */
   _liveBackgroundWork() {
-    return [...this._liveBackgroundTasks.values()].filter((task) => task.background === true)
+    // A `local_bash` task whose shell the tool_result announced ("Command
+    // running in background with ID: <id>", tracked by
+    // `_recordBackgroundShellsFromToolResults`) is background work whatever
+    // `task_started` said: a foreground Bash never produces that text. This
+    // keeps shell detection working if a CLI build stops sending the
+    // undocumented `is_backgrounded` field on `task_started`.
+    return [...this._liveBackgroundTasks.values()].filter((task) =>
+      task.background === true ||
+      (task.taskType === 'local_bash' && this._pendingBackgroundShells.has(task.taskId)))
   }
 
   // #8300: bound on `Query.stopTask()` at the turn's result. The CLI answers
@@ -2072,11 +2099,11 @@ export class SdkSession extends BaseSession {
    * the stop, false when the query has no `stopTask`, it threw, or it did not
    * answer within STOP_TASK_TIMEOUT_MS. Never throws.
    *
+   * @param {object|null} q - the turn's own query handle
    * @param {string} taskId
    * @returns {Promise<boolean>}
    */
-  async _stopLiveTask(taskId) {
-    const q = this._query
+  async _stopLiveTask(q, taskId) {
     if (!q || typeof q.stopTask !== 'function') return false
     let timer = null
     try {
