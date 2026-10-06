@@ -104,16 +104,24 @@ function fakeQuery(script, state) {
   const query = {
     [Symbol.asyncIterator]() { return gen },
     interrupt: async () => { state.interrupts = (state.interrupts || 0) + 1 },
-    stopTask: async (taskId) => {
+    stopTask: (taskId) => new Promise((resolve, reject) => {
       state.stopCalls = [...(state.stopCalls || []), { taskId, closedBefore: closed }]
-      if (state.stopTaskFails) throw new Error('control channel gone')
-      if (typeof state.stopDelayMs === 'number') await new Promise((r) => setTimeout(r, state.stopDelayMs))
-      if (state.stopTaskHangs) await new Promise(() => {})
-    },
+      if (state.stopTaskFails) return reject(new Error('control channel gone'))
+      if (state.stopTaskHangs) return
+      // Like the real SDK: a close while the control request is pending
+      // rejects it ("Query closed before response received").
+      state.pendingStops = [...(state.pendingStops || []), reject]
+      setTimeout(() => {
+        state.pendingStops = (state.pendingStops || []).filter((r) => r !== reject)
+        resolve()
+      }, typeof state.stopDelayMs === 'number' ? state.stopDelayMs : 0)
+    }),
     close: () => {
       state.closeCalls = (state.closeCalls || 0) + 1
       if (state.closeIneffective) return
       closed = true
+      for (const reject of state.pendingStops || []) reject(new Error('Query closed before response received'))
+      state.pendingStops = []
       if (rejectParked) rejectParked(state.closeEndsQuietly ? { __eof: true } : abortError())
     },
   }
@@ -377,6 +385,27 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(session._isBusy, false)
     })
 
+    it('does not close the query on a message that lands while the stops are still pending', async () => {
+      SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
+      state.stopDelayMs = 100
+      const events = capture(session)
+      wire(session, [
+        init(),
+        { type: 'system', subtype: 'task_started', task_id: 't-s', tool_use_id: 'tu-s', task_type: 'local_bash', is_backgrounded: true, description: 'sleep' },
+        orphanNotice,
+        // The CLI answers the stop with bookkeeping BEFORE the control response.
+        { __delayMs: 60 },
+        { type: 'system', subtype: 'task_updated', task_id: 't-s', patch: { status: 'killed' } },
+        { type: 'system', subtype: 'task_notification', task_id: 't-s', status: 'stopped', output_file: '/tmp/o', summary: 'stopped' },
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('/x')
+      const loss = events.find((e) => e.name === 'error' && e.code === 'background_task_ended_with_turn')
+      assert.ok(loss)
+      assert.equal(loss.stopped, true, 'the stop was acknowledged before the close, so it is reported as stopped')
+      assert.equal(state.closeCalls, 1)
+    })
+
     it('judges a further zero-turn result afresh instead of emitting the held one twice', async () => {
       SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
       const events = capture(session)
@@ -502,6 +531,23 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(events.filter((e) => e.name === 'ready').length, 1, 'the late init is not relayed into a finished turn')
       assert.equal(events.filter((e) => e.name === 'error').length, 0)
       assert.notEqual(state.parkTimedOut, true)
+    })
+
+    it('drops routine post-result bookkeeping quietly and closes only on another turn\'s traffic', async () => {
+      const events = capture(session)
+      wire(session, [
+        init(),
+        assistantText('done'),
+        promptResult(1),
+        { type: 'system', subtype: 'status', status: null },
+        { type: 'system', subtype: 'hook_response' },
+        () => { assert.equal(state.closeCalls, undefined, 'bookkeeping after the result is not a lingering process') },
+        init(),
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('hi')
+      assert.equal(state.closeCalls, 1, 'a second init after the result is')
+      assert.equal(events.filter((e) => e.name === 'result').length, 1)
     })
 
     it('destroy() during the stops still ends the process, without emitting on the dead session', async () => {
@@ -825,6 +871,46 @@ describe('SdkSession turn input (#8300)', () => {
       assert.equal(state.closeCalls, 1, 'A closed its own query')
       assert.equal(bState.closeCalls, undefined, 'and never B\'s')
       assert.ok(events.some((e) => e.name === 'error' && e.code === 'background_task_ended_with_turn'))
+    })
+
+    it('leaves the successor\'s task roster and in-flight tools alone, and stays superseded after the successor ends', async () => {
+      SdkSession.ORPHAN_NOTICE_CONFIRM_MS = 30
+      state.stopDelayMs = 80
+      const events = capture(session)
+      const bState = {}
+      let rosterDuringB = null
+      let bPromise = null
+      wire(session, [
+        init(),
+        { type: 'system', subtype: 'task_started', task_id: 't-x', tool_use_id: 'tu-x', task_type: 'local_agent', is_backgrounded: true, description: 'x' },
+        orphanNotice,
+        { __delayMs: 50 },
+        () => {
+          session._handleHardTimeout(session._currentMessageId, false)
+          session._callQuery = (bArgs) => {
+            consumeInput(bArgs.prompt, bState)
+            return fakeQuery([
+              init('sdk-2'),
+              toolUseStart('tu-B', 'Read'),
+              { type: 'system', subtype: 'task_started', task_id: 't-B', tool_use_id: 'tu-B2', task_type: 'local_agent', is_backgrounded: true, description: 'B work' },
+              { __delayMs: 120 },
+              () => { rosterDuringB = [...session._liveBackgroundTasks.keys()] },
+              toolResult('tu-B', 'ok'),
+              { type: 'system', subtype: 'task_notification', task_id: 't-B', status: 'completed', output_file: '/tmp/o', summary: 'done' },
+              promptResult(2),
+            ], bState)
+          }
+          bPromise = session.sendMessage('B')
+        },
+        { __parkUntilClosed: true },
+      ], state)
+      await session.sendMessage('A')
+      await bPromise
+      assert.deepEqual(rosterDuringB, ['t-B'], 'A\'s finish removed only its own task')
+      const synthetic = events.filter((e) => e.name === 'tool_result' && e.toolUseId === 'tu-B' && e.isError === true)
+      assert.equal(synthetic.length, 0, 'A\'s result did not sweep B\'s running tool as failed')
+      assert.equal(events.filter((e) => e.name === 'result').length, 2, 'both turns reported, once each')
+      assert.equal(session._isBusy, false)
     })
   })
 

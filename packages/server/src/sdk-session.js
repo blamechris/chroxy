@@ -881,6 +881,11 @@ export class SdkSession extends BaseSession {
     }
 
     this._isBusy = true
+    // #8300: a per-session monotonic turn token. `supersededByNewerTurn`
+    // compares against it: unlike a handle comparison it never reverts once
+    // a follow-up turn has started and ended.
+    this._turnSeq = (this._turnSeq || 0) + 1
+    const turnSeq = this._turnSeq
     this._messageCounter++
     // `msg-{bootPrefix}-{counter}` — see BaseSession constructor for why
     // the boot-unique prefix is needed (#3700). Format change does not
@@ -1124,7 +1129,7 @@ export class SdkSession extends BaseSession {
     // stream stall cleared busy). This turn then only reports and ends its
     // own process; it must not clear busy state or flush the queue, which
     // belong to the newer turn.
-    const supersededByNewerTurn = () => this._query !== null && this._query !== turnQuery
+    const supersededByNewerTurn = () => this._turnSeq !== turnSeq
 
     try {
       // #7986 / #8030: point the SDK at the installed `claude` binary on every
@@ -1256,6 +1261,11 @@ export class SdkSession extends BaseSession {
       // keep it alive past the result, when a finished turn keeps receiving
       // messages (the process lingered), and when destroy() lands mid-stop.
       let queryClosed = false
+      // #8300: set once finishTurn's stop requests have been answered (or
+      // timed out). A message that lands during the stops must not close the
+      // query first: the real SDK rejects pending control requests on close,
+      // and a stop the CLI had already carried out would be reported as failed.
+      let stopsDone = false
       const closeTurnQuery = () => {
         if (queryClosed || !turnQuery) return
         queryClosed = true
@@ -1280,6 +1290,9 @@ export class SdkSession extends BaseSession {
         // which a follow-up turn may own by now. Asked in parallel and
         // bounded, so N hung tasks cost one STOP_TASK_TIMEOUT_MS, not N.
         const liveWork = this._liveBackgroundWork()
+        // Only this turn's own tasks leave the roster: a follow-up turn that
+        // took the session during the stops owns whatever else is in it.
+        for (const task of liveWork) this._liveBackgroundTasks.delete(task.taskId)
         const stopResults = await Promise.all(liveWork.map((task) => {
           const kind = task.taskType === 'local_bash' ? 'shell' : 'subagent'
           ;(this._log || log).warn(`Background ${kind} "${task.description}" (${task.taskId}) was still running at the turn's result; stopping it with the turn`)
@@ -1293,6 +1306,7 @@ export class SdkSession extends BaseSession {
         // and has removed every listener, so nothing is emitted — but the
         // process is still ended, or a live task would keep it (and this
         // parked loop) alive for good.
+        stopsDone = true
         if (this._destroying) {
           if (input) input.end()
           closeTurnQuery()
@@ -1321,7 +1335,6 @@ export class SdkSession extends BaseSession {
           // work") for a shell nothing will ever read (#8302's shape).
           if (task.taskType === 'local_bash') this.clearBackgroundShell(task.taskId)
         }
-        this._liveBackgroundTasks.clear()
 
         if (streamState.hasStreamStarted) {
           this.emit('stream_end', { messageId })
@@ -1378,14 +1391,16 @@ export class SdkSession extends BaseSession {
         // never be read as occupancy — see context-window.ts (#6769).
         // Null on timeout/old-CLI/error → field omitted → clients keep
         // their previous snapshot (or the honest dash state).
-        const contextUsageSnapshot = heldPath ? null : await this._getContextUsageSnapshot()
+        // The snapshot asks the session's current query, which a superseding
+        // turn would own; a superseded turn reports without one.
+        const contextUsageSnapshot = (heldPath || superseded) ? null : await this._getContextUsageSnapshot()
 
         // #8153: emit plan_ready before result — mirrors CliSession's
         // "the turn that calls ExitPlanMode ends with a normal result
         // event" ordering. `_planAllowedPrompts` is only non-null once
         // ExitPlanMode's tool_use block has been parsed (see
         // _handleToolUseBlock's 'exit_plan' branch above).
-        if (this._inPlanMode && this._planAllowedPrompts !== null) {
+        if (!superseded && this._inPlanMode && this._planAllowedPrompts !== null) {
           this.emit('plan_ready', { allowedPrompts: this._planAllowedPrompts })
           this._inPlanMode = false
           this._planAllowedPrompts = null
@@ -1396,7 +1411,9 @@ export class SdkSession extends BaseSession {
         // turn-end burst. _clearMessageState (called next) would also
         // clear the in-flight map but without broadcasting synthetic
         // tool_results to the dashboard.
-        this._emitResult({
+        // A superseded turn emits its result directly: `_emitResult` would
+        // sweep the shared in-flight tool_starts, which are the successor's.
+        ;(superseded ? (payload) => this.emit('result', payload) : (payload, reason) => this._emitResult(payload, reason))({
           sessionId: msg.session_id || this._sdkSessionId,
           cost: msg.total_cost_usd,
           duration: msg.duration_ms,
@@ -1455,14 +1472,22 @@ export class SdkSession extends BaseSession {
         // kept it alive). It is not relayed into a turn that is over — the
         // process is ended instead, and the first such message is logged.
         if (turnFinished) {
-          if (!queryClosed) {
+          // Only another turn's traffic means the process lingered: an init,
+          // assistant output, stream events or tool results. Bookkeeping
+          // that routinely follows a result (task_updated/task_notification
+          // after a stop, status, hook events) is dropped quietly.
+          const lingering = msg?.type === 'assistant' || msg?.type === 'stream_event' || msg?.type === 'user' ||
+            (msg?.type === 'system' && msg?.subtype === 'init')
+          if (lingering && stopsDone && !queryClosed) {
             ;(this._log || log).warn(`SDK message after the turn's result (${msg?.type}/${msg?.subtype || ''}); ending the lingering process`)
             closeTurnQuery()
           }
           continue
         }
         receivedAnyMessage = true // #8030: gates the spawn-failure backstop below
-        resetResultTimeout() // Any SDK event = activity, reset inactivity timer
+        // A superseded turn's traffic must not re-arm the session's
+        // inactivity timers against the successor.
+        if (!supersededByNewerTurn()) resetResultTimeout() // Any SDK event = activity, reset inactivity timer
 
         switch (msg.type) {
           case 'system': {
@@ -1911,6 +1936,13 @@ export class SdkSession extends BaseSession {
         await finishTurn(held, { heldPath: true })
       }
     } catch (err) {
+      // #8300: a held zero-turn result dies with the loop — its timer must
+      // not finish a turn that is being reported as failed below.
+      if (noticeTimer) {
+        clearTimeout(noticeTimer)
+        noticeTimer = null
+      }
+      heldNoticeResult = null
       // #8300: a timer-driven finish may be mid-flight (stopping live work);
       // let it complete so its result precedes any error surfaced below and
       // nothing it emits lands after `_clearMessageState`.
@@ -1923,7 +1955,8 @@ export class SdkSession extends BaseSession {
       // #4881: capture-and-clear before any branch so the flag never leaks
       // past this turn even when _destroying short-circuits the emits below.
       // Mirrors CliSession._handleChildClose (#4602).
-      const wasIntentionalStop = this._consumeIntentionalStop()
+      // A superseded turn leaves the Stop flag to the turn it belongs to.
+      const wasIntentionalStop = supersededByNewerTurn() ? false : this._consumeIntentionalStop()
       if (!this._destroying) {
         if (closedAfterResult && isQueryCloseError(err)) {
           // #8300: finishTurn already emitted this turn's result and closed
@@ -2030,8 +2063,9 @@ export class SdkSession extends BaseSession {
       // for-await loop exits normally, skipping the catch. Without this
       // clear, the flag would stay armed until the next turn's catch and
       // mis-trigger a spurious `stopped` emit there. Idempotent — the
-      // catch path already cleared it on the throw path.
-      this._clearIntentionalStop()
+      // catch path already cleared it on the throw path. Not for a
+      // superseded turn: the flag is then the successor's.
+      if (!supersededByNewerTurn()) this._clearIntentionalStop()
       // Dequeue any follow-up messages that arrived while busy (#5936: the
       // shared `_outgoingQueue`; flush one item via dequeueNextOutgoing, whose
       // re-dispatched sendMessage re-sets _isBusy so the next `result` drains
@@ -3088,8 +3122,11 @@ export class SdkSession extends BaseSession {
       const q = this._query
       this._query = null
       q.interrupt().catch((err) => {
+        // The close below rejects the pending interrupt ("Query closed
+        // before response received"); that is the expected outcome here.
+        const expected = /closed before/i.test(err?.message || '')
         // #4828: session-scoped when init has fired.
-        ;(this._log || log).warn(`Failed to interrupt active query: ${err.message} (non-critical, session destroying)`)
+        ;(this._log || log)[expected ? 'debug' : 'warn'](`Failed to interrupt active query: ${err.message} (non-critical, session destroying)`)
       })
       try {
         if (typeof q.close === 'function') q.close()
