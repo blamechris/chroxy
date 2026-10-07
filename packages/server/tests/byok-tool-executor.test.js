@@ -2400,31 +2400,64 @@ describe('executeBuiltinTool', () => {
           assert.deepEqual(globWalkSlotStats(), { active: 0, queued: 0 }, 'the limiter must be idle after each test')
         })
 
+        // A broken limiter (e.g. a release that stops pumping the queue) must
+        // fail these tests with a message, not wedge the run with no TAP output
+        // (the #7340 hang class). Every await on a grant is bounded by a timer.
+        const BOUND_MS = 2000
+        const withinBound = (promise, what) => {
+          let timer
+          const guard = new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(
+              `${what} did not settle within ${BOUND_MS}ms: the Glob walk limiter is not handing a released slot to the queue`)), BOUND_MS)
+          })
+          return Promise.race([promise, guard]).finally(() => clearTimeout(timer))
+        }
+        const waitUntil = async (predicate, what) => {
+          const deadline = Date.now() + BOUND_MS
+          while (!predicate()) {
+            if (Date.now() > deadline) {
+              throw new Error(`timed out after ${BOUND_MS}ms waiting for ${what}`)
+            }
+            await new Promise((r) => setTimeout(r, 5))
+          }
+        }
+
         it('acquireGlobWalkSlot grants up to the limit, queues FIFO past it, and cancel dequeues without granting', async () => {
           const a = acquireGlobWalkSlot(2)
           const b = acquireGlobWalkSlot(2)
           const c = acquireGlobWalkSlot(2)
           const d = acquireGlobWalkSlot(2)
-          const relA = await a.granted
-          const relB = await b.granted
-          assert.equal(typeof relA, 'function')
-          assert.equal(typeof relB, 'function')
-          assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 2 })
+          const releases = []
+          try {
+            const relA = await withinBound(a.granted, 'the first grant')
+            releases.push(relA)
+            const relB = await withinBound(b.granted, 'the second grant')
+            releases.push(relB)
+            assert.equal(typeof relA, 'function')
+            assert.equal(typeof relB, 'function')
+            assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 2 })
 
-          c.cancel()
-          assert.equal(await c.granted, null, 'a cancelled request is resolved with null, never a slot')
-          assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 1 })
+            c.cancel()
+            assert.equal(await withinBound(c.granted, 'the cancelled request'), null,
+              'a cancelled request is resolved with null, never a slot')
+            assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 1 })
 
-          relA()
-          relA() // idempotent: a double release must not free a second slot
-          const relD = await d.granted
-          assert.equal(typeof relD, 'function', 'releasing a slot hands it to the next queued request')
-          assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 0 })
+            relA()
+            relA() // idempotent: a double release must not free a second slot
+            const relD = await withinBound(d.granted, 'the queued request after a release')
+            releases.push(relD)
+            assert.equal(typeof relD, 'function', 'releasing a slot hands it to the next queued request')
+            assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 0 })
 
-          d.cancel() // no-op once granted
-          assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 0 })
-          relB()
-          relD()
+            d.cancel() // no-op once granted
+            assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 0 })
+          } finally {
+            // Release whatever this test holds, even on failure, so a red run
+            // cannot leak slots or queue entries into the tests after it.
+            c.cancel()
+            d.cancel()
+            for (const release of releases) release()
+          }
         })
 
         it('never runs more walks than the cap, and every queued Glob still returns the full result', { timeout: 30_000 }, async () => {
@@ -2483,19 +2516,24 @@ describe('executeBuiltinTool', () => {
         it('a Glob aborted while queued returns interrupted and leaves the queue', async () => {
           process.env.CHROXY_GLOB_MAX_CONCURRENT = '1'
           const held = acquireGlobWalkSlot(1)
-          const releaseHeld = await held.granted
+          const releaseHeld = await withinBound(held.granted, 'the held slot')
 
           const controller = new AbortController()
-          setTimeout(() => controller.abort(), 20)
           try {
-            const r = await executeBuiltinTool({
+            const call = executeBuiltinTool({
               toolName: 'Glob', input: { pattern: '**/*.ts' }, signal: controller.signal, ...ctx(),
             })
+            // Abort only once the call is genuinely parked in the queue. Aborting
+            // earlier can hit the pre-walk abort check and never exercise the queue.
+            await waitUntil(() => globWalkSlotStats().queued >= 1, 'the Glob call to queue behind the held slot')
+            controller.abort()
+            const r = await call
 
             assert.equal(r.isError, true)
             assert.match(r.content, /interrupted/)
             assert.deepEqual(globWalkSlotStats(), { active: 1, queued: 0 })
           } finally {
+            controller.abort()
             releaseHeld()
           }
         })
