@@ -82,6 +82,7 @@ import {
   updateServerEntry,
   markServerConnected,
 } from './server-registry';
+import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
@@ -511,6 +512,15 @@ let fileContentRequestNonce = 0;
 // token}`; it's cleared right after that first send so a later reconnect uses
 // the issued session token (captured from auth_ok), not the spent pairing id.
 let pendingPairingId: string | null = null;
+// #8331: how long a Restart now / Postpone may wait for its reply before the
+// banner's buttons are released with an error.
+const DAEMON_UPDATE_ACTION_TIMEOUT_MS = 15_000;
+// #8331: the update banner's state describes ONE connection to ONE daemon. It is
+// cleared on an explicit disconnect, on transport loss (onclose), and at the start
+// of every new handshake (connect), because a reconnect can land on a DIFFERENT
+// build (a manual rollback, a switched checkout) that will never send a replacement
+// status frame to overwrite a stale "Restarting…" or "Updated to".
+const EMPTY_DAEMON_UPDATE = { daemonUpdate: null, daemonUpdateAction: null, daemonUpdateConfirm: null, daemonUpdateError: null } as const;
 
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
@@ -873,6 +883,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #5510 (epic #5509): pairing-approval primitive — outstanding pending pair
   // requests fanned out to this host surface. Empty until a pair_pending lands.
   pendingPairRequests: [],
+  // #8331: daily-daemon update banner state. Null/empty until `daemon_update_status` lands.
+  daemonUpdate: null,
+  daemonUpdateAction: null,
+  daemonUpdateConfirm: null,
+  daemonUpdateError: null,
   // #5513 (epic #5509): set when a redeemed ?pair= link is approval-gated so the
   // UI can transparently open the request-pair flow. Null otherwise.
   pendingApprovalPairHost: null,
@@ -1842,6 +1857,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return true;
   },
 
+  // #8331: ask the daemon to apply (restart-now) or hold off (postpone) the queued
+  // update. The server decides authority and idleness; this only sends and tracks
+  // the request. `confirmBusy` comes from the confirm dialog, never the banner.
+  // A watchdog releases the buttons if the daemon never answers, so a dropped reply
+  // cannot leave them disabled for the life of the page.
+  requestDaemonUpdateAction: (action, target, opts): boolean => {
+    const { socket, daemonUpdateAction } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN || daemonUpdateAction) return false;
+    const requestId = `daemon-update-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const msg: Record<string, unknown> = { type: 'daemon_update_action', action, target, requestId };
+    if (opts?.confirmBusy === true) msg.confirmBusy = true;
+    wsSend(socket, msg);
+    set({ daemonUpdateAction: { requestId, action, target }, daemonUpdateError: null });
+    armDaemonUpdateWatchdog(DAEMON_UPDATE_ACTION_TIMEOUT_MS, () => {
+      if (get().daemonUpdateAction?.requestId === requestId) {
+        set({ daemonUpdateAction: null, daemonUpdateError: 'The daemon did not answer. Check the connection and try again.' });
+      }
+    });
+    return true;
+  },
+  cancelDaemonUpdateConfirm: (): void => {
+    set({ daemonUpdateConfirm: null });
+  },
+  clearDaemonUpdateError: (): void => {
+    set({ daemonUpdateError: null });
+  },
+
   // #5513: clear the approval-gated redemption signal once the UI has consumed
   // it (opened the request-pair panel) so it doesn't re-trigger.
   clearPendingApprovalPairHost: (): void => {
@@ -2673,7 +2715,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
     // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
-    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...errorPatch });
+    // #8331: a new handshake starts from a clean update banner (see EMPTY_DAEMON_UPDATE).
+    clearDaemonUpdateWatchdog();
+    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...EMPTY_DAEMON_UPDATE, ...errorPatch });
 
     if (_retryCount > 0) {
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1}...`);
@@ -3112,6 +3156,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().wslActioningIds.size > 0) {
         set({ wslActioningIds: new Set<string>() });
       }
+      // #8331: the daily-daemon update banner is per connection; a reply to a
+      // Restart now / Postpone can never arrive on the dead socket either.
+      clearDaemonUpdateWatchdog();
+      set({ ...EMPTY_DAEMON_UPDATE });
       // #6691 (S-3): ditto for in-flight orchestration detail requests + pending
       // mutating actions — a reply can never arrive on the dead socket.
       if (get().orchestrationRunDetailLoading.size > 0) {
@@ -3294,6 +3342,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // against the disconnected socket.
     clearPendingTrustGrants();
     clearPendingModelReverts();
+    clearDaemonUpdateWatchdog(); // #8331
     clearPendingPermissionModeReverts();
     clearPendingThinkingLevelReverts();
     // #6954: same fast-reject as onclose/onerror — an explicit disconnect
@@ -3413,6 +3462,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // different server can't show a stale banner.
       serverExposure: null,
       exposureBannerDismissed: false,
+      // #8331: a disconnected dashboard cannot restart anything; the status is re-sent on auth.
+      daemonUpdate: null,
+      daemonUpdateAction: null,
+      daemonUpdateConfirm: null,
+      daemonUpdateError: null,
       // #5821: clear billing canary on disconnect so a reconnect against a
       // different server can't show a stale billing banner.
       billingCanary: null,
@@ -3610,6 +3664,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       credentialTestResults: {},
       pendingPairRequests: [],
       serverStartupLogs: null,
+      // #8331: the queued update describes ONE daemon; never carry it to the next.
+      daemonUpdate: null,
+      daemonUpdateAction: null,
+      daemonUpdateConfirm: null,
+      daemonUpdateError: null,
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -3790,6 +3849,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       credentialTestResults: {},
       pendingPairRequests: [],
       serverStartupLogs: null,
+      // #8331: the queued update describes ONE daemon; never carry it to the next.
+      daemonUpdate: null,
+      daemonUpdateAction: null,
+      daemonUpdateConfirm: null,
+      daemonUpdateError: null,
       // #7559 — the connection-scoped roster, the SAME one `disconnect()` spreads.
       // `switchServer` / `connectLocal` call `disconnect()` only
       // `if (connectionPhase !== 'disconnected')`, and a FAILED CONNECT lands at

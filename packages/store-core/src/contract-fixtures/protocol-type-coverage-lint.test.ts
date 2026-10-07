@@ -244,6 +244,12 @@ const DASHBOARD_ONLY = new Set<string>([
   // gap. One snapshot type carries the whole panel (it doubles as the mutation
   // ack), so there is nothing else to wire.
   'scheduled_tasks',             // registry + scheduler-gate snapshot / mutation ack
+  // Daily-daemon update banner (#8331): strict-primary host surface of the
+  // idle-only auto-deploy. Dashboard-only — the mobile app does not restart the
+  // owner's daemon.
+  'daemon_update_status',            // queued update + last deploy result (banner + "Updated to" notice)
+  'daemon_update_confirm_required',  // restart-now while sessions are busy (confirm dialog)
+  'daemon_update_action_result',     // outcome of daemon_update_action
 ])
 
 // Handled by the APP only — no dashboard surface by design.

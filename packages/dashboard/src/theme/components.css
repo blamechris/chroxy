@@ -29,8 +29,8 @@
   display: grid;
   grid-template-columns: auto 1fr;
   /* Rows: reconnect-banner, tunnel-warming-banner, exposure-warning-banner,
-     header, content (sidebar+main), footer-bar. */
-  grid-template-rows: auto auto auto auto 1fr auto;
+     daemon-update-region (#8331), header, content (sidebar+main), footer-bar. */
+  grid-template-rows: auto auto auto auto auto 1fr auto;
 }
 
 #app.with-sidebar > .reconnect-banner {
@@ -54,18 +54,25 @@
   grid-column: 1 / -1;
 }
 
-#app.with-sidebar > header {
+/* Daemon update banner (#8331) — full width above the header; the row collapses
+   to 0 when nothing is queued. */
+#app.with-sidebar > .daemon-update-region {
   grid-row: 4;
   grid-column: 1 / -1;
 }
 
-#app.with-sidebar > .sidebar {
+#app.with-sidebar > header {
   grid-row: 5;
+  grid-column: 1 / -1;
+}
+
+#app.with-sidebar > .sidebar {
+  grid-row: 6;
   grid-column: 1;
 }
 
 #app.with-sidebar > .main-wrapper {
-  grid-row: 5;
+  grid-row: 6;
   grid-column: 2;
   display: flex;
   flex-direction: column;
@@ -76,7 +83,7 @@
 /* Explicit last-row placement so future in-flow children don't accidentally
    shift the footer's auto-placement target (Copilot review #3177). */
 #app.with-sidebar > .footer-bar {
-  grid-row: 6;
+  grid-row: 7;
   grid-column: 1 / -1;
 }
 
@@ -5019,6 +5026,84 @@ button.sidebar-token-view-session-row:hover {
 
 .exposure-warning-message {
   flex: 1;
+}
+
+/* ---- Daemon Update Banner (#8331) ----
+   "Update ready" band for the daily daemon's idle-only auto-deploy, plus the
+   one-time "Updated to <sha>" / "rolled back" notice. Informational blue/green,
+   not the orange caution of the exposure banner: an update waiting is good news.
+   Every button is a 44px tap target (CLAUDE.md). */
+.daemon-update-region {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.daemon-update-banner,
+.daemon-update-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 4px 12px;
+  font-size: var(--text-base);
+  background: color-mix(in srgb, var(--accent-blue, #4a9eff) 14%, var(--bg-secondary, #1a1a2e));
+  color: var(--text-primary, #e8e8e8);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-blue, #4a9eff) 30%, transparent);
+}
+
+.daemon-update-notice {
+  background: color-mix(in srgb, var(--accent-green, #4ade80) 14%, var(--bg-secondary, #1a1a2e));
+  border-bottom-color: color-mix(in srgb, var(--accent-green, #4ade80) 30%, transparent);
+}
+
+.daemon-update-notice--bad {
+  background: color-mix(in srgb, var(--accent-red, #ff5555) 16%, var(--bg-secondary, #1a1a2e));
+  border-bottom-color: color-mix(in srgb, var(--accent-red, #ff5555) 35%, transparent);
+}
+
+.daemon-update-message {
+  font-weight: 600;
+}
+
+.daemon-update-subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.daemon-update-actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.daemon-update-notice .daemon-update-message {
+  flex: 1;
+}
+
+.daemon-update-btn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.daemon-update-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.daemon-update-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* ---- Tunnel Warming Banner (#2836) ---- */

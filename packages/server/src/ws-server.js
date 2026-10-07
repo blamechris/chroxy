@@ -335,6 +335,7 @@ function _isSecureRequest(req) {
  *   { type: 'scheduled_tasks_request', requestId? }     — #6871 read the standing scheduled-task registry + the scheduler gate state (host-level: a pairing-BOUND client is rejected)
  *   { type: 'scheduled_task_action', action, taskId?, task?, requestId? } — #6871 create/update/pause/resume/delete a scheduled task (UNBOUND-STRICT-PRIMARY gate — a scheduled task makes this machine run an agent session unattended; a pairing-BOUND client is rejected even if it is primary, #7025)
  *   { type: 'set_scheduler_enabled', enabled, requestId? } — #6871 flip the PERSISTED global scheduled-execution gate (features.scheduler); same unbound-strict-primary gate, and a daemon restart is required for it to take effect (reported as scheduler.restartRequired)
+ *   { type: 'daemon_update_action', action: 'restart-now'|'postpone', target, confirmBusy?, requestId? } — #8331 apply or hold off the update the idle-only auto-deploy has queued for the daily daemon (STRICT-PRIMARY + UNBOUND gate — restarting kills every live session; a pairing or bound client gets daemon_update_action_result{code:NOT_AUTHORIZED} and nothing is written). restart-now with busy sessions and no confirmBusy replies daemon_update_confirm_required instead of writing
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
  *   { type: 'set_prompt_evaluator_skip_pattern', value: string|null, sessionId? } — set the per-session evaluator skip-pattern source (#3639)
  *   { type: 'set_chroxy_context_hint', value: boolean, sessionId? } — toggle the per-session Chroxy context hint (#3805)
@@ -543,6 +544,9 @@ function _isSecureRequest(req) {
  *   { type: 'orchestration_run_snapshot', requestId?, generatedAt, seq, run: RunDetail|null, error? } — one run's full detail (pull-only; run:null = degraded reply) (#6691)
  *   { type: 'orchestration_run_delta', runId, seq, generatedAt, run?, node?, gate?, timeline? } — live run update pushed to host-level clients; client applies iff seq===held+1 (#6691)
  *   { type: 'scheduled_tasks', generatedAt, scheduler: { enabled, engineArmed, restartRequired, source }, schedulableProviders, defaultProvider, defaultProviderRefusal, tasks[], requestId?, error? } — #6871 scheduled-task registry snapshot for the dashboard panel; sent to the REQUESTING client only, and re-emitted as the ack for every accepted mutation. Each task carries the engine's own verdicts (providerRefusal / effectivePermissionMode / permissionModeClamped / quarantined) so a client never re-derives a safety decision
+ *   { type: 'daemon_update_status', running, pending, lastDeploy, postponedUntil, requestPending, applying } — #8331 the queued daily-daemon update + last deploy result; sent on auth and on change to STRICT-PRIMARY, UNBOUND clients ONLY
+ *   { type: 'daemon_update_confirm_required', requestId, target, reasons[], sessions[] } — #8331 reply to restart-now while sessions are busy; nothing was written
+ *   { type: 'daemon_update_action_result', requestId, action, ok, force?, postponedUntil?, code?, message? } — #8331 outcome of daemon_update_action (codes: NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, APPLYING, WRITE_FAILED, UNAVAILABLE, UNSUPPORTED_ACTION)
  *   { type: 'orchestration_action_ack', requestId?, action, runId, gateId? } — terminal success echo for a mutating orchestration action (#6691)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
@@ -585,7 +589,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, schedulerEngine = null, sessionCiWatcher = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, orchestrationManager = null, schedulerEngine = null, sessionCiWatcher = null, daemonUpdate = null, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -964,6 +968,8 @@ export class WsServer {
         // ARMS the watch rather than waiting on the sweep's five-minute
         // discovery pass. Null when the watcher is off; the handler no-ops.
         get sessionCiWatcher() { return self._sessionCiWatcher ?? null },
+        // #8331: the daily-daemon update banner's status + request files.
+        get daemonUpdate() { return self._daemonUpdate ?? null },
       },
       runtime: {
         get draining() { return self._draining },
@@ -1066,6 +1072,8 @@ export class WsServer {
       // surfaced in auth_ok so the dashboard can render a warning banner.
       // null until start() has bound a socket.
       get exposure() { return self.exposure },
+      // #8331: the update-banner status, sent post-auth to strict-primary clients only.
+      get daemonUpdate() { return self._daemonUpdate ?? null },
       // #5821: current billing-canary snapshot, seeded into auth_ok so a
       // freshly-connected client renders the billing banner immediately. null
       // until a provider is wired (server-cli sets it post-construct) — live
@@ -1230,6 +1238,16 @@ export class WsServer {
     // Null when `sessionCi.watch` is off. The WsServer only hands it to
     // handlers — it never starts, stops or ticks it (server-cli owns that).
     this._sessionCiWatcher = sessionCiWatcher || null
+    // #8331: the daily-daemon update status (null unless server-cli built and
+    // started one). Its `change` events fan out to STRICT-PRIMARY, UNBOUND clients
+    // only. close() unsubscribes AND closes it, so every teardown path that closes
+    // this server (shutdown, emergencyCleanup) also stops its watcher and timers.
+    this._daemonUpdate = daemonUpdate || null
+    this._daemonUpdateChangeHandler = null
+    if (this._daemonUpdate && typeof this._daemonUpdate.on === 'function') {
+      this._daemonUpdateChangeHandler = (status) => this._broadcastDaemonUpdateStatus(status)
+      this._daemonUpdate.on('change', this._daemonUpdateChangeHandler)
+    }
     this.defaultSessionId = defaultSessionId || null
     this._checkpointManager = new CheckpointManager()
 
@@ -2750,6 +2768,21 @@ export class WsServer {
     )
   }
 
+  /**
+   * #8331: push the daily-daemon update status to the clients allowed to act on
+   * it: STRICT-PRIMARY and unbound (`isPrimaryToken === true && !boundSessionId`),
+   * the same bar `daemon_update_action` enforces. Host-level (`!boundSessionId`)
+   * is NOT enough: a paired phone holds an unbound pairing token, and the status
+   * names the commits and subjects queued for the owner's machine.
+   */
+  _broadcastDaemonUpdateStatus(status) {
+    if (!status) return
+    this._broadcast(
+      { type: 'daemon_update_status', ...status },
+      (client) => client.isPrimaryToken === true && !client.boundSessionId,
+    )
+  }
+
   // #6691: push a single orchestration run delta to host-level (unbound) clients
   // only — runs are host-wide cross-session objects; a session-bound token never
   // receives them. Called by the OrchestrationManager (E-4); the `delta`
@@ -3264,6 +3297,11 @@ export class WsServer {
 
   /** Graceful shutdown */
   close() {
+    if (this._daemonUpdate && this._daemonUpdateChangeHandler && typeof this._daemonUpdate.off === 'function') {
+      this._daemonUpdate.off('change', this._daemonUpdateChangeHandler)
+      this._daemonUpdateChangeHandler = null
+    }
+    try { this._daemonUpdate?.close?.() } catch { /* best effort */ }
     // Remove PairingManager listeners to prevent post-shutdown broadcasts
     if (this._pairingManager && this._pairingRefreshedHandler) {
       this._pairingManager.off('pairing_refreshed', this._pairingRefreshedHandler)

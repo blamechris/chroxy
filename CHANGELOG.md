@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dashboard: "Update ready" banner for the daily daemon, with Restart now,
+  Postpone 1h and an "Updated to <sha>" notice (#8331, follows #8324).** The
+  idle-only auto-deploy was invisible from the dashboard. When `origin/main` is
+  ahead but the daemon is busy, `scripts/deploy-daemon.mjs` now writes
+  `<configDir>/pending-update.json`, and the dashboard shows "Update ready
+  (<sha7>) — restarts when idle". **Restart now** asks the daemon for its idle
+  verdict (the same one `/api/daemon/idle` answers from); with busy sessions it
+  replies with what would be interrupted and writes nothing until the owner
+  confirms, then writes `deploy-request.json` (`force` is derived on the
+  daemon, never trusted from the client), which a launchd `WatchPaths` entry
+  turns into an immediate script tick. **Postpone 1h** writes
+  `deploy-postpone.json`, which the script honours for forward deploys of that
+  target only (never a rollback or repair). After a deploy the dashboard shows
+  "Updated to <sha7>" once per commit, or "Update <sha7> failed and was rolled
+  back". `daemon_update_status` is sent only to strict-primary, unbound
+  clients, and `daemon_update_action` is refused for everyone else
+  (`NOT_AUTHORIZED`, nothing written). See
+  [`docs/guides/daemon-auto-deploy.md`](docs/guides/daemon-auto-deploy.md) and
+  [`docs/security/bearer-token-authority.md`](docs/security/bearer-token-authority.md).
+  Generic file writes (`write_file`, quick-append) refuse the chroxy config
+  directory itself and any file directly in it, so the deploy control files can
+  only be written through `daemon_update_action`; subtrees such as the session
+  worktrees under `<configDir>/worktrees` stay writable. The banner shows
+  "Restarting to apply <sha>…" while a deploy is applying, offers only Postpone
+  when the daemon cannot confirm it is idle, and shows nothing for an update the
+  daemon already runs.
 - **Dashboard: a persistent end-of-turn summary for permission prompts that
   expired unanswered (#7365).** When a permission prompt times out with no
   answer, chroxy silently continues without that tool — the per-prompt

@@ -89,6 +89,63 @@ The answer also carries `commit` (the 40-hex commit the daemon process started f
 - **The locality gate does not prove direct local origin.** See [bearer-token-authority.md](../security/bearer-token-authority.md): the primary token is the authority.
 - **A bootstrap rollback cannot be certified.** If you bootstrap with `--force` onto a daemon that does not report its commit and the deploy has to roll back, the old daemon still cannot report a commit, so the rollback restart cannot be verified. The tree is restored and the owed rollback is cleared on the next tick with a log line saying the restart could not be certified.
 
+## The dashboard banner: update ready, Restart now, Postpone (#8331)
+
+The deploy is not invisible any more. When `origin/main` is ahead but the daemon is busy, the dashboard shows **Update ready (`<sha7>`) — restarts when idle** with the commit subject and two buttons. It behaves like an app auto-update: a merge queues the update, the daemon restarts itself when idle, and you can hurry it, hold it off, and see afterwards that it happened.
+
+Only a client holding the **primary token** (and not bound to one session) is ever told about any of this, and only such a client may act on it. A paired phone gets neither `daemon_update_status` nor the right to send `daemon_update_action` (it is refused with `NOT_AUTHORIZED` and nothing is written). See [bearer-token-authority.md](../security/bearer-token-authority.md).
+
+### The four files
+
+All are small JSON files in `<configDir>`, written atomically (temp file plus rename). Every one is **best effort**: the script never aborts or changes a deploy's outcome because it could not write or delete one, and both sides treat a missing, malformed or oversized (over 4 KB) file as absent.
+
+The config directory is writable by other local processes, so both sides read these files defensively, through one shared module (`packages/server/src/utils/small-file.js`): a file is opened `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, must be a **regular file** (a symlink, FIFO, directory or device reads as absent and can never block the daemon or the script), and at most cap + 1 bytes are read. Writes go to a **random** temp name opened `O_EXCL`, through the descriptor, then renamed into place; a planted file or symlink at a guessable name is never followed. Reads accumulate from the one descriptor until end of file (a short read is legal), and an I/O error is reported as a read error, never as corrupt content: a `deploy-state.json` that could not be read aborts the tick and is left in place rather than quarantined. Generic file writes through the dashboard refuse the config directory itself and any file **directly in it** (`Access denied: the chroxy config directory is managed by the daemon`), so `deploy-request.json` and `deploy-postpone.json` can only be written through `daemon_update_action`, which applies the primary-token gate and the busy-session confirmation. Subtrees stay writable on purpose: chroxy's own session worktrees live at `<configDir>/worktrees/<id>` and orchestration worktrees at `<configDir>/orchestration/worktrees`. A write that would **create** a new top-level entry is refused too (`write_file` of `.chroxy/deploy-request.json/x` would otherwise make a directory with a control file's name and wedge every later write of that file): the first path segment under the config root must already be a directory. The parsing rules (what a valid request or postpone is, the request age, the timestamp range 1970-9999) live in one module, `packages/server/src/utils/deploy-control-files.js`, imported by both the daemon and the script.
+
+| File | Written by | Shape | Lifecycle |
+|---|---|---|---|
+| `pending-update.json` | the script | `{ target, from, subject, commitsAhead, queuedAt, reason }`, `reason` is `busy`, `unknown`, `postponed` or `applying` | Written whenever a **forward** deploy is deferred (busy, cannot confirm idle, postponed, or the daemon turned busy during the build). `queuedAt` is when the update **first** started waiting: a re-write for the same target keeps it, a new target starts a new clock. Rewritten with `reason: "applying"` and an `applyingSince` timestamp **from the moment a restart request is accepted**, and again when a forward deploy passes its gates and starts building, so the banner stops offering buttons that can no longer take effect and the daemon refuses a Postpone in that window. The marker is only believed for 30 minutes (the build timeout plus slack): the daemon reads a missing, invalid or older `applyingSince` as the waiting state before it (`busy`, buttons back), and a tick that does not go on to deploy clears it. Removed on up to date, a verified deploy, a repair, a target that failed (skipped or rolled back), a refusal. `--dry-run` writes nothing. |
+| `last-deploy.json` | the script | unchanged | The banner's "Updated to ..." notice reads it. |
+| `deploy-postpone.json` | the daemon | `{ target, until, requestedAt }` | Written by **Postpone 1h**. See below. |
+| `deploy-request.json` | the daemon | `{ action: "restart-now", target, force, requestedAt, nonce }` | Written by **Restart now**; claimed (renamed) by the script when it reads it. See below. |
+
+### Postpone
+
+`Postpone 1h` writes `deploy-postpone.json` with `until = now + 1h` and `requestedAt = now`. A postpone is honoured only if it is internally sane: `requestedAt` is valid and not more than 5 minutes in the future, and `until - requestedAt` is at most 1 hour and 1 minute. Anything else (a year-9999 deadline, a far-future `requestedAt`, a missing `requestedAt`) is ignored and deleted, and the banner never shows it. The script then defers a **forward deploy whose target equals `target`** until `until`, **even on an idle daemon** (outcome `postponed`, exit 0, `pending-update.json` reason `postponed`, banner "Update `<sha7>` postponed until HH:MM"). It never gates a rollback or a repair, since those are about getting back to a known state. The script deletes the file once it is stale: invalid, expired, for a commit `main` has moved past, or for a commit the daemon already runs. It reads the postpone **again after the build and once more after the final idle probe, immediately before the signal**, so a Postpone that lands while the tick works still holds: the tree is converged back, nothing is signalled, and the outcome is `postponed` (`deferred after build: <sha12> postponed until <iso>`). Once the script writes `applying` the daemon refuses further Postpones outright. `--force` overrides a postpone (it is the operator at the keyboard).
+
+### Restart now
+
+`Restart now` asks the daemon, which computes the **idle verdict with the same function `/api/daemon/idle` answers from**:
+
+- **idle:** it writes `deploy-request.json` with `force: false` and replies. No confirmation is needed.
+- **busy:** it writes **nothing** and replies `daemon_update_confirm_required` with the busy reasons and sessions. The dashboard shows a dialog listing what would be interrupted. **Restart anyway** re-sends with `confirmBusy: true`, and only then does it write `force: true`. `force` is always derived on the daemon from its own verdict; the client can only say it confirmed. A verdict that is missing, throws, or is anything but exactly `idle: true` counts as busy.
+
+It also deletes `deploy-postpone.json` (a request outranks a postpone).
+
+The script reads the request under its lock at the start of a tick:
+
+- a request **older than 20 minutes** is ignored and deleted (a click from an hour ago must not restart the daemon now);
+- a request whose `target` is **not the forward target** (main moved, or the target already rolled back; a request is not `--retry`) is ignored and deleted;
+- otherwise it is **accepted**. It overrides a postpone. `force: true` skips the **busy** gates for that tick's forward deploy to that target, including the re-check after the build. It does **not** skip an unreachable or unknown daemon (only `--force` does), and a rollback that follows a failed health check still waits for idle;
+- the request is **claimed atomically**: the file is renamed to `deploy-request.json.claimed-<random>`, the claimed file is read and validated, then deleted. Whatever sits at `deploy-request.json` afterwards is a newer request, which this tick can never delete; the script runs **one more tick** to apply it (it never loops). If the claimed file cannot be **read** (a transient `EAGAIN` or I/O error, as opposed to invalid content) it is put back at the live path with a no-clobber link and left for a later tick: a newer request already there wins and the claimed one is dropped. A claim a crashed tick left behind is removed once it is older than the request TTL. A `--dry-run` only reads the live file and claims nothing.
+
+### Making Restart now immediate: `WatchPaths`
+
+Without anything else a request waits for the next 600 s tick. The `WatchPaths` entry in the plist above makes launchd run one tick the moment `deploy-request.json` is written. Two things to know:
+
+- the script **deleting** the file fires `WatchPaths` once more, so every request costs one extra tick that finds nothing to do (it exits `up to date`, quietly);
+- a firing that arrives while a tick holds the lock is skipped (`another deploy is running`), which is why the script drains a newer request itself before it exits.
+
+### What the banner shows, and when it shows nothing
+
+- **Update ready (`<sha7>`) — restarts when idle** with Restart now and Postpone 1h (reason `busy`).
+- **Update ready (`<sha7>`) — can't confirm the daemon is idle** (reason `unknown`): only Postpone is offered, because a forced restart never covers a daemon that cannot answer.
+- **Restarting to apply `<sha7>`…** with no buttons, while the script is `applying` or a request is waiting. While `applying`, the daemon refuses both actions with `APPLYING`. A request still unclaimed after 30 s reads **Restart requested — applies at the next scheduled check**. A request is honoured for **20 minutes** (twice the 600 s `StartInterval`) so one missed tick does not lose a click.
+- **Nothing** when the pending update's target is what the daemon already runs, when it was queued **from** a different commit than the daemon runs (a dev server sharing the config dir), or when the daemon cannot say which commit it runs.
+
+### The "Updated to" notice
+
+After a deploy the dashboard shows **Updated to `<sha7>` — `<subject>`** once per commit (remembered in the browser's `localStorage`; storage that is blocked just means it may show again), only while `last-deploy.json` is under 7 days old and only if the daemon actually runs that commit. A target that rolled back shows **Update `<sha7>` failed and was rolled back**.
+
 ## Running it by hand
 
 ```bash
@@ -129,6 +186,12 @@ Save as `~/Library/LaunchAgents/com.chroxy.deploy.plist`. Use the absolute path 
   </array>
   <key>StartInterval</key>
   <integer>600</integer>
+  <!-- #8331: run one tick the moment the dashboard's "Restart now" writes its
+       request. Optional; without it a request waits for the next 600 s tick. -->
+  <key>WatchPaths</key>
+  <array>
+    <string>/Users/YOU/.chroxy/deploy-request.json</string>
+  </array>
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>
@@ -139,7 +202,7 @@ Save as `~/Library/LaunchAgents/com.chroxy.deploy.plist`. Use the absolute path 
 </plist>
 ```
 
-`~/.chroxy/logs/` must exist before the agent first runs (`mkdir -p ~/.chroxy/logs`). The agent has no `KeepAlive`: launchd runs the script every 600 seconds and the script exits.
+`~/.chroxy/logs/` must exist before the agent first runs (`mkdir -p ~/.chroxy/logs`). The agent has no `KeepAlive`: launchd runs the script every 600 seconds and the script exits. `WatchPaths` is the dashboard's fast path (next section): it must name `<configDir>/deploy-request.json` (use your `CHROXY_CONFIG_DIR` if you set one).
 
 Install and remove:
 
@@ -165,6 +228,14 @@ Run one tick on demand: `launchctl kickstart gui/$UID/com.chroxy.deploy`.
 | `deferred: the daemon does not report the commit it runs ...` | An older daemon without the `commit` field; bootstrap once with `--force`. |
 | `deferred after build: busy (...)` / `deferred after build: cannot confirm idle (...)` | The daemon turned busy during the build; the tree was converged back to what it runs. Retried next tick. |
 | `rollback restart deferred: ...; ... the rollback stays owed` | An owed rollback's tree is built but the daemon turned busy before its restart; the restart waits for idle. |
+| `deferred: <sha12> postponed until <iso>` | The owner pressed Postpone 1h in the dashboard (#8331). Nothing was touched; outcome `postponed`, exit 0. Logged once per target and deadline. |
+| `deploy request <nonce> accepted for <sha12>[: skipping the idle check, the owner confirmed]` | A fresh Restart now request for the forward target was read (#8331). |
+| `ignored a stale deploy request for <sha12> ...` / `ignored a deploy request for <sha12>: ...` / `ignored a malformed deploy-request.json` | The request was older than 20 minutes, for another target, there was nothing to deploy, or it was not a valid request. It was deleted and bought nothing. |
+| `could not read deploy-request.json (<code>); it is kept for the next tick` | A transient I/O error (EAGAIN, EIO, EACCES, ...) reading the claimed request. The request is **not** consumed: it was put back at the live path (a newer request already there wins), and the next tick tries again. |
+| `dropped an unreadable deploy-request.json (<code>): it is older than the request TTL` | The same request kept failing to read until it was older than 20 minutes, so it could not be honoured anyway and was dropped instead of being retried for ever. Logged once. |
+| `cleared a stale "applying" marker in pending-update.json (no live tick owns it)` | A crashed tick left `reason: "applying"` behind (older than 30 minutes, or with no valid `applyingSince`); it was cleared. |
+| `removed an expired or superseded deploy-postpone.json` / `removed an invalid deploy-postpone.json` | A postpone that no longer applies, or that failed the sanity bounds above, was cleaned up. |
+| `a newer deploy request arrived during the run; running once more to apply it` | Console only: a newer nonce appeared while the tick ran. |
 | `skipped: <sha12> already rolled back (<outcome>); waiting for a newer main or --retry` | This target failed before; nothing runs until `main` moves or you pass `--retry`. |
 | `repaired checkout to <sha12> (no restart needed)` | The daemon already ran the right commit; only the checkout or build was behind. |
 | `repair failed: ...` | The same, but converging the tree failed. Retried next tick. |
@@ -185,7 +256,7 @@ Run one tick on demand: `launchctl kickstart gui/$UID/com.chroxy.deploy`.
 
 Console only (no `deploy.log` line): `up to date at <sha12>`, `another deploy is running (or port N is in use); skipping this run`, `ABORTED: ...` (a mandatory write or an unreadable state file stopped the run), and every `[dry-run]` line.
 
-`~/.chroxy/last-deploy.json` holds the most recent verified result, `~/.chroxy/deploy-state.json` holds `failedTarget`, `rollbackTo` and the log dedupe key, `~/.chroxy/deploy-build.json` is the build stamp, and the launchd stdout/stderr logs above hold the one-line-per-tick console output.
+`~/.chroxy/pending-update.json`, `deploy-postpone.json` and `deploy-request.json` are the dashboard banner's files (see above). `~/.chroxy/last-deploy.json` holds the most recent verified result, `~/.chroxy/deploy-state.json` holds `failedTarget`, `rollbackTo` and the log dedupe key, `~/.chroxy/deploy-build.json` is the build stamp, and the launchd stdout/stderr logs above hold the one-line-per-tick console output.
 
 ## Rolling back by hand
 

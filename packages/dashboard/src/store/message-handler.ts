@@ -184,7 +184,8 @@ import {
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import type { ServerFailedRestoresListMessage } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema } from '@chroxy/protocol/schemas'
+import { clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema, ServerDaemonUpdateStatusSchema, ServerDaemonUpdateConfirmRequiredSchema, ServerDaemonUpdateActionResultSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import { settleSchedulerRequest } from './scheduledTaskRequests'
 import {
@@ -3808,6 +3809,65 @@ function handlePairResolved(msg: Record<string, unknown>, get: MsgGet, set: MsgS
 }
 
 /**
+ * #8331 — `daemon_update_status`: the daily daemon's queued update, last deploy
+ * result and postpone, sent only to a strict-primary client (on auth and on every
+ * change). REPLACES the held status wholesale. A malformed payload is dropped
+ * without touching the held one: a frame this client cannot read must not blank a
+ * good banner.
+ */
+function handleDaemonUpdateStatus(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerDaemonUpdateStatusSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ daemonUpdate: parsed.data });
+}
+
+/**
+ * #8331 — restart-now met busy sessions and the server wrote NOTHING; it wants the
+ * owner to see what would be interrupted. Opens the confirm dialog, but only for
+ * the request this client has in flight: a stale or foreign frame must not pop a
+ * dialog whose "Restart anyway" would act on a target nobody just chose.
+ */
+function handleDaemonUpdateConfirmRequired(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerDaemonUpdateConfirmRequiredSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const inFlight = get().daemonUpdateAction;
+  if (!inFlight || inFlight.requestId !== parsed.data.requestId) return;
+  clearDaemonUpdateWatchdog();
+  set({ daemonUpdateAction: null, daemonUpdateConfirm: parsed.data, daemonUpdateError: null });
+}
+
+// What each refusal code means to the person who clicked. The server's own
+// `message` is the fallback for a code this client has not heard of.
+const DAEMON_UPDATE_ERROR_TEXT: Record<string, string> = {
+  NOT_AUTHORIZED: 'Only the owner\u2019s primary connection can update the daemon.',
+  STALE_TARGET: 'That update is no longer the one waiting. The banner has been refreshed.',
+  NO_PENDING_UPDATE: 'There is no update waiting any more.',
+  APPLYING: 'The update is already being applied.',
+  WRITE_FAILED: 'The daemon could not record the request. Try again.',
+  UNAVAILABLE: 'This daemon does not support updating from the dashboard.',
+};
+
+/**
+ * #8331 — the outcome of a `daemon_update_action`. Releases the in-flight request
+ * (matching by requestId, so a late reply to an abandoned request cannot clear a
+ * newer one), closes the confirm dialog on success, and turns a refusal into words.
+ */
+function handleDaemonUpdateActionResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerDaemonUpdateActionResultSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const inFlight = get().daemonUpdateAction;
+  if (!inFlight || inFlight.requestId !== parsed.data.requestId) return;
+  clearDaemonUpdateWatchdog();
+  if (parsed.data.ok) {
+    set({ daemonUpdateAction: null, daemonUpdateConfirm: null, daemonUpdateError: null });
+    return;
+  }
+  const code = parsed.data.code ?? '';
+  const text = DAEMON_UPDATE_ERROR_TEXT[code] ?? parsed.data.message ?? `The daemon refused the request (${code || 'unknown'}).`;
+  set({ daemonUpdateAction: null, daemonUpdateConfirm: null, daemonUpdateError: text });
+}
+
+/**
  * #5253 — self-hosted runner survey `runner_status_snapshot`: REPLACE the
  * stored runner survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host survey
@@ -4396,6 +4456,10 @@ const HANDLERS: Record<string, Handler> = {
   orchestration_action_ack: handleOrchestrationActionAck,
   // #6871: scheduled-task registry snapshot (also the mutation ack).
   scheduled_tasks: handleScheduledTasks,
+  // #8331: daily-daemon update banner (strict-primary clients only).
+  daemon_update_status: handleDaemonUpdateStatus,
+  daemon_update_confirm_required: handleDaemonUpdateConfirmRequired,
+  daemon_update_action_result: handleDaemonUpdateActionResult,
   // #6543 (IDE P3 feature B): pulled full redacted tool input for a pre-write diff.
   permission_input: handlePermissionInput,
   // #6772: reply to query_permission_audit — the SettingsPanel "Permission history" view.

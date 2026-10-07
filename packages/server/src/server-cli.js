@@ -14,6 +14,8 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { WsServer } from './ws-server.js'
 import { BillingCanaryMonitor } from './billing-canary-monitor.js'
 import { buildSessionCiWatcher } from './session-ci-watcher.js'
+import { DaemonUpdateStatus } from './daemon-update-status.js'
+import { computeDaemonIdleState } from './daemon-idle-state.js'
 import { resolvePublicIp } from './get-public-ip.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 // #5368 slice (c): QUICK_TUNNEL_DNS_SETTLE_MS + TUNNEL_STATUS_MIN_PROTOCOL_VERSION
@@ -1525,6 +1527,21 @@ export async function startCliServer(config) {
   const sessionCiWatcher = buildSessionCiWatcher({ config, sessionManager, pushManager, logger: log })
   sessionCiWatcher?.start()
 
+  // #8331: the daily-daemon "update ready" banner. Watches the files the idle-only
+  // auto-deploy script leaves in the config dir and answers the dashboard's
+  // Restart now / Postpone. The idle verdict is the SAME function
+  // GET /api/daemon/idle answers from, so the confirm dialog and the script's own
+  // gate cannot disagree. Harmless on a daemon with no deploy script: with no
+  // files there is nothing to report and nothing to act on.
+  const daemonUpdate = new DaemonUpdateStatus({
+    dir: chroxyDir,
+    getIdleState: () => computeDaemonIdleState({
+      sessionManager,
+      getHookPendingPermissionCount: () => wsServer.getHookPendingPermissionCount(),
+    }),
+  })
+  daemonUpdate.start()
+
   wsServer = new WsServer({
     port: PORT,
     apiToken: API_TOKEN,
@@ -1536,6 +1553,8 @@ export async function startCliServer(config) {
     // #7427: nullable — null when `sessionCi.watch` is off. Handed to handlers
     // only; server-cli owns its start() above and ServerOrchestrator its stop().
     sessionCiWatcher,
+    // #8331: closed by wsServer.close().
+    daemonUpdate,
     defaultSessionId,
     authRequired: !NO_AUTH,
     pushManager,

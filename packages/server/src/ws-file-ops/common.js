@@ -2,6 +2,7 @@ import { realpath, lstat, readlink } from 'fs/promises'
 import { resolve, dirname, basename, join, isAbsolute } from 'path'
 import { resolveTargetComponentwiseAsync, COMPONENTWISE_MAX_SYMLINKS } from '../utils/componentwise-resolver.js'
 import { isPathWithin } from '../utils/path-containment.js'
+import { configDir } from '../config-dir.js'
 
 /**
  * Shared utilities for file operations: CWD resolution, path validation, exec helpers.
@@ -313,6 +314,65 @@ export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, c
   const realAbsPath = await realpathOfDeepestAncestor(absPath)
   const valid = isPathWithin(realAbsPath, cwdReal)
   return { valid, realPath: realAbsPath, cwdReal }
+}
+
+/**
+ * The refusal text for a generic file mutation aimed at the daemon's config
+ * directory (#8331). Shared so every mutation path says the same thing.
+ */
+export const CONFIG_DIR_REFUSAL = 'Access denied: the chroxy config directory is managed by the daemon'
+
+const sameDir = (a, b) => isPathWithin(a, b) && isPathWithin(b, a)
+
+/**
+ * Is `absPath` the daemon's config directory itself, a FILE DIRECTLY IN it, or a
+ * write that would create (or pass through) a NEW direct child of it?
+ *
+ * Generic file writes refuse exactly that, so the deploy control files
+ * (`deploy-request.json`, `deploy-postpone.json`) and the rest of the daemon's
+ * top-level state can only be written through the daemon's own paths
+ * (`daemon_update_action` applies the primary-token gate and the busy-session
+ * confirmation). Subtrees stay writable on purpose: chroxy's own session worktrees
+ * live at `<configDir>/worktrees/<id>` and orchestration worktrees at
+ * `<configDir>/orchestration/worktrees`, and ordinary editing inside them must work.
+ *
+ * BOTH sides are resolved with `realpathOfDeepestAncestor` (an existing path by
+ * `realpath`, a new one by its deepest existing ancestor), so the answer is the same
+ * whether the session cwd is the config directory itself, one of its ancestors, a
+ * worktree reaching the root through `../..`, a relocated `CHROXY_CONFIG_DIR`, or a
+ * symlinked parent or dangling link. The config dir is read per call
+ * (`configDir()`), never cached, so a relocation applies at once.
+ *
+ * FAILS CLOSED: a path that cannot be resolved (EACCES on an ancestor, a link
+ * cycle) is reported as protected, never as outside.
+ *
+ * @param {string} absPath - Absolute path of the mutation target
+ * @returns {Promise<boolean>}
+ */
+export async function isConfigDirOrDirectChild(absPath) {
+  try {
+    const [target, root] = await Promise.all([
+      realpathOfDeepestAncestor(absPath),
+      realpathOfDeepestAncestor(configDir()),
+    ])
+    if (sameDir(target, root) || sameDir(dirname(target), root)) return true
+    // A write that would CREATE, or pass through, a direct child of the root is
+    // refused too: `mkdir -p` would otherwise make a DIRECTORY at a control-file name
+    // (`deploy-request.json/x`) and wedge every later write of that file. The first
+    // segment must already be a directory (`worktrees`, `orchestration`, ...), which is
+    // what lets chroxy's own worktrees keep working; no list of names is involved.
+    if (isPathWithin(target, root)) {
+      const segments = target.slice(root.length).split(/[\\/]+/).filter(Boolean)
+      if (segments.length > 1) {
+        let firstIsDirectory = false
+        try { firstIsDirectory = (await lstat(join(root, segments[0]))).isDirectory() } catch { /* absent: not a directory */ }
+        if (!firstIsDirectory) return true
+      }
+    }
+    return false
+  } catch {
+    return true
+  }
 }
 
 /** Cache for resolved workspaceRoot realpaths (key: raw path, value: resolved) */

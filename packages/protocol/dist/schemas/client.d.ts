@@ -1119,6 +1119,16 @@ export declare const RevokeTokenSchema: z.ZodObject<{
     type: z.ZodLiteral<"revoke_token">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const DaemonUpdateActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"daemon_update_action">;
+    action: z.ZodEnum<{
+        "restart-now": "restart-now";
+        postpone: "postpone";
+    }>;
+    target: z.ZodString;
+    confirmBusy: z.ZodOptional<z.ZodBoolean>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ExtensionMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"extension_message">;
     provider: z.ZodString;
@@ -1969,6 +1979,15 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"revoke_token">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"daemon_update_action">;
+    action: z.ZodEnum<{
+        "restart-now": "restart-now";
+        postpone: "postpone";
+    }>;
+    target: z.ZodString;
+    confirmBusy: z.ZodOptional<z.ZodBoolean>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"query_permission_audit">;
     sessionId: z.ZodOptional<z.ZodString>;
     auditType: z.ZodOptional<z.ZodEnum<{
@@ -2215,6 +2234,7 @@ export type SetSchedulerEnabledMessage = z.infer<typeof SetSchedulerEnabledSchem
 export type McpConfigScope = z.infer<typeof McpConfigScopeSchema>;
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>;
 export type GetPermissionInputMessage = z.infer<typeof GetPermissionInputSchema>;
+export type DaemonUpdateActionMessage = z.infer<typeof DaemonUpdateActionSchema>;
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>;
 export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>;
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>;
