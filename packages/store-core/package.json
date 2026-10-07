@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/store-core",
-  "version": "0.11.3",
+  "version": "0.11.4",
   "description": "Shared store logic for Chroxy app and dashboard",
   "type": "module",
   "main": "src/index.ts",
@@ -21,7 +21,7 @@
     "build:publish": "node scripts/build-publish-dir.mjs"
   },
   "dependencies": {
-    "@chroxy/protocol": "^0.11.3",
+    "@chroxy/protocol": "^0.11.4",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1"
   },

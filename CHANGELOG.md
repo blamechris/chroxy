@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-10-07
+
+### Fixed
+
+- **A permission prompt that arrives for a session you are not viewing can
+  now be answered after you switch to it (#8328, #8339).**
+  - Before this change, the session's tab showed `!`, but switching to it
+    rebuilt the message list from history, and permission prompts are not
+    kept in history. The card disappeared and the turn waited until the
+    request timed out and was denied.
+  - The daemon now re-sends the session's pending permissions after every
+    session replay: `switch_session`, `subscribe_sessions` and a replay of
+    empty history. This covers SDK-held prompts and hook-held (claude-tui)
+    prompts.
+  - On reconnect, a re-sent hook-held prompt now lands in the session that
+    asked rather than the one being viewed.
+  - Both clients update a prompt in place by `requestId`, so a repeated
+    delivery is still one card.
+  - A replay re-send no longer re-subscribes clients that had unsubscribed
+    from the session.
+- **A client paired to a single session (a share-a-session pairing token)
+  now receives data for that session only (#8342).**
+  - The rule is one predicate, `isBoundToOtherSession` /
+    `isBoundClient` in `environments/authority.js`.
+  - Frames tagged with another session's id are not delivered to such a
+    client. The check is applied at the broadcaster's single delivery point.
+  - The client is not subscribed to, or made active on, another session. This
+    includes sessions other clients create.
+  - Its connect-time re-send of pending permissions covers its own session
+    only.
+  - A permission request or resolution that maps to no session goes to
+    unbound clients only.
+  - `web_task_*` pushes follow the same working-directory rule as
+    `list_web_tasks`.
+  - Destroying its session no longer moves it onto another session.
+  - A checkpoint restore into a new session is refused for it, with the same
+    reply `create_session` gives. A files-only restore of its own session
+    still works.
+  - Unbound clients (the owner's dashboard and phone) are unchanged. See
+    [`docs/security/bearer-token-authority.md`](docs/security/bearer-token-authority.md)
+    §4.
+
 ## [0.11.3] - 2026-10-07
 
 ### Added
