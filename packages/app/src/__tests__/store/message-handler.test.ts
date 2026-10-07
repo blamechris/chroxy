@@ -5378,6 +5378,54 @@ describe('permission_request message handler', () => {
     expect(state.sessions).toHaveLength(2);
   });
 
+  // #8328 — the server re-sends a session's pending permissions after a replay
+  // (a `switch_session` full-rebuild swap drops the live card, and the frame is
+  // transient so history cannot restore it). The re-send must update the card
+  // in place by requestId and must still render an answerable prompt when it
+  // lands AFTER `history_replay_end`.
+  it('a re-sent permission_request after a full-rebuild replay restores exactly one answerable prompt (#8328)', () => {
+    resetReplayReconcile({ clearCursors: true });
+    const store = createMockStore({
+      activeSessionId: 's-bg',
+      sessions: [{ sessionId: 's-bg', name: 'B', provider: 'claude-sdk' } as any],
+      sessionStates: { 's-bg': createEmptySessionState() },
+      availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } } as any],
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    clearPermissionSplits();
+    const frame = (extra: Record<string, unknown> = {}) => ({
+      type: 'permission_request',
+      sessionId: 's-bg',
+      requestId: 'perm-resend',
+      tool: 'Bash',
+      input: { command: 'gh pr checks' },
+      remainingMs: 300000,
+      ...extra,
+    });
+    const prompts = () => store.getState().sessionStates['s-bg'].messages.filter((m: any) => m.type === 'prompt');
+
+    // Live card, then a duplicate delivery: one card, not two.
+    _testMessageHandler.handle(frame());
+    _testMessageHandler.handle(frame({ remainingMs: 120000 }));
+    expect(prompts()).toHaveLength(1);
+
+    // switch_session's forceFull replay swaps the card away (premise of #8328).
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's-bg', fullHistory: true });
+    _testMessageHandler.handle({ type: 'response', sessionId: 's-bg', content: 'earlier turn', historySeq: 1, timestamp: 1 });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's-bg' });
+    expect(prompts()).toHaveLength(0);
+
+    // The server's per-session re-send, after the end frame.
+    _testMessageHandler.handle(frame());
+    expect(prompts()).toHaveLength(1);
+    expect(prompts()[0].requestId).toBe('perm-resend');
+    expect(prompts()[0].answered).toBeUndefined();
+    expect(prompts()[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny', 'allowSession', 'allowAlways']);
+    resetReplayReconcile({ clearCursors: true });
+  });
+
   it('sets expiresAt from remainingMs', () => {
     const before = Date.now();
     const store = createMockStore({

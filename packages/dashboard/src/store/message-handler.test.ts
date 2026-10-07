@@ -7353,6 +7353,73 @@ describe('dashboard message-handler dispatch', () => {
       expect(activeMsgs.find((m: any) => m.type === 'prompt')).toBeUndefined()
     })
 
+    // #8328 — the server re-sends a session's pending permissions after a
+    // replay (`resendPendingPermissions`, per session). The re-send is only safe
+    // because a second frame for the same requestId updates the card in place.
+    describe('re-sent permission_request (#8328)', () => {
+      const frame = (extra: Record<string, unknown> = {}) => ({
+        type: 'permission_request',
+        sessionId: 's-bg',
+        requestId: 'perm-resend',
+        tool: 'Bash',
+        description: 'gh pr checks',
+        input: { command: 'gh pr checks' },
+        remainingMs: 300000,
+        ...extra,
+      })
+      const promptsOf = () =>
+        ((store.getState() as any).sessionStates['s-bg'].messages as any[]).filter((m) => m.type === 'prompt')
+      beforeEach(() => {
+        resetReplayReconcile({ clearCursors: true })
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's-bg',
+            sessionNotifications: [],
+            sessionStates: { 's-bg': createEmptySessionState() },
+          }),
+        )
+        setStore(store)
+      })
+      afterEach(() => {
+        resetReplayFlags()
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      it('two frames for the same requestId produce ONE prompt, still answerable', () => {
+        handleMessage(frame() as any, ctx() as any)
+        handleMessage(frame({ remainingMs: 120000 }) as any, ctx() as any)
+
+        const prompts = promptsOf()
+        expect(prompts).toHaveLength(1)
+        expect(prompts[0].requestId).toBe('perm-resend')
+        expect(prompts[0].answered).toBeUndefined()
+        expect(prompts[0].options?.map((o: any) => o.value)).toEqual(['allow', 'deny'])
+      })
+
+      it('a full-rebuild replay drops the live card, and the post-end re-send restores exactly one', () => {
+        // The card the client holds while s-bg was a background session.
+        handleMessage(frame() as any, ctx() as any)
+        expect(promptsOf()).toHaveLength(1)
+
+        // switch_session: forceFull replay. `permission_request` is transient,
+        // so history carries no prompt and the swap rebuilds from history alone.
+        handleMessage({ type: 'history_replay_start', sessionId: 's-bg', fullHistory: true } as any, ctx() as any)
+        handleMessage({ type: 'response', sessionId: 's-bg', content: 'earlier turn', historySeq: 1, timestamp: 1 } as any, ctx() as any)
+        handleMessage({ type: 'history_replay_end', sessionId: 's-bg' } as any, ctx() as any)
+        // Premise of #8328: the swap lost the live card.
+        expect(promptsOf()).toHaveLength(0)
+
+        // The server's per-session re-send, AFTER history_replay_end.
+        handleMessage(frame() as any, ctx() as any)
+
+        const prompts = promptsOf()
+        expect(prompts).toHaveLength(1)
+        expect(prompts[0].requestId).toBe('perm-resend')
+        expect(prompts[0].answered).toBeUndefined()
+        expect(prompts[0].options?.map((o: any) => o.value)).toEqual(['allow', 'deny'])
+      })
+    })
+
     it('creates the owning session state and routes the prompt there when that session is NOT loaded (#5693)', () => {
       // 's-bg' is asking but its sessionState has not been hydrated on this
       // client (only 's-active' is loaded). Containment fix: create s-bg's

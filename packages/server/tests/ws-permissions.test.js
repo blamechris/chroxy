@@ -182,6 +182,89 @@ describe('createPermissionHandler', () => {
     })
   })
 
+  // #8328: the per-session form of the ONE resend implementation.
+  describe('resendPendingPermissions — sessionId filter and routing (#8328)', () => {
+    const legacy = (requestId, extra = {}) => ({
+      resolve: () => {},
+      timer: null,
+      data: { requestId, tool: 'Bash', description: 'ls', input: {}, remainingMs: 300_000, createdAt: Date.now(), ...extra },
+    })
+    const sdkSession = (requestId) => ({
+      _pendingPermissions: new Map([[requestId, {}]]),
+      _lastPermissionData: new Map([[requestId, { requestId, tool: 'Bash', description: 'ls', input: {}, remainingMs: 300_000, createdAt: Date.now() }]]),
+    })
+    const sentIds = (opts) => opts.sendFn.mock.calls.map((c) => c.arguments[1].requestId)
+
+    it('unfiltered legacy resend carries the OWNER sessionId (it used to omit it)', () => {
+      const opts = makeHandlerOpts()
+      opts.permissionSessionMap.set('hook-owned', 'sess-bg')
+      opts.pendingPermissions.set('hook-owned', legacy('hook-owned'))
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({})
+      const msg = opts.sendFn.mock.calls[0].arguments[1]
+      assert.equal(msg.sessionId, 'sess-bg', "a background session's hook prompt must not land in the viewed session")
+    })
+
+    it('unfiltered legacy resend OMITS sessionId (absent, not null) for an ownerless entry', () => {
+      const opts = makeHandlerOpts()
+      opts.pendingPermissions.set('hook-orphan', legacy('hook-orphan'))
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({})
+      const msg = opts.sendFn.mock.calls[0].arguments[1]
+      assert.equal('sessionId' in msg, false, 'matches the dispatch-time broadcast convention')
+    })
+
+    it("filtered: sends only that session's SDK permissions", () => {
+      const sm = { _sessions: new Map([['sess-a', { session: sdkSession('sdk-a') }], ['sess-b', { session: sdkSession('sdk-b') }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({}, undefined, { sessionId: 'sess-b' })
+      assert.deepEqual(sentIds(opts), ['sdk-b'])
+    })
+
+    it('filtered: sends only legacy entries the session owns, never ownerless or foreign ones', () => {
+      const opts = makeHandlerOpts()
+      opts.permissionSessionMap.set('hook-a', 'sess-a')
+      opts.permissionSessionMap.set('hook-b', 'sess-b')
+      opts.pendingPermissions.set('hook-a', legacy('hook-a'))
+      opts.pendingPermissions.set('hook-b', legacy('hook-b'))
+      opts.pendingPermissions.set('hook-orphan', legacy('hook-orphan'))
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({}, undefined, { sessionId: 'sess-b' })
+      assert.deepEqual(sentIds(opts), ['hook-b'])
+    })
+
+    it('filtered: an unknown session id sends nothing', () => {
+      const sm = { _sessions: new Map([['sess-a', { session: sdkSession('sdk-a') }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      opts.permissionSessionMap.set('hook-a', 'sess-a')
+      opts.pendingPermissions.set('hook-a', legacy('hook-a'))
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({}, undefined, { sessionId: 'no-such-session' })
+      assert.equal(opts.sendFn.mock.calls.length, 0)
+    })
+
+    it('filtered: still skips an expired owned legacy entry', () => {
+      const opts = makeHandlerOpts()
+      opts.permissionSessionMap.set('hook-old', 'sess-b')
+      opts.pendingPermissions.set('hook-old', legacy('hook-old', { remainingMs: 1, createdAt: Date.now() - 60_000 }))
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({}, undefined, { sessionId: 'sess-b' })
+      assert.equal(opts.sendFn.mock.calls.length, 0)
+    })
+
+    it("no filter still resends every session's permissions (connect path unchanged)", () => {
+      const sm = { _sessions: new Map([['sess-a', { session: sdkSession('sdk-a') }], ['sess-b', { session: sdkSession('sdk-b') }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      opts.permissionSessionMap.set('hook-a', 'sess-a')
+      opts.pendingPermissions.set('hook-a', legacy('hook-a'))
+      opts.pendingPermissions.set('hook-orphan', legacy('hook-orphan'))
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      resendPendingPermissions({})
+      assert.deepEqual(sentIds(opts).sort(), ['hook-a', 'hook-orphan', 'sdk-a', 'sdk-b'])
+    })
+  })
+
   describe('resendPendingPermissions', () => {
     it('sends nothing when no pending permissions', () => {
       const opts = makeHandlerOpts()

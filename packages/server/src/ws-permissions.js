@@ -776,15 +776,35 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
   }
 
   /**
-   * Re-send any pending permission requests to a newly connected/reconnected client.
+   * Re-send pending permission requests to a client.
+   *
+   * Two callers, ONE implementation (#8328 — a second copy of this loop is how
+   * the SDK and hook branches drifted apart before):
+   *  - connect/reconnect (`ws-history.js` post-auth): no filter, every pending
+   *    permission on every session;
+   *  - a session replay (`finishReplay`, via `{ sessionId }`): only the
+   *    permissions the replayed session is blocked on. `permission_request` is
+   *    in `builtinTransient`, so it is never in history, and a full-rebuild
+   *    replay swap (`switch_session` forceFull, `subscribe_sessions`) drops the
+   *    prompt card the client appended live. The re-send is what puts it back.
+   *
+   * A duplicate delivery is safe by construction: both clients update an
+   * existing prompt in place by `requestId` rather than appending a second card.
+   *
    * @param {WebSocket} ws
    * @param {Object} [client] - Optional client descriptor for diagnostic logging (#2832)
+   * @param {Object} [opts]
+   * @param {string} [opts.sessionId] - Restrict the re-send to this session. A
+   *   hook-held (legacy HTTP) permission with NO known owner is never sent by a
+   *   filtered call: it cannot be shown to be this session's, and sending it
+   *   would drop another session's prompt into this one's transcript.
    */
-  function resendPendingPermissions(ws, client) {
+  function resendPendingPermissions(ws, client, { sessionId: onlySessionId } = {}) {
     // SDK-mode: check all sessions for pending permissions
     const sm = getSessionManager()
     if (sm?._sessions instanceof Map) {
       for (const [sessionId, entry] of sm._sessions) {
+        if (onlySessionId && sessionId !== onlySessionId) continue
         if (entry.session?._pendingPermissions instanceof Map) {
           for (const [requestId] of entry.session._pendingPermissions) {
             const permData = entry.session._lastPermissionData?.get(requestId)
@@ -813,7 +833,17 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               // keeps the settings-handler subscription guard symmetric
               // across the reconnect path. The bare Map.set fallback covers
               // unit-test fixtures that construct the handler directly.
-              if (typeof registerPermissionRoute === 'function') {
+              //
+              // #8328: a FILTERED call (a session replay) must not re-register a
+              // route that already exists. `registerPermissionRoute` re-subscribes
+              // EVERY eligible client on each call but seeds the #5704 refcount
+              // only on the first registration, so a client that deliberately
+              // unsubscribed after dispatch would be silently re-subscribed with
+              // no refcount, then treated as an explicit subscription and never
+              // torn down. The unfiltered connect-time call keeps its behaviour.
+              if (onlySessionId && permissionSessionMap.has(requestId)) {
+                // route already registered at dispatch/connect — leave it alone
+              } else if (typeof registerPermissionRoute === 'function') {
                 registerPermissionRoute(requestId, sessionId)
               } else {
                 permissionSessionMap.set(requestId, sessionId)
@@ -850,6 +880,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     // Legacy HTTP-held permissions
     for (const [requestId, pending] of pendingPermissions) {
       if (pending.data) {
+        // #8328: the owning session, recorded at dispatch (`registerPermissionRoute`
+        // keyed by the hook secret's session). Undefined for a request the daemon
+        // could not attribute.
+        const ownerSessionId = permissionSessionMap.get(requestId)
+        if (onlySessionId && ownerSessionId !== onlySessionId) continue
         const elapsed = Math.max(0, Date.now() - (pending.data.createdAt ?? Date.now()))
         const ttl = pending.data.remainingMs ?? PERMISSION_TTL_MS
         const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))
@@ -873,6 +908,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
             description: pending.data.description,
             input: pending.data.input,
             remainingMs,
+            // #8328: route the prompt to the session that asked, exactly as the
+            // dispatch-time broadcast does (`sessionId: ownerSessionId || undefined`
+            // above). It was omitted here, so a hook permission for a background
+            // session re-sent on connect landed in whichever session the client
+            // was viewing. The builder leaves the field absent (not null) when
+            // undefined — an unattributable request keeps the active-session
+            // fallback, same as at dispatch.
+            sessionId: ownerSessionId || undefined,
             // #7968: replay the floor verdict stashed on pending.data at
             // creation time (handlePermissionRequest above) — never re-derived.
             // Fail-closed: a stash with no verdict replays as floored.
