@@ -792,12 +792,12 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
    * A duplicate delivery is safe by construction: both clients update an
    * existing prompt in place by `requestId` rather than appending a second card.
    *
-   * @param {WebSocket} ws
-   * @param {Object} [client] - Optional client descriptor for diagnostic logging (#2832)
    * A session-bound client (`client.boundSessionId != null`) is re-sent only its
    * own session's pending permissions, on both the unfiltered and the filtered
    * call; an unbound client is unaffected.
    *
+   * @param {WebSocket} ws
+   * @param {Object} [client] - Optional client descriptor for diagnostic logging (#2832)
    * @param {Object} [opts]
    * @param {string} [opts.sessionId] - Restrict the re-send to this session. A
    *   hook-held (legacy HTTP) permission with NO known owner is never sent by a
