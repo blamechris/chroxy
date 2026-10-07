@@ -30,7 +30,7 @@ import { randomBytes } from 'node:crypto'
 import { SMALL_FILE_CAP, readBoundedJson, writeFileAtomic } from './utils/small-file.js'
 import {
   REQUEST_TTL_MS, REQUEST_SKEW_MS, POSTPONE_MS, POSTPONE_MAX_MS,
-  isSha, isIso, canonIso, parseRequest, parsePostpone, isRequestFresh,
+  isSha, isIso, canonIso, parseRequest, parsePostpone, isRequestFresh, isApplyingFresh,
 } from './utils/deploy-control-files.js'
 import { mkdirSync, unlinkSync, watch as fsWatch } from 'node:fs'
 import { join } from 'node:path'
@@ -70,7 +70,7 @@ export function readCappedJson(file) {
   return r.state === 'ok' ? r.value : null
 }
 
-function parsePending(v) {
+function parsePending(v, now) {
   if (!v || !isSha(v.target) || !isIso(v.queuedAt)) return null
   return {
     target: v.target.toLowerCase(),
@@ -78,7 +78,12 @@ function parsePending(v) {
     subject: typeof v.subject === 'string' ? clip(v.subject, SUBJECT_MAX) : '',
     commitsAhead: Number.isSafeInteger(v.commitsAhead) && v.commitsAhead >= 0 ? v.commitsAhead : null,
     queuedAt: canonIso(v.queuedAt),
-    reason: PENDING_REASONS.has(v.reason) ? v.reason : 'unknown',
+    // A stale `applying` (no usable applyingSince, or older than APPLYING_MAX_MS) is what a
+    // crashed tick leaves behind, not live work: read it as the state before it, "busy",
+    // so the buttons come back instead of the banner claiming a restart that is not happening.
+    reason: v.reason === 'applying'
+      ? (isApplyingFresh(v.applyingSince, now) ? 'applying' : 'busy')
+      : (PENDING_REASONS.has(v.reason) ? v.reason : 'unknown'),
   }
 }
 
@@ -101,7 +106,7 @@ function parseLastDeploy(v) {
  * @param {number} o.now
  */
 export function buildDaemonUpdateStatus({ dir, running, now }) {
-  const queued = parsePending(readCappedJson(join(dir, PENDING_FILE)))
+  const queued = parsePending(readCappedJson(join(dir, PENDING_FILE)), now)
   const lastDeploy = parseLastDeploy(readCappedJson(join(dir, LAST_DEPLOY_FILE)))
   const postpone = parsePostpone(readCappedJson(join(dir, POSTPONE_FILE)), now)
   const request = parseRequest(readCappedJson(join(dir, REQUEST_FILE)))

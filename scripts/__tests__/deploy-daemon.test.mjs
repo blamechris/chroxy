@@ -41,7 +41,7 @@ import { defaultDeps, deploy, parseArgs, POSTPONE_MAX_MS, REQUEST_SKEW_MS } from
 
 // Every case in this file. Bump it when you add one: a case that vanishes
 // should break the run rather than quietly shrink it.
-const MIN_CASES = 125
+const MIN_CASES = 131
 
 let pass = 0
 let fail = 0
@@ -2033,6 +2033,115 @@ await test('postpone: a deadline outside years 1970-9999 (the extended-year form
     eq((await env.run()).outcome, 'deployed', until)
     eq(readIf(env, 'deploy-postpone.json'), null, `${until}: deleted`)
   }
+})
+
+// -- round 3 (#8331) ---------------------------------------------------------
+
+await test('request: an UNREADABLE request is retried within the TTL and dropped (logged) once it is older than the TTL', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env, { nonce: 'n1', force: true })
+  const alwaysDenied = {
+    ...realFs,
+    openSync(f, ...rest) {
+      if (f.includes('deploy-request.json.claimed-')) throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+      return realFs.openSync(f, ...rest)
+    },
+  }
+  env.deps.fs = alwaysDenied
+  for (let i = 0; i < 2; i++) {
+    eq((await env.run()).outcome, 'deferred-busy')
+    assert(existsSync(env.path('deploy-request.json')), `tick ${i + 1}: put back, still within the TTL`)
+    env.t += 5 * 60e3
+  }
+  env.t += 20 * 60e3 // now well past the TTL since the request was written
+  eq((await env.run()).outcome, 'deferred-busy')
+  assert(!existsSync(env.path('deploy-request.json')), 'dropped, not put back')
+  eq(readdirSync(env.configDir).filter((n) => n.includes('.claimed-')), [], 'and no claim left')
+  assert(env.readLog().includes('dropped an unreadable deploy-request.json'), 'logged')
+  eq(env.readLog().split('dropped an unreadable').length - 1, 1, 'logged once')
+  eq((await env.run()).outcome, 'deferred-busy', 'and nothing is left to retry')
+})
+
+await test('applying from ACCEPTANCE: the moment a request is accepted, a Postpone is already refused (APPLYING)', async () => {
+  const { DaemonUpdateStatus } = await import('../../packages/server/src/daemon-update-status.js')
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env, { force: true })
+  let refused = null
+  const real = env.deps.fs
+  env.deps.fs = {
+    ...real,
+    // The acceptance line is logged right after the marker is written, before any probe or build.
+    appendFileSync(f, content, ...rest) {
+      if (refused === null && String(content).includes('accepted for')) {
+        refused = new DaemonUpdateStatus({ dir: env.configDir, running: A, now: () => env.t }).postpone({ target: B })
+        eq(readIf(env, 'pending-update.json').reason, 'applying')
+      }
+      return real.appendFileSync(f, content, ...rest)
+    },
+  }
+  eq((await env.run()).outcome, 'deployed')
+  eq(refused?.code, 'APPLYING')
+  eq(existsSync(env.path('deploy-postpone.json')), false, 'the refused postpone wrote nothing')
+})
+
+await test('applying from acceptance: a request that is accepted but then deferred leaves the update waiting again, not stuck "applying"', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env, { force: false })
+  eq((await env.run()).outcome, 'deferred-busy')
+  eq(readIf(env, 'pending-update.json').reason, 'busy')
+})
+
+await test('applying carries applyingSince, and a stale one (a crashed tick) is cleared by a tick that does not converge', async () => {
+  const seen = []
+  const env = makeEnv()
+  env.onRun = (cmd, args) => { if ([cmd, ...args].join(' ') === BUILD) seen.push(readIf(env, 'pending-update.json')) }
+  await env.run()
+  assert(Number.isFinite(Date.parse(seen[0].applyingSince)), 'applyingSince is a timestamp')
+  assert(Math.abs(Date.parse(seen[0].applyingSince) - env.t) < 5 * 60e3, 'and recent')
+
+  const upToDate = makeEnv()
+  upToDate.git.remote = A
+  writePending(upToDate, { reason: 'applying', applyingSince: isoAt(upToDate.t - 31 * 60e3) })
+  eq((await upToDate.run()).outcome, 'up-to-date')
+  eq(readIf(upToDate, 'pending-update.json'), null, 'a stale applying marker is gone')
+
+  const noSince = makeEnv()
+  noSince.git.remote = A
+  writePending(noSince, { reason: 'applying' })
+  await noSince.run()
+  eq(readIf(noSince, 'pending-update.json'), null, 'one with no applyingSince counts as stale')
+
+  const live = makeEnv()
+  live.git.remote = A
+  writePending(live, { reason: 'applying', applyingSince: isoAt(live.t - 5 * 60e3) })
+  await live.run()
+  eq(readIf(live, 'pending-update.json'), null, 'nothing waits any more, so even a fresh marker goes at up-to-date')
+
+  const deferred = makeEnv()
+  deferred.daemon.idleFn = () => BUSY
+  writePending(deferred, { reason: 'applying', applyingSince: isoAt(deferred.t - 31 * 60e3) })
+  await deferred.run()
+  eq(readIf(deferred, 'pending-update.json').reason, 'busy', 'a tick that defers rewrites it as the waiting state')
+})
+
+await test('a stale applying marker is cleared even by a tick that only defers an OWED ROLLBACK (it sets no pending state of its own)', async () => {
+  const env = makeEnv()
+  oweA(env)
+  env.daemon.idleFn = () => BUSY
+  writePending(env, { reason: 'applying', applyingSince: isoAt(env.t - 31 * 60e3) })
+  eq((await env.run()).outcome, 'deferred-busy')
+  eq(readIf(env, 'pending-update.json'), null)
+})
+
+await test('a stale applying marker is logged as cleared', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writePending(env, { reason: 'applying', applyingSince: isoAt(env.t - 31 * 60e3) })
+  await env.run()
+  assert(env.readLog().includes('cleared a stale "applying" marker'), 'logged')
 })
 
 // ---------------------------------------------------------------------------

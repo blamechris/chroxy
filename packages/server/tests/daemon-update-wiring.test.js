@@ -91,7 +91,7 @@ describe('daemon update status through a real WsServer', () => {
     const { primary, paired } = await start()
     await waitFor(() => of(primary.messages, 'daemon_update_status')[0], { timeoutMs: 3000, label: 'initial' })
     const before = of(primary.messages, 'daemon_update_status').length
-    writeFileSync(join(dir, PENDING_FILE), JSON.stringify({ target: B, from: A, subject: 'feat: x', commitsAhead: 1, queuedAt: new Date().toISOString(), reason: 'applying' }))
+    writeFileSync(join(dir, PENDING_FILE), JSON.stringify({ target: B, from: A, subject: 'feat: x', commitsAhead: 1, queuedAt: new Date().toISOString(), reason: 'applying', applyingSince: new Date().toISOString() }))
     const next = await waitFor(() => of(primary.messages, 'daemon_update_status').slice(before).find((m) => m.applying === true), { timeoutMs: 4000, label: 'applying broadcast' })
     assert.equal(next.pending.reason, 'applying')
     assert.deepEqual(of(paired.messages, 'daemon_update_status'), [])

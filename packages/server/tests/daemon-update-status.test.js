@@ -465,7 +465,7 @@ describe('the banner is for an update THIS daemon is waiting on (#8331)', () => 
 describe('the applying state (#8331)', () => {
   it('reason "applying" is exposed as applying:true', () => {
     const dir = mkDir()
-    put(dir, PENDING_FILE, pending({ reason: 'applying' }))
+    put(dir, PENDING_FILE, pending({ reason: 'applying', applyingSince: iso(NOW - 60e3) }))
     const s = buildDaemonUpdateStatus({ dir, running: A, now: NOW })
     assert.equal(s.applying, true)
     assert.equal(s.pending.reason, 'applying')
@@ -476,7 +476,7 @@ describe('the applying state (#8331)', () => {
 
   it('restart-now and postpone are refused with APPLYING, and write nothing', () => {
     const dir = mkDir()
-    put(dir, PENDING_FILE, pending({ reason: 'applying' }))
+    put(dir, PENDING_FILE, pending({ reason: 'applying', applyingSince: iso(NOW - 60e3) }))
     const u = mk(dir, { getIdleState: BUSY })
     assert.equal(u.requestRestart({ target: B, confirmBusy: true }).code, 'APPLYING')
     assert.equal(u.postpone({ target: B }).code, 'APPLYING')
@@ -516,5 +516,34 @@ describe('request freshness and timestamp range (#8331)', () => {
     const out = mk(dir, { getIdleState: BUSY }).requestRestart({ target: B.toUpperCase() })
     assert.equal(out.confirmRequired, true)
     assert.equal(out.target, B)
+  })
+})
+
+describe('a stale applying marker (a crashed tick) is not believed (#8331)', () => {
+  const status = (extra) => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending({ reason: 'applying', ...extra }))
+    return { dir, s: buildDaemonUpdateStatus({ dir, running: A, now: NOW }) }
+  }
+
+  it('missing, invalid, or older than 30 minutes: read as the waiting state, with the buttons working', () => {
+    for (const [why, extra] of [
+      ['no applyingSince', {}],
+      ['invalid applyingSince', { applyingSince: 'last tuesday' }],
+      ['31 minutes old', { applyingSince: iso(NOW - 31 * 60e3) }],
+      ['far in the future', { applyingSince: iso(NOW + 3600e3) }],
+    ]) {
+      const { dir, s } = status(extra)
+      assert.equal(s.applying, false, why)
+      assert.equal(s.pending.reason, 'busy', why)
+      const u = mk(dir)
+      assert.deepEqual(u.postpone({ target: B }).ok, true, `${why}: Postpone is allowed again`)
+    }
+  })
+
+  it('a fresh one (29 minutes) is believed', () => {
+    const { s } = status({ applyingSince: iso(NOW - 29 * 60e3) })
+    assert.equal(s.applying, true)
+    assert.equal(s.pending.reason, 'applying')
   })
 })

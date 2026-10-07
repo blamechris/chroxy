@@ -66,6 +66,33 @@ describe('generic file writes refuse the config directory and its direct childre
     assert.equal(existsSync(join(cfg, 'deploy-request.json')), false)
   })
 
+  it('a write that would create a DIRECTORY at a control-file name (deploy-request.json/x) is refused, and creates nothing', async () => {
+    await fileOps.writeFile(ws, '.chroxy/deploy-request.json/x', 'x', home)
+    assert.equal(out[0].error, CONFIG_DIR_REFUSAL)
+    assert.equal(existsSync(join(cfg, 'deploy-request.json')), false, 'no directory was squatted there')
+    out.length = 0
+    await fileOps.writeFile(ws, '.chroxy/deploy-state.json/sub/y', 'x', home)
+    assert.equal(out[0].error, CONFIG_DIR_REFUSAL)
+    assert.equal(existsSync(join(cfg, 'deploy-state.json')), false)
+  })
+
+  it('a NEW top-level directory under the config root is refused (newdir/x from the parent cwd)', async () => {
+    await fileOps.writeFile(ws, '.chroxy/newdir/x', 'x', home)
+    assert.equal(out[0].error, CONFIG_DIR_REFUSAL)
+    assert.equal(existsSync(join(cfg, 'newdir')), false)
+  })
+
+  it('new nested directories inside an EXISTING subtree are fine (worktrees/<id>/src/new/deep.js), from the parent cwd and from the worktree', async () => {
+    const wt = join(cfg, 'worktrees', 'sess-9')
+    await mkdir(wt, { recursive: true })
+    await fileOps.writeFile(ws, '.chroxy/worktrees/sess-9/src/new/deep.js', 'x', home)
+    assert.equal(out[0].error, null)
+    assert.ok(existsSync(join(wt, 'src/new/deep.js')))
+    out.length = 0
+    await fileOps.writeFile(ws, 'src/other/deeper/f.js', 'x', wt)
+    assert.equal(out[0].error, null)
+  })
+
   it('a symlinked parent that leads into the config dir is refused (the link sits inside the session cwd, so only this guard stops it)', async () => {
     await symlink(cfg, join(home, 'alias'))
     await fileOps.writeFile(ws, 'alias/deploy-request.json', forged, home)
@@ -126,11 +153,13 @@ describe('generic file writes refuse the config directory and its direct childre
     assert.equal(out[0].error, null)
   })
 
-  it('only the root and its DIRECT children count; a sibling sharing the name prefix does not', async () => {
+  it('the root, its direct children and NEW top-level directories count; existing subtrees and a sibling sharing the name prefix do not', async () => {
     await mkdir(join(home, '.chroxy-other'), { recursive: true })
+    await mkdir(join(cfg, 'worktrees', 'id'), { recursive: true })
     assert.equal(await isConfigDirOrDirectChild(join(home, '.chroxy-other', 'x.txt')), false)
     assert.equal(await isConfigDirOrDirectChild(join(cfg, 'worktrees', 'id', 'x')), false, 'a subtree')
-    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'a', 'b')), false, 'a grandchild')
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'worktrees', 'id', 'new', 'deep.js')), false, 'new directories INSIDE an existing subtree')
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'a', 'b')), true, 'a grandchild under a NEW top-level name would create that name')
     assert.equal(await isConfigDirOrDirectChild(join(cfg, 'a')), true, 'a direct child')
     assert.equal(await isConfigDirOrDirectChild(cfg), true, 'the root')
   })

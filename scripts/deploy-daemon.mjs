@@ -45,12 +45,13 @@
  * <configDir>, every one of them BEST EFFORT (a failure to write or delete one
  * never aborts a deploy or changes its outcome):
  *   pending-update.json   written here while a forward deploy is deferred (busy /
- *                         unknown / postponed); removed when it deploys, is up to
- *                         date, fails or is refused
+ *                         unknown / postponed) or underway (applying, stamped with
+ *                         applyingSince so a crashed tick's marker ages out);
+ *                         removed when it deploys, is up to date, fails or is refused
  *   deploy-postpone.json  written by the daemon; defers a FORWARD deploy of that
  *                         target until its deadline (never a rollback or repair)
  *   deploy-request.json   written by the daemon; "restart now" for the forward
- *                         target (older than 10 min or another target: ignored and
+ *                         target (older than 20 min or another target: ignored and
  *                         deleted; force:true skips the BUSY gates only). CLAIMED
  *                         atomically (renamed to a private name, read, deleted); a
  *                         newer file that appears at the live path is drained by
@@ -85,7 +86,7 @@ import { isGitShaRef } from '../packages/server/src/utils/argv-safety.js'
 // imports the same module, so both sides agree on what a hostile file looks like.
 import { readBoundedFile, readBoundedJson, writeFileAtomic } from '../packages/server/src/utils/small-file.js'
 import {
-  REQUEST_TTL_MS, POSTPONE_MAX_MS, REQUEST_SKEW_MS, isIso, parseRequest, parsePostpone, isRequestFresh,
+  REQUEST_TTL_MS, POSTPONE_MAX_MS, REQUEST_SKEW_MS, isIso, parseRequest, parsePostpone, isRequestFresh, isApplyingFresh,
 } from '../packages/server/src/utils/deploy-control-files.js'
 
 export const DEFAULT_PORT = 8765
@@ -356,6 +357,7 @@ async function deployOnce(opts, d, meta) {
   //   undefined  leave it alone
   //   'remove'   the update is no longer waiting (deployed, up to date, failed, refused)
   //   { reason, target, from }  a forward deploy is deferred (busy | unknown | postponed)
+  //                             or underway (applying)
   let pendingWant
   const removeQuietly = (file) => { try { fs.unlinkSync(file) } catch { /* absent or unremovable: best effort */ } }
   function applyPending() { writePendingWant(pendingWant) }
@@ -376,7 +378,7 @@ async function deployOnce(opts, d, meta) {
         const n = gitOut(['log', '--format=%h %s', `${from}..${to}`]).split('\n').filter(Boolean).length
         commitsAhead = n
       } catch { /* unrelated histories: unknown */ }
-      writeJson(p.pending, { target: to, from, subject, commitsAhead, queuedAt: kept, reason })
+      writeJson(p.pending, { target: to, from, subject, commitsAhead, queuedAt: kept, reason, ...(reason === 'applying' ? { applyingSince: iso() } : {}) })
     } catch { /* best effort */ }
   }
   // Claim the request ATOMICALLY: rename the live file to a private name, read the
@@ -406,6 +408,16 @@ async function deployOnce(opts, d, meta) {
       // CONTENT: it must not be consumed. Put it back at the live path with a
       // no-clobber link, so a NEWER request that arrived meanwhile wins and this one is
       // dropped; then the claim goes. Any other failure leaves the claim for the TTL cleanup.
+      //
+      // But a request that can NEVER be read must not be retried for ever: its mtime is
+      // when the daemon wrote it (a rename and a link keep it), so one older than the
+      // request TTL could not be honoured anyway and is dropped instead of put back.
+      let aged = false
+      try { aged = d.now() - fs.lstatSync(claimed).mtimeMs > REQUEST_TTL_MS } catch { /* cannot tell: keep it */ }
+      if (aged) {
+        removeQuietly(claimed)
+        return { ...r, aged: true }
+      }
       meta.requestRetry = true
       try {
         fs.linkSync(claimed, p.request)
@@ -848,14 +860,25 @@ async function deployOnce(opts, d, meta) {
     // Both live in <configDir>, written by the daemon's server. The request is
     // CLAIMED (renamed to a private name) under the lock, then read and deleted.
     meta.reached = true
+    // An `applying` marker a crashed tick left behind is cleared; one this tick is about
+    // to write (accepted request, converge) replaces it, and a tick that defers rewrites it.
+    if (!opts.dryRun) {
+      const cur = readBoundedJson(p.pending, { fs })
+      if (cur.state === 'ok' && cur.value.reason === 'applying' && !isApplyingFresh(cur.value.applyingSince, d.now())) {
+        pendingWant = 'remove'
+        event('cleared a stale "applying" marker in pending-update.json (no live tick owns it)')
+      }
+    }
     const reqRead = claimRequest()
     const reqParsed = reqRead.state === 'ok' ? parseRequest(reqRead.value) : null
     let reqAccepted = null // the request this tick acts on: fresh, for the forward target
     let reqForce = false
     let reqNote = null
     if (reqRead.state === 'error') {
-      // Could not READ it (not: it is invalid). It stays for the next tick.
-      reqNote = `could not read deploy-request.json (${reqRead.reason}); it is kept for the next tick`
+      // Could not READ it (not: it is invalid). It stays for the next tick, unless it is already too old to honour.
+      reqNote = reqRead.aged
+        ? `dropped an unreadable deploy-request.json (${reqRead.reason}): it is older than the request TTL`
+        : `could not read deploy-request.json (${reqRead.reason}); it is kept for the next tick`
       if (!opts.dryRun) event(reqNote)
     } else if (reqRead.state !== 'none') {
       if (!reqParsed) reqNote = 'ignored a malformed deploy-request.json'
@@ -865,6 +888,10 @@ async function deployOnce(opts, d, meta) {
         reqAccepted = reqParsed
         reqForce = reqParsed.force === true
         reqNote = `deploy request ${reqParsed.nonce} accepted for ${short(target)}${reqForce ? ': skipping the idle check, the owner confirmed' : ''}`
+        // From the moment a request is ACCEPTED the update is being applied: say so on disk
+        // now, before the probe and the build, so the daemon refuses a Postpone that can
+        // no longer take effect. Whatever the tick then defers to replaces this in `finally`.
+        if (!opts.dryRun) { writePendingWant({ reason: 'applying', target, from: oldForRollback }); pendingWant = 'remove' }
       }
       if (!opts.dryRun) event(reqNote, { range: reqAccepted ? rangeOf(head, target) : null })
     }

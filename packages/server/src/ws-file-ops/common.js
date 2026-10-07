@@ -325,7 +325,8 @@ export const CONFIG_DIR_REFUSAL = 'Access denied: the chroxy config directory is
 const sameDir = (a, b) => isPathWithin(a, b) && isPathWithin(b, a)
 
 /**
- * Is `absPath` the daemon's config directory itself, or a FILE DIRECTLY IN it?
+ * Is `absPath` the daemon's config directory itself, a FILE DIRECTLY IN it, or a
+ * write that would create (or pass through) a NEW direct child of it?
  *
  * Generic file writes refuse exactly that, so the deploy control files
  * (`deploy-request.json`, `deploy-postpone.json`) and the rest of the daemon's
@@ -354,7 +355,21 @@ export async function isConfigDirOrDirectChild(absPath) {
       realpathOfDeepestAncestor(absPath),
       realpathOfDeepestAncestor(configDir()),
     ])
-    return sameDir(target, root) || sameDir(dirname(target), root)
+    if (sameDir(target, root) || sameDir(dirname(target), root)) return true
+    // A write that would CREATE, or pass through, a direct child of the root is
+    // refused too: `mkdir -p` would otherwise make a DIRECTORY at a control-file name
+    // (`deploy-request.json/x`) and wedge every later write of that file. The first
+    // segment must already be a directory (`worktrees`, `orchestration`, ...), which is
+    // what lets chroxy's own worktrees keep working; no list of names is involved.
+    if (isPathWithin(target, root)) {
+      const segments = target.slice(root.length).split(/[\\/]+/).filter(Boolean)
+      if (segments.length > 1) {
+        let firstIsDirectory = false
+        try { firstIsDirectory = (await lstat(join(root, segments[0]))).isDirectory() } catch { /* absent: not a directory */ }
+        if (!firstIsDirectory) return true
+      }
+    }
+    return false
   } catch {
     return true
   }

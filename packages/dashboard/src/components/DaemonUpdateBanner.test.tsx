@@ -95,6 +95,23 @@ describe('banner states', () => {
     } finally { vi.useRealTimers() }
   })
 
+  it('the 30 s clock restarts when the pending target changes (no stale "applies at the next scheduled check" for a new update)', () => {
+    vi.useFakeTimers()
+    try {
+      const props = {
+        busy: false, confirm: null, error: null, onRestartNow: vi.fn(), onPostpone: vi.fn(), onConfirmRestart: vi.fn(), onCancelConfirm: vi.fn(), onDismissError: vi.fn(), now: () => NOW,
+      }
+      const pend = (target: string) => ({ target, from: A, subject: 's', commitsAhead: 1, queuedAt: '2026-10-07T11:00:00.000Z', reason: 'busy' as const })
+      const { rerender } = render(<DaemonUpdateBanner {...props} status={status({ requestPending: true })} />)
+      act(() => { vi.advanceTimersByTime(REQUEST_SLOW_MS + 1) })
+      expect(screen.getByTestId('daemon-update-message').textContent).toContain('applies at the next scheduled check')
+      rerender(<DaemonUpdateBanner {...props} status={status({ requestPending: true, pending: pend(C) })} />)
+      expect(screen.getByTestId('daemon-update-message').textContent).toBe(`Restarting to apply ${C.slice(0, 7)}…`)
+      act(() => { vi.advanceTimersByTime(REQUEST_SLOW_MS - 1) })
+      expect(screen.getByTestId('daemon-update-message').textContent).toContain('Restarting to apply')
+    } finally { vi.useRealTimers() }
+  })
+
   it('unknown idle: "can\'t confirm the daemon is idle", Restart now is NOT offered, Postpone still is', () => {
     const { props } = setup({ status: status({ pending: { target: B, from: A, subject: 'feat: x', commitsAhead: 1, queuedAt: '2026-10-07T11:00:00.000Z', reason: 'unknown' } }) })
     expect(screen.getByTestId('daemon-update-message').textContent).toBe(`Update ready (${B.slice(0, 7)}) — can't confirm the daemon is idle`)

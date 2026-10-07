@@ -142,7 +142,9 @@ export function DaemonUpdateBanner({
   const [requestSlow, setRequestSlow] = useState(false)
   const pendingTarget = pending?.target ?? null
   useEffect(() => {
-    if (!waitingOnRequest) { setRequestSlow(false); return }
+    // Every new wait (a new target, or the request appearing) starts its 30 s clock over.
+    setRequestSlow(false)
+    if (!waitingOnRequest) return
     const t = setTimeout(() => setRequestSlow(true), REQUEST_SLOW_MS)
     return () => clearTimeout(t)
   }, [waitingOnRequest, pendingTarget])

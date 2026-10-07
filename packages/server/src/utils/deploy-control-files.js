@@ -16,6 +16,12 @@ const NONCE = /^[A-Za-z0-9._-]{1,64}$/
 export const REQUEST_TTL_MS = 20 * 60 * 1000
 /** How far in the future a `requestedAt` may be (clock skew between the writer and the reader). */
 export const REQUEST_SKEW_MS = 5 * 60 * 1000
+/**
+ * How long an `applying` marker (written by the script when a forward deploy starts
+ * building) is believed. The build timeout is 20 minutes, so 30 covers it plus slack;
+ * past that the marker is the leftover of a crashed tick, not live work.
+ */
+export const APPLYING_MAX_MS = 30 * 60 * 1000
 /** What the daemon's Postpone writes. */
 export const POSTPONE_MS = 60 * 60 * 1000
 /** A postpone is honoured only for at most this long from its own `requestedAt`: the hour, plus a minute of slack. */
@@ -68,4 +74,14 @@ export function parsePostpone(v, nowMs) {
   if (asked - nowMs > REQUEST_SKEW_MS) return null
   if (Date.parse(v.until) - asked > POSTPONE_MAX_MS) return null
   return { target: v.target.toLowerCase(), until: canonIso(v.until) }
+}
+
+/**
+ * Is an `applying` marker's `applyingSince` recent enough to be live? Missing, invalid,
+ * older than APPLYING_MAX_MS, or meaningfully from the future: no.
+ */
+export function isApplyingFresh(applyingSince, nowMs) {
+  // A missing or unparseable value is NaN, which fails both comparisons: not fresh.
+  const age = nowMs - Date.parse(applyingSince)
+  return age <= APPLYING_MAX_MS && age >= -REQUEST_SKEW_MS
 }

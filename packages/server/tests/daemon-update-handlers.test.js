@@ -128,7 +128,7 @@ describe('daemon_update_action — restart-now', () => {
 
   it('while the update is being applied, both actions are answered APPLYING and write nothing', () => {
     const { ctx, sent, dir } = mkCtx()
-    writeFileSync(join(dir, PENDING_FILE), JSON.stringify({ target: B, from: A, subject: 's', commitsAhead: 1, queuedAt: new Date(NOW - 1000).toISOString(), reason: 'applying' }))
+    writeFileSync(join(dir, PENDING_FILE), JSON.stringify({ target: B, from: A, subject: 's', commitsAhead: 1, queuedAt: new Date(NOW - 1000).toISOString(), reason: 'applying', applyingSince: new Date(NOW - 1000).toISOString() }))
     handle(ctx, primary, act())
     handle(ctx, primary, act({ action: 'postpone' }))
     assert.deepEqual(sent.map((m) => m.code), ['APPLYING', 'APPLYING'])
