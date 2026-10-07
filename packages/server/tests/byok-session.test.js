@@ -4402,8 +4402,18 @@ describe('ClaudeByokSession', () => {
     it('parent interrupt cascades to child subagent', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')
-      let childInterruptCalled = 0
+      // Only child interrupts that happen while the PARENT's interrupt() is on
+      // the stack, and that leave the child's stream aborted, count as the
+      // cascade. The child's own destroy() also calls this.interrupt(), so a
+      // bare call count would stay green with the cascade removed.
+      let parentInterruptOnStack = false
+      let cascadedChildAborts = 0
       let childInstance = null
+      const origParentInterrupt = session.interrupt.bind(session)
+      session.interrupt = function () {
+        parentInterruptOnStack = true
+        try { return origParentInterrupt() } finally { parentInterruptOnStack = false }
+      }
       // Patch the child constructor so we can record interrupt() calls.
       const origExecute = session._executeTaskTool.bind(session)
       session._executeTaskTool = async function (args) {
@@ -4415,8 +4425,11 @@ describe('ClaudeByokSession', () => {
           childInstance = v
           const origInterrupt = v.interrupt.bind(v)
           v.interrupt = function () {
-            childInterruptCalled += 1
-            return origInterrupt()
+            const result = origInterrupt()
+            if (parentInterruptOnStack && v._abortController?.signal?.aborted) {
+              cascadedChildAborts += 1
+            }
+            return result
           }
           return origSet(k, v)
         }
@@ -4436,7 +4449,10 @@ describe('ClaudeByokSession', () => {
             // signal will tear down.
             yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'starting...' } }
             await new Promise((resolve, reject) => {
-              const t = setTimeout(resolve, 60_000)
+              // Short fallback: with the cascade intact the abort settles this
+              // at once; without it the stream ends here and the assertion
+              // below fails in ~2 s instead of hanging a minute.
+              const t = setTimeout(resolve, 2_000)
               // When child.interrupt() fires, the child's abort
               // controller aborts and the SDK's APIUserAbortError
               // surfaces via finalMessage. We approximate by clearing
@@ -4474,7 +4490,10 @@ describe('ClaudeByokSession', () => {
       })
       session.interrupt()
       await turn
-      assert.ok(childInterruptCalled > 0, 'parent.interrupt() must cascade to child.interrupt()')
+      assert.ok(
+        cascadedChildAborts > 0,
+        "parent.interrupt() must abort the child's stream through the cascade",
+      )
       await session.destroy()
     })
 
