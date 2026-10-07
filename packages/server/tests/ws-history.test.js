@@ -867,7 +867,17 @@ describe('sendPostAuthInfo — multi-session mode', () => {
     registerClient(ctx, ws)
 
     sendPostAuthInfo(ctx, ws)
-    assert.equal(ctx.permissions.resendPendingPermissions.callCount, 1)
+    // #8328: `replayHistory` now also re-sends the replayed (active) session's
+    // permissions through the SAME method, with a `{ sessionId }` filter. The
+    // connect-time resend this test is about is the UNFILTERED one — still
+    // exactly one per connect — and the filtered one is scoped to the active
+    // session only. A duplicate frame is one card (both clients update a prompt
+    // in place by requestId).
+    const calls = ctx.permissions.resendPendingPermissions.calls
+    const unfiltered = calls.filter((c) => !c[2])
+    const filtered = calls.filter((c) => c[2])
+    assert.equal(unfiltered.length, 1)
+    assert.deepEqual(filtered.map((c) => c[2]), [{ sessionId: 'sess-1' }])
   })
 
   // #2954 — surface sessions that failed to restore at server startup so

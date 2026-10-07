@@ -1530,6 +1530,48 @@ export function resendPendingQuestions(ctx, ws, sessionId) {
 }
 
 /**
+ * #8328 — re-assert the permission prompts a session is still blocked on, to
+ * ONE client, after a replay of that session.
+ *
+ * `permission_request` is in `builtinTransient`: never in the ring buffer, so a
+ * replay cannot deliver it, and a FULL-rebuild replay (`switch_session`'s
+ * `forceFull`, `subscribe_sessions`) swaps in a message list built from history
+ * alone — dropping the prompt card the client appended LIVE while the session
+ * was a background one. The turn then sits at "Running Bash..." with no card
+ * until the request's timeout denies it. Same shape as `resendPendingQuestions`
+ * above, same fix, and the same reason it hangs off the replay's exit rather
+ * than off `switch_session`: every replay path needs it.
+ *
+ * It delegates to `permissions.resendPendingPermissions` — the ONE
+ * implementation, which the connect-time (unfiltered) resend also uses — and
+ * covers both the SDK-held and the hook-held (claude-tui, the default
+ * provider) pending sets.
+ *
+ * `ctx.permissions` is the permission handler; ctx fixtures that never built
+ * one have nothing to re-send, hence the optional chain on it alone — the
+ * method on a real handler is called unguarded so drift fails loudly.
+ *
+ * Connect: `sendPostAuthInfo` also does the unfiltered resend, so the ACTIVE
+ * session's permission can arrive twice on a (re)connect — once from that call
+ * and once from here after `history_replay_end`. Both clients update a prompt
+ * in place by `requestId` (dashboard `handlePermissionRequest`, app
+ * `case 'permission_request'`), so that is one card, and the second delivery
+ * is what rescues a BACKGROUND session's card on connect: its
+ * `subscribe_sessions` full-rebuild replay otherwise swaps away the card the
+ * unfiltered resend had just placed.
+ *
+ * @param {object} ctx
+ * @param {WebSocket} ws
+ * @param {string} sessionId
+ */
+export function resendPendingPermissionsForSession(ctx, ws, sessionId) {
+  const { permissions, clients } = ctx
+  if (!permissions) return
+  const client = clients && typeof clients.get === 'function' ? clients.get(ws) : undefined
+  permissions.resendPendingPermissions(ws, client, { sessionId })
+}
+
+/**
  * Replay message history for a session to a single client.
  * Sends the retained ring buffer in batches to yield the event loop.
  *
@@ -1555,7 +1597,15 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   const { sessionManager, send, clients } = ctx
   if (!sessionManager) return
   const history = sessionManager.getHistory(sessionId)
-  if (history.length === 0) return
+  if (history.length === 0) {
+    // #8328: no replay frames means the client does not rebuild this session's
+    // messages, so nothing it holds is dropped here — but a client that never
+    // received the live broadcast (it was not subscribed when the request was
+    // raised) still needs the prompt, and an in-place update by `requestId`
+    // makes the re-send free for one that did.
+    resendPendingPermissionsForSession(ctx, ws, sessionId)
+    return
+  }
 
   const truncated = sessionManager.isHistoryTruncated(sessionId)
 
@@ -1598,6 +1648,12 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
     // sweep has already run by the time this lands, which is the entire reason
     // a still-pending question survives the reconnect.
     resendPendingQuestions(ctx, ws, sessionId)
+    // #8328: likewise AFTER the end frame. A full-rebuild replay swaps in a
+    // history-only message list at `history_replay_end`, dropping the live
+    // permission card the client held for this session; `permission_request`
+    // is transient, so the replay itself cannot restore it. Sent after the
+    // swap, the re-send lands on the rebuilt list and is kept.
+    resendPendingPermissionsForSession(ctx, ws, sessionId)
   }
 
   // #5555.3 — start at the resolved offset: 0 for a full replay, the

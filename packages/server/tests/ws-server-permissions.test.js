@@ -656,6 +656,103 @@ describe('permission/question routing to originating session', () => {
     ws.close()
   })
 
+  // #8328 — owner-path regression through the REAL WsServer: a permission raised
+  // by a session the client is NOT viewing is dropped by the full-rebuild replay
+  // swap on switch_session (the frame is transient: never in history), so the
+  // server must re-send it AFTER history_replay_end.
+  describe('pending permission survives switch_session (#8328)', () => {
+    function twoSessionsWithHistory() {
+      const { manager, sessionsMap } = createTwoSessionManager()
+      manager._sessions = sessionsMap // the SDK-mode pending scan reads this
+      manager.getHistory = (id) => (id === 'sess-b' ? [{ type: 'response', content: 'hi from b', _seq: 1 }] : [])
+      manager.isHistoryTruncated = () => false
+      return { manager, sessionsMap }
+    }
+    const idxOf = (messages, pred) => messages.findIndex(pred)
+
+    it('re-sends a pending SDK permission for the target session after history_replay_end', async () => {
+      const { manager, sessionsMap } = twoSessionsWithHistory()
+      const sessB = sessionsMap.get('sess-b').session
+      sessB._pendingPermissions = new Map([['perm-sdk-b', {}]])
+      sessB._lastPermissionData = new Map([['perm-sdk-b', {
+        requestId: 'perm-sdk-b', tool: 'Bash', description: 'gh pr checks', input: { command: 'gh pr checks' },
+        remainingMs: 300_000, createdAt: Date.now(), floored: false,
+      }]])
+
+      server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, true)
+      // The client views sess-a and connect re-sends sess-b's prompt through the
+      // unfiltered path (the card the client then holds as a background prompt).
+      // Wait for that copy, then look only at what the SWITCH produces.
+      await waitForMessageMatch(messages, (m) => m.type === 'permission_request' && m.requestId === 'perm-sdk-b', 2000, 'connect-time resend')
+      const base = messages.length
+
+      send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+      await waitFor(() => messages.slice(base).some((m) => m.type === 'permission_request' && m.requestId === 'perm-sdk-b'), { label: 'permission_request after switch' })
+
+      const after = messages.slice(base)
+      const endIdx = idxOf(after, (m) => m.type === 'history_replay_end' && m.sessionId === 'sess-b')
+      const permIdx = idxOf(after, (m) => m.type === 'permission_request' && m.requestId === 'perm-sdk-b')
+      assert.ok(endIdx >= 0, 'sess-b was replayed')
+      assert.ok(permIdx > endIdx, `permission_request must follow history_replay_end (end=${endIdx}, perm=${permIdx})`)
+      assert.equal(after[permIdx].sessionId, 'sess-b')
+
+      ws.close()
+    })
+
+    it('re-sends a pending hook-routed permission for the target session after history_replay_end', async () => {
+      const { manager } = twoSessionsWithHistory()
+      server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, true)
+      messages.length = 0
+
+      // What POST /permission leaves behind for a claude-tui/cli session.
+      server._permissionSessionMap.set('perm-hook-b', 'sess-b')
+      server._pendingPermissions.set('perm-hook-b', {
+        resolve: () => {}, timer: null,
+        data: { requestId: 'perm-hook-b', tool: 'Bash', description: 'ls', input: {}, remainingMs: 300_000, createdAt: Date.now(), floored: false },
+      })
+
+      send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+      await waitForMessageMatch(messages, (m) => m.type === 'permission_request' && m.requestId === 'perm-hook-b', 2000, 'hook permission_request for sess-b')
+
+      const endIdx = idxOf(messages, (m) => m.type === 'history_replay_end' && m.sessionId === 'sess-b')
+      const permIdx = idxOf(messages, (m) => m.type === 'permission_request' && m.requestId === 'perm-hook-b')
+      assert.ok(permIdx > endIdx && endIdx >= 0, `hook permission_request must follow history_replay_end (end=${endIdx}, perm=${permIdx})`)
+      assert.equal(messages[permIdx].sessionId, 'sess-b')
+
+      ws.close()
+    })
+
+    it('does not send sess-a\'s pending permission when switching to sess-b', async () => {
+      const { manager, sessionsMap } = twoSessionsWithHistory()
+      const sessA = sessionsMap.get('sess-a').session
+      sessA._pendingPermissions = new Map([['perm-sdk-a', {}]])
+      sessA._lastPermissionData = new Map([['perm-sdk-a', {
+        requestId: 'perm-sdk-a', tool: 'Bash', description: 'ls', input: {}, remainingMs: 300_000, createdAt: Date.now(), floored: false,
+      }]])
+      server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, true)
+      messages.length = 0
+
+      send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+      await waitForMessageMatch(messages, (m) => m.type === 'history_replay_end' && m.sessionId === 'sess-b', 2000, 'sess-b replay end')
+      // Flush ordering: a follow-up round trip guarantees the replay tail was processed.
+      send(ws, { type: 'switch_session', sessionId: 'sess-a' })
+      await waitFor(() => messages.filter((m) => m.type === 'session_switched').length >= 2, { label: 'second switch' })
+
+      const switchedToB = idxOf(messages, (m) => m.type === 'session_switched' && m.sessionId === 'sess-b')
+      const switchedToA = idxOf(messages, (m) => m.type === 'session_switched' && m.sessionId === 'sess-a')
+      const leaked = messages.slice(switchedToB, switchedToA).filter((m) => m.type === 'permission_request')
+      assert.equal(leaked.length, 0, 'sess-a\'s prompt must not ride a sess-b replay')
+
+      ws.close()
+    })
+  })
+
   it('routes user_question_response to the originating session, not activeSessionId', async () => {
     const { manager, sessionsMap } = createTwoSessionManager()
 
