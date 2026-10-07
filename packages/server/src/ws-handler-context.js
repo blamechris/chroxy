@@ -86,6 +86,7 @@
  * @property {object|null} orchestrationManager - #6691 OrchestrationManager; null while the feature is off.
  * @property {object|null} schedulerEngine - #6871 scheduled-task engine; null when scheduling is off.
  * @property {object|null} sessionCiWatcher - #7427 SessionCiWatcher, so an on-demand PR survey can arm the watch; null when `sessionCi.watch` is off.
+ * @property {object|null} daemonUpdate - #8331 DaemonUpdateStatus (pending-update banner + restart-now / postpone request files); null when not wired.
  *
  * @typedef {Object} WsHandlerRuntime
  * @property {boolean} draining - True while the server is draining for shutdown.
@@ -199,6 +200,11 @@ export const CTX_NAMESPACES = {
     // NULL whenever `sessionCi.watch` is off — the handler treats absence as
     // "nothing to arm" and its reply is unaffected either way.
     'sessionCiWatcher',
+    // #8331: the DaemonUpdateStatus module (daemon-update-status.js) behind the
+    // dashboard's "update ready" banner. NULL in tests and wherever server-cli did
+    // not build one; the `daemon_update_action` handler reports that as
+    // UNAVAILABLE rather than pretending an update can be applied.
+    'daemonUpdate',
   ],
   runtime: [
     'draining',

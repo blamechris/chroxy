@@ -58,6 +58,7 @@ import { ContainerLostBanner } from './components/ContainerLostBanner'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { ExposureWarningBanner } from './components/ExposureWarningBanner'
+import { DaemonUpdateBanner } from './components/DaemonUpdateBanner'
 import { BillingWarningBanner } from './components/BillingWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
@@ -257,6 +258,15 @@ export function App() {
   const serverExposure = useConnectionStore(s => s.serverExposure)
   const exposureBannerDismissed = useConnectionStore(s => s.exposureBannerDismissed)
   const dismissExposureBanner = useConnectionStore(s => s.dismissExposureBanner)
+  // #8331 — the daily daemon's queued update. Null for every client but a
+  // strict-primary one (the server only sends it to those).
+  const daemonUpdate = useConnectionStore(s => s.daemonUpdate)
+  const daemonUpdateAction = useConnectionStore(s => s.daemonUpdateAction)
+  const daemonUpdateConfirm = useConnectionStore(s => s.daemonUpdateConfirm)
+  const daemonUpdateError = useConnectionStore(s => s.daemonUpdateError)
+  const requestDaemonUpdateAction = useConnectionStore(s => s.requestDaemonUpdateAction)
+  const cancelDaemonUpdateConfirm = useConnectionStore(s => s.cancelDaemonUpdateConfirm)
+  const clearDaemonUpdateError = useConnectionStore(s => s.clearDaemonUpdateError)
   // #5821: billing-canary banner state.
   const billingCanary = useConnectionStore(s => s.billingCanary)
   const billingBannerDismissed = useConnectionStore(s => s.billingBannerDismissed)
@@ -2608,6 +2618,21 @@ export function App() {
           onDismiss={dismissExposureBanner}
         />
       )}
+
+      {/* #8331 — "update ready" for the daily daemon (Restart now / Postpone 1h),
+          the confirm dialog for busy sessions, and the one-time "Updated to
+          <sha>" notice. Renders nothing for a client the server did not tell. */}
+      <DaemonUpdateBanner
+        status={daemonUpdate}
+        busy={Boolean(daemonUpdateAction)}
+        confirm={daemonUpdateConfirm ?? null}
+        error={daemonUpdateError ?? null}
+        onRestartNow={(target) => { requestDaemonUpdateAction('restart-now', target) }}
+        onPostpone={(target) => { requestDaemonUpdateAction('postpone', target) }}
+        onConfirmRestart={(target) => { requestDaemonUpdateAction('restart-now', target, { confirmBusy: true }) }}
+        onCancelConfirm={cancelDaemonUpdateConfirm}
+        onDismissError={clearDaemonUpdateError}
+      />
 
       {/* #5821 — billing-canary warnings (silent metered default; claude-tui
           reclassification tripwire) during the 2026-06-15 credit window. */}

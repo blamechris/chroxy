@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerFailedRestoresListMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerGithubWebhookConfigMessage, ServerSessionPrStatusMessage, ServerSessionPrThreadsMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment, InputContextEnvelope, ServerOrchestrationRunsSnapshot, ServerScheduledTasksMessage, ScheduledTaskInput, CodexSandboxMode, ServerDaemonUpdateStatusMessage, ServerDaemonUpdateConfirmRequiredMessage } from '@chroxy/protocol'
 import type { HeldRunDetail } from '@chroxy/store-core'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
@@ -1020,6 +1020,23 @@ export interface ConnectionState {
    * attacker-controlled and rendered as plain text (React escapes).
    */
   pendingPairRequests: ServerPairPendingMessage[];
+
+  /**
+   * #8331 — the daily daemon's queued update, as the server last reported it
+   * (`daemon_update_status`). Only a STRICT-PRIMARY, unbound client is ever told,
+   * so a paired phone's store stays null. Null until the first status lands, and
+   * reset on a server switch / disconnect: it describes ONE daemon.
+   */
+  daemonUpdate: ServerDaemonUpdateStatusMessage | null;
+  /** #8331 — the Restart now / Postpone request in flight (disables the banner's buttons). */
+  daemonUpdateAction: { requestId: string; action: 'restart-now' | 'postpone'; target: string } | null;
+  /**
+   * #8331 — set when the server answered restart-now with `daemon_update_confirm_required`:
+   * sessions are busy and nothing was written. Drives the confirm dialog.
+   */
+  daemonUpdateConfirm: ServerDaemonUpdateConfirmRequiredMessage | null;
+  /** #8331 — the last failed action's reason, in words; cleared by the next attempt or a dismiss. */
+  daemonUpdateError: string | null;
 
   /**
    * #5513 (epic #5509) — a `?pair=` link the dashboard tried to redeem turned
@@ -2385,6 +2402,15 @@ export interface ConnectionState {
   // #5510: deny a pending pair request, sending `pair_deny`. Same optimistic
   // drop + wire-result contract as approvePairRequest.
   denyPairRequest: (requestId: string) => boolean;
+
+  // #8331: Restart now / Postpone for the queued daemon update. Sends
+  // `daemon_update_action`; `confirmBusy` is set only by the confirm dialog. Returns
+  // whether it went on the wire (false = socket closed or one already in flight).
+  requestDaemonUpdateAction: (action: 'restart-now' | 'postpone', target: string, opts?: { confirmBusy?: boolean }) => boolean;
+  // #8331: dismiss the busy-sessions confirm dialog without restarting.
+  cancelDaemonUpdateConfirm: () => void;
+  // #8331: dismiss a failed-action message.
+  clearDaemonUpdateError: () => void;
 
   // #5513: clear the approval-gated redemption signal (`pendingApprovalPairHost`)
   // after the UI has opened the request-pair flow for it.

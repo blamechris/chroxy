@@ -20,3 +20,4 @@ export * from "./server/environment.js";
 export * from "./server/messages.js";
 export * from "./server/orchestration.js";
 export * from "./server/scheduler.js";
+export * from "./server/daemon-update.js";

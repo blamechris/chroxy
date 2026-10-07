@@ -1329,6 +1329,21 @@ export const RevokeTokenSchema = z.object({
     type: z.literal('revoke_token'),
     requestId: z.string().max(128).optional(),
 });
+// -- Daemon update banner (#8331) --
+// Restart-now / postpone for the update the deploy script has queued for the
+// daily daemon. Gated server-side on a STRICT PRIMARY, UNBOUND client
+// (handlers/daemon-update-handlers.js): restarting the daemon kills every live
+// session. `target` must still be the waiting update (else STALE_TARGET).
+// `confirmBusy` says the owner saw the busy-session list and accepted it; it is
+// never what makes the restart "forced" -- the server derives that from its own
+// idle verdict.
+export const DaemonUpdateActionSchema = z.object({
+    type: z.literal('daemon_update_action'),
+    action: z.enum(['restart-now', 'postpone']),
+    target: z.string().regex(/^[0-9a-f]{40}$/i),
+    confirmBusy: z.boolean().optional(),
+    requestId: z.string().max(128).optional(),
+});
 // -- Extension message --
 export const ExtensionMessageSchema = z.object({
     type: z.literal('extension_message'),
@@ -1912,6 +1927,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SessionPresetApproveSchema,
     SessionPresetRevokeSchema,
     RevokeTokenSchema,
+    DaemonUpdateActionSchema,
     QueryPermissionAuditSchema,
     ExtensionMessageSchema,
     CreateEnvironmentSchema,

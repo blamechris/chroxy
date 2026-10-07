@@ -20,3 +20,4 @@ export * from './server/environment.ts';
 export * from './server/messages.ts';
 export * from './server/orchestration.ts';
 export * from './server/scheduler.ts';
+export * from './server/daemon-update.ts';

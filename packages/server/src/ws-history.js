@@ -386,6 +386,9 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     billingCanary,
     // #5536: long-lived identity keypair for signing the eager exchange key.
     serverIdentity,
+    // #8331: the daily-daemon update status; sent below to strict-primary,
+    // unbound clients only. Optional — absent on old callers and test harnesses.
+    daemonUpdate,
     // #7821: configured explicit agent routes. Kept on the history context so
     // auth_ok feature derivation and auth_bootstrap use the same live config.
     agentConnections,
@@ -793,6 +796,18 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
 
   send(ws, { type: 'server_mode', mode: serverMode })
   send(ws, { type: 'status', connected: true })
+
+  // #8331: the "update ready" banner's data. The SAME bar as the
+  // `daemon_update_action` it exists to drive: strict primary token AND unbound.
+  // A paired phone (an unbound pairing token) must not be told which commits are
+  // queued for the owner's machine, and a bound client sees nothing host-level.
+  if (daemonUpdate && client?.isPrimaryToken === true && !client.boundSessionId) {
+    try {
+      send(ws, { type: 'daemon_update_status', ...daemonUpdate.getStatus() })
+    } catch (err) {
+      log.warn(`daemon_update_status failed for ${client.id}: ${err?.message || err}`)
+    }
+  }
 
   // Multi-session mode
   if (sessionManager) {

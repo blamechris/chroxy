@@ -190,6 +190,9 @@ const PLATFORM_SPECIFIC = {
   // so it is BOTH-CLIENTS. Coverage passes because the dashboard has a
   // `permission_input: handlePermissionInput` HANDLERS-map entry and the mobile
   // app has a `case 'permission_input':` clause.
+  'daemon_update_status': 'dashboard', // #8331 queued daily-daemon update + last deploy result for the "Update ready" banner — host-level, strict-primary-only surface of the idle-only auto-deploy; dashboard-only (the mobile app does not restart the owner's daemon)
+  'daemon_update_confirm_required': 'dashboard', // #8331 reply to restart-now while sessions are busy — the dashboard's confirm dialog; dashboard-only, same surface
+  'daemon_update_action_result': 'dashboard', // #8331 outcome of daemon_update_action (ok or a code) — clears the banner's pending state; dashboard-only, same surface
   'scheduled_tasks': 'dashboard', // #6871 (epic #6784) scheduled-task registry + scheduler-gate snapshot for the Control Room "Scheduled tasks" tab — host-level surface, dashboard-only (the mobile app has no Control Room; the `chroxy schedule` CLI #6868 is the headless counterpart); mobile parity would be a fast-follow
   'repo_events_snapshot': 'dashboard', // Control Room repo-events survey reply (#5966, epic #5422 phase 5) — GitHub-webhook activity buffered by the daemon (#6468); host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'repo_events_delta': 'dashboard', // Control Room repo-events LIVE delta (#6536, PR-2 of #5966) — host-broadcast of a new webhook event so the pane updates without a Refresh; host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
