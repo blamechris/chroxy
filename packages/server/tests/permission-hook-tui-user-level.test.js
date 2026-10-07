@@ -4,15 +4,16 @@ import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 
 import { createPermissionHandler } from '../src/ws-permissions.js'
-import { createPermissionHookManager } from '../src/permission-hook.js'
+import { createPermissionHookManager, countUserLevelChroxyHooks } from '../src/permission-hook.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { writeHookSettings, sessionPermissionHookCommand, SESSION_SETTINGS_HOOK_MARKER } from '../src/claude-tui/pty-driver.js'
 import { buildSpawnEnv } from '../src/utils/spawn-env.js'
+import { shellQuotePath } from '../src/utils/verify-binary.js'
 
 /**
  * #8263 — an orphaned user-level chroxy permission hook doubled every
@@ -162,7 +163,10 @@ describe('claude-tui env + settings carry the #8263 flag and marker', () => {
     const entry = JSON.parse(readFileSync(settingsPath, 'utf-8')).hooks.PreToolUse[0]
     assert.equal(entry._chroxy, true)
     assert.ok(!entry.hooks[0].command.includes(SESSION_SETTINGS_HOOK_MARKER))
-    assert.ok(entry.hooks[0].command.endsWith('permission-hook.sh'))
+    // The registration quotes the script path only when it needs it, so compare
+    // against the expected form for THIS checkout rather than a fixed suffix (a
+    // checkout path with a space would otherwise fail on the closing quote).
+    assert.equal(entry.hooks[0].command, shellQuotePath(resolve(hookPath)))
     await mgr.destroy()
   })
 })
@@ -350,6 +354,68 @@ describe('the per-session hook command survives an install path with shell metac
       CHROXY_TUI_CHILD: '1',
     }
     const r = await runCommand({ shellCommand: commandFor(quotedScript), env, payload: read('.env') })
+    assert.equal(r.status, 0, `hook must start and exit 0, got ${r.status}: ${r.stderr}`)
+    assert.equal(daemon.stats.floorRequests, 1, 'floor probed')
+    assert.equal(daemon.stats.permissionRequests, 1, 'floored target raised a real prompt')
+    assert.equal(decisionOf(r.stdout).permissionDecision, 'deny')
+  })
+})
+
+describe('the claude-cli (user-level) registration shell-quotes the script path (#8263)', () => {
+  // register() writes the command Claude runs through a shell. An install path
+  // with a space split into words, the hook failed to start (exit 127, a
+  // NON-blocking error) and the permission check was silently skipped.
+  let dir
+  let daemon
+  let quotedScript
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-8263-cli-quote-'))
+    // `chroxy/packages/server` in the path so _isChroxyHookEntry's path arm applies.
+    const scriptDir = join(dir, "it's a dir $HOME", 'chroxy', 'packages', 'server', 'hooks')
+    mkdirSync(scriptDir, { recursive: true })
+    quotedScript = join(scriptDir, 'permission-hook.sh')
+    copyFileSync(hookPath, quotedScript)
+    chmodSync(quotedScript, 0o755)
+  })
+  afterEach(async () => {
+    if (daemon) await daemon.close()
+    daemon = null
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const registerAndRead = async () => {
+    const settingsPath = join(dir, 'settings.json')
+    writeFileSync(settingsPath, '{}')
+    const mgr = createPermissionHookManager(new EventEmitter(), { settingsPath, hookScript: quotedScript })
+    await mgr.register()
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'))
+    await mgr.destroy()
+    return { settingsPath, settings }
+  }
+
+  it('writes the quoted form, and the entry is still recognised as ours without its flag', async () => {
+    const { settingsPath, settings } = await registerAndRead()
+    const entry = settings.hooks.PreToolUse[0]
+    assert.equal(entry.hooks[0].command, shellQuotePath(quotedScript))
+    assert.ok(entry.hooks[0].command.startsWith("'") && entry.hooks[0].command.endsWith("'"), entry.hooks[0].command)
+    // Drop the canonical flag so only the path-match arm can recognise it.
+    delete entry._chroxy
+    writeFileSync(settingsPath, JSON.stringify(settings))
+    assert.equal(countUserLevelChroxyHooks({ settingsPath }).found, 1)
+  })
+
+  it('run through sh -c the written command starts, reaches /permission-floor and /permission', async () => {
+    const { settings } = await registerAndRead()
+    const command = settings.hooks.PreToolUse[0].hooks[0].command
+    daemon = await startRealDaemon({ promptDecision: 'deny' })
+    // No CHROXY_TUI_CHILD: this is the claude-cli path, where the copy always decides.
+    const env = {
+      PATH: process.env.PATH,
+      CHROXY_PORT: String(daemon.port),
+      CHROXY_HOOK_SECRET: HOOK_SECRET,
+      CHROXY_PERMISSION_MODE: 'auto',
+    }
+    const r = await runCommand({ shellCommand: command, env, payload: read('.env') })
     assert.equal(r.status, 0, `hook must start and exit 0, got ${r.status}: ${r.stderr}`)
     assert.equal(daemon.stats.floorRequests, 1, 'floor probed')
     assert.equal(daemon.stats.permissionRequests, 1, 'floored target raised a real prompt')

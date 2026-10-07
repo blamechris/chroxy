@@ -179,11 +179,15 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   floor probe included, so the floor is enforced exactly once per call, by the copy
   the session registered. Outside a TUI child (claude-cli's user-level registration,
   plain Claude Code) nothing changes, and a missing flag degrades to the old
-  double-run, never to a skipped floor. The daemon does **not** edit the user-level
-  file: an entry there may belong to a live claude-cli session of another daemon, and
-  the register/unregister path has its own pre-existing hazards (#8350). `chroxy
-  doctor` warns about a stranded entry (read-only) and tells the operator to remove it
-  by hand.
+  double-run, never to a skipped floor. The daemon does **not** sweep or clean the
+  user-level file: an entry there may belong to a live claude-cli session of another
+  daemon, and the register/unregister path has its own pre-existing hazards (#8350). A
+  claude-cli session's `start()` still registers its own hook there, as before. `chroxy
+  doctor` warns about a stranded entry (read-only; it also warns when the file cannot
+  be read) and tells the operator to remove it by hand. One consequence: tool
+  subprocesses of a claude-tui session inherit `CHROXY_TUI_CHILD` and `CHROXY_PORT`,
+  so a nested `claude` started from a claude-tui shell has its unmarked user-level
+  chroxy hook inert; that nested session's own permission handling applies.
 - **The per-session hook command shell-quotes the script path** (#8263). Claude runs a
   hook's `command` through a shell and treats a hook that cannot start (exit 127) as
   non-blocking, so an install path containing a space used to skip the floor probe and

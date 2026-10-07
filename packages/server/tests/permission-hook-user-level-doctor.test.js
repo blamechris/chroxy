@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -85,6 +85,41 @@ describe('chroxy doctor: user-level hook warning (#8263)', () => {
     assert.ok(!/restart|at startup/i.test(check.message), check.message)
     writeFileSync(p, JSON.stringify({ hooks: { PreToolUse: [USER_HOOK] } }))
     assert.equal(checkUserLevelChroxyHook({ settingsPath: p }), null)
+  })
+
+  it('missing file: no warning (nothing to check is not an error)', () => {
+    assert.equal(checkUserLevelChroxyHook({ settingsPath: join(dir, 'none.json') }), null)
+  })
+
+  it('invalid JSON: warns that the file could not be read, naming the problem and the path', () => {
+    const p = join(dir, 'bad.json')
+    writeFileSync(p, '{ not json')
+    const check = checkUserLevelChroxyHook({ settingsPath: p })
+    assert.ok(check, 'must not read the same as "nothing there"')
+    assert.equal(check.status, 'warn')
+    assert.equal(check.name, 'User-level permission hook')
+    assert.ok(check.message.startsWith('could not read user-level settings:'), check.message)
+    assert.ok(check.message.includes(p), check.message)
+    assert.ok(/JSON/i.test(check.message), check.message)
+  })
+
+  it('unreadable file: warns that the file could not be read', () => {
+    // A directory at the settings path makes readFileSync fail with EISDIR on every
+    // platform and for root too, unlike a chmod 000 file.
+    const p = join(dir, 'settings.json')
+    mkdirSync(p)
+    const check = checkUserLevelChroxyHook({ settingsPath: p })
+    assert.ok(check, 'must not read the same as "nothing there"')
+    assert.equal(check.status, 'warn')
+    assert.ok(check.message.startsWith('could not read user-level settings:'), check.message)
+    assert.ok(/EISDIR/.test(check.message), check.message)
+  })
+
+  it('runDoctorChecks surfaces the read-error warning when opted in', async () => {
+    const p = join(dir, 'bad.json')
+    writeFileSync(p, '{')
+    const on = await runDoctorChecks({ providers: [], userHookSettingsPath: p, checkUserLevelHook: true, tunnelProbe: async () => ({ ok: true }) })
+    assert.ok(on.checks.some((c) => c.name === 'User-level permission hook' && c.status === 'warn' && c.message.startsWith('could not read')))
   })
 
   it('runDoctorChecks reads the user file only when opted in', async () => {

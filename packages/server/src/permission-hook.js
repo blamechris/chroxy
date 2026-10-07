@@ -12,6 +12,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 const DEFAULT_SETTINGS_PATH = resolve(homedir(), '.claude', 'settings.json')
+const DEFAULT_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
 
 // Module-level, in-process lock for settings.json read-modify-write operations.
 // Shared across all importers of this module in a single Node.js process so CLI
@@ -76,9 +77,10 @@ function _isChroxyHookEntry(entry) {
  * Register the Chroxy permission hook in settings.json.
  * Idempotent — removes any existing Chroxy hook entry before adding.
  * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
+ * @param {string} [hookScript] - Hook script path (defaults to the packaged script; a test seam
+ *   so the written command can be checked against an install path that needs shell quoting)
  */
-function registerPermissionHookSync(settingsPath) {
-  const hookScript = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
+function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRIPT) {
   settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
 
   let settings = {}
@@ -188,10 +190,11 @@ export function countUserLevelChroxyHooks({ settingsPath } = {}) {
  * Create a permission hook manager that handles registration, retry, and cleanup.
  *
  * @param {EventEmitter} emitter - Used to emit 'error' events on failure
- * @param {{ settingsPath?: string }} [options] - Optional settings path for test isolation
+ * @param {{ settingsPath?: string, hookScript?: string }} [options] - Optional settings path for test
+ *   isolation, and a hook script path override (test seam, see registerPermissionHookSync)
  * @returns {{ register(): Promise, unregister(): Promise, destroy(): Promise }}
  */
-export function createPermissionHookManager(emitter, { settingsPath } = {}) {
+export function createPermissionHookManager(emitter, { settingsPath, hookScript } = {}) {
   let retryCount = 0
   let retryTimer = null
   let registered = false
@@ -234,7 +237,7 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
         return
       }
       try {
-        registerPermissionHookSync(settingsPath)
+        registerPermissionHookSync(settingsPath, hookScript)
         if (retryTimer) {
           clearTimeout(retryTimer)
           retryTimer = null

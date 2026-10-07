@@ -523,6 +523,40 @@ export async function checkTunnelRoutability(deps = {}) {
 }
 
 /**
+ * #8263: warn about a chroxy permission-hook entry in the USER-LEVEL Claude
+ * settings. claude-tui children load that file as well as their per-session
+ * settings, so a stranded entry used to double every permission prompt. The
+ * hook script now stays inert for it inside a TUI child, so this is a hygiene
+ * warning, not a live fault. Read-only: the daemon does not sweep or clean the
+ * user-level file, because the entry may belong to a live claude-cli session of
+ * another daemon (#8350) — the operator removes it.
+ *
+ * A file that exists but cannot be read or parsed is reported too: "could not
+ * look" must not read the same as "nothing there" (a missing file is not an
+ * error, and still yields null).
+ *
+ * @param {{settingsPath?: string}} [deps]
+ * @returns {{ name: string, status: 'warn', message: string } | null} null when none found
+ */
+export function checkUserLevelChroxyHook({ settingsPath } = {}) {
+  const { found, settingsPath: target, error } = countUserLevelChroxyHooks({ settingsPath })
+  const NAME = 'User-level permission hook'
+  if (error) {
+    return {
+      name: NAME,
+      status: 'warn',
+      message: `could not read user-level settings: ${error} (${target}) — a chroxy permission-hook entry there, if any, was not checked`,
+    }
+  }
+  if (found === 0) return null
+  return {
+    name: NAME,
+    status: 'warn',
+    message: `${found} chroxy permission-hook entr${found === 1 ? 'y' : 'ies'} in ${target} — fix: remove the hooks.PreToolUse entry that runs permission-hook.sh from that file by hand (only when no claude-cli session is running; it is ignored inside claude-tui sessions)`,
+  }
+}
+
+/**
  * Run all preflight dependency checks and return results.
  *
  * Provider-aware: only runs the binary/credential checks for the
@@ -548,28 +582,6 @@ export async function checkTunnelRoutability(deps = {}) {
  *   named-tunnel hostname.
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
-/**
- * #8263: warn about a chroxy permission-hook entry in the USER-LEVEL Claude
- * settings. claude-tui children load that file as well as their per-session
- * settings, so a stranded entry used to double every permission prompt. The
- * hook script now stays inert for it inside a TUI child, so this is a hygiene
- * warning, not a live fault. Read-only: nothing here (or at daemon start) edits
- * the user's settings file, because the entry may belong to a live claude-cli
- * session of another daemon (#8350) — the operator removes it.
- *
- * @param {{settingsPath?: string}} [deps]
- * @returns {{ name: string, status: 'warn', message: string } | null} null when none found
- */
-export function checkUserLevelChroxyHook({ settingsPath } = {}) {
-  const { found, settingsPath: target } = countUserLevelChroxyHooks({ settingsPath })
-  if (found === 0) return null
-  return {
-    name: 'User-level permission hook',
-    status: 'warn',
-    message: `${found} chroxy permission-hook entr${found === 1 ? 'y' : 'ies'} in ${target} — fix: remove the hooks.PreToolUse entry that runs permission-hook.sh from that file by hand (only when no claude-cli session is running; it is ignored inside claude-tui sessions)`,
-  }
-}
-
 export async function runDoctorChecks({
   port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(),
   tunnelProbe, detectStranded = detectStrandedState, platform = process.platform,
