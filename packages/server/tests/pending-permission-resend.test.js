@@ -367,3 +367,100 @@ describe('resendPendingPermissions — route registration (#8328 / #5704)', () =
     assert.equal(ctx.permissionSessionMap.get('perm-sdk-b'), 'sess-b')
   })
 })
+
+// ── A session-bound client is re-sent only its own session's prompts ───────
+
+describe('resendPendingPermissions — a session-bound client gets only its bound session', () => {
+  const bound = (id) => ({ id: 'client-1', boundSessionId: id, activeSessionId: id })
+  const ids = (ctx) => permFrames(ctx._sends).map((m) => m.requestId).sort()
+
+  it('sends nothing for a pending SDK permission on a sibling session', () => {
+    const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound('sess-a'))
+    assert.deepEqual(ids(ctx), [])
+  })
+
+  it('sends a pending SDK permission on its own session and skips the sibling\'s', () => {
+    const ctx = makeCtx({ sdk: { 'sess-a': [sdkEntry('perm-sdk-a')], 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound('sess-a'))
+    assert.deepEqual(ids(ctx), ['perm-sdk-a'])
+  })
+
+  it('does not send a hook-held permission owned by a sibling session', () => {
+    const ctx = makeCtx({ hooks: [{ requestId: 'perm-hook-b', owner: 'sess-b' }] })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound('sess-a'))
+    assert.deepEqual(ids(ctx), [])
+  })
+
+  it('sends a hook-held permission owned by its own session', () => {
+    const ctx = makeCtx({ hooks: [{ requestId: 'perm-hook-a', owner: 'sess-a' }, { requestId: 'perm-hook-b', owner: 'sess-b' }] })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound('sess-a'))
+    assert.deepEqual(ids(ctx), ['perm-hook-a'])
+  })
+
+  it('does not send a hook-held permission with no known owner', () => {
+    const ctx = makeCtx({ hooks: [{ requestId: 'perm-hook-orphan' }] })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound('sess-a'))
+    assert.deepEqual(ids(ctx), [])
+  })
+
+  it('treats an empty-string bound id as bound (sends nothing from other sessions)', () => {
+    const ctx = makeCtx({
+      sdk: { 'sess-a': [sdkEntry('perm-sdk-a')] },
+      hooks: [{ requestId: 'perm-hook-a', owner: 'sess-a' }, { requestId: 'perm-hook-orphan' }],
+    })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound(''))
+    assert.deepEqual(ids(ctx), [])
+  })
+
+  it('sends nothing when an explicit sessionId filter names a different session than the binding', () => {
+    const ctx = makeCtx({
+      sdk: { 'sess-a': [sdkEntry('perm-sdk-a')], 'sess-b': [sdkEntry('perm-sdk-b')] },
+      hooks: [{ requestId: 'perm-hook-b', owner: 'sess-b' }],
+    })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound('sess-a'), { sessionId: 'sess-b' })
+    assert.deepEqual(ids(ctx), [])
+  })
+
+  it('sends its own session\'s prompt when the explicit sessionId filter matches the binding', () => {
+    const ctx = makeCtx({ sdk: { 'sess-a': [sdkEntry('perm-sdk-a')], 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound('sess-a'), { sessionId: 'sess-a' })
+    assert.deepEqual(ids(ctx), ['perm-sdk-a'])
+  })
+
+  it('registers no route for a prompt it does not send', () => {
+    const calls = []
+    const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] }, registerPermissionRoute: (r, s) => calls.push([r, s]) })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), bound('sess-a'))
+    assert.deepEqual(calls, [])
+  })
+
+  it('an unbound client still receives every session\'s pending prompts', () => {
+    const ctx = makeCtx({
+      sdk: { 'sess-a': [sdkEntry('perm-sdk-a')], 'sess-b': [sdkEntry('perm-sdk-b')] },
+      hooks: [{ requestId: 'perm-hook-b', owner: 'sess-b' }, { requestId: 'perm-hook-orphan' }],
+    })
+    ctx.permissions.resendPendingPermissions(makeFakeWs(), { id: 'client-1', boundSessionId: null })
+    assert.deepEqual(ids(ctx), ['perm-hook-b', 'perm-hook-orphan', 'perm-sdk-a', 'perm-sdk-b'])
+  })
+
+  it('a bound client\'s replay of a session it is not bound to sends that session\'s prompt to no one', async () => {
+    // The replay's own session filter ('sess-b') matches the pending prompt, so
+    // only the binding check keeps it from the bound client.
+    const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    const ws = makeFakeWs()
+    ctx.clients.set(ws, bound('sess-a'))
+    replayHistory(ctx, ws, 'sess-b')
+    await settle()
+    assert.deepEqual(ids(ctx), [])
+  })
+
+  it('a bound client\'s replay of its own session sends its own prompt and not a sibling\'s', async () => {
+    const ctx = makeCtx({ sdk: { 'sess-a': [sdkEntry('perm-sdk-a')], 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    const ws = makeFakeWs()
+    ctx.clients.set(ws, bound('sess-a'))
+    replayHistory(ctx, ws, 'sess-a')
+    await settle()
+    assert.deepEqual(ids(ctx), ['perm-sdk-a'])
+  })
+})

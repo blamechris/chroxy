@@ -1014,7 +1014,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     send(ws, { type: 'available_permission_modes', modes: permissionModesForProvider(legacyProvider) })
   }
 
-  permissions.resendPendingPermissions(ws)
+  permissions.resendPendingPermissions(ws, client)
   // #5555: legacy single-session bootstrap burst — providers + slash commands
   // + agents for the cliSession's cwd (no provider scoping in legacy mode).
   sendAuthBootstrap(ctx, ws, { cwd: cliSession?.cwd || null, provider: null, sessionId: null })

@@ -874,6 +874,98 @@ describe('session-handlers', () => {
       assert.ok(destroyed, 'session_destroyed not broadcast')
       assert.equal(destroyed.sessionId, 'sess-1')
     })
+
+    describe('re-homing clients that were viewing the destroyed session', () => {
+      function setup() {
+        const ctx = makeCtx()
+        ctx._sessions.set('sess-1', { session: createMockSession(), name: 'S1', cwd: '/tmp' })
+        ctx._sessions.set('sess-2', { session: createMockSession(), name: 'S2', cwd: '/tmp' })
+        ctx.sessions.sessionManager.listSessions = createSpy(() => [
+          { sessionId: 'sess-1' },
+          { sessionId: 'sess-2' },
+        ])
+        ctx.sessions.sessionManager.firstSessionId = 'sess-2'
+        ctx.sessions.sessionManager.destroySession = createSpy(() => {
+          ctx._sessions.delete('sess-1')
+        })
+        ctx.transport.sendSessionInfo = createSpy()
+        ctx.transport.replayHistory = createSpy()
+        return ctx
+      }
+      function addClient(ctx, overrides) {
+        const ws = {}
+        const client = makeClient(overrides)
+        client.subscribedSessionIds = new Set(overrides.subscribedSessionIds || [])
+        ctx.transport.clients.set(ws, client)
+        return { ws, client }
+      }
+      const sentTo = (ctx, ws) => ctx.transport.send.calls.filter(([w]) => w === ws).map(([, m]) => m)
+      const replaysTo = (ctx, ws) => ctx.transport.replayHistory.calls.filter(([w]) => w === ws)
+      const infoTo = (ctx, ws) => ctx.transport.sendSessionInfo.calls.filter(([w]) => w === ws)
+
+      it('moves an unbound client viewing the destroyed session onto the first session', async () => {
+        const ctx = setup()
+        const initiator = addClient(ctx, { id: 'initiator', activeSessionId: 'sess-2', subscribedSessionIds: ['sess-2'] })
+        const viewer = addClient(ctx, { id: 'viewer', activeSessionId: 'sess-1', subscribedSessionIds: ['sess-1'] })
+
+        await sessionHandlers.destroy_session(initiator.ws, initiator.client, { sessionId: 'sess-1' }, ctx)
+
+        assert.equal(viewer.client.activeSessionId, 'sess-2')
+        const switched = sentTo(ctx, viewer.ws).find(m => m.type === 'session_switched')
+        assert.ok(switched, 'session_switched not sent')
+        assert.equal(switched.sessionId, 'sess-2')
+        assert.equal(infoTo(ctx, viewer.ws).length, 1)
+        const replays = replaysTo(ctx, viewer.ws)
+        assert.equal(replays.length, 1)
+        assert.equal(replays[0][1], 'sess-2')
+        assert.deepEqual(replays[0][2], { forceFull: true })
+      })
+
+      it('does not move a session-bound client onto another session when its bound session is destroyed', async () => {
+        const ctx = setup()
+        const guest = addClient(ctx, { id: 'guest', boundSessionId: 'sess-1', activeSessionId: 'sess-1', subscribedSessionIds: ['sess-1'] })
+
+        await sessionHandlers.destroy_session(guest.ws, guest.client, { sessionId: 'sess-1' }, ctx)
+
+        assert.equal(ctx.sessions.sessionManager.destroySession.callCount, 1)
+        assert.equal(guest.client.activeSessionId, null)
+        assert.equal(guest.client.subscribedSessionIds.has('sess-1'), false)
+        assert.equal(sentTo(ctx, guest.ws).filter(m => m.type === 'session_switched').length, 0)
+        assert.equal(infoTo(ctx, guest.ws).length, 0)
+        assert.equal(replaysTo(ctx, guest.ws).length, 0)
+        assert.equal(ctx._broadcasts.filter(m => m.type === 'client_focus_changed').length, 0)
+        const destroyed = ctx._broadcasts.find(m => m.type === 'session_destroyed')
+        assert.ok(destroyed, 'session_destroyed not broadcast')
+        assert.equal(destroyed.sessionId, 'sess-1')
+      })
+
+      it('does not move another connected bound client when the owner destroys its bound session', async () => {
+        const ctx = setup()
+        const owner = addClient(ctx, { id: 'owner', activeSessionId: 'sess-2', subscribedSessionIds: ['sess-2'] })
+        const guest = addClient(ctx, { id: 'guest', boundSessionId: 'sess-1', activeSessionId: 'sess-1', subscribedSessionIds: ['sess-1'] })
+
+        await sessionHandlers.destroy_session(owner.ws, owner.client, { sessionId: 'sess-1' }, ctx)
+
+        assert.equal(guest.client.activeSessionId, null)
+        assert.equal(sentTo(ctx, guest.ws).filter(m => m.type === 'session_switched').length, 0)
+        assert.equal(infoTo(ctx, guest.ws).length, 0)
+        assert.equal(replaysTo(ctx, guest.ws).length, 0)
+      })
+
+      it('leaves a bound client whose bound session was not destroyed untouched', async () => {
+        const ctx = setup()
+        const owner = addClient(ctx, { id: 'owner', activeSessionId: 'sess-2', subscribedSessionIds: ['sess-2'] })
+        const guest = addClient(ctx, { id: 'guest', boundSessionId: 'sess-2', activeSessionId: 'sess-2', subscribedSessionIds: ['sess-2'] })
+
+        await sessionHandlers.destroy_session(owner.ws, owner.client, { sessionId: 'sess-1' }, ctx)
+
+        assert.equal(guest.client.activeSessionId, 'sess-2')
+        assert.equal(guest.client.subscribedSessionIds.has('sess-2'), true)
+        assert.equal(sentTo(ctx, guest.ws).filter(m => m.type === 'session_switched').length, 0)
+        assert.equal(infoTo(ctx, guest.ws).length, 0)
+        assert.equal(replaysTo(ctx, guest.ws).length, 0)
+      })
+    })
   })
 
   describe('rename_session', () => {

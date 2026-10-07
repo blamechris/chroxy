@@ -658,6 +658,38 @@ describe('createPermissionHandler', () => {
         'unmapped requests must not carry a sessionId in the broadcast')
     })
 
+    it('sends a permission_request that maps to no session to unbound clients only', async () => {
+      const opts = makeHandlerOpts()
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+      const req = makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }))
+      handlePermissionRequest(req, makeRes())
+      await new Promise(r => setImmediate(r))
+
+      const [, filter] = opts.broadcastFn.mock.calls[0].arguments
+      assert.equal(typeof filter, 'function')
+      assert.equal(filter({ boundSessionId: null }), true)
+      assert.equal(filter({}), true)
+      assert.equal(filter({ boundSessionId: 'sess-a' }), false)
+      assert.equal(filter({ boundSessionId: '' }), false)
+    })
+
+    it('sends a permission_request that maps to a session without a recipient filter', async () => {
+      const findSessionByHookSecret = mock.fn(() => ({
+        session: { notifyPermissionPending: mock.fn(), notifyPermissionResolved: mock.fn() },
+        sessionId: 'chroxy-sess-7',
+      }))
+      const opts = makeHandlerOpts({ findSessionByHookSecret })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+      const req = makeReq(JSON.stringify({ tool_name: 'Write', tool_input: { file_path: '/tmp/x' } }), { authorization: 'Bearer hook-secret-abc' })
+      handlePermissionRequest(req, makeRes())
+      await new Promise(r => setImmediate(r))
+
+      const [, filter] = opts.broadcastFn.mock.calls[0].arguments
+      assert.equal(filter, undefined)
+    })
+
     it('does not populate permissionSessionMap when hookSecret has no chroxy sessionId (legacy single-session mode)', async () => {
       // In legacy single-session mode the lookup returns the cliSession
       // but no chroxy-managed sessionId. We must not invent a key — bound
@@ -1142,6 +1174,22 @@ describe('createPermissionHandler', () => {
       const [msg] = opts.broadcastFn.mock.calls[0].arguments
       assert.equal(msg.sessionId, 'sess-mapped',
         'mapped legacy requests must carry sessionId so clients route consistently with the SDK and WS paths')
+    })
+
+    it('sends an unmapped legacy permission_resolved to unbound clients only and a mapped one to everyone', async () => {
+      const run = async (permissionSessionMap) => {
+        const pendingPermissions = new Map([['r', { resolve: mock.fn(), timer: null }]])
+        const opts = makeHandlerOpts({ pendingPermissions, permissionSessionMap })
+        const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+        handlePermissionResponseHttp(makeReq(JSON.stringify({ requestId: 'r', decision: 'deny' })), makeRes())
+        await new Promise(r => setImmediate(r))
+        return opts.broadcastFn.mock.calls[0].arguments
+      }
+      const [, unmappedFilter] = await run(new Map())
+      assert.equal(unmappedFilter({ boundSessionId: null }), true)
+      assert.equal(unmappedFilter({ boundSessionId: 'sess-a' }), false)
+      const [, mappedFilter] = await run(new Map([['r', 'sess-mapped']]))
+      assert.equal(mappedFilter, undefined)
     })
 
     // #3059: HTTP user-initiated permission responses must produce an audit

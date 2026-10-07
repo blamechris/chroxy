@@ -12,6 +12,7 @@ import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
 import { getProviderPermissionModeSupport } from './permission-mode-support.js'
+import { isBoundClient, isBoundToOtherSession } from './environments/authority.js'
 
 const log = createLogger('handler-utils')
 
@@ -354,6 +355,18 @@ export function terminalMirrorRecipient(client, sid) {
     isSessionViewer(client, sid)
 }
 
+// The single rule for whether `client` may see a web task (list, teleport and the
+// task_created / task_updated / task_error pushes all route through it): an
+// unbound client sees every task; a session-bound client sees only a task whose
+// cwd equals its bound session's cwd. A bound client with no resolvable bound
+// cwd, or whose task is unknown (`null`/`undefined`) or has no cwd, sees nothing.
+export function canClientSeeWebTask(client, task, sessionManager) {
+  if (!isBoundClient(client)) return true
+  if (!task) return false
+  const boundCwd = sessionManager?.getSession?.(client.boundSessionId)?.cwd
+  return Boolean(boundCwd) && task.cwd === boundCwd
+}
+
 // #7273 — this WAS a hand-rolled prefix match. It handled the trailing-separator
 // case (which most of the other copies did not) but stayed case-SENSITIVE and,
 // more seriously, shared the `relative()`-family's blindness to a target on a
@@ -578,6 +591,8 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
 export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
   for (const [clientWs, c] of ctx.transport.clients) {
     if (c.authenticated && clientWs !== excludeWs) {
+      // A client bound to another session is never subscribed to a new one.
+      if (isBoundToOtherSession(c, sessionId)) continue
       // #5563: route through the index-maintaining helper so the
       // sessionId→clients reverse index stays in sync. Falls back to a bare
       // add for fixtures whose ctx predates the helper.

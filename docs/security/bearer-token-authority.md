@@ -127,6 +127,8 @@ When `ws-auth.js` accepts a pair-issued token, it sets `client.boundSessionId` o
 
 Bound tokens cannot create, destroy, switch, or list sibling sessions. They can chat into their bound session and answer permissions for it. That's it.
 
+A bound client receives frames, subscriptions and pushes for its bound session only. The rule is `isBoundToOtherSession` / `isBoundClient` in [`environments/authority.js`](../../packages/server/src/environments/authority.js), applied at the broadcaster's delivery point (`ws-broadcaster.js`), at the client manager's subscribe/activate (`ws-client-manager.js`), and in web-task visibility (`canClientSeeWebTask` in `handler-utils.js`). A frame that carries no session id (an unattributed permission request or resolution) goes to unbound clients only.
+
 ### Host-level writes a bound token must NOT reach
 
 These host-level mutations are gated against bound tokens even though they arrive on the same WS surface, because each one escalates beyond a single session's scope:

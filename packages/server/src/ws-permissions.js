@@ -13,6 +13,7 @@ import { redactValue, sanitizeToolInput } from './redaction.js'
 // the shell hook.
 import { isFlooredTarget } from './permission-floor.js'
 import { buildPermissionRequestMessage } from '@chroxy/protocol'
+import { isBoundClient } from './environments/authority.js'
 
 const log = createLogger('ws')
 
@@ -136,12 +137,20 @@ function sendJson(res, status, body, extraHeaders) {
 }
 
 /**
+ * Recipient filter for a permission frame that maps to no session: it carries
+ * no `sessionId`, so a session-bound client has no session it could belong to
+ * and does not receive it. Frames attributed to a session keep the unfiltered
+ * fan-out (the broadcaster's per-session delivery check applies to them).
+ */
+const unboundOnly = (client) => !isBoundClient(client)
+
+/**
  * Create a permission handler for the WsServer.
  * Manages HTTP permission lifecycle (hook requests, responses, resend, resolve).
  *
  * @param {Object} opts
  * @param {Function} opts.sendFn - (ws, message) => void
- * @param {Function} opts.broadcastFn - (message) => void
+ * @param {Function} opts.broadcastFn - (message, filter?) => void
  * @param {Function} opts.validateBearerAuth - (req, res) => boolean — validates main API token (used by /permission-response)
  * @param {Function} opts.validateHookAuth - (req, res) => boolean — validates per-session hook secret (used by /permission)
  * @param {Object|null} opts.pushManager - PushManager instance (nullable)
@@ -375,7 +384,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // `sessionId` entirely (absent, not null) when undefined — the request
         // maps to no chroxy session and clients fall back to the active one.
         sessionId: ownerSessionId || undefined,
-      }))
+      }), ownerSessionId ? undefined : unboundOnly)
 
       if (pushManager) {
         // #5702 (8d): settle the fire-and-forget send so a failed phone
@@ -726,7 +735,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               requestId,
               decision,
               ...(result.sessionId ? { sessionId: result.sessionId } : {}),
-            })
+            }, result.sessionId ? undefined : unboundOnly)
           }
           // #6771 — an allowAlways over the HTTP fallback (iOS notification
           // action) just persisted a durable project rule on the in-process
@@ -791,6 +800,10 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
    * A duplicate delivery is safe by construction: both clients update an
    * existing prompt in place by `requestId` rather than appending a second card.
    *
+   * A session-bound client (`client.boundSessionId != null`) is re-sent only its
+   * own session's pending permissions, on both the unfiltered and the filtered
+   * call; an unbound client is unaffected.
+   *
    * @param {WebSocket} ws
    * @param {Object} [client] - Optional client descriptor for diagnostic logging (#2832)
    * @param {Object} [opts]
@@ -800,11 +813,22 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
    *   would drop another session's prompt into this one's transcript.
    */
   function resendPendingPermissions(ws, client, { sessionId: onlySessionId } = {}) {
+    // A session-bound client (share-a-session pairing token, `boundSessionId`)
+    // is re-sent only its own session's pending permissions. The bound id is
+    // checked with the fail-safe `!= null` test (`isBoundClient`), so an
+    // empty-string id counts as bound; a missing client descriptor (unit
+    // fixtures that call the handler directly) is treated as unbound, as before.
+    // An explicit `sessionId` filter that names a different session than the
+    // binding narrows the result to nothing rather than widening it.
+    const boundSessionId = client && isBoundClient(client) ? client.boundSessionId : null
+    const isBound = boundSessionId != null
+    if (isBound && onlySessionId && onlySessionId !== boundSessionId) return
     // SDK-mode: check all sessions for pending permissions
     const sm = getSessionManager()
     if (sm?._sessions instanceof Map) {
       for (const [sessionId, entry] of sm._sessions) {
         if (onlySessionId && sessionId !== onlySessionId) continue
+        if (isBound && sessionId !== boundSessionId) continue
         if (entry.session?._pendingPermissions instanceof Map) {
           for (const [requestId] of entry.session._pendingPermissions) {
             const permData = entry.session._lastPermissionData?.get(requestId)
@@ -885,6 +909,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // could not attribute.
         const ownerSessionId = permissionSessionMap.get(requestId)
         if (onlySessionId && ownerSessionId !== onlySessionId) continue
+        // A bound client gets only the entries owned by its bound session; an
+        // ownerless entry cannot be shown to be that session's, so it is skipped.
+        if (isBound && ownerSessionId !== boundSessionId) continue
         const elapsed = Math.max(0, Date.now() - (pending.data.createdAt ?? Date.now()))
         const ttl = pending.data.remainingMs ?? PERMISSION_TTL_MS
         const remainingMs = Math.min(ttl, Math.max(0, ttl - elapsed))

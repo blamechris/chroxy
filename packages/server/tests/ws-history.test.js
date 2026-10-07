@@ -773,11 +773,14 @@ describe('sendPostAuthInfo — cliSession fallback', () => {
     const cliSession = { cwd: '/tmp', isReady: false, model: null, permissionMode: 'approve' }
     const ws = makeFakeWs()
     const ctx = makeCtx({ cliSession })
-    registerClient(ctx, ws)
+    const client = registerClient(ctx, ws)
 
     sendPostAuthInfo(ctx, ws)
     assert.equal(ctx.permissions.resendPendingPermissions.callCount, 1)
-    assert.deepEqual(ctx.permissions.resendPendingPermissions.lastCall, [ws])
+    // The client descriptor rides along so the resend can honour a session binding.
+    assert.equal(ctx.permissions.resendPendingPermissions.lastCall.length, 2)
+    assert.equal(ctx.permissions.resendPendingPermissions.lastCall[0], ws)
+    assert.equal(ctx.permissions.resendPendingPermissions.lastCall[1], client)
   })
 })
 

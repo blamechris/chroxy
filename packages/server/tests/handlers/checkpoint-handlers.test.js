@@ -181,6 +181,54 @@ describe('checkpoint-handlers', () => {
       assert.equal(restored.newSessionId, 'restored-session-id')
     })
 
+    describe('session-bound requester', () => {
+      function boundSetup() {
+        const sessions = new Map()
+        const session = createMockSession()
+        session.isRunning = false
+        sessions.set('s1', { session, name: 'Bound session', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1', boundSessionId: 's1' })
+        return { ctx, client }
+      }
+
+      for (const mode of ['both', 'conversation', undefined]) {
+        it(`refuses a new-session restore (mode ${mode ?? 'default'}) before creating a session or touching files`, async () => {
+          const { ctx, client } = boundSetup()
+          await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode }, ctx)
+
+          assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+          assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0)
+          assert.equal(ctx._sent.some(m => m.type === 'checkpoint_restored'), false)
+          const err = ctx._sent.find(m => m.type === 'session_error')
+          assert.ok(err, 'session_error not sent')
+          assert.equal(err.code, 'SESSION_TOKEN_MISMATCH')
+          assert.equal(err.boundSessionId, 's1')
+          assert.equal(err.boundSessionName, 'Bound session')
+          assert.equal(client.activeSessionId, 's1')
+        })
+      }
+
+      it('still restores files only, staying on the bound session', async () => {
+        const { ctx, client } = boundSetup()
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'files' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1)
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
+        const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
+        assert.ok(restored)
+        assert.equal(restored.filesOnly, true)
+        assert.equal(client.activeSessionId, 's1')
+      })
+
+      it('an unbound requester still gets a new-session restore', async () => {
+        const { ctx } = boundSetup()
+        const client = makeClient({ activeSessionId: 's1' })
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'both' }, ctx)
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1)
+      })
+    })
+
     // #6766 — truthfulness: a fork-capable provider (the SDK) rewinds the
     // conversation truncated to the checkpoint boundary; every other provider
     // degrades to a files-only restore and says so. These tests mock the SDK
@@ -717,6 +765,35 @@ describe('checkpoint-handlers', () => {
         assert.match(err.message, /same working directory/)
         assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0, 'must NOT hard-reset the shared tree')
         assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0, 'must NOT create the rewind session')
+      })
+
+      it('names no other session in the refusal sent to a session-bound requester', async () => {
+        const ctx = makeRestoreCtx({
+          checkpointCwd: '/repo',
+          siblings: [{ sessionId: 'sess-other-77', name: 'Sibling', cwd: '/repo', isBusy: true }],
+        })
+        const client = makeClient({ activeSessionId: 's1', boundSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'files' }, ctx)
+
+        const err = ctx._sent.find(m => m.type === 'session_error')
+        assert.ok(err, 'a bound requester is still refused')
+        assert.match(err.message, /same working directory/)
+        assert.equal(/Sibling|sess-other-77/.test(err.message), false, 'no other session name or id in the message')
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0)
+      })
+
+      it('still names the busy session in the refusal sent to an unbound requester', async () => {
+        const ctx = makeRestoreCtx({
+          checkpointCwd: '/repo',
+          siblings: [{ sessionId: 's2', name: 'Sibling', cwd: '/repo', isBusy: true }],
+        })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1', mode: 'files' }, ctx)
+
+        const err = ctx._sent.find(m => m.type === 'session_error')
+        assert.match(err.message, /Sibling/)
       })
 
       it('allows the restore when the co-located sibling is IDLE', async () => {

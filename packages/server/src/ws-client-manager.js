@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { createLogger } from './logger.js'
+import { isBoundToOtherSession } from './environments/authority.js'
 
 const log = createLogger('ws-client-manager')
 
@@ -225,6 +226,12 @@ export class WsClientManager extends EventEmitter {
    */
   subscribe(client, sessionId) {
     if (!sessionId) return
+    // A session-bound client is never subscribed (nor indexed) on a session
+    // other than its binding, so the reverse index cannot stream one to it.
+    if (isBoundToOtherSession(client, sessionId)) {
+      log.debug(`Not subscribing session-bound client ${client.id} to ${sessionId} (bound to ${client.boundSessionId})`)
+      return
+    }
     if (!client.subscribedSessionIds) client.subscribedSessionIds = new Set()
     client.subscribedSessionIds.add(sessionId)
     this._indexAdd(client, sessionId)
@@ -254,6 +261,12 @@ export class WsClientManager extends EventEmitter {
    * @param {string|null} sessionId
    */
   setActiveSession(client, sessionId) {
+    // A session-bound client's active session is its binding or null (cleared
+    // when the bound session is gone); any other session is ignored.
+    if (sessionId && isBoundToOtherSession(client, sessionId)) {
+      log.debug(`Not activating ${sessionId} for session-bound client ${client.id} (bound to ${client.boundSessionId})`)
+      return
+    }
     const prev = client.activeSessionId
     if (prev === sessionId) return
     client.activeSessionId = sessionId

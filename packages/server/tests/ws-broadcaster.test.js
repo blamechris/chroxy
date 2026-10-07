@@ -948,4 +948,143 @@ describe('WsBroadcaster', () => {
       assert.equal(wsBackpressured.closeCode, 4008)
     })
   })
+
+  // A session-bound client receives frames tagged with its own session only,
+  // whichever broadcast entry point carries them.
+  describe('session-bound recipients', () => {
+    let manager
+    let delivered
+    let wired
+
+    function reg(id, { bound = undefined, active = null, subscribe = [] } = {}) {
+      const ws = createFakeWs()
+      const client = createFakeClient({ id })
+      if (bound !== undefined) client.boundSessionId = bound
+      client._ws = ws
+      manager.addClient(ws, client)
+      if (active) manager.setActiveSession(client, active)
+      for (const sid of subscribe) manager.subscribe(client, sid)
+      return { ws, client }
+    }
+
+    /** Put a client in a session's index by hand, as a drifted subscription would. */
+    function forceIndexed(client, sessionId) {
+      client.subscribedSessionIds.add(sessionId)
+      manager._indexAdd(client, sessionId)
+    }
+
+    const idsOf = () => delivered.map((e) => e.ws._id).sort()
+
+    beforeEach(() => {
+      manager = new WsClientManager()
+      delivered = []
+      wired = new WsBroadcaster({
+        clients: manager.clients,
+        clientManager: manager,
+        sendFn: (ws, msg) => delivered.push({ ws, message: msg }),
+      })
+    })
+
+    function setup() {
+      const guest = reg('guest', { bound: 'A', active: 'A' })
+      const host = reg('host', { active: 'B' })
+      guest.ws._id = 'guest'
+      host.ws._id = 'host'
+      return { guest, host }
+    }
+
+    it('does not deliver a frame tagged with another session through _broadcast', () => {
+      setup()
+      wired._broadcast({ type: 'permission_request', requestId: 'r1', sessionId: 'B' })
+      assert.deepEqual(idsOf(), ['host'])
+    })
+
+    it('delivers a frame tagged with its own session through _broadcast', () => {
+      setup()
+      wired._broadcast({ type: 'session_destroyed', sessionId: 'A' })
+      assert.deepEqual(idsOf(), ['guest', 'host'])
+    })
+
+    it('delivers a frame without a sessionId to every client', () => {
+      setup()
+      wired._broadcast({ type: 'server_status', message: 'hi' })
+      assert.deepEqual(idsOf(), ['guest', 'host'])
+    })
+
+    it('treats an empty-string binding as bound to a different session', () => {
+      const { guest } = setup()
+      guest.client.boundSessionId = ''
+      wired._broadcast({ type: 'x', sessionId: 'B' })
+      assert.deepEqual(idsOf(), ['host'])
+    })
+
+    it('does not deliver another session\'s frame through _broadcastToSession (index path)', () => {
+      const { guest } = setup()
+      forceIndexed(guest.client, 'B')
+      wired._broadcastToSession('B', { type: 'stream_delta' })
+      assert.deepEqual(idsOf(), ['host'])
+    })
+
+    it('does not deliver another session\'s frame through _broadcastToSession with a custom filter', () => {
+      setup()
+      wired._broadcastToSession('B', { type: 'stream_delta' }, () => true)
+      assert.deepEqual(idsOf(), ['host'])
+    })
+
+    it('does not deliver another session\'s frame through the full-scan fallback', () => {
+      const guest = createFakeClient({ id: 'guest', activeSessionId: 'B', subscribedSessionIds: new Set(['B']) })
+      guest.boundSessionId = 'A'
+      const host = createFakeClient({ id: 'host', activeSessionId: 'B' })
+      const gws = createFakeWs()
+      const hws = createFakeWs()
+      const bare = new Map([[gws, guest], [hws, host]])
+      const out = []
+      const b = new WsBroadcaster({ clients: bare, sendFn: (ws) => out.push(ws) })
+      b._broadcastToSession('B', { type: 'stream_delta' })
+      assert.deepEqual(out, [hws])
+    })
+
+    it('delivers its own session\'s stream through _broadcastToSession', () => {
+      setup()
+      wired._broadcastToSession('A', { type: 'stream_delta' })
+      assert.deepEqual(idsOf(), ['guest'])
+    })
+
+    it('does not count a client bound elsewhere as a subscriber', () => {
+      const { guest } = setup()
+      forceIndexed(guest.client, 'B')
+      guest.client.usesDeflate = true
+      assert.equal(wired._countSessionSubscribers('B'), 1)
+      assert.equal(wired._hasDeflateSubscriber('B'), false)
+    })
+
+    it('does not count a client bound elsewhere in the full-scan subscriber count or deflate check', () => {
+      const guest = createFakeClient({ id: 'guest', activeSessionId: 'B', subscribedSessionIds: new Set(['B']) })
+      guest.boundSessionId = 'A'
+      guest.usesDeflate = true
+      const host = createFakeClient({ id: 'host', activeSessionId: 'B' })
+      const bare = new Map([[createFakeWs(), guest], [createFakeWs(), host]])
+      const b = new WsBroadcaster({ clients: bare, sendFn: () => {} })
+      assert.equal(b._countSessionSubscribers('B'), 1)
+      assert.equal(b._hasDeflateSubscriber('B'), false)
+      host.usesDeflate = true
+      assert.equal(b._hasDeflateSubscriber('B'), true)
+    })
+
+    it('does not deliver another session\'s frame through broadcastMinProtocolVersion or broadcastError', () => {
+      const { guest, host } = setup()
+      guest.client.protocolVersion = 5
+      host.client.protocolVersion = 5
+      wired.broadcastMinProtocolVersion(1, { type: 'x', sessionId: 'B' })
+      wired.broadcastError('session', 'boom', true, 'B')
+      assert.deepEqual(idsOf(), ['host', 'host'])
+    })
+
+    it('still delivers every session\'s frames to an unbound client', () => {
+      const { host } = setup()
+      wired._broadcast({ type: 'x', sessionId: 'A' })
+      wired._broadcast({ type: 'x', sessionId: 'B' })
+      assert.equal(delivered.filter((e) => e.ws === host.ws).length, 2)
+    })
+  })
 })

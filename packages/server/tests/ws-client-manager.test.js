@@ -679,4 +679,65 @@ describe('WsClientManager', () => {
       mgr.verifyIndexIntegrity()
     })
   })
+
+  describe('session-bound clients', () => {
+    function registerBound(id, bound, extra = {}) {
+      const ws = createMockWs(1)
+      const info = createClientInfo({ id, authenticated: true, _ws: ws, boundSessionId: bound, ...extra })
+      manager.addClient(ws, info)
+      return info
+    }
+    const indexedIds = (sid) => [...manager.getSessionSubscribers(sid)].map(c => c.id).sort()
+
+    it('subscribe to another session adds nothing', () => {
+      const client = registerBound('g', 'A')
+      manager.subscribe(client, 'B')
+      assert.equal(client.subscribedSessionIds.has('B'), false)
+      assert.deepStrictEqual(indexedIds('B'), [])
+      manager.verifyIndexIntegrity()
+    })
+
+    it('subscribe to its own session is indexed', () => {
+      const client = registerBound('g', 'A')
+      manager.subscribe(client, 'A')
+      assert.ok(client.subscribedSessionIds.has('A'))
+      assert.deepStrictEqual(indexedIds('A'), ['g'])
+      manager.verifyIndexIntegrity()
+    })
+
+    it('an empty-string binding is bound: subscribe to another session adds nothing', () => {
+      const client = registerBound('g', '')
+      manager.subscribe(client, 'B')
+      assert.deepStrictEqual(indexedIds('B'), [])
+    })
+
+    it('setActiveSession to another session leaves the client as it was', () => {
+      const client = registerBound('g', 'A')
+      manager.setActiveSession(client, 'A')
+      manager.setActiveSession(client, 'B')
+      assert.equal(client.activeSessionId, 'A')
+      assert.deepStrictEqual(indexedIds('B'), [])
+      assert.deepStrictEqual(indexedIds('A'), ['g'])
+      manager.verifyIndexIntegrity()
+    })
+
+    it('setActiveSession to its own session or to null still applies', () => {
+      const client = registerBound('g', 'A')
+      manager.setActiveSession(client, 'A')
+      assert.equal(client.activeSessionId, 'A')
+      manager.setActiveSession(client, null)
+      assert.equal(client.activeSessionId, null)
+      assert.deepStrictEqual(indexedIds('A'), [])
+    })
+
+    it('an unbound client subscribes and activates any session', () => {
+      const ws = createMockWs(1)
+      const client = createClientInfo({ id: 'u', authenticated: true, _ws: ws })
+      manager.addClient(ws, client)
+      manager.subscribe(client, 'B')
+      manager.setActiveSession(client, 'C')
+      assert.deepStrictEqual(indexedIds('B'), ['u'])
+      assert.deepStrictEqual(indexedIds('C'), ['u'])
+    })
+  })
 })
