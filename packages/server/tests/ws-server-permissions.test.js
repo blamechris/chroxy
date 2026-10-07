@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { WsServer as _WsServer } from '../src/ws-server.js'
 import { createMockSession, createMockSessionManager, waitFor } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
+import { PairingManager } from '../src/pairing.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 // Also clears the log listener that WsServer.start() registers, so log_entry broadcasts
@@ -791,6 +792,76 @@ describe('permission/question routing to originating session', () => {
       assert.equal(leaked.length, 0, 'sess-a\'s prompt must not ride a sess-b replay')
 
       ws.close()
+    })
+
+    // A client paired to ONE session (share-a-session token) is re-sent only that
+    // session's pending prompts on connect. The sibling session's SDK prompt, its
+    // hook-held prompt and an ownerless hook-held prompt all stay unsent.
+    describe('connect-time resend to a session-bound client', () => {
+      function pendingOnBothSessions() {
+        const { manager, sessionsMap } = twoSessionsWithHistory()
+        for (const [id, reqId] of [['sess-a', 'perm-sdk-a'], ['sess-b', 'perm-sdk-b']]) {
+          const sess = sessionsMap.get(id).session
+          sess._pendingPermissions = new Map([[reqId, {}]])
+          sess._lastPermissionData = new Map([[reqId, {
+            requestId: reqId, tool: 'Bash', description: `run ${reqId}`, input: { command: 'ls' },
+            remainingMs: 300_000, createdAt: Date.now(), floored: false,
+          }]])
+        }
+        return manager
+      }
+
+      function addHookHeld(srv, requestId, owner) {
+        if (owner) srv._permissionSessionMap.set(requestId, owner)
+        srv._pendingPermissions.set(requestId, {
+          resolve: () => {}, timer: null,
+          data: { requestId, tool: 'Bash', description: 'ls', input: {}, remainingMs: 300_000, createdAt: Date.now(), floored: false },
+        })
+      }
+
+      async function connectWithToken(port, token) {
+        const { ws, messages } = await createClient(port, false)
+        send(ws, { type: 'auth', token })
+        await waitForMessage(messages, 'auth_ok', 2000)
+        return { ws, messages }
+      }
+
+      // Unique ids: the connect-time resend and the replay-exit resend may both deliver one prompt.
+      const permIds = (messages) => [...new Set(messages.filter((m) => m.type === 'permission_request').map((m) => m.requestId))].sort()
+
+      it('sends the bound session\'s pending prompt and none from a sibling session', async () => {
+        const manager = pendingOnBothSessions()
+        const pairingManager = new PairingManager({ wsUrl: null })
+        server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-b', authRequired: true, pairingManager })
+        addHookHeld(server, 'perm-hook-a', 'sess-a')
+        addHookHeld(server, 'perm-hook-b', 'sess-b')
+        addHookHeld(server, 'perm-hook-orphan', null)
+        const port = await startServerAndGetPort(server)
+
+        const { pairingId } = pairingManager.generateBoundPairing('sess-a')
+        const { sessionToken } = pairingManager.validatePairing(pairingId)
+        const { ws, messages } = await connectWithToken(port, sessionToken)
+        // Both own-session prompts arrive; the settle round trip below proves nothing else follows.
+        await waitFor(() => permIds(messages).length >= 2, { label: 'own-session prompts' })
+        send(ws, { type: 'switch_session', sessionId: 'sess-a' })
+        await waitFor(() => messages.filter((m) => m.type === 'session_switched').length >= 2, { label: 'settle round trip' })
+
+        assert.deepEqual(permIds(messages), ['perm-hook-a', 'perm-sdk-a'])
+        ws.close()
+        pairingManager.destroy()
+      })
+
+      it('still sends every session\'s pending prompts to an unbound client', async () => {
+        const manager = pendingOnBothSessions()
+        server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: true })
+        addHookHeld(server, 'perm-hook-b', 'sess-b')
+        const port = await startServerAndGetPort(server)
+
+        const { ws, messages } = await connectWithToken(port, TOKEN)
+        await waitFor(() => permIds(messages).length >= 3, { label: 'all prompts' })
+        assert.deepEqual(permIds(messages), ['perm-hook-b', 'perm-sdk-a', 'perm-sdk-b'])
+        ws.close()
+      })
     })
   })
 
