@@ -91,7 +91,9 @@ describe('dismissing an expired permission keeps a record (#7353)', () => {
     expect(counts()).toEqual({ s1: 1 })
   })
 
-  it('stays collapsed when the prompt remounts (tab switch)', () => {
+  // A REMOUNT only: on a real session switch the server's full-rebuild replay drops the
+  // transient prompt message entirely, so no card is rendered at all (#8348, #8339).
+  it('stays collapsed when the prompt remounts', () => {
     const first = renderExpired()
     fireEvent.click(screen.getByText('Dismiss'))
     first.unmount()
@@ -99,6 +101,24 @@ describe('dismissing an expired permission keeps a record (#7353)', () => {
     renderExpired()
     expect(screen.getByTestId('perm-dropped-record')).toBeInTheDocument()
     expect(screen.queryByText('Dismiss')).not.toBeInTheDocument()
+  })
+
+  it('moves focus to the record after Dismiss so keyboard position is kept', () => {
+    renderExpired()
+    const dismiss = screen.getByText('Dismiss')
+    dismiss.focus()
+    expect(document.activeElement).toBe(dismiss)
+    fireEvent.click(dismiss)
+    const anchor = document.getElementById('perm-desc-req-exp')
+    expect(anchor).not.toBeNull()
+    expect(document.activeElement).toBe(anchor)
+  })
+
+  it('does not steal focus when an already-dismissed prompt remounts', () => {
+    useConnectionStore.getState().dismissExpiredPermission('req-exp')
+    renderExpired()
+    expect(document.getElementById('perm-desc-req-exp')).not.toBeNull()
+    expect(document.activeElement).toBe(document.body)
   })
 
   it('only collapses the dismissed prompt, not a sibling expired prompt', () => {

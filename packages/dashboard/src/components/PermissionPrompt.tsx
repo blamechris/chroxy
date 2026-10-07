@@ -269,6 +269,19 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // remount, and it COLLAPSES the card to a record instead of removing it.
   const dismissed = useConnectionStore((s) => Boolean(s.dismissedExpiredPermissions?.[requestId]))
   const dismissExpiredPermission = useConnectionStore((s) => s.dismissExpiredPermission)
+  // Clicking Dismiss unmounts the focused button, which would drop focus to
+  // <body>. Remember that THIS instance was dismissed by a click (a remount of an
+  // already-dismissed prompt must not steal focus) and, once the record has
+  // rendered, move focus to its tabIndex=-1 element so keyboard and
+  // screen-reader position is kept.
+  const focusRecordRef = useRef(false)
+  const showsDroppedRecord = dismissed && isExpired && !answered
+  useEffect(() => {
+    if (showsDroppedRecord && focusRecordRef.current) {
+      focusRecordRef.current = false
+      document.getElementById(`perm-desc-${requestId}`)?.focus()
+    }
+  }, [showsDroppedRecord, requestId])
 
   // #2840: keyboard hint labels near the Allow / Allow-for-Session buttons
   // so the Cmd/Ctrl+Y and Cmd/Ctrl+Shift+Y shortcuts are discoverable.
@@ -282,7 +295,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // compact muted record — tool, description, outcome — with no controls.
   // It keeps the `perm-desc-<id>` anchor so the end-of-turn expired summary's
   // "Jump to prompt" link still lands on it.
-  if (dismissed && isExpired && !answered) {
+  if (showsDroppedRecord) {
     const droppedDescription = stripExpiredNote(description) || 'Permission requested'
     return (
       <div
@@ -478,7 +491,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       {isExpired && !answered && (
         <div className="perm-expired-info" data-testid="perm-expired-info">
           <span className="perm-expired-msg">Permission expired — Claude will continue without this tool</span>
-          <button className="btn-dismiss" onClick={() => dismissExpiredPermission(requestId)} type="button" aria-label="Dismiss expired permission">
+          <button className="btn-dismiss" onClick={() => { focusRecordRef.current = true; dismissExpiredPermission(requestId) }} type="button" aria-label="Dismiss expired permission">
             Dismiss
           </button>
         </div>
