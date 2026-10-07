@@ -19,7 +19,7 @@ import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
 import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
-import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions } from './ws-history.js'
+import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, reseedActiveAgents, resendPendingQuestions, resendPendingPermissionsForSession } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
 import { isUserShellEnabled, isIdeFeatureEnabled, isOrchestrationEnabled, DEFAULT_MAX_PAYLOAD_BYTES } from './config.js'
 import { createHttpHandler } from './http-routes.js'
@@ -888,6 +888,9 @@ export class WsServer {
         // #7457: re-assert the questions a session is still blocked on, after a
         // replay's end frame let the client's sweep stamp them '(resolved)'.
         resendPendingQuestions: (ws, sid) => self._resendPendingQuestions(ws, sid),
+        // #8340: the permission-card counterpart, for the replay path that ends
+        // its own `history_replay_end` outside `replayHistory` (request_full_history).
+        resendPendingPermissions: (ws, sid) => self._resendPendingPermissions(ws, sid),
         get clients() { return self.clients },
       },
       sessions: {
@@ -2571,6 +2574,7 @@ export class WsServer {
   _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
   _reseedActiveAgents(ws, sessionId) { reseedActiveAgents(this._historyCtx, ws, sessionId) }
   _resendPendingQuestions(ws, sessionId) { resendPendingQuestions(this._historyCtx, ws, sessionId) }
+  _resendPendingPermissions(ws, sessionId) { resendPendingPermissionsForSession(this._historyCtx, ws, sessionId) }
 
   /** Route incoming client messages */
   async _handleMessage(ws, msg) {
