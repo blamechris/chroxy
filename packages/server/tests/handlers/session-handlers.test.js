@@ -928,7 +928,7 @@ describe('session-handlers', () => {
         await sessionHandlers.destroy_session(guest.ws, guest.client, { sessionId: 'sess-1' }, ctx)
 
         assert.equal(ctx.sessions.sessionManager.destroySession.callCount, 1)
-        assert.notEqual(guest.client.activeSessionId, 'sess-2')
+        assert.equal(guest.client.activeSessionId, null)
         assert.equal(guest.client.subscribedSessionIds.has('sess-1'), false)
         assert.equal(sentTo(ctx, guest.ws).filter(m => m.type === 'session_switched').length, 0)
         assert.equal(infoTo(ctx, guest.ws).length, 0)
@@ -946,7 +946,7 @@ describe('session-handlers', () => {
 
         await sessionHandlers.destroy_session(owner.ws, owner.client, { sessionId: 'sess-1' }, ctx)
 
-        assert.notEqual(guest.client.activeSessionId, 'sess-2')
+        assert.equal(guest.client.activeSessionId, null)
         assert.equal(sentTo(ctx, guest.ws).filter(m => m.type === 'session_switched').length, 0)
         assert.equal(infoTo(ctx, guest.ws).length, 0)
         assert.equal(replaysTo(ctx, guest.ws).length, 0)

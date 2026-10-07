@@ -25,6 +25,7 @@ import {
 import { listProviders, getProvider, resolveDaemonDefaultProvider } from '../providers.js'
 import { isProviderModelUnrestricted } from '../config.js'
 import { getProviderPermissionModeSupport } from '../permission-mode-support.js'
+import { isBoundClient } from '../environments/authority.js'
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
 // Credential + skills handlers were split into sibling modules (audit P2-4);
 // their maps are composed into settingsHandlers below.
@@ -584,7 +585,9 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     // is truthy — only `answeredAt` is refreshed to the server-confirmed time).
     // This also matches the SDK path, which broadcasts session events to every
     // subscriber without excluding the origin client.
-    ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision })
+    // The frame carries no sessionId (the request maps to no session), so it goes
+    // to unbound clients only; a session-bound client has no session to match.
+    ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision }, (c) => !isBoundClient(c))
   }
 
   // #6771 — an `allowAlways` that resolved on an in-process session just

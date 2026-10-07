@@ -427,7 +427,13 @@ async function handleDestroySession(ws, client, msg, ctx) {
     // broadcast below, but gets no `session_switched`, session info, replay or
     // focus change for `firstId`. Same rule as the checkpoint-restore re-home
     // (checkpoint-handlers.js, #5700), which also leaves `activeSessionId` as is.
-    if (isBoundClient(c)) continue
+    if (isBoundClient(c)) {
+      // The one session a bound client may be active on is gone: clear it so the
+      // client is left on no session rather than on (and indexed under) a
+      // destroyed one. A client bound to a different session is untouched.
+      if (c.boundSessionId === targetId) ctx.transport.setActiveSession(c, null)
+      continue
+    }
     if (c.authenticated && c.activeSessionId === targetId) {
       ctx.transport.setActiveSession(c, firstId)
       const entry = ctx.sessions.sessionManager.getSession(firstId)

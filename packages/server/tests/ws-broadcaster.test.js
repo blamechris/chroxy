@@ -1039,7 +1039,7 @@ describe('WsBroadcaster', () => {
       const hws = createFakeWs()
       const bare = new Map([[gws, guest], [hws, host]])
       const out = []
-      const b = new WsBroadcaster({ clients: bare, sendFn: (ws, msg) => out.push(ws) })
+      const b = new WsBroadcaster({ clients: bare, sendFn: (ws) => out.push(ws) })
       b._broadcastToSession('B', { type: 'stream_delta' })
       assert.deepEqual(out, [hws])
     })
@@ -1053,8 +1053,22 @@ describe('WsBroadcaster', () => {
     it('does not count a client bound elsewhere as a subscriber', () => {
       const { guest } = setup()
       forceIndexed(guest.client, 'B')
+      guest.client.usesDeflate = true
       assert.equal(wired._countSessionSubscribers('B'), 1)
       assert.equal(wired._hasDeflateSubscriber('B'), false)
+    })
+
+    it('does not count a client bound elsewhere in the full-scan subscriber count or deflate check', () => {
+      const guest = createFakeClient({ id: 'guest', activeSessionId: 'B', subscribedSessionIds: new Set(['B']) })
+      guest.boundSessionId = 'A'
+      guest.usesDeflate = true
+      const host = createFakeClient({ id: 'host', activeSessionId: 'B' })
+      const bare = new Map([[createFakeWs(), guest], [createFakeWs(), host]])
+      const b = new WsBroadcaster({ clients: bare, sendFn: () => {} })
+      assert.equal(b._countSessionSubscribers('B'), 1)
+      assert.equal(b._hasDeflateSubscriber('B'), false)
+      host.usesDeflate = true
+      assert.equal(b._hasDeflateSubscriber('B'), true)
     })
 
     it('does not deliver another session\'s frame through broadcastMinProtocolVersion or broadcastError', () => {

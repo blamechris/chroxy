@@ -35,7 +35,7 @@ import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
-import { terminalMirrorRecipient } from './handler-utils.js'
+import { terminalMirrorRecipient, canClientSeeWebTask } from './handler-utils.js'
 import { getProviderDataDirs, resolveDaemonDefaultProvider } from './providers.js'
 import { assertCtxShape } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
@@ -2430,9 +2430,16 @@ export class WsServer {
     })
 
     // Forward web task events to all authenticated clients
-    this._webTaskManager.on('task_created', (task) => this._broadcast({ type: 'web_task_created', task }))
-    this._webTaskManager.on('task_updated', (task) => this._broadcast({ type: 'web_task_updated', task }))
-    this._webTaskManager.on('task_error', ({ taskId, message }) => this._broadcast({ type: 'web_task_error', taskId, message }))
+    // A session-bound client receives a task frame only for a task in its bound
+    // session's cwd (canClientSeeWebTask — the same rule list_web_tasks applies).
+    // An error whose task cannot be resolved by id reaches unbound clients only.
+    const webTaskRecipient = (task) => (client) => canClientSeeWebTask(client, task, this.sessionManager)
+    this._webTaskManager.on('task_created', (task) => this._broadcast({ type: 'web_task_created', task }, webTaskRecipient(task)))
+    this._webTaskManager.on('task_updated', (task) => this._broadcast({ type: 'web_task_updated', task }, webTaskRecipient(task)))
+    this._webTaskManager.on('task_error', ({ taskId, message }) => {
+      const task = this._webTaskManager.getTask?.(taskId) ?? null
+      this._broadcast({ type: 'web_task_error', taskId, message }, webTaskRecipient(task))
+    })
 
     // Broadcast structured log entries to dashboard clients.
     // Re-entrancy guard prevents infinite recursion when _broadcast() itself

@@ -892,7 +892,18 @@ describe('permission/question routing to originating session', () => {
       await waitFor(() => guest.messages.filter((m) => m.type === 'session_switched').length > before, { label: 'settle round trip' })
     }
 
-    const foreign = (messages) => messages.filter((m) => typeof m.sessionId === 'string' && m.sessionId !== 'sess-a')
+    // Task ids the web-task tests register, mapped to their cwd; sess-a's cwd is /tmp/a.
+    const taskCwds = new Map()
+    // Every frame a client bound to sess-a must not have received: one tagged with
+    // another session, an UNTAGGED permission frame (it names no session it could
+    // belong to), or a web-task frame for a task outside sess-a's cwd.
+    const foreign = (messages) => messages.filter((m) => {
+      if (typeof m.sessionId === 'string') return m.sessionId !== 'sess-a'
+      if (m.type === 'permission_request' || m.type === 'permission_resolved') return true
+      if (m.type === 'web_task_created' || m.type === 'web_task_updated') return m.task?.cwd !== '/tmp/a'
+      if (m.type === 'web_task_error') return taskCwds.get(m.taskId) !== '/tmp/a'
+      return false
+    })
 
     it('a hook-routed permission for a sibling session reaches the primary client and not the bound one', async () => {
       const { manager, sessionsMap } = createTwoSessionManager()
@@ -922,6 +933,72 @@ describe('permission/question routing to originating session', () => {
         server._pendingPermissions.get(permReq.requestId)?.resolve('deny')
         await responsePromise
       }
+      guest.ws.close()
+      primary.ws.close()
+      pairingManager.destroy()
+    })
+
+    it('a permission request that maps to no session reaches the primary client and not the bound one', async () => {
+      const { manager, sessionsMap } = createTwoSessionManager()
+      manager._sessions = sessionsMap
+      const pairingManager = new PairingManager({ wsUrl: null })
+      server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: true, pairingManager })
+      const port = await startServerAndGetPort(server)
+
+      const guest = await connectBound(port, pairingManager, 'sess-a')
+      const primary = await connectPrimary(port)
+
+      const responsePromise = fetch(`http://127.0.0.1:${port}/permission`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }),
+      })
+      const permReq = await waitForMessageMatch(primary.messages, (m) => m.type === 'permission_request', 2000, 'primary permission_request')
+      try {
+        assert.equal(Object.prototype.hasOwnProperty.call(permReq, 'sessionId'), false)
+        await settle(guest)
+
+        assert.deepEqual(guest.messages.filter((m) => m.type === 'permission_request'), [])
+        assert.deepEqual(foreign(guest.messages), [])
+      } finally {
+        server._pendingPermissions.get(permReq.requestId)?.resolve('deny')
+        await responsePromise
+      }
+      guest.ws.close()
+      primary.ws.close()
+      pairingManager.destroy()
+    })
+
+    it('web task frames reach a bound client only for its own cwd and every task reaches the primary client', async () => {
+      const { manager, sessionsMap } = createTwoSessionManager()
+      manager._sessions = sessionsMap
+      const pairingManager = new PairingManager({ wsUrl: null })
+      server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: true, pairingManager })
+      const port = await startServerAndGetPort(server)
+
+      const guest = await connectBound(port, pairingManager, 'sess-a')
+      const primary = await connectPrimary(port)
+
+      const wtm = server._webTaskManager
+      const own = { taskId: 'task-own', cwd: '/tmp/a', status: 'running' }
+      const other = { taskId: 'task-other', cwd: '/tmp/b', status: 'running' }
+      for (const t of [own, other]) { wtm._tasks.set(t.taskId, t); taskCwds.set(t.taskId, t.cwd) }
+
+      wtm.emit('task_created', own)
+      wtm.emit('task_updated', { ...own, status: 'done' })
+      wtm.emit('task_error', { taskId: 'task-own', message: 'own failed' })
+      wtm.emit('task_created', other)
+      wtm.emit('task_updated', { ...other, status: 'done' })
+      wtm.emit('task_error', { taskId: 'task-other', message: 'other failed' })
+      wtm.emit('task_error', { taskId: 'task-unknown', message: 'unknown failed' })
+      await waitForMessageMatch(primary.messages, (m) => m.type === 'web_task_error' && m.taskId === 'task-unknown', 2000, 'primary last task error')
+      await settle(guest)
+
+      const taskFrames = (msgs) => msgs.filter((m) => m.type.startsWith('web_task_')).map((m) => `${m.type}:${m.task?.taskId ?? m.taskId}`)
+      assert.deepEqual(taskFrames(guest.messages), ['web_task_created:task-own', 'web_task_updated:task-own', 'web_task_error:task-own'])
+      assert.equal(taskFrames(primary.messages).length, 7)
+      assert.deepEqual(foreign(guest.messages), [])
+
       guest.ws.close()
       primary.ws.close()
       pairingManager.destroy()

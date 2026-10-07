@@ -718,9 +718,24 @@ describe('settings-handlers', () => {
       )
       assert.ok(call, 'permission_resolved was broadcast on the legacy path')
       assert.equal(call[0].decision, 'allow')
-      // The whole point of #6590: NO second (exclusion filter) argument, so the
-      // broadcast reaches every client including the resolver.
-      assert.equal(call.length, 1, 'broadcast has no client-exclusion filter (resolver included)')
+      // The whole point of #6590: the filter selects by binding, never by client
+      // id, so the unbound resolver is included.
+      const filter = call[1]
+      assert.equal(typeof filter, 'function')
+      assert.equal(filter(client), true, 'the unbound resolver receives its own permission_resolved')
+      assert.equal(filter({ id: 'another-unbound', boundSessionId: null }), true)
+    })
+
+    it('a legacy-unmapped permission_resolved is not delivered to a session-bound client', () => {
+      const ctx = makeCtx()
+      ctx.permissions.pendingPermissions = new Map([['req-legacy', { data: {} }]])
+      ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+      const client = makeClient({ id: 'client-resolver', activeSessionId: null, boundSessionId: null })
+
+      settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-legacy', decision: 'allow' }, ctx)
+
+      const call = ctx.transport.broadcast.calls.find((args) => args[0]?.type === 'permission_resolved')
+      assert.equal(call[1]({ id: 'guest', boundSessionId: 's1' }), false)
     })
 
     // Issue #2912: permission_response rejection for a bound-client must use

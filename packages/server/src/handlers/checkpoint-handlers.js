@@ -6,6 +6,7 @@
 import { realpathSync } from 'fs'
 import { sendSessionError, broadcastFocusChanged, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
+import { isBoundClient } from '../environments/authority.js'
 
 const log = createLogger('ws')
 
@@ -165,7 +166,10 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
             (s) => s && s.sessionId !== sid && s.isBusy && normalizeCwd(s.cwd) === targetCwd,
           )
           if (busyShare) {
-            sendSessionError(ws, ctx, `Cannot restore checkpoint: another session ("${busyShare.name}") is busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
+            // A session-bound requester is told only that a restore is blocked
+            // here; the other session's name is not part of what it may see.
+            const busyWho = isBoundClient(client) ? 'another session is' : `another session ("${busyShare.name}") is`
+            sendSessionError(ws, ctx, `Cannot restore checkpoint: ${busyWho} busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
             return
           }
         }

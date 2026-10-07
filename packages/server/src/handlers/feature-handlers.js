@@ -10,7 +10,7 @@
  * reduce file fragmentation (each file had 1–4 small functions).
  */
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
-import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
+import { validateCwdAllowed, buildSessionTokenMismatchPayload, sendSessionError, canClientSeeWebTask } from '../handler-utils.js'
 import { validateDockerImage } from '../docker-image-allowlist.js'
 import { WebTaskUnavailableError } from '../web-task-manager.js'
 import { destroyEnvironmentWithSessions, ENVIRONMENT_HAS_LIVE_SESSIONS } from '../environments/destroy-with-sessions.js'
@@ -164,14 +164,8 @@ function handleListWebTasks(ws, client, msg, ctx) {
   // Adversary A10: bound clients only see tasks whose cwd matches the
   // bound session's cwd, so the list endpoint doesn't become a side
   // channel for enumerating cross-session task state.
-  if (client.boundSessionId) {
-    const entry = ctx.sessions.sessionManager?.getSession?.(client.boundSessionId)
-    const boundCwd = entry?.cwd
-    const scoped = boundCwd ? tasks.filter((t) => t.cwd === boundCwd) : []
-    ctx.transport.send(ws, { type: 'web_task_list', tasks: scoped })
-    return
-  }
-  ctx.transport.send(ws, { type: 'web_task_list', tasks })
+  const visible = tasks.filter((t) => canClientSeeWebTask(client, t, ctx.sessions.sessionManager))
+  ctx.transport.send(ws, { type: 'web_task_list', tasks: visible })
 }
 
 function handleTeleportWebTask(ws, client, msg, ctx) {
@@ -179,11 +173,9 @@ function handleTeleportWebTask(ws, client, msg, ctx) {
   // execFile. Bound pairing-issued clients must not trigger local
   // execution of cloud-task output — that's an unbounded SSRF-style
   // escalation from a scoped mobile pairing back to full-shell access.
-  if (client.boundSessionId) {
+  if (isBoundClient(client)) {
     const task = ctx.services.webTaskManager.getTask?.(msg.taskId)
-    const entry = ctx.sessions.sessionManager?.getSession?.(client.boundSessionId)
-    const boundCwd = entry?.cwd
-    if (!task || !boundCwd || task.cwd !== boundCwd) {
+    if (!canClientSeeWebTask(client, task, ctx.sessions.sessionManager)) {
       ctx.transport.send(ws, {
         type: 'web_task_error',
         taskId: msg.taskId,

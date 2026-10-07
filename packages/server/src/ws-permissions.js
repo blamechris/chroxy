@@ -137,12 +137,20 @@ function sendJson(res, status, body, extraHeaders) {
 }
 
 /**
+ * Recipient filter for a permission frame that maps to no session: it carries
+ * no `sessionId`, so a session-bound client has no session it could belong to
+ * and does not receive it. Frames attributed to a session keep the unfiltered
+ * fan-out (the broadcaster's per-session delivery check applies to them).
+ */
+const unboundOnly = (client) => !isBoundClient(client)
+
+/**
  * Create a permission handler for the WsServer.
  * Manages HTTP permission lifecycle (hook requests, responses, resend, resolve).
  *
  * @param {Object} opts
  * @param {Function} opts.sendFn - (ws, message) => void
- * @param {Function} opts.broadcastFn - (message) => void
+ * @param {Function} opts.broadcastFn - (message, filter?) => void
  * @param {Function} opts.validateBearerAuth - (req, res) => boolean — validates main API token (used by /permission-response)
  * @param {Function} opts.validateHookAuth - (req, res) => boolean — validates per-session hook secret (used by /permission)
  * @param {Object|null} opts.pushManager - PushManager instance (nullable)
@@ -376,7 +384,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // `sessionId` entirely (absent, not null) when undefined — the request
         // maps to no chroxy session and clients fall back to the active one.
         sessionId: ownerSessionId || undefined,
-      }))
+      }), ownerSessionId ? undefined : unboundOnly)
 
       if (pushManager) {
         // #5702 (8d): settle the fire-and-forget send so a failed phone
@@ -727,7 +735,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               requestId,
               decision,
               ...(result.sessionId ? { sessionId: result.sessionId } : {}),
-            })
+            }, result.sessionId ? undefined : unboundOnly)
           }
           // #6771 — an allowAlways over the HTTP fallback (iOS notification
           // action) just persisted a durable project rule on the in-process
