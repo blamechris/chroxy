@@ -422,6 +422,12 @@ async function handleDestroySession(ws, client, msg, ctx) {
     // #5563: index-maintaining helpers — unsubscribe every client from the
     // destroyed session, and re-home any client that was actively viewing it.
     ctx.transport.unsubscribeClient(c, targetId)
+    // A session-bound client is scoped to its bound session and is never moved
+    // onto another one: it keeps its unsubscribe and the `session_destroyed`
+    // broadcast below, but gets no `session_switched`, session info, replay or
+    // focus change for `firstId`. Same rule as the checkpoint-restore re-home
+    // (checkpoint-handlers.js, #5700), which also leaves `activeSessionId` as is.
+    if (isBoundClient(c)) continue
     if (c.authenticated && c.activeSessionId === targetId) {
       ctx.transport.setActiveSession(c, firstId)
       const entry = ctx.sessions.sessionManager.getSession(firstId)
