@@ -552,8 +552,10 @@ export async function checkTunnelRoutability(deps = {}) {
  * #8263: warn about a chroxy permission-hook entry in the USER-LEVEL Claude
  * settings. claude-tui children load that file as well as their per-session
  * settings, so a stranded entry used to double every permission prompt. The
- * hook script now stays inert for it inside a TUI child and the daemon sweeps it
- * at startup, so this is a hygiene warning, not a live fault. Read-only.
+ * hook script now stays inert for it inside a TUI child, so this is a hygiene
+ * warning, not a live fault. Read-only: nothing here (or at daemon start) edits
+ * the user's settings file, because the entry may belong to a live claude-cli
+ * session of another daemon (#8350) — the operator removes it.
  *
  * @param {{settingsPath?: string}} [deps]
  * @returns {{ name: string, status: 'warn', message: string } | null} null when none found
@@ -564,7 +566,7 @@ export function checkUserLevelChroxyHook({ settingsPath } = {}) {
   return {
     name: 'User-level permission hook',
     status: 'warn',
-    message: `${found} chroxy permission-hook entr${found === 1 ? 'y' : 'ies'} in ${target} — fix: restart the daemon (it removes orphans at startup), or delete the hooks.PreToolUse entry that runs permission-hook.sh from that file`,
+    message: `${found} chroxy permission-hook entr${found === 1 ? 'y' : 'ies'} in ${target} — fix: remove the hooks.PreToolUse entry that runs permission-hook.sh from that file by hand (only when no claude-cli session is running; it is ignored inside claude-tui sessions)`,
   }
 }
 

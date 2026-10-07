@@ -2,7 +2,7 @@ import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,7 +11,7 @@ import { EventEmitter } from 'node:events'
 import { createPermissionHandler } from '../src/ws-permissions.js'
 import { createPermissionHookManager } from '../src/permission-hook.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
-import { writeHookSettings, SESSION_SETTINGS_HOOK_MARKER } from '../src/claude-tui/pty-driver.js'
+import { writeHookSettings, sessionPermissionHookCommand, SESSION_SETTINGS_HOOK_MARKER } from '../src/claude-tui/pty-driver.js'
 import { buildSpawnEnv } from '../src/utils/spawn-env.js'
 
 /**
@@ -298,5 +298,61 @@ describe('permission-hook.sh in a claude-tui child (#8263)', () => {
     const r = await runUnmarked(tuiEnv(daemon.port, 'approve', { CHROXY_TUI_CHILD: '0' }), bash())
     assert.equal(daemon.stats.permissionRequests, 1)
     assert.equal(decisionOf(r.stdout).permissionDecision, 'allow')
+  })
+})
+
+describe('the per-session hook command survives an install path with shell metacharacters (#8263)', () => {
+  // Claude runs a hook's `command` through a shell, and treats a hook that fails
+  // to START (exit 127) as a NON-blocking error. An unquoted path containing a
+  // space split into words, the hook never ran, and the one copy that enforces
+  // the floor inside a TUI child was silently skipped. The path below holds a
+  // space, a single quote and a `$`, which exercises the quoting end to end.
+  let dir
+  let daemon
+  let quotedScript
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-8263-quote-'))
+    const scriptDir = join(dir, "it's a dir $HOME", 'hooks')
+    mkdirSync(scriptDir, { recursive: true })
+    quotedScript = join(scriptDir, 'permission-hook.sh')
+    copyFileSync(hookPath, quotedScript)
+    chmodSync(quotedScript, 0o755)
+  })
+  afterEach(async () => {
+    if (daemon) await daemon.close()
+    daemon = null
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const commandFor = (permissionHookScript) => {
+    const settings = JSON.parse(readFileSync(writeHookSettings(dir, { permissionsEnabled: true, permissionHookScript }), 'utf-8'))
+    return settings.hooks.PreToolUse[0].hooks.find((h) => h.command.includes('permission-hook.sh')).command
+  }
+
+  it('the written command is one shell word for the path, then the marker', () => {
+    const command = commandFor(quotedScript)
+    assert.ok(command.startsWith("'"), `path must be quoted: ${command}`)
+    assert.ok(command.endsWith(`' ${SESSION_SETTINGS_HOOK_MARKER}`), `got: ${command}`)
+    assert.equal(sessionPermissionHookCommand(quotedScript), command)
+  })
+
+  it('a plain path is written exactly as before (no quotes, existing entries unchanged)', () => {
+    assert.equal(sessionPermissionHookCommand('/opt/chroxy/hooks/permission-hook.sh'), `/opt/chroxy/hooks/permission-hook.sh ${SESSION_SETTINGS_HOOK_MARKER}`)
+  })
+
+  it('run through sh -c it still reaches /permission-floor and /permission', async () => {
+    daemon = await startRealDaemon({ promptDecision: 'deny' })
+    const env = {
+      PATH: process.env.PATH,
+      CHROXY_PORT: String(daemon.port),
+      CHROXY_HOOK_SECRET: HOOK_SECRET,
+      CHROXY_PERMISSION_MODE: 'auto',
+      CHROXY_TUI_CHILD: '1',
+    }
+    const r = await runCommand({ shellCommand: commandFor(quotedScript), env, payload: read('.env') })
+    assert.equal(r.status, 0, `hook must start and exit 0, got ${r.status}: ${r.stderr}`)
+    assert.equal(daemon.stats.floorRequests, 1, 'floor probed')
+    assert.equal(daemon.stats.permissionRequests, 1, 'floored target raised a real prompt')
+    assert.equal(decisionOf(r.stdout).permissionDecision, 'deny')
   })
 })

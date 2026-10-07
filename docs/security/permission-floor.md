@@ -179,9 +179,19 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   floor probe included, so the floor is enforced exactly once per call, by the copy
   the session registered. Outside a TUI child (claude-cli's user-level registration,
   plain Claude Code) nothing changes, and a missing flag degrades to the old
-  double-run, never to a skipped floor. The daemon also removes orphaned entries from
-  the user-level file at startup (`sweepOrphanedUserHooks`), and `chroxy doctor` warns
-  about one.
+  double-run, never to a skipped floor. The daemon does **not** edit the user-level
+  file: an entry there may belong to a live claude-cli session of another daemon, and
+  the register/unregister path has its own pre-existing hazards (#8350). `chroxy
+  doctor` warns about a stranded entry (read-only) and tells the operator to remove it
+  by hand.
+- **The per-session hook command shell-quotes the script path** (#8263). Claude runs a
+  hook's `command` through a shell and treats a hook that cannot start (exit 127) as
+  non-blocking, so an install path containing a space used to skip the floor probe and
+  the `/permission` request for the marked copy — the only copy left deciding. The path
+  is quoted as one POSIX word (`shellQuotePath`), the marker stays a separate word, and
+  a plain path is written exactly as before. The claude-cli registration is quoted the
+  same way, and `_isChroxyHookEntry` still recognises both the old unquoted and the
+  quoted form.
 - **The hook-routed pipeline's own files are floored by the filesystem, and the base
   dir is checked rather than assumed** (#7337 for `claude-cli`, #7372 for
   `claude-tui`). Both providers keep their per-session state — `settings.json` that
