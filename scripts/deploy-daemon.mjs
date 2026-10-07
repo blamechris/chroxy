@@ -51,9 +51,12 @@
  *                         target until its deadline (never a rollback or repair)
  *   deploy-request.json   written by the daemon; "restart now" for the forward
  *                         target (older than 10 min or another target: ignored and
- *                         deleted; force:true skips the BUSY gates only). Consumed
- *                         at the end of the tick only if its nonce is unchanged; a
- *                         newer one is drained by one more tick.
+ *                         deleted; force:true skips the BUSY gates only). CLAIMED
+ *                         atomically (renamed to a private name, read, deleted); a
+ *                         newer file that appears at the live path is drained by
+ *                         one more tick.
+ * Reads of these files are bounded and regular-files-only, writes use a random
+ * O_EXCL temp name (../packages/server/src/utils/small-file.js).
  *
  * Mutual exclusion is a kernel-held TCP port (`--lock-port`), not a file: it
  * cannot go stale, needs no reclaim protocol, and dies with the process.
@@ -68,15 +71,19 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+  renameSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { isEntryPoint } from './lib/is-entry-point.mjs'
 import { isGitShaRef } from '../packages/server/src/utils/argv-safety.js'
+// The ONE bounded reader / atomic writer for the banner's small files; the daemon
+// imports the same module, so both sides agree on what a hostile file looks like.
+import { readBoundedFile, readBoundedJson, writeFileAtomic } from '../packages/server/src/utils/small-file.js'
 
 export const DEFAULT_PORT = 8765
 export const DEFAULT_LOCK_PORT = 47651
@@ -91,8 +98,15 @@ const LOCKFILE = /^(package-lock\.json|packages\/[^/]+\/package-lock\.json)$/
 // server through <configDir>. A request older than this is ignored and deleted:
 // a click from an hour ago must not restart the daemon now.
 export const REQUEST_TTL_MS = 10 * 60 * 1000
-// Every one of those files is a few hundred bytes; a bigger one is not ours.
-const SMALL_FILE_CAP = 4096
+// A postpone is honoured only when it is internally sane: `requestedAt` not more than
+// REQUEST_SKEW_MS in the future, and a hold of at most POSTPONE_MAX_MS from it. The
+// daemon writes exactly one hour; the extra minute is slack for clock rounding. A
+// hand-written year-9999 deadline is therefore ignored and deleted rather than
+// blocking a target for ever.
+export const POSTPONE_MAX_MS = 61 * 60 * 1000
+export const REQUEST_SKEW_MS = 5 * 60 * 1000
+// connection.json and the stamp are bigger than the banner files but still tiny.
+const STATE_FILE_CAP = 64 * 1024
 const NONCE = /^[A-Za-z0-9._-]{1,64}$/
 
 export const USAGE = `Usage: node scripts/deploy-daemon.mjs [options]
@@ -216,7 +230,10 @@ export function defaultDeps() {
       }
     },
     fetch: globalThis.fetch,
-    fs: { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync },
+    fs: {
+      appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+      renameSync, unlinkSync, writeFileSync, writeSync,
+    },
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log: (line) => console.log(line),
@@ -270,17 +287,18 @@ class StateWriteError extends Error {}
  */
 export async function deploy(opts, deps = defaultDeps()) {
   const d = { ...defaultDeps(), ...deps }
-  const meta = { reached: false, nonce: null }
+  const meta = { reached: false }
   const first = await deployOnce(opts, d, meta)
   // A request that arrived while the tick ran (its WatchPaths firing was
   // swallowed by the lock, or came before the tick read the file) is drained by
   // ONE more tick, never a loop: whatever it finds, the next WatchPaths firing or
   // timer tick is the backstop.
   if (opts.dryRun || !meta.reached) return first
-  const waiting = peekRequestNonce(d.fs, join(opts.configDir, REQUEST_FILE))
-  if (waiting === null || waiting === meta.nonce) return first
+  // The tick CLAIMED any request it saw (renamed it away), so a request file that
+  // exists now arrived after the claim.
+  if (!hasValidRequest(d.fs, join(opts.configDir, REQUEST_FILE))) return first
   d.log(`a newer deploy request arrived during the run; running once more to apply it`)
-  const second = await deployOnce(opts, d, { reached: false, nonce: null })
+  const second = await deployOnce(opts, d, { reached: false })
   return { ...first, exitCode: Math.max(first.exitCode, second.exitCode), drained: second.outcome }
 }
 
@@ -288,17 +306,6 @@ export const PENDING_FILE = 'pending-update.json'
 export const POSTPONE_FILE = 'deploy-postpone.json'
 export const REQUEST_FILE = 'deploy-request.json'
 
-/** The one reader for a small JSON file the server wrote: size-capped, shape-checked by the caller. */
-function readSmallJson(fs, file) {
-  let raw
-  try { raw = fs.readFileSync(file, 'utf8') } catch (e) { return e.code === 'ENOENT' ? { state: 'none' } : { state: 'bad', raw: null } }
-  if (raw.length > SMALL_FILE_CAP) return { state: 'bad', raw }
-  try {
-    const value = JSON.parse(raw)
-    if (value && typeof value === 'object' && !Array.isArray(value)) return { state: 'ok', value, raw }
-  } catch { /* fall through */ }
-  return { state: 'bad', raw }
-}
 /** -> the request body when it has the shape the server writes, else null. */
 function parseRequest(v) {
   if (v.action !== 'restart-now') return null
@@ -308,16 +315,23 @@ function parseRequest(v) {
   if (typeof v.nonce !== 'string' || !NONCE.test(v.nonce)) return null
   return { target: v.target.toLowerCase(), force: v.force, requestedAt: v.requestedAt, nonce: v.nonce }
 }
-function parsePostpone(v) {
+/**
+ * -> the postpone when it is well-formed AND internally sane (see POSTPONE_MAX_MS),
+ * else null. An unbounded or far-future deadline is not a postpone.
+ */
+function parsePostpone(v, nowMs) {
   if (typeof v.target !== 'string' || !FULL_SHA.test(v.target)) return null
   if (typeof v.until !== 'string' || !Number.isFinite(Date.parse(v.until))) return null
+  if (typeof v.requestedAt !== 'string' || !Number.isFinite(Date.parse(v.requestedAt))) return null
+  const asked = Date.parse(v.requestedAt)
+  if (asked - nowMs > REQUEST_SKEW_MS) return null
+  if (Date.parse(v.until) - asked > POSTPONE_MAX_MS) return null
   return { target: v.target.toLowerCase(), until: v.until }
 }
-/** The nonce of a well-formed request now on disk, else null. */
-function peekRequestNonce(fs, file) {
-  const r = readSmallJson(fs, file)
-  const req = r.state === 'ok' ? parseRequest(r.value) : null
-  return req ? req.nonce : null
+/** Is a well-formed request sitting at the live path right now? */
+function hasValidRequest(fs, file) {
+  const r = readBoundedJson(file, { fs })
+  return r.state === 'ok' && parseRequest(r.value) !== null
 }
 
 async function deployOnce(opts, d, meta) {
@@ -344,16 +358,18 @@ async function deployOnce(opts, d, meta) {
     if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${tail(r.stderr || r.error)}`)
     return r.stdout.trim()
   }
+  // Bounded and regular-files-only (never a symlink, never blocks on a FIFO): see
+  // utils/small-file.js. A refused file reads as absent.
   const readJson = (file) => {
-    try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return null }
+    const r = readBoundedJson(file, { fs, cap: STATE_FILE_CAP })
+    return r.state === 'ok' ? r.value : null
   }
-  // Atomic: a reader (or a crash) sees the old file or the new one, never half
-  // of either. The tmp name carries the pid so two writers cannot share one.
+  // Atomic: a reader (or a crash) sees the old file or the new one, never half of
+  // either. The temp name is random and opened O_EXCL, so a planted file or symlink
+  // at a guessable name cannot be followed (utils/small-file.js).
   const writeJson = (file, value) => {
     fs.mkdirSync(dirname(file), { recursive: true })
-    const tmp = `${file}.tmp-${d.pid}`
-    fs.writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n')
-    fs.renameSync(tmp, file)
+    writeFileAtomic(file, JSON.stringify(value, null, 2) + '\n', { fs, mode: 0o666 })
   }
   const rangeOf = (a, b) => `${short(a)}..${short(b)}`
 
@@ -374,7 +390,7 @@ async function deployOnce(opts, d, meta) {
       const { reason, target: to, from } = pendingWant
       // queuedAt is when the update FIRST started waiting: a re-written file for
       // the same target keeps it, so the banner does not restart its clock every tick.
-      const prev = readSmallJson(fs, p.pending)
+      const prev = readBoundedJson(p.pending, { fs })
       const kept = prev.state === 'ok' && prev.value.target === to && typeof prev.value.queuedAt === 'string' && Number.isFinite(Date.parse(prev.value.queuedAt))
         ? prev.value.queuedAt : iso()
       let subject = ''
@@ -387,19 +403,30 @@ async function deployOnce(opts, d, meta) {
       writeJson(p.pending, { target: to, from, subject, commitsAhead, queuedAt: kept, reason })
     } catch { /* best effort */ }
   }
-  // Delete the request this tick read, but ONLY if it is still the one it read: a
-  // newer click written while we deployed carries a new nonce and must survive
-  // (the wrapper then drains it with one more tick).
-  function consumeRequest(read) {
+  // Claim the request ATOMICALLY: rename the live file to a private name, read the
+  // claimed file, delete it. Whatever sits at the live path afterwards is a NEWER
+  // request (the daemon renames its files into place), so it can never be deleted
+  // by this tick; the wrapper drains it with one more tick. A dry run only looks.
+  function claimRequest() {
+    if (opts.dryRun) return readBoundedJson(p.request, { fs })
+    // A claim that a crashed tick left behind (this tick holds the lock, so nobody
+    // else owns it) is removed once it is older than the TTL.
     try {
-      if (!read || read.state === 'none') return
-      const now = readSmallJson(fs, p.request)
-      if (now.state === 'none') return
-      const same = read.state === 'ok'
-        ? now.state === 'ok' && now.value.nonce === read.value.nonce
-        : now.state === 'bad' && now.raw !== null && now.raw === read.raw
-      if (same) fs.unlinkSync(p.request)
-    } catch { /* best effort */ }
+      for (const name of fs.readdirSync(opts.configDir)) {
+        if (!name.startsWith(`${REQUEST_FILE}.claimed-`)) continue
+        const leftover = join(opts.configDir, name)
+        try { if (d.now() - fs.lstatSync(leftover).mtimeMs > REQUEST_TTL_MS) fs.unlinkSync(leftover) } catch { /* best effort */ }
+      }
+    } catch { /* a directory that cannot be listed has nothing to clean */ }
+    const claimed = `${p.request}.claimed-${randomBytes(8).toString('hex')}`
+    try {
+      fs.renameSync(p.request, claimed)
+    } catch (e) {
+      return e.code === 'ENOENT' ? { state: 'none' } : { state: 'bad', reason: e.code || String(e.message || e) }
+    }
+    const r = readBoundedJson(claimed, { fs })
+    removeQuietly(claimed)
+    return r
   }
 
   // ---- state: { failedTarget, failedOutcome, rollbackTo, lastKey } --------
@@ -408,14 +435,13 @@ async function deployOnce(opts, d, meta) {
   let held = false
   let state = {}
   function loadState() {
-    let raw
-    try {
-      raw = fs.readFileSync(p.state, 'utf8')
-    } catch (e) {
-      if (e.code === 'ENOENT') return { ok: true }
-      // Unreadable is not absent: `rollbackTo` may be in there.
-      return { ok: false, reason: `cannot read deploy-state.json: ${e.message}` }
-    }
+    // Bounded, regular files only (a FIFO here would block the whole tick while it
+    // holds the lock).
+    const read = readBoundedFile(p.state, { fs, cap: STATE_FILE_CAP })
+    if (read.state === 'none') return { ok: true }
+    // Unreadable is not absent: `rollbackTo` may be in there.
+    if (read.state === 'bad') return { ok: false, reason: `cannot read deploy-state.json: ${read.reason}` }
+    const raw = read.raw
     try {
       const parsed = JSON.parse(raw)
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
@@ -762,7 +788,6 @@ async function deployOnce(opts, d, meta) {
     held = true
   }
 
-  let reqRead = null // the request file as this tick read it; consumed in `finally`
   try {
     const loaded = loadState()
     if (!loaded.ok) {
@@ -829,12 +854,11 @@ async function deployOnce(opts, d, meta) {
     if (failedHere) pendingWant = 'remove' // a target that rolled back is not "waiting"
 
     // -- 2b. a deploy request and a postpone from the dashboard (#8331) ---------
-    // Both live in <configDir>, written by the daemon's server. The request is read
-    // under the lock and consumed (nonce-checked) at the end of the tick.
+    // Both live in <configDir>, written by the daemon's server. The request is
+    // CLAIMED (renamed to a private name) under the lock, then read and deleted.
     meta.reached = true
-    reqRead = readSmallJson(fs, p.request)
+    const reqRead = claimRequest()
     const reqParsed = reqRead.state === 'ok' ? parseRequest(reqRead.value) : null
-    meta.nonce = reqParsed ? reqParsed.nonce : null
     let reqAccepted = null // the request this tick acts on: fresh, for the forward target
     let reqForce = false
     let reqNote = null
@@ -854,17 +878,24 @@ async function deployOnce(opts, d, meta) {
     // deploy to the requested target. It never covers an unreachable daemon, a
     // rollback, a repair or --retry; only --force does that.
     const forceBusy = opts.force || reqForce
-    let postponed = null
-    const postRead = readSmallJson(fs, p.postpone)
-    if (postRead.state !== 'none') {
-      const pp = postRead.state === 'ok' ? parsePostpone(postRead.value) : null
-      // Stale: malformed, expired, for a commit main has moved past, or already running.
+    // The postpone that applies to the forward target RIGHT NOW (re-read after the
+    // build too, since a Postpone can land while it runs).
+    const currentPostpone = () => {
+      const r = readBoundedJson(p.postpone, { fs })
+      if (r.state === 'none') return { none: true }
+      const pp = r.state === 'ok' ? parsePostpone(r.value, d.now()) : null
+      // Stale: malformed or out of bounds, expired, for a commit main has moved past, or already running.
       const stale = !pp || !(Date.parse(pp.until) > d.now()) || pp.target !== target || running === pp.target
-      if (!stale && forward && !reqAccepted && !opts.force) postponed = { until: pp.until } // --force is the operator overriding by hand
-      else if (stale || reqAccepted) {
+      return { pp, stale }
+    }
+    let postponed = null
+    const cp = currentPostpone()
+    if (!cp.none) {
+      if (!cp.stale && forward && !reqAccepted && !opts.force) postponed = { until: cp.pp.until } // --force is the operator overriding by hand
+      else if (cp.stale || reqAccepted) {
         if (!opts.dryRun) {
           removeQuietly(p.postpone)
-          if (stale) event(`removed ${pp ? 'an expired or superseded' : 'a malformed'} deploy-postpone.json`)
+          if (cp.stale) event(`removed ${cp.pp ? 'an expired or superseded' : 'an invalid'} deploy-postpone.json`)
         }
       }
     }
@@ -1020,6 +1051,25 @@ async function deployOnce(opts, d, meta) {
         return { exitCode: 1, outcome: 'rollback-failed' }
       }
 
+      // The build took time. A Postpone the owner pressed while it ran was
+      // acknowledged, so it must hold: put the tree back and defer, exactly like the
+      // busy re-check below. An accepted restart request outranks it, as before.
+      if (isForward && !opts.force && !reqAccepted) {
+        const again = currentPostpone()
+        if (!again.none && !again.stale) {
+          const back = convergeTree(old, { allowReset: true })
+          if (!back.ok) {
+            setRollbackTo(old)
+            event(`ROLLBACK-FAILED after a postpone arrived during the build; restoring the checkout failed (${back.reason}). Rollback to ${short(old)} is owed.`, { range })
+            return { exitCode: 1, outcome: 'rollback-failed' }
+          }
+          pendingWant = { reason: 'postponed', target: fwdTarget, from: old }
+          deferral(`deferred after build: ${short(fwdTarget)} postponed until ${again.pp.until}`,
+            { range, key: `postponed:${fwdTarget}:${again.pp.until}`, reasons: `postponed until ${again.pp.until}` })
+          return { exitCode: 0, outcome: 'postponed' }
+        }
+      }
+
       // The build took time: the daemon may have turned busy.
       let prevPid = pre.pid ?? null
       // ALWAYS re-probe after the build. A daemon that was down when the tick
@@ -1132,10 +1182,7 @@ async function deployOnce(opts, d, meta) {
     event(`failed: ${e?.message || e}`, { key: `error:${e?.message}` })
     return { exitCode: 1, outcome: 'failed' }
   } finally {
-    if (held && !opts.dryRun) {
-      consumeRequest(reqRead)
-      applyPending()
-    }
+    if (held && !opts.dryRun) applyPending()
     if (held && deferralOver && (state.deferredSince || state.deferredLoggedAt)) {
       delete state.deferredSince
       delete state.deferredLoggedAt

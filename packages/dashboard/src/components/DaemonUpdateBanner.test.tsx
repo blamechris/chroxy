@@ -222,8 +222,11 @@ describe('deriveNotice', () => {
     expect(deriveNotice(s(deployed('ok', { at: new Date(NOW - 7.1 * 864e5).toISOString() })), NOW)).toBeNull()
   })
 
-  it('"Updated to X" needs the daemon to actually be running X', () => {
+  it('"Updated to X" needs the daemon to be KNOWN to run X', () => {
     expect(deriveNotice(s(deployed('ok'), C), NOW)).toBeNull()
-    expect(deriveNotice(s(deployed('ok'), null), NOW)).not.toBeNull()
+    expect(deriveNotice(s(deployed('ok'), B), NOW)).not.toBeNull()
+    // No evidence, no claim: a daemon that cannot report its commit gets no "Updated to".
+    expect(deriveNotice(s(deployed('ok'), null), NOW)).toBeNull()
+    expect(deriveNotice(s(deployed('deployed-tunnel-unverified'), null), NOW)).toBeNull()
   })
 })

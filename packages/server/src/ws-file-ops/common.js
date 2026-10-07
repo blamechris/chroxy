@@ -2,6 +2,7 @@ import { realpath, lstat, readlink } from 'fs/promises'
 import { resolve, dirname, basename, join, isAbsolute } from 'path'
 import { resolveTargetComponentwiseAsync, COMPONENTWISE_MAX_SYMLINKS } from '../utils/componentwise-resolver.js'
 import { isPathWithin } from '../utils/path-containment.js'
+import { configDir } from '../config-dir.js'
 
 /**
  * Shared utilities for file operations: CWD resolution, path validation, exec helpers.
@@ -313,6 +314,45 @@ export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, c
   const realAbsPath = await realpathOfDeepestAncestor(absPath)
   const valid = isPathWithin(realAbsPath, cwdReal)
   return { valid, realPath: realAbsPath, cwdReal }
+}
+
+/**
+ * The refusal text for a generic file mutation aimed at the daemon's config
+ * directory (#8331). Shared so every mutation path says the same thing.
+ */
+export const CONFIG_DIR_REFUSAL = 'Access denied: the chroxy config directory is managed by the daemon'
+
+/**
+ * Does `absPath` resolve to the daemon's config directory or anything beneath it?
+ *
+ * Generic file writes refuse the config directory, so the deploy control files
+ * (`deploy-request.json`, `deploy-postpone.json`) can only be written through
+ * `daemon_update_action`, which applies the primary-token gate and the
+ * busy-session confirmation.
+ *
+ * BOTH sides are resolved with `realpathOfDeepestAncestor` (an existing path by
+ * `realpath`, a new one by its deepest existing ancestor), so the answer is the
+ * same whether the session cwd is the config directory itself, one of its
+ * ancestors, a relocated `CHROXY_CONFIG_DIR`, or reaches it through a symlinked
+ * parent or a dangling link. The config dir is read per call (`configDir()`), never
+ * cached, so a relocation applies at once.
+ *
+ * FAILS CLOSED: a path that cannot be resolved (EACCES on an ancestor, a link
+ * cycle) is reported as inside, never as outside.
+ *
+ * @param {string} absPath - Absolute path of the mutation target
+ * @returns {Promise<boolean>}
+ */
+export async function isWithinConfigDir(absPath) {
+  try {
+    const [target, root] = await Promise.all([
+      realpathOfDeepestAncestor(absPath),
+      realpathOfDeepestAncestor(configDir()),
+    ])
+    return isPathWithin(target, root)
+  } catch {
+    return true
+  }
 }
 
 /** Cache for resolved workspaceRoot realpaths (key: raw path, value: resolved) */

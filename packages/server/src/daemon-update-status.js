@@ -27,7 +27,8 @@
 
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
-import { closeSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, watch as fsWatch, writeFileSync } from 'node:fs'
+import { SMALL_FILE_CAP, readBoundedJson, writeFileAtomic } from './utils/small-file.js'
+import { mkdirSync, unlinkSync, watch as fsWatch } from 'node:fs'
 import { join } from 'node:path'
 import { configDir } from './config-dir.js'
 import { DAEMON_COMMIT } from './daemon-commit.js'
@@ -46,8 +47,14 @@ export const REQUEST_TTL_MS = 10 * 60 * 1000
 const WATCHED = new Set([PENDING_FILE, LAST_DEPLOY_FILE, POSTPONE_FILE, REQUEST_FILE])
 
 /** Every file here is a few hundred bytes. A bigger one is not ours. */
-export const MAX_FILE_BYTES = 4096
+export const MAX_FILE_BYTES = SMALL_FILE_CAP
 export const POSTPONE_MS = 60 * 60 * 1000
+// A postpone is honoured only if it is internally sane: a plausible `requestedAt`
+// and a hold of at most an hour (plus a minute of slack). The script applies the
+// same bounds, so a hand-written year-9999 deadline neither blocks a deploy nor
+// shows in the banner.
+export const POSTPONE_MAX_MS = POSTPONE_MS + 60 * 1000
+export const REQUEST_SKEW_MS = 5 * 60 * 1000
 const SUBJECT_MAX = 200
 const SHA = /^[0-9a-f]{40}$/i
 const PENDING_REASONS = new Set(['busy', 'unknown', 'postponed'])
@@ -60,23 +67,13 @@ const clip = (v, n) => String(v).slice(0, n)
 const canonIso = (v) => new Date(Date.parse(v)).toISOString()
 
 /**
- * Read a small JSON object, never more than MAX_FILE_BYTES + 1 bytes of it.
- * -> the parsed object, or null when absent, oversized, unparseable or not an object.
+ * Read a small JSON object: bounded, regular files only, never following a
+ * symlink or blocking on a FIFO (see utils/small-file.js).
+ * -> the parsed object, or null when absent, refused, oversized, unparseable or not an object.
  */
 export function readCappedJson(file) {
-  let fd
-  try { fd = openSync(file, 'r') } catch { return null }
-  try {
-    const buf = Buffer.alloc(MAX_FILE_BYTES + 1)
-    const n = readSync(fd, buf, 0, buf.length, 0)
-    if (n > MAX_FILE_BYTES) return null
-    const value = JSON.parse(buf.toString('utf8', 0, n))
-    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
-  } catch {
-    return null
-  } finally {
-    try { closeSync(fd) } catch { /* nothing to close */ }
-  }
+  const r = readBoundedJson(file)
+  return r.state === 'ok' ? r.value : null
 }
 
 function parsePending(v) {
@@ -102,8 +99,16 @@ function parseLastDeploy(v) {
   }
 }
 
-function parsePostpone(v) {
-  if (!v || !isSha(v.target) || !isIso(v.until)) return null
+/**
+ * A postpone is valid only with a sane `requestedAt` (not meaningfully in the
+ * future) and a hold of at most POSTPONE_MAX_MS from it. Anything else is ignored.
+ */
+function parsePostpone(v, now) {
+  if (!v || !isSha(v.target) || !isIso(v.until) || !isIso(v.requestedAt)) return null
+  const asked = Date.parse(v.requestedAt)
+  const until = Date.parse(v.until)
+  if (asked - now > REQUEST_SKEW_MS) return null
+  if (until - asked > POSTPONE_MAX_MS) return null
   return { target: v.target.toLowerCase(), until: canonIso(v.until) }
 }
 
@@ -122,7 +127,7 @@ function parseRequest(v) {
 export function buildDaemonUpdateStatus({ dir, running, now }) {
   const pending = parsePending(readCappedJson(join(dir, PENDING_FILE)))
   const lastDeploy = parseLastDeploy(readCappedJson(join(dir, LAST_DEPLOY_FILE)))
-  const postpone = parsePostpone(readCappedJson(join(dir, POSTPONE_FILE)))
+  const postpone = parsePostpone(readCappedJson(join(dir, POSTPONE_FILE)), now)
   const request = parseRequest(readCappedJson(join(dir, REQUEST_FILE)))
   // A postpone or a request only means something for the update that is waiting.
   const postponedUntil = pending && postpone && postpone.target === pending.target && Date.parse(postpone.until) > now
@@ -139,12 +144,10 @@ export function buildDaemonUpdateStatus({ dir, running, now }) {
   }
 }
 
-// Atomic: the script (or a watcher) sees the old file or the new one, never half.
-function writeJsonAtomic(file, value) {
-  const tmp = `${file}.tmp-${process.pid}`
-  writeFileSync(tmp, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
-  renameSync(tmp, file)
-}
+// Atomic and race-safe: random temp name opened O_EXCL, written through the
+// descriptor, renamed into place (utils/small-file.js). A reader sees the old
+// file or the new one, never half of either.
+const writeJsonAtomic = (file, value) => writeFileAtomic(file, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 })
 
 /** What the confirm dialog shows: the idle verdict's own words, bounded. */
 function busySummary(idle) {

@@ -1,17 +1,20 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { constants as fsConstants, openSync as fsOpen, writeSync as fsWriteSync, closeSync as fsClose, renameSync as fsRename } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   DaemonUpdateStatus, buildDaemonUpdateStatus, readCappedJson, MAX_FILE_BYTES, POSTPONE_MS,
-  PENDING_FILE, POSTPONE_FILE, REQUEST_FILE, LAST_DEPLOY_FILE, REQUEST_TTL_MS,
+  PENDING_FILE, POSTPONE_FILE, REQUEST_FILE, LAST_DEPLOY_FILE, REQUEST_TTL_MS, POSTPONE_MAX_MS, REQUEST_SKEW_MS,
 } from '../src/daemon-update-status.js'
 import {
   PENDING_FILE as SCRIPT_PENDING, POSTPONE_FILE as SCRIPT_POSTPONE, REQUEST_FILE as SCRIPT_REQUEST,
-  REQUEST_TTL_MS as SCRIPT_TTL,
+  REQUEST_TTL_MS as SCRIPT_TTL, POSTPONE_MAX_MS as SCRIPT_POSTPONE_MAX, REQUEST_SKEW_MS as SCRIPT_SKEW,
 } from '../../../scripts/deploy-daemon.mjs'
 import { ServerDaemonUpdateStatusSchema } from '@chroxy/protocol'
+import { readBoundedFile } from '../src/utils/small-file.js'
 
 // #8331 — the server half of the update banner. Everything runs against a temp
 // config dir (never ~/.chroxy: the sandbox guard would throw).
@@ -47,6 +50,8 @@ describe('file names and TTL match the deploy script (drift guard)', () => {
     assert.equal(POSTPONE_FILE, SCRIPT_POSTPONE)
     assert.equal(REQUEST_FILE, SCRIPT_REQUEST)
     assert.equal(REQUEST_TTL_MS, SCRIPT_TTL)
+    assert.equal(POSTPONE_MAX_MS, SCRIPT_POSTPONE_MAX)
+    assert.equal(REQUEST_SKEW_MS, SCRIPT_SKEW)
   })
 })
 
@@ -116,11 +121,11 @@ describe('buildDaemonUpdateStatus — validation', () => {
   it('postponedUntil only applies to the pending target, and only while in the future', () => {
     const dir = mkDir()
     put(dir, PENDING_FILE, pending())
-    put(dir, POSTPONE_FILE, { target: C, until: iso(NOW + 3600e3) })
+    put(dir, POSTPONE_FILE, { target: C, until: iso(NOW + 3600e3), requestedAt: iso(NOW) })
     assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).postponedUntil, null, 'another target')
-    put(dir, POSTPONE_FILE, { target: B, until: iso(NOW - 1) })
+    put(dir, POSTPONE_FILE, { target: B, until: iso(NOW - 1), requestedAt: iso(NOW - 3600e3) })
     assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).postponedUntil, null, 'expired')
-    put(dir, POSTPONE_FILE, { target: B, until: iso(NOW + 1) })
+    put(dir, POSTPONE_FILE, { target: B, until: iso(NOW + 1), requestedAt: iso(NOW - 1000) })
     assert.notEqual(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).postponedUntil, null)
   })
 
@@ -140,7 +145,7 @@ describe('requestRestart', () => {
   it('idle: writes force:false, removes the postpone, and the file has the script\'s shape', () => {
     const dir = mkDir()
     put(dir, PENDING_FILE, pending())
-    put(dir, POSTPONE_FILE, { target: B, until: iso(NOW + 3600e3) })
+    put(dir, POSTPONE_FILE, { target: B, until: iso(NOW + 3600e3), requestedAt: iso(NOW) })
     const out = mk(dir).requestRestart({ target: B })
     assert.deepEqual(out, { ok: true, force: false })
     const req = get(dir, REQUEST_FILE)
@@ -309,5 +314,114 @@ describe('the watcher', () => {
     assert.equal(seen.length, 1)
     assert.equal(seen[0].postponedUntil, iso(NOW + POSTPONE_MS))
     u.close()
+  })
+})
+
+describe('hostile files read as absent and never block (#8331)', () => {
+  const posix = process.platform !== 'win32'
+
+  it('a FIFO at a watched name reads as absent WITHOUT blocking (run in a child with a timeout, so a regression fails instead of hanging the run)', { skip: !posix }, () => {
+    const dir = mkDir()
+    for (const f of [PENDING_FILE, POSTPONE_FILE, REQUEST_FILE, LAST_DEPLOY_FILE]) execFileSync('mkfifo', [join(dir, f)])
+    const modulePath = new URL('../src/daemon-update-status.js', import.meta.url).href
+    const code = `import { buildDaemonUpdateStatus } from ${JSON.stringify(modulePath)}; ` +
+      `const s = buildDaemonUpdateStatus({ dir: ${JSON.stringify(dir)}, running: null, now: ${NOW} }); ` +
+      `process.stdout.write(JSON.stringify([s.pending, s.lastDeploy, s.postponedUntil, s.requestPending]))`
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 10_000 })
+    assert.ok(!r.error, `the reader blocked on a FIFO (${r.error && r.error.code})`)
+    assert.deepEqual(JSON.parse(r.stdout), [null, null, null, false])
+  })
+
+  it('a FIFO that HAS a writer and valid JSON in it is still refused: only a regular file is read', { skip: !posix }, () => {
+    const dir = mkDir()
+    execFileSync('mkfifo', [join(dir, PENDING_FILE)])
+    // Hold both ends open (non-blocking) so nothing here can block, then put a valid document in the pipe.
+    const hold = fsOpen(join(dir, PENDING_FILE), fsConstants.O_RDWR | fsConstants.O_NONBLOCK)
+    try {
+      fsWriteSync(hold, JSON.stringify(pending()))
+      assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).pending, null)
+      assert.match(readBoundedFile(join(dir, PENDING_FILE)).reason, /not a regular file/)
+    } finally { fsClose(hold) }
+  })
+
+  it('a symlink at a watched name is refused, even to a valid file', { skip: !posix }, () => {
+    const dir = mkDir()
+    put(dir, 'real.json', pending())
+    symlinkSync(join(dir, 'real.json'), join(dir, PENDING_FILE))
+    assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).pending, null)
+    assert.notEqual(readCappedJson(join(dir, 'real.json')), null, 'the target itself reads fine: it is the link that is refused')
+  })
+
+  it('a directory at a watched name reads as absent', () => {
+    const dir = mkDir()
+    mkdirSync(join(dir, PENDING_FILE))
+    assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).pending, null)
+  })
+})
+
+describe('writes use unpredictable temp names (#8331)', () => {
+  it('a symlink planted at the old predictable temp name is neither followed nor truncated', { skip: process.platform === 'win32' }, () => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending())
+    put(dir, 'victim.txt', 'precious')
+    for (const f of [REQUEST_FILE, POSTPONE_FILE]) symlinkSync(join(dir, 'victim.txt'), join(dir, `${f}.tmp-${process.pid}`))
+    const u = mk(dir)
+    assert.deepEqual(u.requestRestart({ target: B }), { ok: true, force: false })
+    assert.equal(u.postpone({ target: B }).ok, true)
+    assert.equal(readFileSync(join(dir, 'victim.txt'), 'utf8'), 'precious')
+  })
+
+  it('a failed write leaves no temp file behind', () => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending())
+    mkdirSync(join(dir, REQUEST_FILE)) // the rename onto a directory fails
+    assert.equal(mk(dir).requestRestart({ target: B }).code, 'WRITE_FAILED')
+    assert.deepEqual(readdirSync(dir).filter((f) => f.includes('.tmp-')), [])
+  })
+
+  it('temp names differ every write', () => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending())
+    const names = new Set()
+    const u = mk(dir, { now: () => NOW })
+    // Spy via the directory: a rename-in-flight is not observable, so assert on the helper directly.
+    return import('../src/utils/small-file.js').then(({ writeFileAtomic }) => {
+      const seen = []
+      const fakeFs = {
+        openSync: (p, ...rest) => { seen.push(p); return fsOpen(p, ...rest) },
+        writeSync: (fd, ...a) => fsWriteSync(fd, ...a), closeSync: (fd) => fsClose(fd), renameSync: (a, b) => fsRename(a, b), unlinkSync: () => {},
+      }
+      writeFileAtomic(join(dir, 'x.json'), '{}', { fs: fakeFs })
+      writeFileAtomic(join(dir, 'x.json'), '{}', { fs: fakeFs })
+      for (const n of seen) names.add(n)
+      assert.equal(names.size, 2)
+      assert.ok(seen.every((p) => !p.includes(String(process.pid))), 'no pid in the name')
+      void u
+    })
+  })
+})
+
+describe('a postpone is bounded (#8331)', () => {
+  const setup = (postpone) => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending())
+    put(dir, POSTPONE_FILE, postpone)
+    return buildDaemonUpdateStatus({ dir, running: A, now: NOW }).postponedUntil
+  }
+
+  it('a year-9999 deadline is ignored', () => {
+    assert.equal(setup({ target: B, until: '9999-12-31T00:00:00.000Z', requestedAt: iso(NOW) }), null)
+  })
+
+  it('a far-future requestedAt is ignored, a missing one too', () => {
+    assert.equal(setup({ target: B, until: iso(NOW + 400 * 864e5 + 3600e3), requestedAt: iso(NOW + 400 * 864e5) }), null)
+    assert.equal(setup({ target: B, until: iso(NOW + 3600e3) }), null)
+  })
+
+  it('exactly the server\'s own hour (and a minute of slack) is honoured; a minute more is not', () => {
+    assert.notEqual(setup({ target: B, until: iso(NOW + POSTPONE_MAX_MS), requestedAt: iso(NOW) }), null)
+    assert.equal(setup({ target: B, until: iso(NOW + POSTPONE_MAX_MS + 1), requestedAt: iso(NOW) }), null)
+    assert.notEqual(setup({ target: B, until: iso(NOW + 3600e3), requestedAt: iso(NOW + REQUEST_SKEW_MS) }), null)
+    assert.equal(setup({ target: B, until: iso(NOW + 3600e3 + REQUEST_SKEW_MS + 2), requestedAt: iso(NOW + REQUEST_SKEW_MS + 1) }), null)
   })
 })

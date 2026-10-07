@@ -97,18 +97,20 @@ Only a client holding the **primary token** (and not bound to one session) is ev
 
 ### The four files
 
-All are small JSON files in `<configDir>`, written atomically (temp file plus rename). Every one is **best effort**: the script never aborts or changes a deploy's outcome because it could not write or delete one, and the daemon treats a missing, malformed or oversized (over 4 KB) file as absent.
+All are small JSON files in `<configDir>`, written atomically (temp file plus rename). Every one is **best effort**: the script never aborts or changes a deploy's outcome because it could not write or delete one, and both sides treat a missing, malformed or oversized (over 4 KB) file as absent.
+
+The config directory is writable by other local processes, so both sides read these files defensively, through one shared module (`packages/server/src/utils/small-file.js`): a file is opened `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, must be a **regular file** (a symlink, FIFO, directory or device reads as absent and can never block the daemon or the script), and at most cap + 1 bytes are read. Writes go to a **random** temp name opened `O_EXCL`, through the descriptor, then renamed into place; a planted file or symlink at a guessable name is never followed. Generic file writes through the dashboard refuse the config directory (`Access denied: the chroxy config directory is managed by the daemon`), so `deploy-request.json` and `deploy-postpone.json` can only be written through `daemon_update_action`, which applies the primary-token gate and the busy-session confirmation.
 
 | File | Written by | Shape | Lifecycle |
 |---|---|---|---|
 | `pending-update.json` | the script | `{ target, from, subject, commitsAhead, queuedAt, reason }`, `reason` is `busy`, `unknown` or `postponed` | Written whenever a **forward** deploy is deferred (busy, cannot confirm idle, postponed, or the daemon turned busy during the build). `queuedAt` is when the update **first** started waiting: a re-write for the same target keeps it, a new target starts a new clock. Removed on up to date, a verified deploy, a repair, a target that failed (skipped or rolled back), a refusal. `--dry-run` writes nothing. |
 | `last-deploy.json` | the script | unchanged | The banner's "Updated to ..." notice reads it. |
 | `deploy-postpone.json` | the daemon | `{ target, until, requestedAt }` | Written by **Postpone 1h**. See below. |
-| `deploy-request.json` | the daemon | `{ action: "restart-now", target, force, requestedAt, nonce }` | Written by **Restart now**. See below. |
+| `deploy-request.json` | the daemon | `{ action: "restart-now", target, force, requestedAt, nonce }` | Written by **Restart now**; claimed (renamed) by the script when it reads it. See below. |
 
 ### Postpone
 
-`Postpone 1h` writes `deploy-postpone.json` with `until = now + 1h`. The script then defers a **forward deploy whose target equals `target`** until `until`, **even on an idle daemon** (outcome `postponed`, exit 0, `pending-update.json` reason `postponed`, banner "Update `<sha7>` postponed until HH:MM"). It never gates a rollback or a repair, since those are about getting back to a known state. The script deletes the file once it is stale: expired, for a commit `main` has moved past, or for a commit the daemon already runs. `--force` overrides a postpone (it is the operator at the keyboard).
+`Postpone 1h` writes `deploy-postpone.json` with `until = now + 1h` and `requestedAt = now`. A postpone is honoured only if it is internally sane: `requestedAt` is valid and not more than 5 minutes in the future, and `until - requestedAt` is at most 1 hour and 1 minute. Anything else (a year-9999 deadline, a far-future `requestedAt`, a missing `requestedAt`) is ignored and deleted, and the banner never shows it. The script then defers a **forward deploy whose target equals `target`** until `until`, **even on an idle daemon** (outcome `postponed`, exit 0, `pending-update.json` reason `postponed`, banner "Update `<sha7>` postponed until HH:MM"). It never gates a rollback or a repair, since those are about getting back to a known state. The script deletes the file once it is stale: invalid, expired, for a commit `main` has moved past, or for a commit the daemon already runs. It reads the postpone **again after the build**, so a Postpone pressed while the build runs still holds: the tree is converged back, nothing is signalled, and the outcome is `postponed` (`deferred after build: <sha12> postponed until <iso>`). `--force` overrides a postpone (it is the operator at the keyboard).
 
 ### Restart now
 
@@ -124,7 +126,7 @@ The script reads the request under its lock at the start of a tick:
 - a request **older than 10 minutes** is ignored and deleted (a click from an hour ago must not restart the daemon now);
 - a request whose `target` is **not the forward target** (main moved, or the target already rolled back; a request is not `--retry`) is ignored and deleted;
 - otherwise it is **accepted**. It overrides a postpone. `force: true` skips the **busy** gates for that tick's forward deploy to that target, including the re-check after the build. It does **not** skip an unreachable or unknown daemon (only `--force` does), and a rollback that follows a failed health check still waits for idle;
-- at the end of the tick the file is deleted **only if it still carries the nonce that was read**. A newer click written while the tick ran has a new nonce and survives, and the script runs **one more tick** to apply it (it never loops).
+- the request is **claimed atomically**: the file is renamed to `deploy-request.json.claimed-<random>`, the claimed file is read and validated, then deleted. Whatever sits at `deploy-request.json` afterwards is a newer request, which this tick can never delete; the script runs **one more tick** to apply it (it never loops). A claim a crashed tick left behind is removed once it is older than 10 minutes. A `--dry-run` only reads the live file and claims nothing.
 
 ### Making Restart now immediate: `WatchPaths`
 
@@ -222,7 +224,7 @@ Run one tick on demand: `launchctl kickstart gui/$UID/com.chroxy.deploy`.
 | `deferred: <sha12> postponed until <iso>` | The owner pressed Postpone 1h in the dashboard (#8331). Nothing was touched; outcome `postponed`, exit 0. Logged once per target and deadline. |
 | `deploy request <nonce> accepted for <sha12>[: skipping the idle check, the owner confirmed]` | A fresh Restart now request for the forward target was read (#8331). |
 | `ignored a stale deploy request for <sha12> ...` / `ignored a deploy request for <sha12>: ...` / `ignored a malformed deploy-request.json` | The request was older than 10 minutes, for another target, there was nothing to deploy, or it was not a valid request. It was deleted and bought nothing. |
-| `removed an expired or superseded deploy-postpone.json` / `removed a malformed deploy-postpone.json` | A postpone that no longer applies was cleaned up. |
+| `removed an expired or superseded deploy-postpone.json` / `removed an invalid deploy-postpone.json` | A postpone that no longer applies, or that failed the sanity bounds above, was cleaned up. |
 | `a newer deploy request arrived during the run; running once more to apply it` | Console only: a newer nonce appeared while the tick ran. |
 | `skipped: <sha12> already rolled back (<outcome>); waiting for a newer main or --retry` | This target failed before; nothing runs until `main` moves or you pass `--retry`. |
 | `repaired checkout to <sha12> (no restart needed)` | The daemon already ran the right commit; only the checkout or build was behind. |

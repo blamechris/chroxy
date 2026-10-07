@@ -73,9 +73,11 @@ export function deriveNotice(status: ServerDaemonUpdateStatusMessage, nowMs: num
   })
   const r = last.result
   if (r === 'ok' || r.startsWith('ok (') || r === 'deployed-tunnel-unverified') {
-    // "Updated to X" is only true while the daemon is actually running X. A manual
-    // restart onto another commit since then makes the record history, not news.
-    if (status.running !== null && status.running !== last.to) return null
+    // "Updated to X" is only true while the daemon is KNOWN to be running X. A daemon
+    // that cannot say what it runs (null), or that runs another commit (a manual
+    // restart since), makes the record history, not news: with no evidence there is
+    // no claim.
+    if (status.running === null || status.running !== last.to) return null
     return make('updated', last.to, r === 'deployed-tunnel-unverified' ? 'the tunnel did not answer yet' : null)
   }
   if (r === 'rolled-back-build' || r === 'rolled-back-restart') return make('rolled-back', last.to)

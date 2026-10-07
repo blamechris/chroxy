@@ -515,6 +515,15 @@ let pendingPairingId: string | null = null;
 // banner's buttons are released with an error.
 const DAEMON_UPDATE_ACTION_TIMEOUT_MS = 15_000;
 let daemonUpdateWatchdog: ReturnType<typeof setTimeout> | null = null;
+// #8331: the update banner's state describes ONE connection to ONE daemon. It is
+// cleared on an explicit disconnect, on transport loss (onclose), and at the start
+// of every new handshake (connect), because a reconnect can land on a DIFFERENT
+// build (a manual rollback, a switched checkout) that will never send a replacement
+// status frame to overwrite a stale "Restarting…" or "Updated to".
+const EMPTY_DAEMON_UPDATE = { daemonUpdate: null, daemonUpdateAction: null, daemonUpdateConfirm: null, daemonUpdateError: null } as const;
+function clearDaemonUpdateWatchdog(): void {
+  if (daemonUpdateWatchdog) { clearTimeout(daemonUpdateWatchdog); daemonUpdateWatchdog = null; }
+}
 
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
@@ -2711,7 +2720,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
     // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
-    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...errorPatch });
+    // #8331: a new handshake starts from a clean update banner (see EMPTY_DAEMON_UPDATE).
+    clearDaemonUpdateWatchdog();
+    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...EMPTY_DAEMON_UPDATE, ...errorPatch });
 
     if (_retryCount > 0) {
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1}...`);
@@ -3150,6 +3161,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().wslActioningIds.size > 0) {
         set({ wslActioningIds: new Set<string>() });
       }
+      // #8331: the daily-daemon update banner is per connection; a reply to a
+      // Restart now / Postpone can never arrive on the dead socket either.
+      clearDaemonUpdateWatchdog();
+      set({ ...EMPTY_DAEMON_UPDATE });
       // #6691 (S-3): ditto for in-flight orchestration detail requests + pending
       // mutating actions — a reply can never arrive on the dead socket.
       if (get().orchestrationRunDetailLoading.size > 0) {
@@ -3332,6 +3347,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // against the disconnected socket.
     clearPendingTrustGrants();
     clearPendingModelReverts();
+    clearDaemonUpdateWatchdog(); // #8331
     clearPendingPermissionModeReverts();
     clearPendingThinkingLevelReverts();
     // #6954: same fast-reject as onclose/onerror — an explicit disconnect
