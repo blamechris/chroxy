@@ -5,7 +5,7 @@ import { glob as fsGlob, rm as rmAsync, symlink as symlinkAsync, rename as renam
 import { tmpdir, homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { createServer } from 'node:http'
-import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded, buildSafeBashEnv } from '../src/byok-tool-executor.js'
+import { executeBuiltinTool, compileCaseCheck, caseCheckPasses, segmentMatches, walkGlob, acquireGlobWalkSlot, globWalkSlotStats, expandBraces, parseRangeGroup, hasRangeBrace, hostBraceDepthExceeded, buildSafeBashEnv } from '../src/byok-tool-executor.js'
 import { globPatternComplexityReason } from '../src/built-in-tools/tool-transforms.js'
 
 /**
@@ -2373,6 +2373,153 @@ describe('executeBuiltinTool', () => {
           results.length < 15_000,
           `an interrupted walk over 15,000 files collected ${results.length} — it should have stopped short, not completed`,
         )
+      })
+
+      // #7356 — concurrent Glob walks are bounded. The limiter is daemon-wide
+      // (module-level), so every test below drains it back to idle and asserts
+      // so: a leaked slot would starve every later Glob in this process.
+      describe('concurrent walk bound (#7356)', () => {
+        let savedEnv
+        let keepAlive
+        beforeEach(() => {
+          // `runGlob`'s deadline timer is unref()'d (the daemon always has other
+          // handles). A call parked behind a held slot has no ref'd handle of its
+          // own, so without this the test process exits with the promise pending.
+          keepAlive = setInterval(() => {}, 1000)
+          savedEnv = {
+            max: process.env.CHROXY_GLOB_MAX_CONCURRENT,
+            timeout: process.env.CHROXY_GLOB_TIMEOUT_MS,
+          }
+        })
+        afterEach(() => {
+          clearInterval(keepAlive)
+          for (const [k, v] of [['CHROXY_GLOB_MAX_CONCURRENT', savedEnv.max], ['CHROXY_GLOB_TIMEOUT_MS', savedEnv.timeout]]) {
+            if (v === undefined) delete process.env[k]
+            else process.env[k] = v
+          }
+          assert.deepEqual(globWalkSlotStats(), { active: 0, queued: 0 }, 'the limiter must be idle after each test')
+        })
+
+        it('acquireGlobWalkSlot grants up to the limit, queues FIFO past it, and cancel dequeues without granting', async () => {
+          const a = acquireGlobWalkSlot(2)
+          const b = acquireGlobWalkSlot(2)
+          const c = acquireGlobWalkSlot(2)
+          const d = acquireGlobWalkSlot(2)
+          const relA = await a.granted
+          const relB = await b.granted
+          assert.equal(typeof relA, 'function')
+          assert.equal(typeof relB, 'function')
+          assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 2 })
+
+          c.cancel()
+          assert.equal(await c.granted, null, 'a cancelled request is resolved with null, never a slot')
+          assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 1 })
+
+          relA()
+          relA() // idempotent: a double release must not free a second slot
+          const relD = await d.granted
+          assert.equal(typeof relD, 'function', 'releasing a slot hands it to the next queued request')
+          assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 0 })
+
+          d.cancel() // no-op once granted
+          assert.deepEqual(globWalkSlotStats(), { active: 2, queued: 0 })
+          relB()
+          relD()
+        })
+
+        it('never runs more walks than the cap, and every queued Glob still returns the full result', { timeout: 30_000 }, async () => {
+          process.env.CHROXY_GLOB_MAX_CONCURRENT = '2'
+          buildBigTree(dir, 15, 1000) // 15,000 files — long enough that all four calls overlap
+
+          let maxActive = 0
+          let maxQueued = 0
+          let sampling = true
+          const sampler = (async () => {
+            while (sampling) {
+              const { active, queued } = globWalkSlotStats()
+              if (active > maxActive) maxActive = active
+              if (queued > maxQueued) maxQueued = queued
+              await new Promise((r) => setImmediate(r))
+            }
+          })()
+
+          let results
+          try {
+            results = await Promise.all([1, 2, 3, 4].map(() =>
+              executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'd00*/*.ts' }, ...ctx() })))
+          } finally {
+            sampling = false
+            await sampler
+          }
+
+          assert.equal(maxActive, 2, `exactly the cap may walk at once, observed ${maxActive}`)
+          assert.ok(maxQueued >= 1, `four overlapping calls against a cap of 2 must have queued (max queued ${maxQueued})`)
+          for (const r of results) {
+            assert.equal(r.isError, false)
+            assert.equal(r.content, results[0].content, 'queueing must not change a Glob result')
+          }
+          assert.equal(results[0].content.split('\n').length, 10_000, 'd000-d009 hold 10,000 matches')
+        })
+
+        it('a Glob that times out while queued returns the timeout, leaves the queue, and never starts a walk', async () => {
+          process.env.CHROXY_GLOB_MAX_CONCURRENT = '1'
+          writeFileSync(join(dir, 'a.ts'), '')
+          const held = acquireGlobWalkSlot(1)
+          const releaseHeld = await held.granted
+
+          process.env.CHROXY_GLOB_TIMEOUT_MS = '50'
+          try {
+            const r = await executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, ...ctx() })
+
+            assert.equal(r.isError, true)
+            assert.match(r.content, /timed out/)
+            assert.deepEqual(globWalkSlotStats(), { active: 1, queued: 0 },
+              'the timed-out call must have left the queue (a stale waiter would still be holding a place and later start a walk)')
+          } finally {
+            releaseHeld()
+          }
+        })
+
+        it('a Glob aborted while queued returns interrupted and leaves the queue', async () => {
+          process.env.CHROXY_GLOB_MAX_CONCURRENT = '1'
+          const held = acquireGlobWalkSlot(1)
+          const releaseHeld = await held.granted
+
+          const controller = new AbortController()
+          setTimeout(() => controller.abort(), 20)
+          try {
+            const r = await executeBuiltinTool({
+              toolName: 'Glob', input: { pattern: '**/*.ts' }, signal: controller.signal, ...ctx(),
+            })
+
+            assert.equal(r.isError, true)
+            assert.match(r.content, /interrupted/)
+            assert.deepEqual(globWalkSlotStats(), { active: 1, queued: 0 })
+          } finally {
+            releaseHeld()
+          }
+        })
+
+        it('parallel Globs each cancel their OWN walk: aborting one leaves the other intact, and both slots come back', { timeout: 30_000 }, async () => {
+          process.env.CHROXY_GLOB_MAX_CONCURRENT = '2'
+          buildBigTree(dir, 15, 1000)
+          const controller = new AbortController()
+          setTimeout(() => controller.abort(), 2)
+
+          const [aborted, other] = await Promise.all([
+            executeBuiltinTool({ toolName: 'Glob', input: { pattern: '**/*.ts' }, signal: controller.signal, ...ctx() }),
+            executeBuiltinTool({ toolName: 'Glob', input: { pattern: 'd001/*.ts' }, ...ctx() }),
+          ])
+
+          assert.equal(aborted.isError, true)
+          assert.match(aborted.content, /interrupted/)
+          assert.equal(other.isError, false, 'the sibling call must not inherit the abort')
+          assert.equal(other.content.split('\n').length, 1000)
+          // The aborted walk is released promptly (it observes its own stop flag), not left holding a slot.
+          const deadline = Date.now() + 5_000
+          while (globWalkSlotStats().active !== 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5))
+          assert.equal(globWalkSlotStats().active, 0, 'both walks must have released their slots')
+        })
       })
 
       // #7910 review (security, TOCTOU) — `dirent.isDirectory()`/
