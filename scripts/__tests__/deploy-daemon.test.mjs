@@ -2063,27 +2063,29 @@ await test('request: an UNREADABLE request is retried within the TTL and dropped
   eq((await env.run()).outcome, 'deferred-busy', 'and nothing is left to retry')
 })
 
-await test('applying from ACCEPTANCE: the moment a request is accepted, a Postpone is already refused (APPLYING)', async () => {
-  const { DaemonUpdateStatus } = await import('../../packages/server/src/daemon-update-status.js')
+await test('applying from ACCEPTANCE: the moment a request is accepted, the marker the daemon refuses a Postpone on is already on disk', async () => {
+  // The daemon answers APPLYING exactly when pending-update.json says `applying` with a
+  // FRESH applyingSince (isApplyingFresh, the one rule both sides import); its refusal is
+  // proven in packages/server/tests/daemon-update-status.test.js. This job installs no
+  // server dependencies, so the daemon module itself is not imported here.
+  const { isApplyingFresh } = await import('../../packages/server/src/utils/deploy-control-files.js')
   const env = makeEnv()
   env.daemon.idleFn = () => BUSY
   writeReq(env, { force: true })
-  let refused = null
+  let atAcceptance = null
   const real = env.deps.fs
   env.deps.fs = {
     ...real,
     // The acceptance line is logged right after the marker is written, before any probe or build.
     appendFileSync(f, content, ...rest) {
-      if (refused === null && String(content).includes('accepted for')) {
-        refused = new DaemonUpdateStatus({ dir: env.configDir, running: A, now: () => env.t }).postpone({ target: B })
-        eq(readIf(env, 'pending-update.json').reason, 'applying')
-      }
+      if (atAcceptance === null && String(content).includes('accepted for')) atAcceptance = readIf(env, 'pending-update.json')
       return real.appendFileSync(f, content, ...rest)
     },
   }
   eq((await env.run()).outcome, 'deployed')
-  eq(refused?.code, 'APPLYING')
-  eq(existsSync(env.path('deploy-postpone.json')), false, 'the refused postpone wrote nothing')
+  eq(atAcceptance?.reason, 'applying', 'applying is on disk at acceptance')
+  eq(atAcceptance?.target, B, 'for the accepted target')
+  eq(isApplyingFresh(atAcceptance?.applyingSince, env.t), true, 'with a fresh applyingSince, so the daemon refuses a Postpone')
 })
 
 await test('applying from acceptance: a request that is accepted but then deferred leaves the update waiting again, not stuck "applying"', async () => {
