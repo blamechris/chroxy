@@ -890,7 +890,11 @@ export class WsServer {
         resendPendingQuestions: (ws, sid) => self._resendPendingQuestions(ws, sid),
         // #8340: the permission-card counterpart, for the replay path that ends
         // its own `history_replay_end` outside `replayHistory` (request_full_history).
-        resendPendingPermissions: (ws, sid) => self._resendPendingPermissions(ws, sid),
+        // Wired straight to the per-session implementation, NOT through a
+        // `_resendPendingPermissions` method: that name is the legacy `(ws)`
+        // connect-time delegate (test compat), and a same-named wrapper here was
+        // silently shadowed by it, dropping `sid` (unfiltered resend).
+        resendPendingPermissions: (ws, sid) => resendPendingPermissionsForSession(self._historyCtx, ws, sid),
         get clients() { return self.clients },
       },
       sessions: {
@@ -2574,7 +2578,6 @@ export class WsServer {
   _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
   _reseedActiveAgents(ws, sessionId) { reseedActiveAgents(this._historyCtx, ws, sessionId) }
   _resendPendingQuestions(ws, sessionId) { resendPendingQuestions(this._historyCtx, ws, sessionId) }
-  _resendPendingPermissions(ws, sessionId) { resendPendingPermissionsForSession(this._historyCtx, ws, sessionId) }
 
   /** Route incoming client messages */
   async _handleMessage(ws, msg) {
