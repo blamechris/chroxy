@@ -41,6 +41,20 @@
  *   3. It is quiet. A tick with nothing to do prints one console line and writes
  *      nothing to deploy.log; a repeated condition is logged once.
  *
+ * The dashboard banner (#8331) talks to this script through three small files in
+ * <configDir>, every one of them BEST EFFORT (a failure to write or delete one
+ * never aborts a deploy or changes its outcome):
+ *   pending-update.json   written here while a forward deploy is deferred (busy /
+ *                         unknown / postponed); removed when it deploys, is up to
+ *                         date, fails or is refused
+ *   deploy-postpone.json  written by the daemon; defers a FORWARD deploy of that
+ *                         target until its deadline (never a rollback or repair)
+ *   deploy-request.json   written by the daemon; "restart now" for the forward
+ *                         target (older than 10 min or another target: ignored and
+ *                         deleted; force:true skips the BUSY gates only). Consumed
+ *                         at the end of the tick only if its nonce is unchanged; a
+ *                         newer one is drained by one more tick.
+ *
  * Mutual exclusion is a kernel-held TCP port (`--lock-port`), not a file: it
  * cannot go stale, needs no reclaim protocol, and dies with the process.
  *
@@ -73,6 +87,13 @@ const FULL_SHA = /^[0-9a-f]{40}$/i
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
 const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const LOCKFILE = /^(package-lock\.json|packages\/[^/]+\/package-lock\.json)$/
+// The three files the dashboard banner (#8331) exchanges with the daemon's
+// server through <configDir>. A request older than this is ignored and deleted:
+// a click from an hour ago must not restart the daemon now.
+export const REQUEST_TTL_MS = 10 * 60 * 1000
+// Every one of those files is a few hundred bytes; a bigger one is not ours.
+const SMALL_FILE_CAP = 4096
+const NONCE = /^[A-Za-z0-9._-]{1,64}$/
 
 export const USAGE = `Usage: node scripts/deploy-daemon.mjs [options]
 
@@ -242,13 +263,64 @@ class StateWriteError extends Error {}
  * Run one deploy tick.
  * @returns {Promise<{ exitCode: number, outcome: string }>}
  *   outcome is one of: up-to-date, repaired, deployed, deployed-tunnel-unverified,
- *   dry-run, deferred-busy, deferred-unavailable, deferred-busy-after-build,
+ *   dry-run, deferred-busy, deferred-unavailable, deferred-busy-after-build, postponed,
  *   skipped-failed-target, locked, refused, fetch-failed, rolled-back-build,
  *   rolled-back-health, rollback-completed, rollback-manual-restart, rollback-owed, rollback-failed,
  *   failed-restart, repair-failed, state-write-failed, failed.
  */
 export async function deploy(opts, deps = defaultDeps()) {
   const d = { ...defaultDeps(), ...deps }
+  const meta = { reached: false, nonce: null }
+  const first = await deployOnce(opts, d, meta)
+  // A request that arrived while the tick ran (its WatchPaths firing was
+  // swallowed by the lock, or came before the tick read the file) is drained by
+  // ONE more tick, never a loop: whatever it finds, the next WatchPaths firing or
+  // timer tick is the backstop.
+  if (opts.dryRun || !meta.reached) return first
+  const waiting = peekRequestNonce(d.fs, join(opts.configDir, REQUEST_FILE))
+  if (waiting === null || waiting === meta.nonce) return first
+  d.log(`a newer deploy request arrived during the run; running once more to apply it`)
+  const second = await deployOnce(opts, d, { reached: false, nonce: null })
+  return { ...first, exitCode: Math.max(first.exitCode, second.exitCode), drained: second.outcome }
+}
+
+export const PENDING_FILE = 'pending-update.json'
+export const POSTPONE_FILE = 'deploy-postpone.json'
+export const REQUEST_FILE = 'deploy-request.json'
+
+/** The one reader for a small JSON file the server wrote: size-capped, shape-checked by the caller. */
+function readSmallJson(fs, file) {
+  let raw
+  try { raw = fs.readFileSync(file, 'utf8') } catch (e) { return e.code === 'ENOENT' ? { state: 'none' } : { state: 'bad', raw: null } }
+  if (raw.length > SMALL_FILE_CAP) return { state: 'bad', raw }
+  try {
+    const value = JSON.parse(raw)
+    if (value && typeof value === 'object' && !Array.isArray(value)) return { state: 'ok', value, raw }
+  } catch { /* fall through */ }
+  return { state: 'bad', raw }
+}
+/** -> the request body when it has the shape the server writes, else null. */
+function parseRequest(v) {
+  if (v.action !== 'restart-now') return null
+  if (typeof v.target !== 'string' || !FULL_SHA.test(v.target)) return null
+  if (typeof v.force !== 'boolean') return null
+  if (typeof v.requestedAt !== 'string' || !Number.isFinite(Date.parse(v.requestedAt))) return null
+  if (typeof v.nonce !== 'string' || !NONCE.test(v.nonce)) return null
+  return { target: v.target.toLowerCase(), force: v.force, requestedAt: v.requestedAt, nonce: v.nonce }
+}
+function parsePostpone(v) {
+  if (typeof v.target !== 'string' || !FULL_SHA.test(v.target)) return null
+  if (typeof v.until !== 'string' || !Number.isFinite(Date.parse(v.until))) return null
+  return { target: v.target.toLowerCase(), until: v.until }
+}
+/** The nonce of a well-formed request now on disk, else null. */
+function peekRequestNonce(fs, file) {
+  const r = readSmallJson(fs, file)
+  const req = r.state === 'ok' ? parseRequest(r.value) : null
+  return req ? req.nonce : null
+}
+
+async function deployOnce(opts, d, meta) {
   const { fs } = d
   const p = {
     log: join(opts.configDir, 'logs', 'deploy.log'),
@@ -257,6 +329,9 @@ export async function deploy(opts, deps = defaultDeps()) {
     stamp: join(opts.configDir, 'deploy-build.json'),
     conn: join(opts.configDir, 'connection.json'),
     // Retired by earlier designs; only ever deleted.
+    pending: join(opts.configDir, PENDING_FILE),
+    postpone: join(opts.configDir, POSTPONE_FILE),
+    request: join(opts.configDir, REQUEST_FILE),
     legacy: ['deploy.lock', 'deploy.lock.reclaim', 'deploy-pending-restart.json'].map((f) => join(opts.configDir, f)),
   }
   const npmBin = opts.npm || 'npm'
@@ -281,6 +356,51 @@ export async function deploy(opts, deps = defaultDeps()) {
     fs.renameSync(tmp, file)
   }
   const rangeOf = (a, b) => `${short(a)}..${short(b)}`
+
+  // ---- banner files (#8331) -----------------------------------------------
+  // pending-update.json, deploy-postpone.json and deploy-request.json are how the
+  // dashboard sees and steers this script. All of it is BEST EFFORT: a failure to
+  // write or delete any of them never aborts a deploy or changes its outcome.
+  // What the tick wants done to pending-update.json, applied once at the end:
+  //   undefined  leave it alone
+  //   'remove'   the update is no longer waiting (deployed, up to date, failed, refused)
+  //   { reason, target, from }  a forward deploy is deferred (busy | unknown | postponed)
+  let pendingWant
+  const removeQuietly = (file) => { try { fs.unlinkSync(file) } catch { /* absent or unremovable: best effort */ } }
+  function applyPending() {
+    try {
+      if (pendingWant === 'remove') { removeQuietly(p.pending); return }
+      if (!pendingWant) return
+      const { reason, target: to, from } = pendingWant
+      // queuedAt is when the update FIRST started waiting: a re-written file for
+      // the same target keeps it, so the banner does not restart its clock every tick.
+      const prev = readSmallJson(fs, p.pending)
+      const kept = prev.state === 'ok' && prev.value.target === to && typeof prev.value.queuedAt === 'string' && Number.isFinite(Date.parse(prev.value.queuedAt))
+        ? prev.value.queuedAt : iso()
+      let subject = ''
+      try { subject = gitOut(['log', '-1', '--format=%s', to]).slice(0, 200) } catch { /* cosmetic */ }
+      let commitsAhead = null
+      try {
+        const n = gitOut(['log', '--format=%h %s', `${from}..${to}`]).split('\n').filter(Boolean).length
+        commitsAhead = n
+      } catch { /* unrelated histories: unknown */ }
+      writeJson(p.pending, { target: to, from, subject, commitsAhead, queuedAt: kept, reason })
+    } catch { /* best effort */ }
+  }
+  // Delete the request this tick read, but ONLY if it is still the one it read: a
+  // newer click written while we deployed carries a new nonce and must survive
+  // (the wrapper then drains it with one more tick).
+  function consumeRequest(read) {
+    try {
+      if (!read || read.state === 'none') return
+      const now = readSmallJson(fs, p.request)
+      if (now.state === 'none') return
+      const same = read.state === 'ok'
+        ? now.state === 'ok' && now.value.nonce === read.value.nonce
+        : now.state === 'bad' && now.raw !== null && now.raw === read.raw
+      if (same) fs.unlinkSync(p.request)
+    } catch { /* best effort */ }
+  }
 
   // ---- state: { failedTarget, failedOutcome, rollbackTo, lastKey } --------
   // Read and written ONLY while holding the lock (a dry run takes none and reads
@@ -331,7 +451,7 @@ export async function deploy(opts, deps = defaultDeps()) {
       if (mandatory) throw new StateWriteError(`cannot write deploy-state.json: ${e.message}`)
     }
   }
-  const markFailed = (target, outcome) => { state.failedTarget = target; state.failedOutcome = outcome; persist({ mandatory: true }) }
+  const markFailed = (target, outcome) => { state.failedTarget = target; state.failedOutcome = outcome; pendingWant = 'remove'; persist({ mandatory: true }) }
   const clearFailed = () => { if (state.failedTarget) { delete state.failedTarget; delete state.failedOutcome; persist({ mandatory: true }) } }
   const setRollbackTo = (sha) => { state.rollbackTo = sha; persist({ mandatory: true }) }
   const clearRollbackTo = () => { if (state.rollbackTo) { delete state.rollbackTo; persist({ mandatory: true }) } }
@@ -642,6 +762,7 @@ export async function deploy(opts, deps = defaultDeps()) {
     held = true
   }
 
+  let reqRead = null // the request file as this tick read it; consumed in `finally`
   try {
     const loaded = loadState()
     if (!loaded.ok) {
@@ -652,21 +773,25 @@ export async function deploy(opts, deps = defaultDeps()) {
 
     // -- 1. the checkout must be clean and on the branch ------------------------
     if (!fs.existsSync(join(opts.checkout, '.git'))) {
+      pendingWant = 'remove'
       event(`refused: ${opts.checkout} is not a git checkout`, { key: 'not-a-checkout' })
       return { exitCode: 1, outcome: 'refused' }
     }
     const porcelain = git(['status', '--porcelain'])
     if (porcelain.status !== 0) {
+      pendingWant = 'remove'
       event(`refused: git status failed: ${tail(porcelain.stderr || porcelain.error)}`, { key: 'status-failed' })
       return { exitCode: 1, outcome: 'refused' }
     }
     if (porcelain.stdout.trim() !== '') {
+      pendingWant = 'remove'
       const h = (git(['rev-parse', 'HEAD']).stdout || '').trim()
       event(`refused: checkout has uncommitted changes (${porcelain.stdout.trim().split('\n').length} path(s)); not deploying over them`, { key: `dirty:${h}` })
       return { exitCode: 1, outcome: 'refused' }
     }
     const branchNow = git(['rev-parse', '--abbrev-ref', 'HEAD'])
     if (branchNow.status !== 0 || branchNow.stdout.trim() !== opts.branch) {
+      pendingWant = 'remove'
       event(`refused: checkout is on '${branchNow.stdout.trim() || '?'}', not '${opts.branch}'`, { key: `branch:${branchNow.stdout.trim()}` })
       return { exitCode: 1, outcome: 'refused' }
     }
@@ -701,7 +826,52 @@ export async function deploy(opts, deps = defaultDeps()) {
     const needsWork = !(running === desired && treeOk)
     const skipMsg = `skipped: ${short(target)} already rolled back (${state.failedOutcome || 'unknown'}); waiting for a newer main or --retry`
 
+    if (failedHere) pendingWant = 'remove' // a target that rolled back is not "waiting"
+
+    // -- 2b. a deploy request and a postpone from the dashboard (#8331) ---------
+    // Both live in <configDir>, written by the daemon's server. The request is read
+    // under the lock and consumed (nonce-checked) at the end of the tick.
+    meta.reached = true
+    reqRead = readSmallJson(fs, p.request)
+    const reqParsed = reqRead.state === 'ok' ? parseRequest(reqRead.value) : null
+    meta.nonce = reqParsed ? reqParsed.nonce : null
+    let reqAccepted = null // the request this tick acts on: fresh, for the forward target
+    let reqForce = false
+    let reqNote = null
+    if (reqRead.state !== 'none') {
+      const ageMs = reqParsed ? d.now() - Date.parse(reqParsed.requestedAt) : NaN
+      if (!reqParsed) reqNote = 'ignored a malformed deploy-request.json'
+      else if (!(ageMs <= REQUEST_TTL_MS && ageMs >= -60 * 1000)) reqNote = `ignored a stale deploy request for ${short(reqParsed.target)} (requested ${reqParsed.requestedAt})`
+      else if (!forward || reqParsed.target !== target) reqNote = `ignored a deploy request for ${short(reqParsed.target)}: ${forward ? `the target now is ${short(target)}` : 'there is no forward deploy to apply'}`
+      else {
+        reqAccepted = reqParsed
+        reqForce = reqParsed.force === true
+        reqNote = `deploy request ${reqParsed.nonce} accepted for ${short(target)}${reqForce ? ': skipping the idle check, the owner confirmed' : ''}`
+      }
+      if (!opts.dryRun) event(reqNote, { range: reqAccepted ? rangeOf(head, target) : null })
+    }
+    // `forceBusy` is what a force request buys: the BUSY gates of the forward
+    // deploy to the requested target. It never covers an unreachable daemon, a
+    // rollback, a repair or --retry; only --force does that.
+    const forceBusy = opts.force || reqForce
+    let postponed = null
+    const postRead = readSmallJson(fs, p.postpone)
+    if (postRead.state !== 'none') {
+      const pp = postRead.state === 'ok' ? parsePostpone(postRead.value) : null
+      // Stale: malformed, expired, for a commit main has moved past, or already running.
+      const stale = !pp || !(Date.parse(pp.until) > d.now()) || pp.target !== target || running === pp.target
+      if (!stale && forward && !reqAccepted && !opts.force) postponed = { until: pp.until } // --force is the operator overriding by hand
+      else if (stale || reqAccepted) {
+        if (!opts.dryRun) {
+          removeQuietly(p.postpone)
+          if (stale) event(`removed ${pp ? 'an expired or superseded' : 'a malformed'} deploy-postpone.json`)
+        }
+      }
+    }
+
     if (opts.dryRun) {
+      if (reqNote) d.log(`[dry-run] deploy request: ${reqNote}`)
+      if (postponed) d.log(`[dry-run] a real run would defer ${short(target)}: postponed until ${postponed.until}`)
       d.log(`[dry-run] daemon runs: ${running ? short(running) : `unknown (${reachable ? 'it reports no commit' : pr.reasons.join('; ')})`}`)
       d.log(`[dry-run] checkout HEAD: ${short(head)}; build stamp: ${stamp ? short(stamp.sha) : 'none'}; ${opts.remote}/${opts.branch}: ${short(target)}`)
       d.log(`[dry-run] owed rollback: ${owed ? short(owed) : 'none'}; failed target: ${state.failedTarget ? `${short(state.failedTarget)} (${state.failedOutcome})` : 'none'}`)
@@ -734,10 +904,12 @@ export async function deploy(opts, deps = defaultDeps()) {
       // An owed rollback against a DOWN daemon proceeds (nothing is listening:
       // nothing to lose). Everything else needs a daemon that can say what it runs.
       if (!opts.force && (pr.kind === 'down' || pr.kind === 'unknown')) {
+        if (forward) pendingWant = { reason: 'unknown', target, from: oldForRollback }
         deferral(`deferred: cannot confirm idle (${pr.reasons.join('; ')})`, { range: rangeOf(head, target), key: `unavailable:${target}`, reasons: pr.reasons.join('; ') })
         return { exitCode: 0, outcome: 'deferred-unavailable' }
       }
       if (!opts.force && reachable && pr.commit === null) {
+        if (forward) pendingWant = { reason: 'unknown', target, from: oldForRollback }
         deferral('deferred: the daemon does not report the commit it runs (it predates the commit field; bootstrap once with --force)', { range: rangeOf(head, target), key: `no-commit:${target}`, reasons: 'no commit reported' })
         return { exitCode: 0, outcome: 'deferred-unavailable' }
       }
@@ -747,6 +919,7 @@ export async function deploy(opts, deps = defaultDeps()) {
 
     // -- 4. nothing to do ------------------------------------------------------------
     if (!needsWork) {
+      pendingWant = 'remove'
       if (owed) { clearRollbackTo(); event(`owed rollback to ${short(owed)} is already satisfied`) } else if (!failedHere) {
         // A genuinely healthy tick: forget the last logged condition so a repeat
         // of it later is news again.
@@ -763,7 +936,16 @@ export async function deploy(opts, deps = defaultDeps()) {
     // owed rollback is the one exception: that daemon cannot report a commit at
     // all, and is handled below by restoring the tree without touching it.
     const owedNoRoute = owed && pr.noRoute
-    if ((pr.kind === 'busy' || (pr.kind === 'unknown' && !owedNoRoute)) && !opts.force) {
+    // A postponed target waits out its deadline even on an idle daemon. Only a
+    // forward deploy can be postponed: `postponed` is null for a rollback or a repair.
+    if (postponed) {
+      pendingWant = { reason: 'postponed', target, from: oldForRollback }
+      deferral(`deferred: ${short(target)} postponed until ${postponed.until}`,
+        { range: rangeOf(head, desired), key: `postponed:${target}:${postponed.until}`, reasons: `postponed until ${postponed.until}` })
+      return { exitCode: 0, outcome: 'postponed' }
+    }
+    if ((pr.kind === 'busy' && !forceBusy) || (pr.kind === 'unknown' && !owedNoRoute && !opts.force)) {
+      if (forward) pendingWant = { reason: pr.kind === 'busy' ? 'busy' : 'unknown', target, from: oldForRollback }
       const owedNote = owed ? ` (rollback to ${short(owed)} is owed)` : ''
       deferral(pr.kind === 'busy' ? `deferred${owedNote}: busy (${pr.reasons.join('; ')})` : `deferred${owedNote}: cannot confirm idle (${pr.reasons.join('; ')})`,
         { range: rangeOf(head, desired), key: `busy:${desired}`, reasons: pr.reasons.join('; ') })
@@ -772,6 +954,7 @@ export async function deploy(opts, deps = defaultDeps()) {
 
     // -- 6. the daemon already runs `desired`: only the checkout is behind ---------
     if (running === desired) {
+      pendingWant = 'remove'
       const fix = convergeTree(desired, { allowReset: true })
       if (!fix.ok) {
         event(`repair failed: ${fix.reason}`, { range: rangeOf(head, desired), key: `repair-failed:${desired}` })
@@ -799,14 +982,14 @@ export async function deploy(opts, deps = defaultDeps()) {
       return { exitCode: 1, outcome: 'rollback-manual-restart' }
     }
 
-    return await converge({ desired, kind: owed ? 'rollback' : 'forward', old: oldForRollback, pr, initiator: owed ? 'tick' : 'forward', target: owed ? null : target })
+    return await converge({ desired, kind: owed ? 'rollback' : 'forward', old: oldForRollback, pr, initiator: owed ? 'tick' : 'forward', target: owed ? null : target, forceBusy: !owed && forceBusy })
 
     // ---------------------------------------------------------------------
     // The one path that moves the daemon to `desired`: tree, re-check, restart,
     // verify. The forward deploy, the rollback after a failed one, and an owed
     // rollback on a later tick all run THIS code.
     // ---------------------------------------------------------------------
-    async function converge({ desired: want, kind, old, pr: pre, initiator, target: fwdTarget }) {
+    async function converge({ desired: want, kind, old, pr: pre, initiator, target: fwdTarget, forceBusy: skipBusy = false }) {
       const isForward = kind === 'forward'
       // A rollback's range reads bad..good, not good..good.
       const range = isForward ? rangeOf(head, want) : rangeOf(fwdTarget || pre.commit || head, want)
@@ -814,6 +997,7 @@ export async function deploy(opts, deps = defaultDeps()) {
       const built = convergeTree(want, { allowReset: !isForward })
       if (!built.ok) {
         if (built.refused) {
+          pendingWant = 'remove'
           event(`refused: ${built.reason}`, { range, key: `refused:${want}` })
           return { exitCode: 1, outcome: 'refused' }
         }
@@ -844,7 +1028,8 @@ export async function deploy(opts, deps = defaultDeps()) {
       if (!opts.force) {
         const again = await probe()
         const stillDown = !isForward && again.kind === 'down'
-        if (!stillDown && again.kind !== 'idle') {
+        const busyButForced = skipBusy && isForward && again.kind === 'busy'
+        if (!stillDown && again.kind !== 'idle' && !busyButForced) {
           const why = `${again.kind === 'busy' ? 'busy' : 'cannot confirm idle'} (${again.reasons.join('; ')})`
           if (isForward) {
             const back = convergeTree(old, { allowReset: true })
@@ -853,6 +1038,7 @@ export async function deploy(opts, deps = defaultDeps()) {
               event(`ROLLBACK-FAILED after the daemon turned ${why}; restoring the checkout failed (${back.reason}). Rollback to ${short(old)} is owed.`, { range })
               return { exitCode: 1, outcome: 'rollback-failed' }
             }
+            pendingWant = { reason: again.kind === 'busy' ? 'busy' : 'unknown', target: fwdTarget, from: old }
             deferral(`deferred after build: ${why}`, { range, key: `busy-after-build:${want}`, reasons: why })
             return { exitCode: 0, outcome: 'deferred-busy-after-build' }
           }
@@ -870,6 +1056,7 @@ export async function deploy(opts, deps = defaultDeps()) {
       if (v.ok) {
         clearRollbackTo()
         if (isForward) {
+          pendingWant = 'remove'
           clearFailed()
           if (v.tunnelUnverified) {
             recordResult(old, want, 'deployed-tunnel-unverified')
@@ -945,6 +1132,10 @@ export async function deploy(opts, deps = defaultDeps()) {
     event(`failed: ${e?.message || e}`, { key: `error:${e?.message}` })
     return { exitCode: 1, outcome: 'failed' }
   } finally {
+    if (held && !opts.dryRun) {
+      consumeRequest(reqRead)
+      applyPending()
+    }
     if (held && deferralOver && (state.deferredSince || state.deferredLoggedAt)) {
       delete state.deferredSince
       delete state.deferredLoggedAt

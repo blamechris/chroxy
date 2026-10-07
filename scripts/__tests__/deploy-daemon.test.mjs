@@ -41,7 +41,7 @@ import { defaultDeps, deploy, parseArgs } from '../deploy-daemon.mjs'
 
 // Every case in this file. Bump it when you add one: a case that vanishes
 // should break the run rather than quietly shrink it.
-const MIN_CASES = 88
+const MIN_CASES = 105
 
 let pass = 0
 let fail = 0
@@ -1465,6 +1465,263 @@ await test('real git: up to date against a real origin is a no-op', async () => 
   const r = await env.run()
   eq(r.outcome, 'up-to-date')
   eq(mutating(env), [])
+})
+
+// ---------------------------------------------------------------------------
+// the dashboard banner's files (#8331): pending-update.json, deploy-postpone.json,
+// deploy-request.json
+// ---------------------------------------------------------------------------
+
+const isoAt = (ms) => new Date(ms).toISOString()
+const readIf = (env, f) => (existsSync(env.path(f)) ? JSON.parse(readFileSync(env.path(f), 'utf8')) : null)
+const writeReq = (env, o = {}) => {
+  const r = { action: 'restart-now', target: B, force: true, requestedAt: isoAt(env.t), nonce: 'n1', ...o }
+  writeFileSync(env.path('deploy-request.json'), JSON.stringify(r))
+  return r
+}
+const writePostpone = (env, o = {}) => writeFileSync(env.path('deploy-postpone.json'), JSON.stringify({ target: B, until: isoAt(env.t + 3600e3), requestedAt: isoAt(env.t), ...o }))
+const writePending = (env, o = {}) => writeFileSync(env.path('pending-update.json'), JSON.stringify({ target: B, from: A, subject: 's', commitsAhead: 1, queuedAt: isoAt(env.t), reason: 'busy', ...o }))
+
+await test('pending-update.json: written when a forward deploy is deferred busy, with a stable queuedAt until the target changes', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  eq((await env.run()).outcome, 'deferred-busy')
+  const p1 = readIf(env, 'pending-update.json')
+  eq([p1.target, p1.from, p1.subject, p1.commitsAhead, p1.reason], [B, A, 'feat: x', 1, 'busy'])
+  assert(Number.isFinite(Date.parse(p1.queuedAt)), 'queuedAt is a timestamp')
+  env.t += 5 * 60e3
+  await env.run()
+  eq(readIf(env, 'pending-update.json').queuedAt, p1.queuedAt, 'the same target keeps its queuedAt across ticks')
+  env.git.remote = C
+  env.t += 5 * 60e3
+  await env.run()
+  const p3 = readIf(env, 'pending-update.json')
+  eq(p3.target, C)
+  assert(p3.queuedAt !== p1.queuedAt, 'a new target starts a new clock')
+})
+
+await test('pending-update.json: reason is unknown when the daemon cannot say whether it is idle', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => 'throw'
+  eq((await env.run()).outcome, 'deferred-unavailable')
+  eq(readIf(env, 'pending-update.json').reason, 'unknown')
+})
+
+await test('pending-update.json: removed by a verified deploy, an up-to-date tick and a skipped failed target', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  await env.run()
+  assert(readIf(env, 'pending-update.json'), 'queued')
+  env.daemon.idleFn = () => IDLE
+  eq((await env.run()).outcome, 'deployed')
+  eq(readIf(env, 'pending-update.json'), null, 'deployed: gone')
+
+  const upToDate = makeEnv()
+  upToDate.git.remote = A
+  writePending(upToDate)
+  eq((await upToDate.run()).outcome, 'up-to-date')
+  eq(readIf(upToDate, 'pending-update.json'), null, 'up to date: gone')
+
+  const skipped = makeEnv()
+  writeFileSync(skipped.path('deploy-state.json'), JSON.stringify({ failedTarget: B, failedOutcome: 'rolled-back-build' }))
+  writePending(skipped)
+  eq((await skipped.run()).outcome, 'skipped-failed-target')
+  eq(readIf(skipped, 'pending-update.json'), null, 'a target that rolled back is not waiting')
+
+  const failed = makeEnv()
+  failed.daemon.idleFn = () => BUSY
+  await failed.run()
+  failed.daemon.idleFn = () => IDLE
+  failed.build.failShas.add(B)
+  eq((await failed.run()).outcome, 'rolled-back-build')
+  eq(readIf(failed, 'pending-update.json'), null, 'a failed build: gone')
+})
+
+await test('a pending/request/postpone file that cannot be written or removed never aborts or changes a deploy', async () => {
+  const busy = makeEnv()
+  mkdirSync(busy.path('pending-update.json')) // a directory where the file belongs: write and unlink both fail
+  busy.daemon.idleFn = () => BUSY
+  eq((await busy.run()).outcome, 'deferred-busy')
+  const idle = makeEnv()
+  mkdirSync(idle.path('pending-update.json'))
+  mkdirSync(idle.path('deploy-postpone.json'))
+  mkdirSync(idle.path('deploy-request.json'))
+  const r = await idle.run()
+  eq([r.exitCode, r.outcome], [0, 'deployed'])
+  eq(idle.daemon.commit, B)
+})
+
+await test('--dry-run writes none of the banner files and consumes none of them', async () => {
+  const fresh = makeEnv()
+  fresh.daemon.idleFn = () => BUSY
+  eq((await fresh.run({ dryRun: true })).outcome, 'dry-run')
+  for (const f of ['pending-update.json', 'deploy-postpone.json', 'deploy-request.json']) eq(readIf(fresh, f), null, `${f} not created`)
+
+  const seeded = makeEnv()
+  writeReq(seeded)
+  writePostpone(seeded, { target: C })
+  writePending(seeded)
+  const before = ['pending-update.json', 'deploy-postpone.json', 'deploy-request.json'].map((f) => readFileSync(seeded.path(f), 'utf8'))
+  await seeded.run({ dryRun: true })
+  const after = ['pending-update.json', 'deploy-postpone.json', 'deploy-request.json'].map((f) => readFileSync(seeded.path(f), 'utf8'))
+  eq(after, before, 'byte-identical: nothing was deleted or rewritten')
+})
+
+await test('postpone: a matching target waits out its deadline even on an IDLE daemon, then deploys and removes the file', async () => {
+  const env = makeEnv()
+  writePostpone(env)
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [0, 'postponed'])
+  untouched(env)
+  eq(readIf(env, 'pending-update.json').reason, 'postponed')
+  assert(env.readLog().includes('postponed until'), 'logged')
+  assert(readIf(env, 'deploy-postpone.json'), 'the postpone stays until it expires')
+  env.t += 2 * 3600e3
+  eq((await env.run()).outcome, 'deployed')
+  eq(readIf(env, 'deploy-postpone.json'), null, 'expired: removed')
+})
+
+await test('postpone: a postpone for another target, a malformed one, and --force do not defer', async () => {
+  const other = makeEnv()
+  writePostpone(other, { target: C })
+  eq((await other.run()).outcome, 'deployed')
+  eq(readIf(other, 'deploy-postpone.json'), null, 'a postpone for a commit main moved past is removed')
+
+  const bad = makeEnv()
+  writeFileSync(bad.path('deploy-postpone.json'), '{"target":"nope"}')
+  eq((await bad.run()).outcome, 'deployed')
+  eq(readIf(bad, 'deploy-postpone.json'), null)
+
+  const forced = makeEnv()
+  writePostpone(forced)
+  eq((await forced.run({ force: true })).outcome, 'deployed')
+})
+
+await test('postpone never gates a rollback or a repair', async () => {
+  const env = makeEnv()
+  oweA(env)
+  env.git.remote = C // the postponed target is the remote tip, and not what the daemon runs
+  writePostpone(env, { target: C })
+  const r = await env.run()
+  eq(r.outcome, 'rollback-completed')
+  eq(env.daemon.commit, A)
+
+  const repair = makeEnv()
+  repair.git.remote = B
+  repair.git.head = A
+  repair.daemon.commit = B // the daemon already runs the tip, only the checkout is behind
+  writePostpone(repair, { target: B })
+  const r2 = await repair.run()
+  eq(r2.outcome, 'repaired')
+  eq(kills(repair), [])
+})
+
+await test('request: force:true skips the BUSY gates for the forward deploy, and the request file is consumed', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env)
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [0, 'deployed'])
+  eq(env.daemon.commit, B)
+  eq(readIf(env, 'deploy-request.json'), null, 'consumed')
+  assert(env.readLog().includes('deploy request n1 accepted'), 'logged')
+})
+
+await test('request: force:false does not skip the idle gate (but is still consumed)', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env, { force: false })
+  eq((await env.run()).outcome, 'deferred-busy')
+  untouched(env)
+  eq(readIf(env, 'deploy-request.json'), null)
+})
+
+await test('request: a force request does not skip an unreachable daemon (only --force does)', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => ({ status: 500, body: {} })
+  writeReq(env)
+  eq((await env.run()).outcome, 'deferred-unavailable')
+  untouched(env)
+})
+
+await test('request: a stale request is ignored and deleted, and buys nothing', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env, { requestedAt: isoAt(env.t - 11 * 60e3) })
+  eq((await env.run()).outcome, 'deferred-busy')
+  untouched(env)
+  eq(readIf(env, 'deploy-request.json'), null)
+  assert(env.readLog().includes('stale deploy request'), 'says why')
+  const fresh = makeEnv()
+  fresh.daemon.idleFn = () => BUSY
+  writeReq(fresh, { requestedAt: isoAt(fresh.t - 9 * 60e3) })
+  eq((await fresh.run()).outcome, 'deployed') // 9 minutes is inside the window
+})
+
+await test('request: a request for a different target, or when there is nothing to deploy, is ignored and deleted', async () => {
+  const mismatch = makeEnv()
+  mismatch.daemon.idleFn = () => BUSY
+  writeReq(mismatch, { target: C })
+  eq((await mismatch.run()).outcome, 'deferred-busy')
+  untouched(mismatch)
+  eq(readIf(mismatch, 'deploy-request.json'), null)
+
+  const failedTip = makeEnv()
+  failedTip.daemon.idleFn = () => BUSY
+  writeFileSync(failedTip.path('deploy-state.json'), JSON.stringify({ failedTarget: B, failedOutcome: 'rolled-back-build' }))
+  writeReq(failedTip)
+  eq((await failedTip.run()).outcome, 'skipped-failed-target')
+  untouched(failedTip)
+  eq(readIf(failedTip, 'deploy-request.json'), null, 'a request is not --retry')
+})
+
+await test('request: a malformed or oversized request is ignored and deleted', async () => {
+  for (const content of ['not json', '[]', JSON.stringify({ action: 'restart-now', target: B, force: true, requestedAt: isoAt(Date.now()), nonce: 'n1', pad: 'x'.repeat(5000) }),
+    JSON.stringify({ action: 'restart-now', target: B, force: 'yes', requestedAt: isoAt(Date.now()), nonce: 'n1' })]) {
+    const env = makeEnv()
+    env.daemon.idleFn = () => BUSY
+    writeFileSync(env.path('deploy-request.json'), content)
+    eq((await env.run()).outcome, 'deferred-busy', content.slice(0, 20))
+    untouched(env)
+    eq(readIf(env, 'deploy-request.json'), null)
+  }
+})
+
+await test('request: any accepted request overrides a postpone and removes it', async () => {
+  const env = makeEnv()
+  writePostpone(env)
+  writeReq(env, { force: false })
+  eq((await env.run()).outcome, 'deployed')
+  eq(readIf(env, 'deploy-postpone.json'), null)
+  const stale = makeEnv()
+  writePostpone(stale)
+  writeReq(stale, { requestedAt: isoAt(stale.t - 11 * 60e3) })
+  eq((await stale.run()).outcome, 'postponed', 'a stale request does not override')
+})
+
+await test('request: a NEWER request written while the tick ran is not deleted by it, and is drained by one more tick', async () => {
+  const env = makeEnv()
+  writeReq(env, { nonce: 'n1', force: false })
+  env.onRun = (cmd, args) => {
+    if (cmd === 'git' && args[0] === 'merge') {
+      env.onRun = null
+      writeReq(env, { nonce: 'n2', force: false })
+    }
+  }
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [0, 'deployed'])
+  eq(r.drained, 'up-to-date', 'the second tick ran and found nothing to deploy')
+  assert(env.readLog().includes('ignored a deploy request'), 'and consumed n2 as having nothing to apply')
+  eq(readIf(env, 'deploy-request.json'), null)
+  eq(kills(env).length, 1, 'one restart only')
+})
+
+await test('request: no drain without a newer request, and it never loops', async () => {
+  const env = makeEnv()
+  writeReq(env)
+  const r = await env.run()
+  eq(r.drained, undefined)
+  eq(kills(env).length, 1)
 })
 
 // ---------------------------------------------------------------------------
