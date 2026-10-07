@@ -84,6 +84,16 @@ export interface PermissionPromptProps {
   toolInput?: Record<string, unknown>
 }
 
+/**
+ * #7353 — the expired-permission handler appends its own
+ * `\n(Expired — …)` note to the prompt's stored content (message-handler.ts,
+ * `permission_expired`). The compact "dropped" record states the outcome
+ * itself, so that trailing note is stripped rather than shown twice.
+ */
+function stripExpiredNote(description: string): string {
+  return description.replace(/\n\(Expired[^\n]*\)\s*$/, '')
+}
+
 function formatCountdown(ms: number): string {
   const totalSecs = Math.floor(ms / 1000)
   const mins = Math.floor(totalSecs / 60)
@@ -255,7 +265,10 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // #6771 — "Always allow (this project)" shares the same eligibility gate as
   // "Allow for Session" (rule-eligible tool + provider that supports rules).
   const showAllowAlways = showAllowSession
-  const [dismissed, setDismissed] = useState(false)
+  // #7353: dismissal lives in the store (not component state) so it survives a
+  // remount, and it COLLAPSES the card to a record instead of removing it.
+  const dismissed = useConnectionStore((s) => Boolean(s.dismissedExpiredPermissions?.[requestId]))
+  const dismissExpiredPermission = useConnectionStore((s) => s.dismissExpiredPermission)
 
   // #2840: keyboard hint labels near the Allow / Allow-for-Session buttons
   // so the Cmd/Ctrl+Y and Cmd/Ctrl+Shift+Y shortcuts are discoverable.
@@ -263,7 +276,27 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const allowHint = isMac ? '\u2318Y' : 'Ctrl+Y'
   const allowSessionHint = isMac ? '\u2318\u21E7Y' : 'Ctrl+Shift+Y'
 
-  if (dismissed) return null
+  // #7353: Dismiss clears the interactive affordance, never the history. The
+  // expired card is the only place a dropped tool call is visible (no
+  // notification fired, the audit log is in-memory), so it collapses to a
+  // compact muted record — tool, description, outcome — with no controls.
+  // It keeps the `perm-desc-<id>` anchor so the end-of-turn expired summary's
+  // "Jump to prompt" link still lands on it.
+  if (dismissed && isExpired && !answered) {
+    const droppedDescription = stripExpiredNote(description) || 'Permission requested'
+    return (
+      <div
+        className="permission-prompt permission-prompt-dropped"
+        data-testid="perm-dropped-record"
+        role="status"
+        title={`${tool}: ${droppedDescription}`}
+      >
+        <span className="perm-dropped-text" id={`perm-desc-${requestId}`} tabIndex={-1}>
+          Permission expired — <span className="perm-tool">{tool}</span>: {droppedDescription} — dropped
+        </span>
+      </div>
+    )
+  }
 
   return (
     // #5731 (a11y): a permission request is a time-critical decision that
@@ -445,7 +478,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       {isExpired && !answered && (
         <div className="perm-expired-info" data-testid="perm-expired-info">
           <span className="perm-expired-msg">Permission expired — Claude will continue without this tool</span>
-          <button className="btn-dismiss" onClick={() => setDismissed(true)} type="button" aria-label="Dismiss expired permission">
+          <button className="btn-dismiss" onClick={() => dismissExpiredPermission(requestId)} type="button" aria-label="Dismiss expired permission">
             Dismiss
           </button>
         </div>

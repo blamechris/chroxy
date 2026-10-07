@@ -1101,6 +1101,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   monthlyBudget: null,
   sessionNotFoundError: null,
   resolvedPermissions: {},
+  dismissedExpiredPermissions: {},
   serverPhase: null,
   tunnelProgress: null,
   // #5356: exposure snapshot from auth_ok + banner dismissal flag.
@@ -4457,6 +4458,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set((state) => ({
       // #2838: cap map size to prevent unbounded growth across long sessions.
       resolvedPermissions: capResolvedPermissions(state.resolvedPermissions, requestId, decision),
+    }));
+  },
+
+  dismissExpiredPermission: (requestId: string) => {
+    set((state) => ({
+      // Same LRU cap as resolvedPermissions (#2838): unbounded growth over a long run.
+      dismissedExpiredPermissions: capResolvedPermissions<true>(state.dismissedExpiredPermissions, requestId, true),
     }));
   },
 

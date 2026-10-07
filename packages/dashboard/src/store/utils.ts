@@ -208,6 +208,9 @@ export function createEmptyConnectionScope() {
     permissionInputs: {},
     // The requestIds belong to the dropped connection.
     resolvedPermissions: {},
+    // #7353: same lifetime as resolvedPermissions — the requestIds belong to the
+    // dropped connection.
+    dismissedExpiredPermissions: {},
     // #3272 review: a reconnect against a different (or older) server must not
     // have its UI gates left enabled by stale state. Empty map = fail-closed
     // for any capability-gated affordance.

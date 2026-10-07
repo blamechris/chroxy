@@ -4498,6 +4498,25 @@ button.sidebar-token-view-session-row:hover {
   margin-top: 6px;
 }
 
+/* #7353: compact record an expired permission collapses to on Dismiss. One
+   muted line, no controls (so no tap target): tool, description, outcome. The
+   full text is on the title attribute when the line is truncated. */
+.permission-prompt.permission-prompt-dropped {
+  padding: 6px 12px;
+  background: transparent;
+  max-width: 85%;
+}
+
+.perm-dropped-text {
+  display: block;
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- Question Prompt (#1193) ---- */
 .question-prompt {
   background: var(--bg-secondary);
