@@ -4,7 +4,7 @@
  * Handles: create_checkpoint, list_checkpoints, restore_checkpoint, delete_checkpoint
  */
 import { realpathSync } from 'fs'
-import { sendSessionError, broadcastFocusChanged } from '../handler-utils.js'
+import { sendSessionError, broadcastFocusChanged, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ws')
@@ -98,6 +98,23 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
   // untouched (fork-capable providers only); 'both' (the default and the pre-#6767
   // behaviour) does both. Any unknown value falls back to 'both'.
   const mode = msg.mode === 'files' || msg.mode === 'conversation' || msg.mode === 'both' ? msg.mode : 'both'
+  // A session-bound (share-a-session) client stays on its bound session. A
+  // 'conversation'/'both' restore creates a new session and makes it the
+  // requester's active one, so refuse it up front — before the working tree or
+  // any session is touched — with the same payload `create_session` returns.
+  // 'files' only reverts the working tree of the client's own active session
+  // (which a bound client holds only as its binding) and is unchanged.
+  if (mode !== 'files' && client.boundSessionId != null) {
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessions.sessionManager,
+        boundSessionId: client.boundSessionId,
+        message: 'Not authorized: client is bound to a specific session',
+      }),
+    })
+    return
+  }
   const currentEntry = ctx.sessions.sessionManager.getSession(sid)
   if (currentEntry?.session?.isRunning) {
     sendSessionError(ws, ctx, 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.')

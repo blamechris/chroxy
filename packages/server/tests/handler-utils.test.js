@@ -14,7 +14,7 @@ import {
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { isPathWithin } from '../src/utils/path-containment.js'
-import { nsCtx } from './test-helpers.js'
+import { nsCtx, makeSessionIndexCtx } from './test-helpers.js'
 import { createClientSender } from '../src/ws-client-sender.js'
 import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
@@ -41,6 +41,7 @@ import {
   SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE,
   isSessionViewer,
   terminalMirrorRecipient,
+  autoSubscribeOtherClients,
 } from '../src/handler-utils.js'
 import { OUTSIDE_HOME_DIR, OUTSIDE_HOME_FILE } from './helpers/outside-home.js'
 
@@ -1764,5 +1765,34 @@ describe('getPermissionModes provider-aware copy (#6638)', () => {
       assert.ok(m.label && m.label.length > 0, `${m.id} has a label`)
       assert.ok(m.description && m.description.length > 0, `${m.id} has a description`)
     }
+  })
+})
+
+describe('autoSubscribeOtherClients with session-bound clients', () => {
+  const mkClient = (id, bound) => ({ id, authenticated: true, boundSessionId: bound, subscribedSessionIds: new Set() })
+
+  it('subscribes unbound clients and a client bound to the new session, not one bound elsewhere', () => {
+    const unbound = mkClient('u', null)
+    const sameBound = mkClient('s', 'new-s')
+    const otherBound = mkClient('o', 'other')
+    const emptyBound = mkClient('e', '')
+    const ctx = nsCtx({ ...makeSessionIndexCtx() })
+    for (const [i, c] of [unbound, sameBound, otherBound, emptyBound].entries()) {
+      ctx.transport.clients.set({ i }, c)
+    }
+    autoSubscribeOtherClients('new-s', null, ctx)
+    assert.equal(unbound.subscribedSessionIds.has('new-s'), true)
+    assert.equal(sameBound.subscribedSessionIds.has('new-s'), true)
+    assert.equal(otherBound.subscribedSessionIds.has('new-s'), false)
+    assert.equal(emptyBound.subscribedSessionIds.has('new-s'), false)
+  })
+
+  it('also skips a client bound elsewhere when the transport has no subscribe helper', () => {
+    const unbound = mkClient('u', null)
+    const otherBound = mkClient('o', 'other')
+    const ctx = nsCtx({ transport: { clients: new Map([[{ a: 1 }, unbound], [{ a: 2 }, otherBound]]) } })
+    autoSubscribeOtherClients('new-s', null, ctx)
+    assert.equal(unbound.subscribedSessionIds.has('new-s'), true)
+    assert.equal(otherBound.subscribedSessionIds.has('new-s'), false)
   })
 })

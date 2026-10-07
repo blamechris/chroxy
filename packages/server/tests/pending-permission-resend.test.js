@@ -444,12 +444,23 @@ describe('resendPendingPermissions — a session-bound client gets only its boun
     assert.deepEqual(ids(ctx), ['perm-hook-b', 'perm-hook-orphan', 'perm-sdk-a', 'perm-sdk-b'])
   })
 
-  it('a bound client\'s replay of its own session does not pick up a sibling\'s prompt', async () => {
+  it('a bound client\'s replay of a session it is not bound to sends that session\'s prompt to no one', async () => {
+    // The replay's own session filter ('sess-b') matches the pending prompt, so
+    // only the binding check keeps it from the bound client.
     const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    const ws = makeFakeWs()
+    ctx.clients.set(ws, bound('sess-a'))
+    replayHistory(ctx, ws, 'sess-b')
+    await settle()
+    assert.deepEqual(ids(ctx), [])
+  })
+
+  it('a bound client\'s replay of its own session sends its own prompt and not a sibling\'s', async () => {
+    const ctx = makeCtx({ sdk: { 'sess-a': [sdkEntry('perm-sdk-a')], 'sess-b': [sdkEntry('perm-sdk-b')] } })
     const ws = makeFakeWs()
     ctx.clients.set(ws, bound('sess-a'))
     replayHistory(ctx, ws, 'sess-a')
     await settle()
-    assert.deepEqual(ids(ctx), [])
+    assert.deepEqual(ids(ctx), ['perm-sdk-a'])
   })
 })

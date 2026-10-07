@@ -865,6 +865,104 @@ describe('permission/question routing to originating session', () => {
     })
   })
 
+  // A client paired to ONE session (share-a-session token) is sent frames for
+  // that session only, whatever path produces them. Real WsServer, real sockets.
+  describe('frames for other sessions never reach a session-bound client', () => {
+    async function connectBound(port, pairingManager, sessionId) {
+      const { pairingId } = pairingManager.generateBoundPairing(sessionId)
+      const { sessionToken } = pairingManager.validatePairing(pairingId)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: sessionToken })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      return { ws, messages }
+    }
+
+    async function connectPrimary(port) {
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      return { ws, messages }
+    }
+
+    // A round trip on the guest's own socket: once its reply arrives, every frame
+    // the server queued for it earlier has arrived too.
+    async function settle(guest) {
+      const before = guest.messages.filter((m) => m.type === 'session_switched').length
+      send(guest.ws, { type: 'switch_session', sessionId: 'sess-a' })
+      await waitFor(() => guest.messages.filter((m) => m.type === 'session_switched').length > before, { label: 'settle round trip' })
+    }
+
+    const foreign = (messages) => messages.filter((m) => typeof m.sessionId === 'string' && m.sessionId !== 'sess-a')
+
+    it('a hook-routed permission for a sibling session reaches the primary client and not the bound one', async () => {
+      const { manager, sessionsMap } = createTwoSessionManager()
+      manager._sessions = sessionsMap
+      sessionsMap.get('sess-b').session._hookSecret = 'hook-secret-b'
+      const pairingManager = new PairingManager({ wsUrl: null })
+      server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: true, pairingManager })
+      const port = await startServerAndGetPort(server)
+
+      const guest = await connectBound(port, pairingManager, 'sess-a')
+      const primary = await connectPrimary(port)
+
+      const responsePromise = fetch(`http://127.0.0.1:${port}/permission`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer hook-secret-b' },
+        body: JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }),
+      })
+      const permReq = await waitForMessageMatch(primary.messages, (m) => m.type === 'permission_request', 2000, 'primary permission_request')
+      try {
+        assert.equal(permReq.sessionId, 'sess-b')
+        await settle(guest)
+
+        assert.deepEqual(guest.messages.filter((m) => m.type === 'permission_request'), [])
+        assert.deepEqual(foreign(guest.messages), [])
+      } finally {
+        // Release the hook's held request so the HTTP call ends, pass or fail.
+        server._pendingPermissions.get(permReq.requestId)?.resolve('deny')
+        await responsePromise
+      }
+      guest.ws.close()
+      primary.ws.close()
+      pairingManager.destroy()
+    })
+
+    it('a session another client creates is neither subscribed nor streamed to the bound client', async () => {
+      const { manager, sessionsMap } = createTwoSessionManager()
+      manager._sessions = sessionsMap
+      manager.createSession = ({ name, cwd } = {}) => {
+        const s = createMockSession()
+        s.cwd = cwd || '/tmp'
+        sessionsMap.set('sess-new', { session: s, name: name || 'New', cwd: s.cwd, type: 'cli', isBusy: false })
+        return 'sess-new'
+      }
+      const pairingManager = new PairingManager({ wsUrl: null })
+      server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: true, pairingManager })
+      const port = await startServerAndGetPort(server)
+
+      const guest = await connectBound(port, pairingManager, 'sess-a')
+      const creator = await connectPrimary(port)
+      const observer = await connectPrimary(port)
+
+      send(creator.ws, { type: 'create_session', name: 'Fresh' })
+      await waitForMessageMatch(creator.messages, (m) => m.type === 'session_switched' && m.sessionId === 'sess-new', 2000, 'creator switched')
+      await waitForMessageMatch(observer.messages, (m) => m.type === 'client_focus_changed' && m.sessionId === 'sess-new', 2000, 'observer focus notice')
+
+      server._broadcastToSession('sess-new', { type: 'stream_delta', delta: 'hello' })
+      await waitForMessageMatch(observer.messages, (m) => m.type === 'stream_delta' && m.sessionId === 'sess-new', 2000, 'observer stream')
+      await settle(guest)
+
+      assert.deepEqual(foreign(guest.messages), [])
+      const guestClient = [...server.clients.values()].find((c) => c.boundSessionId === 'sess-a')
+      assert.equal(guestClient.subscribedSessionIds.has('sess-new'), false)
+
+      guest.ws.close()
+      creator.ws.close()
+      observer.ws.close()
+      pairingManager.destroy()
+    })
+  })
+
   it('routes user_question_response to the originating session, not activeSessionId', async () => {
     const { manager, sessionsMap } = createTwoSessionManager()
 

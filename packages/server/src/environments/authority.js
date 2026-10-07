@@ -38,6 +38,18 @@ export function isBoundClient(client) {
 }
 
 /**
+ * True when `client` is session-bound (fail-safe, see `isBoundClient`) to a
+ * session other than `sessionId`: such a client receives no data for
+ * `sessionId` — no frame tagged with it and no subscription to it. This is the
+ * ONE predicate behind the broadcaster's delivery paths and the client
+ * manager's subscription index; a client bound to `sessionId` itself, and an
+ * unbound client, are never "bound to another session".
+ */
+export function isBoundToOtherSession(client, sessionId) {
+  return client.boundSessionId != null && client.boundSessionId !== sessionId
+}
+
+/**
  * Fan an `environment_list` out to UNBOUND (host-authority) clients only. The
  * `environment_list` payload carries the whole descriptor (host metadata + the
  * #7552 sessions roster), so a bound client must not receive it — not on a pull

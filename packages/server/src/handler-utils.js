@@ -12,6 +12,7 @@ import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
 import { getProviderPermissionModeSupport } from './permission-mode-support.js'
+import { isBoundToOtherSession } from './environments/authority.js'
 
 const log = createLogger('handler-utils')
 
@@ -578,6 +579,8 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
 export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
   for (const [clientWs, c] of ctx.transport.clients) {
     if (c.authenticated && clientWs !== excludeWs) {
+      // A client bound to another session is never subscribed to a new one.
+      if (isBoundToOtherSession(c, sessionId)) continue
       // #5563: route through the index-maintaining helper so the
       // sessionId→clients reverse index stays in sync. Falls back to a bare
       // add for fixtures whose ctx predates the helper.

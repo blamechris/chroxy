@@ -1,6 +1,7 @@
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { isSessionViewer } from './handler-utils.js'
+import { isBoundToOtherSession } from './environments/authority.js'
 
 const log = createLogger('ws')
 
@@ -92,6 +93,13 @@ export class WsBroadcaster {
     if (client._evicted) {
       return false
     }
+    // A session-bound client receives frames tagged with its own session only.
+    // Checked here, the single delivery point every broadcast path ends in, so
+    // an unfiltered `_broadcast` and both `_broadcastToSession` paths agree.
+    // Frames without a string `sessionId` are not session-scoped and pass.
+    if (typeof message?.sessionId === 'string' && isBoundToOtherSession(client, message.sessionId)) {
+      return false
+    }
     if (ws.bufferedAmount > this._backpressureThreshold) {
       client._backpressureDrops = (client._backpressureDrops || 0) + 1
       metrics.inc('backpressure.drops')
@@ -152,6 +160,9 @@ export class WsBroadcaster {
    * identical: `a === sid || Boolean(subscribed.has(sid))`.
    */
   _matchesSession(client, sessionId) {
+    // A client bound to another session is never a recipient, whatever its
+    // active/subscribed sets say (same rule as the delivery point above).
+    if (isBoundToOtherSession(client, sessionId)) return false
     return isSessionViewer(client, sessionId)
   }
 
@@ -167,6 +178,7 @@ export class WsBroadcaster {
     if (!this._clientManager) return
     for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
       if (!client.authenticated) continue
+      if (isBoundToOtherSession(client, sessionId)) continue
       const sock = client._ws
       if (!sock || sock.readyState !== 1) continue
       yield { client, sock }
