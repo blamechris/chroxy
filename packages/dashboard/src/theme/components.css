@@ -4840,7 +4840,9 @@ button.sidebar-token-view-session-row:hover {
 
 .permission-expired-summary-text {
   font-size: var(--text-sm);
-  color: var(--text-dim);
+  /* #7353 review: --text-dim is 3.3:1 on --bg-primary, below AA for small
+     italic text; --text-muted is 5.4:1, matching the dropped-permission record. */
+  color: var(--text-muted);
   font-style: italic;
 }
 
