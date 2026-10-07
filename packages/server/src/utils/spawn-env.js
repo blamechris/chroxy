@@ -150,6 +150,11 @@ export const CHROXY_SECRET_DENYLIST = [
 export const CHROXY_INHERITED_SESSION_ENV = [
   'CHROXY_PORT',
   'CHROXY_HOOK_SECRET',
+  // #8263: "this is a claude-tui child" is per-session state exactly like the
+  // two above. An ambient copy (a daemon launched from inside a TUI child)
+  // would make a claude-cli child's legitimate user-level permission hook
+  // inert, so every builder strips it and ClaudeTuiSession re-adds its own.
+  'CHROXY_TUI_CHILD',
 ]
 
 /**

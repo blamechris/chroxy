@@ -31,6 +31,7 @@ import { detectStrandedState } from './config-dir-migration.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
 import { createLogger } from './logger.js'
+import { countUserLevelChroxyHooks } from './permission-hook.js'
 
 const log = createLogger('doctor')
 
@@ -547,6 +548,26 @@ export async function checkTunnelRoutability(deps = {}) {
  *   named-tunnel hostname.
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
+/**
+ * #8263: warn about a chroxy permission-hook entry in the USER-LEVEL Claude
+ * settings. claude-tui children load that file as well as their per-session
+ * settings, so a stranded entry used to double every permission prompt. The
+ * hook script now stays inert for it inside a TUI child and the daemon sweeps it
+ * at startup, so this is a hygiene warning, not a live fault. Read-only.
+ *
+ * @param {{settingsPath?: string}} [deps]
+ * @returns {{ name: string, status: 'warn', message: string } | null} null when none found
+ */
+export function checkUserLevelChroxyHook({ settingsPath } = {}) {
+  const { found, settingsPath: target } = countUserLevelChroxyHooks({ settingsPath })
+  if (found === 0) return null
+  return {
+    name: 'User-level permission hook',
+    status: 'warn',
+    message: `${found} chroxy permission-hook entr${found === 1 ? 'y' : 'ies'} in ${target} — fix: restart the daemon (it removes orphans at startup), or delete the hooks.PreToolUse entry that runs permission-hook.sh from that file`,
+  }
+}
+
 export async function runDoctorChecks({
   port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(),
   tunnelProbe, detectStranded = detectStrandedState, platform = process.platform,
@@ -600,6 +621,11 @@ export async function runDoctorChecks({
   // this EXACT list, so doctor's pre-flight check and the daemon's real gate
   // can never silently diverge on which paths count as "cloudflared".
   cloudflaredCandidates = CLOUDFLARED_CANDIDATES,
+  // #8263: opt-in (`chroxy doctor` passes true) so `chroxy start`'s preflight and
+  // the unit tests never read the operator's real ~/.claude/settings.json.
+  // `userHookSettingsPath` is the test seam for that read.
+  checkUserLevelHook = false,
+  userHookSettingsPath,
 } = {}) {
   const checks = []
 
@@ -818,6 +844,11 @@ export async function runDoctorChecks({
           ? `file fallback — ${kh.detail} — fix: ${kh.repairHint}`
           : `file fallback — ${kh.detail}`,
   })
+
+  if (checkUserLevelHook) {
+    const hookCheck = checkUserLevelChroxyHook({ settingsPath: userHookSettingsPath })
+    if (hookCheck) checks.push(hookCheck)
+  }
 
   // 5.6 Tunnel routability (#5328 WP-5.6). For a configured NAMED tunnel, probe
   // the hostname end-to-end so a broken DNS route / down tunnel is visible here

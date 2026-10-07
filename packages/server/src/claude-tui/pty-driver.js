@@ -40,6 +40,20 @@ const log = createLogger('claude-tui-session')
 const PERMISSION_HOOK_SCRIPT = resolve(__dirname, '..', '..', 'hooks', 'permission-hook.sh')
 const NATIVE_ROUTE_CHECK_SCRIPT = resolve(__dirname, '..', '..', 'hooks', 'claude-native-route-check.mjs')
 
+// #8263: the argument that marks a permission-hook.sh invocation as the one THIS
+// session's own `--settings` file registered. A claude-tui child loads the
+// user-level ~/.claude/settings.json AND the per-session --settings file, so a
+// chroxy hook entry left in the user-level file (an orphan from a claude-cli
+// session that exited uncleanly, #3714) fires the same script a second time per
+// tool call: two permission prompts, and the duplicate loses the
+// AskUserQuestion sibling lock so the user's answer never reaches claude. The
+// script, running inside a TUI child (CHROXY_TUI_CHILD=1, set by
+// ClaudeTuiSession._buildPtyEnv) WITHOUT this argument, exits without a
+// decision. The marker string is duplicated in hooks/permission-hook.sh; the
+// test in tests/permission-hook-tui-user-level.test.js executes the command
+// written below against the real script so the two cannot drift apart.
+export const SESSION_SETTINGS_HOOK_MARKER = '--session-settings'
+
 export function buildNativeRouteCheckHook({ nodePath, scriptPath, markerPath, nonce }) {
   // Claude Code's command-hook exec form passes each `args` entry verbatim,
   // without a shell, on every platform. Besides avoiding command injection,
@@ -320,7 +334,9 @@ export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonc
   if (permissionsEnabled) {
     preToolUseHooks.push({
       type: 'command',
-      command: PERMISSION_HOOK_SCRIPT,
+      // #8263: the marker makes this copy — and only this copy — live inside a
+      // chroxy-managed TUI child (see SESSION_SETTINGS_HOOK_MARKER).
+      command: `${PERMISSION_HOOK_SCRIPT} ${SESSION_SETTINGS_HOOK_MARKER}`,
       timeout: 300,
     })
   }

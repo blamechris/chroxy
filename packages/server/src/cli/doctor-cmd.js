@@ -14,7 +14,7 @@ export function registerDoctorCommand(program) {
       const providers = options.provider
         ? options.provider.split(',').map(s => s.trim()).filter(Boolean)
         : undefined
-      const result = await runDoctorChecks({ port, providers })
+      const result = await runDoctorChecks({ port, providers, checkUserLevelHook: true })
       const { checks, passed } = result
 
       console.log('\nChroxy Doctor\n')

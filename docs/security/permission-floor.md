@@ -169,6 +169,19 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   `.git`/`.claude` with no prompt. The hook now asks the daemon instead of
   re-deriving path rules in bash (a shell copy would be a second source of truth and
   would drift — the #6986/#7001 lesson).
+- **Exactly one copy of the hook decides inside a claude-tui child** (#8263). A TUI
+  child loads the user-level `~/.claude/settings.json` as well as its per-session
+  `--settings` file, so a chroxy entry stranded in the user-level file (an orphan of
+  a crashed claude-cli session) used to run `permission-hook.sh` twice per tool call.
+  The per-session command now carries `--session-settings`, `_buildPtyEnv` sets
+  `CHROXY_TUI_CHILD=1`, and the script exits silently ("no decision") only when it
+  runs in a TUI child **without** the marker. The marked copy runs the whole script,
+  floor probe included, so the floor is enforced exactly once per call, by the copy
+  the session registered. Outside a TUI child (claude-cli's user-level registration,
+  plain Claude Code) nothing changes, and a missing flag degrades to the old
+  double-run, never to a skipped floor. The daemon also removes orphaned entries from
+  the user-level file at startup (`sweepOrphanedUserHooks`), and `chroxy doctor` warns
+  about one.
 - **The hook-routed pipeline's own files are floored by the filesystem, and the base
   dir is checked rather than assumed** (#7337 for `claude-cli`, #7372 for
   `claude-tui`). Both providers keep their per-session state — `settings.json` that

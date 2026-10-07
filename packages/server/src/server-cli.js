@@ -65,6 +65,7 @@ import { clientActiveProvider, overlayBroadcastReachesProvider, broadcastRosterP
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
 import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders, isSemanticTitlesEnabled, resolveSemanticTitleModel, resolveSemanticTitleTimeoutMs, resolveBinaryProvenanceMode, isBinarySignatureGateEnabled } from './config.js'
 import { sweepStaleProviderDirs } from './sweep-stale-provider-dirs.js'
+import { sweepOrphanedUserHooks } from './permission-hook.js'
 import { buildOrchestrationManager } from './orchestration/build-manager.js'
 import { buildSchedulerEngine } from './scheduler.js'
 import { parseDuration } from './duration.js'
@@ -1121,6 +1122,13 @@ export async function startCliServer(config) {
   } catch (err) {
     log.warn(`docker-byok compose sweep failed: ${err.message}`)
   }
+
+  // #8263: strip chroxy permission-hook entries orphaned in the user-level
+  // ~/.claude/settings.json by a claude-cli session that exited uncleanly. It
+  // MUST run before the SessionManager is created / restoreState() runs: a
+  // restored claude-cli session registers its own legitimate entry on start, and
+  // a sweep after that would delete it. Never throws, never blocks startup.
+  await sweepOrphanedUserHooks({ logger: log })
 
   // #4509: resolve once so the SessionManager arg side and the startup log
   // line below can't drift apart, and any over-ceiling operator value emits

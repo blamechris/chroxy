@@ -158,6 +158,92 @@ function unregisterPermissionHookSync(settingsPath) {
 }
 
 /**
+ * Strip orphaned chroxy permission-hook entries from the user-level settings
+ * file (#8263). Run ONCE at daemon start, before any session exists.
+ *
+ * Why it exists: `registerPermissionHookSync` / `unregisterPermissionHookSync`
+ * only run from a claude-cli session's start/stop, so a host that runs only
+ * claude-tui (the default provider) never prunes an entry a crashed claude-cli
+ * session left behind. The hook script now stays inert for such an entry inside a
+ * claude-tui child (CHROXY_TUI_CHILD, see hooks/permission-hook.sh), but a stale
+ * entry is still wrong to leave in a user's file, so the daemon removes it.
+ *
+ * Why daemon start and NOT claude-tui session start: at daemon start this
+ * process owns no live claude-cli session, so any chroxy entry on disk is
+ * either stale or belongs to another daemon. At claude-tui session start a
+ * claude-cli session in this same daemon may own a live entry (its
+ * register() ran at its own start), and removing it would silently turn that
+ * session's permission gating off. A claude-cli session started later
+ * re-registers its own entry, so a sweep here never costs it anything.
+ *
+ * Only entries `_isChroxyHookEntry` recognises are removed; every other hook,
+ * hook event and settings key is left as parsed. The file is rewritten only
+ * when something was removed. Never throws: a missing, unreadable or
+ * invalid file is logged and skipped so a sweep cannot affect startup.
+ *
+ * @param {object} [options]
+ * @param {string} [options.settingsPath] - defaults to ~/.claude/settings.json (injectable for tests)
+ * @param {{info: Function, warn: Function}} [options.logger]
+ * @returns {Promise<{removed: number, settingsPath: string}>}
+ */
+export function sweepOrphanedUserHooks({ settingsPath, logger = log } = {}) {
+  const target = settingsPath || DEFAULT_SETTINGS_PATH
+  return withSettingsLock(() => {
+    let removed = 0
+    try {
+      let settings
+      try {
+        settings = JSON.parse(readFileSync(target, 'utf-8'))
+      } catch (err) {
+        if (err.code === 'ENOENT') return { removed: 0, settingsPath: target }
+        if (err instanceof SyntaxError) {
+          logger.warn(`Orphan hook sweep skipped: ${target} contains invalid JSON`)
+          return { removed: 0, settingsPath: target }
+        }
+        throw err
+      }
+      const entries = settings?.hooks?.PreToolUse
+      if (!Array.isArray(entries)) return { removed: 0, settingsPath: target }
+
+      const kept = entries.filter((entry) => !_isChroxyHookEntry(entry))
+      removed = entries.length - kept.length
+      if (removed === 0) return { removed: 0, settingsPath: target }
+
+      settings.hooks.PreToolUse = kept
+      // Same tidy-up as unregisterPermissionHookSync: don't leave empty shells.
+      if (kept.length === 0) delete settings.hooks.PreToolUse
+      if (Object.keys(settings.hooks).length === 0) delete settings.hooks
+      writeFileRestricted(target, JSON.stringify(settings, null, 2) + '\n')
+      logger.info(`Removed ${removed} orphaned chroxy permission-hook entr${removed === 1 ? 'y' : 'ies'} from ${target} (#8263)`)
+      return { removed, settingsPath: target }
+    } catch (err) {
+      logger.warn(`Orphan hook sweep failed for ${target}: ${err.message}`)
+      return { removed: 0, settingsPath: target }
+    }
+  })
+}
+
+/**
+ * Report whether the user-level settings file holds a chroxy permission-hook
+ * entry (#8263). Read-only; used by `chroxy doctor`. Never throws.
+ *
+ * @param {{settingsPath?: string}} [options]
+ * @returns {{found: number, settingsPath: string, error?: string}}
+ */
+export function countUserLevelChroxyHooks({ settingsPath } = {}) {
+  const target = settingsPath || DEFAULT_SETTINGS_PATH
+  try {
+    const settings = JSON.parse(readFileSync(target, 'utf-8'))
+    const entries = settings?.hooks?.PreToolUse
+    const found = Array.isArray(entries) ? entries.filter(_isChroxyHookEntry).length : 0
+    return { found, settingsPath: target }
+  } catch (err) {
+    if (err.code === 'ENOENT') return { found: 0, settingsPath: target }
+    return { found: 0, settingsPath: target, error: err.message }
+  }
+}
+
+/**
  * Create a permission hook manager that handles registration, retry, and cleanup.
  *
  * @param {EventEmitter} emitter - Used to emit 'error' events on failure
