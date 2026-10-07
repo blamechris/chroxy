@@ -4441,7 +4441,16 @@ describe('ClaudeByokSession', () => {
               // controller aborts and the SDK's APIUserAbortError
               // surfaces via finalMessage. We approximate by clearing
               // the timeout on the child's abort controller.
-              childInstance?._abortController?.signal.addEventListener('abort', () => {
+              const signal = childInstance?._abortController?.signal
+              // The parent's interrupt() can abort the child before this
+              // stream runs. A listener added to an already-aborted signal
+              // never fires, so settle now instead of waiting out the timer.
+              if (signal?.aborted) {
+                clearTimeout(t)
+                reject(new APIUserAbortError())
+                return
+              }
+              signal?.addEventListener('abort', () => {
                 clearTimeout(t)
                 reject(new APIUserAbortError())
               }, { once: true })
