@@ -58,7 +58,7 @@ describe('file names and TTL match the deploy script (drift guard)', () => {
 describe('buildDaemonUpdateStatus — validation', () => {
   it('an empty dir is an empty status, and it is a valid wire frame', () => {
     const s = buildDaemonUpdateStatus({ dir: mkDir(), running: A, now: NOW })
-    assert.deepEqual(s, { running: A, pending: null, lastDeploy: null, postponedUntil: null, requestPending: false })
+    assert.deepEqual(s, { running: A, pending: null, lastDeploy: null, postponedUntil: null, requestPending: false, applying: false })
     assert.ok(ServerDaemonUpdateStatusSchema.safeParse({ type: 'daemon_update_status', ...s }).success)
   })
 
@@ -107,14 +107,13 @@ describe('buildDaemonUpdateStatus — validation', () => {
 
   it('canonicalises timestamps, clips subjects, and survives an unknown reason', () => {
     const dir = mkDir()
-    put(dir, PENDING_FILE, pending({ queuedAt: '2026-10-07', subject: 's'.repeat(400), reason: 'weird', from: 'garbage', commitsAhead: -3 }))
-    const s = buildDaemonUpdateStatus({ dir, running: null, now: NOW })
+    put(dir, PENDING_FILE, pending({ queuedAt: '2026-10-07', subject: 's'.repeat(400), reason: 'weird', commitsAhead: -3 }))
+    const s = buildDaemonUpdateStatus({ dir, running: A, now: NOW })
     assert.equal(s.pending.queuedAt, '2026-10-07T00:00:00.000Z')
     assert.equal(s.pending.subject.length, 200)
     assert.equal(s.pending.reason, 'unknown')
-    assert.equal(s.pending.from, null)
     assert.equal(s.pending.commitsAhead, null)
-    assert.equal(s.running, null)
+    assert.equal(s.running, A)
     assert.ok(ServerDaemonUpdateStatusSchema.safeParse({ type: 'daemon_update_status', ...s }).success)
   })
 
@@ -423,5 +422,99 @@ describe('a postpone is bounded (#8331)', () => {
     assert.equal(setup({ target: B, until: iso(NOW + POSTPONE_MAX_MS + 1), requestedAt: iso(NOW) }), null)
     assert.notEqual(setup({ target: B, until: iso(NOW + 3600e3), requestedAt: iso(NOW + REQUEST_SKEW_MS) }), null)
     assert.equal(setup({ target: B, until: iso(NOW + 3600e3 + REQUEST_SKEW_MS + 2), requestedAt: iso(NOW + REQUEST_SKEW_MS + 1) }), null)
+  })
+})
+
+describe('the banner is for an update THIS daemon is waiting on (#8331)', () => {
+  const status = (pend, running) => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pend)
+    return { dir, s: buildDaemonUpdateStatus({ dir, running, now: NOW }) }
+  }
+
+  it('a pending update whose target is what the daemon ALREADY runs reads as no update', () => {
+    assert.equal(status(pending({ target: B, from: A }), B).s.pending, null)
+  })
+
+  it('a pending update queued FROM another commit (a dev server sharing the config dir) reads as no update', () => {
+    assert.equal(status(pending({ target: B, from: C }), A).s.pending, null, 'queued from C, this daemon runs A')
+    assert.equal(status(pending({ target: B, from: 'garbage' }), A).s.pending, null, 'no from at all')
+  })
+
+  it('a daemon that cannot say what it runs shows no pending update, even when the file has no usable `from` either', () => {
+    assert.equal(status(pending(), null).s.pending, null)
+    assert.equal(status(pending({ from: 'garbage' }), null).s.pending, null, 'null === null must not read as a match')
+  })
+
+  it('a degenerate record whose target equals its own `from` and the running commit shows nothing', () => {
+    assert.equal(status(pending({ target: B, from: B }), B).s.pending, null)
+  })
+
+  it('the matching case still shows, and actions refuse NO_PENDING_UPDATE in every hidden case', () => {
+    assert.notEqual(status(pending({ target: B, from: A }), A).s.pending, null)
+    for (const [pend, running] of [[pending({ target: B, from: A }), B], [pending({ target: B, from: C }), A], [pending(), null]]) {
+      const { dir } = status(pend, running)
+      const u = new DaemonUpdateStatus({ dir, running, now: () => NOW, getIdleState: IDLE })
+      assert.equal(u.requestRestart({ target: B }).code, 'NO_PENDING_UPDATE')
+      assert.equal(u.postpone({ target: B }).code, 'NO_PENDING_UPDATE')
+      assert.equal(existsSync(join(dir, REQUEST_FILE)) || existsSync(join(dir, POSTPONE_FILE)), false)
+    }
+  })
+})
+
+describe('the applying state (#8331)', () => {
+  it('reason "applying" is exposed as applying:true', () => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending({ reason: 'applying' }))
+    const s = buildDaemonUpdateStatus({ dir, running: A, now: NOW })
+    assert.equal(s.applying, true)
+    assert.equal(s.pending.reason, 'applying')
+    assert.ok(ServerDaemonUpdateStatusSchema.safeParse({ type: 'daemon_update_status', ...s }).success)
+    put(dir, PENDING_FILE, pending({ reason: 'busy' }))
+    assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).applying, false)
+  })
+
+  it('restart-now and postpone are refused with APPLYING, and write nothing', () => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending({ reason: 'applying' }))
+    const u = mk(dir, { getIdleState: BUSY })
+    assert.equal(u.requestRestart({ target: B, confirmBusy: true }).code, 'APPLYING')
+    assert.equal(u.postpone({ target: B }).code, 'APPLYING')
+    assert.equal(existsSync(join(dir, REQUEST_FILE)) || existsSync(join(dir, POSTPONE_FILE)), false)
+  })
+})
+
+describe('request freshness and timestamp range (#8331)', () => {
+  it('a request is fresh for 20 minutes (twice the 600 s launchd interval), not 21', () => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending())
+    const at = (min) => put(dir, REQUEST_FILE, { action: 'restart-now', target: B, force: true, requestedAt: iso(NOW - min * 60e3), nonce: 'n' })
+    at(19); assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).requestPending, true)
+    at(21); assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).requestPending, false)
+    assert.equal(REQUEST_TTL_MS, 20 * 60 * 1000)
+  })
+
+  it('a timestamp outside years 1970-9999 (the extended-year form the wire schema rejects) reads as invalid everywhere', () => {
+    const far = '+275760-09-13T00:00:00.000Z'
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending({ queuedAt: far }))
+    assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).pending, null)
+    put(dir, PENDING_FILE, pending())
+    put(dir, LAST_DEPLOY_FILE, { from: A, to: B, at: far, result: 'ok', subject: 's' })
+    assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).lastDeploy, null)
+    put(dir, POSTPONE_FILE, { target: B, until: far, requestedAt: far })
+    assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).postponedUntil, null)
+    put(dir, REQUEST_FILE, { action: 'restart-now', target: B, force: true, requestedAt: far, nonce: 'n' })
+    assert.equal(buildDaemonUpdateStatus({ dir, running: A, now: NOW }).requestPending, false)
+    // The frame that does get built always parses.
+    assert.ok(ServerDaemonUpdateStatusSchema.safeParse({ type: 'daemon_update_status', ...buildDaemonUpdateStatus({ dir, running: A, now: NOW }) }).success)
+  })
+
+  it('restart-now echoes the STORED, lowercase target in confirm_required', () => {
+    const dir = mkDir()
+    put(dir, PENDING_FILE, pending())
+    const out = mk(dir, { getIdleState: BUSY }).requestRestart({ target: B.toUpperCase() })
+    assert.equal(out.confirmRequired, true)
+    assert.equal(out.target, B)
   })
 })

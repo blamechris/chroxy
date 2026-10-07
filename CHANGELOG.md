@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`NOT_AUTHORIZED`, nothing written). See
   [`docs/guides/daemon-auto-deploy.md`](docs/guides/daemon-auto-deploy.md) and
   [`docs/security/bearer-token-authority.md`](docs/security/bearer-token-authority.md).
+  Generic file writes (`write_file`, quick-append) refuse the chroxy config
+  directory itself and any file directly in it, so the deploy control files can
+  only be written through `daemon_update_action`; subtrees such as the session
+  worktrees under `<configDir>/worktrees` stay writable. The banner shows
+  "Restarting to apply <sha>…" while a deploy is applying, offers only Postpone
+  when the daemon cannot confirm it is idle, and shows nothing for an update the
+  daemon already runs.
 - **Dashboard: a persistent end-of-turn summary for permission prompts that
   expired unanswered (#7365).** When a permission prompt times out with no
   answer, chroxy silently continues without that tool — the per-prompt

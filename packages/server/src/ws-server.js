@@ -544,9 +544,9 @@ function _isSecureRequest(req) {
  *   { type: 'orchestration_run_snapshot', requestId?, generatedAt, seq, run: RunDetail|null, error? } — one run's full detail (pull-only; run:null = degraded reply) (#6691)
  *   { type: 'orchestration_run_delta', runId, seq, generatedAt, run?, node?, gate?, timeline? } — live run update pushed to host-level clients; client applies iff seq===held+1 (#6691)
  *   { type: 'scheduled_tasks', generatedAt, scheduler: { enabled, engineArmed, restartRequired, source }, schedulableProviders, defaultProvider, defaultProviderRefusal, tasks[], requestId?, error? } — #6871 scheduled-task registry snapshot for the dashboard panel; sent to the REQUESTING client only, and re-emitted as the ack for every accepted mutation. Each task carries the engine's own verdicts (providerRefusal / effectivePermissionMode / permissionModeClamped / quarantined) so a client never re-derives a safety decision
- *   { type: 'daemon_update_status', running, pending, lastDeploy, postponedUntil, requestPending } — #8331 the queued daily-daemon update + last deploy result; sent on auth and on change to STRICT-PRIMARY, UNBOUND clients ONLY
+ *   { type: 'daemon_update_status', running, pending, lastDeploy, postponedUntil, requestPending, applying } — #8331 the queued daily-daemon update + last deploy result; sent on auth and on change to STRICT-PRIMARY, UNBOUND clients ONLY
  *   { type: 'daemon_update_confirm_required', requestId, target, reasons[], sessions[] } — #8331 reply to restart-now while sessions are busy; nothing was written
- *   { type: 'daemon_update_action_result', requestId, action, ok, force?, postponedUntil?, code?, message? } — #8331 outcome of daemon_update_action (codes: NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, WRITE_FAILED, UNAVAILABLE, UNSUPPORTED_ACTION)
+ *   { type: 'daemon_update_action_result', requestId, action, ok, force?, postponedUntil?, code?, message? } — #8331 outcome of daemon_update_action (codes: NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, APPLYING, WRITE_FAILED, UNAVAILABLE, UNSUPPORTED_ACTION)
  *   { type: 'orchestration_action_ack', requestId?, action, runId, gateId? } — terminal success echo for a mutating orchestration action (#6691)
  *
  * Encrypted envelope (bidirectional, wraps any message above after key exchange):
@@ -2768,10 +2768,6 @@ export class WsServer {
     )
   }
 
-  // #6691: push a single orchestration run delta to host-level (unbound) clients
-  // only — runs are host-wide cross-session objects; a session-bound token never
-  // receives them. Called by the OrchestrationManager (E-4); the `delta`
-  // already carries its own type/runId/seq (schemas/server/orchestration.ts).
   /**
    * #8331: push the daily-daemon update status to the clients allowed to act on
    * it: STRICT-PRIMARY and unbound (`isPrimaryToken === true && !boundSessionId`),
@@ -2787,6 +2783,10 @@ export class WsServer {
     )
   }
 
+  // #6691: push a single orchestration run delta to host-level (unbound) clients
+  // only — runs are host-wide cross-session objects; a session-bound token never
+  // receives them. Called by the OrchestrationManager (E-4); the `delta`
+  // already carries its own type/runId/seq (schemas/server/orchestration.ts).
   _broadcastOrchestrationDelta(delta) {
     if (!delta) return
     this._broadcast(delta, (client) => !client.boundSessionId)

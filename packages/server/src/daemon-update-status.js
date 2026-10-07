@@ -28,6 +28,10 @@
 import { EventEmitter } from 'node:events'
 import { randomBytes } from 'node:crypto'
 import { SMALL_FILE_CAP, readBoundedJson, writeFileAtomic } from './utils/small-file.js'
+import {
+  REQUEST_TTL_MS, REQUEST_SKEW_MS, POSTPONE_MS, POSTPONE_MAX_MS,
+  isSha, isIso, canonIso, parseRequest, parsePostpone, isRequestFresh,
+} from './utils/deploy-control-files.js'
 import { mkdirSync, unlinkSync, watch as fsWatch } from 'node:fs'
 import { join } from 'node:path'
 import { configDir } from './config-dir.js'
@@ -43,28 +47,18 @@ export const PENDING_FILE = 'pending-update.json'
 export const LAST_DEPLOY_FILE = 'last-deploy.json'
 export const POSTPONE_FILE = 'deploy-postpone.json'
 export const REQUEST_FILE = 'deploy-request.json'
-export const REQUEST_TTL_MS = 10 * 60 * 1000
+// The parsing rules and these bounds live in utils/deploy-control-files.js, the ONE copy the
+// script imports too; re-exported so callers keep importing them from here.
+export { REQUEST_TTL_MS, REQUEST_SKEW_MS, POSTPONE_MS, POSTPONE_MAX_MS }
 const WATCHED = new Set([PENDING_FILE, LAST_DEPLOY_FILE, POSTPONE_FILE, REQUEST_FILE])
 
 /** Every file here is a few hundred bytes. A bigger one is not ours. */
 export const MAX_FILE_BYTES = SMALL_FILE_CAP
-export const POSTPONE_MS = 60 * 60 * 1000
-// A postpone is honoured only if it is internally sane: a plausible `requestedAt`
-// and a hold of at most an hour (plus a minute of slack). The script applies the
-// same bounds, so a hand-written year-9999 deadline neither blocks a deploy nor
-// shows in the banner.
-export const POSTPONE_MAX_MS = POSTPONE_MS + 60 * 1000
-export const REQUEST_SKEW_MS = 5 * 60 * 1000
 const SUBJECT_MAX = 200
-const SHA = /^[0-9a-f]{40}$/i
-const PENDING_REASONS = new Set(['busy', 'unknown', 'postponed'])
+// `applying` is the script's own state: a forward deploy has passed its gates and is building / restarting.
+const PENDING_REASONS = new Set(['busy', 'unknown', 'postponed', 'applying'])
 
-const isSha = (v) => typeof v === 'string' && SHA.test(v)
-const isIso = (v) => typeof v === 'string' && v.length <= 40 && Number.isFinite(Date.parse(v))
 const clip = (v, n) => String(v).slice(0, n)
-// The wire schema wants canonical UTC ISO (`.datetime()`); Date.parse accepts far more.
-// Re-serialising here means a hand-written `2026-10-07` cannot fail a client's whole-frame parse.
-const canonIso = (v) => new Date(Date.parse(v)).toISOString()
 
 /**
  * Read a small JSON object: bounded, regular files only, never following a
@@ -100,24 +94,6 @@ function parseLastDeploy(v) {
 }
 
 /**
- * A postpone is valid only with a sane `requestedAt` (not meaningfully in the
- * future) and a hold of at most POSTPONE_MAX_MS from it. Anything else is ignored.
- */
-function parsePostpone(v, now) {
-  if (!v || !isSha(v.target) || !isIso(v.until) || !isIso(v.requestedAt)) return null
-  const asked = Date.parse(v.requestedAt)
-  const until = Date.parse(v.until)
-  if (asked - now > REQUEST_SKEW_MS) return null
-  if (until - asked > POSTPONE_MAX_MS) return null
-  return { target: v.target.toLowerCase(), until: canonIso(v.until) }
-}
-
-function parseRequest(v) {
-  if (!v || !isSha(v.target) || !isIso(v.requestedAt)) return null
-  return { target: v.target.toLowerCase(), requestedAt: v.requestedAt }
-}
-
-/**
  * Build the `daemon_update_status` payload from the four files.
  * @param {object} o
  * @param {string} o.dir
@@ -125,22 +101,28 @@ function parseRequest(v) {
  * @param {number} o.now
  */
 export function buildDaemonUpdateStatus({ dir, running, now }) {
-  const pending = parsePending(readCappedJson(join(dir, PENDING_FILE)))
+  const queued = parsePending(readCappedJson(join(dir, PENDING_FILE)))
   const lastDeploy = parseLastDeploy(readCappedJson(join(dir, LAST_DEPLOY_FILE)))
   const postpone = parsePostpone(readCappedJson(join(dir, POSTPONE_FILE)), now)
   const request = parseRequest(readCappedJson(join(dir, REQUEST_FILE)))
+  const runningSha = isSha(running) ? running.toLowerCase() : null
+  // The banner is for an update THIS daemon is waiting on: the target is not what it
+  // already runs, and the queued update was queued FROM what it runs. A different
+  // process sharing the config dir (a dev server on another commit) reads as "no
+  // pending update", as does a daemon that cannot say what it runs.
+  const pending = queued && runningSha !== null && queued.target !== runningSha && queued.from === runningSha ? queued : null
   // A postpone or a request only means something for the update that is waiting.
   const postponedUntil = pending && postpone && postpone.target === pending.target && Date.parse(postpone.until) > now
     ? postpone.until
     : null
-  const age = request ? now - Date.parse(request.requestedAt) : NaN
-  const requestPending = Boolean(pending && request && request.target === pending.target && age <= REQUEST_TTL_MS && age >= -60 * 1000)
+  const requestPending = Boolean(pending && request && request.target === pending.target && isRequestFresh(request, now))
   return {
-    running: isSha(running) ? running.toLowerCase() : null,
+    running: runningSha,
     pending,
     lastDeploy,
     postponedUntil,
     requestPending,
+    applying: pending !== null && pending.reason === 'applying',
   }
 }
 
@@ -252,6 +234,8 @@ export class DaemonUpdateStatus extends EventEmitter {
   _pendingFor(target) {
     const { pending } = this.getStatus()
     if (!pending) return { error: { ok: false, code: 'NO_PENDING_UPDATE', message: 'There is no update waiting.' } }
+    // Once the script is building / restarting, neither button can take effect.
+    if (pending.reason === 'applying') return { error: { ok: false, code: 'APPLYING', message: 'The update is already being applied.' } }
     if (typeof target !== 'string' || pending.target !== target.toLowerCase()) {
       return { error: { ok: false, code: 'STALE_TARGET', message: 'That update is no longer the one waiting.' } }
     }
@@ -278,7 +262,7 @@ export class DaemonUpdateStatus extends EventEmitter {
     }
     const isIdle = idle?.idle === true
     if (!isIdle && confirmBusy !== true) {
-      return { ok: false, confirmRequired: true, ...busySummary(idle) }
+      return { ok: false, confirmRequired: true, target: checked.pending.target, ...busySummary(idle) }
     }
     const force = !isIdle
     try {

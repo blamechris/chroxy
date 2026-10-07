@@ -3,10 +3,10 @@
  * dialog, and the once-per-commit notice (including the rollback notice).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within, act } from '@testing-library/react'
 import { StrictMode } from 'react'
 import type { ServerDaemonUpdateStatusMessage } from '@chroxy/protocol'
-import { DaemonUpdateBanner, deriveNotice, formatClock, type DaemonUpdateBannerProps } from './DaemonUpdateBanner'
+import { DaemonUpdateBanner, deriveNotice, formatClock, REQUEST_SLOW_MS, type DaemonUpdateBannerProps } from './DaemonUpdateBanner'
 
 const A = 'a'.repeat(40)
 const B = 'b'.repeat(40)
@@ -20,6 +20,7 @@ const status = (over: Partial<ServerDaemonUpdateStatusMessage> = {}): ServerDaem
   lastDeploy: null,
   postponedUntil: null,
   requestPending: false,
+  applying: false,
   ...over,
 })
 const deployed = (result: string, over: Record<string, unknown> = {}) => ({ from: A, to: B, at: '2026-10-07T11:59:00.000Z', result, subject: 'feat: faster tabs', ...over })
@@ -68,6 +69,38 @@ describe('banner states', () => {
     expect(screen.getByTestId('daemon-update-message').textContent).toBe(`Restarting to apply ${B.slice(0, 7)}…`)
     expect(screen.queryByTestId('daemon-update-restart-now')).not.toBeInTheDocument()
     expect(screen.queryByTestId('daemon-update-postpone')).not.toBeInTheDocument()
+  })
+
+  it('applying: "Restarting to apply <sha7>…" with NO buttons, whatever else the status says', () => {
+    setup({ status: status({ applying: true, pending: { target: B, from: A, subject: 'feat: x', commitsAhead: 1, queuedAt: '2026-10-07T11:00:00.000Z', reason: 'applying' } }) })
+    expect(screen.getByTestId('daemon-update-message').textContent).toBe(`Restarting to apply ${B.slice(0, 7)}…`)
+    expect(screen.queryByTestId('daemon-update-restart-now')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('daemon-update-postpone')).not.toBeInTheDocument()
+    cleanup()
+    // Even a stale "postponed" or request flag cannot bring the buttons back while applying.
+    setup({ status: status({ applying: true, postponedUntil: '2026-10-07T13:05:00.000Z', pending: { target: B, from: A, subject: 's', commitsAhead: 1, queuedAt: '2026-10-07T11:00:00.000Z', reason: 'applying' } }) })
+    expect(screen.queryByTestId('daemon-update-restart-now')).not.toBeInTheDocument()
+  })
+
+  it('a restart request still unclaimed after 30 s says it applies at the next scheduled check', () => {
+    vi.useFakeTimers()
+    try {
+      setup({ status: status({ requestPending: true }) })
+      expect(screen.getByTestId('daemon-update-message').textContent).toBe(`Restarting to apply ${B.slice(0, 7)}…`)
+      act(() => { vi.advanceTimersByTime(REQUEST_SLOW_MS - 1) })
+      expect(screen.getByTestId('daemon-update-message').textContent).toContain('Restarting to apply')
+      act(() => { vi.advanceTimersByTime(2) })
+      expect(screen.getByTestId('daemon-update-message').textContent).toBe('Restart requested — applies at the next scheduled check')
+      expect(screen.queryByTestId('daemon-update-restart-now')).not.toBeInTheDocument()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('unknown idle: "can\'t confirm the daemon is idle", Restart now is NOT offered, Postpone still is', () => {
+    const { props } = setup({ status: status({ pending: { target: B, from: A, subject: 'feat: x', commitsAhead: 1, queuedAt: '2026-10-07T11:00:00.000Z', reason: 'unknown' } }) })
+    expect(screen.getByTestId('daemon-update-message').textContent).toBe(`Update ready (${B.slice(0, 7)}) — can't confirm the daemon is idle`)
+    expect(screen.queryByTestId('daemon-update-restart-now')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('daemon-update-postpone'))
+    expect(props.onPostpone).toHaveBeenCalledWith(B)
   })
 
   it('an action in flight disables the buttons', () => {

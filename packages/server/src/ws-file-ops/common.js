@@ -322,34 +322,39 @@ export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, c
  */
 export const CONFIG_DIR_REFUSAL = 'Access denied: the chroxy config directory is managed by the daemon'
 
+const sameDir = (a, b) => isPathWithin(a, b) && isPathWithin(b, a)
+
 /**
- * Does `absPath` resolve to the daemon's config directory or anything beneath it?
+ * Is `absPath` the daemon's config directory itself, or a FILE DIRECTLY IN it?
  *
- * Generic file writes refuse the config directory, so the deploy control files
- * (`deploy-request.json`, `deploy-postpone.json`) can only be written through
- * `daemon_update_action`, which applies the primary-token gate and the
- * busy-session confirmation.
+ * Generic file writes refuse exactly that, so the deploy control files
+ * (`deploy-request.json`, `deploy-postpone.json`) and the rest of the daemon's
+ * top-level state can only be written through the daemon's own paths
+ * (`daemon_update_action` applies the primary-token gate and the busy-session
+ * confirmation). Subtrees stay writable on purpose: chroxy's own session worktrees
+ * live at `<configDir>/worktrees/<id>` and orchestration worktrees at
+ * `<configDir>/orchestration/worktrees`, and ordinary editing inside them must work.
  *
  * BOTH sides are resolved with `realpathOfDeepestAncestor` (an existing path by
- * `realpath`, a new one by its deepest existing ancestor), so the answer is the
- * same whether the session cwd is the config directory itself, one of its
- * ancestors, a relocated `CHROXY_CONFIG_DIR`, or reaches it through a symlinked
- * parent or a dangling link. The config dir is read per call (`configDir()`), never
- * cached, so a relocation applies at once.
+ * `realpath`, a new one by its deepest existing ancestor), so the answer is the same
+ * whether the session cwd is the config directory itself, one of its ancestors, a
+ * worktree reaching the root through `../..`, a relocated `CHROXY_CONFIG_DIR`, or a
+ * symlinked parent or dangling link. The config dir is read per call
+ * (`configDir()`), never cached, so a relocation applies at once.
  *
  * FAILS CLOSED: a path that cannot be resolved (EACCES on an ancestor, a link
- * cycle) is reported as inside, never as outside.
+ * cycle) is reported as protected, never as outside.
  *
  * @param {string} absPath - Absolute path of the mutation target
  * @returns {Promise<boolean>}
  */
-export async function isWithinConfigDir(absPath) {
+export async function isConfigDirOrDirectChild(absPath) {
   try {
     const [target, root] = await Promise.all([
       realpathOfDeepestAncestor(absPath),
       realpathOfDeepestAncestor(configDir()),
     ])
-    return isPathWithin(target, root)
+    return sameDir(target, root) || sameDir(dirname(target), root)
   } catch {
     return true
   }

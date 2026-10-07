@@ -9,7 +9,7 @@ import { GIT } from '../git.js'
 import { openNoFollow } from './open-nofollow.js'
 import { createLogger } from '../logger.js'
 import { isSafeArgvValue } from '../utils/argv-safety.js'
-import { unresolvablePathError, isWithinConfigDir, CONFIG_DIR_REFUSAL } from './common.js'
+import { unresolvablePathError, isConfigDirOrDirectChild, CONFIG_DIR_REFUSAL } from './common.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -458,7 +458,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Generic file writes refuse the daemon's config directory, so the deploy
       // control files can only be written through `daemon_update_action`. This runs
       // BEFORE the mkdir below: a refused write must not create anything either.
-      if (await isWithinConfigDir(absPath)) {
+      if (await isConfigDirOrDirectChild(absPath)) {
         sendFn(ws, { type: 'write_file_result', path: requestedPath, error: CONFIG_DIR_REFUSAL })
         return
       }
@@ -615,7 +615,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       absPath = fileExists ? resolvedTarget : target
 
       // Same rule as write_file: generic writes refuse the config directory.
-      if (await isWithinConfigDir(absPath)) {
+      if (await isConfigDirOrDirectChild(absPath)) {
         sendFn(ws, { type: 'append_memory_result', path: null, created: false, error: CONFIG_DIR_REFUSAL })
         return
       }

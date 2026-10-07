@@ -73,7 +73,7 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import {
-  appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+  appendFileSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, unlinkSync, writeFileSync, writeSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
@@ -84,6 +84,9 @@ import { isGitShaRef } from '../packages/server/src/utils/argv-safety.js'
 // The ONE bounded reader / atomic writer for the banner's small files; the daemon
 // imports the same module, so both sides agree on what a hostile file looks like.
 import { readBoundedFile, readBoundedJson, writeFileAtomic } from '../packages/server/src/utils/small-file.js'
+import {
+  REQUEST_TTL_MS, POSTPONE_MAX_MS, REQUEST_SKEW_MS, isIso, parseRequest, parsePostpone, isRequestFresh,
+} from '../packages/server/src/utils/deploy-control-files.js'
 
 export const DEFAULT_PORT = 8765
 export const DEFAULT_LOCK_PORT = 47651
@@ -94,20 +97,13 @@ const FULL_SHA = /^[0-9a-f]{40}$/i
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/
 const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const LOCKFILE = /^(package-lock\.json|packages\/[^/]+\/package-lock\.json)$/
-// The three files the dashboard banner (#8331) exchanges with the daemon's
-// server through <configDir>. A request older than this is ignored and deleted:
-// a click from an hour ago must not restart the daemon now.
-export const REQUEST_TTL_MS = 10 * 60 * 1000
-// A postpone is honoured only when it is internally sane: `requestedAt` not more than
-// REQUEST_SKEW_MS in the future, and a hold of at most POSTPONE_MAX_MS from it. The
-// daemon writes exactly one hour; the extra minute is slack for clock rounding. A
-// hand-written year-9999 deadline is therefore ignored and deleted rather than
-// blocking a target for ever.
-export const POSTPONE_MAX_MS = 61 * 60 * 1000
-export const REQUEST_SKEW_MS = 5 * 60 * 1000
+// The files the dashboard banner (#8331) exchanges with the daemon's server through
+// <configDir>. What counts as a valid request or postpone, how old a request may be and
+// how far a postpone may reach are decided in ONE module the daemon imports too
+// (utils/deploy-control-files.js); re-exported here for the tests and docs.
+export { REQUEST_TTL_MS, POSTPONE_MAX_MS, REQUEST_SKEW_MS }
 // connection.json and the stamp are bigger than the banner files but still tiny.
 const STATE_FILE_CAP = 64 * 1024
-const NONCE = /^[A-Za-z0-9._-]{1,64}$/
 
 export const USAGE = `Usage: node scripts/deploy-daemon.mjs [options]
 
@@ -231,7 +227,7 @@ export function defaultDeps() {
     },
     fetch: globalThis.fetch,
     fs: {
-      appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+      appendFileSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
       renameSync, unlinkSync, writeFileSync, writeSync,
     },
     now: () => Date.now(),
@@ -296,7 +292,8 @@ export async function deploy(opts, deps = defaultDeps()) {
   if (opts.dryRun || !meta.reached) return first
   // The tick CLAIMED any request it saw (renamed it away), so a request file that
   // exists now arrived after the claim.
-  if (!hasValidRequest(d.fs, join(opts.configDir, REQUEST_FILE))) return first
+  // A request put back after a transient read error is for a LATER tick: draining would just meet the same error.
+  if (meta.requestRetry || !hasValidRequest(d.fs, join(opts.configDir, REQUEST_FILE))) return first
   d.log(`a newer deploy request arrived during the run; running once more to apply it`)
   const second = await deployOnce(opts, d, { reached: false })
   return { ...first, exitCode: Math.max(first.exitCode, second.exitCode), drained: second.outcome }
@@ -306,28 +303,6 @@ export const PENDING_FILE = 'pending-update.json'
 export const POSTPONE_FILE = 'deploy-postpone.json'
 export const REQUEST_FILE = 'deploy-request.json'
 
-/** -> the request body when it has the shape the server writes, else null. */
-function parseRequest(v) {
-  if (v.action !== 'restart-now') return null
-  if (typeof v.target !== 'string' || !FULL_SHA.test(v.target)) return null
-  if (typeof v.force !== 'boolean') return null
-  if (typeof v.requestedAt !== 'string' || !Number.isFinite(Date.parse(v.requestedAt))) return null
-  if (typeof v.nonce !== 'string' || !NONCE.test(v.nonce)) return null
-  return { target: v.target.toLowerCase(), force: v.force, requestedAt: v.requestedAt, nonce: v.nonce }
-}
-/**
- * -> the postpone when it is well-formed AND internally sane (see POSTPONE_MAX_MS),
- * else null. An unbounded or far-future deadline is not a postpone.
- */
-function parsePostpone(v, nowMs) {
-  if (typeof v.target !== 'string' || !FULL_SHA.test(v.target)) return null
-  if (typeof v.until !== 'string' || !Number.isFinite(Date.parse(v.until))) return null
-  if (typeof v.requestedAt !== 'string' || !Number.isFinite(Date.parse(v.requestedAt))) return null
-  const asked = Date.parse(v.requestedAt)
-  if (asked - nowMs > REQUEST_SKEW_MS) return null
-  if (Date.parse(v.until) - asked > POSTPONE_MAX_MS) return null
-  return { target: v.target.toLowerCase(), until: v.until }
-}
 /** Is a well-formed request sitting at the live path right now? */
 function hasValidRequest(fs, file) {
   const r = readBoundedJson(file, { fs })
@@ -383,15 +358,16 @@ async function deployOnce(opts, d, meta) {
   //   { reason, target, from }  a forward deploy is deferred (busy | unknown | postponed)
   let pendingWant
   const removeQuietly = (file) => { try { fs.unlinkSync(file) } catch { /* absent or unremovable: best effort */ } }
-  function applyPending() {
+  function applyPending() { writePendingWant(pendingWant) }
+  function writePendingWant(want) {
     try {
-      if (pendingWant === 'remove') { removeQuietly(p.pending); return }
-      if (!pendingWant) return
-      const { reason, target: to, from } = pendingWant
+      if (want === 'remove') { removeQuietly(p.pending); return }
+      if (!want) return
+      const { reason, target: to, from } = want
       // queuedAt is when the update FIRST started waiting: a re-written file for
       // the same target keeps it, so the banner does not restart its clock every tick.
       const prev = readBoundedJson(p.pending, { fs })
-      const kept = prev.state === 'ok' && prev.value.target === to && typeof prev.value.queuedAt === 'string' && Number.isFinite(Date.parse(prev.value.queuedAt))
+      const kept = prev.state === 'ok' && prev.value.target === to && isIso(prev.value.queuedAt)
         ? prev.value.queuedAt : iso()
       let subject = ''
       try { subject = gitOut(['log', '-1', '--format=%s', to]).slice(0, 200) } catch { /* cosmetic */ }
@@ -425,6 +401,20 @@ async function deployOnce(opts, d, meta) {
       return e.code === 'ENOENT' ? { state: 'none' } : { state: 'bad', reason: e.code || String(e.message || e) }
     }
     const r = readBoundedJson(claimed, { fs })
+    if (r.state === 'error') {
+      // A transient I/O error (EAGAIN, EIO, ...) says nothing about the request's
+      // CONTENT: it must not be consumed. Put it back at the live path with a
+      // no-clobber link, so a NEWER request that arrived meanwhile wins and this one is
+      // dropped; then the claim goes. Any other failure leaves the claim for the TTL cleanup.
+      meta.requestRetry = true
+      try {
+        fs.linkSync(claimed, p.request)
+        removeQuietly(claimed)
+      } catch (e) {
+        if (e.code === 'EEXIST') removeQuietly(claimed)
+      }
+      return r
+    }
     removeQuietly(claimed)
     return r
   }
@@ -440,7 +430,8 @@ async function deployOnce(opts, d, meta) {
     const read = readBoundedFile(p.state, { fs, cap: STATE_FILE_CAP })
     if (read.state === 'none') return { ok: true }
     // Unreadable is not absent: `rollbackTo` may be in there.
-    if (read.state === 'bad') return { ok: false, reason: `cannot read deploy-state.json: ${read.reason}` }
+    // Not read is not absent, and not corrupt either: an I/O error or a refused kind of file aborts the tick.
+    if (read.state !== 'ok') return { ok: false, reason: `cannot read deploy-state.json: ${read.reason}` }
     const raw = read.raw
     try {
       const parsed = JSON.parse(raw)
@@ -526,7 +517,7 @@ async function deployOnce(opts, d, meta) {
   function recordResult(from, to, result) {
     if (opts.dryRun) return
     let subject = ''
-    try { subject = gitOut(['log', '-1', '--format=%s', to]) } catch { /* cosmetic */ }
+    try { subject = gitOut(['log', '-1', '--format=%s', to]).slice(0, 200) } catch { /* cosmetic */ }
     try { writeJson(p.last, { from, to, at: iso(), result, subject }) } catch { /* best effort */ }
   }
 
@@ -862,10 +853,13 @@ async function deployOnce(opts, d, meta) {
     let reqAccepted = null // the request this tick acts on: fresh, for the forward target
     let reqForce = false
     let reqNote = null
-    if (reqRead.state !== 'none') {
-      const ageMs = reqParsed ? d.now() - Date.parse(reqParsed.requestedAt) : NaN
+    if (reqRead.state === 'error') {
+      // Could not READ it (not: it is invalid). It stays for the next tick.
+      reqNote = `could not read deploy-request.json (${reqRead.reason}); it is kept for the next tick`
+      if (!opts.dryRun) event(reqNote)
+    } else if (reqRead.state !== 'none') {
       if (!reqParsed) reqNote = 'ignored a malformed deploy-request.json'
-      else if (!(ageMs <= REQUEST_TTL_MS && ageMs >= -60 * 1000)) reqNote = `ignored a stale deploy request for ${short(reqParsed.target)} (requested ${reqParsed.requestedAt})`
+      else if (!isRequestFresh(reqParsed, d.now())) reqNote = `ignored a stale deploy request for ${short(reqParsed.target)} (requested ${reqParsed.requestedAt})`
       else if (!forward || reqParsed.target !== target) reqNote = `ignored a deploy request for ${short(reqParsed.target)}: ${forward ? `the target now is ${short(target)}` : 'there is no forward deploy to apply'}`
       else {
         reqAccepted = reqParsed
@@ -1025,6 +1019,35 @@ async function deployOnce(opts, d, meta) {
       // A rollback's range reads bad..good, not good..good.
       const range = isForward ? rangeOf(head, want) : rangeOf(fwdTarget || pre.commit || head, want)
 
+      // The gates are passed: this forward deploy is now BUILDING and about to
+      // restart. Say so on disk at once (the build takes minutes) so the banner stops
+      // offering Restart now / Postpone, which can no longer take effect, and the
+      // daemon refuses them (APPLYING). `finally` removes the file, or replaces it
+      // with whatever this tick ends up deferring to.
+      if (isForward) {
+        writePendingWant({ reason: 'applying', target: fwdTarget, from: old })
+        pendingWant = 'remove'
+      }
+
+      // A Postpone that lands while the tick is working is honoured by putting the
+      // tree back and deferring, exactly like a daemon that turned busy. An accepted
+      // restart request outranks it, as does --force. -> a result, or null.
+      const holdForPostpone = (when) => {
+        if (!isForward || opts.force || reqAccepted) return null
+        const again = currentPostpone()
+        if (again.none || again.stale) return null
+        const back = convergeTree(old, { allowReset: true })
+        if (!back.ok) {
+          setRollbackTo(old)
+          event(`ROLLBACK-FAILED after a postpone arrived ${when}; restoring the checkout failed (${back.reason}). Rollback to ${short(old)} is owed.`, { range })
+          return { exitCode: 1, outcome: 'rollback-failed' }
+        }
+        pendingWant = { reason: 'postponed', target: fwdTarget, from: old }
+        deferral(`deferred after build: ${short(fwdTarget)} postponed until ${again.pp.until}`,
+          { range, key: `postponed:${fwdTarget}:${again.pp.until}`, reasons: `postponed until ${again.pp.until}` })
+        return { exitCode: 0, outcome: 'postponed' }
+      }
+
       const built = convergeTree(want, { allowReset: !isForward })
       if (!built.ok) {
         if (built.refused) {
@@ -1051,24 +1074,9 @@ async function deployOnce(opts, d, meta) {
         return { exitCode: 1, outcome: 'rollback-failed' }
       }
 
-      // The build took time. A Postpone the owner pressed while it ran was
-      // acknowledged, so it must hold: put the tree back and defer, exactly like the
-      // busy re-check below. An accepted restart request outranks it, as before.
-      if (isForward && !opts.force && !reqAccepted) {
-        const again = currentPostpone()
-        if (!again.none && !again.stale) {
-          const back = convergeTree(old, { allowReset: true })
-          if (!back.ok) {
-            setRollbackTo(old)
-            event(`ROLLBACK-FAILED after a postpone arrived during the build; restoring the checkout failed (${back.reason}). Rollback to ${short(old)} is owed.`, { range })
-            return { exitCode: 1, outcome: 'rollback-failed' }
-          }
-          pendingWant = { reason: 'postponed', target: fwdTarget, from: old }
-          deferral(`deferred after build: ${short(fwdTarget)} postponed until ${again.pp.until}`,
-            { range, key: `postponed:${fwdTarget}:${again.pp.until}`, reasons: `postponed until ${again.pp.until}` })
-          return { exitCode: 0, outcome: 'postponed' }
-        }
-      }
+      // The build took time: a Postpone pressed while it ran was acknowledged.
+      const heldAfterBuild = holdForPostpone('during the build')
+      if (heldAfterBuild) return heldAfterBuild
 
       // The build took time: the daemon may have turned busy.
       let prevPid = pre.pid ?? null
@@ -1097,6 +1105,11 @@ async function deployOnce(opts, d, meta) {
         }
         prevPid = again.pid
       }
+
+      // The idle probe above was asynchronous too: look at the postpone one last
+      // time, immediately before committing to the signal.
+      const heldBeforeSignal = holdForPostpone('during the final idle check')
+      if (heldBeforeSignal) return heldBeforeSignal
 
       // Owed BEFORE the signal: an interruption anywhere after it leaves a
       // rollback owed instead of a false "up to date".

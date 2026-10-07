@@ -38,6 +38,7 @@ const status = (over: Record<string, unknown> = {}) => ({
   lastDeploy: null,
   postponedUntil: null,
   requestPending: false,
+  applying: false,
   ...over,
 })
 
@@ -175,6 +176,30 @@ describe('requestDaemonUpdateAction (#8331)', () => {
     expect(useConnectionStore.getState().daemonUpdateError).toMatch(/did not answer/)
   })
 
+  it('a matching reply cancels the watchdog (confirm_required and action_result)', async () => {
+    vi.useFakeTimers()
+    const { useConnectionStore } = await seed()
+    const wd = await import('./daemon-update-watchdog')
+    const { handleMessage } = await import('./message-handler')
+    const ctx = { url: 'wss://t', token: 'tok', socket: useConnectionStore.getState().socket, isReconnect: false, silent: false }
+    useConnectionStore.getState().requestDaemonUpdateAction('postpone', B)
+    const requestId = useConnectionStore.getState().daemonUpdateAction!.requestId
+    expect(wd.isDaemonUpdateWatchdogArmed()).toBe(true)
+    handleMessage({ type: 'daemon_update_action_result', requestId, action: 'postpone', ok: true } as never, ctx as never)
+    expect(wd.isDaemonUpdateWatchdogArmed()).toBe(false)
+    useConnectionStore.getState().requestDaemonUpdateAction('restart-now', B)
+    const id2 = useConnectionStore.getState().daemonUpdateAction!.requestId
+    expect(wd.isDaemonUpdateWatchdogArmed()).toBe(true)
+    handleMessage({ type: 'daemon_update_confirm_required', requestId: id2, target: B, reasons: ['busy'], sessions: [] } as never, ctx as never)
+    expect(wd.isDaemonUpdateWatchdogArmed()).toBe(false)
+    // A reply for some OTHER request does not cancel the one that is still waiting.
+    useConnectionStore.getState().cancelDaemonUpdateConfirm()
+    useConnectionStore.getState().requestDaemonUpdateAction('postpone', B)
+    handleMessage({ type: 'daemon_update_action_result', requestId: 'someone-else', action: 'postpone', ok: true } as never, ctx as never)
+    expect(wd.isDaemonUpdateWatchdogArmed()).toBe(true)
+    wd.clearDaemonUpdateWatchdog()
+  })
+
   it('cancel and clear-error only touch their own field', async () => {
     const { useConnectionStore } = await seed()
     useConnectionStore.setState({ daemonUpdateConfirm: { type: 'daemon_update_confirm_required', requestId: 'r', target: B, reasons: [], sessions: [] } })
@@ -188,7 +213,7 @@ describe('requestDaemonUpdateAction (#8331)', () => {
   it('the queued update dies with the connection: disconnect, forgetSession and _resetSessionMemory each clear it', async () => {
     const { useConnectionStore } = await seed()
     const dirty = () => useConnectionStore.setState({
-      daemonUpdate: { type: 'daemon_update_status', running: A, pending: null, lastDeploy: null, postponedUntil: null, requestPending: false },
+      daemonUpdate: { type: 'daemon_update_status', running: A, pending: null, lastDeploy: null, postponedUntil: null, requestPending: false, applying: false },
       daemonUpdateAction: { requestId: 'r', action: 'postpone', target: B },
       daemonUpdateConfirm: { type: 'daemon_update_confirm_required', requestId: 'r', target: B, reasons: [], sessions: [] },
       daemonUpdateError: 'from server A',

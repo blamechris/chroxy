@@ -31,7 +31,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync,
+  appendFileSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync, writeSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
@@ -41,7 +41,7 @@ import { defaultDeps, deploy, parseArgs, POSTPONE_MAX_MS, REQUEST_SKEW_MS } from
 
 // Every case in this file. Bump it when you add one: a case that vanishes
 // should break the run rather than quietly shrink it.
-const MIN_CASES = 115
+const MIN_CASES = 125
 
 let pass = 0
 let fail = 0
@@ -69,7 +69,7 @@ const A = 'a'.repeat(40) // the commit the daemon runs
 const B = 'b'.repeat(40) // origin/main
 const C = 'c'.repeat(40) // a later origin/main
 const realFs = {
-  appendFileSync, closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
+  appendFileSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync,
   renameSync, unlinkSync, writeFileSync, writeSync,
 }
 const roots = []
@@ -1668,15 +1668,15 @@ await test('request: a force request does not skip an unreachable daemon (only -
 await test('request: a stale request is ignored and deleted, and buys nothing', async () => {
   const env = makeEnv()
   env.daemon.idleFn = () => BUSY
-  writeReq(env, { requestedAt: isoAt(env.t - 11 * 60e3) })
+  writeReq(env, { requestedAt: isoAt(env.t - 21 * 60e3) })
   eq((await env.run()).outcome, 'deferred-busy')
   untouched(env)
   eq(readIf(env, 'deploy-request.json'), null)
   assert(env.readLog().includes('stale deploy request'), 'says why')
   const fresh = makeEnv()
   fresh.daemon.idleFn = () => BUSY
-  writeReq(fresh, { requestedAt: isoAt(fresh.t - 9 * 60e3) })
-  eq((await fresh.run()).outcome, 'deployed') // 9 minutes is inside the window
+  writeReq(fresh, { requestedAt: isoAt(fresh.t - 19 * 60e3) })
+  eq((await fresh.run()).outcome, 'deployed') // 19 minutes is inside the window
 })
 
 await test('request: a request for a different target, or when there is nothing to deploy, is ignored and deleted', async () => {
@@ -1718,7 +1718,7 @@ await test('request: any accepted request overrides a postpone and removes it', 
   eq(readIf(env, 'deploy-postpone.json'), null)
   const stale = makeEnv()
   writePostpone(stale)
-  writeReq(stale, { requestedAt: isoAt(stale.t - 11 * 60e3) })
+  writeReq(stale, { requestedAt: isoAt(stale.t - 21 * 60e3) })
   eq((await stale.run()).outcome, 'postponed', 'a stale request does not override')
 })
 
@@ -1776,7 +1776,7 @@ await test('request: a claim a crashed tick left behind is removed once older th
   const old = env.path('deploy-request.json.claimed-aaaa')
   const fresh = env.path('deploy-request.json.claimed-bbbb')
   writeFileSync(old, '{}'); writeFileSync(fresh, '{}')
-  const longAgo = new Date(Date.now() - 11 * 60e3)
+  const longAgo = new Date(Date.now() - 21 * 60e3)
   utimesSync(old, longAgo, longAgo)
   env.git.remote = A // nothing to do: the cleanup runs regardless
   await env.run()
@@ -1893,6 +1893,146 @@ await test('writes use unpredictable temp names: a symlink planted at the old pi
   eq((await ok.run()).outcome, 'deployed')
   eq(readFileSync(ok.path('victim.txt'), 'utf8'), 'precious')
   eq(readdirSync(ok.configDir).filter((n) => /\.tmp-[0-9a-f]{16}$/.test(n)), [], 'no temp file is left behind')
+})
+
+// -- round 2 (#8331) ---------------------------------------------------------
+
+// A filesystem whose reads come back SHORT, the way a network filesystem may return them.
+const shortReadFs = (env, { match, chunk }) => {
+  const paths = {}
+  return {
+    ...realFs,
+    openSync(f, ...rest) { const fd = realFs.openSync(f, ...rest); paths[fd] = f; return fd },
+    readSync(fd, buf, off, len, pos) { return realFs.readSync(fd, buf, off, paths[fd] && match(paths[fd]) ? Math.min(len, chunk) : len, pos) },
+  }
+}
+
+await test('a SHORT read of deploy-state.json is completed, never mistaken for corrupt state: the owed rollback still happens', async () => {
+  const env = makeEnv()
+  oweA(env)
+  env.deps.fs = shortReadFs(env, { match: (p) => p === env.path('deploy-state.json'), chunk: 8 })
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [0, 'rollback-completed'])
+  eq([env.daemon.commit, env.state().rollbackTo], [A, undefined])
+  assert(!readdirSync(env.configDir).some((n) => n.includes('.corrupt-')), 'the state file was not quarantined')
+})
+
+await test('an oversized request split across reads is still refused', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeFileSync(env.path('deploy-request.json'), JSON.stringify({ action: 'restart-now', target: B, force: true, requestedAt: isoAt(env.t), nonce: 'n1' }) + ' '.repeat(5000))
+  env.deps.fs = shortReadFs(env, { match: (p) => p.includes('deploy-request.json'), chunk: 1000 })
+  eq((await env.run()).outcome, 'deferred-busy', 'the padded request did not force a deploy')
+})
+
+await test('an I/O error reading the state file aborts the tick and leaves it in place (read error is not corruption)', async () => {
+  const env = makeEnv()
+  oweA(env)
+  const before = readFileSync(env.path('deploy-state.json'), 'utf8')
+  const paths = {}
+  env.deps.fs = {
+    ...realFs,
+    openSync(f, ...rest) { const fd = realFs.openSync(f, ...rest); paths[fd] = f; return fd },
+    readSync(fd, ...rest) { if (paths[fd] === env.path('deploy-state.json')) throw Object.assign(new Error('EIO'), { code: 'EIO' }); return realFs.readSync(fd, ...rest) },
+  }
+  const r = await env.run()
+  eq(r.outcome, 'state-write-failed')
+  eq(readFileSync(env.path('deploy-state.json'), 'utf8'), before, 'untouched, not quarantined')
+  eq(kills(env), [])
+})
+
+await test('request: a transient read error does not consume the request: it is put back and a later tick applies it', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env, { nonce: 'n1', force: true })
+  let failed = false
+  env.deps.fs = {
+    ...realFs,
+    openSync(f, ...rest) {
+      if (!failed && f.includes('deploy-request.json.claimed-')) { failed = true; throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' }) }
+      return realFs.openSync(f, ...rest)
+    },
+  }
+  const first = await env.run()
+  assert(failed, 'the error was injected')
+  eq(first.outcome, 'deferred-busy', 'this tick did not act on it')
+  eq(first.drained, undefined, 'and did not drain it into the same error')
+  assert(existsSync(env.path('deploy-request.json')), 'the request is back at the live path')
+  eq(readdirSync(env.configDir).filter((n) => n.includes('.claimed-')), [], 'no claim left behind')
+  assert(env.readLog().includes('could not read deploy-request.json'), 'logged')
+  env.deps.fs = realFs
+  eq((await env.run()).outcome, 'deployed', 'the next tick applies the very same request')
+})
+
+await test('request: a put-back never clobbers a NEWER request that arrived meanwhile (no-clobber link)', async () => {
+  const env = makeEnv()
+  env.daemon.idleFn = () => BUSY
+  writeReq(env, { nonce: 'n1', force: false })
+  let failed = false
+  env.deps.fs = {
+    ...realFs,
+    openSync(f, ...rest) {
+      if (!failed && f.includes('deploy-request.json.claimed-')) { failed = true; writeReq(env, { nonce: 'n2', force: false }); throw Object.assign(new Error('EAGAIN'), { code: 'EAGAIN' }) }
+      return realFs.openSync(f, ...rest)
+    },
+  }
+  await env.run()
+  eq(readIf(env, 'deploy-request.json').nonce, 'n2', 'the newer request survived')
+  eq(readdirSync(env.configDir).filter((n) => n.includes('.claimed-')), [], 'and the old claim was dropped')
+})
+
+await test('applying: from the moment a forward deploy starts building, pending-update.json says reason "applying"; it is gone once deployed', async () => {
+  const env = makeEnv()
+  const seen = []
+  env.onRun = (cmd, args) => {
+    const key = [cmd, ...args].join(' ')
+    if (key === BUILD || key === KILL) seen.push([key === BUILD ? 'build' : 'kill', readIf(env, 'pending-update.json')?.reason])
+  }
+  eq((await env.run()).outcome, 'deployed')
+  eq(seen, [['build', 'applying'], ['kill', 'applying']])
+  eq(readIf(env, 'pending-update.json'), null)
+})
+
+await test('applying: a failed build clears it, and a daemon that turns busy during the build goes back to "busy"', async () => {
+  const failed = makeEnv()
+  failed.build.failShas.add(B)
+  await failed.run()
+  eq(readIf(failed, 'pending-update.json'), null)
+  const busy = makeEnv()
+  let probes = 0
+  busy.daemon.idleFn = () => (probes++ === 0 ? IDLE : BUSY)
+  eq((await busy.run()).outcome, 'deferred-busy-after-build')
+  eq(readIf(busy, 'pending-update.json').reason, 'busy')
+})
+
+await test('postpone: one that lands during the FINAL asynchronous idle probe still holds (checked immediately before the signal)', async () => {
+  const env = makeEnv()
+  let probes = 0
+  env.daemon.idleFn = () => {
+    // probe 0 = the tick's own, probe 1 = the post-build re-check
+    if (probes++ === 1) writePostpone(env, { requestedAt: isoAt(env.t), until: isoAt(env.t + 3600e3) })
+    return IDLE
+  }
+  const r = await env.run()
+  eq([r.exitCode, r.outcome], [0, 'postponed'])
+  eq(kills(env), [], 'never signalled')
+  eq([env.git.head, env.stamp().sha], [A, A])
+})
+
+await test('last-deploy.json: a long commit subject is capped at 200 characters', async () => {
+  const env = makeEnv()
+  env.git.subject = 'x'.repeat(500)
+  await env.run()
+  eq(env.last().subject.length, 200)
+})
+
+await test('postpone: a deadline outside years 1970-9999 (the extended-year form) is ignored and deleted', async () => {
+  for (const until of ['+275760-09-13T00:00:00.000Z', '0001-01-01T00:00:00.000Z']) {
+    const env = makeEnv()
+    writePostpone(env, { until, requestedAt: until })
+    eq((await env.run()).outcome, 'deployed', until)
+    eq(readIf(env, 'deploy-postpone.json'), null, `${until}: deleted`)
+  }
 })
 
 // ---------------------------------------------------------------------------

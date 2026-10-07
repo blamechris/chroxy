@@ -82,6 +82,7 @@ import {
   updateServerEntry,
   markServerConnected,
 } from './server-registry';
+import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
@@ -514,16 +515,12 @@ let pendingPairingId: string | null = null;
 // #8331: how long a Restart now / Postpone may wait for its reply before the
 // banner's buttons are released with an error.
 const DAEMON_UPDATE_ACTION_TIMEOUT_MS = 15_000;
-let daemonUpdateWatchdog: ReturnType<typeof setTimeout> | null = null;
 // #8331: the update banner's state describes ONE connection to ONE daemon. It is
 // cleared on an explicit disconnect, on transport loss (onclose), and at the start
 // of every new handshake (connect), because a reconnect can land on a DIFFERENT
 // build (a manual rollback, a switched checkout) that will never send a replacement
 // status frame to overwrite a stale "Restarting…" or "Updated to".
 const EMPTY_DAEMON_UPDATE = { daemonUpdate: null, daemonUpdateAction: null, daemonUpdateConfirm: null, daemonUpdateError: null } as const;
-function clearDaemonUpdateWatchdog(): void {
-  if (daemonUpdateWatchdog) { clearTimeout(daemonUpdateWatchdog); daemonUpdateWatchdog = null; }
-}
 
 // Stable device ID persisted across sessions
 const STORAGE_KEY_DEVICE_ID = 'chroxy_device_id';
@@ -1873,13 +1870,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (opts?.confirmBusy === true) msg.confirmBusy = true;
     wsSend(socket, msg);
     set({ daemonUpdateAction: { requestId, action, target }, daemonUpdateError: null });
-    if (daemonUpdateWatchdog) clearTimeout(daemonUpdateWatchdog);
-    daemonUpdateWatchdog = setTimeout(() => {
-      daemonUpdateWatchdog = null;
+    armDaemonUpdateWatchdog(DAEMON_UPDATE_ACTION_TIMEOUT_MS, () => {
       if (get().daemonUpdateAction?.requestId === requestId) {
         set({ daemonUpdateAction: null, daemonUpdateError: 'The daemon did not answer. Check the connection and try again.' });
       }
-    }, DAEMON_UPDATE_ACTION_TIMEOUT_MS);
+    });
     return true;
   },
   cancelDaemonUpdateConfirm: (): void => {

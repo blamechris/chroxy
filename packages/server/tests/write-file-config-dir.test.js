@@ -5,14 +5,15 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
-import { isWithinConfigDir, CONFIG_DIR_REFUSAL } from '../src/ws-file-ops/common.js'
+import { isConfigDirOrDirectChild, CONFIG_DIR_REFUSAL } from '../src/ws-file-ops/common.js'
 
-// #8331 — generic file writes refuse the daemon's config directory, so the deploy
-// control files (deploy-request.json, deploy-postpone.json) can only be written
-// through `daemon_update_action`. Everything runs in a temp tree with
+// #8331 — generic file writes refuse the daemon's config directory ITSELF and any file
+// DIRECTLY in it, so the deploy control files (deploy-request.json, deploy-postpone.json)
+// can only be written through `daemon_update_action`. Subtrees stay writable: chroxy's own
+// session worktrees live at <configDir>/worktrees/<id>. Everything runs in a temp tree with
 // CHROXY_CONFIG_DIR pointed into it; the real config dir is never touched.
 
-describe('generic file writes refuse the config directory (#8331)', () => {
+describe('generic file writes refuse the config directory and its direct children (#8331)', () => {
   let root, home, cfg, project, fileOps, savedEnv
   const out = []
   const send = (_ws, msg) => out.push(msg)
@@ -51,10 +52,18 @@ describe('generic file writes refuse the config directory (#8331)', () => {
     assert.deepEqual(await readdir(cfg), [])
   })
 
-  it('a new subdirectory of the config dir is not created either', async () => {
-    await fileOps.writeFile(ws, 'newdir/x.json', '{}', cfg)
+  it('a file directly in the config dir is refused even when it does not exist yet, and nothing is created', async () => {
+    await fileOps.writeFile(ws, 'brand-new-state.json', '{}', cfg)
     assert.equal(out[0].error, CONFIG_DIR_REFUSAL)
     assert.deepEqual(await readdir(cfg), [])
+  })
+
+  it('a worktree reaching the config root through ../.. is refused (the cwd check also denies it, but never writes)', async () => {
+    const wt = join(cfg, 'worktrees', 'sess-1')
+    await mkdir(wt, { recursive: true })
+    await fileOps.writeFile(ws, '../../deploy-request.json', forged, wt)
+    assert.ok(out[0].error)
+    assert.equal(existsSync(join(cfg, 'deploy-request.json')), false)
   })
 
   it('a symlinked parent that leads into the config dir is refused (the link sits inside the session cwd, so only this guard stops it)', async () => {
@@ -80,6 +89,34 @@ describe('generic file writes refuse the config directory (#8331)', () => {
     assert.equal(existsSync(join(cfg, 'CLAUDE.md')), false)
   })
 
+  it('chroxy\'s OWN session worktree (<cfg>/worktrees/<id>) stays writable, for write_file and quick-append', async () => {
+    const wt = join(cfg, 'worktrees', 'sess-2')
+    await mkdir(wt, { recursive: true })
+    await fileOps.writeFile(ws, 'src/a.js', 'x', wt)
+    assert.equal(out[0].error, null)
+    assert.ok(existsSync(join(wt, 'src/a.js')))
+    out.length = 0
+    await fileOps.appendMemory(ws, 'a note', wt)
+    assert.equal(out[0].error, null)
+  })
+
+  it('an orchestration worktree (<cfg>/orchestration/worktrees/<id>) stays writable', async () => {
+    const wt = join(cfg, 'orchestration', 'worktrees', 'run-1')
+    await mkdir(wt, { recursive: true })
+    await fileOps.writeFile(ws, 'x', 'ok', wt)
+    assert.equal(out[0].error, null)
+    assert.ok(existsSync(join(wt, 'x')))
+  })
+
+  it('a worktree reached through a SYMLINK is writable', async () => {
+    const wt = join(cfg, 'worktrees', 'sess-3')
+    await mkdir(wt, { recursive: true })
+    await symlink(wt, join(home, 'wt-link'))
+    await fileOps.writeFile(ws, 'wt-link/ok.txt', 'fine', home)
+    assert.equal(out[0].error, null)
+    await rm(join(home, 'wt-link'))
+  })
+
   it('a normal project write still works, as does quick-append', async () => {
     await fileOps.writeFile(ws, 'src/ok.txt', 'fine', project)
     assert.equal(out[0].error, null)
@@ -89,16 +126,18 @@ describe('generic file writes refuse the config directory (#8331)', () => {
     assert.equal(out[0].error, null)
   })
 
-  it('a sibling that merely shares the config dir\'s name prefix is not "inside" it', async () => {
+  it('only the root and its DIRECT children count; a sibling sharing the name prefix does not', async () => {
     await mkdir(join(home, '.chroxy-other'), { recursive: true })
-    assert.equal(await isWithinConfigDir(join(home, '.chroxy-other', 'x.txt')), false)
-    assert.equal(await isWithinConfigDir(join(cfg, 'a', 'b')), true)
-    assert.equal(await isWithinConfigDir(cfg), true)
+    assert.equal(await isConfigDirOrDirectChild(join(home, '.chroxy-other', 'x.txt')), false)
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'worktrees', 'id', 'x')), false, 'a subtree')
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'a', 'b')), false, 'a grandchild')
+    assert.equal(await isConfigDirOrDirectChild(join(cfg, 'a')), true, 'a direct child')
+    assert.equal(await isConfigDirOrDirectChild(cfg), true, 'the root')
   })
 
   it('FAILS CLOSED: a path that cannot be resolved (a symlink loop) counts as inside', async () => {
     await symlink(join(home, 'loop'), join(home, 'loop'))
-    assert.equal(await isWithinConfigDir(join(home, 'loop', 'x.json')), true)
+    assert.equal(await isConfigDirOrDirectChild(join(home, 'loop', 'x.json')), true)
     await rm(join(home, 'loop'))
   })
 
@@ -108,8 +147,8 @@ describe('generic file writes refuse the config directory (#8331)', () => {
     const prev = process.env.CHROXY_CONFIG_DIR
     process.env.CHROXY_CONFIG_DIR = elsewhere
     try {
-      assert.equal(await isWithinConfigDir(join(elsewhere, 'deploy-request.json')), true)
-      assert.equal(await isWithinConfigDir(join(cfg, 'deploy-request.json')), false, 'the old location is an ordinary directory now')
+      assert.equal(await isConfigDirOrDirectChild(join(elsewhere, 'deploy-request.json')), true)
+      assert.equal(await isConfigDirOrDirectChild(join(cfg, 'deploy-request.json')), false, 'the old location is an ordinary directory now')
     } finally { process.env.CHROXY_CONFIG_DIR = prev }
   })
 })

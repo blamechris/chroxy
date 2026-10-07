@@ -53,7 +53,8 @@ function handleDaemonUpdateAction(ws, client, msg, ctx) {
       ctx.transport.send(ws, {
         type: 'daemon_update_confirm_required',
         requestId,
-        target: msg.target,
+        // The STORED target (normalised), not whatever the client typed.
+        target: out.target,
         reasons: out.reasons,
         sessions: out.sessions,
       })

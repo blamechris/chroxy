@@ -9,13 +9,20 @@
  * The config directory is writable by other local processes, so every one of these
  * files is untrusted input:
  *
- *  - READS open with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, `fstat` the descriptor
- *    and require a REGULAR FILE, and read at most `cap + 1` bytes from that
- *    descriptor. A FIFO therefore cannot block the open, a symlink is refused, a
- *    directory or device is refused, and an oversized file is never loaded.
- *    Anything refused reads as ABSENT to the caller (`state: 'bad'`), never as a
- *    partial object. Where the platform has no `O_NOFOLLOW` (win32) a `lstat`
- *    before the open refuses a symlink.
+ *  - READS go through `_openTrustedFdSync` (the same open the credential reader uses):
+ *    `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` on POSIX, so a FIFO cannot block the open and
+ *    a symlink is refused atomically; on win32 (no `O_NOFOLLOW`) a pre-open `lstat`
+ *    plus a post-open fd/path identity check (fresh `lstat`, BigInt dev/ino), refusing
+ *    when identity cannot be established. The descriptor is then required to be a
+ *    REGULAR FILE, and the read ACCUMULATES from that one descriptor until EOF or
+ *    cap + 1 bytes (a short read is legal, so one `read` is never taken for the whole
+ *    file).
+ *  - The result says WHY a file was not usable, because callers act differently:
+ *      `none`   no such file
+ *      `bad`    the CONTENT or kind is refused (a symlink, a FIFO, a directory, an
+ *               oversized file, not a JSON object): reads as absent
+ *      `error`  an I/O error (EAGAIN, EIO, EACCES, …) or a read that did not complete:
+ *               the file may be perfectly valid and MUST NOT be treated as corrupt
  *  - WRITES go to a RANDOM temp name opened with `O_EXCL` (so a planted file or
  *    symlink at that name cannot be followed or truncated), are written through
  *    that descriptor, and are renamed into place; the temp file is removed on
@@ -27,50 +34,65 @@
 
 import * as realFs from 'node:fs'
 import { randomBytes } from 'node:crypto'
+import { _openTrustedFdSync, defaultTrustedFileReadDeps } from '../trusted-file-read.js'
 
 /** Every file here is a few hundred bytes. A bigger one is not ours. */
 export const SMALL_FILE_CAP = 4096
 
 const C = realFs.constants
+const HAS_O_NOFOLLOW = typeof C.O_NOFOLLOW === 'number' && C.O_NOFOLLOW !== 0
 
 /**
  * @param {string} file
- * @param {{ fs?: object, cap?: number }} [o]
- * @returns {{ state: 'none' } | { state: 'bad', reason: string } | { state: 'ok', raw: string }}
+ * @param {{ fs?: object, cap?: number, platform?: string, hasONoFollow?: boolean }} [o]
+ *   `platform` / `hasONoFollow` are test seams to drive the win32 path anywhere.
+ * @returns {{ state: 'none' } | { state: 'bad', reason: string } | { state: 'error', reason: string } | { state: 'ok', raw: string }}
  */
-export function readBoundedFile(file, { fs = realFs, cap = SMALL_FILE_CAP } = {}) {
-  const noFollow = C.O_NOFOLLOW ?? 0
-  if (noFollow === 0) {
-    // No O_NOFOLLOW on this platform: refuse a symlink with an lstat first.
-    try {
-      if (fs.lstatSync(file).isSymbolicLink()) return { state: 'bad', reason: 'is a symlink' }
-    } catch (e) {
-      return e.code === 'ENOENT' ? { state: 'none' } : { state: 'bad', reason: e.code || String(e.message || e) }
-    }
+export function readBoundedFile(file, { fs = realFs, cap = SMALL_FILE_CAP, platform = process.platform, hasONoFollow = HAS_O_NOFOLLOW } = {}) {
+  // The credential reader's own deps (its O_NOFOLLOW constant included), with only the
+  // filesystem calls and the platform seams swapped for ours.
+  const deps = {
+    ...defaultTrustedFileReadDeps,
+    hasONoFollow,
+    platform,
+    openSync: (p, flags) => fs.openSync(p, flags),
+    closeSync: (fd) => fs.closeSync(fd),
+    fstatSync: (fd) => fs.fstatSync(fd, { bigint: true }),
+    lstatSync: (p) => fs.lstatSync(p, { bigint: true }),
   }
-  let fd
+  let opened
   try {
-    fd = fs.openSync(file, C.O_RDONLY | noFollow | (C.O_NONBLOCK ?? 0))
+    opened = _openTrustedFdSync(file, deps)
   } catch (e) {
     if (e.code === 'ENOENT') return { state: 'none' }
-    return { state: 'bad', reason: e.code === 'ELOOP' ? 'is a symlink' : (e.code || String(e.message || e)) }
+    // ELOOP is a symlink, or an identity check that could not prove the open.
+    if (e.code === 'ELOOP') return { state: 'bad', reason: 'is a symlink or could not be proven to be the file at its path' }
+    return { state: 'error', reason: e.code || String(e.message || e) }
   }
+  const { fd, stat } = opened
   try {
-    if (!fs.fstatSync(fd).isFile()) return { state: 'bad', reason: 'is not a regular file' }
-    const buf = Buffer.alloc(cap + 1)
-    const n = fs.readSync(fd, buf, 0, cap + 1, 0)
-    if (n > cap) return { state: 'bad', reason: `is larger than ${cap} bytes` }
-    return { state: 'ok', raw: buf.toString('utf8', 0, n) }
+    if (!stat.isFile()) return { state: 'bad', reason: 'is not a regular file' }
+    const limit = cap + 1
+    const buf = Buffer.alloc(limit)
+    let total = 0
+    while (total < limit) {
+      const n = fs.readSync(fd, buf, total, limit - total, total)
+      if (n === 0) break
+      total += n
+    }
+    if (total > cap) return { state: 'bad', reason: `is larger than ${cap} bytes` }
+    return { state: 'ok', raw: buf.toString('utf8', 0, total) }
   } catch (e) {
-    return { state: 'bad', reason: e.code || String(e.message || e) }
+    return { state: 'error', reason: e.code || String(e.message || e) }
   } finally {
     try { fs.closeSync(fd) } catch { /* nothing to close */ }
   }
 }
 
 /**
- * `readBoundedFile` + parse. A value that is not a plain JSON object is `bad`.
- * @returns {{ state: 'none' } | { state: 'bad', reason: string } | { state: 'ok', raw: string, value: object }}
+ * `readBoundedFile` + parse. A value that is not a plain JSON object is `bad`; an I/O
+ * error stays an `error` and is never reported as unparseable content.
+ * @returns {{ state: 'none' } | { state: 'bad' | 'error', reason: string } | { state: 'ok', raw: string, value: object }}
  */
 export function readBoundedJson(file, o) {
   const r = readBoundedFile(file, o)
@@ -93,7 +115,7 @@ export function writeFileAtomic(file, text, { fs = realFs, mode = 0o600 } = {}) 
   const tmp = `${file}.tmp-${randomBytes(8).toString('hex')}`
   let fd
   try {
-    fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | (C.O_NOFOLLOW ?? 0), mode)
+    fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | (C.O_NOFOLLOW ?? 0) | (C.O_NONBLOCK ?? 0), mode)
     const data = Buffer.from(text, 'utf8')
     for (let off = 0; off < data.length;) off += fs.writeSync(fd, data, off, data.length - off)
     fs.closeSync(fd)

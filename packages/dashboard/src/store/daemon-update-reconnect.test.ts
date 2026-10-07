@@ -41,11 +41,12 @@ class MockWebSocket {
 ;(globalThis as unknown as { fetch: unknown }).fetch = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok' }) }))
 
 const { useConnectionStore } = await import('./connection')
+const { isDaemonUpdateWatchdogArmed } = await import('./daemon-update-watchdog')
 const mh = await import('./message-handler')
 
 const B = 'b'.repeat(40)
 const dirty = () => useConnectionStore.setState({
-  daemonUpdate: { type: 'daemon_update_status', running: 'a'.repeat(40), pending: null, lastDeploy: null, postponedUntil: null, requestPending: true },
+  daemonUpdate: { type: 'daemon_update_status', running: 'a'.repeat(40), pending: null, lastDeploy: null, postponedUntil: null, requestPending: true, applying: false },
   daemonUpdateAction: { requestId: 'r1', action: 'restart-now', target: B },
   daemonUpdateConfirm: { type: 'daemon_update_confirm_required', requestId: 'r1', target: B, reasons: ['busy'], sessions: [] },
   daemonUpdateError: 'from before the drop',
@@ -92,5 +93,14 @@ describe('update banner state vs automatic reconnects (#8331)', () => {
     dirty()
     useConnectionStore.getState().connect('wss://tunnel.example.com/ws', 'tok', { silent: true })
     expect(fields()).toEqual([null, null, null, null])
+  })
+
+  it('the action watchdog is cancelled the moment the transport drops (before any reconnect is attempted)', async () => {
+    const ws = await openConnected()
+    useConnectionStore.setState({ socket: ws as unknown as WebSocket })
+    expect(useConnectionStore.getState().requestDaemonUpdateAction('postpone', B)).toBe(true)
+    expect(isDaemonUpdateWatchdogArmed()).toBe(true)
+    ws.onclose?.({ code: 1006 })
+    expect(isDaemonUpdateWatchdogArmed()).toBe(false)
   })
 })

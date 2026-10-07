@@ -118,6 +118,23 @@ describe('daemon_update_action — restart-now', () => {
     assert.ok(existsSync(join(dir, REQUEST_FILE)))
   })
 
+  it('confirm_required echoes the STORED lowercase target, not what the client typed', () => {
+    const idle = () => ({ idle: false, reasons: ['busy'], sessions: [] })
+    const { ctx, sent } = mkCtx({ idle })
+    handle(ctx, primary, act({ target: B.toUpperCase() }))
+    assert.equal(sent[0].type, 'daemon_update_confirm_required')
+    assert.equal(sent[0].target, B)
+  })
+
+  it('while the update is being applied, both actions are answered APPLYING and write nothing', () => {
+    const { ctx, sent, dir } = mkCtx()
+    writeFileSync(join(dir, PENDING_FILE), JSON.stringify({ target: B, from: A, subject: 's', commitsAhead: 1, queuedAt: new Date(NOW - 1000).toISOString(), reason: 'applying' }))
+    handle(ctx, primary, act())
+    handle(ctx, primary, act({ action: 'postpone' }))
+    assert.deepEqual(sent.map((m) => m.code), ['APPLYING', 'APPLYING'])
+    assert.deepEqual(written(dir), [])
+  })
+
   it('a stale target and an absent update are answered, not applied', () => {
     const stale = mkCtx()
     handle(stale.ctx, primary, act({ target: 'c'.repeat(40) }))

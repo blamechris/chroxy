@@ -12,11 +12,12 @@
  *     confirmation; nothing was written. The client shows the listed reasons and
  *     re-sends with `confirmBusy: true`.
  *   - `daemon_update_action_result` — the outcome, ok or a `code`
- *     (NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, WRITE_FAILED, UNAVAILABLE,
+ *     (NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, APPLYING, WRITE_FAILED, UNAVAILABLE,
  *     UNSUPPORTED_ACTION).
  */
 import { z } from 'zod';
-export declare const DAEMON_UPDATE_PENDING_REASON_VALUES: readonly ["busy", "unknown", "postponed"];
+/** `applying`: the script has passed its gates and is building / restarting; no button can take effect. */
+export declare const DAEMON_UPDATE_PENDING_REASON_VALUES: readonly ["busy", "unknown", "postponed", "applying"];
 export declare const DaemonUpdatePendingSchema: z.ZodObject<{
     target: z.ZodString;
     from: z.ZodNullable<z.ZodString>;
@@ -27,6 +28,7 @@ export declare const DaemonUpdatePendingSchema: z.ZodObject<{
         unknown: "unknown";
         busy: "busy";
         postponed: "postponed";
+        applying: "applying";
     }>;
 }, z.core.$strip>;
 export declare const DaemonUpdateLastDeploySchema: z.ZodObject<{
@@ -49,6 +51,7 @@ export declare const ServerDaemonUpdateStatusSchema: z.ZodObject<{
             unknown: "unknown";
             busy: "busy";
             postponed: "postponed";
+            applying: "applying";
         }>;
     }, z.core.$strip>>;
     lastDeploy: z.ZodNullable<z.ZodObject<{
@@ -60,6 +63,7 @@ export declare const ServerDaemonUpdateStatusSchema: z.ZodObject<{
     }, z.core.$strip>>;
     postponedUntil: z.ZodNullable<z.ZodString>;
     requestPending: z.ZodBoolean;
+    applying: z.ZodBoolean;
 }, z.core.$strip>;
 export declare const ServerDaemonUpdateConfirmRequiredSchema: z.ZodObject<{
     type: z.ZodLiteral<"daemon_update_confirm_required">;

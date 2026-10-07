@@ -27,6 +27,8 @@ import type { ServerDaemonUpdateConfirmRequiredMessage, ServerDaemonUpdateStatus
 import { ConfirmDialog } from './ConfirmDialog'
 
 const NOTICE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+/** A restart request the script has not picked up after this long is waiting for its next scheduled check. */
+export const REQUEST_SLOW_MS = 30_000
 const SEEN_PREFIX = 'chroxy.daemonUpdate.notice.'
 
 export type DaemonUpdateNotice = {
@@ -134,12 +136,29 @@ export function DaemonUpdateBanner({
   }, [noticeKey])
   const shownNotice = notice && shownKey === notice.key ? notice : null
 
+  // A request the script has not picked up for 30 s is waiting for its next scheduled
+  // check (launchd runs it every 10 minutes unless a WatchPaths entry fires it sooner).
+  const waitingOnRequest = Boolean(pending && status?.requestPending && !status?.applying)
+  const [requestSlow, setRequestSlow] = useState(false)
+  const pendingTarget = pending?.target ?? null
+  useEffect(() => {
+    if (!waitingOnRequest) { setRequestSlow(false); return }
+    const t = setTimeout(() => setRequestSlow(true), REQUEST_SLOW_MS)
+    return () => clearTimeout(t)
+  }, [waitingOnRequest, pendingTarget])
+
   let bannerText = ''
-  let bannerState: 'restarting' | 'postponed' | 'ready' = 'ready'
+  let bannerState: 'restarting' | 'requested' | 'postponed' | 'unknown' | 'ready' = 'ready'
   if (pending) {
     const sha = shortSha(pending.target)
-    if (status?.requestPending) { bannerState = 'restarting'; bannerText = `Restarting to apply ${sha}…` }
+    if (status?.applying) { bannerState = 'restarting'; bannerText = `Restarting to apply ${sha}…` }
+    else if (status?.requestPending) {
+      if (requestSlow) { bannerState = 'requested'; bannerText = 'Restart requested — applies at the next scheduled check' }
+      else { bannerState = 'restarting'; bannerText = `Restarting to apply ${sha}…` }
+    }
     else if (status?.postponedUntil) { bannerState = 'postponed'; bannerText = `Update ${sha} postponed until ${formatClock(status.postponedUntil)}` }
+    // The daemon could not confirm it is idle: Restart now cannot help (a forced restart never covers an unknown daemon), so it is not offered.
+    else if (pending.reason === 'unknown') { bannerState = 'unknown'; bannerText = `Update ready (${sha}) — can't confirm the daemon is idle` }
     else bannerText = `Update ready (${sha}) — restarts when idle`
   }
 
@@ -159,12 +178,14 @@ export function DaemonUpdateBanner({
                   {pending.commitsAhead !== null && pending.commitsAhead > 1 ? ` (+${pending.commitsAhead - 1} more)` : ''}
                 </span>
               )}
-              {bannerState !== 'restarting' && (
+              {bannerState !== 'restarting' && bannerState !== 'requested' && (
                 <span className="daemon-update-actions">
-                  <button type="button" className="daemon-update-btn" data-testid="daemon-update-restart-now" disabled={busy} onClick={() => onRestartNow(pending.target)}>
-                    Restart now
-                  </button>
-                  {bannerState === 'ready' && (
+                  {bannerState !== 'unknown' && (
+                    <button type="button" className="daemon-update-btn" data-testid="daemon-update-restart-now" disabled={busy} onClick={() => onRestartNow(pending.target)}>
+                      Restart now
+                    </button>
+                  )}
+                  {(bannerState === 'ready' || bannerState === 'unknown') && (
                     <button type="button" className="daemon-update-btn" data-testid="daemon-update-postpone" disabled={busy} onClick={() => onPostpone(pending.target)}>
                       Postpone 1h
                     </button>

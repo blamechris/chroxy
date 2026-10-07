@@ -12,7 +12,7 @@
  *     confirmation; nothing was written. The client shows the listed reasons and
  *     re-sends with `confirmBusy: true`.
  *   - `daemon_update_action_result` — the outcome, ok or a `code`
- *     (NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, WRITE_FAILED, UNAVAILABLE,
+ *     (NOT_AUTHORIZED, STALE_TARGET, NO_PENDING_UPDATE, APPLYING, WRITE_FAILED, UNAVAILABLE,
  *     UNSUPPORTED_ACTION).
  */
 
@@ -20,7 +20,8 @@ import { z } from 'zod'
 
 const Sha = z.string().regex(/^[0-9a-f]{40}$/)
 
-export const DAEMON_UPDATE_PENDING_REASON_VALUES = ['busy', 'unknown', 'postponed'] as const
+/** `applying`: the script has passed its gates and is building / restarting; no button can take effect. */
+export const DAEMON_UPDATE_PENDING_REASON_VALUES = ['busy', 'unknown', 'postponed', 'applying'] as const
 
 export const DaemonUpdatePendingSchema = z.object({
   target: Sha,
@@ -49,6 +50,8 @@ export const ServerDaemonUpdateStatusSchema = z.object({
   postponedUntil: z.string().datetime().nullable(),
   /** A fresh restart request for the pending target is waiting for the script. */
   requestPending: z.boolean(),
+  /** The queued update is being applied right now (build / restart); Restart now and Postpone are refused. */
+  applying: z.boolean(),
 })
 
 export const ServerDaemonUpdateConfirmRequiredSchema = z.object({

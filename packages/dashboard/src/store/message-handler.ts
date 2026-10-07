@@ -184,6 +184,7 @@ import {
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import type { ServerFailedRestoresListMessage } from '@chroxy/protocol'
+import { clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema, ServerDaemonUpdateStatusSchema, ServerDaemonUpdateConfirmRequiredSchema, ServerDaemonUpdateActionResultSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import { settleSchedulerRequest } from './scheduledTaskRequests'
@@ -3831,6 +3832,7 @@ function handleDaemonUpdateConfirmRequired(msg: Record<string, unknown>, get: Ms
   if (!parsed.success) return;
   const inFlight = get().daemonUpdateAction;
   if (!inFlight || inFlight.requestId !== parsed.data.requestId) return;
+  clearDaemonUpdateWatchdog();
   set({ daemonUpdateAction: null, daemonUpdateConfirm: parsed.data, daemonUpdateError: null });
 }
 
@@ -3840,6 +3842,7 @@ const DAEMON_UPDATE_ERROR_TEXT: Record<string, string> = {
   NOT_AUTHORIZED: 'Only the owner\u2019s primary connection can update the daemon.',
   STALE_TARGET: 'That update is no longer the one waiting. The banner has been refreshed.',
   NO_PENDING_UPDATE: 'There is no update waiting any more.',
+  APPLYING: 'The update is already being applied.',
   WRITE_FAILED: 'The daemon could not record the request. Try again.',
   UNAVAILABLE: 'This daemon does not support updating from the dashboard.',
 };
@@ -3854,6 +3857,7 @@ function handleDaemonUpdateActionResult(msg: Record<string, unknown>, get: MsgGe
   if (!parsed.success) return;
   const inFlight = get().daemonUpdateAction;
   if (!inFlight || inFlight.requestId !== parsed.data.requestId) return;
+  clearDaemonUpdateWatchdog();
   if (parsed.data.ok) {
     set({ daemonUpdateAction: null, daemonUpdateConfirm: null, daemonUpdateError: null });
     return;
