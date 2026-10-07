@@ -726,6 +726,47 @@ describe('permission/question routing to originating session', () => {
       ws.close()
     })
 
+    // #8328 / #5704 — the replay resend must not re-subscribe a client that
+    // deliberately unsubscribed from the session after dispatch. Re-registering
+    // an existing route re-subscribes every eligible client without a refcount,
+    // so the subscription would be mistaken for an explicit one and never torn down.
+    it('a replay resend does not re-subscribe another client that unsubscribed from the session', async () => {
+      const { manager, sessionsMap } = twoSessionsWithHistory()
+      const sessB = sessionsMap.get('sess-b').session
+      sessB._pendingPermissions = new Map([['perm-sdk-b', {}]])
+      sessB._lastPermissionData = new Map([['perm-sdk-b', {
+        requestId: 'perm-sdk-b', tool: 'Bash', description: 'ls', input: {},
+        remainingMs: 300_000, createdAt: Date.now(), floored: false,
+      }]])
+      server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+      const port = await startServerAndGetPort(server)
+
+      // Client X: connect-time resend registers the route and subscribes X to sess-b.
+      const x = await createClient(port, true)
+      await waitForMessageMatch(x.messages, (m) => m.type === 'permission_request' && m.requestId === 'perm-sdk-b', 2000, 'connect-time resend to X')
+      const y = await createClient(port, true)
+      await waitForMessageMatch(y.messages, (m) => m.type === 'permission_request' && m.requestId === 'perm-sdk-b', 2000, 'connect-time resend to Y')
+      const xClient = [...server.clients.values()][0]
+      assert.ok(xClient.subscribedSessionIds.has('sess-b'), 'precondition: dispatch/connect subscribed X to sess-b')
+
+      // X deliberately unsubscribes (active on sess-a, so the active-session guard does not apply).
+      send(x.ws, { type: 'unsubscribe_sessions', sessionIds: ['sess-b'] })
+      await waitForMessageMatch(x.messages, (m) => m.type === 'subscriptions_updated', 2000, 'X unsubscribed')
+      assert.equal(xClient.subscribedSessionIds.has('sess-b'), false, 'precondition: X no longer subscribed to sess-b')
+
+      // Client Y switches to sess-b: the filtered replay resend runs for Y.
+      // (Y must be connected BEFORE X unsubscribes: a connect re-registers every
+      // route through the unfiltered path, which is intended and unchanged.)
+      const base = y.messages.length
+      send(y.ws, { type: 'switch_session', sessionId: 'sess-b' })
+      await waitFor(() => y.messages.slice(base).some((m) => m.type === 'permission_request' && m.requestId === 'perm-sdk-b'), { label: 'Y gets the re-sent permission' })
+
+      assert.equal(xClient.subscribedSessionIds.has('sess-b'), false, 'X must not be silently re-subscribed by Y\'s replay resend')
+
+      x.ws.close()
+      y.ws.close()
+    })
+
     it('does not send sess-a\'s pending permission when switching to sess-b', async () => {
       const { manager, sessionsMap } = twoSessionsWithHistory()
       const sessA = sessionsMap.get('sess-a').session

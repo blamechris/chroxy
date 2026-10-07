@@ -47,7 +47,7 @@ function sdkEntry(requestId, { remainingMs = 300_000, createdAt = Date.now(), to
  * `sdk` maps sessionId -> list of sdkEntry; `hooks` is a list of
  * `{ requestId, owner }` legacy hook-held permissions (owner may be undefined).
  */
-function makeCtx({ sessions = ['sess-a', 'sess-b'], history = HISTORY, sdk = {}, hooks = [] } = {}) {
+function makeCtx({ sessions = ['sess-a', 'sess-b'], history = HISTORY, sdk = {}, hooks = [], registerPermissionRoute, routes = {} } = {}) {
   const sends = []
   const { manager } = createMockSessionManager(sessions.map((id) => ({ id, name: id, cwd: `/${id}` })))
   manager.getHistory = () => history
@@ -72,6 +72,8 @@ function makeCtx({ sessions = ['sess-a', 'sess-b'], history = HISTORY, sdk = {},
     })
     if (owner) permissionSessionMap.set(requestId, owner)
   }
+  // Routes already registered at dispatch time (requestId -> sessionId).
+  for (const [requestId, owner] of Object.entries(routes)) permissionSessionMap.set(requestId, owner)
 
   const send = (_ws, msg) => sends.push(msg)
   const permissions = createPermissionHandler({
@@ -82,6 +84,7 @@ function makeCtx({ sessions = ['sess-a', 'sess-b'], history = HISTORY, sdk = {},
     pendingPermissions,
     permissionSessionMap,
     getSessionManager: () => manager,
+    ...(registerPermissionRoute ? { registerPermissionRoute } : {}),
   })
   return { clients: new Map(), sessionManager: manager, send, permissions, _sends: sends, permissionSessionMap }
 }
@@ -300,5 +303,67 @@ describe('replayHistory — ctx without a permission handler (#8328)', () => {
 
     assert.ok(ctx._sends.some((m) => m.type === 'history_replay_end'))
     assert.equal(permFrames(ctx._sends).length, 0)
+  })
+})
+
+// ── Route registration on a replay resend (#8328 / #5704) ──────────────────
+
+describe('resendPendingPermissions — route registration (#8328 / #5704)', () => {
+  // `registerPermissionRoute` re-subscribes every eligible client on EVERY call
+  // but seeds the #5704 refcount only on the first registration. A filtered
+  // (replay) resend that re-registered an existing route would silently
+  // re-subscribe a client that had deliberately unsubscribed, with no refcount.
+  function routeSpy() {
+    const calls = []
+    return { calls, fn: (requestId, sessionId) => calls.push([requestId, sessionId]) }
+  }
+
+  it('filtered resend does NOT re-register a route that already exists (frame still sent)', () => {
+    const spy = routeSpy()
+    const ctx = makeCtx({
+      sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] },
+      routes: { 'perm-sdk-b': 'sess-b' },
+      registerPermissionRoute: spy.fn,
+    })
+    const ws = makeFakeWs()
+    ctx.permissions.resendPendingPermissions(ws, { id: 'client-1' }, { sessionId: 'sess-b' })
+
+    assert.deepEqual(spy.calls, [], 'an existing route must not be re-registered by a replay resend')
+    assert.deepEqual(permFrames(ctx._sends).map((m) => m.requestId), ['perm-sdk-b'])
+  })
+
+  it('filtered resend DOES register a route that is missing', () => {
+    const spy = routeSpy()
+    const ctx = makeCtx({
+      sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] },
+      registerPermissionRoute: spy.fn,
+    })
+    const ws = makeFakeWs()
+    ctx.permissions.resendPendingPermissions(ws, { id: 'client-1' }, { sessionId: 'sess-b' })
+
+    assert.deepEqual(spy.calls, [['perm-sdk-b', 'sess-b']])
+    assert.deepEqual(permFrames(ctx._sends).map((m) => m.requestId), ['perm-sdk-b'])
+  })
+
+  it('unfiltered (connect-time) resend still registers the route, even when it exists', () => {
+    const spy = routeSpy()
+    const ctx = makeCtx({
+      sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] },
+      routes: { 'perm-sdk-b': 'sess-b' },
+      registerPermissionRoute: spy.fn,
+    })
+    const ws = makeFakeWs()
+    ctx.permissions.resendPendingPermissions(ws, { id: 'client-1' })
+
+    assert.deepEqual(spy.calls, [['perm-sdk-b', 'sess-b']])
+    assert.deepEqual(permFrames(ctx._sends).map((m) => m.requestId), ['perm-sdk-b'])
+  })
+
+  it('without registerPermissionRoute a missing route falls back to a bare map set (filtered)', () => {
+    const ctx = makeCtx({ sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    const ws = makeFakeWs()
+    ctx.permissions.resendPendingPermissions(ws, { id: 'client-1' }, { sessionId: 'sess-b' })
+
+    assert.equal(ctx.permissionSessionMap.get('perm-sdk-b'), 'sess-b')
   })
 })

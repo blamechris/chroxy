@@ -833,7 +833,17 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               // keeps the settings-handler subscription guard symmetric
               // across the reconnect path. The bare Map.set fallback covers
               // unit-test fixtures that construct the handler directly.
-              if (typeof registerPermissionRoute === 'function') {
+              //
+              // #8328: a FILTERED call (a session replay) must not re-register a
+              // route that already exists. `registerPermissionRoute` re-subscribes
+              // EVERY eligible client on each call but seeds the #5704 refcount
+              // only on the first registration, so a client that deliberately
+              // unsubscribed after dispatch would be silently re-subscribed with
+              // no refcount, then treated as an explicit subscription and never
+              // torn down. The unfiltered connect-time call keeps its behaviour.
+              if (onlySessionId && permissionSessionMap.has(requestId)) {
+                // route already registered at dispatch/connect — leave it alone
+              } else if (typeof registerPermissionRoute === 'function') {
                 registerPermissionRoute(requestId, sessionId)
               } else {
                 permissionSessionMap.set(requestId, sessionId)
