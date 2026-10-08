@@ -1,4 +1,4 @@
-import { realpath, lstat, readlink, stat } from 'fs/promises'
+import { realpath, lstat, readlink } from 'fs/promises'
 import { resolve, dirname, basename, join, isAbsolute } from 'path'
 import { resolveTargetComponentwiseAsync, COMPONENTWISE_MAX_SYMLINKS } from '../utils/componentwise-resolver.js'
 import { isPathWithin } from '../utils/path-containment.js'
@@ -230,34 +230,49 @@ export async function isUnresolvablePathWithin(absPath, rootReal) {
  * #7284 — did `absPath` fail ENOENT only because a component above it is a
  * regular file (a path THROUGH a file, `afile.txt/subdir`)?
  *
- * POSIX reports ENOTDIR for that; Windows reports ENOENT from `realpath`,
- * `readdir` and `lstat` alike, so a handler keyed on `err.code === 'ENOTDIR'`
- * answered "Directory not found" for a path whose parent exists and is a file.
- * A handler that has just seen ENOENT on a path it has ALREADY contained asks
- * this to tell the two apart. It walks up to the deepest ancestor `stat()` can
- * see and answers whether that ancestor is not a directory.
+ * Windows reports ENOENT from `realpath`, `readdir` and `lstat` for that, where
+ * POSIX reports ENOTDIR, so a handler keyed on `err.code === 'ENOTDIR'` answered
+ * "Directory not found" for a path whose parent exists and is a file. A handler
+ * that has just seen ENOENT on a path it has ALREADY contained asks this.
  *
- * FOR CHOOSING AN ERROR MESSAGE ONLY, like {@link isUnresolvablePathWithin}.
- * It never probes above `rootReal`: an ancestor outside the boundary is not
- * the caller's to describe, so the walk stops at `rootReal` and an unknown
- * root (`null`) answers `false`. Any error it cannot
- * get past (EACCES, a cycle, the depth ceiling) answers `false`, leaving the
- * caller's ENOENT message as it was. On POSIX the ENOENT it is asked about is
- * a real "missing", so the answer is `false` there and nothing changes.
+ * WIN32 ONLY. On every other platform `readdir` already says ENOTDIR, so this
+ * answers `false` having touched nothing: the caller's ENOENT stands, byte for
+ * byte, and no extra probe exists to be abused.
+ *
+ * FOR CHOOSING AN ERROR MESSAGE ONLY, and written so that it cannot become an
+ * existence oracle for anything outside `rootReal`. The containment check that
+ * ran before the failed `readdir` is on the path STRING; by the time this runs
+ * a component may have been swapped for a symlink or junction, so a following
+ * `stat()` could be answering about a target outside the boundary. Hence:
+ *   - the walk uses `lstat`, never `stat`, and only on a path lexically inside
+ *     `rootReal`;
+ *   - a visited component that is a symlink, junction or reparse point declines
+ *     the whole answer (`false`: the old message stands);
+ *   - the ancestor it would classify must also `realpath` to somewhere inside
+ *     `rootReal`, which covers symlinked components ABOVE it that the walk
+ *     never visited.
+ * Anything it cannot establish (EACCES, a cycle, the depth ceiling, `null`
+ * root) declines. The cost of declining is only the old, less specific text.
  *
  * @param {string} absPath - Absolute, already-contained path that failed ENOENT
  * @param {string|null} rootReal - The handler's boundary, already a real path
+ * @param {{ platform?: string, lstat?: Function, realpath?: Function }} [deps] -
+ *   Test seam: platform and fs. Defaults to the live process and `fs/promises`.
  * @returns {Promise<boolean>}
  */
-export async function notADirectoryError(absPath, rootReal) {
+export async function notADirectoryError(absPath, rootReal, deps = {}) {
+  const platform = deps.platform ?? process.platform
+  if (platform !== 'win32') return false
   if (!rootReal || !isAbsolute(absPath)) return false
+  const doLstat = deps.lstat ?? lstat
+  const doRealpath = deps.realpath ?? realpath
   try {
     let cursor = dirname(absPath)
     for (let i = 0; i < 256 && cursor !== dirname(cursor); i++) {
       if (!isPathWithin(cursor, rootReal)) return false
       let st
       try {
-        st = await stat(cursor)
+        st = await doLstat(cursor)
       } catch (err) {
         if (err.code === 'ENOENT' || err.code === 'ENOTDIR') {
           cursor = dirname(cursor)
@@ -265,7 +280,9 @@ export async function notADirectoryError(absPath, rootReal) {
         }
         return false
       }
-      return !st.isDirectory()
+      if (st.isSymbolicLink()) return false
+      if (st.isDirectory()) return false
+      return isPathWithin(await doRealpath(cursor), rootReal)
     }
   } catch {
     return false
@@ -275,18 +292,19 @@ export async function notADirectoryError(absPath, rootReal) {
 
 /**
  * #7284 — the error a listing handler should treat `err` as. `err` itself,
- * except an ENOENT for a path through a file, which becomes an ENOTDIR (the
- * code POSIX gives it) so the handler's existing ENOTDIR message is taken on
- * every platform. See {@link notADirectoryError}.
+ * except (on win32 only) an ENOENT for a path through a file, which becomes an
+ * ENOTDIR (the code POSIX gives it) so the handler's existing ENOTDIR message
+ * is taken on every platform. See {@link notADirectoryError}.
  *
  * @param {NodeJS.ErrnoException} err - The failure from the directory read
  * @param {string} absPath - The contained path that was read
  * @param {string|null} rootReal - The handler's boundary, already a real path
+ * @param {object} [deps] - See {@link notADirectoryError}
  * @returns {Promise<NodeJS.ErrnoException>}
  */
-export async function withPosixNotADirectory(err, absPath, rootReal) {
+export async function withPosixNotADirectory(err, absPath, rootReal, deps) {
   if (err?.code !== 'ENOENT') return err
-  if (!(await notADirectoryError(absPath, rootReal))) return err
+  if (!(await notADirectoryError(absPath, rootReal, deps))) return err
   return Object.assign(new Error(`ENOTDIR: not a directory, scandir '${absPath}'`), { code: 'ENOTDIR', path: absPath })
 }
 
