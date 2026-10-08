@@ -146,6 +146,21 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () =
     assert.deepEqual(legacyResolved, [{ requestId: 'perm-5', decision: 'allow' }])
   })
 
+  it('reports `mapped` so a caller can tell the request\'s own session from the dispatch fallback (#8359)', () => {
+    // UNMAPPED + a dispatch fallback: sessionId is filled from the fallback, mapped is false.
+    const unmapped = build({ map: [], legacy: ['perm-um'] })
+    const ru = unmapped.resolver.resolve('perm-um', 'allow', null, { clientId: 'c1', dispatchFallbackSessionId: 's9' })
+    assert.equal(ru.via, 'legacy')
+    assert.equal(ru.sessionId, 's9')
+    assert.equal(ru.mapped, false, 'a fallback-filled sessionId is not the request\'s own mapping')
+    // MAPPED to a session with no in-process respondToPermission: legacy dispatch, mapped is true.
+    const mapped = build({ map: [['perm-m', OWNER]], legacy: ['perm-m'], ownerSession: {} })
+    const rm = mapped.resolver.resolve('perm-m', 'allow', null, { clientId: 'c1', dispatchFallbackSessionId: 's9' })
+    assert.equal(rm.via, 'legacy')
+    assert.equal(rm.sessionId, OWNER)
+    assert.equal(rm.mapped, true)
+  })
+
   it('a mapped SDK session whose request already expired → expired (map consumed)', () => {
     const owner = makeSdkSession({ pending: [] }) // respondToPermission returns false
     const { resolver, permissionSessionMap } = build({ map: [['perm-6', OWNER]], ownerSession: owner })

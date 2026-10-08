@@ -18,7 +18,10 @@
 //
 // ResolveResult (discriminated on `kind`):
 //   { kind: 'binding_mismatch', boundSessionId }            -> HTTP 403 / WS error  (map NOT consumed)
-//   { kind: 'resolved', via: 'sdk'|'legacy', sessionId }    -> HTTP 200 / WS ack    (map consumed)
+//   { kind: 'resolved', via: 'sdk'|'legacy', sessionId, mapped }  -> HTTP 200 / WS ack  (map consumed)
+//     `mapped` (#8359): true when `sessionId` came from the request's own mapping, false when it is
+//     only the WS dispatch fallback (or null). A caller deciding whether a frame may NAME the session
+//     reads this, never `sessionId`: the fallback fills `sessionId` for an unmapped prompt too.
 //   { kind: 'expired', sessionId }                          -> HTTP 410 / WS permission_expired
 //   { kind: 'not_found' }                                   -> HTTP 404 / WS permission_expired
 
@@ -165,7 +168,7 @@ export function createPermissionResolver({
             }
           }
           audit(clientId, originSessionId, requestId, decision, extra)
-          return { kind: 'resolved', via: 'sdk', sessionId: originSessionId }
+          return { kind: 'resolved', via: 'sdk', sessionId: originSessionId, mapped: mappedSessionId != null }
         }
         return { kind: 'expired', sessionId: originSessionId }
       }
@@ -182,7 +185,7 @@ export function createPermissionResolver({
       // Legacy (non-SDK) sessions have no PermissionManager/rule store, so
       // 'allowAlways' here is never durable — tool is the only enrichment.
       audit(clientId, originSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})
-      return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null }
+      return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null, mapped: mappedSessionId != null }
     }
 
     return { kind: 'not_found' }
