@@ -145,6 +145,18 @@ function terminalSubscriberFilter(sessionId) {
 function setupSessionForwarding(normalizer, ctx) {
   const { sessionManager, devPreview, checkpointManager, broadcast, broadcastToSession, defaultProvider = null } = ctx
 
+  // #8497: sessions whose turn a `result` ended in the CURRENT synchronous turn
+  // end. A provider that finishes a requested Stop with a `result` and then a
+  // `stopped` (claude-cli) emits both back to back in one call stack, so the
+  // `stopped` that follows must not announce idle a second time. Cleared on a
+  // microtask rather than on the next stream_start: a Stop pressed before the
+  // next turn produced any output forwards nothing in between, and a flag that
+  // outlived the tick would swallow that turn's idle (the stuck-busy bug this
+  // exists to fix). The failure mode of the tick scope is a repeated idle, which
+  // is idempotent on every client; the failure mode of a longer scope is a
+  // session that stays busy forever.
+  const idledByResultThisTick = new Set()
+
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     // #5313 (WP-1.3): this listener runs synchronously inside the
     // SessionManager EventEmitter's emit(). A throw here unwinds emit() and
@@ -256,6 +268,22 @@ function setupSessionForwarding(normalizer, ctx) {
       broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })
     } else if (event === 'result') {
       broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: data?.cost ?? null })
+      idledByResultThisTick.add(sessionId)
+      queueMicrotask(() => idledByResultThisTick.delete(sessionId))
+    }
+
+    // #8497: a requested Stop ends the turn with `stopped` and, on most
+    // providers (ACP, Codex app-server, the jsonl-subprocess family), NO
+    // `result`. Both clients leave busy on `agent_idle` / `session_activity`,
+    // which only a `result` produced, so those sessions stayed busy for good.
+    // Announcing idle here covers every provider at the one place they all meet
+    // the wire, and `stopped` stays the quiet confirmation: no `result` is
+    // minted, so no marker or chip can follow. Skipped when the same turn end
+    // already went idle through a `result`.
+    let announceIdle = false
+    if (event === 'stopped' && !idledByResultThisTick.has(sessionId)) {
+      announceIdle = true
+      broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: null })
     }
 
     // Dev server preview: scan tool_result events for localhost server patterns
@@ -267,6 +295,7 @@ function setupSessionForwarding(normalizer, ctx) {
       sessionId,
       mode: 'multi',
       getSessionEntry: () => sessionManager.getSession(sessionId),
+      announceIdle,
     }
     const result = normalizer.normalize(event, data, normCtx)
     if (!result) return

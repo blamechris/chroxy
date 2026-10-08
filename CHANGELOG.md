@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A session no longer stays busy after you press Stop (#8497).** On ACP,
+  Codex app-server and the other providers that end a stopped turn without a
+  result, the dashboard and the mobile app kept showing "Agent is working"
+  and a busy session. The server now takes the session out of busy when it
+  confirms the stop. The confirmation is still the same quiet "Session
+  stopped." notice, with no chip.
+
 - **A reply that was cut off, refused or stopped no longer looks finished (#7326).**
   - The `result` frame now carries an optional `turnOutcome` (`completed`,
     `truncated`, `refused`, `stopped`), mapped from each provider's own signal:
