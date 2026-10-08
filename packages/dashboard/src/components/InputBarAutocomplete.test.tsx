@@ -115,7 +115,7 @@ describe('@ file picker follows the caret (#8433)', () => {
     expect(draft('A')).toBe('see README.md and more')
     expect(box().selectionStart).toBe('see README.md'.length)
     expect(box().selectionEnd).toBe('see README.md'.length)
-    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(screen.queryByTestId('file-picker')).toBeNull()
   })
 
   it('caret inside a token: filters up to the caret and replaces the whole word', () => {
@@ -158,20 +158,31 @@ describe('@ file picker follows the caret (#8433)', () => {
     expect(box().selectionStart).toBe('open @pack and README.md'.length)
   })
 
+  it('an @ that does not start a token never opens the picker (me@x, a@RE)', () => {
+    render(<AppLikeParent initial={{}} />)
+    typeWithCaret('me@x', 4)
+    expect(screen.queryByTestId('file-picker')).toBeNull()
+    typeWithCaret('mail a@RE', 9)
+    expect(screen.queryByTestId('file-picker')).toBeNull()
+    // the same text after whitespace does open it
+    typeWithCaret('mail a @RE', 10)
+    expect(screen.getByTestId('file-picker')).toBeTruthy()
+  })
+
   it('closes when the caret moves out of the token without an edit', () => {
     render(<AppLikeParent initial={{}} />)
     typeWithCaret('@RE and more', 3)
-    expect(screen.getByRole('listbox')).toBeTruthy()
+    expect(screen.getByTestId('file-picker')).toBeTruthy()
     box().setSelectionRange(8, 8)
     fireEvent.select(box())
-    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(screen.queryByTestId('file-picker')).toBeNull()
   })
 
   it('closes when the caret is typed past whitespace out of the token', () => {
     render(<AppLikeParent initial={{}} />)
     typeWithCaret('@RE', 3)
-    expect(screen.getByRole('listbox')).toBeTruthy()
+    expect(screen.getByTestId('file-picker')).toBeTruthy()
     typeWithCaret('@RE ', 4)
-    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(screen.queryByTestId('file-picker')).toBeNull()
   })
 })
