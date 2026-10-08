@@ -269,6 +269,128 @@ export function createEmptyConnectionScope() {
  */
 
 /**
+ * #7588 — the ACTIVE-SESSION PANEL roster: the flat, per-active-session pulls
+ * (`permission_audit_result` #6772, `memory_stack_result` #6867 / #6996) and their
+ * request/error flags. The panel renders whichever session is active, so its
+ * contents are only true of THAT session on THAT daemon.
+ *
+ * The name is not `createEmptyActiveSessionPanels` (the issue's) on purpose: that
+ * spelling contains `ptyActive`, which `store.test.ts`'s "PTY dead code removal"
+ * source scan (#1759) forbids anywhere in `connection.ts`.
+ *
+ * ## Why it is its own roster
+ *
+ * Its lifetime is not `createEmptyConnectionScope()`'s ("this connection"): it
+ * also dies when the ACTIVE SESSION changes while the socket lives on. Seven
+ * literals were hand-copied across `switchSession`, the `session_list`
+ * active-removal death path and the `session_timeout` death path (plus the test's
+ * expected values), and #7546 was the copy that went missing: `switchSession`
+ * reset them, the death paths did not, and a dead session's memory stack and
+ * permission history rendered against whichever session became active next.
+ *
+ * It is spread or applied at exactly six sites: `switchSession` (one `set` ahead
+ * of both the cached and the uncached branch), the `session_list` active-removal
+ * death path, the `session_timeout` death path, `disconnect()`, `forgetSession`
+ * and `_resetSessionMemory`. A panel field added here is cleared at all six; one
+ * added anywhere else is not, and `store/reset-factories.test.ts` holds that line.
+ *
+ * It is NOT every path that changes the active session. `handleSessionSwitched`
+ * (`session_switched`), `auth_ok`'s non-reconnect branch (`activeSessionId: null`)
+ * and the `session_error` SESSION_NOT_FOUND write (`activeSessionId: null`) move
+ * the active session without it; they predate this factory and are tracked
+ * (#8488). `session_switched` in particular is not given the reset blindly: it
+ * also echoes the user's own switch, which `switchSession` has already reset, and
+ * an unconditional clear there could wipe a pull that was answered in between.
+ *
+ * `permissionAuditLoading` and `memoryStackLoading` ALSO belong to
+ * `createEmptyInFlightMarkers()` (the transport-drop clear, #8378), with the same
+ * value. The overlap is deliberate: dropping them from the markers would leave a
+ * spinner latched after a socket drop, and dropping them here would leave one
+ * latched across a session change (the in-flight pull belongs to the old
+ * session). `reset-factories.test.ts` pins that these two are the ONLY overlap and
+ * that the values agree.
+ *
+ * `lastMemoryStackRequestId` is deliberately NOT here. It is the correlation
+ * nonce `handleMemoryStackResult` uses to drop a superseded reply, and a `null`
+ * nonce APPLIES every reply, so nulling it on a session switch would let the
+ * previous session's in-flight reply land on the new one. It is connection-
+ * lifetime (`createEmptyConnectionReadings()`), not per-session.
+ *
+ * `primaryClientId` is not here either: its reset value differs per branch (the
+ * new session's cached owner, or `null`), so it is not a constant.
+ *
+ * A fresh object per call, like its siblings.
+ */
+export function createEmptySessionPanels() {
+  return {
+    // #6772: the permission-audit history is scoped to the active session
+    // (`queryPermissionAudit`). The loading + error flags reset with it so an
+    // in-flight pull for the old session cannot wedge the button.
+    permissionAudit: null,
+    permissionAuditLoading: false,
+    permissionAuditError: false,
+    // #6996: the merged CLAUDE.md stack is the active session's cwd. Without the
+    // reset `MemoryPanel`'s `entries === null` mount-guard never re-fires across
+    // a switch and the panel keeps showing the previous session's stack.
+    memoryStackEntries: null,
+    memoryStackFile: null,
+    memoryStackError: null,
+    memoryStackLoading: false,
+  } satisfies Partial<ConnectionState>;
+}
+
+/**
+ * #8411 — the CONNECTION-LIFETIME READINGS roster: the object-shaped, transient
+ * answers to requests made on ONE daemon's socket (the IDE navigation results,
+ * the permission-confirm dialog, the memory-read correlation nonce).
+ *
+ * ## Why it is its own roster
+ *
+ * These were cleared inline by `disconnect()` and by NEITHER full-reset site.
+ * `switchServer` / `connectLocal` run `disconnect()` only
+ * `if (connectionPhase !== 'disconnected')`, and a failed connect rests at
+ * exactly that phase with the previous server's values populated, so that switch
+ * reached `_resetSessionMemory()` alone and carried all of them across (#7559
+ * closed the same hole for the collection-shaped fields, via
+ * `createEmptyConnectionScope()`).
+ *
+ * It is not folded into `createEmptyConnectionScope()` because that roster is
+ * deliberately NOT spread by `forgetSession` (the taxonomy rewrite is #8207's),
+ * and these must die at `forgetSession` as well: the direct `connect()` to a
+ * different URL reaches it alone, and an open "find references" modal or a
+ * pending file-open from server A is just as wrong on server B. Spread by
+ * `disconnect()`, `forgetSession` and `_resetSessionMemory`.
+ *
+ * Per-field decisions, in one place:
+ * - `pendingPermissionConfirm`, `fileBrowserPendingOpen`, `symbolLocation`
+ *   (a one-shot jump with a nonce), `workspaceSymbols`, `codeSearchResults`,
+ *   `referencesResult`: replies to requests sent on the dropped socket.
+ * - `referencesSymbol` / `referencesOpen`: the modal that shows `referencesResult`;
+ *   clearing the result and leaving the modal open would render an empty "find
+ *   references" dialog for a symbol of the other daemon.
+ * - `lastMemoryStackRequestId`: a correlation nonce for a request on the dropped
+ *   socket. See `createEmptySessionPanels()` for why it is NOT per-session.
+ * - The `*Loading` siblings (`workspaceSymbolsLoading`, `codeSearchLoading`,
+ *   `referencesLoading`) already live in `createEmptyInFlightMarkers()` (#8378)
+ *   and are not repeated here.
+ *
+ * A fresh object per call, like its siblings.
+ */
+export function createEmptyConnectionReadings() {
+  return {
+    pendingPermissionConfirm: null,
+    fileBrowserPendingOpen: null,
+    workspaceSymbols: null,
+    symbolLocation: null,
+    codeSearchResults: null,
+    referencesResult: null,
+    referencesSymbol: '',
+    referencesOpen: false,
+    lastMemoryStackRequestId: null,
+  } satisfies Partial<ConnectionState>;
+}
+
+/**
  * #7579 — the DAEMON-SNAPSHOT roster: object-shaped state that is a reading of
  * ONE daemon, kept across a same-server Disconnect → Connect, and dropped the
  * moment the tab points at a different daemon.

@@ -60,7 +60,7 @@ import {
   armEnvironmentDestroyTimer,
   cancelAllEnvironmentDestroyTimers,
 } from './message-handler'
-import { createEmptySessionState } from './utils'
+import { createEmptySessionPanels, createEmptySessionState } from './utils'
 import {
   buildChatViewMessages,
   isLivePermissionPrompt,
@@ -5001,16 +5001,11 @@ describe('dashboard message-handler dispatch', () => {
   // That is the whole reason for the positive control below.
   // ---------------------------------------------------------------------------
   describe('active-session death resets the memory + permission panels (#7546)', () => {
-    // The exact reset values switchSession uses (connection.ts). No more, no less.
-    const EXPECTED_RESET: Record<string, unknown> = {
-      memoryStackEntries: null,
-      memoryStackFile: null,
-      memoryStackError: null,
-      memoryStackLoading: false,
-      permissionAudit: null,
-      permissionAuditLoading: false,
-      permissionAuditError: false,
-    }
+    // #7588 — the reset values switchSession uses, read from the ONE factory it and
+    // both death paths spread, rather than a fourth hand copy that could only drift.
+    // `reset-factories.test.ts` holds the independent statement of which fields the
+    // factory must contain and pins each site to it.
+    const EXPECTED_RESET: Record<string, unknown> = createEmptySessionPanels()
     const PANEL_FIELDS = Object.keys(EXPECTED_RESET)
 
     // A fully-dirtied panel: every field holds a non-reset value, so a clear that
@@ -5027,6 +5022,13 @@ describe('dashboard message-handler dispatch', () => {
         permissionAuditError: true,
       }
     }
+
+    it('control: the hand-written dirty fixture covers exactly the factory\'s fields', () => {
+      // `dirtyPanel` stays literal so each field gets a realistic stale value; this is
+      // what turns a field added to the factory but not here red, instead of silently
+      // unexercised.
+      expect(Object.keys(dirtyPanel()).sort()).toEqual([...PANEL_FIELDS].sort())
+    })
 
     function seedTwoSessions() {
       store = createMockStore(
