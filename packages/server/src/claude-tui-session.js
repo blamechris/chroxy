@@ -614,6 +614,10 @@ export class ClaudeTuiSession extends BaseSession {
     // after a `--resume`, still holds re-rendered history). 0 = "since construction"
     // until the first turn marks it.
     this._turnOutputStartBytes = 0
+    // #8441: true once a turn has begun on the CURRENT PTY. Before that, the tail
+    // is startup chrome plus whatever `claude --resume` re-rendered, so a limit
+    // banner in it is history, not why claude died. Reset for every spawn.
+    this._turnStartedOnThisPty = false
     // #4031 (review): _outputTail is ANSI-stripped for readability +
     // probe stability, so the hex-dump diagnostic sourced from it
     // could never surface the very escape/control bytes we wanted to
@@ -2370,7 +2374,12 @@ export class ClaudeTuiSession extends BaseSession {
         this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
       } else {
         this._logPtyDiagnostic(`Claude PTY exited (code=${codeStr}${this._ptyExitInfo?.signal ? ` signal=${this._ptyExitInfo.signal}` : ''})`)
-        this.emit('error', { message: PTY_EXITED_MESSAGE })
+        // #8441: since #8387 the tail is in the log, not the message, so a limit
+        // that ended claude would be invisible here. Only when a turn ran on this
+        // PTY: before one, the tail is re-rendered history (see
+        // `_turnStartedOnThisPty`). The generic sentence stays for everything else.
+        const limit = this._turnStartedOnThisPty ? classifyUsageLimit(this._outputSinceTurnStart()) : null
+        this.emit('error', limit ? this._usageLimitPayload(limit) : { message: PTY_EXITED_MESSAGE })
       }
     }
     // #5315 (WP-2.1) — an UNEXPECTED PTY death (we already returned above when
@@ -3269,9 +3278,7 @@ export class ClaudeTuiSession extends BaseSession {
     // scan (and a later _onPtyGone / stall scan) can't match a banner left over
     // from a prior process on a respawn. Constructor already empties these for
     // the first spawn; this covers every subsequent _respawnPty.
-    this._outputTail = ''
-    this._outputTailRaw = Buffer.alloc(0)
-    this._tailTruncated = false // #8401
+    this._resetOutputForSpawn()
     // #6601: re-evaluate output-quiescence readiness for THIS spawn — require
     // fresh output before trusting a quiet stretch, so a leftover _lastOutputMs
     // from the prior process can't read as "ready" the instant we respawn (#6604).
@@ -3906,6 +3913,20 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _markTurnOutputStart() {
     this._turnOutputStartBytes = this._totalOutputBytes
+    this._turnStartedOnThisPty = true // #8441
+  }
+
+  /**
+   * Empty the output tails for a fresh PTY (every spawn after the constructor's
+   * own initial state). #8441: also forgets that a turn ran, because
+   * `_turnOutputStartBytes` spans respawns and would otherwise point the
+   * turn-scoped scan at the whole new PTY's output, re-rendered history included.
+   */
+  _resetOutputForSpawn() {
+    this._outputTail = ''
+    this._outputTailRaw = Buffer.alloc(0)
+    this._tailTruncated = false // #8401
+    this._turnStartedOnThisPty = false // #8441
   }
 
   /**
@@ -4503,7 +4524,18 @@ export class ClaudeTuiSession extends BaseSession {
       // here as the stall, first-output and hard-timeout paths do: an auth failure
       // still gets its dedicated, actionable error. Not on a Stop the user asked
       // for. The scan reads only what THIS turn printed (#8223).
-      const authFail = !this._activeTurn?.aborted && this._scanTurnOutputForAuthFailure()
+      const stopped = !!this._activeTurn?.aborted
+      const authFail = !stopped && this._scanTurnOutputForAuthFailure()
+      // #8441: and a usage limit that ended claude (or the turn) says so. The poll
+      // loop leaves on `_ptyExited` before it reads the transcript, so
+      // `_detectTurnUsageLimit` reads the transcript first and then this turn's PTY
+      // output, as the stall handlers do. Not on a Stop, and an auth failure wins.
+      const limit = stopped || authFail ? null : this._detectTurnUsageLimit()
+      if (limit) {
+        const payload = this._usageLimitPayload(limit)
+        this._finishTurnError(payload.message, messageId, { code: payload.code })
+        return
+      }
       this._finishTurnError(
         authFail ? AUTH_REQUIRED_MESSAGE : message,
         messageId,
