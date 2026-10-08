@@ -775,6 +775,7 @@ export function Sidebar({
             <input
               type="text"
               placeholder="Filter..."
+              data-unsaved-ignore
               value={filter}
               onChange={e => onFilterChange(e.target.value)}
               className="sidebar-filter-input"

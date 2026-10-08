@@ -2932,12 +2932,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         console.warn(`[chroxy] Connection Failed: The server is still restarting. Try again later.`);
       },
       onAuthFailed: ({ reason }) => {
-        // The same end state the capped ladder reached (disconnected, saved
-        // connection cleared), but with the auth error rather than "Could not
-        // reach server", and after one probe instead of six.
+        // Stop and show the error, after one probe instead of six, but KEEP the saved
+        // connection (#8385). /health is unauthenticated, so a 401/403 is a proxy or
+        // an access gate that a sign-in or a config change on the user's side can
+        // lift — not proof the server is gone. The capped ladder's give-up still
+        // clears it, because six refusals in a row is the stronger signal.
         set({ connectionPhase: 'disconnected', connectionError: reason, reconnectRetryAt: null });
         console.warn(`[chroxy] Connection Failed: ${reason}`);
-        void get().clearSavedConnection();
       },
       onProbeGaveUp: () => {
         set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });

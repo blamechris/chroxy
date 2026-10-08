@@ -39,6 +39,25 @@ describe('ConversationSearch (#1077)', () => {
     vi.useRealTimers()
   })
 
+  it('a filled search box does not count as unsaved work (#8385)', async () => {
+    const { hasUnsavedWork } = await import('../utils/unsaved-work')
+    render(
+      <ConversationSearch
+        searchResults={[]}
+        searchLoading={false}
+        searchQuery=""
+        searchConversations={mockSearchConversations}
+        clearSearchResults={mockClearSearchResults}
+        onResumeSession={mockOnResumeSession}
+        onViewConversation={mockOnViewConversation}
+      />,
+    )
+    const input = screen.getByPlaceholderText('Search conversations...') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'auth' } })
+    expect(input.value).toBe('auth')
+    expect(hasUnsavedWork()).toBe(false)
+  })
+
   it('renders search input', () => {
     render(
       <ConversationSearch

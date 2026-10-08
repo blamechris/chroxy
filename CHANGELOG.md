@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no cap, retries back off to one every 30 seconds after a few minutes, and a 401 or 403
   from the daemon's address stops the retrying and shows the auth error.
 
+- **Dashboard follow-ups to the update-reconnect work (#8385).** Text left in a list
+  filter or a search box (the sidebar filter, conversation search, find-in-conversation)
+  no longer turns the automatic reload into the "Chroxy was updated" banner; a half-filled
+  form still does. A 401 or 403 from the daemon's address now keeps the saved connection
+  instead of clearing it, and the message says the server at that address refused the
+  connection and to check the address and token, since a proxy or access gate can cause it.
+
 ## [0.11.4] - 2026-10-07
 
 ### Fixed

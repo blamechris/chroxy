@@ -83,6 +83,7 @@ export function TranscriptSearchBar({
         className="transcript-search-input"
         data-testid="transcript-search-input"
         placeholder="Find in conversation"
+        data-unsaved-ignore
         aria-label="Find in conversation"
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}

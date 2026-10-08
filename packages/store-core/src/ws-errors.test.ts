@@ -79,14 +79,14 @@ describe('getHealthCheckErrorMessage', () => {
     expect(msg).toMatch(/not responding/i)
   })
 
-  it('returns token message for HTTP 4xx errors', () => {
-    const msg = getHealthCheckErrorMessage({ message: 'HTTP 403' })
-    expect(msg).toMatch(/token|rejected/i)
+  it('names the address as well as the token for HTTP 4xx errors (#8385)', () => {
+    expect(getHealthCheckErrorMessage({ message: 'HTTP 403' }))
+      .toBe('The server at this address refused the connection (HTTP 403) — check the address and token')
   })
 
-  it('returns token message for HTTP 401 (unauthorized)', () => {
-    const msg = getHealthCheckErrorMessage({ message: 'HTTP 401' })
-    expect(msg).toMatch(/token|rejected/i)
+  it('carries the status for HTTP 401 (unauthorized)', () => {
+    expect(getHealthCheckErrorMessage({ message: 'HTTP 401' }))
+      .toBe('The server at this address refused the connection (HTTP 401) — check the address and token')
   })
 
   it('returns server error message for HTTP 5xx errors', () => {
