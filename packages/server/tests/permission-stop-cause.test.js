@@ -20,6 +20,7 @@ import { join } from 'node:path'
 import { PermissionManager, wirePermissionManager } from '../src/permission-manager.js'
 import { BaseSession } from '../src/base-session.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
+import { SdkSession } from '../src/sdk-session.js'
 import { SessionManager } from '../src/session-manager.js'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
 import { sendHistoryEntry } from '../src/ws-history.js'
@@ -370,5 +371,92 @@ describe('ClaudeByokSession and the user Stop (#8430)', () => {
     await decided
     assert.deepEqual(reasons, ['aborted'])
     session.destroy()
+  })
+})
+
+/**
+ * #8430 -- end to end, in the order a LIVE claude-sdk Stop takes: the real
+ * SessionManager wiring over a real SdkSession, the `interrupt` message handler as
+ * the Stop entry point, and a query whose generator throws AbortError when
+ * interrupted. The SDK's abort never reaches the permission manager's listener
+ * first; the open prompt is drained by the turn's teardown. What the journal
+ * records, and what each kind of client is replayed, is asserted on the REAL
+ * history entry, not on the permission manager's own event.
+ */
+describe('a live claude-sdk Stop is journaled and replayed as stopped (#8430)', () => {
+  let mgr, session, ctx, client
+  beforeEach(() => {
+    mgr = new SessionManager({ skipPreflight: true, maxSessions: 3, stateFilePath: tmpState() })
+    session = new SdkSession({ cwd: '/tmp' })
+    session._processReady = true
+    mgr._sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+    mgr._wireSessionEvents('s1', session)
+    ctx = nsCtx({
+      sessionManager: {
+        getSession: (id) => mgr.getSession(id),
+        recordUserInterrupt: (id) => mgr.recordUserInterrupt(id),
+        getHistoryCount: () => 0,
+        listSessions: () => [],
+      },
+      send: mock.fn(),
+      broadcast: mock.fn(),
+      broadcastToSession: mock.fn(),
+      permissionSessionMap: new Map(),
+      questionSessionMap: new Map(),
+      pendingPermissions: new Map(),
+      clients: new Map(),
+    })
+    client = { id: 'c1', activeSessionId: 's1' }
+  })
+  afterEach(() => { session.destroy() })
+
+  // The prompt is raised, then the turn ends on `ending` -- with NO abort event
+  // reaching the prompt's signal, exactly as on the daemon.
+  async function run(ending, { stop }) {
+    let release
+    const gate = new Promise((r) => { release = r })
+    session._callQuery = () => {
+      const gen = (async function* () {
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_p', name: 'Bash', input: {} } } }
+        session._handlePermission('Bash', { command: 'ls' }, new AbortController().signal, undefined, 'toolu_p')
+        await gate
+        throw ending
+      })()
+      gen.interrupt = async () => { release() }
+      return gen
+    }
+    session.on('error', () => {})
+    const turn = session.sendMessage('go')
+    await new Promise((r) => setTimeout(r, 15))
+    if (stop) await handleSessionMessage({}, client, { type: 'interrupt' }, ctx)
+    else release()
+    await turn
+    return mgr.getHistory('s1').filter((e) => e.type === 'permission_outcome')
+  }
+  const abortError = () => Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+  const replay = (entry, caps) => {
+    const frames = []
+    sendHistoryEntry((_ws, payload) => frames.push(payload), {}, 's1', entry, { clientCapabilities: new Set(caps) })
+    return frames[0].outcome
+  }
+
+  it('the journal records stopped, and a client that can label it is replayed stopped', async () => {
+    const outcomes = await run(abortError(), { stop: true })
+    assert.equal(outcomes.length, 1)
+    assert.equal(outcomes[0].outcome, 'stopped')
+    assert.equal(replay(outcomes[0], ['permission_outcome_stopped_v1']), 'stopped')
+  })
+
+  it('a client that did not advertise the capability is replayed expired (the stored entry stays stopped)', async () => {
+    const outcomes = await run(abortError(), { stop: true })
+    assert.equal(replay(outcomes[0], ['voice_input']), 'expired')
+    assert.equal(outcomes[0].outcome, 'stopped')
+  })
+
+  it('CONTROL: the same teardown with no Stop (a turn failure) is journaled expired', async () => {
+    const outcomes = await run(new Error('boom'), { stop: false })
+    assert.equal(outcomes.length, 1)
+    assert.equal(outcomes[0].outcome, 'expired')
+    assert.equal(replay(outcomes[0], ['permission_outcome_stopped_v1']), 'expired')
   })
 })
