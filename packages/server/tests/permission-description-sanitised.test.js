@@ -48,6 +48,18 @@ const KEYED_SECRET = { requests: { [HOOK_URL]: { method: 'POST' } } }
 // The same, with the token starting near character 190 of the serialization, so
 // a 200-char clip would leave its first characters behind.
 const KEYED_STRADDLING = { requests: { [`${'a'.repeat(123)} ${HOOK_URL}`]: { method: 'POST' } } }
+// Property names whose credential the sanitizer's own 10K clip would cut below
+// the pattern minimum (a long key first, then the credential key).
+const KEYED_OVERSIZE = { [`sk-proj-${'a'.repeat(10154)}`]: 1, [HOOK_URL]: 2 }
+// A control character before the credential: JSON-escaped, `\n` leaves a word
+// character in front of `https`, which defeats a pattern that needs a boundary.
+const ESCAPED_PREFIXES = ['\n', '\t', '\r', '\u0000'].flatMap((c) => [
+  { [`${c}${HOOK_URL}`]: 1 },
+  { note: `${c}${HOOK_URL}` },
+])
+// A credential inside a long string VALUE, starting about 85 characters in.
+const VALUE_STRADDLING = { note: `${'a'.repeat(85)} ${HOOK_URL}` }
+const KEY_CASES = [KEYED_SECRET, KEYED_STRADDLING, KEYED_OVERSIZE, VALUE_STRADDLING, ...ESCAPED_PREFIXES]
 const OWN_TRUNCATED_FIELD = { _truncated: true, id: 'resource-123' }
 
 function assertNoHookToken(text, label) {
@@ -100,13 +112,24 @@ describe('describeToolInput (#8384)', () => {
     assert.ok(text.length <= 200)
   })
 
+  it('masks a credential in a property name whatever the input is or how it is escaped', () => {
+    for (const input of KEY_CASES) assertNoHookToken(describeToolInput(input), JSON.stringify(input).slice(0, 40))
+  })
+
+  it('masks a credential key that follows a key the sanitizer would clip through', () => {
+    const text = describeToolInput(KEYED_OVERSIZE)
+    assertNoHookToken(text, 'description')
+    assert.ok(text.length <= 200)
+  })
+
   it('describes an input that carries its own _truncated field by its content', () => {
     assert.ok(describeToolInput(OWN_TRUNCATED_FIELD, 'Tool').includes('resource-123'))
   })
 
-  it('describes an oversized input by the start of its sanitized serialization', () => {
-    const text = describeToolInput({ a: 'x'.repeat(20000), password: SECRET })
-    assert.ok(text.startsWith('{"a":"xxx'), text.slice(0, 40))
+  it('describes an oversized input from its own redacted entries', () => {
+    const text = describeToolInput({ a: 'x'.repeat(20000), b: 'short', password: SECRET })
+    assert.ok(text.startsWith('{"a":"[omitted]"'), text.slice(0, 40))
+    assert.ok(text.includes('"b":"short"'), text)
     assertNoSecret(text, 'description')
   })
 
@@ -152,7 +175,7 @@ describe('in-process producer: PermissionManager.handlePermission (claude-sdk, c
   }
 
   it('masks a credential in a property name, even where a clip would split it', () => {
-    for (const input of [KEYED_SECRET, KEYED_STRADDLING]) {
+    for (const input of KEY_CASES) {
       const { payload } = raiseOn(pm, 'CustomTool', input)
       assertNoHookToken(payload.description, 'description')
     }
@@ -223,10 +246,12 @@ describe('BYOK producer: ClaudeByokSession (#8384, #8397)', () => {
   })
 
   it('masks a credential in a property name', () => {
-    let payload
-    session.once('permission_request', (d) => { payload = d })
-    session._permissions.handlePermission('CustomTool', KEYED_STRADDLING, null, 'approve')
-    assertNoHookToken(payload.description, 'description')
+    for (const input of KEY_CASES) {
+      let payload
+      session.once('permission_request', (d) => { payload = d })
+      session._permissions.handlePermission('CustomTool', input, null, 'approve')
+      assertNoHookToken(payload.description, 'description')
+    }
   })
 
   it('drops recordDescription from a child prompt relayed upward', () => {
@@ -347,7 +372,7 @@ describe('hook-routed producer: ws-permissions.js (claude-cli, claude-tui) (#838
 
   for (const owner of ['cli', 'tui']) {
     it(`${owner}: masks a credential in a property name, even where a clip would split it`, async () => {
-      for (const input of [KEYED_SECRET, KEYED_STRADDLING]) {
+      for (const input of KEY_CASES) {
         const { message } = await raise(owner, input)
         assertNoHookToken(message.description, 'description')
       }

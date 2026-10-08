@@ -111,11 +111,6 @@ const MAX_INPUT_CHARS = 10_240 // ~10K chars max for broadcast (JS string length
 // stack. Real tool inputs are shallow; anything past this is summarized away.
 const MAX_SANITIZE_DEPTH = 8
 
-// The wrappers `sanitizeToolInput` itself returns for an oversized input. Held
-// by identity (not by a field on the object), so an input's own `_truncated`
-// key is never mistaken for one and the wrapper's wire shape is unchanged.
-const TRUNCATION_WRAPPERS = new WeakSet()
-
 /**
  * Recursively redact a single tool_input value of any shape (#6029). Applies the
  * KEY-NAME pass to object keys and the VALUE-SHAPE pass (`redactValue`) to every
@@ -194,11 +189,7 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
   // Final size check on the whole object
   const serialized = JSON.stringify(result)
   if (serialized.length > maxChars) {
-    const wrapper = { _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' }
-    // Remember which object is the sanitizer's own wrapper: an input may carry a
-    // `_truncated` field of its own, and the wrapper's shape is persisted.
-    TRUNCATION_WRAPPERS.add(wrapper)
-    return wrapper
+    return { _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' }
   }
   return result
 }
@@ -279,6 +270,59 @@ export function describeByNamedField(rawInput) {
   return named ? redactBounded(String(named)).slice(0, RECORD_DESCRIPTION_MAX) : undefined
 }
 
+// Bounds on the walk `describeToolInput` makes. Only 200 characters of its
+// result are ever shown, so it needs only the first few entries of an input.
+const DESCRIBE_MAX_ENTRIES = 64
+const OMITTED_TEXT = '[omitted]'
+
+/**
+ * A redacted, bounded copy of a tool input for DESCRIBING it (never for
+ * broadcast: `sanitizeToolInput` owns that). Every property name and every
+ * string value is redacted as the RAW string, before it is JSON-escaped (an
+ * escaped `\n` hides a credential from patterns that expect a word boundary) and
+ * before it is shortened (a clip can leave a prefix no pattern recognises). A
+ * string longer than the scan bound is read by `redactBounded`, which drops what
+ * it cannot scan rather than keeping an unscanned tail.
+ *
+ * @param {*} value
+ * @param {number} depth
+ * @param {WeakSet} seen
+ * @param {{ left: number }} budget entries still to be read, shared across the walk
+ * @returns {*}
+ */
+function redactedForDescription(value, depth, seen, budget) {
+  if (typeof value === 'string') {
+    const text = redactBounded(value)
+    return value && !text ? OMITTED_TEXT : text.slice(0, SERIALIZED_DESCRIPTION_MAX)
+  }
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value !== 'object') return String(value)
+  if (depth >= MAX_SANITIZE_DEPTH) return '[REDACTED:depth]'
+  if (seen.has(value)) return '[REDACTED:cycle]'
+  seen.add(value)
+  let out
+  if (Array.isArray(value)) {
+    out = []
+    for (const item of value) {
+      if (budget.left <= 0) break
+      budget.left -= 1
+      out.push(redactedForDescription(item, depth + 1, seen, budget))
+    }
+  } else {
+    out = Object.create(null)
+    for (const [key, child] of Object.entries(value)) {
+      if (budget.left <= 0) break
+      budget.left -= 1
+      const name = redactedForDescription(key, depth + 1, seen, budget)
+      out[name] = SENSITIVE_KEY_NAMES.has(key.toLowerCase())
+        ? '[REDACTED]'
+        : redactedForDescription(child, depth + 1, seen, budget)
+    }
+  }
+  seen.delete(value)
+  return out
+}
+
 /**
  * The human-readable `description` of a permission prompt, derived from its
  * tool input. The ONE place a producer (in-process sdk/byok/codex, hook-routed
@@ -286,15 +330,16 @@ export function describeByNamedField(rawInput) {
  * once.
  *
  * - An input with an identifying field (command, file_path, ...) is described by
- *   that field, run through the same value redaction `sanitizeToolInput` applies
- *   to every string.
- * - Anything else is described by the SANITIZED input, serialized: a value under
- *   a sensitive key reads `[REDACTED]` exactly as it does in the prompt's
- *   `input`. The raw input is never serialized, because the value redactor does
- *   not recognise a secret behind a quoted JSON key.
+ *   that field, redacted over the bounded scan.
+ * - Anything else is described by a structurally redacted copy of the input
+ *   (`redactedForDescription`), serialized: a value under a sensitive key reads
+ *   `[REDACTED]` exactly as it does in the prompt's `input`, and secrets in
+ *   property names are redacted too. The raw input is never serialized, and the
+ *   sanitizer's size-clipped summary is never used: this walk reads the input
+ *   itself, redacting each string whole before it is shortened.
  *
- * Redaction always runs before any clipping. The result is not clipped to the
- * length a client shows; the producer does that.
+ * The serialization is scanned once more (defence in depth), then clipped to the
+ * length a client shows.
  *
  * @param {unknown} rawInput
  * @param {string} [emptyFallback] returned when the input has nothing to describe
@@ -307,12 +352,8 @@ export function describeToolInput(rawInput, emptyFallback = '') {
     if (text) return text
   }
   if (rawInput && typeof rawInput === 'object' && Object.keys(rawInput).length > 0) {
-    const sanitized = sanitizeToolInput(rawInput)
-    const text = TRUNCATION_WRAPPERS.has(sanitized) ? String(sanitized.summary ?? '') : JSON.stringify(sanitized)
-    // `sanitizeToolInput` masks values, but copies property NAMES verbatim, so
-    // the whole serialization is scanned again -- unclipped, it is already
-    // bounded by the sanitizer's own cap -- and only then clipped.
-    return redactValue(text).slice(0, SERIALIZED_DESCRIPTION_MAX)
+    const walked = redactedForDescription(rawInput, 0, new WeakSet(), { left: DESCRIBE_MAX_ENTRIES })
+    return redactValue(JSON.stringify(walked)).slice(0, SERIALIZED_DESCRIPTION_MAX)
   }
   return emptyFallback
 }
