@@ -8,7 +8,8 @@
  *   - Escape key
  *   - window blur
  *   - scroll on any ancestor (the menu's anchor coordinates would otherwise
- *     drift away from the target row)
+ *     drift away from the target row) — except a scroll inside the menu
+ *     itself, which scrolls when taller than the viewport (#8483)
  *
  * Item visibility is driven by `items[]` — the parent decides which actions
  * are capability-gated (e.g. "Open in Finder" only when running under Tauri,
@@ -71,7 +72,12 @@ export function SessionContextMenu({
   // real menu size until after layout, but a conservative estimate keeps the
   // first paint inside bounds — the effect below corrects it once mounted.
   const estimatedWidth = 200
-  const estimatedHeight = Math.max(32, visibleItems.length * 44 + 8)
+  // #8483: the stylesheet bounds the menu to (viewport - margin) and lets it
+  // scroll, so the estimate is bounded the same way.
+  const estimatedHeight = Math.min(
+    Math.max(32, visibleItems.length * 44 + 8),
+    Math.max(32, window.innerHeight - 16),
+  )
   const initialLeft = Math.min(x, Math.max(0, window.innerWidth - estimatedWidth))
   const initialTop = Math.min(y, Math.max(0, window.innerHeight - estimatedHeight))
 
@@ -103,7 +109,13 @@ export function SessionContextMenu({
       }
     }
     const onBlur = () => onDismiss()
-    const onScroll = () => onDismiss()
+    // #8483: the menu itself scrolls when it is taller than the viewport, and
+    // that scroll event reaches this capture listener too — only a scroll
+    // outside the menu moves the anchor row away from it.
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Node && menuRef.current?.contains(e.target)) return
+      onDismiss()
+    }
     document.addEventListener('mousedown', onMouseDown, true)
     document.addEventListener('keydown', onKey)
     window.addEventListener('blur', onBlur)
@@ -148,6 +160,9 @@ export function SessionContextMenu({
     if (target && document.activeElement !== target) {
       target.focus()
     }
+    // #8483: keep the focused row visible when the menu scrolls. Guarded
+    // because jsdom does not implement scrollIntoView.
+    target?.scrollIntoView?.({ block: 'nearest' })
   }, [focusedIndex])
 
   if (visibleItems.length === 0) return null
