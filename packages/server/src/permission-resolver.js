@@ -18,7 +18,10 @@
 //
 // ResolveResult (discriminated on `kind`):
 //   { kind: 'binding_mismatch', boundSessionId }            -> HTTP 403 / WS error  (map NOT consumed)
-//   { kind: 'resolved', via: 'sdk'|'legacy', sessionId }    -> HTTP 200 / WS ack    (map consumed)
+//   { kind: 'resolved', via: 'sdk'|'legacy', sessionId, mapped }  -> HTTP 200 / WS ack  (map consumed)
+//     `mapped` (#8359): true when `sessionId` came from the request's own mapping, false when it is
+//     only the WS dispatch fallback (or null). A caller deciding whether a frame may NAME the session
+//     reads this, never `sessionId`: the fallback fills `sessionId` for an unmapped prompt too.
 //   { kind: 'expired', sessionId }                          -> HTTP 410 / WS permission_expired
 //   { kind: 'not_found' }                                   -> HTTP 404 / WS permission_expired
 
@@ -128,7 +131,21 @@ export function createPermissionResolver({
     // signal (the method's contract) — see the #5373 PR note on the WS
     // _pendingPermissions pre-check this reconciles.
     const sm = getSessionManager?.()
-    if (originSessionId && sm) {
+    // #8359: an UNMAPPED request that sits in the legacy store is an HTTP-held
+    // prompt (POST /permission whose bearer matched no session hook secret). The
+    // WS dispatch fallback names the answering client's active session, and if that
+    // is an in-process session its respondToPermission returns false for an id it
+    // never issued -- so the SDK attempt below ended in `expired` and the held
+    // request was never released. Go straight to the legacy store instead.
+    //
+    // Order when an id is in BOTH stores (not expected: legacy ids are minted by
+    // the HTTP handler, SDK ids by a PermissionManager): a MAPPED request always
+    // tries its session first (invariant F), so only an unmapped one is routed here;
+    // unmapped + legacy-pending resolves legacy because the mapping is the only
+    // evidence an in-process session owns it, and its absence plus a held HTTP
+    // request is evidence of the opposite. The binding check above is untouched.
+    const legacyHeldUnmapped = mappedSessionId == null && pendingPermissions.has(requestId)
+    if (originSessionId && sm && !legacyHeldUnmapped) {
       const entry = sm.getSession(originSessionId)
       if (entry && typeof entry.session.respondToPermission === 'function') {
         // #6830 — read the tool name BEFORE respondToPermission runs: it deletes
@@ -165,7 +182,7 @@ export function createPermissionResolver({
             }
           }
           audit(clientId, originSessionId, requestId, decision, extra)
-          return { kind: 'resolved', via: 'sdk', sessionId: originSessionId }
+          return { kind: 'resolved', via: 'sdk', sessionId: originSessionId, mapped: mappedSessionId != null }
         }
         return { kind: 'expired', sessionId: originSessionId }
       }
@@ -181,8 +198,15 @@ export function createPermissionResolver({
       resolveLegacyPermission(requestId, decision)
       // Legacy (non-SDK) sessions have no PermissionManager/rule store, so
       // 'allowAlways' here is never durable — tool is the only enrichment.
-      audit(clientId, originSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})
-      return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null }
+      // #8359: attributed to the request's own mapping, never to the dispatch
+      // fallback. For an unmapped request `originSessionId` is only the session the
+      // answering client happens to be on, a hint for where to dispatch; it says
+      // nothing about whom the request belongs to. Matches the HTTP path, which
+      // passes no fallback and so records null. (The SDK branch above keeps
+      // `originSessionId`: there that session's own `respondToPermission` accepted
+      // the id, which is what makes it the owner.)
+      audit(clientId, mappedSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})
+      return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null, mapped: mappedSessionId != null }
     }
 
     return { kind: 'not_found' }

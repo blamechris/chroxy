@@ -812,9 +812,13 @@ describe('settings-handlers', () => {
         assert.equal(resolvedFrames(ctx).length, 0, 'would be a duplicate of the pipeline broadcast')
       })
 
-      it('an UNMAPPED legacy prompt answered by a client with an active session is not stamped with that session', () => {
-        // The resolver falls back to client.activeSessionId for dispatch only; the
-        // prompt never belonged to that session, so the frame must not claim it.
+      // #8359: the resolver's dispatch fallback fills `result.sessionId` with the
+      // answering client's activeSessionId for an UNMAPPED prompt. The handler used
+      // to key the tagless branch on `!result.sessionId`, so a client WITH an active
+      // session answering an unmapped prompt broadcast nothing and every other
+      // client kept a stale card. POST /permission-response sends the tagless
+      // unbound-only frame in the same case; the WS path now matches.
+      it('an UNMAPPED legacy prompt answered by a client with an active session broadcasts one tagless unbound-only frame (#8359)', () => {
         const ctx = makeCtx(new Map())
         ctx.permissions.pendingPermissions = new Map([['req-unmapped', { data: {} }]])
         ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
@@ -823,7 +827,94 @@ describe('settings-handlers', () => {
         settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-unmapped', decision: 'allow' }, ctx)
 
         assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1)
-        assert.equal(resolvedFrames(ctx).length, 0)
+        const frames = resolvedFrames(ctx)
+        assert.equal(frames.length, 1, 'exactly one permission_resolved')
+        // Not stamped with s9: the prompt never belonged to the answerer's session.
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-unmapped', decision: 'allow' })
+        // Unbound-only: a session-bound client has no session to match a tagless frame (#8342).
+        const filter = frames[0][1]
+        assert.equal(typeof filter, 'function')
+        assert.equal(filter(client), true, 'the resolver itself still prunes (#6590)')
+        assert.equal(filter({ id: 'other-unbound', boundSessionId: null }), true)
+        assert.equal(filter({ id: 'guest', boundSessionId: 's9' }), false)
+      })
+
+      it('an UNMAPPED HTTP-held prompt answered by a client whose active session is in-process still resolves and broadcasts (#8359)', () => {
+        // The live shape: POST /permission with the primary token (no session hook
+        // secret) is unmapped; the answering client sits on a claude-sdk session,
+        // whose respondToPermission returns false for an id it never issued. The
+        // dispatch used to try that session, return `expired`, and leave the HTTP
+        // request held forever with no frame to anyone.
+        const sdkSession = createMockSession()
+        sdkSession.respondToPermission = createSpy(() => false)
+        const ctx = makeCtx(new Map([['s9', { session: sdkSession, name: 'S', cwd: '/tmp' }]]))
+        ctx.permissions.pendingPermissions = new Map([['req-held', { data: { tool: 'Bash' } }]])
+        ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's9' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-held', decision: 'allow' }, ctx)
+
+        assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1, 'the held HTTP request is released')
+        assert.equal(sdkSession.respondToPermission.callCount, 0)
+        const frames = resolvedFrames(ctx)
+        assert.equal(frames.length, 1, 'exactly one permission_resolved')
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-held', decision: 'allow' })
+        assert.equal(frames[0][1]({ id: 'guest', boundSessionId: 's9' }), false)
+        assert.equal(frames[0][1]({ id: 'other', boundSessionId: null }), true)
+        assert.equal(ctx.transport.send.calls.filter((a) => a[1]?.type === 'permission_expired').length, 0)
+      })
+
+      // #8359: the audit entry follows the request's own mapping. The session the
+      // answering client happens to be viewing is only where the answer was
+      // dispatched from, so it is not the entry's session.
+      describe('audit attribution', () => {
+        const auditFor = (ctx, sessionId) => {
+          const querier = makeClient({ id: 'querier', boundSessionId: sessionId })
+          settingsHandlers.query_permission_audit(makeWs(), querier, { sessionId }, ctx)
+          return ctx._sent.filter((m) => m.type === 'permission_audit_result').flatMap((m) => m.entries)
+        }
+
+        it('an unmapped legacy prompt answered by a client viewing S is audited without a session', () => {
+          const ctx = makeCtx(new Map())
+          ctx.permissions.permissionAudit = new PermissionAuditLog()
+          ctx.permissions.pendingPermissions = new Map([['req-un', { data: { tool: 'Bash' } }]])
+          ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+          const client = makeClient({ id: 'client-resolver', activeSessionId: 'S' })
+
+          settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-un', decision: 'allow' }, ctx)
+
+          const decisions = ctx.permissions.permissionAudit.query({ type: 'decision' })
+          assert.equal(decisions.length, 1)
+          assert.equal(decisions[0].requestId, 'req-un')
+          assert.equal(decisions[0].sessionId, null, 'not S')
+          // And the per-session audit query for S does not return it.
+          assert.deepEqual(auditFor(ctx, 'S').filter((e) => e.requestId === 'req-un'), [])
+        })
+
+        it('a MAPPED prompt is audited under its mapped session and that session\'s query returns it', () => {
+          const ctx = hookFixture()
+          ctx.permissions.permissionAudit = new PermissionAuditLog()
+          const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+
+          settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-hook', decision: 'allow' }, ctx)
+
+          const decisions = ctx.permissions.permissionAudit.query({ type: 'decision' })
+          assert.equal(decisions.length, 1)
+          assert.equal(decisions[0].sessionId, 's1')
+          assert.equal(auditFor(ctx, 's1').filter((e) => e.requestId === 'req-hook').length, 1)
+        })
+      })
+
+      it('a MAPPED legacy prompt is still session-tagged and unfiltered, not tagless (#8359 control)', () => {
+        const ctx = hookFixture()
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-hook', decision: 'allow' }, ctx)
+
+        const frames = resolvedFrames(ctx)
+        assert.equal(frames.length, 1)
+        assert.equal(frames[0][0].sessionId, 's1')
+        assert.equal(frames[0][1], undefined)
       })
     })
 
