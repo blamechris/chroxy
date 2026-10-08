@@ -32,6 +32,17 @@ export const SAFETY_FLAG_KEYS = ['dangerouslyDisableSandbox', 'run_in_background
 /** Bound on a flag's key and on a scalar string value; longer strings render as a placeholder. */
 const FLAG_KEY_MAX_CHARS = 80
 const FLAG_VALUE_MAX_CHARS = 200
+/**
+ * A safety flag's string value on the compact (clamped) group line: short enough
+ * that BOTH safety lines and the command fit in two lines. The record detail keeps
+ * the full bounded value.
+ */
+const COMPACT_SAFETY_VALUE_MAX_CHARS = 60
+
+export interface PermissionInputOptions {
+  /** The two-line group line: cut a long safety-flag string so every safety line stays on one line. */
+  compact?: boolean
+}
 
 export interface PermissionInputParts {
   /** `key: value` lines for the safety-relevant flags, in `SAFETY_FLAG_KEYS` order. Rendered first, set apart. */
@@ -40,9 +51,25 @@ export interface PermissionInputParts {
   body: string
 }
 
-/** One line only: a newline in a key or value must not be able to forge a second flag line. */
+/**
+ * Characters that render as nothing or reorder what is around them: bidi
+ * embeddings/overrides/isolates and marks (U+202A-202E, U+2066-2069, U+200E/200F,
+ * U+061C), zero-width and invisible-operator characters (U+200B-200D, U+2060-2064,
+ * U+180E, U+FEFF), C1 controls (U+0080-009F) and tag characters (U+E0000-E007F).
+ * An RLO before "eslaf" would DISPLAY as "false".
+ */
+const HIDDEN_CHARS = /[\u0080-\u009f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/gu
+
+/** U+FFFD, the visible stand-in for a hidden character: its presence stays on the audit line. */
+const HIDDEN_MARKER = '\ufffd'
+
+/**
+ * One visible line: a newline in a key or value must not be able to forge a second
+ * flag line (C0, DEL, U+2028/2029 become a space), and a hidden or bidi character
+ * is replaced by a visible marker (U+FFFD) instead of silently disguising the text.
+ */
 function oneLine(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ')
+  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(HIDDEN_CHARS, HIDDEN_MARKER)
 }
 
 /**
@@ -51,31 +78,33 @@ function oneLine(text: string): string {
  * object, an array or a long string is NOT dropped: it still separates the group
  * key, so it renders as a bounded placeholder.
  */
-function flagValue(value: unknown): string | null {
+function flagValue(value: unknown, maxChars = FLAG_VALUE_MAX_CHARS): string | null {
   if (value === true) return 'true'
   if (typeof value === 'number') return Number.isFinite(value) ? String(value) : null
   if (typeof value === 'string') {
     if (value.length === 0) return null
     // Quoted (JSON-escaped) so a value can never read as a bare `key: value` flag of its own.
-    return value.length <= FLAG_VALUE_MAX_CHARS ? JSON.stringify(oneLine(value)) : '<string>'
+    if (value.length > FLAG_VALUE_MAX_CHARS) return '<string>'
+    const line = oneLine(value)
+    return JSON.stringify(line.length > maxChars ? `${line.slice(0, maxChars)}…` : line)
   }
   if (Array.isArray(value)) return '<array>'
   if (value !== null && typeof value === 'object') return '<object>'
   return null
 }
 
-function flagLine(key: string, value: unknown): string | null {
-  const shown = flagValue(value)
+function flagLine(key: string, value: unknown, maxChars?: number): string | null {
+  const shown = flagValue(value, maxChars)
   if (shown === null) return null
   return `${oneLine(key.length > FLAG_KEY_MAX_CHARS ? `${key.slice(0, FLAG_KEY_MAX_CHARS)}…` : key)}: ${shown}`
 }
 
 const SAFETY_KEY_SET = new Set<string>(SAFETY_FLAG_KEYS)
 
-function safetyFlagLines(toolInput: Record<string, unknown>): string[] {
+function safetyFlagLines(toolInput: Record<string, unknown>, compact: boolean): string[] {
   const lines: string[] = []
   for (const key of SAFETY_FLAG_KEYS) {
-    const line = flagLine(key, toolInput[key])
+    const line = flagLine(key, toolInput[key], compact ? COMPACT_SAFETY_VALUE_MAX_CHARS : undefined)
     if (line !== null) lines.push(line)
   }
   return lines
@@ -114,9 +143,10 @@ function truncate(text: string, max: number): string {
 export function permissionInputParts(
   tool: string | undefined | null,
   toolInput: Record<string, unknown> | null | undefined,
+  options: PermissionInputOptions = {},
 ): PermissionInputParts | null {
   if (!toolInput || shouldSuppressRawToolInput(tool)) return null
-  const safetyFlags = safetyFlagLines(toolInput)
+  const safetyFlags = safetyFlagLines(toolInput, options.compact === true)
   const command = toolInput.command
   let body: string
   if (typeof command === 'string' && command.length > 0) {

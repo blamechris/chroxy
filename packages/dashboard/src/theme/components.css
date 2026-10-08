@@ -4717,6 +4717,7 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .perm-record-input {
+  unicode-bidi: isolate;
   margin: 4px 0 0;
   padding: 6px 8px;
   max-height: 200px;
@@ -4752,6 +4753,7 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .perm-group-input {
+  unicode-bidi: isolate;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -4769,6 +4771,7 @@ button.sidebar-token-view-session-row:hover {
      "key: value" text, so it never rests on color alone. */
   color: var(--warning-fg);
   font-weight: 700;
+  unicode-bidi: isolate;
 }
 
 .perm-group-chevron {

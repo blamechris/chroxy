@@ -115,6 +115,14 @@ describe('PermissionRecordGroup (#6894)', () => {
     expect(screen.getByTestId('perm-input-flag')).toHaveTextContent('dangerouslyDisableSandbox: <object>')
   })
 
+  it('a long safety-flag string is cut on the group line so both safety flags fit; the record detail keeps it (#8505)', () => {
+    const long = 'v'.repeat(150)
+    renderGroup({ toolInput: { command: 'ls', run_in_background: long, dangerouslyDisableSandbox: long } })
+    const flags = within(screen.getByTestId('perm-group-input')).getAllByTestId('perm-input-flag')
+    expect(flags).toHaveLength(2)
+    for (const f of flags) expect(f.textContent!.length).toBeLessThan(110)
+  })
+
   it('a plain command has no flag element', () => {
     renderGroup({ toolInput: { command: 'ls' } })
     expect(screen.queryByTestId('perm-input-flag')).not.toBeInTheDocument()
@@ -125,6 +133,12 @@ describe('PermissionRecordGroup (#6894)', () => {
     const rule = (/\.perm-input-flag\s*\{([^}]*)\}/.exec(css)?.[1] ?? '').replace(/\/\*[\s\S]*?\*\//g, '')
     expect(rule).toMatch(/color:\s*var\(--[a-z-]+\)/)
     expect(rule).toMatch(/font-weight:\s*(bold|[6-9]00)/)
+    // defence in depth against bidi reordering of the flag text
+    expect(rule).toMatch(/unicode-bidi:\s*isolate/)
+    for (const sel of ['perm-group-input', 'perm-record-input']) {
+      const box = (new RegExp(`\\.${sel}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? '')
+      expect(box, sel).toMatch(/unicode-bidi:\s*isolate/)
+    }
     expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/)
   })
 

@@ -135,6 +135,50 @@ describe('permissionInputText', () => {
       )
     })
 
+    it.each([
+      ['U+2028 line separator', '\u2028'],
+      ['U+2029 paragraph separator', '\u2029'],
+    ])('%s in a flag value becomes a space, never a second line', (_name, ch) => {
+      expect(permissionInputText('Bash', { command: 'ls', note: `a${ch}b` })).toBe('ls\nnote: "a b"')
+    })
+
+    it.each([
+      ['RLO U+202E', '\u202e'], ['LRE U+202A', '\u202a'], ['PDF U+202C', '\u202c'],
+      ['LRI U+2066', '\u2066'], ['PDI U+2069', '\u2069'],
+      ['LRM U+200E', '\u200e'], ['RLM U+200F', '\u200f'], ['ALM U+061C', '\u061c'],
+      ['ZWSP U+200B', '\u200b'], ['ZWNJ U+200C', '\u200c'], ['ZWJ U+200D', '\u200d'],
+      ['WJ U+2060', '\u2060'], ['BOM U+FEFF', '\ufeff'],
+      ['C1 U+0085', '\u0085'], ['C1 U+009F', '\u009f'],
+      ['invisible times U+2062', '\u2062'], ['invisible separator U+2064', '\u2064'],
+      ['Mongolian vowel separator U+180E', '\u180e'], ['tag character U+E0041', '\u{e0041}'],
+    ])('%s in a flag value is replaced by a visible marker, so it cannot disguise the text', (_name, ch) => {
+      // an RLO would make "eslaf" DISPLAY as "false"
+      const text = permissionInputText('Bash', { command: 'ls', dangerouslyDisableSandbox: `${ch}eslaf` })!
+      expect(text.split('\n')[0]).toBe('dangerouslyDisableSandbox: "\ufffdeslaf"')
+    })
+
+    it('hidden and bidi characters in a flag KEY are replaced too', () => {
+      expect(permissionInputText('Bash', { command: 'ls', 'a\u202eb': 1 })).toBe('ls\na\ufffdb: 1')
+    })
+
+    it('a long string on a safety flag is cut for the compact group line, so both safety lines fit; the full record keeps the bounded value', () => {
+      const long = 'v'.repeat(150)
+      const input = { command: 'ls', run_in_background: long, dangerouslyDisableSandbox: long }
+      const compact = permissionInputParts('Bash', input, { compact: true })!
+      expect(compact.safetyFlags).toHaveLength(2)
+      for (const line of compact.safetyFlags) {
+        expect(line.length).toBeLessThan(110)
+        expect(line).toMatch(/…"$/)
+      }
+      const full = permissionInputParts('Bash', input)!
+      expect(full.safetyFlags[0]).toBe(`dangerouslyDisableSandbox: "${long}"`)
+      // compact does not touch a short value or a non-safety flag
+      expect(permissionInputParts('Bash', { command: 'ls', dangerouslyDisableSandbox: true, note: long }, { compact: true })).toEqual({
+        safetyFlags: ['dangerouslyDisableSandbox: true'],
+        body: `ls\nnote: "${long}"`,
+      })
+    })
+
     it('hoists the safety flag for a tool with no command too, and the JSON still carries it', () => {
       const text = permissionInputText('Custom', { dangerouslyDisableSandbox: true, payload: 'p' })!
       expect(text.split('\n')[0]).toBe('dangerouslyDisableSandbox: true')

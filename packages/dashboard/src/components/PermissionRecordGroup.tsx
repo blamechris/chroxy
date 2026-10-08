@@ -56,7 +56,7 @@ export function PermissionRecordGroup({
 }: PermissionRecordGroupProps) {
   const { initial, persist } = useInitialExpanded(`perm-group:${groupId}`, false)
   const [expanded, setExpanded] = useState(initial)
-  const inputParts = permissionInputParts(tool, toolInput)
+  const inputParts = permissionInputParts(tool, toolInput, { compact: true })
   const membersId = `perm-group-members-${groupId}`
   return (
     <div
