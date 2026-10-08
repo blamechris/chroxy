@@ -11,12 +11,14 @@ pub mod qrcode;
 pub mod server;
 pub mod settings;
 pub mod setup;
+pub mod tray_state;
 #[cfg(target_os = "macos")]
 pub mod speech;
 pub mod window;
 
 use server::{ServerManager, ServerStatus};
 use settings::DesktopSettings;
+use tray_state::{is_chroxy_health, MenuState, PortState, TrayPlan};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -56,6 +58,8 @@ static IS_FIRST_RUN: AtomicBool = AtomicBool::new(false);
 
 /// Menu item handles so we can enable/disable them from anywhere.
 struct TrayMenuItems {
+    /// Disabled, read-only status line at the top of the server group (#8267).
+    status: MenuItem<tauri::Wry>,
     start: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
     restart: MenuItem<tauri::Wry>,
@@ -109,7 +113,7 @@ fn get_server_info(
 
 #[tauri::command]
 fn start_server(app: tauri::AppHandle) {
-    handle_start(&app);
+    handle_start_checked(&app);
 }
 
 /// #5281 ③ — browse the LAN for chroxy daemons advertising `_chroxy._tcp` and
@@ -157,18 +161,8 @@ fn get_startup_logs(
 }
 
 #[tauri::command]
-fn get_qr_code_svg(
-    state: tauri::State<'_, Mutex<ServerManager>>,
-) -> Result<serde_json::Value, String> {
-    let mgr = lock_or_recover(&state);
-    if !mgr.is_running() {
-        return Err("Server is not running".to_string());
-    }
-    drop(mgr);
-
-    let (hostname, token) = qrcode::get_connection_info()?;
-    let url = qrcode::build_connection_url(&hostname, &token);
-    let svg = qrcode::generate_qr_svg(&url)?;
+fn get_qr_code_svg(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let (svg, url) = qr_for_reachable_daemon(&app)?;
     Ok(serde_json::json!({
         "svg": svg,
         "url": url,
@@ -942,6 +936,7 @@ pub fn run() {
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
+        .manage(Mutex::new(TrayRuntime::default()))
         .manage({
             #[cfg(target_os = "macos")]
             { Mutex::new(speech::SpeechState::new()) }
@@ -980,7 +975,7 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 {
                     match action {
-                        "shell-start" => { handle_start(app); return; }
+                        "shell-start" => { handle_start_checked(app); return; }
                         "shell-stop" => { handle_stop(app); return; }
                         "shell-restart" => { handle_restart(app); return; }
                         "shell-open-in-finder" => {
@@ -1471,6 +1466,11 @@ pub fn run() {
                 }
             }
 
+            // #8267 — keep the tray in step with an externally managed daemon on
+            // the configured port. Started after the launch-time start/adopt
+            // decision so the first probe sees the app-managed server's state.
+            spawn_port_watcher(app.handle().clone());
+
             // Silent update check on launch
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1557,6 +1557,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // forward from the tray, regardless of server state or any global hotkey.
     let show_window_item =
         MenuItemBuilder::with_id("show_window", "Show Chroxy").build(app)?;
+    let status = MenuItemBuilder::with_id("server_status", "Server stopped")
+        .enabled(false)
+        .build(app)?;
     let start = MenuItemBuilder::with_id("start", "Start Server").build(app)?;
     let stop = MenuItemBuilder::with_id("stop", "Stop Server")
         .enabled(false)
@@ -1615,7 +1618,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let menu = MenuBuilder::new(app)
         .items(&[&show_window_item])
         .separator()
-        .items(&[&start, &stop, &restart])
+        .items(&[&status, &start, &stop, &restart])
         .separator()
         .items(&[&dashboard, &console, &show_qr])
         .separator()
@@ -1629,6 +1632,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     app.manage(Mutex::new(TrayMenuItems {
+        status: status.clone(),
         start: start.clone(),
         stop: stop.clone(),
         restart: restart.clone(),
@@ -1661,7 +1665,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let id = event.id().as_ref();
             match id {
                 "show_window" => window::show_window(app),
-                "start" => handle_start(app),
+                "start" => handle_start_checked(app),
                 "stop" => handle_stop(app),
                 "restart" => handle_restart(app),
                 "dashboard" => handle_dashboard(app),
@@ -1693,42 +1697,73 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Tray menu states that determine which items are enabled.
-enum MenuState {
-    Running,
-    Stopped,
-    Restarting,
+/// What the tray last rendered from: the app-managed server's state plus what the
+/// configured port looked like when it was not ours (#8267). Kept together so any
+/// change to either re-derives the whole menu from [`tray_state::tray_plan`]
+/// instead of patching individual items.
+#[derive(Clone, Copy)]
+struct TrayRuntime {
+    menu: MenuState,
+    port: PortState,
+}
+
+impl Default for TrayRuntime {
+    fn default() -> Self {
+        Self { menu: MenuState::Stopped, port: PortState::Free }
+    }
+}
+
+fn tray_runtime(app: &tauri::AppHandle) -> TrayRuntime {
+    app.try_state::<Mutex<TrayRuntime>>()
+        .map(|s| *lock_or_recover(&s))
+        .unwrap_or_default()
+}
+
+/// The port of a verified chroxy daemon this app did not start, if there is one.
+/// Only meaningful while the app-managed server is not itself active.
+fn external_daemon_port(app: &tauri::AppHandle) -> Option<u16> {
+    match tray_runtime(app) {
+        TrayRuntime { menu: MenuState::Stopped, port: PortState::Chroxy(p) } => Some(p),
+        _ => None,
+    }
 }
 
 fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
+    let Some(runtime) = app.try_state::<Mutex<TrayRuntime>>() else {
+        return;
+    };
+    // Held across the apply so two threads cannot interleave a stale plan.
+    let mut rt = lock_or_recover(&runtime);
+    rt.menu = state;
+    apply_tray_plan(app, &tray_state::tray_plan(rt.menu, rt.port));
+}
+
+/// Record what is listening on the configured port and re-render the menu.
+fn update_port_state(app: &tauri::AppHandle, port: PortState) {
+    let Some(runtime) = app.try_state::<Mutex<TrayRuntime>>() else {
+        return;
+    };
+    let mut rt = lock_or_recover(&runtime);
+    if rt.port == port {
+        return;
+    }
+    rt.port = port;
+    apply_tray_plan(app, &tray_state::tray_plan(rt.menu, rt.port));
+}
+
+fn apply_tray_plan(app: &tauri::AppHandle, plan: &TrayPlan) {
     if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
         let items = lock_or_recover(&items);
-        match state {
-            MenuState::Running => {
-                let _ = items.start.set_enabled(false);
-                let _ = items.stop.set_enabled(true);
-                let _ = items.restart.set_enabled(true);
-                let _ = items.dashboard.set_enabled(true);
-                let _ = items.console.set_enabled(true);
-                let _ = items.show_qr.set_enabled(true);
-            }
-            MenuState::Stopped => {
-                let _ = items.start.set_enabled(true);
-                let _ = items.stop.set_enabled(false);
-                let _ = items.restart.set_enabled(false);
-                let _ = items.dashboard.set_enabled(false);
-                let _ = items.console.set_enabled(false);
-                let _ = items.show_qr.set_enabled(false);
-            }
-            MenuState::Restarting => {
-                let _ = items.start.set_enabled(false);
-                let _ = items.stop.set_enabled(false);
-                let _ = items.restart.set_enabled(false);
-                let _ = items.dashboard.set_enabled(false);
-                let _ = items.console.set_enabled(false);
-                let _ = items.show_qr.set_enabled(false);
-            }
-        }
+        let _ = items.status.set_text(&plan.status_label);
+        let _ = items.start.set_text(&plan.start_label);
+        let _ = items.stop.set_text(&plan.stop_label);
+        let _ = items.restart.set_text(&plan.restart_label);
+        let _ = items.start.set_enabled(plan.start);
+        let _ = items.stop.set_enabled(plan.stop);
+        let _ = items.restart.set_enabled(plan.restart);
+        let _ = items.dashboard.set_enabled(plan.dashboard);
+        let _ = items.console.set_enabled(plan.console);
+        let _ = items.show_qr.set_enabled(plan.show_qr);
     }
     // #4942 — mirror the gating on the macOS app-menu Shell submenu so
     // the menu-bar entries reflect server status the same way the tray
@@ -1737,27 +1772,44 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
     #[cfg(target_os = "macos")]
     if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
         let items = lock_or_recover(&items);
-        match state {
-            MenuState::Running => {
-                let _ = items.shell_start.set_enabled(false);
-                let _ = items.shell_stop.set_enabled(true);
-                let _ = items.shell_restart.set_enabled(true);
-                let _ = items.shell_open_console.set_enabled(true);
-            }
-            MenuState::Stopped => {
-                let _ = items.shell_start.set_enabled(true);
-                let _ = items.shell_stop.set_enabled(false);
-                let _ = items.shell_restart.set_enabled(false);
-                let _ = items.shell_open_console.set_enabled(false);
-            }
-            MenuState::Restarting => {
-                let _ = items.shell_start.set_enabled(false);
-                let _ = items.shell_stop.set_enabled(false);
-                let _ = items.shell_restart.set_enabled(false);
-                let _ = items.shell_open_console.set_enabled(false);
-            }
-        }
+        let _ = items.shell_start.set_enabled(plan.start);
+        let _ = items.shell_stop.set_enabled(plan.stop);
+        let _ = items.shell_restart.set_enabled(plan.restart);
+        let _ = items.shell_open_console.set_enabled(plan.console);
     }
+}
+
+/// How often the tray re-checks what holds the configured port.
+const PORT_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Watch the configured port for an externally managed daemon (#8267) and keep
+/// the tray in step with it, so it follows a daemon that goes away or comes back.
+/// While the app's own server is active the port is ours and nothing is probed.
+fn spawn_port_watcher(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut pending_downgrade = false;
+        loop {
+            let owned = {
+                let state = app.state::<Mutex<ServerManager>>();
+                let status = lock_or_recover(&state).status();
+                matches!(
+                    status,
+                    ServerStatus::Running | ServerStatus::Starting | ServerStatus::Restarting
+                )
+            };
+            let current = tray_runtime(&app).port;
+            let (next, pending) = if owned {
+                (PortState::Free, false)
+            } else {
+                let observed =
+                    tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500));
+                tray_state::next_external(current, observed, pending_downgrade)
+            };
+            pending_downgrade = pending;
+            update_port_state(&app, next);
+            std::thread::sleep(PORT_WATCH_INTERVAL);
+        }
+    });
 }
 
 /// Whether `monitor_startup` is watching an initial start or a restart.
@@ -1855,21 +1907,6 @@ fn startup_action(auto_start: bool, has_token: bool) -> StartupAction {
 /// #6015 — probe an already-running external server's `/health` on loopback.
 /// A few short attempts (so a just-launched daemon is still adopted); returns
 /// true on the first 200. Mirrors the embedded-server health check (ureq, 2s).
-/// #6015 (security, #6123 review) — confirm a 200 `/health` body is actually a
-/// chroxy server before adopting it. We navigate WITH the access token, so a
-/// 200 from an UNRELATED local service squatting on the port must NOT receive
-/// the token. chroxy's health JSON is `{"status":"ok","mode":...,"version":...}`
-/// — require `status:"ok"` AND a string `version` as the fingerprint. Pure, so
-/// unit-tested.
-fn is_chroxy_health(body: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(body)
-        .map(|v| {
-            v.get("status").and_then(|s| s.as_str()) == Some("ok")
-                && v.get("version").and_then(|x| x.as_str()).is_some()
-        })
-        .unwrap_or(false)
-}
-
 fn probe_external_health(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{}/health", port);
     for attempt in 0..10 {
@@ -1904,6 +1941,71 @@ fn probe_external_health(port: u16) -> bool {
         }
     }
     false
+}
+
+/// User-initiated Start (tray, app menu, dashboard command). Refuses to start a
+/// second server on a port something else already holds (#8267): `start()` runs
+/// `kill_port_holder`, which would SIGTERM an externally managed daemon (launchd
+/// would respawn it, killing its live sessions). The launch-time auto-start keeps
+/// calling [`handle_start`] directly, so it still reclaims a stale orphan.
+///
+/// Probes live rather than trusting the watcher's last sample, which can be up to
+/// one interval old; runs off the caller's thread because the probe can block.
+fn handle_start_checked(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let active = {
+            let state = app.state::<Mutex<ServerManager>>();
+            let status = lock_or_recover(&state).status();
+            matches!(
+                status,
+                ServerStatus::Running | ServerStatus::Starting | ServerStatus::Restarting
+            )
+        };
+        if !active {
+            let held = tray_state::probe_port(
+                config::load_port(),
+                std::time::Duration::from_millis(1500),
+            );
+            if held.is_occupied() {
+                update_port_state(&app, held);
+                let msg = match held {
+                    PortState::Chroxy(p) => format!(
+                        "A chroxy daemon already serves port {}. Use Open Dashboard to connect to it.",
+                        p
+                    ),
+                    PortState::Foreign(p) => format!(
+                        "Port {} is in use by another program. Free it, or change the port in config.json.",
+                        p
+                    ),
+                    PortState::Free => unreachable!("is_occupied() excluded Free"),
+                };
+                send_notification(&app, "Cannot Start Server", &msg);
+                return;
+            }
+        }
+        handle_start(&app);
+    });
+}
+
+/// Stop/Restart act on the server this app spawned. Against an externally
+/// managed daemon they must do nothing: `restart()` would kill the port holder,
+/// and `stop()` would tell a window that is connected to a live daemon that the
+/// server stopped. Returns true (after telling the user) when the action is
+/// refused.
+fn refuse_for_external_daemon(app: &tauri::AppHandle, action: &str) -> bool {
+    let Some(port) = external_daemon_port(app) else {
+        return false;
+    };
+    send_notification(
+        app,
+        "Managed Externally",
+        &format!(
+            "The daemon on port {} was not started by this app, so it cannot be {}. Manage it with its service manager.",
+            port, action
+        ),
+    );
+    true
 }
 
 fn handle_start(app: &tauri::AppHandle) {
@@ -2078,6 +2180,9 @@ fn handle_start(app: &tauri::AppHandle) {
 }
 
 fn handle_stop(app: &tauri::AppHandle) {
+    if refuse_for_external_daemon(app, "stopped") {
+        return;
+    }
     let state = app.state::<Mutex<ServerManager>>();
     let mut mgr = lock_or_recover(&state);
     mgr.stop();
@@ -2087,6 +2192,9 @@ fn handle_stop(app: &tauri::AppHandle) {
 }
 
 fn handle_restart(app: &tauri::AppHandle) {
+    if refuse_for_external_daemon(app, "restarted") {
+        return;
+    }
     let state = app.state::<Mutex<ServerManager>>();
     let result = {
         let mut mgr = lock_or_recover(&state);
@@ -2112,45 +2220,75 @@ fn handle_restart(app: &tauri::AppHandle) {
     }
 }
 
+/// The daemon the tray's Open/QR/Console items act on: the app-managed server
+/// when it is running, else a verified externally managed chroxy daemon (#8267).
+/// Returns `(port, token, external)`.
+fn reachable_daemon(app: &tauri::AppHandle) -> Option<(u16, Option<String>, bool)> {
+    {
+        let state = app.state::<Mutex<ServerManager>>();
+        let mgr = lock_or_recover(&state);
+        if mgr.is_running() {
+            return Some((mgr.port(), mgr.token(), false));
+        }
+    }
+    // `ServerManager` only loads config on start(), so an external daemon's
+    // port and token come from the same source the launch-time adopt path uses.
+    external_daemon_port(app).map(|port| (port, config::load_config().api_token, true))
+}
+
 fn handle_dashboard(app: &tauri::AppHandle) {
-    let state = app.state::<Mutex<ServerManager>>();
-    let mgr = lock_or_recover(&state);
-    if !mgr.is_running() {
+    let Some((port, token, external)) = reachable_daemon(app) else {
         // Emit server_stopped so the loading page shows "Server stopped"
         // instead of the default "Starting server..." text
         window::emit_server_stopped(app);
         return;
+    };
+    if external && token.is_none() {
+        window::emit_server_error(
+            app,
+            &format!(
+                "A daemon is running on port {} but no access token was found. Pair the app or paste a token in Settings.",
+                port
+            ),
+        );
+        return;
     }
-
-    let port = mgr.port();
-    let token = mgr.token();
-    drop(mgr);
 
     window::emit_server_ready(app, port, token.as_deref());
 }
 
 fn handle_console(app: &tauri::AppHandle) {
-    let state = app.state::<Mutex<ServerManager>>();
-    let mgr = lock_or_recover(&state);
-    if !mgr.is_running() {
-        // No-op when server isn't running — avoid emitting server_stopped
+    if reachable_daemon(app).is_none() {
+        // No-op when no server is reachable — avoid emitting server_stopped
         // which would incorrectly disconnect the dashboard during Starting/Restarting
         return;
     }
-    drop(mgr);
 
     window::emit_navigate_console(app);
 }
 
+/// Build `(svg, connection_url)` for the daemon the tray is acting on. An
+/// externally managed daemon is asked directly (`GET /connect`) rather than
+/// assumed to share this app's on-disk state.
+fn qr_for_reachable_daemon(app: &tauri::AppHandle) -> Result<(String, String), String> {
+    // Verify a server is reachable (menu state can become stale on crash/restart)
+    let (port, token, external) =
+        reachable_daemon(app).ok_or_else(|| "Server is not running".to_string())?;
+    let (hostname, token) = if external {
+        qrcode::get_external_connection_info(port, token.as_deref())?
+    } else {
+        qrcode::get_connection_info()?
+    };
+    let url = qrcode::build_connection_url(&hostname, &token);
+    let svg = qrcode::generate_qr_svg(&url)?;
+    Ok((svg, url))
+}
+
 fn handle_show_qr(app: &tauri::AppHandle) {
-    // Verify server is running (menu state can become stale on crash/restart)
-    let state = app.state::<Mutex<ServerManager>>();
-    let mgr = lock_or_recover(&state);
-    if !mgr.is_running() {
+    if reachable_daemon(app).is_none() {
         send_notification(app, "QR Code", "Server is not running");
         return;
     }
-    drop(mgr);
 
     // If popup already exists, focus it
     if let Some(win) = app.get_webview_window("qr_popup") {
@@ -2158,17 +2296,8 @@ fn handle_show_qr(app: &tauri::AppHandle) {
         return;
     }
 
-    let (hostname, token) = match qrcode::get_connection_info() {
-        Ok(info) => info,
-        Err(e) => {
-            send_notification(app, "QR Code Error", &e);
-            return;
-        }
-    };
-
-    let url = qrcode::build_connection_url(&hostname, &token);
-    let svg = match qrcode::generate_qr_svg(&url) {
-        Ok(s) => s,
+    let (svg, url) = match qr_for_reachable_daemon(app) {
+        Ok(v) => v,
         Err(e) => {
             send_notification(app, "QR Code Error", &e);
             return;

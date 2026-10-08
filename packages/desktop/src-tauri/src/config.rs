@@ -165,23 +165,7 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Load and parse the daemon's `config.json`. Returns default config if file doesn't exist.
 /// Falls back to OS keychain for apiToken if not present in config file.
 pub fn load_config() -> ChroxyConfig {
-    let path = match config_path() {
-        Some(p) => p,
-        None => return ChroxyConfig::default(),
-    };
-
-    let contents = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return ChroxyConfig::default(),
-    };
-
-    let mut config: ChroxyConfig = match serde_json::from_str(&contents) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("[config] Failed to parse {}: {}", path.display(), e);
-            ChroxyConfig::default()
-        }
-    };
+    let mut config = load_config_file();
 
     // Fallback: if apiToken is missing from config file, check OS keychain.
     // The server migrates tokens from config.json to keychain on first run.
@@ -193,6 +177,38 @@ pub fn load_config() -> ChroxyConfig {
     }
 
     config
+}
+
+/// The configured daemon port, read from `config.json` only. Unlike
+/// [`load_config`] this never consults the OS keychain, so it is cheap and
+/// prompt-free enough for the tray's periodic port probe (#8267).
+pub fn load_port() -> u16 {
+    match load_config_file().port {
+        0 => default_port(),
+        p => p,
+    }
+}
+
+/// Parse `config.json` without the keychain fallback. Returns the default config
+/// if the file is missing or malformed.
+fn load_config_file() -> ChroxyConfig {
+    let path = match config_path() {
+        Some(p) => p,
+        None => return ChroxyConfig::default(),
+    };
+
+    let contents = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return ChroxyConfig::default(),
+    };
+
+    match serde_json::from_str(&contents) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("[config] Failed to parse {}: {}", path.display(), e);
+            ChroxyConfig::default()
+        }
+    }
 }
 
 /// Read the API token from the OS keychain.
