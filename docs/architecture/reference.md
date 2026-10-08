@@ -231,7 +231,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `auth_fail` | Authentication failed (timeout/invalid token) |
 | `auth_ok` | Authentication successful with server info |
 | `available_models` | List of models server accepts |
-| `available_permission_modes` | List of permission modes available |
+| `available_permission_modes` | List of permission modes for one provider (`provider` tags it; clients key rosters by provider) |
 | `budget_exceeded` | Cost budget exceeded — session paused |
 | `budget_resumed` | Previously paused session resumed after budget increase |
 | `budget_warning` | Cost approaching budget limit |

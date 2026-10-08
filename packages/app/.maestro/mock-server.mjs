@@ -1320,6 +1320,9 @@ function sendPostAuthBurst(ws, sendFn) {
   })
   sendFn(ws, {
     type: 'available_permission_modes',
+    // #8224: the roster is keyed by the provider it describes; the mock session
+    // above reports claude-sdk.
+    provider: 'claude-sdk',
     modes: [
       { id: 'approve', label: 'Approve' },
       { id: 'auto', label: 'Auto' },

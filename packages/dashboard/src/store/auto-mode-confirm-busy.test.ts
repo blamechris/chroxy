@@ -71,14 +71,14 @@ async function confirmCopyFor(opts: {
         },
       } as unknown as ProviderInfo,
     ],
-    availablePermissionModes: [{
+    permissionModesByProvider: { 'claude-cli': [{
       id: 'auto',
       label: 'Auto',
       supported: true,
       // Deliberately stale in the unknown-capability case: the active
       // provider capability, not a previous session's roster, owns the copy.
       enforcement: 'chroxy',
-    }],
+    }] },
     socket: null,
   })
 

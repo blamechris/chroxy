@@ -169,40 +169,22 @@ describe('session-handlers', () => {
       })
     })
 
-    it('re-sends provider-scoped permission modes on switch (codex → codex copy) (#6638)', () => {
+    // #6638/#7811/#8224 — the permission-mode roster (codex copy, daemon-default
+    // copy for a provider-less entry, provider tag) is produced by
+    // `sendSessionInfo`; its content is asserted in ws-history.test.js. What this
+    // handler owns is calling it AFTER `setActiveSession`, because the roster is
+    // sent only to the client's active session, and NOT sending a second copy.
+    it('delegates the permission-mode roster to sendSessionInfo, once, after the session is active (#8224)', () => {
       const ctx = makeCtx()
-      const session = createMockSession()
-      ctx._sessions.set('sess-cx', { session, name: 'Codex', cwd: '/tmp', provider: 'codex' })
-      sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-cx' }, ctx)
-      const modesMsg = ctx._sent.find(m => m.type === 'available_permission_modes')
-      assert.ok(modesMsg, 'available_permission_modes re-sent on switch')
-      const acceptEdits = modesMsg.modes.find(m => m.id === 'acceptEdits')
-      assert.match(acceptEdits.description, /apply_patch/, 'switch to codex → codex-tuned mode copy')
-    })
+      ctx._sessions.set('sess-cx', { session: createMockSession(), name: 'Codex', cwd: '/tmp', provider: 'codex' })
+      const ws = makeWs()
+      const client = makeClient()
+      sessionHandlers.switch_session(ws, client, { sessionId: 'sess-cx' }, ctx)
 
-    // #7811 — the permission-mode re-send derived its copy from
-    // `entry.provider` directly (`switchProvider`), unlike the `available_models`
-    // roster sent moments earlier in the SAME switch, which already falls
-    // through to the daemon default when the entry records no provider
-    // (#7759, "tags the daemon default when the entry reports no provider"
-    // above). A provider-less entry on a codex-default daemon therefore paired
-    // a codex `available_models` roster with the CLAUDE mode-picker copy.
-    // Assert on the DESCRIPTIONS, not the ids — every provider exposes the
-    // same `approve`/`acceptEdits`/… ids, so an id-only comparison passes
-    // whether or not the fix is applied and proves nothing.
-    it('re-sends the DAEMON DEFAULT permission-mode copy when the entry reports no provider (#7811)', () => {
-      const ctx = makeCtx({ config: { provider: 'codex' } })
-      ctx._sessions.set('sess-np', { session: createMockSession(), name: 'NoProvider', cwd: '/tmp' })
-
-      sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-np' }, ctx)
-
-      const modesMsg = ctx._sent.find(m => m.type === 'available_permission_modes')
-      assert.ok(modesMsg, 'available_permission_modes not sent on switch')
-      const acceptEdits = modesMsg.modes.find(m => m.id === 'acceptEdits')
-      assert.match(acceptEdits.description, /apply_patch/,
-        "a provider-less entry on a codex-default daemon must get codex's copy")
-      const auto = modesMsg.modes.find(m => m.id === 'auto')
-      assert.doesNotMatch(auto.description, /dangerously-skip-permissions/, 'must not fall back to the Claude copy')
+      assert.equal(client.activeSessionId, 'sess-cx', 'active session is set before the roster is requested')
+      assert.deepEqual(ctx.transport.sendSessionInfo.calls.map(([w, sid]) => [w, sid]), [[ws, 'sess-cx']])
+      assert.equal(ctx._sent.filter(m => m.type === 'available_permission_modes').length, 0,
+        'the handler itself no longer sends a duplicate roster')
     })
 
     it('sends session_error when session not found', () => {

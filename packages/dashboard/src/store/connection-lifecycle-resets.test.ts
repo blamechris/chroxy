@@ -174,7 +174,7 @@ const DISCONNECT_PRESERVES = ELEVEN.filter((f) => !CLEARED_BY_DISCONNECT.has(f))
  */
 const ROSTER_EXPECTED = [
   'permissionInputs', 'resolvedPermissions', 'serverCapabilities', 'availableProviders',
-  'modelsByProvider', 'availablePermissionModes', 'connectedClients', 'webTasks',
+  'modelsByProvider', 'permissionModesByProvider', 'connectedClients', 'webTasks',
   'slashCommands', 'filePickerFiles', 'mcpResources', 'customAgents', 'conversationHistory',
   'searchResults', 'checkpoints', 'environments',
   'infoNotifications',
@@ -207,7 +207,7 @@ function serverAState(): Record<string, unknown> {
     serverCapabilities: { fileOps: true, teleport: true },
     availableProviders: [{ name: 'claude-a', displayName: 'A' }],
     modelsByProvider: { 'claude-a': { models: [{ id: 'model-a', fullId: 'a/model-a', label: 'A' }], defaultModelId: 'model-a' } },
-    availablePermissionModes: [{ id: 'yolo-a', label: 'Server A only mode' }],
+    permissionModesByProvider: { 'claude-a': [{ id: 'yolo-a', label: 'Server A only mode' }] },
     connectedClients: [{ clientId: 'client-a', deviceName: 'A' }],
     webTasks: [{ taskId: 'task-a', status: 'running' }],
     slashCommands: [{ name: 'a-command', source: 'project' }],
@@ -800,7 +800,7 @@ describe('#7559 the failed connect, end to end', () => {
     expect(survivors, "server A's connection state survived into server B").toEqual([])
   })
 
-  it("availablePermissionModes — the SHARP member: an older server B that omits it leaves no stale list", () => {
+  it("permissionModesByProvider — the SHARP member: an older server B that omits it leaves no stale list", () => {
     // #7564's re-ranking, as a test. `auth_ok` re-sets this field only
     // CONDITIONALLY (`if (auth.availablePermissionModes)`), so it is the one
     // member nothing downstream repairs: without the switch-path clear, server
@@ -828,9 +828,9 @@ describe('#7559 the failed connect, end to end', () => {
     )
 
     expect(
-      useConnectionStore.getState().availablePermissionModes,
+      useConnectionStore.getState().permissionModesByProvider,
       "server A's permission modes are still driving the picker on server B (#7559)",
-    ).toEqual([])
+    ).toEqual({})
   })
 
   it('serverCapabilities — the FAIL-OPEN member: empty is the capability-gated fail-closed state', () => {

@@ -1533,11 +1533,18 @@ export interface ConnectionState {
   // session-lifetime question.
   modelsByProvider: Record<string, ProviderModelRoster>;
 
-  // Available permission modes from server (CLI mode).
+  // Available permission modes from server, keyed by the PROVIDER whose
+  // roster it is (#8224). Which modes a provider can honour (Plan on claude-sdk
+  // but not claude-tui, Auto where there is a permission floor) and the copy
+  // differ per provider, and the server used to refresh a single flat list only
+  // on an explicit `switch_session` — a created session that auto-switched the
+  // creator inherited the PREVIOUS session's roster ("Plan (unavailable)").
+  // Read it with `selectPermissionModesForProvider(permissionModesByProvider,
+  // <active session's provider>)`, never by picking a key directly.
   // #4019: PermissionMode is the typed shape from store-core; the optional
   // `description` field flows through to the chat dropdown + creation modal
   // so the two surfaces share one source of truth.
-  availablePermissionModes: PermissionMode[];
+  permissionModesByProvider: Record<string, PermissionMode[]>;
 
   // Previous permission mode (for Shift+Tab plan mode toggle)
   previousPermissionMode: string | null;

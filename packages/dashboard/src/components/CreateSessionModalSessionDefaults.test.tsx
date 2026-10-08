@@ -35,7 +35,7 @@ beforeEach(() => {
     defaultModel: '',
     modelsByProvider: {},
     availableProviders: PROVIDERS,
-    availablePermissionModes: [],
+    permissionModesByProvider: {},
     environments: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},

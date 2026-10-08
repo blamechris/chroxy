@@ -117,7 +117,7 @@ export const EMPTY_MODEL_ROSTER: ProviderModelRoster = Object.freeze({
  * silently invisible. The write and BOTH reads canonicalize through this one
  * function so the two sides cannot drift again.
  */
-function canonicalProviderTag(provider: unknown): string | null {
+export function canonicalProviderTag(provider: unknown): string | null {
   if (typeof provider !== 'string') return null
   const trimmed = provider.trim()
   if (trimmed === '') return null
@@ -126,7 +126,7 @@ function canonicalProviderTag(provider: unknown): string | null {
 }
 
 /** Bucket key for a broadcast: its canonical tag, or the untagged sentinel. */
-function bucketKey(provider: unknown): string {
+export function bucketKey(provider: unknown): string {
   return canonicalProviderTag(provider) ?? UNTAGGED_MODELS_PROVIDER
 }
 

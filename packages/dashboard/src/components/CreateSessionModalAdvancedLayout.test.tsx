@@ -28,7 +28,7 @@ function mockStore(environments: unknown[] = []) {
         defaultModel: null,
         modelsByProvider: {},
         availableProviders: [TUI_PROVIDER],
-        availablePermissionModes: [],
+        permissionModesByProvider: {},
         environments,
         requestDirectoryListing: () => {},
         setDirectoryListingCallback: () => {},

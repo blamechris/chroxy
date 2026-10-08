@@ -15,6 +15,7 @@ import type {
   Checkpoint,
 } from './types'
 import type { PermissionRule } from './handlers'
+import { selectPermissionModesForProvider, type PermissionModesByProvider } from './permission-modes-by-provider'
 // #7420 — the replay window / live-arrival ledger the `user_question` case writes.
 import {
   resetReplayReconcile,
@@ -285,21 +286,40 @@ describe('shared dispatch table', () => {
   })
 
   describe('available_permission_modes', () => {
-    it('sets availablePermissionModes when the payload parses', () => {
+    it('files the roster under the provider that sent it when the payload parses', () => {
       const env = makeAdapter()
       dispatch(env, {
         type: 'available_permission_modes',
+        provider: 'claude-sdk',
         modes: [
           { id: 'default', label: 'Default' },
           { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
           { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
         ],
       })
-      expect(env.flat.availablePermissionModes).toEqual([
-        { id: 'default', label: 'Default' },
-        { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
-        { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
-      ])
+      expect(env.flat.permissionModesByProvider).toEqual({
+        'claude-sdk': [
+          { id: 'default', label: 'Default' },
+          { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
+          { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
+        ],
+      })
+    })
+
+    it('keeps every OTHER provider\'s roster when one provider\'s arrives (#8224)', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'available_permission_modes', provider: 'claude-tui', modes: [{ id: 'plan', label: 'Plan (unavailable)', supported: false }] })
+      dispatch(env, { type: 'available_permission_modes', provider: 'claude-sdk', modes: [{ id: 'plan', label: 'Plan', supported: true }] })
+      const byProvider = env.flat.permissionModesByProvider as PermissionModesByProvider
+      expect(selectPermissionModesForProvider(byProvider, 'claude-tui')[0]?.supported).toBe(false)
+      expect(selectPermissionModesForProvider(byProvider, 'claude-sdk')[0]?.supported).toBe(true)
+    })
+
+    it('replaces (never merges) one provider\'s roster', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'available_permission_modes', provider: 'codex', modes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] })
+      dispatch(env, { type: 'available_permission_modes', provider: 'codex', modes: [{ id: 'a', label: 'A' }] })
+      expect(selectPermissionModesForProvider(env.flat.permissionModesByProvider as PermissionModesByProvider, 'codex').map((m) => m.id)).toEqual(['a'])
     })
 
     it('drops malformed support metadata without dropping the mode', () => {
@@ -308,13 +328,14 @@ describe('shared dispatch table', () => {
         type: 'available_permission_modes',
         modes: [{ id: 'future', label: 'Future', supported: 'yes', enforcement: 'invented' }],
       })
-      expect(env.flat.availablePermissionModes).toEqual([{ id: 'future', label: 'Future' }])
+      expect(selectPermissionModesForProvider(env.flat.permissionModesByProvider as PermissionModesByProvider, null))
+        .toEqual([{ id: 'future', label: 'Future' }])
     })
 
     it('leaves state untouched when modes is not an array', () => {
       const env = makeAdapter()
       dispatch(env, { type: 'available_permission_modes' })
-      expect(env.flat.availablePermissionModes).toBeUndefined()
+      expect(env.flat.permissionModesByProvider).toBeUndefined()
     })
   })
 

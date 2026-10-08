@@ -149,7 +149,6 @@ import {
   handleSearchResults,
   handleCheckpointList,
   resolveSessionId,
-  type PermissionMode,
   type PermissionRule,
   type PendingPermissionConfirm,
   type NotificationPrefsState,
@@ -180,6 +179,10 @@ import {
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
 import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
+import {
+  mergePermissionModesByProvider,
+  type PermissionModesByProvider,
+} from './permission-modes-by-provider'
 import { applyInputAcknowledgement, type InputDeliveryMap } from './input-delivery'
 
 // ---------------------------------------------------------------------------
@@ -653,6 +656,8 @@ export interface DispatchMessageMap {
   available_permission_modes: {
     type: 'available_permission_modes'
     modes?: unknown[]
+    /** #8224 — the provider whose roster this is. Absent from an older daemon. */
+    provider?: unknown
   }
   session_updated: {
     type: 'session_updated'
@@ -1093,15 +1098,27 @@ export type DispatchTable<S extends DispatchSessionBase> = {
 // state removed the difference rather than papering over it.
 // ---------------------------------------------------------------------------
 
-/** `available_permission_modes` — replace the flat list when the payload parses. */
+/**
+ * `available_permission_modes` — replace the roster of the provider that sent it
+ * inside the shared `permissionModesByProvider` map when the payload parses
+ * (#8224; it used to replace one flat list, so a roster for a provider other
+ * than the ACTIVE session's — or a stale one nobody refreshed — decided what the
+ * mode picker offered). A payload that does not parse is a no-op that preserves
+ * every existing roster.
+ */
 function dispatchAvailablePermissionModes<S extends DispatchSessionBase>(
   msg: DispatchMessageMap['available_permission_modes'],
   adapter: ClientStoreAdapter<S>,
 ): void {
   const modes = handleAvailablePermissionModes(msg as Record<string, unknown>)
-  if (modes) {
-    adapter.setState({ availablePermissionModes: modes } as Record<string, PermissionMode[]>)
-  }
+  if (!modes) return
+  adapter.updateState((flat) => {
+    const previous = (flat as { permissionModesByProvider?: PermissionModesByProvider })
+      .permissionModesByProvider
+    return {
+      permissionModesByProvider: mergePermissionModesByProvider(previous, msg.provider, modes),
+    } as unknown as typeof flat
+  })
 }
 
 /** `session_updated` — rename the matching session in the list. */

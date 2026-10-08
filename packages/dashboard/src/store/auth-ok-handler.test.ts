@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { selectPermissionModesForProvider } from '@chroxy/store-core'
 
 // Mock the crypto module before importing the handler
 vi.mock('./crypto', () => ({
@@ -334,7 +335,27 @@ describe('auth_ok handler', () => {
         createAuthOkMessage({ availablePermissionModes: [{ id: 'approve', label: 'Approve' }] }),
         ctx as any,
       )
-      expect(store.getState().availablePermissionModes).toEqual([{ id: 'approve', label: 'Approve' }])
+      // #8224: filed under the provider the roster describes — here untagged,
+      // as an older server sends it, which lands in the untagged bucket.
+      expect(selectPermissionModesForProvider(store.getState().permissionModesByProvider, null))
+        .toEqual([{ id: 'approve', label: 'Approve' }])
+    })
+
+    it('files the auth_ok roster under the provider it names (#8224)', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(
+        createAuthOkMessage({
+          availablePermissionModes: [{ id: 'plan', label: 'Plan (unavailable)', supported: false }],
+          availablePermissionModesProvider: 'claude-tui',
+        }),
+        ctx as any,
+      )
+      const byProvider = store.getState().permissionModesByProvider
+      expect(selectPermissionModesForProvider(byProvider, 'claude-tui')).toEqual([
+        { id: 'plan', label: 'Plan (unavailable)', supported: false },
+      ])
+      // A DIFFERENT provider is not served claude-tui's roster.
+      expect(selectPermissionModesForProvider(byProvider, 'claude-sdk')).toEqual([])
     })
 
     it('applies a subsequent auth_bootstrap burst to the provider/slash/agent stores', () => {

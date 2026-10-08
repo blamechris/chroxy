@@ -51,7 +51,7 @@ beforeEach(() => {
     defaultModel: null,
     modelsByProvider: {},
     availableProviders: [SDK_CAPABLE, TUI_DEGRADED],
-    availablePermissionModes: [],
+    permissionModesByProvider: {},
     environments: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},

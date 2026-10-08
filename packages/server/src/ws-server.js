@@ -382,7 +382,7 @@ function _isSecureRequest(req) {
  *   { type: 'permission_request', requestId, tool, description, input, remainingMs, floored } — permission prompt (`floored` #7968: the permission-floor verdict)
  *   { type: 'confirm_permission_mode', mode, warning } — server challenges auto mode (client must re-send with confirmed: true)
  *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated
- *   { type: 'available_permission_modes', modes: [...] } — permission modes
+ *   { type: 'available_permission_modes', modes: [...], provider? } — permission modes for ONE provider (#8224: `provider` names it; clients file the roster under it and derive the active session's picker, so a session of a provider that has no roster yet never inherits another provider's "Plan (unavailable)"). Sent with the connect burst and by `sendSessionInfo` for every session surfaced to a client
  *   { type: 'session_list', sessions: [...] }         — all sessions
  *   { type: 'session_switched', sessionId, name, cwd, conversationId?, sessionPreset? } — switched active session. On a fresh create-confirm `sessionPreset` (#5553) discloses the resolved per-repo preset (length-only preamble — the text is already folded into the prompt server-side — plus the seed staged editable into the composer + trust metadata); omitted when the session has no preset.
  *   { type: 'session_created', sessionId, name }      — new session created
