@@ -147,6 +147,17 @@ vi.mock('./utils/native-notifications', async (importOriginal) => ({
     sendNativeNotificationMock(title, options),
 }))
 
+// #8385 — the image-paste path decodes and re-encodes through a canvas, which JSDOM
+// does not implement. Stub only that step; everything downstream (App's
+// appendImageAttachments, the attachment state, the unsaved-work probe) is real.
+vi.mock('./utils/image-utils', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/image-utils')>()),
+  processImageFiles: async () => ({
+    accepted: [{ type: 'image' as const, mediaType: 'image/png', data: 'AAAA', name: 'shot.png' }],
+    rejected: [],
+  }),
+}))
+
 vi.mock('./components/StdinDisabledBanner', () => ({
   StdinDisabledBanner: (props: {
     visible: boolean
@@ -424,6 +435,34 @@ describe('App', () => {
       stateOverrides = { ...two, activeSessionId: 's2' }
       rerender(<App />)
       expect((screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement).value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+
+    // #8385 — App passes `fileAttachments` / `imageAttachments` into
+    // composerHasUnsavedWork. The unit tests cover each clause of that function; these
+    // two pin the WIRING, so replacing either argument with `[]` goes red. The textarea
+    // is empty when checked, so the DOM scan cannot be what answers.
+    it('a staged file attachment counts (and blocks the auto-reload)', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1', filePickerFiles: [{ path: 'src/index.ts', size: 10 }] }
+      render(<App />)
+      const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+      fireEvent.change(box, { target: { value: '@' } })
+      fireEvent.click(await screen.findByRole('option', { name: /src\/index\.ts/ }))
+      fireEvent.change(box, { target: { value: '' } })
+      expect(box.value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+
+    it('a staged image attachment counts (and blocks the auto-reload)', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      render(<App />)
+      const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+      const png = new File([new Uint8Array([1, 2, 3])], 'shot.png', { type: 'image/png' })
+      fireEvent.paste(box, { clipboardData: { getData: () => '', items: [], files: [png] } })
+      await screen.findByTestId('image-thumbnails')
+      expect(box.value).toBe('')
       expect(hasUnsavedWork()).toBe(true)
     })
 

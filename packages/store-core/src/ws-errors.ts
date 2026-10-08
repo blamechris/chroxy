@@ -57,14 +57,17 @@ export function getWsCloseMessage(code: number): string | null {
  * Map an HTTP health check failure to a user-readable error message.
  *
  *   AbortError     — fetch timed out (server not responding)
- *   HTTP 4xx       — bad token / not authorised
+ *   HTTP 4xx       — refused: a wrong address or token, or a proxy / access gate
+ *                    in front of the daemon (/health itself is unauthenticated)
  *   HTTP 5xx       — server-side error / restart in flight
  *   Other HTTP     — unexpected status (3xx etc.) — show the raw status
  *   Network error  — no network / tunnel down (no message / non-HTTP)
  */
 export function getHealthCheckErrorMessage(err: { name?: string; message?: string }): string {
   if (err.name === 'AbortError') return 'Server not responding — check your network'
-  if (err.message?.startsWith('HTTP 4')) return 'Server rejected the connection — check your token'
+  // /health needs no token, so a 4xx here is as likely a proxy or an access gate in
+  // front of the daemon as a bad token (#8385); the copy names both.
+  if (err.message?.startsWith('HTTP 4')) return `The server at this address refused the connection (${err.message}) — check the address and token`
   if (err.message?.startsWith('HTTP 5')) return 'Server error — the server may be restarting'
   if (err.message?.startsWith('HTTP ')) return `Server unreachable (${err.message})`
   return 'Could not reach server — check your network'

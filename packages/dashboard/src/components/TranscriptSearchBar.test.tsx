@@ -30,6 +30,13 @@ describe('TranscriptSearchBar (#6788)', () => {
     expect(screen.getByTestId('transcript-search-count')).toHaveTextContent('2/3')
   })
 
+  it('a filled find box does not count as unsaved work (#8385)', async () => {
+    const { hasUnsavedWork } = await import('../utils/unsaved-work')
+    renderBar({ query: 'foo' })
+    expect((screen.getByTestId('transcript-search-input') as HTMLInputElement).value).toBe('foo')
+    expect(hasUnsavedWork()).toBe(false)
+  })
+
   it('Enter advances to the next match', () => {
     const onNext = vi.fn()
     renderBar({ onNext })

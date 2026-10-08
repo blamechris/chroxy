@@ -123,7 +123,11 @@ describe('the daemon that served this page is retried with no cap (#8268)', () =
     expect(MockWebSocket.instances[0]!.url).toBe(OWN)
   })
 
-  it('finds a daemon that returns within the first minutes in under 8 s', async () => {
+  // beforeEach pins Math.random to 0, so the ladder's 0-50% jitter is ZERO here and the
+  // 8 s rung is exactly 8 s. With real jitter the wait can reach ~12 s (#8385); this
+  // test pins the base delay, not the worst case.
+  it('with jitter pinned to zero, finds a daemon that returns within the first minutes within the 8 s base delay', async () => {
+    expect(Math.random()).toBe(0)
     setFetch(downFetch)
     useConnectionStore.getState().connect(OWN, 'tok')
     await vi.advanceTimersByTimeAsync(60_000)
@@ -146,7 +150,7 @@ describe('the daemon that served this page is retried with no cap (#8268)', () =
     expect(inSecondTenMinutes).toBeLessThanOrEqual(25)
   })
 
-  it('a 401/403 probe ends the ladder with the auth error and clears the saved connection', async () => {
+  it('a 401/403 probe ends the ladder with the auth error and KEEPS the saved connection (#8385)', async () => {
     for (const status of [401, 403]) {
       MockWebSocket.instances = []
       const probes = vi.fn(async () => ({ ok: false, status, json: async () => ({}) }))
@@ -158,10 +162,10 @@ describe('the daemon that served this page is retried with no cap (#8268)', () =
       const s = useConnectionStore.getState()
       expect(probes, `HTTP ${status}: probed once, never retried`).toHaveBeenCalledTimes(1)
       expect(s.connectionPhase).toBe('disconnected')
-      expect(s.connectionError).toBe('Server rejected the connection — check your token')
+      expect(s.connectionError).toBe(`The server at this address refused the connection (HTTP ${status}) — check the address and token`)
       expect(s.reconnectRetryAt).toBeNull()
       expect(MockWebSocket.instances.length).toBe(0)
-      expect(cleared).toHaveBeenCalledTimes(1)
+      expect(cleared).not.toHaveBeenCalled()
     }
   })
 
@@ -178,10 +182,14 @@ describe('a target this page did not come from keeps the cap (#5698, #5725)', ()
   it('a 401 probe is still retried up to the cap, then "Could not reach server" (unchanged)', async () => {
     const probes = vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) }))
     ;(globalThis as unknown as { fetch: unknown }).fetch = probes
+    const cleared = vi.fn()
+    useConnectionStore.setState({ clearSavedConnection: cleared })
     useConnectionStore.getState().connect(REMOTE, 'tok')
     await vi.advanceTimersByTimeAsync(5 * 60_000)
     expect(probes).toHaveBeenCalledTimes(6)
     expect(useConnectionStore.getState().connectionError).toBe('Could not reach server')
+    // The capped path's give-up still clears the saved connection (unchanged by #8385).
+    expect(cleared).toHaveBeenCalledTimes(1)
   })
 
   it('the probe ladder still ends on "Disconnected" with "Could not reach server"', async () => {

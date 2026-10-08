@@ -12,6 +12,12 @@
  *    composer and every form (add-server, preset editors, settings) without each of
  *    them having to register. Checkboxes, radios, hidden and read-only fields do not
  *    count.
+ *
+ * A field that holds only an EPHEMERAL QUERY (a list filter, a search box) opts out with
+ * `data-unsaved-ignore`: losing its text to a reload costs one keystroke-burst, and
+ * counting it would quietly turn the auto-reload into the persistent banner whenever
+ * someone left a filter filled in (#8385). Never put it on a field whose text the user
+ * would be annoyed to retype from scratch (a form, a rename, a message).
  */
 const probes = new Set<() => boolean>()
 
@@ -46,6 +52,7 @@ export function composerHasUnsavedWork(c: ComposerState): boolean {
 const TEXT_INPUT_TYPES = new Set(['', 'text', 'search', 'url', 'email', 'password', 'tel', 'number'])
 
 function elementHoldsTypedText(el: Element): boolean {
+  if (el.hasAttribute('data-unsaved-ignore')) return false
   if (el instanceof HTMLTextAreaElement) {
     return !el.readOnly && el.value.trim() !== ''
   }

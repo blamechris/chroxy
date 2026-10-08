@@ -170,6 +170,24 @@ describe('Sidebar', () => {
     expect(input).toHaveValue('api')
   })
 
+  // #8385 — a filled filter box must not turn the stale-bundle auto-reload into the
+  // persistent banner; a real form input beside it still does.
+  it('a filled filter box does not count as unsaved work', async () => {
+    const { hasUnsavedWork } = await import('../utils/unsaved-work')
+    renderSidebar({ filter: 'api' })
+    expect(screen.getByPlaceholderText('Filter...')).toHaveValue('api')
+    expect(hasUnsavedWork()).toBe(false)
+    const real = document.createElement('input')
+    real.type = 'text'
+    real.value = 'half-filled'
+    document.body.appendChild(real)
+    try {
+      expect(hasUnsavedWork()).toBe(true)
+    } finally {
+      real.remove()
+    }
+  })
+
   it('calls onFilterChange on input', () => {
     const onFilterChange = vi.fn()
     renderSidebar({ onFilterChange })
