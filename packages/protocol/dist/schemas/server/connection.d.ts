@@ -54,6 +54,7 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
     serverMode: z.ZodLiteral<"cli">;
     serverVersion: z.ZodString;
     latestVersion: z.ZodNullable<z.ZodString>;
+    dashboardBuildId: z.ZodOptional<z.ZodString>;
     serverCommit: z.ZodString;
     cwd: z.ZodNullable<z.ZodString>;
     connectedClients: z.ZodArray<z.ZodObject<{

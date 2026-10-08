@@ -369,6 +369,76 @@ describe('App', () => {
     expect(screen.queryByTestId('reconnect-banner')).not.toBeInTheDocument()
   })
 
+  // #8268 — the wiring from the store into the banners and the unsaved-work probe.
+  it('shows "retrying in Ns" and no attempt counter for an uncapped reconnect', () => {
+    stateOverrides = { connectionPhase: 'reconnecting', reconnectUncapped: true, reconnectRetryAt: Date.now() + 8_000, connectionRetryCount: 30 }
+    render(<App />)
+    const text = screen.getByTestId('reconnect-banner').textContent ?? ''
+    expect(text).toMatch(/retrying in \d+s/)
+    expect(text).not.toContain('attempt')
+  })
+
+  it('keeps the attempt counter for a capped reconnect', () => {
+    stateOverrides = { connectionPhase: 'reconnecting', reconnectUncapped: false, connectionRetryCount: 2 }
+    render(<App />)
+    expect(screen.getByTestId('reconnect-banner').textContent).toContain('attempt 2/5')
+  })
+
+  it('shows the persistent "Chroxy was updated" banner and the client version when the page is stale', () => {
+    stateOverrides = {
+      connectionPhase: 'connected', sessions: [], serverVersion: '99.0.0',
+      staleBundle: { clientVersion: '0.11.4', clientBuildId: 'a', serverVersion: '99.0.0', serverBuildId: 'b' },
+    }
+    render(<App />)
+    expect(screen.getByTestId('stale-bundle-banner')).toBeInTheDocument()
+    expect(screen.getByTestId('client-version-badge')).toBeInTheDocument()
+  })
+
+  it('shows neither for a current page', () => {
+    stateOverrides = { connectionPhase: 'connected', sessions: [], staleBundle: null }
+    render(<App />)
+    expect(screen.queryByTestId('stale-bundle-banner')).not.toBeInTheDocument()
+  })
+
+  // #8268 — App feeds its own refs and attachment state to the unsaved-work check the
+  // stale-bundle auto-reload consults. composerHasUnsavedWork has the per-branch unit
+  // tests; these pin that App passes the right data into it. In each, the visible
+  // textarea is EMPTY at the moment of the check, so the DOM scan cannot be what
+  // answers, and the ref is the only thing that knows.
+  describe('the composer feeds the unsaved-work check (#8268)', () => {
+    const mk = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null })
+    const two = { connectionPhase: 'connected', sessions: [mk('s1'), mk('s2')] }
+
+    it('is false for a clean composer', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      render(<App />)
+      expect(hasUnsavedWork()).toBe(false)
+    })
+
+    it('a draft for a session that is not the visible tab counts', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      const { rerender } = render(<App />)
+      fireEvent.change(screen.getByRole('textbox', { name: /message input/i }), { target: { value: 'unsent thought' } })
+      stateOverrides = { ...two, activeSessionId: 's2' }
+      rerender(<App />)
+      expect((screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement).value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+
+    it('a pasted-text chip counts even after its marker was deleted from the textarea', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      render(<App />)
+      const box = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.paste(box, { clipboardData: { getData: (t: string) => (t === 'text/plain' ? 'line\n'.repeat(50) : ''), items: [], files: [] } })
+      fireEvent.change(box, { target: { value: '' } })
+      expect((box as HTMLTextAreaElement).value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+  })
+
   it('shows welcome screen when connected with no sessions', () => {
     stateOverrides = { connectionPhase: 'connected', sessions: [] }
     render(<App />)

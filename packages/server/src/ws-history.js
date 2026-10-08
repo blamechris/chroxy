@@ -345,7 +345,7 @@ export function sendHistoryEntry(send, ws, sessionId, entry) {
 export function sendPostAuthInfo(ctx, ws, extra = {}) {
   const {
     clients, sessionManager, cliSession, defaultSessionId,
-    serverMode, serverVersion, latestVersion, gitInfo,
+    serverMode, serverVersion, latestVersion, dashboardBuildId, gitInfo,
     encryptionEnabled, localhostBypass, tunnelActive, keyExchangeTimeoutMs,
     protocolVersion, minProtocolVersion, webTaskManager,
     // #5721: `send` MUST be `WsServer._send` (which returns the delivery
@@ -699,6 +699,9 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     serverMode,
     serverVersion,
     latestVersion,
+    // #8268: id of the dashboard bundle the daemon serves now; a page that loaded a
+    // different one is stale. Omitted (not null) when no dist is built.
+    ...(dashboardBuildId ? { dashboardBuildId } : {}),
     serverCommit: gitInfo.commit,
     cwd: sessionInfo.cwd,
     defaultCwd: sessionManager?.defaultCwd || null,

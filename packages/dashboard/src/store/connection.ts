@@ -88,6 +88,7 @@ import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeReq
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getAuthToken } from '../utils/auth';
+import { isLocalDaemonUrl } from '../utils/daemon-origin';
 import { buildAutoModeConfirmMessage } from '../lib/auto-mode-confirm';
 import { hasInterruptibleWork, isSessionBusy } from '../lib/session-busy';
 import {
@@ -188,6 +189,8 @@ import {
   // #5621 — the shared retry-ladder defaults (was duplicated verbatim here).
   CONNECT_MAX_RETRIES,
   CONNECT_RETRY_DELAYS,
+  // #8268 — the slower-tailed ladder for a client with no retry cap.
+  UNCAPPED_RETRY_DELAYS,
   type ProbeResult,
   type ConnectEndpoint,
   // #5939 (epic #5935 ④): optimistic queued-message helpers for the
@@ -1124,6 +1127,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   currentDeviceKey: getCurrentDeviceKey(),
   connectionError: null,
   connectionRetryCount: 0,
+  reconnectUncapped: false,
+  reconnectRetryAt: null,
+  staleBundle: null,
   serverStartupLogs: null,
   latencyMs: null,
   connectionQuality: null,
@@ -2748,15 +2754,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       existing.onmessage = null;
       existing.close();
     }
+    // #8268 — the daemon that served this page (or, in the desktop app, a loopback
+    // daemon) is this machine's own process: an update restarts it for minutes, and
+    // giving up there loses the session view after every update. Retry with no cap,
+    // and show it. The mobile app's cap (#5698, #5725) is untouched, and so is the
+    // cap for a registry server this page did not come from.
+    const uncapped = isLocalDaemonUrl(url);
+    // `uncapped` is recomputed for every attempt, not fixed for the ladder: each retry
+    // (scheduleRetry) and each socket-close reconnect re-enters connect() with the
+    // endpoint resolved for THAT attempt (#5597), so a registry entry repointed
+    // mid-ladder is judged by its new URL on the next attempt.
+    const maxConnectRetries = uncapped ? Infinity : CONNECT_MAX_RETRIES;
+    const retryLadder = uncapped ? UNCAPPED_RETRY_DELAYS : CONNECT_RETRY_DELAYS;
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
     // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
     // #8331: a new handshake starts from a clean update banner (see EMPTY_DAEMON_UPDATE).
     clearDaemonUpdateWatchdog();
-    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...EMPTY_DAEMON_UPDATE, ...errorPatch });
+    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, reconnectUncapped: uncapped, reconnectRetryAt: null, userDisconnected: false, ...EMPTY_DAEMON_UPDATE, ...errorPatch });
 
     if (_retryCount > 0) {
-      console.log(`[ws] Connection attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1}...`);
+      console.log(`[ws] Connection attempt ${_retryCount + 1}/${uncapped ? 'unlimited' : CONNECT_MAX_RETRIES + 1}...`);
     }
 
     // #5597 — re-resolve the live endpoint (URL + token) for the active registry
@@ -2783,8 +2801,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // CONNECT_RETRY_DELAYS defaults directly instead of re-declaring the ladder.
     void runConnectAttempt({
       attempt: _retryCount,
-      maxRetries: CONNECT_MAX_RETRIES,
-      retryDelays: CONNECT_RETRY_DELAYS,
+      maxRetries: maxConnectRetries,
+      retryDelays: retryLadder,
       // #5597 seam — re-resolve the endpoint per attempt instead of dialing the
       // closure-captured URL/token forever. The dashboard already re-read the
       // registry TOKEN per reconnect (#5281); this mirrors that for the URL, so
@@ -2806,6 +2824,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const timeoutId = setTimeout(() => controller.abort(), 5000);
         try {
           const res = await fetch(httpUrl, { method: 'GET', signal: controller.signal });
+          // #8268 — without a cap a refused probe would retry for ever. A 401/403
+          // is a gate in front of the daemon (a proxy, an access policy) that
+          // retrying cannot lift, so it ends the ladder with the auth error.
+          if (uncapped && (res.status === 401 || res.status === 403)) {
+            return { kind: 'auth_failed', reason: getHealthCheckErrorMessage({ message: `HTTP ${res.status}` }) };
+          }
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           try {
             const body = await res.json();
@@ -2842,7 +2866,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           restartEtaMs,
           restartingSince: currentState.restartingSince || Date.now(),
         });
-        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1})`);
+        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${uncapped ? 'unlimited' : CONNECT_MAX_RETRIES + 1})`);
       },
       onProbeFailed: (reason) => {
         set({ connectionError: reason });
@@ -2861,6 +2885,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       },
       scheduleRetry: (nextAttempt, delayMs) => {
         console.log(`[ws] Retrying in ${delayMs}ms...`);
+        // #8268 — the banner's "retrying in Ns". Cleared when the attempt begins.
+        set({ reconnectRetryAt: Date.now() + delayMs });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           // #5597 — re-resolve the registry endpoint so a repointed `wsUrl`
@@ -2872,6 +2898,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       onRestartGaveUp: () => {
         set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
         console.warn(`[chroxy] Connection Failed: The server is still restarting. Try again later.`);
+      },
+      onAuthFailed: ({ reason }) => {
+        // The same end state the capped ladder reached (disconnected, saved
+        // connection cleared), but with the auth error rather than "Could not
+        // reach server", and after one probe instead of six.
+        set({ connectionPhase: 'disconnected', connectionError: reason, reconnectRetryAt: null });
+        console.warn(`[chroxy] Connection Failed: ${reason}`);
+        void get().clearSavedConnection();
       },
       onProbeGaveUp: () => {
         set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
@@ -2931,18 +2965,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         get().connect(next.url, next.token);
       },
       isStale: () => myAttemptId !== connectionAttemptId,
-      retryDelays: CONNECT_RETRY_DELAYS,
+      retryDelays: retryLadder,
       // #5698 — stop the reconnect ladder after RECONNECT_MAX_RUNG rungs and go
       // terminal instead of spinning forever. A user-initiated retryConnection()
       // resets the counter (resetReconnectAttempt), so this is not permanent.
-      maxRung: RECONNECT_MAX_RUNG,
+      // #8268 — except for the daemon that served this page: no cap there (see
+      // `uncapped` above), which `undefined` here means.
+      maxRung: uncapped ? undefined : RECONNECT_MAX_RUNG,
       onGaveUp: () => {
         if (myAttemptId !== connectionAttemptId) return; // superseded — don't clobber a newer attempt
         console.log('[ws] reconnect ladder exhausted — server appears down');
         set({
           connectionPhase: 'server_down',
           connectionError: 'Server appears to be down',
+          reconnectRetryAt: null,
         });
+      },
+      onScheduled: (delayMs) => {
+        if (myAttemptId !== connectionAttemptId) return;
+        set({ reconnectRetryAt: Date.now() + delayMs });
       },
     });
     const scheduleReconnect = (
@@ -3343,6 +3384,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     set({
       connectionPhase: 'disconnected',
+      reconnectRetryAt: null,
       sessionStates: cleanedSessionStates,
       socket: null,
       serverMode: null,

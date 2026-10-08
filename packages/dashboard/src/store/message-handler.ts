@@ -819,6 +819,8 @@ export function sendClientVisible(socket: WebSocket | null, visible: boolean): v
 
 // Re-export encrypt for wsSend (import is used inside the function)
 import { encrypt } from './crypto';
+import { isOwnDaemonUrl } from '../utils/daemon-origin';
+import { detectStaleBundle, getClientBuildId, getClientVersion, handleStaleBundle } from '../utils/stale-bundle';
 
 // ---------------------------------------------------------------------------
 // Platform adapters — web dashboard uses console.warn + no-op haptics
@@ -4696,6 +4698,18 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             : null)
         : null;
 
+      // #8268 — stale-bundle verdict. `auth_ok.dashboardBuildId` is the id of the
+      // bundle the daemon serves NOW; the page's own id came from the HTML it loaded.
+      const rawDashboardBuildId = (msg as { dashboardBuildId?: unknown }).dashboardBuildId;
+      const staleBundle = isOwnDaemonUrl(ctx.url)
+        ? detectStaleBundle({
+            clientVersion: getClientVersion(),
+            clientBuildId: getClientBuildId(),
+            serverVersion: auth.serverVersion,
+            serverBuildId: typeof rawDashboardBuildId === 'string' && rawDashboardBuildId ? rawDashboardBuildId : null,
+          })
+        : null;
+
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
         connectionPhase: 'connected' as const,
@@ -4718,6 +4732,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         connectedClients: clients,
         connectionError: null as string | null,
         connectionRetryCount: 0,
+        reconnectRetryAt: null,
+        // #8268 — is this page a bundle from before the update this daemon is
+        // running? Judged only against the daemon that served the page.
+        staleBundle,
         // Clear shutdown / startup state on successful connect
         serverPhase: null,
         tunnelProgress: null,
@@ -4804,6 +4822,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           customAgents: [],
         });
       }
+      // #8268 — an update landed under this window. Reload now if that loses
+      // nothing; otherwise the persistent "Chroxy was updated" banner (driven by
+      // `staleBundle` above) is what the user acts on.
+      if (staleBundle) handleStaleBundle(staleBundle);
       // #5555 — fold the static permission-mode enum out of auth_ok when the
       // server provided it, so we don't have to wait for the discrete
       // `available_permission_modes` burst frame. Older servers omit the field

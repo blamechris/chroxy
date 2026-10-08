@@ -281,3 +281,38 @@ describe('ReconnectBanner', () => {
     })
   })
 })
+
+// #8268 — a daemon that is retried with no cap has no "attempt N/M", and a long
+// outage must show when the next attempt is instead of looking frozen.
+describe('ReconnectBanner — no-cap mode and retry countdown (#8268)', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('drops the attempt counter when there is no retry budget', () => {
+    render(<ReconnectBanner {...baseProps} attempt={42} maxAttempts={null} />)
+    const text = screen.getByTestId('reconnect-banner').textContent ?? ''
+    expect(text).not.toContain('/')
+    expect(text).not.toContain('attempt')
+  })
+
+  it('reads "retrying in Ns" and counts down each second', () => {
+    vi.setSystemTime(new Date('2026-10-07T12:00:00Z'))
+    const at = Date.now() + 5_000
+    render(<ReconnectBanner {...baseProps} maxAttempts={null} nextRetryAt={at} />)
+    expect(screen.getByTestId('reconnect-banner').textContent).toContain('retrying in 5s')
+    act(() => { vi.advanceTimersByTime(2_000) })
+    expect(screen.getByTestId('reconnect-banner').textContent).toContain('retrying in 3s')
+    act(() => { vi.advanceTimersByTime(3_000) })
+    expect(screen.getByTestId('reconnect-banner').textContent).toContain('retrying now')
+  })
+
+  it('shows no countdown when no retry is armed', () => {
+    render(<ReconnectBanner {...baseProps} maxAttempts={null} nextRetryAt={null} />)
+    expect(screen.getByTestId('reconnect-banner').textContent).not.toContain('retrying')
+  })
+
+  it('the terminal state shows no countdown even if a stale retry time is present', () => {
+    render(<ReconnectBanner {...baseProps} terminal message="Server appears to be down" nextRetryAt={Date.now() + 9_000} />)
+    expect(screen.getByTestId('reconnect-banner').textContent).not.toContain('retrying')
+  })
+})
