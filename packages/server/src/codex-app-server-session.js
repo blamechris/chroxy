@@ -1971,8 +1971,9 @@ export class CodexAppServerSession extends BaseSession {
     return this._permissions.respondToPermission(requestId, decision, editedInput, reason)
   }
 
-  respondToQuestion(text, answers) {
-    return this._permissions.respondToQuestion(text, answers)
+  respondToQuestion(text, answers, toolUseId) {
+    // #8460: same shared manager, same id check as SDK/BYOK.
+    return this._permissions.respondToQuestion(text, answers, toolUseId)
   }
 
   // #6829 — permission-rule accessors, mirroring SdkSession/ByokSession. Codex's

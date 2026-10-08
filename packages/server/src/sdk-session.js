@@ -2892,8 +2892,9 @@ export class SdkSession extends BaseSession {
    * In SDK mode, the canUseTool callback is holding a Promise open.
    * This method resolves it with the user's answer as structured updatedInput.
    */
-  respondToQuestion(text, answersMap) {
-    this._permissions.respondToQuestion(text, answersMap)
+  respondToQuestion(text, answersMap, toolUseId) {
+    // #8460: the id lets the manager refuse an answer meant for a different question.
+    return this._permissions.respondToQuestion(text, answersMap, toolUseId)
   }
 
   /**

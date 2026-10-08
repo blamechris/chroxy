@@ -1360,7 +1360,7 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // text-input prompt → freeform text + Enter). Other providers ignore
     // the trailing arg.
     const opts = hasFreeform ? { freeformText: msg.freeformText } : undefined
-    entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId, opts)
+    const delivered = entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId, opts)
     // #8362: the one place every provider's answer passes through. cli and tui
     // deliver the answer before the tool's result event arrives, so without this
     // record a restart in that window labels an answered question interrupted.
@@ -1377,7 +1377,11 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // tool, synthetic or the provider's own error result, so marking it
     // answered hides no real interrupted state.
     const hasAnswers = msg.answers && typeof msg.answers === 'object' && Object.keys(msg.answers).length > 0
-    if (msg.answer.length > 0 || hasAnswers) {
+    // #8460: the one drop the provider REPORTS -- an answer the permission manager
+    // (SDK / BYOK / codex) refused because its toolUseId is not the pending
+    // question's -- returns `false`. That answer was for a question that is no
+    // longer the one being asked, so it must not mark anything answered.
+    if (delivered !== false && (msg.answer.length > 0 || hasAnswers)) {
       ctx.sessions.sessionManager.recordQuestionAnswered?.(questionSessionId, msg.toolUseId)
     }
   }

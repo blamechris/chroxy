@@ -2670,8 +2670,9 @@ export class ClaudeByokSession extends BaseSession {
   /**
    * Response to an AskUserQuestion tool. Same forwarding pattern.
    */
-  respondToQuestion(text, answersMap) {
-    this._permissions.respondToQuestion(text, answersMap)
+  respondToQuestion(text, answersMap, toolUseId) {
+    // #8460: the id lets the manager refuse an answer meant for a different question.
+    return this._permissions.respondToQuestion(text, answersMap, toolUseId)
   }
 
   /**
