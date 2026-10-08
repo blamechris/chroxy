@@ -153,8 +153,21 @@ export class JsonlSubprocessSession extends BaseSession {
     })
   }
 
+  /**
+   * #8502: true from the moment this turn's `result` is emitted until the child
+   * has exited and `_isBusy` has cleared (the close handler, which then emits
+   * `busy_cleared`). The result precedes the end of the busy window for this
+   * family, so a session list built in between would say a finished session is
+   * busy; the forwarder holds the result-time list back while this is true.
+   * @returns {boolean}
+   */
+  get busyClearedOwed() {
+    return this._busyClearedOwed === true
+  }
+
   destroy() {
     this._destroying = true
+    this._busyClearedOwed = false
     this._processReady = false
     this._isBusy = false
     // #4881: clear so a teardown after interrupt() never leaks the flag past
@@ -429,6 +442,10 @@ export class JsonlSubprocessSession extends BaseSession {
       const event = this._parseJsonLine(line)
       if (!event) return
       this._processJsonlLine(event, ctx)
+      // #8502: the result went out while the child is still alive and busy; the
+      // close handler owes the refresh once it has cleared busy. Set after the
+      // emit, in the same synchronous stack, before the forwarder's microtask.
+      if (ctx.didEmitResult && this._process === proc) this._busyClearedOwed = true
     })
 
     proc.stderr.on('data', (chunk) => {
@@ -459,6 +476,7 @@ export class JsonlSubprocessSession extends BaseSession {
     proc.on('close', (code) => {
       this._process = null
       this._isBusy = false
+      this._busyClearedOwed = false
       // #4881: capture-and-clear BEFORE the _destroying short-circuit so the
       // flag never leaks past a close even when destroy() fires first.
       // Mirrors CliSession._handleChildClose (#4602).
@@ -508,6 +526,7 @@ export class JsonlSubprocessSession extends BaseSession {
     proc.on('error', (err) => {
       this._process = null
       this._isBusy = false
+      this._busyClearedOwed = false
       // Spawn-level error (ENOENT, EACCES, etc.) means the argv never
       // reached a real process — revert `_skillsPrepended` so the next
       // sendMessage retry still injects the prepend bucket (#3225). We

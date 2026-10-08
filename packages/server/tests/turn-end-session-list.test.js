@@ -48,7 +48,8 @@ function wire(session) {
   const viewer = []
   const global = []
   const sm = new EventEmitter()
-  sm.getSession = () => null
+  // The real SessionManager.getSession returns the entry holding the live session.
+  sm.getSession = () => ({ session })
   sm.listSessions = () => [{ sessionId: SID, isBusy: session.isRunning }]
   sm.getSessionContext = () => Promise.resolve(null)
   const normalizer = new EventNormalizer()
@@ -103,6 +104,22 @@ function rowsAfterIdlePing(global) {
     .filter((f) => f.type === 'session_list')
     .map((f) => f.sessions.find((x) => x.sessionId === SID))
     .filter(Boolean)
+}
+
+/**
+ * Busy-bearing frames a client VIEWING the session got after its `agent_idle`
+ * for the turn: a `session_activity` ping or SID's list row saying busy. The
+ * clients re-derive `isIdle` from list rows, active session included, so any
+ * such frame flips the viewer back to Working after it was told the turn ended.
+ */
+function busyFramesAfterAgentIdle(viewer) {
+  const at = viewer.findIndex((f) => f.type === 'agent_idle')
+  assert.ok(at >= 0, 'precondition: the viewer was told the turn ended')
+  return viewer.slice(at + 1).filter((f) => {
+    if (f.type === 'session_activity' && f.sessionId === SID) return f.isBusy === true
+    if (f.type === 'session_list') return f.sessions.some((x) => x.sessionId === SID && x.isBusy === true)
+    return false
+  })
 }
 
 const lists = (frames) => frames.filter((f) => f.type === 'session_list')
@@ -232,6 +249,84 @@ describe('#8502 the turn-end list is scoped to one synchronous turn end', () => 
   })
 })
 
+describe('#8502 a busy window that outlives the result', () => {
+  function stubNet(extra) {
+    const stub = Object.assign(new EventEmitter(), { isRunning: true, busyClearedOwed: false }, extra)
+    const net = wire(stub)
+    const emit = (event, data = {}) => net.sm.emit('session_event', { sessionId: SID, event, data })
+    return { stub, net, emit }
+  }
+
+  it('sends no result-time list while busy_cleared is owed, and the busy_cleared one when it lands', async () => {
+    const { stub, net, emit } = stubNet({ busyClearedOwed: true })
+    emit('stream_start', { messageId: 'm1' })
+    const before = lists(net.global).length
+    emit('result', { cost: null, duration: 0, usage: null, sessionId: 'c1' })
+    await settle()
+    assert.equal(lists(net.global).length, before, 'a list now would say busy for a session about to go idle')
+    // The child exits: busy clears and the owed refresh is announced.
+    stub.isRunning = false
+    stub.busyClearedOwed = false
+    emit('busy_cleared')
+    await settle()
+    const after = lists(net.global).slice(before)
+    assert.equal(after.length, 1)
+    assert.equal(after[0].sessions[0].isBusy, false)
+    net.normalizer.destroy()
+  })
+
+  it('busy_cleared is the provider\'s own word: its list is built even if the owed flag is read as still set', async () => {
+    const { stub, net, emit } = stubNet({ busyClearedOwed: true })
+    stub.isRunning = false
+    const before = lists(net.global).length
+    emit('busy_cleared')
+    await settle()
+    assert.equal(lists(net.global).length - before, 1)
+    net.normalizer.destroy()
+  })
+
+  it('keeps the result-time list where it is correct: the session legitimately busy again', async () => {
+    const { net, emit } = stubNet() // e.g. _maybeDequeue restarted the next queued turn; nothing owed
+    emit('stream_start', { messageId: 'm1' })
+    const before = lists(net.global).length
+    emit('result', { cost: null, duration: 0, usage: null, sessionId: 'c1' })
+    await settle()
+    const after = lists(net.global).slice(before)
+    assert.equal(after.length, 1, 'the list is still published')
+    assert.equal(after[0].sessions[0].isBusy, true, 'and says busy, which is true')
+    net.normalizer.destroy()
+  })
+})
+
+describe('#8502 a turn that ends only in an error', () => {
+  let session
+  let net
+  afterEach(() => {
+    net?.normalizer.destroy()
+    session?.destroy()
+    session = null
+    net = null
+  })
+
+  it('claude-sdk thrown query error: a client that is not viewing the session, and the viewer, end idle', async () => {
+    // No result and no stopped is emitted for this turn end, and agent_idle /
+    // session_activity(false) only come from those, so without a refreshed list
+    // the clients (which leave busy only on those three signals) stay busy.
+    session = new SdkSession({ cwd: '/tmp', stateFilePath: tmpStateFile() })
+    session._fetchSupportedModels = () => {}
+    net = wire(session)
+    session._callQuery = () => fakeQuery([init, async () => { throw new Error('upstream exploded') }])
+    await session.sendMessage('go')
+    await settle()
+    assert.equal(session.isRunning, false, 'precondition: the session is idle once the turn failed')
+    assert.ok(net.viewer.some((f) => f.type === 'message' && f.messageType === 'error'), 'precondition: the error reached the viewer')
+    assert.equal(net.viewer.some((f) => f.type === 'agent_idle'), false, 'precondition: no result or stopped ended this turn')
+    assert.equal(lastBusyClaim(net.global), false, 'a client that is not viewing it')
+    const lastRow = lists(net.viewer).at(-1)?.sessions.find((x) => x.sessionId === SID)
+    assert.equal(lastRow?.isBusy, false, 'the viewer, which re-derives idle from the list row')
+  })
+})
+
 // The jsonl-subprocess family (codex exec, gemini): `result` is emitted when the
 // JSONL line is parsed, but the child is still exiting and `_isBusy` clears in
 // its `close` handler, a LATER event-loop turn. A list built in a microtask after
@@ -280,10 +375,16 @@ describe('#8502 jsonl-subprocess providers: the list is refreshed once the child
     session._processReady = true
     net = wire(session)
     await session.sendMessage('hi')
+    await waitFor(() => net.viewer.some((f) => f.type === 'agent_idle'), { label: 'result forwarded' })
+    assert.equal(session.busyClearedOwed, true, 'the child is still exiting, so the busy_cleared refresh is owed')
     await waitFor(() => session.isRunning === false, { label: 'child closed' })
+    assert.equal(session.busyClearedOwed, false, 'and is no longer owed once it was announced')
     await settle()
     assert.equal(rowsAfterIdlePing(net.global).at(-1)?.isBusy, false, 'a list after the child closed reports idle')
     assert.equal(lastBusyClaim(net.global), false)
+    // The viewer: it got agent_idle at the result and must not be flipped back to
+    // Working by a list built while the child was still exiting.
+    assert.deepEqual(busyFramesAfterAgentIdle(net.viewer), [], 'no busy frame follows the viewer\'s agent_idle')
     rmSync(join(shim, '..'), { recursive: true, force: true })
   })
 })

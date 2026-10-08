@@ -171,11 +171,23 @@ function setupSessionForwarding(normalizer, ctx) {
   // would end the turn busy. A microtask runs once the emitting call stack
   // unwinds and before any later await; the providers clear busy synchronously in
   // that same stack (checked per provider in #8502).
-  const queueTurnEndSessionList = (sessionId) => {
+  //
+  // `afterBusyCleared` marks the list the provider itself asked for once its busy
+  // window really ended (`busy_cleared`). Every other trigger is skipped while the
+  // session reports `busyClearedOwed`: its busy flag outlives the `result` (the
+  // jsonl-subprocess family clears it in the child's close handler, a later
+  // event-loop turn), so a list built now would publish the finished session as
+  // busy AFTER the viewer's agent_idle, and the clients, which re-derive isIdle
+  // from the list row even for the active session, would flip back to Working
+  // until the child exits. The session states this itself; it is not guessed
+  // from `isRunning`, which is also true for a restarted queued turn and for
+  // background shells, where the list is correct and wanted.
+  const queueTurnEndSessionList = (sessionId, { afterBusyCleared = false } = {}) => {
     if (turnEndListQueued.has(sessionId)) return
     turnEndListQueued.add(sessionId)
     queueMicrotask(() => {
       turnEndListQueued.delete(sessionId)
+      if (!afterBusyCleared && sessionManager.getSession?.(sessionId)?.session?.busyClearedOwed === true) return
       try {
         executeSideEffects([{ type: 'session_list' }], sessionId, ctx)
       } catch (err) {
@@ -295,7 +307,7 @@ function setupSessionForwarding(normalizer, ctx) {
     // parsed) says so when busy actually clears. Nothing to normalise or relay to
     // a viewer: it exists to refresh the list the clients re-derive busy from.
     if (event === 'busy_cleared') {
-      queueTurnEndSessionList(sessionId)
+      queueTurnEndSessionList(sessionId, { afterBusyCleared: true })
       return
     }
 
@@ -326,6 +338,12 @@ function setupSessionForwarding(normalizer, ctx) {
     // were deduped against: the `result` that deduped it queued the list, and the
     // queue is idempotent per synchronous turn end.
     if (event === 'stopped') queueTurnEndSessionList(sessionId)
+    // A turn can also end with only an `error` (an SDK query that threw, a BYOK
+    // `_emitTurnError`, ACP / Codex `_failTurn`): no `result`, no `stopped`, so no
+    // agent_idle or idle ping, and the clients leave busy on nothing else. The
+    // list is the one signal left. An `error` that does not end a turn costs one
+    // list that reports the session's true state, which is still busy.
+    if (event === 'error') queueTurnEndSessionList(sessionId)
 
     // Dev server preview: scan tool_result events for localhost server patterns
     if (event === 'tool_result' && data?.result) {
