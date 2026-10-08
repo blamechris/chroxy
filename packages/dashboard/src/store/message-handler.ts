@@ -2793,7 +2793,14 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
   // #5555.3 — advance the cursor for replayed tool_start entries.
   if (toolStartIsReplay) recordHistorySeq(toolStartTargetId, (msg as { historySeq?: unknown }).historySeq);
   const result = sharedToolStart(msg, get().activeSessionId, toolStartIsReplay, cached);
-  if (!result.shouldDispatch || !result.chatMessage) return;
+  if (!result.shouldDispatch || !result.chatMessage) {
+    // #8455: a replayed start for a card held without its input fills it in.
+    const reconcile = result.reconcile;
+    if (reconcile && result.sessionId && get().sessionStates[result.sessionId]) {
+      updateSession(result.sessionId, (ss) => applyMessageReconcileToSession(ss, reconcile));
+    }
+    return;
+  }
   const toolMsg = result.chatMessage;
   const targetId = result.sessionId;
   if (targetId && get().sessionStates[targetId]) {

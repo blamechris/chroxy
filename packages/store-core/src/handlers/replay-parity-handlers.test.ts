@@ -479,3 +479,83 @@ describe('a replayed reply the client holds only in part (#8444)', () => {
   })
 })
 
+
+describe('a replayed tool_start for a card the client holds without its input (#8455)', () => {
+  const INPUT = { file_path: '/repo/a.js' }
+  // The card a live client holds after the start: the SDK sends `input: null`.
+  const heldWithoutInput = (): ChatMessage =>
+    handleToolStart({ messageId: 'tu1', toolUseId: 'tu1', tool: 'Read', input: null }, 's1', false, []).chatMessage!
+  const replayedStart = (input: unknown) =>
+    handleToolStart({ messageId: 'tu1', toolUseId: 'tu1', tool: 'Read', input, timestamp: 5, historySeq: 1 }, 's1', true, [])
+  const replayedAgainst = (held: ChatMessage, input: unknown) =>
+    handleToolStart({ messageId: 'tu1', toolUseId: 'tu1', tool: 'Read', input, timestamp: 5, historySeq: 1 }, 's1', true, [held])
+
+  it('fills in the input and the content a connected client has', () => {
+    const held = heldWithoutInput()
+    const out = replayedAgainst(held, INPUT)
+    expect(out.shouldDispatch).toBe(false)
+    expect(out.activeTool).toBeNull()
+    const [next] = applyMessageReconcile([held], out.reconcile!)
+    const live = handleToolResult({ toolUseId: 'tu1', result: 'ok', input: INPUT }, 's1')!.applyTo([held])[0]!
+    expect(next!.toolInput).toEqual(INPUT)
+    expect(next!.content).toBe('{"file_path":"/repo/a.js"}')
+    expect({ content: next!.content, toolInput: next!.toolInput }).toEqual({ content: live.content, toolInput: live.toolInput })
+  })
+
+  it('leaves a card that already has its input untouched, whatever the entry carries', () => {
+    const whole = handleToolStart({ messageId: 'tu1', toolUseId: 'tu1', tool: 'Read', input: INPUT }, 's1', false, []).chatMessage!
+    for (const input of [INPUT, { file_path: '/other.js' }, null]) {
+      const out = replayedAgainst(whole, input)
+      expect(out.shouldDispatch, JSON.stringify(input)).toBe(false)
+      expect(out.reconcile, JSON.stringify(input)).toBeUndefined()
+    }
+  })
+
+  it('never replaces an input the card holds with a different one (the held input wins)', () => {
+    const held = { ...heldWithoutInput(), toolInput: { file_path: '/from-result.js' }, content: '{"file_path":"/from-result.js"}' }
+    expect(replayedAgainst(held, INPUT).reconcile).toBeUndefined()
+  })
+
+  it('gives nothing when the entry has no usable input', () => {
+    for (const input of [null, undefined, 'x', 7, ['a']]) {
+      expect(replayedAgainst(heldWithoutInput(), input).reconcile, String(input)).toBeUndefined()
+    }
+  })
+
+  it('keeps content that is neither empty nor the tool name', () => {
+    const held = { ...heldWithoutInput(), content: 'custom' }
+    const out = replayedAgainst(held, INPUT)
+    expect(applyMessageReconcile([held], out.reconcile!)[0]).toMatchObject({ toolInput: INPUT, content: 'custom' })
+  })
+
+  it('does not touch a message of another type that shares the id', () => {
+    const other: ChatMessage = { id: 'tu1', type: 'response', content: 'x', timestamp: 1 }
+    expect(replayedAgainst(other, INPUT).reconcile).toBeUndefined()
+  })
+
+  it('still builds a new card when nothing is held', () => {
+    const out = replayedStart(INPUT)
+    expect(out.shouldDispatch).toBe(true)
+    expect(out.reconcile).toBeUndefined()
+    expect(out.chatMessage).toMatchObject({ toolInput: INPUT, content: '{"file_path":"/repo/a.js"}' })
+  })
+
+  describe('a full-rebuild replay (the dedup cache is the replay tail)', () => {
+    afterEach(() => resetReplayReconcile({ clearCursors: true }))
+
+    it('completes only a card the replay itself appended, never the old prefix copy', () => {
+      const prefix = heldWithoutInput()
+      let messages: ChatMessage[] = [prefix]
+      reconcileReplayStart('s1', true, messages)
+      const start = (input: unknown) => {
+        const out = handleToolStart({ messageId: 'tu1', toolUseId: 'tu1', tool: 'Read', input, timestamp: 5, historySeq: 1 }, 's1', true, replayDedupCache('s1', messages))
+        if (out.shouldDispatch) messages = [...messages, out.chatMessage!]
+        else if (out.reconcile) messages = applyMessageReconcile(messages, out.reconcile)
+      }
+      start(INPUT)
+      expect(messages).toHaveLength(2)
+      expect(messages[0]).toBe(prefix)
+      expect(messages[1]!.toolInput).toEqual(INPUT)
+    })
+  })
+})

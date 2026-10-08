@@ -568,6 +568,14 @@ export interface ToolStartPayload {
    * skip the state write in lockstep with the rest of this payload.
    */
   applyToActiveTools: (current: ActiveTool[]) => ActiveTool[]
+  /**
+   * #8455: set when the entry was a replayed `tool_start` for a card the client
+   * already holds WITHOUT its input (the connection dropped before the
+   * `tool_result` that carries it) and the entry knows the input. The caller
+   * applies it in place with {@link applyMessageReconcileToSession}; a plain
+   * duplicate has none.
+   */
+  reconcile?: MessageReconcile
 }
 
 /**
@@ -588,6 +596,21 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  */
 function toolCardContent(input: unknown, tool: string | undefined): string {
   return input ? JSON.stringify(input) : tool || ''
+}
+
+/**
+ * #8455: the patch that gives a held `tool_use` card the input a replayed
+ * `tool_start` entry carries, or `undefined` when there is nothing to give: the
+ * entry has no usable input, the held message is not a tool card, or the card
+ * already holds an input (never overwritten). The content follows the same rule as
+ * the `tool_result` backfill: the placeholder (empty, or the tool name) becomes the
+ * serialized input, anything else is left alone.
+ */
+function heldToolInputReconcile(held: ChatMessage, input: unknown): MessageReconcile | undefined {
+  if (held.type !== 'tool_use' || held.toolInput !== undefined || !isPlainObject(input)) return undefined
+  const patch: Partial<ChatMessage> = { toolInput: input }
+  if (!held.content || held.content === held.tool) patch.content = toolCardContent(input, held.tool)
+  return { target: held, patch }
 }
 
 /**
@@ -640,7 +663,17 @@ export function handleToolStart(
   const noopApply = (current: ActiveTool[]) => current
 
   if (receivingHistoryReplay) {
-    if (cachedMessages.some((m) => m.id === toolId)) {
+    const held = cachedMessages.find((m) => m.id === toolId)
+    if (held) {
+      // #8455: SDK/CLI/BYOK start a tool with `input: null` and the input arrives on
+      // the `tool_result`; the history entry for this start was backfilled with it
+      // (#7346). A client that held the card but missed that result still lacks the
+      // input, and the replayed `tool_result` entry carries none -- so this entry is
+      // where it is filled in, the way the tool_result would have, content included.
+      // A card that already has an input keeps it: the input is written once, and a
+      // replayed copy that differs is the same call as recorded by a different
+      // path, not a correction.
+      const reconcile = heldToolInputReconcile(held, msg.input)
       return {
         shouldDispatch: false,
         sessionId,
@@ -648,6 +681,7 @@ export function handleToolStart(
         toolName,
         activeTool: null,
         applyToActiveTools: noopApply,
+        ...(reconcile ? { reconcile } : null),
       }
     }
   }
