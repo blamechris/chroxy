@@ -24,6 +24,10 @@
  *  - `permission_mode_switch` -- switching to Auto respawned the provider child.
  *  - `model_switch`           -- a mid-turn model change respawned it.
  *  - `user_stop`              -- the user pressed Stop.
+ *  - `user_stop_before_run`   -- the user pressed Stop while the tool's
+ *                                permission prompt was still pending (#8363).
+ *                                Unlike every other reason the server KNOWS the
+ *                                tool never ran: it was never approved.
  *  - `process_exit`           -- the provider process exited (crash/kill).
  *  - `hard_timeout`           -- the absolute turn cap fired.
  *  - `stream_stall`           -- the provider went silent past the stall window.
@@ -38,6 +42,7 @@ export const TURN_TERMINATION_REASONS = [
     'permission_mode_switch',
     'model_switch',
     'user_stop',
+    'user_stop_before_run',
     'process_exit',
     'hard_timeout',
     'stream_stall',
@@ -55,6 +60,7 @@ const CAUSE = {
     permission_mode_switch: 'permission-mode switch',
     model_switch: 'model switch',
     user_stop: 'Stop',
+    user_stop_before_run: 'Stop',
     process_exit: 'session process exit',
     hard_timeout: 'turn timeout',
     stream_stall: 'stream stall',
@@ -69,7 +75,10 @@ const CAUSE = {
  * hard timeout, a stream stall), so a real result can still follow, and even a
  * confirmed kill does not undo a side effect that completed before the result
  * was delivered. So the wording never asserts "did not run" and never tells
- * the user to blindly retry -- it says no result arrived and to check first.
+ * the user to blindly retry (the one exception is `user_stop_before_run`: a
+ * prompt still pending when Stop was pressed means the tool was never approved,
+ * so that reason alone says it did not run). Everywhere else it says no result
+ * arrived and to check first.
  */
 const CHECK = 'Check whether it took effect before retrying.';
 /**
@@ -81,21 +90,35 @@ export function describeTurnTermination(reason) {
     if (!isTurnTerminationReason(reason)) {
         return {
             cause: 'turn terminated',
+            label: 'terminated',
             summary: `Turn ended before this tool returned a result. ${CHECK}`,
         };
     }
     const cause = CAUSE[reason];
     if (reason === 'user_stop') {
-        return { cause, summary: `Stopped before this tool returned a result. ${CHECK}` };
+        return { cause, label: 'stopped', summary: `Stopped before this tool returned a result. ${CHECK}` };
+    }
+    if (reason === 'user_stop_before_run') {
+        // #8363: the prompt was still pending when Stop was pressed, so the tool was
+        // never approved and never started. This is the one reason that can say so;
+        // it must not read as the user refusing it (the provider's own text for the
+        // cancelled prompt says exactly that).
+        return {
+            cause,
+            label: 'stopped',
+            summary: 'Stopped before this tool ran — the turn was stopped while it was waiting for approval, so it was never approved.',
+        };
     }
     if (reason === 'daemon_restart') {
         return {
             cause,
+            label: 'terminated',
             summary: 'Interrupted by a daemon restart — this tool may or may not have finished. Check before re-sending.',
         };
     }
     return {
         cause,
+        label: 'terminated',
         summary: `Turn ended (${cause}) before this tool returned a result. ${CHECK}`,
     };
 }

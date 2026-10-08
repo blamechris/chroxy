@@ -172,6 +172,30 @@ describe('ToolGroup', () => {
     expect(screen.getByTestId('tool-group-entry-detail-1')).not.toHaveTextContent('synthesized placeholder text')
   })
 
+  // #8363 -- Stop pressed while a tool's permission prompt was pending. The
+  // provider writes a denial result saying the USER declined; the row says stopped.
+  it('a Stop on a pending permission is badged stopped and says it never ran (#8363)', () => {
+    const messages = [
+      tool('1', 'Bash', {
+        toolResult: "The user doesn't want to proceed with this tool use.",
+        toolResultIsError: true,
+        toolResultTerminatedReason: 'user_stop_before_run',
+      }),
+      // CONTROL: a real Deny -- no reason -- keeps the failure styling and its text
+      tool('2', 'Bash', { toolResult: "The user doesn't want to proceed with this tool use.", toolResultIsError: true }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    expect(screen.getByTestId('tool-group-entry-terminated-1')).toHaveTextContent('stopped')
+    fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+    const note = screen.getByTestId('tool-group-entry-terminated-note-1')
+    expect(note).toHaveTextContent('Stopped before this tool ran')
+    expect(screen.getByTestId('tool-group-entry-detail-1')).not.toHaveTextContent("doesn't want to proceed")
+    const denied = screen.getByTestId('tool-group-entry-2')
+    expect(denied).toHaveAttribute('data-error', 'true')
+    expect(denied).not.toHaveAttribute('data-terminated')
+    expect(screen.queryByTestId('tool-group-entry-terminated-2')).toBeNull()
+  })
+
   it('an unrecognised reason from a newer server still renders as terminated, with generic wording (#7376)', () => {
     const messages = [
       tool('1', 'Bash', { toolResult: 'x', toolResultIsError: true, toolResultTerminatedReason: 'from_the_future' }),

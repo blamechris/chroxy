@@ -134,7 +134,7 @@ function ActivityEntry({
             red alert icon instead of the green check. */}
         {hasResult ? (
           termination ? (
-            <Icon name="stop" size={12} color={COLORS.accentOrange} testID={`activity-entry-terminated-${message.id}`} accessibilityLabel="turn terminated" />
+            <Icon name="stop" size={12} color={COLORS.accentOrange} testID={`activity-entry-terminated-${message.id}`} accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
           ) : message.toolResultIsError ? (
             <Icon name="alertCircle" size={12} color={COLORS.accentRed} testID={`activity-entry-error-${message.id}`} accessibilityLabel="tool failed" />
           ) : (

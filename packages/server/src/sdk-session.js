@@ -730,6 +730,17 @@ export class SdkSession extends BaseSession {
     // client UI feedback is unaffected.
     this._lastRefusedWarnTs = 0
 
+    // #8363: tool_use ids whose permission prompt is awaiting a decision right
+    // now (added when the provider asks, dropped when it settles), and the subset
+    // that was still waiting when Stop was pressed. Stopping a turn makes the SDK
+    // resolve a pending prompt as a denial and write ITS OWN tool_result, whose
+    // text says the user did not want to proceed -- but nobody refused anything.
+    // The tool_result path (`_terminatedReasonForToolResult`) uses the second set
+    // to tag that result as a Stop. A decision the user actually gave never joins
+    // it: it leaves `_pendingPermissionToolUseIds` first.
+    this._pendingPermissionToolUseIds = new Set()
+    this._stopCancelledToolUseIds = new Set()
+
     // #4881: provider parity with CliSession's #4602 _intentionalStop flag.
     // Set by `interrupt()` immediately before aborting the active SDK query
     // generator, then consumed inside `_callQuery`'s try/catch/finally so a
@@ -933,6 +944,7 @@ export class SdkSession extends BaseSession {
     this._isBusy = true
     // #7376: a turn starts with no Stop requested, whatever the last one did.
     this._stopRequestedThisTurn = false
+    this._stopCancelledToolUseIds.clear() // #8363
     // #8300: a per-session monotonic turn token. `supersededByNewerTurn`
     // compares against it: unlike a handle comparison it never reverts once
     // a follow-up turn has started and ended.
@@ -2021,6 +2033,9 @@ export class SdkSession extends BaseSession {
                 // tool's OWN output that happens to start with the sentence (a
                 // fetched page, a file, an echo) is not an error block.
                 if (block.is_error !== true) continue
+                // #8363: Stop cancelled this tool's pending prompt; the result is
+                // tagged as a Stop below, and is not a provider-side fault.
+                if (this._stopCancelledToolUseIds.has(block.tool_use_id)) continue
                 const text = toolResultText(block)
                 if (!isSdkToolCancellationText(text)) continue
                 const tool = this._inFlightToolStarts.get(block.tool_use_id)?.tool || 'unknown'
@@ -2776,7 +2791,48 @@ export class SdkSession extends BaseSession {
    * Delegates to the PermissionManager.
    */
   _handlePermission(toolName, input, signal, suggestions, toolUseId = undefined) {
-    return this._permissions.handlePermission(toolName, input, signal, this.permissionMode, suggestions, toolUseId)
+    return this._trackPermissionDecision(
+      toolUseId,
+      this._permissions.handlePermission(toolName, input, signal, this.permissionMode, suggestions, toolUseId),
+    )
+  }
+
+  /**
+   * #8363: follow a permission decision from the moment the provider asks until
+   * it settles, so `interrupt()` knows which tool calls Stop caught mid-prompt.
+   * Passes the decision through unchanged. An `allow` removes the call from the
+   * stopped set again: if the user approved it in the instant between Stop and
+   * the abort, the tool may run and its result is a real one.
+   * @param {string|undefined} toolUseId
+   * @param {Promise<{behavior: string}>} decision
+   * @returns {Promise<{behavior: string}>}
+   */
+  _trackPermissionDecision(toolUseId, decision) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return decision
+    this._pendingPermissionToolUseIds.add(toolUseId)
+    const settled = (result) => {
+      this._pendingPermissionToolUseIds.delete(toolUseId)
+      if (result?.behavior === 'allow') this._stopCancelledToolUseIds.delete(toolUseId)
+    }
+    return Promise.resolve(decision).then(
+      (result) => { settled(result); return result },
+      (err) => { settled(undefined); throw err },
+    )
+  }
+
+  /**
+   * #8363: the termination reason for a provider `tool_result`, or undefined.
+   * Consulted by `emitToolResults` for every result block. A result is a Stop's
+   * when the call's permission prompt was still pending at the moment Stop was
+   * pressed and the provider's block is an error (the denial it wrote itself).
+   * Single-use: the id is dropped on the way out.
+   * @param {string} toolUseId
+   * @param {{is_error?: boolean}} block
+   * @returns {string|undefined}
+   */
+  _terminatedReasonForToolResult(toolUseId, block) {
+    if (!this._stopCancelledToolUseIds.delete(toolUseId)) return undefined
+    return block?.is_error === true ? 'user_stop_before_run' : undefined
   }
 
   /**
@@ -2803,7 +2859,10 @@ export class SdkSession extends BaseSession {
     const toolUseId = typeof hookToolUseId === 'string' && hookToolUseId.length > 0
       ? hookToolUseId
       : hookInput?.tool_use_id
-    const result = await this._permissions.handlePermission(toolName, input, signal, this.permissionMode, undefined, toolUseId)
+    const result = await this._trackPermissionDecision(
+      toolUseId,
+      this._permissions.handlePermission(toolName, input, signal, this.permissionMode, undefined, toolUseId),
+    )
     const allow = result?.behavior === 'allow'
     return {
       continue: true,
@@ -3069,6 +3128,19 @@ export class SdkSession extends BaseSession {
     // catch/finally (single-use, mirrors CliSession#4602).
     this.markIntentionalStop()
     this._noteTurnStopRequested() // #7376
+    // #8363: every permission prompt still waiting is about to be resolved by the
+    // abort, not by the user. Snapshot them BEFORE the abort -- the SDK writes the
+    // tool_result for each as soon as it sees the interrupt, which can be before
+    // this session's abort listeners have run.
+    //
+    // Only a prompt that is STILL waiting. A decision delivered in this same
+    // synchronous tick (the scheduler denies, then interrupts, back to back) has
+    // already left the permission manager's pending state, though its id leaves
+    // `_pendingPermissionToolUseIds` a microtask later; that call was refused,
+    // not stopped.
+    for (const id of this._pendingPermissionToolUseIds) {
+      if (this._permissions.hasPendingForToolUse(id)) this._stopCancelledToolUseIds.add(id)
+    }
 
     // #4828: session-scoped (interrupt() only meaningful with an active query).
     ;(this._log || log).info('Interrupting query')

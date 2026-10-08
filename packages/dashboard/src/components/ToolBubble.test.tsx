@@ -49,6 +49,23 @@ describe('ToolBubble', () => {
     expect(screen.getByTestId('tool-bubble-tool-1')).not.toHaveTextContent('synthesized placeholder text')
   })
 
+  // #8363 -- Stop pressed while the tool's permission prompt was pending. The
+  // provider's own result text says the user declined; the row must say stopped.
+  it('a Stop on a pending permission reads as stopped, not as a refusal (#8363)', () => {
+    render(
+      <ToolBubble
+        {...baseProps}
+        toolName="Bash"
+        result="Stopped before this tool ran -- the turn was stopped while it was waiting for approval, so it was never approved."
+        terminatedReason="user_stop_before_run"
+        isTail
+      />,
+    )
+    const note = screen.getByTestId('tool-bubble-terminated-tool-1')
+    expect(note).toHaveTextContent('Stopped before this tool ran')
+    expect(note).not.toHaveTextContent(/doesn't want|refus|denied/i)
+  })
+
   it('POSITIVE CONTROL: an ordinary tool shows no terminated note and keeps its result (#7376)', () => {
     render(<ToolBubble {...baseProps} isTail />)
     expect(screen.queryByTestId('tool-bubble-terminated-tool-1')).toBeNull()

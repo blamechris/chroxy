@@ -244,7 +244,7 @@ function ToolGroupEntry({
             data-testid={`tool-group-entry-terminated-${message.id}`}
             title={termination.summary}
           >
-            terminated
+            {termination.label}
           </span>
         )}
         <span className="tool-group-entry-toggle" aria-hidden="true">

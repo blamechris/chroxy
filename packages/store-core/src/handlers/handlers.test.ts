@@ -8367,6 +8367,16 @@ describe('handleToolResult', () => {
     expect(p.toolResultIsError).toBe(true)
   })
 
+  // #8363 -- the reason for a Stop that cancelled a pending permission rides the
+  // same field, so a client that knows nothing new still renders it as terminated.
+  it('patches toolResultTerminatedReason for a Stop on a pending permission', () => {
+    const p = handleToolResult(
+      { toolUseId: 'tu-1', result: 'Stopped before this tool ran', isError: true, terminatedReason: 'user_stop_before_run' },
+      's',
+    )!.patch
+    expect(p.toolResultTerminatedReason).toBe('user_stop_before_run')
+  })
+
   it('POSITIVE CONTROL: no toolResultTerminatedReason key for a genuine failure or a success', () => {
     for (const msg of [
       { toolUseId: 'tu-1', result: 'boom', isError: true },

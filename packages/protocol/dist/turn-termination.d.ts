@@ -24,6 +24,10 @@
  *  - `permission_mode_switch` -- switching to Auto respawned the provider child.
  *  - `model_switch`           -- a mid-turn model change respawned it.
  *  - `user_stop`              -- the user pressed Stop.
+ *  - `user_stop_before_run`   -- the user pressed Stop while the tool's
+ *                                permission prompt was still pending (#8363).
+ *                                Unlike every other reason the server KNOWS the
+ *                                tool never ran: it was never approved.
  *  - `process_exit`           -- the provider process exited (crash/kill).
  *  - `hard_timeout`           -- the absolute turn cap fired.
  *  - `stream_stall`           -- the provider went silent past the stall window.
@@ -34,7 +38,7 @@
  *                                (restore-time history sweep). Unlike the
  *                                others the outcome is genuinely unknown.
  */
-export declare const TURN_TERMINATION_REASONS: readonly ["permission_mode_switch", "model_switch", "user_stop", "process_exit", "hard_timeout", "stream_stall", "first_output_timeout", "auth_required", "sink_base_compromised", "daemon_restart"];
+export declare const TURN_TERMINATION_REASONS: readonly ["permission_mode_switch", "model_switch", "user_stop", "user_stop_before_run", "process_exit", "hard_timeout", "stream_stall", "first_output_timeout", "auth_required", "sink_base_compromised", "daemon_restart"];
 export type TurnTerminationReason = (typeof TURN_TERMINATION_REASONS)[number];
 /** Narrow an arbitrary value to a known {@link TurnTerminationReason}. */
 export declare function isTurnTerminationReason(value: unknown): value is TurnTerminationReason;
@@ -42,6 +46,12 @@ export declare function isTurnTerminationReason(value: unknown): value is TurnTe
 export interface TurnTerminationDescription {
     /** Short noun phrase for the cause, e.g. `permission-mode switch`. */
     cause: string;
+    /**
+     * One word for the tool row's badge: `stopped` when the user pressed Stop,
+     * `terminated` for everything else. A Stop is the user's own act and must not
+     * be badged like a fault (#8363).
+     */
+    label: 'stopped' | 'terminated';
     /** One sentence for the tool row: what happened and the right next step. */
     summary: string;
 }
