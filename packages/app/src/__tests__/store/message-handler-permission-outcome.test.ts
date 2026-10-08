@@ -197,12 +197,14 @@ describe('a Stop-cancelled permission prompt (#8374)', () => {
     expect(derivePendingPermissionCounts(store.getState().sessionStates as any, Date.now() + 1)).toEqual({});
   });
 
-  it('a non-user abort (reason "aborted") is not labelled a Stop', () => {
-    const { read, send } = boot([livePrompt()]);
+  it('a non-user abort (reason "aborted") is an expired record, not a Stop and not a user deny', () => {
+    const { read, send, store } = boot([livePrompt()]);
     send(resolvedFrame({ reason: 'aborted' }));
     const [card] = read().filter((m) => m.type === 'prompt');
-    expect(card!.permissionOutcome).toBeUndefined();
-    expect(card!.answered).toBe('deny');
+    expect(card!.permissionOutcome).toBe('expired');
+    expect(card!.answered).toBeUndefined();
+    expect(card!.options).toBeUndefined();
+    expect(derivePendingPermissionCounts(store.getState().sessionStates as any, Date.now() + 1)).toEqual({});
   });
 
   it('CONTROL: a user Deny stays an answered deny with no outcome record', () => {

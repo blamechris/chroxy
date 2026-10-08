@@ -409,10 +409,31 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
     expect(allowed.permissionOutcome).toBeUndefined()
   })
 
-  it('a non-user abort (reason "aborted": a stalled stream, a dead provider) is NOT labelled a Stop', () => {
+  it('a non-user abort (reason "aborted": a stalled stream, a dead provider) is an expired record, not a Stop and not a user deny', () => {
     const next = applyPermissionResolved(livePending(), resolved({ reason: 'aborted' }), NOW)
-    expect(next.permissionOutcome).toBeUndefined()
-    expect(next.answered).toBe('deny')
+    // The same meaning history gives it (session-manager journals it `expired`),
+    // so a live card and its replayed record agree.
+    expect(next.permissionOutcome).toBe('expired')
+    expect(next.answered).toBeUndefined()
+    expect(next.options).toBeUndefined()
+    expect(next.expiresAt).toBe(NOW)
+    expect(isLivePermissionPrompt(next, NOW + 1)).toBe(false)
+  })
+
+  it('CONTROL: only the stop and abort reasons are no-decision; a timeout/user/absent reason keeps the deny', () => {
+    for (const reason of ['user', undefined]) {
+      const next = applyPermissionResolved(livePending(), resolved(reason ? { reason } : {}), NOW)
+      expect(next.answered).toBe('deny')
+      expect(next.permissionOutcome).toBeUndefined()
+    }
+  })
+
+  it('a live "aborted" card and the replayed "expired" outcome are the same record (no duplicate, no change)', () => {
+    const live = applyPermissionResolved(livePending(), resolved({ reason: 'aborted' }), NOW)
+    const env = makeEnv([live])
+    dispatch(env, outcome({ outcome: 'expired' }))
+    expect(env.sessions.s1!.messages).toHaveLength(1)
+    expect(env.sessions.s1!.messages[0]).toBe(live)
   })
 
   it('keeps an already-past expiry rather than moving it forward', () => {

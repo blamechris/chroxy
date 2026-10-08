@@ -337,8 +337,11 @@ const CAPABILITY_PERMISSION_OUTCOME_STOPPED = 'permission_outcome_stopped_v1'
  * @param {WebSocket} ws
  * @param {string} sessionId
  * @param {object} entry - A ring-buffer entry, possibly carrying `_seq`.
+ * @param {{clientCapabilities?: Set<string>}|null} [client] - The client RECORD
+ *   (`clients.get(ws)`), which is where the auth handshake stores the capabilities
+ *   it advertised. NOT `ws`: that is the raw socket and carries none (#8374).
  */
-export function sendHistoryEntry(send, ws, sessionId, entry) {
+export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
   // `sourceToolUseId` (#8336) is server-internal: it lets the restore-time sweep
   // pair a recorded question with its tool_start, and no client reads it. Live
   // broadcasts never carry it (the event normalizer picks fields), so the replay
@@ -353,7 +356,7 @@ export function sendHistoryEntry(send, ws, sessionId, entry) {
   // new value: the record survives, only its label degrades. The stored entry is
   // untouched (`wireEntry` is a copy), so a capable client still gets `stopped`.
   if (wireEntry.type === 'permission_outcome' && wireEntry.outcome === 'stopped'
-    && !(ws?.clientCapabilities?.has?.(CAPABILITY_PERMISSION_OUTCOME_STOPPED) ?? false)) {
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_PERMISSION_OUTCOME_STOPPED) ?? false)) {
     wireEntry.outcome = 'expired'
   }
   send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
@@ -1730,7 +1733,7 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // (#7459), and the bufferedAmount gating (#7460) were each missing there.
   sendChunkedWithBackpressure(ws, history, {
     startOffset,
-    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry),
+    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry, client),
     onDone: finishReplay,
   })
 }

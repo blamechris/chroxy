@@ -112,7 +112,8 @@ export interface PermissionResolvedPayload {
   /**
    * #8374: why the server resolved the prompt (`'user'`, `'timeout'`, `'stopped'`, `'aborted'`,
    * ...), or null when the frame carried none (the hook route and other-client
-   * broadcasts). Only {@link PERMISSION_STOPPED_REASON} is acted on.
+   * broadcasts). Only {@link PERMISSION_STOPPED_REASON} and
+   * {@link PERMISSION_ABORTED_REASON} are acted on.
    */
   reason: string | null
 }
@@ -136,6 +137,14 @@ export function handlePermissionResolved(
 export const PERMISSION_STOPPED_REASON = 'stopped'
 
 /**
+ * #8374: the `permission_resolved` reason for every OTHER abort of the turn's
+ * controller -- a dead provider process, a stalled stream's watchdog, a
+ * teardown. Not a Stop and not a user's refusal: nobody decided, so it carries
+ * the meaning history gives it (`session-manager.js` journals it `expired`).
+ */
+export const PERMISSION_ABORTED_REASON = 'aborted'
+
+/**
  * Apply a `permission_resolved` frame to the prompt message it resolves. The one
  * place both clients' handlers do it, so the two cannot disagree about what a
  * Stop-cancelled prompt looks like.
@@ -146,6 +155,10 @@ export const PERMISSION_STOPPED_REASON = 'stopped'
  *     so a session switch changes nothing about it. A countdown still running is
  *     closed; one that already ended keeps its time. The renderers read
  *     `permissionOutcome` ahead of `answered`, so the card says "stopped".
+ *   - Any other abort (`reason: 'aborted'`): nobody decided either, so the same
+ *     no-decision shape, as an `expired` record -- what history journals for it,
+ *     so the live card and its replay agree. Before this it was stamped as an
+ *     answered deny and read "Denied" live but "expired" after a switch.
  *   - anything else: the decision is the answer, exactly as before.
  *
  * Returns a new message; the caller owns finding it.
@@ -155,10 +168,14 @@ export function applyPermissionResolved(
   resolved: PermissionResolvedPayload,
   now: number,
 ): ChatMessage {
-  if (resolved.reason === PERMISSION_STOPPED_REASON) {
+  const noDecision =
+    resolved.reason === PERMISSION_STOPPED_REASON ? 'stopped'
+      : resolved.reason === PERMISSION_ABORTED_REASON ? 'expired'
+        : null
+  if (noDecision) {
     return {
       ...m,
-      permissionOutcome: 'stopped',
+      permissionOutcome: noDecision,
       answered: undefined,
       answeredAt: undefined,
       options: undefined,

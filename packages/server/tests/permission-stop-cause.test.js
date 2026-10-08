@@ -179,24 +179,32 @@ describe('the user Stop entry point marks the open prompt (#8374)', () => {
 
 describe('a client that cannot label a stopped outcome is sent expired (#8374)', () => {
   const entry = (outcome) => ({ type: 'permission_outcome', requestId: 'p', tool: 'Bash', description: 'ls', outcome, timestamp: 1, _seq: 4 })
-  const replay = (ws, e) => {
+  // The capabilities live on the client RECORD (`clients.get(ws)`), never on the
+  // raw socket `ws` -- reading them off `ws` made every client look old.
+  const replay = (client, e) => {
     const frames = []
-    sendHistoryEntry((_ws, payload) => frames.push(payload), ws, 's1', e)
+    sendHistoryEntry((_ws, payload) => frames.push(payload), {}, 's1', e, client)
     return frames[0]
   }
 
   it('a client advertising the capability gets "stopped"', () => {
-    const ws = { clientCapabilities: new Set(['permission_outcome_stopped_v1']) }
-    assert.equal(replay(ws, entry('stopped')).outcome, 'stopped')
+    const client = { clientCapabilities: new Set(['permission_outcome_stopped_v1']) }
+    assert.equal(replay(client, entry('stopped')).outcome, 'stopped')
   })
 
   it('a client that does not (an older build, which drops an outcome it cannot parse) gets "expired"', () => {
-    for (const ws of [{ clientCapabilities: new Set(['voice_input']) }, { clientCapabilities: new Set() }, {}, null]) {
-      const frame = replay(ws, entry('stopped'))
+    for (const client of [{ clientCapabilities: new Set(['voice_input']) }, { clientCapabilities: new Set() }, {}, null, undefined]) {
+      const frame = replay(client, entry('stopped'))
       assert.equal(frame.outcome, 'expired')
       assert.equal(frame.requestId, 'p', 'the record is kept, only its label degrades')
       assert.equal(frame.historySeq, 4)
     }
+  })
+
+  it('capabilities on the raw socket are not consulted (that is not where the handshake puts them)', () => {
+    const frames = []
+    sendHistoryEntry((_ws, payload) => frames.push(payload), { clientCapabilities: new Set(['permission_outcome_stopped_v1']) }, 's1', entry('stopped'), null)
+    assert.equal(frames[0].outcome, 'expired')
   })
 
   it('does not touch the stored entry, so a capable client reconnecting later still gets "stopped"', () => {

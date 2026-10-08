@@ -441,10 +441,12 @@ describe('permission_resolved flips answered + clears options (in-place)', () =>
     expect(bubble.expiresAt as number).toBeLessThanOrEqual(Date.now())
   })
 
-  it('#8374: a non-user abort (reason "aborted") is not labelled a Stop', () => {
+  it('#8374: a non-user abort (reason "aborted") is an expired record, not a Stop and not a user deny', () => {
     const bubble = resolveWith({ reason: 'aborted' })
-    expect(bubble.permissionOutcome).toBeUndefined()
-    expect(bubble.answered).toBe('deny')
+    expect(bubble.permissionOutcome).toBe('expired')
+    expect(bubble.answered).toBeUndefined()
+    expect(bubble.options).toBeUndefined()
+    expect(bubble.expiresAt as number).toBeLessThanOrEqual(Date.now())
   })
 
   it('#8374 CONTROL: a user Deny (reason "user", or none) still reads as an answered deny', () => {
