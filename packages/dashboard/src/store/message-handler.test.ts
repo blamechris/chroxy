@@ -5281,6 +5281,203 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #8336 — a question cut off by a daemon restart. The frames below are what
+  // the server sends for it, captured from its real code path (a
+  // SessionMessageHistory persisted, restored through sweepUnresolvedToolStarts,
+  // and replayed by resolveReplayPlan + sendHistoryEntry; see
+  // packages/server/tests/session-message-history.test.js, "replays the cut-off
+  // question over the wire"). The client's cursor survives the restart, so it is
+  // a DELTA replay: tool_start, the synthetic tool_result, then the question.
+  describe('a question cut off by a daemon restart (#8336)', () => {
+    beforeEach(() => {
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    afterEach(() => {
+      resetReplayReconcile({ clearCursors: true })
+    })
+
+    const questions = [{ question: 'Which shape?', options: [{ label: 'Round' }] }]
+
+    // Same id as the replayed tool_start's `messageId`: a tool row dedups by it,
+    // a question (which has no messageId) does not, which is the whole bug.
+    const heldToolRow = () => ({
+      id: 'm1',
+      type: 'tool_use',
+      tool: 'AskUserQuestion',
+      toolUseId: 'Q',
+      timestamp: 10,
+    })
+    const heldCard = (extra: Record<string, unknown> = {}) => ({
+      id: 'question-live',
+      type: 'prompt',
+      content: 'Which shape?',
+      toolUseId: 'Q',
+      timestamp: 11,
+      options: [{ label: 'Round', value: 'Round' }],
+      questions: [{ question: 'Which shape?', options: [{ label: 'Round', value: 'Round' }] }],
+      ...extra,
+    })
+
+    function seed(messages: any[] = []) {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages } },
+        }),
+      )
+      setStore(store)
+    }
+
+    const messagesOf = () => (store.getState() as any).sessionStates.s1.messages
+    const cards = () => messagesOf().filter((m: any) => m.type === 'prompt')
+
+    // The server's frames for the restart replay (delta shape, cursor 2).
+    function replayAfterRestart(fullHistory: boolean) {
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory, latestSeq: 5 }, ctx() as any)
+      handleMessage(
+        { type: 'tool_start', messageId: 'm1', toolUseId: 'Q', tool: 'AskUserQuestion', input: null, timestamp: 10, sessionId: 's1', historySeq: 3 } as any,
+        ctx() as any,
+      )
+      handleMessage(
+        {
+          type: 'tool_result', toolUseId: 'Q',
+          result: 'Tool was in flight when chroxy was last shut down. Tool may have continued or been cancelled — no record of outcome.',
+          interrupted: true, isError: true, synthetic: true, reason: 'session_restored',
+          timestamp: 11, sessionId: 's1', historySeq: 4,
+        } as any,
+        ctx() as any,
+      )
+      handleMessage(
+        { type: 'user_question', toolUseId: 'Q', questions, timestamp: 11, interrupted: true, sessionId: 's1', historySeq: 5 } as any,
+        ctx() as any,
+      )
+      handleMessage({ type: 'history_replay_end', sessionId: 's1', latestSeq: 5 }, ctx() as any)
+    }
+
+    it('a tab that stayed open: one card, marked interrupted, not "(resolved)"', () => {
+      seed([heldToolRow(), heldCard()])
+      replayAfterRestart(false)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(interrupted)')
+      // The held bubble was kept, not replaced: same id, same place.
+      expect(cards()[0].id).toBe('question-live')
+      expect(messagesOf().filter((m: any) => m.type === 'tool_use')).toHaveLength(1)
+    })
+
+    // Codex round 1 on #8360: a tab whose cursor is already past the question
+    // is sent only the entries beyond it. The server re-appends the marked
+    // question at the tail, so that is all this tab receives of it.
+    it('a tab whose cursor is past the question hears the verdict from the tail copy alone', () => {
+      seed([heldToolRow(), heldCard()])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false, latestSeq: 7 }, ctx() as any)
+      handleMessage(
+        { type: 'user_question', toolUseId: 'Q', questions, timestamp: 11, interrupted: true, sessionId: 's1', historySeq: 7 } as any,
+        ctx() as any,
+      )
+      handleMessage({ type: 'history_replay_end', sessionId: 's1', latestSeq: 7 }, ctx() as any)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(interrupted)')
+      expect(cards()[0].id).toBe('question-live')
+    })
+
+    it('a reloaded tab sent both the in-place entry and the tail copy still shows one card', () => {
+      seed([])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true, latestSeq: 6 }, ctx() as any)
+      for (const historySeq of [3, 6]) {
+        handleMessage(
+          { type: 'user_question', toolUseId: 'Q', questions, timestamp: 11, interrupted: true, sessionId: 's1', historySeq } as any,
+          ctx() as any,
+        )
+      }
+      handleMessage({ type: 'history_replay_end', sessionId: 's1', latestSeq: 6 }, ctx() as any)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(interrupted)')
+    })
+
+    it('a reloaded tab (full rebuild): one card, marked interrupted', () => {
+      seed([])
+      replayAfterRestart(true)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(interrupted)')
+    })
+
+    it('a full rebuild over a held copy keeps exactly one card (the replayed one)', () => {
+      seed([heldToolRow(), heldCard()])
+      replayAfterRestart(true)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(interrupted)')
+    })
+
+    it('a card the sweep already stamped "(resolved)" is corrected by the replayed verdict', () => {
+      seed([heldToolRow(), heldCard({ answered: '(resolved)' })])
+      replayAfterRestart(false)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(interrupted)')
+    })
+
+    it('never overwrites a real answer the client already holds', () => {
+      seed([heldToolRow(), heldCard({ answered: 'Round' })])
+      replayAfterRestart(false)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('Round')
+    })
+
+    // The duplicate is not specific to restarts: any delta replay that re-sends a
+    // question the client holds (a dropped socket, no restart) appended it twice,
+    // and the post-replay re-send then revived only one of the two.
+    it('a plain reconnect re-delivering a held pending question: one card, answerable again', () => {
+      seed([heldCard()])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false, latestSeq: 6 }, ctx() as any)
+      handleMessage(
+        { type: 'user_question', toolUseId: 'Q', questions, timestamp: 11, sessionId: 's1', historySeq: 6 } as any,
+        ctx() as any,
+      )
+      handleMessage({ type: 'history_replay_end', sessionId: 's1', latestSeq: 6 }, ctx() as any)
+      expect(cards()).toHaveLength(1)
+      // Precondition: this is the sweep's own stamp, as before.
+      expect(cards()[0].answered).toBe('(resolved)')
+
+      // The server's post-replay re-send of what it is still blocked on (#7457).
+      handleMessage({ type: 'user_question', toolUseId: 'Q', questions, sessionId: 's1' } as any, ctx() as any)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBeUndefined()
+    })
+
+    it('a long-answered question replayed from history still reads "(resolved)"', () => {
+      seed([])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true, latestSeq: 6 }, ctx() as any)
+      handleMessage(
+        { type: 'user_question', toolUseId: 'Q', questions, timestamp: 11, sessionId: 's1', historySeq: 3 } as any,
+        ctx() as any,
+      )
+      handleMessage({ type: 'history_replay_end', sessionId: 's1', latestSeq: 6 }, ctx() as any)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(resolved)')
+    })
+
+    it('a live re-send revives an interrupted card when the question is pending again', () => {
+      seed([heldToolRow(), heldCard()])
+      replayAfterRestart(false)
+      expect(cards()[0].answered).toBe('(interrupted)')
+
+      handleMessage({ type: 'user_question', toolUseId: 'Q', questions, sessionId: 's1' } as any, ctx() as any)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBeUndefined()
+    })
+  })
+
   // #7457 — the NON-racing half of #7420, and the half the client cannot fix
   // alone. A question that is genuinely still PENDING comes back through the
   // ordinary history replay (`user_question` is not `builtinTransient`, so it

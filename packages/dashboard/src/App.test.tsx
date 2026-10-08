@@ -2569,7 +2569,7 @@ describe('App', () => {
       },
     ]
 
-    it('renders the placeholder (and hides question content) when the AskUserQuestion permission_request is unresolved', () => {
+    it('renders the permission card alone (no pending stub, question card hidden) when the AskUserQuestion permission_request is unresolved', () => {
       stateOverrides = {
         ...connectedState,
         getActiveSessionState: () => ({
@@ -2588,8 +2588,11 @@ describe('App', () => {
       }
       render(<App />)
       const chatPane = screen.getByTestId('chat-pane')
-      // Placeholder renders…
-      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // The permission card is the one pending-state surface (#8264: no
+      // second "Pending permission…" stub beside it; PermissionPrompt is
+      // mocked in this file)…
+      expect(within(chatPane).getByTestId('permission-prompt-mock-req-aq-1')).toBeInTheDocument()
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
       // …and the model-supplied question + option labels are NOT in the
       // chat pane (gate works end-to-end through App's derivation).
       expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
@@ -2675,8 +2678,8 @@ describe('App', () => {
       }
       render(<App />)
       const chatPane = screen.getByTestId('chat-pane')
-      // Placeholder STILL renders — deny does not un-gate.
-      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // Still gated — deny does not un-gate (and, #8264, still no stub).
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
       // Question content stays hidden.
       expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
       expect(within(chatPane).queryByText('Ryu')).not.toBeInTheDocument()
@@ -2710,7 +2713,7 @@ describe('App', () => {
       }
       render(<App />)
       const chatPane = screen.getByTestId('chat-pane')
-      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
       expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
     })
 
@@ -3789,6 +3792,46 @@ describe('#7516 — the notification session-jump is gated on roster membership'
     // here because the row must not offer the jump, not because the handler
     // used to misbehave.)
     expect(switchSession).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7466 — the banner block's footprint outlives the LAST banner
+// ---------------------------------------------------------------------------
+/**
+ * Wiring cell for `NotificationBannerLayoutHold.test.tsx`. The component can
+ * only hold a retired banner's height if it is STILL MOUNTED when the list goes
+ * empty, and that is App's decision: it used to mount the component only while
+ * `sessionNotifications.length > 0`, which unmounted it (and the hold with it)
+ * in the same commit that removed the last row (`dismissSessionNotification`
+ * deletes outright). A component that holds perfectly under a parent that
+ * unmounts it is the "guard wired to only some of its callers" failure.
+ */
+describe('#7466 — App keeps the banner slot mounted when the last notification is removed', () => {
+  it('holds the stack height after the list empties', () => {
+    const real = Element.prototype.getBoundingClientRect
+    const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.getAttribute('role') === 'log' && this.classList.contains('notification-banners')) {
+        return { height: 44, width: 300, top: 0, left: 0, right: 300, bottom: 44, x: 0, y: 0, toJSON() {} } as DOMRect
+      }
+      return real.call(this)
+    })
+    try {
+      const note = {
+        id: 'n-1', sessionId: 's1', sessionName: 'Chroxy',
+        eventType: 'completed' as const, message: 'Turn finished', timestamp: 1,
+      }
+      stateOverrides = { connectionPhase: 'connected', sessions: [], activeSessionId: null, sessionNotifications: [note] }
+      const { rerender } = render(<App />)
+      expect(document.querySelector('.notification-banners')).not.toBeNull()
+      stateOverrides = { connectionPhase: 'connected', sessions: [], activeSessionId: null, sessionNotifications: [] }
+      rerender(<App />)
+      expect(document.querySelector('.notification-banners')).toBeNull()
+      const slot = screen.getByTestId('notification-banners-slot')
+      expect(slot.style.minHeight).toBe('44px')
+    } finally {
+      spy.mockRestore()
+    }
   })
 })
 

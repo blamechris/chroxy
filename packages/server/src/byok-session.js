@@ -1814,6 +1814,8 @@ export class ClaudeByokSession extends BaseSession {
         input,
         signal,
         this.permissionMode,
+        undefined,
+        toolUseId,
       )
     } catch (err) {
       // permission_request was rejected (timeout, abort, etc.). Surface

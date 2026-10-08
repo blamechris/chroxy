@@ -137,6 +137,7 @@ import {
   type QueuedMessagesBuilder,
   // --- user_question (#5618) — byte-identical parse + append + notify ---
   handleUserQuestion,
+  OTHER_OPTION_VALUE,
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
   handleMultiQuestionIntervention,
   applyInterventionBuilder,
@@ -172,8 +173,10 @@ import { handleRawOutput } from './handlers/stream'
 // non-decision value of `answered` a re-delivery is allowed to clear.
 import {
   noteLivePromptDuringReplay,
+  wasPromptLiveDuringReplay,
   replayDedupCache,
   REPLAY_RESOLVED_PLACEHOLDER,
+  QUESTION_INTERRUPTED_PLACEHOLDER,
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
 import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
@@ -1003,6 +1006,9 @@ export interface DispatchMessageMap {
     // a live one, so the dispatcher reads it to decide liveness. Not a new wire
     // field: the same value already drives `recordHistorySeq`.
     historySeq?: number
+    // #8336 — set on a REPLAYED question whose tool was in flight when the
+    // daemon shut down (see `handleUserQuestion`). Never on a live frame.
+    interrupted?: boolean
   }
   // --- multi_question_intervention (#5618) — the deny-event the builder reads ---
   multi_question_intervention: {
@@ -2104,6 +2110,35 @@ function dispatchCheckpointList<S extends DispatchSessionBase>(
 }
 
 /**
+ * What a person sees of a question form: each question's text, its option
+ * labels and whether it is multi-select. The synthetic "Other" sentinel the
+ * normalizer appends is left out, so a card built before it existed (or by a
+ * client that dropped it) still matches.
+ */
+function questionSignature(questions: unknown): string | null {
+  if (!Array.isArray(questions)) return null
+  return JSON.stringify(
+    questions.map((q) => {
+      const qq = (q ?? {}) as { question?: unknown; options?: unknown; multiSelect?: unknown }
+      const options = Array.isArray(qq.options) ? qq.options : []
+      return [
+        qq.question,
+        options
+          .filter((o) => (o as { value?: unknown })?.value !== OTHER_OPTION_VALUE)
+          .map((o) => (o as { label?: unknown })?.label),
+        qq.multiSelect === true,
+      ]
+    }),
+  )
+}
+
+/** Do two prompts ask the same thing? See {@link questionSignature}. */
+function sameQuestions(a: unknown, b: unknown): boolean {
+  const sa = questionSignature(a)
+  return sa !== null && sa === questionSignature(b)
+}
+
+/**
  * `user_question` (#5618) — append the question prompt to its (resolved)
  * session, falling back to the global log, then raise a background-session
  * notification. Byte-identical between the two clients' switches: both parsed
@@ -2146,15 +2181,22 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // `history_replay_end`; a stuck model re-emitting the same AskUserQuestion
   // payload (the pre-#4668 failure mode) collapses the same way.
   //
-  // The `!deliveredByReplay` gate is LOAD-BEARING, not caution. During a full
-  // rebuild the pre-replay prefix is sliced off at `history_replay_end`
-  // (`messages.slice(base)`), so merging a REPLAYED copy into the held one would
-  // leave the question in the part of the array about to be discarded — it would
-  // vanish from the transcript entirely, which is the worse half of #7457's own
-  // symptom. A replayed frame therefore always appends.
+  // That live branch is kept apart from the replayed one below (#8336), and
+  // both search only the view a rebuild will KEEP (`replayDedupCache`, #7508):
+  // during a full rebuild the pre-replay prefix is sliced off at
+  // `history_replay_end` (`messages.slice(base)`), so a copy matched there would
+  // be written into the part of the array about to be discarded and the
+  // question would vanish from the transcript entirely.
   const toolUseId = chatMessage.toolUseId
-  const canSupersede =
-    !deliveredByReplay && typeof toolUseId === 'string' && toolUseId.length > 0
+  // #8336 — a REPLAYED frame for a question this client already holds is the
+  // same question, delivered again. That happens on any cursor-honoured delta
+  // replay: the client got the question LIVE (no `historySeq`, so no cursor
+  // advance), reconnects, and the server replays everything past the cursor --
+  // the question included. Both used to be appended, so the transcript showed
+  // the card twice (and the sweep then stamped both). It now collapses onto
+  // the held bubble exactly as a live re-send does, with the rules below
+  // differing only in what the replayed copy is ALLOWED to change.
+  const hasToolUseId = typeof toolUseId === 'string' && toolUseId.length > 0
   // The id the ledger must name is the one that SURVIVES this dispatch: on a
   // supersede the freshly minted `chatMessage.id` is discarded, and recording it
   // would protect a message that is not in the array while leaving the revived
@@ -2178,31 +2220,86 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
       // this reason — "so a replayed entry isn't suppressed by an id in the
       // discarded prefix" — and it returns the whole array when no rebuild is in
       // progress, which is the ordinary reconnect.
+      //
+      // It is also what makes the REPLAYED merge (#8336) safe where #7457's
+      // original "a replayed frame always appends" was not: in a full rebuild a
+      // held copy in the prefix is invisible to this search, so the replayed
+      // copy appends into the kept tail as it always did; only a copy the swap
+      // will keep (the tail, or the whole array on a delta replay) is merged.
       const searchable = replayDedupCache(sessionId, ss.messages)
       // The view is either the array itself or a tail slice of it, so the
       // difference in length IS the offset back into `ss.messages`.
       const offset = ss.messages.length - searchable.length
-      const found = canSupersede
+      // Identity. A LIVE re-send is matched on `toolUseId` alone (#7457: the
+      // same id IS the same question, and a re-emitting model may reword it).
+      // A REPLAYED copy must also carry the same questions (#8336): a replay is
+      // a rebuild of the whole history, where two DIFFERENT questions that
+      // happen to share an id would otherwise collapse into the first and the
+      // second would vanish. The server mints `ask-<uuid>-<n>-<ms>` per
+      // PermissionManager and providers mint their own tool ids, so a clash is
+      // not expected -- but a dropped question is silent and unrecoverable,
+      // while one extra card is not, so the replayed branch pays for the check.
+      const found = hasToolUseId
         ? searchable.findIndex(
-            (m) => m.type === 'prompt' && m.toolUseId === toolUseId,
+            (m) =>
+              m.type === 'prompt' &&
+              m.toolUseId === toolUseId &&
+              (!deliveredByReplay || sameQuestions(m.questions, chatMessage.questions)),
           )
         : -1
       const idx = found === -1 ? -1 : found + offset
       const held = idx === -1 ? undefined : ss.messages[idx]
       if (!held) return { messages: [...ss.messages, chatMessage] } as Partial<S>
       survivingId = held.id
+      const heldAnswered = held.answered
+      if (deliveredByReplay) {
+        // The held bubble stays as it is — its id, its age, and above all its
+        // `answered`, which may be a real decision the replay knows nothing of.
+        // The one thing a replayed copy may add is the server's verdict that the
+        // question was cut off, and only over a bubble that carries no decision
+        // (unanswered, or the sweep's placeholder).
+        //
+        // Not over a bubble the live ledger vouches for (#7420): a copy that
+        // arrived LIVE inside this replay window is evidence the question is
+        // pending, and a replayed "interrupted" is older than that. The
+        // post-replay `resendPendingQuestions` frame would repair it, but the
+        // answer controls would be gone until it landed.
+        if (
+          chatMessage.answered === QUESTION_INTERRUPTED_PLACEHOLDER &&
+          (heldAnswered === undefined || heldAnswered === REPLAY_RESOLVED_PLACEHOLDER) &&
+          !wasPromptLiveDuringReplay(sessionId, held.id)
+        ) {
+          const next = ss.messages.slice()
+          next[idx] = { ...held, answered: QUESTION_INTERRUPTED_PLACEHOLDER }
+          return { messages: next } as Partial<S>
+        }
+        return {} as Partial<S>
+      }
+      // A LIVE re-delivery of a question we hold (#7457) SUPERSEDES it: the
+      // `answered` the replay-end sweep may have stamped is cleared, id and
+      // timestamp kept so the bubble neither moves nor re-ages. Exactly the
+      // merge `handlePermissionRequest` has always done for a re-sent
+      // `permission_request`, keyed on `toolUseId` because that is what a
+      // question carries instead of a `requestId`. Its producer is the server's
+      // `resendPendingQuestions` (ws-history.js), which re-asserts every
+      // still-blocked question after each replay's `history_replay_end`; a stuck
+      // model re-emitting the same AskUserQuestion payload (the pre-#4668
+      // failure mode) collapses the same way.
       const next = ss.messages.slice()
       // #7508 F3 — `answered` is a decision TOKEN with exactly one non-decision
-      // value (#6222/#6223). Clearing the sweep's placeholder IS #7457's fix;
-      // clearing a REAL decision is not. A second device can answer after the
-      // server's pending-set read and before this frame lands, and nothing on
-      // the wire un-sticks a prompt revived on top of that answer — the question
-      // variant of `permission_resolved` emits no message, only a route-map
-      // delete, and the late second answer is dropped as an unmapped toolUseId.
-      // So carry a real token across, and clear only the placeholder.
-      const heldAnswered = held.answered
+      // value (#6222/#6223), and since #8336 a second ("interrupted"). Clearing
+      // the sweep's placeholder IS #7457's fix; clearing a REAL decision is not.
+      // A second device can answer after the server's pending-set read and
+      // before this frame lands, and nothing on the wire un-sticks a prompt
+      // revived on top of that answer — the question variant of
+      // `permission_resolved` emits no message, only a route-map delete, and the
+      // late second answer is dropped as an unmapped toolUseId. So carry a real
+      // token across, and clear only the placeholder. A LIVE frame proves the
+      // question is pending again, which is why it may also clear "interrupted".
       const keepAnswered =
-        heldAnswered !== undefined && heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER
+        heldAnswered !== undefined &&
+        heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER &&
+        heldAnswered !== QUESTION_INTERRUPTED_PLACEHOLDER
       next[idx] = {
         ...chatMessage,
         id: held.id,
@@ -2218,7 +2315,14 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // for a session the store holds nothing for — `noteLivePromptDuringReplay`
   // reads no store state, so only the statement order moved.
   if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, survivingId)
-  if (sessionId) adapter.pushSessionNotification(sessionId, 'question', questionText)
+  // #8336 — an interrupted question is a correction, not a new question: it
+  // arrives replayed (in place, or as the tail copy that carries the verdict past
+  // a delta cursor) for a question the person was already told about, and nothing
+  // is waiting on them. Notifying "has a question" for it, on a session they are
+  // not looking at, is a false alarm that fires again on every such replay.
+  if (sessionId && chatMessage.answered !== QUESTION_INTERRUPTED_PLACEHOLDER) {
+    adapter.pushSessionNotification(sessionId, 'question', questionText)
+  }
 }
 
 /**

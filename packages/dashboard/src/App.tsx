@@ -2895,19 +2895,20 @@ export function App() {
           onDeny={denyPairRequest}
         />
 
-        {/* Cross-session notification banners */}
-        {sessionNotifications.length > 0 && (
-          <NotificationBanners
-            notifications={sessionNotifications}
-            onApprove={handleBannerApprove}
-            onDeny={handleBannerDeny}
-            onDismiss={dismissSessionNotification}
-            onMarkRead={markSessionNotificationRead}
-            onSwitchSession={handleSwitchSession}
-            isSessionListed={sessionIsListed}
-            permissionStatus={permissionStatus}
-          />
-        )}
+        {/* Cross-session notification banners. Always mounted (it renders
+            nothing when empty): #7466 — it must outlive the last banner so it
+            can hold that banner's footprint and keep the view-tab strip from
+            sliding under the pointer. */}
+        <NotificationBanners
+          notifications={sessionNotifications}
+          onApprove={handleBannerApprove}
+          onDeny={handleBannerDeny}
+          onDismiss={dismissSessionNotification}
+          onMarkRead={markSessionNotificationRead}
+          onSwitchSession={handleSwitchSession}
+          isSessionListed={sessionIsListed}
+          permissionStatus={permissionStatus}
+        />
 
         {/* Normal session UI. #5204 — suppressed while the Control Room tab
             is active (the CR view above takes the main content area). */}

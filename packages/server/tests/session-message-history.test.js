@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { SessionMessageHistory } from '../src/session-message-history.js'
-import { sendHistoryEntry } from '../src/ws-history.js'
+import { resolveReplayPlan, sendHistoryEntry } from '../src/ws-history.js'
 
 describe('SessionMessageHistory', () => {
   let history
@@ -735,6 +735,165 @@ describe('SessionMessageHistory', () => {
     })
   })
 
+  // #8336 — a question cut off by a restart must not replay as an ordinary one.
+  describe('sweepUnresolvedToolStarts marks the question it cut off (#8336)', () => {
+    it('stamps interrupted on the user_question of a swept AskUserQuestion, on a copy', () => {
+      const question = { type: 'user_question', toolUseId: 'Q', questions: [{ question: 'Which shape?' }], timestamp: 1500 }
+      const input = [
+        { type: 'tool_start', toolUseId: 'Q', tool: 'AskUserQuestion', timestamp: 1000 },
+        question,
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+
+      // The marked question stays in place AND is appended once more at the tail
+      // (see the cursor test below for why).
+      assert.deepEqual(out.map(e => e.type), ['tool_start', 'tool_result', 'user_question', 'user_question'])
+      for (const i of [2, 3]) {
+        assert.equal(out[i].interrupted, true)
+        assert.equal(out[i].toolUseId, 'Q')
+        assert.deepEqual(out[i].questions, question.questions)
+        assert.notStrictEqual(out[i], question)
+      }
+      assert.notStrictEqual(out[2], out[3], 'the tail entry is its own object, so it gets its own _seq')
+      assert.equal(question.interrupted, undefined, 'the caller\'s entry is copied, never mutated')
+    })
+
+    it('leaves an ANSWERED question alone (its tool_result exists)', () => {
+      const input = [
+        { type: 'tool_start', toolUseId: 'Q', tool: 'AskUserQuestion', timestamp: 1000 },
+        { type: 'user_question', toolUseId: 'Q', questions: [{ question: 'Which shape?' }], timestamp: 1500 },
+        { type: 'tool_result', toolUseId: 'Q', result: 'Round', timestamp: 1800 },
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      assert.equal(out.length, 3)
+      assert.equal(out[1].interrupted, undefined)
+      assert.strictEqual(out[1], input[1], 'untouched entries pass through by reference')
+    })
+
+    it('does not mark a question whose own tool is not the one swept', () => {
+      const input = [
+        { type: 'tool_start', toolUseId: 'Bash1', tool: 'Bash', timestamp: 1000 },
+        { type: 'user_question', toolUseId: 'Q', questions: [{ question: 'Which shape?' }], timestamp: 1500 },
+        { type: 'tool_start', toolUseId: 'Q', tool: 'AskUserQuestion', timestamp: 1400 },
+        { type: 'tool_result', toolUseId: 'Q', result: 'Round', timestamp: 1800 },
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      assert.equal(out.find(e => e.type === 'user_question').interrupted, undefined)
+    })
+
+    // The sequence the daemon really sends: the client connected earlier and
+    // holds the question LIVE, its cursor is the end of the first replay, then
+    // the daemon restarts. The cursor is honoured (delta replay), so the replay
+    // re-delivers the tool_start, the synthetic result and the question.
+    it('replays the cut-off question over the wire with interrupted: true after a restart', () => {
+      const sid = 's1'
+      const before = new SessionMessageHistory({ maxHistory: 50 })
+      before.recordHistory(sid, 'message', { type: 'message', content: 'hi', timestamp: 1 })
+      before.recordHistory(sid, 'result', { cost: 0, duration: 1, usage: null })
+      const cursor = before.getLatestSeq(sid)
+      before.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: 'Q', tool: 'AskUserQuestion', input: null })
+      before.recordHistory(sid, 'user_question', { toolUseId: 'Q', questions: [{ question: 'Which shape?', options: [{ label: 'Round' }] }] })
+
+      // Persist and restore exactly as the state file does (session-manager.js).
+      const persisted = JSON.parse(JSON.stringify(before.getHistory(sid).map(e => before.truncateEntry(e))))
+      const after = new SessionMessageHistory({ maxHistory: 50 })
+      after.setHistory(sid, SessionMessageHistory.sweepUnresolvedToolStarts(persisted))
+
+      const restored = after.getHistory(sid)
+      const plan = resolveReplayPlan(
+        { getLatestHistorySeq: (id) => after.getLatestSeq(id), getOldestHistorySeq: (id) => after.getOldestSeq(id) },
+        restored, sid, cursor, after.getLatestSeq(sid),
+      )
+      assert.equal(plan.fullHistory, false, 'the restart does not invalidate the cursor, so this is a delta replay')
+
+      const frames = []
+      for (const entry of restored.slice(plan.startOffset)) {
+        sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+      }
+      assert.deepEqual(frames.map(f => f.type), ['tool_start', 'tool_result', 'user_question', 'user_question'])
+      const q = frames[2]
+      assert.equal(q.interrupted, true)
+      assert.equal(q.toolUseId, 'Q')
+      assert.equal(typeof q.historySeq, 'number')
+      assert.equal(frames[1].interrupted, true, 'the tool row already said so')
+    })
+
+    // Codex round 1 on #8360: marking the question in place is not enough on
+    // its own. The restore renumbers history from 1 and the sweep inserts a
+    // synthetic result BEFORE later entries, so a client whose cursor is already
+    // past the question's new position is sent only what lies beyond it.
+    describe('a delta cursor that is already past the question', () => {
+      const sid = 's1'
+      function restoreWithCursor(cursorChoice) {
+        const before = new SessionMessageHistory({ maxHistory: 50 })
+        before.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: 'Q', tool: 'AskUserQuestion', input: null })
+        before.recordHistory(sid, 'user_question', { toolUseId: 'Q', questions: [{ question: 'Which shape?', options: [{ label: 'Round' }] }] })
+        before.recordHistory(sid, 'tool_start', { messageId: 'm2', toolUseId: 'B', tool: 'Bash', input: null })
+        before.recordHistory(sid, 'tool_result', { toolUseId: 'B', result: 'ok' })
+        const cursor = cursorChoice(before)
+        const persisted = JSON.parse(JSON.stringify(before.getHistory(sid).map(e => before.truncateEntry(e))))
+        const after = new SessionMessageHistory({ maxHistory: 50 })
+        after.setHistory(sid, SessionMessageHistory.sweepUnresolvedToolStarts(persisted))
+        const restored = after.getHistory(sid)
+        const plan = resolveReplayPlan(
+          { getLatestHistorySeq: (id) => after.getLatestSeq(id), getOldestHistorySeq: (id) => after.getOldestSeq(id) },
+          restored, sid, cursor, after.getLatestSeq(sid),
+        )
+        const frames = []
+        for (const entry of restored.slice(plan.startOffset)) {
+          sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+        }
+        return { plan, frames, cursor }
+      }
+
+      it('still hears that the question was cut off (cursor at the end of the first run)', () => {
+        const { plan, frames, cursor } = restoreWithCursor((h) => h.getLatestSeq(sid))
+        assert.equal(cursor, 4)
+        assert.equal(plan.fullHistory, false, 'the cursor is honoured, so this is a delta replay')
+        const questions = frames.filter(f => f.type === 'user_question')
+        assert.equal(questions.length, 1, 'the question is re-delivered even though its own position is behind the cursor')
+        assert.equal(questions[0].interrupted, true)
+        assert.equal(questions[0].toolUseId, 'Q')
+        assert.ok(questions[0].historySeq > cursor, 'delivered past the cursor')
+      })
+
+      it('still hears it when the cursor sits between the question and the end', () => {
+        const { plan, frames } = restoreWithCursor(() => 2)
+        assert.equal(plan.fullHistory, false)
+        assert.equal(frames.filter(f => f.type === 'user_question' && f.interrupted === true).length >= 1, true)
+      })
+
+      it('a cursor BEFORE the question gets the in-place entry and the tail copy, both marked', () => {
+        const { frames } = restoreWithCursor(() => 0)
+        const questions = frames.filter(f => f.type === 'user_question')
+        assert.equal(questions.length, 2)
+        assert.deepEqual(questions.map(q => q.interrupted), [true, true])
+        assert.deepEqual(questions[0].questions, questions[1].questions, 'the client collapses them on identity')
+      })
+
+      it('a second restart does not stack more copies', () => {
+        const first = new SessionMessageHistory({ maxHistory: 50 })
+        first.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: 'Q', tool: 'AskUserQuestion', input: null })
+        first.recordHistory(sid, 'user_question', { toolUseId: 'Q', questions: [{ question: 'Which shape?' }] })
+        const once = SessionMessageHistory.sweepUnresolvedToolStarts(first.getHistory(sid).map(e => first.truncateEntry(e)))
+        const twice = SessionMessageHistory.sweepUnresolvedToolStarts(once)
+        assert.equal(twice.length, once.length)
+      })
+    })
+
+    it('a pending question replayed without a restart carries no interrupted flag', () => {
+      const sid = 's1'
+      const h = new SessionMessageHistory({ maxHistory: 50 })
+      h.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: 'Q', tool: 'AskUserQuestion', input: null })
+      h.recordHistory(sid, 'user_question', { toolUseId: 'Q', questions: [{ question: 'Which shape?' }] })
+      const frames = []
+      for (const entry of h.getHistory(sid)) {
+        sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+      }
+      assert.equal(frames.find(f => f.type === 'user_question').interrupted, undefined)
+    })
+  })
+
   // #5555.3 — monotonic per-session history seq used by lastSeq delta replay.
   describe('history seq (#5555.3)', () => {
     it('stamps a strictly increasing 1-based _seq on each pushed entry', () => {
@@ -778,6 +937,41 @@ describe('SessionMessageHistory', () => {
       // Next recorded entry continues the sequence.
       history.recordHistory('s1', 'message', { type: 'user_input', content: 'c', timestamp: 1 })
       assert.equal(history.getHistory('s1')[2]._seq, 3)
+    })
+
+    // #8336 -- sequence continuity across a restart.
+    it('setHistory continues numbering from firstSeq and leaves the counter past the end', () => {
+      history.setHistory('s1', [{ type: 'message', content: 'a' }, { type: 'message', content: 'b' }], { firstSeq: 7 })
+      assert.deepStrictEqual(history.getHistory('s1').map(e => e._seq), [7, 8])
+      assert.equal(history.getLastIssuedSeq('s1'), 8)
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'c', timestamp: 1 })
+      assert.equal(history.getLatestSeq('s1'), 9)
+    })
+
+    it('setHistory ignores a firstSeq that is not a positive integer', () => {
+      for (const firstSeq of [0, -3, 1.5, NaN, '9', null, Infinity]) {
+        history.setHistory('s1', [{ type: 'message', content: 'a' }], { firstSeq })
+        assert.deepStrictEqual(history.getHistory('s1').map(e => e._seq), [1], `firstSeq ${String(firstSeq)}`)
+      }
+    })
+
+    it('getLastIssuedSeq is 0 for an unknown session and survives a whole-buffer trim', () => {
+      assert.equal(history.getLastIssuedSeq('nope'), 0)
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'a', timestamp: 1 })
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'b', timestamp: 2 })
+      assert.equal(history.getLastIssuedSeq('s1'), 2)
+    })
+
+    it('setHistory trims to the cap, oldest first, keeps numbering, and flags truncation', () => {
+      const h = new SessionMessageHistory({ maxMessages: 3 })
+      const entries = [1, 2, 3, 4, 5].map(i => ({ type: 'message', content: `m${i}` }))
+      h.setHistory('s1', entries, { firstSeq: 10 })
+      assert.deepStrictEqual(h.getHistory('s1').map(e => e.content), ['m3', 'm4', 'm5'])
+      assert.deepStrictEqual(h.getHistory('s1').map(e => e._seq), [12, 13, 14])
+      assert.equal(h.getLastIssuedSeq('s1'), 14)
+      assert.equal(h.isHistoryTruncated('s1'), true)
+      h.setHistory('s2', entries.slice(0, 2).map(e => ({ ...e })))
+      assert.equal(h.isHistoryTruncated('s2'), false, 'within the cap: not truncated')
     })
 
     it('truncateEntry strips _seq so it never reaches the persisted state file', () => {

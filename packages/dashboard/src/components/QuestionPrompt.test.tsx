@@ -217,6 +217,32 @@ describe('QuestionPrompt', () => {
     expect(screen.queryByPlaceholderText('Type your response…')).not.toBeInTheDocument()
   })
 
+  // #8336 — a question the daemon was cut off before anyone answered.
+  it('reads as interrupted, not answered, for the interrupted token (#8336)', () => {
+    render(
+      <QuestionPrompt
+        question="Which shape?"
+        options={options}
+        answered="(interrupted)"
+        onSelect={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Which shape?')).toBeInTheDocument()
+    expect(screen.getByTestId('question-interrupted')).toHaveTextContent(/Interrupted/)
+    // No answered chrome: no check mark row, no echo of the token, no live controls.
+    expect(screen.queryByTestId('question-answered-summary')).not.toBeInTheDocument()
+    expect(screen.queryByText('(interrupted)')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('an ordinary answer is not shown as interrupted (#8336)', () => {
+    render(
+      <QuestionPrompt question="Which shape?" options={options} answered="a" onSelect={vi.fn()} />
+    )
+    expect(screen.queryByTestId('question-interrupted')).not.toBeInTheDocument()
+    expect(screen.getByTestId('question-answered-summary')).toBeInTheDocument()
+  })
+
   it('disables Send button when text is empty (#1336)', () => {
     render(
       <QuestionPrompt
@@ -869,9 +895,10 @@ describe('QuestionPrompt', () => {
           onSelect={vi.fn()}
         />
       )
-      // Neutral placeholder renders…
-      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
-      expect(screen.getByText(/Pending permission to view question/i)).toBeInTheDocument()
+      // #8264: nothing renders at all — no "Pending permission…" stub (the
+      // permission card is the single pending-state surface)…
+      expect(screen.queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+      expect(screen.queryByText(/Pending permission to view question/i)).not.toBeInTheDocument()
       // …and the actual question payload is NOT in the DOM. The model-
       // supplied question text and every option label must stay hidden
       // until permission is granted.
@@ -913,8 +940,8 @@ describe('QuestionPrompt', () => {
       // Neither variant renders while permission is pending.
       expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
       expect(screen.queryByTestId('multi-question-deferred-notice')).not.toBeInTheDocument()
-      // The placeholder takes over.
-      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // #8264: and no placeholder takes over.
+      expect(screen.queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
       // No question text from any of the questions is visible.
       expect(screen.queryByText('Q1?')).not.toBeInTheDocument()
       expect(screen.queryByText('Q2?')).not.toBeInTheDocument()
@@ -929,8 +956,8 @@ describe('QuestionPrompt', () => {
           onSelect={vi.fn()}
         />
       )
-      // While pending: placeholder only.
-      expect(screen.getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // While pending: nothing (#8264).
+      expect(screen.queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
       expect(screen.queryByText('What is your password?')).not.toBeInTheDocument()
 
       // User clicks Allow → store flips pendingPermission to false →
@@ -964,12 +991,11 @@ describe('QuestionPrompt', () => {
       expect(screen.getByText('Option A')).toBeInTheDocument()
     })
 
-    it('placeholder copy is neutral — does not leak any question or option text', () => {
-      // The leaked content is the bug; the placeholder must NOT
-      // accidentally echo the question or options through some shared
-      // prop. Verify the placeholder carries only the generic "Pending
-      // permission" copy and nothing else.
-      render(
+    it('renders an empty tree while pending — no stub, no echo of any question or option text (#8264)', () => {
+      // The leaked content is the bug; the gate must not echo the question
+      // or options through some shared prop, and (#8264) must not render a
+      // second "pending" element beside the permission card either.
+      const { container } = render(
         <QuestionPrompt
           question="LEAK_ME_QUESTION"
           options={[
@@ -980,11 +1006,7 @@ describe('QuestionPrompt', () => {
           onSelect={vi.fn()}
         />
       )
-      const placeholder = screen.getByTestId('question-prompt-pending-permission')
-      expect(placeholder.textContent).not.toContain('LEAK_ME_QUESTION')
-      expect(placeholder.textContent).not.toContain('LEAK_ME_OPTION_A')
-      expect(placeholder.textContent).not.toContain('LEAK_ME_OPTION_B')
-      // And nothing leaks elsewhere in the rendered tree either.
+      expect(container.innerHTML).toBe('')
       expect(screen.queryByText(/LEAK_ME/)).not.toBeInTheDocument()
     })
   })

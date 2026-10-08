@@ -1433,6 +1433,78 @@ describe("history_replay_end: '(resolved)' sweep vs a racing live AskUserQuestio
   });
 });
 
+// #8336 — a question cut off by a daemon restart. Same frames as the dashboard's
+// test of the same name (captured from the server's restore + replay path); the
+// handling is shared store-core, so this pins that the mobile app gets both
+// fixes: one card, marked interrupted rather than '(resolved)'.
+describe('a question cut off by a daemon restart (#8336)', () => {
+  beforeEach(() => {
+    resetReplayReconcile({ clearCursors: true });
+  });
+
+  afterEach(() => {
+    resetReplayFlags();
+    resetReplayReconcile({ clearCursors: true });
+  });
+
+  const questions = [{ question: 'Which shape?', options: [{ label: 'Round' }] }];
+  const heldCard = (extra: Record<string, unknown> = {}) => ({
+    id: 'question-live',
+    type: 'prompt',
+    content: 'Which shape?',
+    toolUseId: 'Q',
+    timestamp: 11,
+    options: [{ label: 'Round', value: 'Round' }],
+    questions: [{ question: 'Which shape?', options: [{ label: 'Round', value: 'Round' }] }],
+    ...extra,
+  });
+
+  function seed(messages: any[]) {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages } },
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    return store;
+  }
+
+  const cards = (store: any) =>
+    (store.getState().sessionStates.s1.messages as any[]).filter((m) => m.type === 'prompt');
+
+  function replayAfterRestart(fullHistory: boolean) {
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1', fullHistory, latestSeq: 5 });
+    _testMessageHandler.handle({
+      type: 'user_question', toolUseId: 'Q', questions, timestamp: 11, interrupted: true, sessionId: 's1', historySeq: 5,
+    });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1', latestSeq: 5 });
+  }
+
+  it('an open app: one card, marked interrupted, not "(resolved)"', () => {
+    const store = seed([heldCard()]);
+    replayAfterRestart(false);
+    expect(cards(store)).toHaveLength(1);
+    expect(cards(store)[0].answered).toBe('(interrupted)');
+    expect(cards(store)[0].id).toBe('question-live');
+  });
+
+  it('a fresh app (full rebuild): one card, marked interrupted', () => {
+    const store = seed([]);
+    replayAfterRestart(true);
+    expect(cards(store)).toHaveLength(1);
+    expect(cards(store)[0].answered).toBe('(interrupted)');
+  });
+
+  it('a held real answer is never overwritten', () => {
+    const store = seed([heldCard({ answered: 'Round' })]);
+    replayAfterRestart(false);
+    expect(cards(store)).toHaveLength(1);
+    expect(cards(store)[0].answered).toBe('Round');
+  });
+});
+
 // #7457 — the NON-racing half of #7420, and the half the client cannot fix
 // alone. A question that is genuinely still PENDING comes back through the
 // ordinary history replay (`user_question` is not `builtinTransient`, so it IS

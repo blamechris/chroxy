@@ -1050,12 +1050,12 @@ export class SdkSession extends BaseSession {
     // documentation is { behavior: 'allow', updatedPermissions:
     // <suggestions from callback options> }.
     if (this.permissionMode !== 'auto') {
-      options.canUseTool = (toolName, input, { signal, suggestions }) =>
-        this._handlePermission(toolName, input, signal, suggestions)
+      options.canUseTool = (toolName, input, { signal, suggestions, toolUseID }) =>
+        this._handlePermission(toolName, input, signal, suggestions, toolUseID)
     } else {
       options.hooks = {
         PreToolUse: [{
-          hooks: [(input, _toolUseId, { signal }) => this._handleAutoPreToolUse(input, signal)],
+          hooks: [(input, toolUseId, { signal }) => this._handleAutoPreToolUse(input, signal, toolUseId)],
           // PermissionManager's default human-decision timeout is 300s. Give
           // its hook callback a small completion margin so the manager owns the
           // timeout result instead of the SDK aborting it first.
@@ -2743,8 +2743,8 @@ export class SdkSession extends BaseSession {
    * In-process permission handler for canUseTool callback.
    * Delegates to the PermissionManager.
    */
-  _handlePermission(toolName, input, signal, suggestions) {
-    return this._permissions.handlePermission(toolName, input, signal, this.permissionMode, suggestions)
+  _handlePermission(toolName, input, signal, suggestions, toolUseId = undefined) {
+    return this._permissions.handlePermission(toolName, input, signal, this.permissionMode, suggestions, toolUseId)
   }
 
   /**
@@ -2752,7 +2752,7 @@ export class SdkSession extends BaseSession {
    * the same tool name/input that canUseTool receives, but its response uses
    * hookSpecificOutput rather than PermissionResult.
    */
-  async _handleAutoPreToolUse(hookInput, signal) {
+  async _handleAutoPreToolUse(hookInput, signal, hookToolUseId = undefined) {
     const toolName = hookInput?.tool_name
     const input = hookInput?.tool_input
     if (typeof toolName !== 'string' || !input || typeof input !== 'object' || Array.isArray(input)) {
@@ -2766,7 +2766,12 @@ export class SdkSession extends BaseSession {
       }
     }
 
-    const result = await this._permissions.handlePermission(toolName, input, signal, this.permissionMode)
+    // #8336: the provider's id for this tool call -- the hook's second argument,
+    // else the same id on the hook payload.
+    const toolUseId = typeof hookToolUseId === 'string' && hookToolUseId.length > 0
+      ? hookToolUseId
+      : hookInput?.tool_use_id
+    const result = await this._permissions.handlePermission(toolName, input, signal, this.permissionMode, undefined, toolUseId)
     const allow = result?.behavior === 'allow'
     return {
       continue: true,
