@@ -144,14 +144,18 @@ BYOK have always fed. The text is only as good as what claude is asked for:
   it leaves the daemon, and a block is shown whole rather than token by token so a
   secret that straddles two chunks is still caught.
 - Subagent (sidechain) reasoning is not shown; only the main conversation's.
-- **Known limit, `claude-tui`:** on a turn that thinks and then calls a tool, the
-  thinking bubble can appear below that tool's row. Claude Code writes a turn's
-  assistant lines to the transcript after it has run the PreToolUse hook, so the
-  reasoning is not on disk yet when the tool starts. Holding the tool back to wait
-  for it was tried and rejected (it cost up to 500 ms on every tool turn and still
-  timed out). A turn that only thinks and answers is unaffected, and so is a
-  thinking block that is already in the transcript when the tool starts. The
-  proper fix is a client-side hint, not a server wait.
+- **Known limit, `claude-tui` (display order):** Claude Code batches its
+  transcript writes and writes a turn's assistant lines after it has run the
+  PreToolUse hook and after the Stop hook. So the reasoning often reaches the disk
+  late, and on current clients the thinking bubble can appear **below the tool row
+  it preceded, or below the answer**. Chroxy never holds a tool or the answer back
+  for it: reasoning already on disk is shown first; reasoning that lands later
+  (the daemon keeps collecting for 5 s after a turn is answered) is shown when it
+  lands, on its own id, recorded in history, so a replay shows it too, after the
+  answer. A block that has not reached the disk within 5 s is not shown. The proper
+  fix for the order is a client-side hint (the thinking frame naming what it
+  precedes), tracked in #8518; a server-side wait was tried and rejected (up to
+  500 ms on every tool turn, and it still timed out).
 
 ### `CHROXY_TUI_MULTISELECT_REINJECT` env override (experimental, #5797)
 

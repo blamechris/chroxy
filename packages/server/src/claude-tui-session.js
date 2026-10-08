@@ -822,6 +822,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._thinkingEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.CHROXY_TUI_THINKING ?? '').trim().toLowerCase())
     this._thinkingScanMs = ClaudeTuiSession.THINKING_SCAN_MS
     this._lastThinkingScanMs = 0
+    // #7393: one record per turn whose reasoning is still being collected: the
+    // active turn, plus turns that have been answered but are inside their late
+    // window (see _endThinkingForTurn). `_thinkingLateTimer` drives the late ones.
+    this._thinkingRecords = []
+    this._thinkingLateTimer = null
+    this._thinkingLateMs = ClaudeTuiSession.THINKING_LATE_MS
     // #8400: usage-limit / rate-limit / overload, read from the same transcript.
     // `_usageLimitBaseline` is the cumulative count at turn start (null until a
     // scan could read it), `_lastUsageLimitScanMs` throttles the poll-loop scan on
@@ -2046,6 +2052,11 @@ export class ClaudeTuiSession extends BaseSession {
   // is what the user watches: a reasoning block shows up within about this long
   // of claude writing it. The read is incremental (only appended bytes).
   static get THINKING_SCAN_MS() { return 250 }
+  // #7393: how long after a turn is ANSWERED its reasoning is still collected.
+  // Claude Code batches its transcript writes, so the thinking block can reach the
+  // disk well after the Stop hook (seen: seconds). The answer never waits for it;
+  // the block is shown when it lands, inside this window.
+  static get THINKING_LATE_MS() { return 5_000 }
   // #8400: how long a reported usage limit shortens a repeat of itself to one line. The
   // longest window claude names is the 5-hour session, so a retry inside six
   // hours of the message is the same episode; past that, the message is a
@@ -4580,7 +4591,8 @@ export class ClaudeTuiSession extends BaseSession {
       // Code writes a turn's assistant lines AFTER it has run the PreToolUse hook,
       // so on a turn that thinks and then calls a tool the thinking block is not
       // on disk yet when the hook is read, and it reaches the wire after the
-      // tool_start (the client then shows the tool row above it). Measured on a
+      // tool_start (the client then shows the tool row above it). The same lag
+      // hits the Stop: see _endThinkingForTurn's late window. Measured on a
       // real Haiku turn (#8513): thinking stamped .588 and tool_use .594 in the
       // transcript, yet the transcript still lacked the tool_use 500 ms after the
       // hook was read. Waiting for it was tried and removed: it cost up to 500 ms
@@ -4643,7 +4655,7 @@ export class ClaudeTuiSession extends BaseSession {
       // _handleHardTimeout clears _isBusy; bail out cleanly if it fired.
       if (!this._isBusy) break
       // #7393: show the reasoning claude has written since the last pass, BEFORE
-      // this pass's hook files (see the KNOWN LIMIT note below, at the batch emit).
+      // this pass's hook files (see the KNOWN LIMIT note above, at the batch emit).
       this._drainTurnThinking()
       await drainHookFiles()
       pollIters++
@@ -4752,11 +4764,13 @@ export class ClaudeTuiSession extends BaseSession {
     const duration = this._nowMonotonic() - startedAt
     const text = typeof stopPayload.last_assistant_message === 'string' ? stopPayload.last_assistant_message : ''
 
-    // #7393: claude has finished, so everything it wrote about its reasoning is
-    // in the transcript. Show what the periodic drain has not reached yet BEFORE
-    // the response text, then stop collecting.
+    // #7393: claude has finished. Show what the transcript already holds that the
+    // periodic drain has not reached yet BEFORE the response text. What claude has
+    // not flushed to the transcript yet is NOT waited for (that would delay the
+    // answer): claude batches its transcript writes, so the block often lands
+    // after this Stop, and the late window opened here shows it when it does.
     this._drainTurnThinking({ force: true })
-    this._endThinkingForTurn()
+    this._endThinkingForTurn({ answered: true })
 
     // Deliver the response as a single stream burst so the dashboard renders
     // one assistant bubble (matches CliSession's event shape on Claude's side).
@@ -5717,23 +5731,29 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * #7393 — start of a turn: drop anything left from the last one and arm
-   * collection from now. Reasoning is read from the transcript (claude-tui has no
-   * stream to read it from), so what separates this turn's blocks from history
-   * is the capture cutoff plus a per-turn set of entry uuids.
+   * #7393 — start of a turn: open its record and arm collection from now.
+   * Reasoning is read from the transcript (claude-tui has no stream to read it
+   * from), so what separates this turn's blocks from history and from the
+   * neighbouring turns is the entry's own timestamp: each record owns the window
+   * [sinceMs, untilMs] and a block goes to the record whose window holds its
+   * stamp. A previous turn still inside its late window keeps collecting; a
+   * block it is owed can land after this turn has started and still goes to it.
    */
   _beginThinkingForTurn() {
     const turn = this._activeTurn
     if (!turn) return
     turn.thinking = null
-    this._transcriptTaskScanner?.stopThinkingCapture()
     if (!this._thinkingEnabled) return
     const sinceMs = Date.now()
     turn.thinking = {
+      turn,
       sinceMs,
+      untilMs: null, // set when the turn is answered
+      expiresMono: null,
       streams: new ThinkingStreams((event, data) => this.emit(event, data), turn.messageId),
       seen: new Set(),
     }
+    this._thinkingRecords.push(turn.thinking)
     this._transcriptTaskScanner?.startThinkingCapture(sinceMs)
     this._lastThinkingScanMs = this._nowMonotonic()
   }
@@ -5742,37 +5762,86 @@ export class ClaudeTuiSession extends BaseSession {
    * #7393 — emit the thinking blocks claude has written to the transcript since
    * the last drain, each as its own `thinking: true` stream (see
    * thinking-stream.js). Throttled to `_thinkingScanMs`; `force` bypasses that
-   * (the final drain at Stop). Never throws: reasoning is a nicety, and nothing
-   * here may cost a turn its answer.
+   * (right before a hook batch's events, and the final drain at Stop). Only for a
+   * live turn; an aborted turn's blocks are dropped when routed. Never throws: reasoning is a nicety,
+   * and nothing here may cost a turn its answer.
    */
   _drainTurnThinking({ force = false } = {}) {
     const turn = this._activeTurn
-    const thinking = turn?.thinking
-    if (!thinking || turn.aborted) return
+    if (!turn?.thinking) return
+    const nowMs = this._nowMonotonic()
+    if (!force && nowMs - this._lastThinkingScanMs < this._thinkingScanMs) return
+    this._lastThinkingScanMs = nowMs
+    this._routeThinking()
+  }
+
+  /**
+   * #7393 — read the transcript and give each new thinking block to the turn
+   * record whose window holds its timestamp. Used by the poll loop (through
+   * `_drainTurnThinking`) and by the late timer. Never throws.
+   */
+  _routeThinking() {
     try {
-      const nowMs = this._nowMonotonic()
-      if (!force && nowMs - this._lastThinkingScanMs < this._thinkingScanMs) return
-      this._lastThinkingScanMs = nowMs
+      if (this._thinkingRecords.length === 0) return
       const scanner = this._resolveTranscriptScanner()
-      if (!scanner) return
-      // Idempotent while active; re-arms a scanner that was replaced mid-turn.
-      scanner.startThinkingCapture(thinking.sinceMs)
-      scanner.scan()
-      for (const block of scanner.drainThinking()) {
-        if (block.uuid) {
-          if (thinking.seen.has(block.uuid)) continue
-          thinking.seen.add(block.uuid)
+      if (scanner) {
+        // Idempotent while active; (re)arms a scanner that was replaced, from the
+        // earliest window still open.
+        scanner.startThinkingCapture(Math.min(...this._thinkingRecords.map((r) => r.sinceMs)))
+        scanner.scan()
+        for (const block of scanner.drainThinking()) {
+          const rec = this._thinkingRecords.find((r) => block.ts >= r.sinceMs && (r.untilMs === null || block.ts <= r.untilMs))
+          if (!rec || rec.turn?.aborted) continue
+          if (block.uuid) {
+            if (rec.seen.has(block.uuid)) continue
+            rec.seen.add(block.uuid)
+          }
+          rec.streams.emitBlock(block)
         }
-        thinking.streams.emitBlock(block)
       }
     } catch (err) {
       ;(this._log || log).debug?.(`thinking drain failed: ${err?.message} — no reasoning this pass`)
     }
+    this._settleThinking()
   }
 
-  /** #7393 — the turn has its answer: stop collecting and release what was queued. */
-  _endThinkingForTurn() {
-    if (this._activeTurn) this._activeTurn.thinking = null
+  /**
+   * #7393 — a turn is over. `answered` (the Stop path) opens its late window: the
+   * record keeps collecting for `_thinkingLateMs`, driven by a timer, because the
+   * block may reach the disk after the Stop hook; the caller has already shown
+   * what was there. Any other end (error, abort, interrupt, timeout, stall, PTY
+   * exit) has no answer to decorate, so the record is dropped at once.
+   */
+  _endThinkingForTurn({ answered = false } = {}) {
+    const rec = this._activeTurn?.thinking
+    if (!rec) return
+    this._activeTurn.thinking = null
+    if (answered) {
+      rec.untilMs = Date.now()
+      rec.expiresMono = this._nowMonotonic() + this._thinkingLateMs
+      if (!this._thinkingLateTimer && !this._destroying) {
+        this._thinkingLateTimer = setInterval(() => this._routeThinking(), Math.max(50, this._thinkingScanMs))
+        this._thinkingLateTimer.unref?.()
+      }
+    } else {
+      this._thinkingRecords = this._thinkingRecords.filter((r) => r !== rec)
+    }
+    this._settleThinking()
+  }
+
+  /** #7393 — drop expired late windows; with none left, stop collecting and stop the timer. */
+  _settleThinking() {
+    const nowMs = this._nowMonotonic()
+    this._thinkingRecords = this._thinkingRecords.filter((r) => r.expiresMono === null || r.expiresMono > nowMs)
+    if (this._thinkingRecords.length > 0) return
+    if (this._thinkingLateTimer) { clearInterval(this._thinkingLateTimer); this._thinkingLateTimer = null }
+    this._transcriptTaskScanner?.stopThinkingCapture()
+  }
+
+  /** #7393 — destroy(): forget every window and stop the timer. */
+  _disposeThinking() {
+    this._thinkingRecords = []
+    if (this._thinkingLateTimer) { clearInterval(this._thinkingLateTimer); this._thinkingLateTimer = null }
     this._transcriptTaskScanner?.stopThinkingCapture()
   }
 
@@ -6230,7 +6299,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._destroying = true
     this._processReady = false
     this._isBusy = false
-    this._endThinkingForTurn() // #7393
+    this._disposeThinking() // #7393
     this._activeTurn = null
     // #5315 (WP-2.1) — cancel any pending respawn so a scheduled _respawnPty
     // can't fire after teardown and spawn a fresh claude into a destroyed

@@ -381,6 +381,9 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     // The transcript has no entry for this tool_use (Claude Code writes it after
     // the hook; #8513 live smoke), and the tool_start must still go out on the
     // very next poll pass. A wait for the transcript was tried and removed.
+    // Load-independent: instead of timing it, record every timer the session
+    // arms between the hook file appearing and the tool_start, and require that
+    // none is a wait longer than the 150 ms poll sleep (the removed wait was 500 ms).
     const sessFile = writeSessFile()
     writeJournal(sessFile, [])
     const { s, sinkDir } = makeTurnSession()
@@ -388,12 +391,22 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     s.on('tool_start', () => at.push(Date.now()))
     const turn = s.sendMessage('hi')
     await waitFor(() => turnPolling(s), 'the turn to be polling')
-    const t0 = Date.now()
-    writeFileSync(join(sinkDir, 'pre-x.json'), JSON.stringify({
-      tool_use_id: 'toolu_not_in_the_transcript', tool_name: 'Bash', tool_input: { command: 'ls' },
-    }))
-    await waitFor(() => at.length === 1, 'the tool_start')
-    assert.ok(at[0] - t0 < 350, `tool_start came ${at[0] - t0} ms after the hook (one poll pass is ~150 ms)`)
+    const realSetTimeout = globalThis.setTimeout
+    const delays = []
+    globalThis.setTimeout = (fn, ms, ...rest) => { delays.push(ms); return realSetTimeout(fn, ms, ...rest) }
+    try {
+      writeFileSync(join(sinkDir, 'pre-x.json'), JSON.stringify({
+        tool_use_id: 'toolu_not_in_the_transcript', tool_name: 'Bash', tool_input: { command: 'ls' },
+      }))
+      await waitFor(() => at.length === 1, 'the tool_start', { timeoutMs: 10_000 })
+    } finally {
+      globalThis.setTimeout = realSetTimeout
+    }
+    // The poll sleeps 150 ms; the 2000 ms hook-fs bound and the test's own 8 s
+    // watchdogs are armed per pass but are bounds, not waits. Anything in between
+    // is a wait that was added (the removed one was 500 ms).
+    const long = delays.filter((d) => typeof d === 'number' && d > 160 && d < 2000)
+    assert.deepEqual(long, [], `a wait longer than the poll sleep was armed before tool_start: ${long}`)
     stop(sinkDir)
     await turn
   })
@@ -518,14 +531,109 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     assert.equal(t[0].thinkingDurationMs, 700)
   })
 
+  // --- the transcript is written LATE (live smoke on 9e92a64c1) -------------------
+  // Claude Code batches its transcript writes: on the real turn the thinking block
+  // is stamped 22:32:25.093 and the Stop hook fired ~60 ms later, but the line was
+  // not on disk when chroxy processed the Stop. Capture was switched off right
+  // after the answer, so the block was never shown on either turn. The answer must
+  // not wait for it, and the block must still be shown when it lands.
+
+  it('shows reasoning whose transcript line lands AFTER the Stop was processed, without delaying the answer', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    const turn = s.sendMessage('what is 6 x 7?')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    const stamp = now() // claude stamps the block now, but writes the line later
+    stop(sinkDir, 'The answer is 42.')
+    const t0 = Date.now()
+    await turn
+    assert.ok(Date.now() - t0 < 600, 'the answer did not wait for the transcript')
+    assert.equal(events.results.length, 1)
+    assert.deepEqual(thinkingFrames(events.frames), [], 'precondition: nothing on disk yet')
+
+    appendJournal(transcript, [thinkingEntry({ text: 'Six times seven is forty-two.', durationMs: 900, ts: stamp })])
+    await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end'), 'the late thinking block')
+    const turnId = events.frames[0].messageId
+    assert.deepEqual(thinkingFrames(events.frames), [
+      { name: 'stream_start', messageId: `${turnId}-thinking-0`, thinking: true },
+      { name: 'stream_delta', messageId: `${turnId}-thinking-0`, delta: 'Six times seven is forty-two.', thinking: true },
+      { name: 'stream_end', messageId: `${turnId}-thinking-0`, thinking: true, thinkingDurationMs: 900 },
+    ])
+    const respDelta = responseFrames(events.frames).find((f) => f.name === 'stream_delta')
+    assert.equal(respDelta.delta, 'The answer is 42.', 'the response text is untouched')
+  })
+
+  it('attributes late reasoning to the turn it belongs to when the next turn has already started', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    let turn = s.sendMessage('one')
+    await waitFor(() => turnPolling(s), 'turn one polling')
+    const stampOne = now()
+    stop(sinkDir, 'one done', 'stop-1.json')
+    await turn
+    const turnOneId = events.frames[0].messageId
+
+    await new Promise((r) => setTimeout(r, 20))
+    turn = s.sendMessage('two')
+    await waitFor(() => turnPolling(s), 'turn two polling')
+    const turnTwoId = events.frames.filter((f) => f.name === 'stream_start' && !f.thinking).pop().messageId
+    assert.notEqual(turnTwoId, turnOneId)
+    // Turn one's block is only now flushed, followed by turn two's own.
+    appendJournal(transcript, [
+      thinkingEntry({ text: 'turn one reasoning', ts: stampOne }),
+      thinkingEntry({ text: 'turn two reasoning', ts: now() }),
+    ])
+    await waitFor(() => thinkingFrames(events.frames).filter((f) => f.name === 'stream_end').length === 2, 'both blocks')
+    stop(sinkDir, 'two done', 'stop-2.json')
+    await turn
+    const byId = {}
+    for (const f of thinkingFrames(events.frames).filter((x) => x.name === 'stream_delta')) byId[f.messageId] = f.delta
+    assert.deepEqual(byId, {
+      [`${turnOneId}-thinking-0`]: 'turn one reasoning',
+      [`${turnTwoId}-thinking-0`]: 'turn two reasoning',
+    })
+  })
+
+  it('gives up on a block that never lands once the late window has passed, and stops its timer', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    s._thinkingLateMs = 150
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    const stamp = now()
+    stop(sinkDir)
+    await turn
+    await waitFor(() => captureOff(s) && s._thinkingLateTimer === null, 'the late window to close')
+    appendJournal(transcript, [thinkingEntry({ text: 'far too late', ts: stamp })])
+    await new Promise((r) => setTimeout(r, 400))
+    assert.deepEqual(thinkingFrames(events.frames), [])
+  })
+
+  it('destroy() clears the late timer', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s, sinkDir } = makeTurnSession()
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    stop(sinkDir)
+    await turn
+    assert.ok(s._thinkingLateTimer, 'precondition: the late window is open')
+    await s.destroy()
+    assert.equal(s._thinkingLateTimer, null)
+  })
+
   // --- capture lifetime (#8513 review) ----------------------------------------
 
   const captureOff = (s) => s._transcriptTaskScanner?._thinkingSinceMs === null
 
-  it('stops collecting once the turn is answered, so idle scans queue nothing', async () => {
+  it('stops collecting once the late window after the answer has closed, so idle scans queue nothing', async () => {
     const sessFile = writeSessFile()
     const transcript = writeJournal(sessFile, [])
     const { s, events, sinkDir } = makeTurnSession()
+    s._thinkingLateMs = 150
     const turn = s.sendMessage('hi')
     await waitFor(() => turnPolling(s), 'the turn to be polling')
     appendJournal(transcript, [thinkingEntry({ text: 'during', ts: now() })])
@@ -533,10 +641,11 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     stop(sinkDir)
     await turn
     assert.ok(s._transcriptTaskScanner, 'precondition: the scanner exists')
-    assert.equal(captureOff(s), true, 'capture is off after the answer')
+    await waitFor(() => captureOff(s), 'capture to switch off after the late window')
     appendJournal(transcript, [thinkingEntry({ text: 'between turns', ts: now(50) })])
     s._scanTranscript() // what the idle background-task poll does
     assert.deepEqual(s._transcriptTaskScanner.drainThinking(), [], 'nothing is retained while idle')
+    assert.equal(s._thinkingLateTimer, null, 'and the late timer is gone')
   })
 
   it('stops collecting when the turn is stopped by the user (the error/abort path, not the Stop hook)', async () => {
@@ -569,6 +678,35 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     await waitFor(() => !s._isBusy, 'the turn to end')
     assert.equal(captureOff(s), true)
     assert.ok(events.errors.length >= 1)
+  })
+
+  it('drops the turn\'s reasoning window when the PTY dies mid-turn', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s } = makeTurnSession()
+    s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    s._drainTurnThinking({ force: true }) // make sure the scanner is capturing
+    assert.equal(captureOff(s), false, 'precondition')
+    assert.equal(s._thinkingRecords.length, 1, 'precondition')
+    s._onPtyGone({ exitCode: 1 }, 'exit')
+    clearTimeout(s._respawnTimer)
+    s._respawnTimer = null
+    assert.equal(s._thinkingRecords.length, 0)
+    assert.equal(captureOff(s), true)
+  })
+
+  it('destroy() mid-turn forgets every reasoning window and switches capture off', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s } = makeTurnSession()
+    s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    s._drainTurnThinking({ force: true })
+    assert.equal(captureOff(s), false, 'precondition')
+    await s.destroy()
+    assert.equal(s._thinkingRecords.length, 0)
+    assert.equal(captureOff(s), true)
   })
 
   it('shows no reasoning for a turn that has been aborted', async () => {

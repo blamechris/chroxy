@@ -269,7 +269,7 @@ export class TranscriptTaskScanner {
 
   /**
    * #7393 — take (and clear) the queued thinking blocks, oldest first.
-   * @returns {Array<{uuid: string, text: string, redacted: boolean, durationMs: number|undefined}>}
+   * @returns {Array<{uuid: string, ts: number, text: string, redacted: boolean, durationMs: number|undefined}>}
    */
   drainThinking() {
     const out = this._thinking
@@ -478,6 +478,7 @@ export class TranscriptTaskScanner {
       }
       this._thinking.push({
         uuid: thinkingBlocks.length > 1 ? `${uuid}#${this._thinking.length}` : uuid,
+        ts: entryTs,
         text,
         redacted,
         durationMs: duration,
