@@ -122,6 +122,9 @@ describe('a connection cut mid-reply is completed by the cursor replay -- dashbo
         expect(new Set(messages.map((m) => m.id)).size, 'a bubble id appears twice').toBe(messages.length)
         const tools = (rows: typeof full) => rows.filter((r) => r.type === 'tool_use').length
         const splitByATool = full.filter((r) => r.type === 'response').length > 1
+        // Tool cards are compared on every cut, including the split-reply cuts the
+        // whole-transcript check skips: input and result must match a connected client.
+        expect(model.filter((r) => r.type === 'tool_use')).toEqual(full.filter((r) => r.type === 'tool_use'))
         if (!splitByATool || tools(atCut) === tools(full)) expect(model).toEqual(full)
       })
     }
