@@ -47,6 +47,9 @@ import { formatWriteConfirmation } from './built-in-tools/tool-transforms.js'
  *   3. The known built-in Bash shape: `{ stdout, stderr, interrupted,
  *      isImage, noOutputExpected }`.
  *   4. The known built-in Read shape: `{ type: 'text', file: { content } }`.
+ *   4b. (checked right after rule 1a) `{ type: 'file_unchanged', file: {
+ *      filePath } }` — a repeated Read of an unchanged file — rendered as
+ *      "File unchanged since it was last read (<path>)" (#8252).
  *   5. Anything else — unchanged from before this normalizer existed:
  *      `JSON.stringify(resp)`. This is a deliberate no-regression floor: an
  *      unrecognised structured shape must render exactly as it did before,
@@ -78,6 +81,12 @@ export function normalizeClaudeTuiToolResponse(toolName, resp) {
   // anything.
   const fromArrayContent = flattenArrayContent(resp.content)
   if (fromArrayContent !== null) return fromArrayContent
+
+  // Rule 1c (#8252) — a repeated Read of a file that has not changed. Claude
+  // Code answers with `{ type: 'file_unchanged', file: { filePath } }` instead of
+  // the content, and the model is told to refer to the earlier read. Shape-
+  // matched, not tool-matched: the type tag is unambiguous.
+  if (resp.type === 'file_unchanged') return normalizeFileUnchangedResponse(resp)
 
   // The Write-shape check MUST be computed (and consulted by rule 1b)
   // BEFORE a string `content` field is allowed to win. Reversing this —
@@ -270,4 +279,22 @@ function normalizeWriteResponse(resp) {
     filePath: typeof resp.filePath === 'string' ? resp.filePath : '',
     created: resp.type === 'create',
   })
+}
+
+/**
+ * Render the built-in Read tool's repeated-read result — `{ type:
+ * 'file_unchanged', file: { filePath } }` — as one plain sentence naming the
+ * file, instead of the JSON envelope (#8252). A missing path drops the
+ * parenthetical rather than printing an empty one.
+ *
+ * @param {Record<string, unknown>} resp
+ * @returns {string}
+ */
+function normalizeFileUnchangedResponse(resp) {
+  const filePath = resp.file && typeof resp.file === 'object' && typeof resp.file.filePath === 'string'
+    ? resp.file.filePath
+    : ''
+  return filePath
+    ? `File unchanged since it was last read (${filePath})`
+    : 'File unchanged since it was last read'
 }
