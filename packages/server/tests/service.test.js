@@ -1414,7 +1414,7 @@ describe('service', () => {
         assert.throws(() => install(BIN_B), (e) => e.code === 'SERVICE_ALREADY_INSTALLED')
       })
 
-      it('--force re-points wrapper, plist and service.json together, booting out the old job first', () => {
+      it('--force re-points wrapper, plist and service.json together, booting out the old job first', { skip: posixOnly }, () => {
         install(BIN_A)
         const calls = []
         install(BIN_B, { force: true, _skipRegister: false, _exec: (cmd, args) => { calls.push([cmd, ...args]) } })
@@ -1426,7 +1426,7 @@ describe('service', () => {
         assert.deepEqual(verbs, ['bootout', 'bootstrap'], 'bootout must precede bootstrap on a forced reinstall')
       })
 
-      it('a fresh install does not bootout anything', () => {
+      it('a fresh install does not bootout anything', { skip: posixOnly }, () => {
         const calls = []
         install(BIN_A, { _skipRegister: false, _exec: (cmd, args) => { calls.push([cmd, ...args]) } })
         assert.deepEqual(calls.map((c) => c[1]), ['bootstrap'])
