@@ -33,6 +33,8 @@ function entry(over: Partial<ProviderCredentialEntry> = {}): ProviderCredentialE
 
 function setMockState(extra: Record<string, unknown> = {}): void {
   mockState = {
+    // #8419: the refresh effect is gated on a completed handshake.
+    connectionPhase: 'connected',
     credentialsStatus: { credentials: [], fileExists: false, fileError: null },
     credentialTestResults: {} as Record<string, ProviderCredentialTestResult>,
     refreshCredentialsStatus: mockRefresh,
@@ -61,6 +63,49 @@ describe('ProviderCredentialsPane', () => {
   it('refreshes status when opened', () => {
     render(<ProviderCredentialsPane isOpen={true} />)
     expect(mockRefresh).toHaveBeenCalled()
+  })
+
+  describe('#8419 refetch follows the connection, not only isOpen', () => {
+    it('asks exactly once on a first open while connected (no double request)', () => {
+      render(<ProviderCredentialsPane isOpen={true} />)
+      expect(mockRefresh).toHaveBeenCalledTimes(1)
+    })
+
+    it('asks nothing while disconnected, then once when the handshake completes', () => {
+      setMockState({ connectionPhase: 'connecting' })
+      const { rerender } = render(<ProviderCredentialsPane isOpen={true} />)
+      expect(mockRefresh).not.toHaveBeenCalled()
+
+      setMockState({ connectionPhase: 'connected' })
+      rerender(<ProviderCredentialsPane isOpen={true} />)
+      expect(mockRefresh).toHaveBeenCalledTimes(1)
+    })
+
+    it('re-asks after a switch with isOpen constant (the Control Room Settings tab)', () => {
+      const { rerender } = render(<ProviderCredentialsPane isOpen={true} />)
+      expect(mockRefresh).toHaveBeenCalledTimes(1)
+
+      // Switch: the old connection ends, the new handshake is in flight...
+      setMockState({ connectionPhase: 'connecting' })
+      rerender(<ProviderCredentialsPane isOpen={true} />)
+      expect(mockRefresh, 'no request into a connection that is not up').toHaveBeenCalledTimes(1)
+
+      // ...and completes.
+      setMockState({ connectionPhase: 'connected' })
+      rerender(<ProviderCredentialsPane isOpen={true} />)
+      expect(mockRefresh).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not re-ask on an unrelated re-render while connected', () => {
+      const { rerender } = render(<ProviderCredentialsPane isOpen={true} />)
+      rerender(<ProviderCredentialsPane isOpen={true} />)
+      expect(mockRefresh).toHaveBeenCalledTimes(1)
+    })
+
+    it('asks nothing while closed', () => {
+      render(<ProviderCredentialsPane isOpen={false} />)
+      expect(mockRefresh).not.toHaveBeenCalled()
+    })
   })
 
   it('shows a loading hint when no snapshot has arrived', () => {

@@ -1011,10 +1011,17 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   // ConnectionPhase is still 'reconnecting'). The banner only fires for
   // user-initiated writes; the refresh path quietly retries on the next
   // open or when notificationPrefs/byokCredentialsStatus actually need it.
+  //
+  // #8419: also keyed on `connected`. The Control Room Settings tab passes a
+  // constant `isOpen`, so after a Server Picker switch (which clears
+  // `byokCredentialsStatus`, #7579) nothing re-asked the new daemon and the row
+  // read "Missing". The gate means no request while disconnected; it fires when
+  // the new handshake completes. See ProviderCredentialsPane for the same pairing.
+  const connected = useConnectionStore(s => s.connectionPhase === 'connected')
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || !connected) return
     refreshByokCredentialsStatus()
-  }, [isOpen, refreshByokCredentialsStatus])
+  }, [isOpen, connected, refreshByokCredentialsStatus])
 
   // #4542: Pull the latest notification prefs on open. Out-of-band changes
   // (other dashboard / mobile client setting a category) are pushed via the
