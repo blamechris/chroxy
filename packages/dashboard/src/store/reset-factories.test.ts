@@ -59,7 +59,10 @@ vi.mock('../utils/auth', () => ({ getAuthToken: () => 'local-token' }))
 const { useConnectionStore } = await import('./connection')
 // Captured before any test mutates the store: what the store was CONSTRUCTED with.
 const INITIAL = { ...useConnectionStore.getState() } as unknown as Record<string, unknown>
-const { createEmptySessionPanels, createEmptyConnectionReadings, createEmptySessionState } = await import('./utils')
+const {
+  createEmptySessionPanels, createEmptyConnectionReadings, createEmptySessionState,
+  createEmptyConnectionScope, createEmptyInFlightMarkers, createEmptyDaemonSnapshots, createEmptyFlatSessionMirror,
+} = await import('./utils')
 const { handleMessage, stopHeartbeat, clearDeltaBuffers, clearPermissionSplits, resetReplayFlags } =
   await import('./message-handler')
 type State = import('./types').ConnectionState
@@ -125,6 +128,30 @@ describe('#8411 / #7588 controls', () => {
     expect(PANEL_KEYS.length, 'the panel roster is empty').toBeGreaterThanOrEqual(7)
     expect(READING_KEYS.length, 'the readings roster is empty').toBeGreaterThanOrEqual(9)
     expect(PANEL_KEYS.filter((k) => READING_KEYS.includes(k))).toEqual([])
+  })
+
+  it('each key has ONE reset value: the readings overlap no other roster, the panels overlap only the two loading flags', () => {
+    // A key in two rosters with different values would be reset to whichever spread
+    // lands last. The ONE deliberate overlap is permissionAuditLoading / memoryStackLoading,
+    // which are both a panel flag (cleared on a session change) and an in-flight marker
+    // (cleared on a transport drop, #8378). Pinned exactly, with the values equal, so a
+    // third overlap is red and the two cannot drift apart.
+    const others: Record<string, Roster> = {
+      createEmptyConnectionScope: createEmptyConnectionScope(),
+      createEmptyInFlightMarkers: createEmptyInFlightMarkers(),
+      createEmptyDaemonSnapshots: createEmptyDaemonSnapshots(),
+      createEmptyFlatSessionMirror: createEmptyFlatSessionMirror(),
+    }
+    for (const [name, roster] of Object.entries(others)) {
+      expect(Object.keys(roster).length, `${name}() returned nothing`).toBeGreaterThan(0)
+      expect(READING_KEYS.filter((k) => k in roster), `readings overlap ${name}()`).toEqual([])
+    }
+    const overlap = PANEL_KEYS.filter((k) => Object.values(others).some((r) => k in r))
+    expect(overlap.sort()).toEqual(['memoryStackLoading', 'permissionAuditLoading'])
+    for (const k of overlap) {
+      expect(PANELS[k], `${k}: the panel and in-flight reset values disagree`)
+        .toEqual((others.createEmptyInFlightMarkers as Roster)[k])
+    }
   })
 
   it('every key is dirtied by the derivation to a value that differs from its reset', () => {
@@ -347,6 +374,75 @@ describe('#8411 / #7588 structure: every reset site takes the roster by spread, 
       'the panel reset must precede the cached/uncached branch split',
     ).toBe(true)
     expect(handListed(body, PANEL_KEYS)).toEqual([])
+  })
+
+  // The closed-world half of the guard (#7588's exact scenario). The checks above only know
+  // the keys a factory ALREADY owns, so a NEW reset value written beside the factory
+  // (`set({ claudeMdDraft: null })`) is invisible to them whatever it is called. These
+  // enumerate every state write the site makes and allow only the known ones.
+  const FLAT_MIRROR_KEYS = Object.keys(createEmptyFlatSessionMirror())
+
+  const setHeads = (code: string): string[] =>
+    [...code.matchAll(/\bset\(\s*(\{\s*[A-Za-z_$][\w$]*|[A-Za-z_$][\w$]*\(\))/g)].map((m) => m[1]!.replace(/\s+/g, ' '))
+
+  it('switchSession makes exactly four state writes, and the panel factory is the only reset among them', () => {
+    expect(
+      setHeads(connectionBodies.switchSession),
+      'switchSession writes state the guard does not know. A new reset value beside the factory is the ' +
+      'copy that drifts (#7588): add it to createEmptySessionPanels(), not to a second set().',
+    ).toEqual([
+      '{ sessionNotFoundError',
+      'createEmptySessionPanels()',
+      '{ activeSessionId',
+      '{ activeSessionId',
+    ])
+  })
+
+  it('the cached and uncached branch literals of switchSession write only the active id, notifications and the flat mirror', () => {
+    const body = connectionBodies.switchSession
+    const branches = body.slice(body.indexOf('if (cached) {'), body.indexOf('if (socket && socket.readyState'))
+    const keys = [...branches.matchAll(/^\s*([A-Za-z_$][\w$]*)\s*:/gm)].map((m) => m[1]!)
+    expect(keys.length, 'the branch extraction matched (almost) nothing').toBeGreaterThanOrEqual(24)
+    const allowed = new Set([...FLAT_MIRROR_KEYS, 'activeSessionId', 'sessionNotifications'])
+    expect(keys.filter((k) => !allowed.has(k)), 'a branch of switchSession writes a field outside the flat mirror').toEqual([])
+  })
+
+  const deathBlocks = (): string[] => {
+    const out: string[] = []
+    let from = 0
+    for (;;) {
+      const s = handlerSrc.indexOf('patch.activeSessionId = nextId;', from)
+      if (s < 0) break
+      const e = handlerSrc.indexOf('set(patch);', s)
+      expect(e, 'a death-path block has no set(patch)').toBeGreaterThan(s)
+      out.push(stripComments(handlerSrc.slice(s, e)))
+      from = e
+    }
+    return out
+  }
+
+  it('control: both death-path blocks were found', () => {
+    const blocks = deathBlocks()
+    expect(blocks.length, 'session_list and session_timeout each switch the active session').toBe(2)
+    for (const b of blocks) expect(b.length).toBeGreaterThan(400)
+  })
+
+  it('each death path writes only the active id, the flat mirror and the panel factory (no state it does not know)', () => {
+    const allowed = new Set([...FLAT_MIRROR_KEYS, 'activeSessionId'])
+    for (const block of deathBlocks()) {
+      const written = [...block.matchAll(/\bpatch\.([A-Za-z_$][\w$]*)\s*=/g)].map((m) => m[1]!)
+      expect(written.length, 'the write extraction matched nothing').toBeGreaterThanOrEqual(12)
+      expect(
+        written.filter((k) => !allowed.has(k)),
+        'a death path writes a field outside the flat mirror beside the panel factory: a new per-session reset ' +
+        'value belongs in createEmptySessionPanels() (#7588)',
+      ).toEqual([])
+      expect(block.match(/Object\.assign\(patch, createEmptySessionPanels\(\)\)/g)?.length).toBe(1)
+      // Any other way of writing state into the patch or the store is also unknown.
+      expect(block.match(/Object\.assign\(/g)?.length, 'an Object.assign other than the panel factory').toBe(1)
+      expect(/(^|[^\w$.])set\(/.test(block), 'a death-path block writes the store directly').toBe(false)
+      expect(/\.\.\.\w/.test(block), 'a spread into the patch that the guard does not know').toBe(false)
+    }
   })
 
   it('switchSession does NOT clear the connection-lifetime readings', () => {

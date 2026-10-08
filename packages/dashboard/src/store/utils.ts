@@ -288,11 +288,27 @@ export function createEmptyConnectionScope() {
  * reset them, the death paths did not, and a dead session's memory stack and
  * permission history rendered against whichever session became active next.
  *
- * Every site that means "a different session is about to be shown" or "a
- * different daemon" spreads this: `switchSession`, both death paths,
- * `disconnect()`, `forgetSession` and `_resetSessionMemory`. A panel field added
- * here is therefore cleared at all six, and one added anywhere else is not —
- * `store/reset-factories.test.ts` holds that line.
+ * It is spread or applied at exactly six sites: `switchSession` (one `set` ahead
+ * of both the cached and the uncached branch), the `session_list` active-removal
+ * death path, the `session_timeout` death path, `disconnect()`, `forgetSession`
+ * and `_resetSessionMemory`. A panel field added here is cleared at all six; one
+ * added anywhere else is not, and `store/reset-factories.test.ts` holds that line.
+ *
+ * It is NOT every path that changes the active session. `handleSessionSwitched`
+ * (`session_switched`), `auth_ok`'s non-reconnect branch (`activeSessionId: null`)
+ * and the `session_error` SESSION_NOT_FOUND write (`activeSessionId: null`) move
+ * the active session without it; they predate this factory and are tracked
+ * (#8488). `session_switched` in particular is not given the reset blindly: it
+ * also echoes the user's own switch, which `switchSession` has already reset, and
+ * an unconditional clear there could wipe a pull that was answered in between.
+ *
+ * `permissionAuditLoading` and `memoryStackLoading` ALSO belong to
+ * `createEmptyInFlightMarkers()` (the transport-drop clear, #8378), with the same
+ * value. The overlap is deliberate: dropping them from the markers would leave a
+ * spinner latched after a socket drop, and dropping them here would leave one
+ * latched across a session change (the in-flight pull belongs to the old
+ * session). `reset-factories.test.ts` pins that these two are the ONLY overlap and
+ * that the values agree.
  *
  * `lastMemoryStackRequestId` is deliberately NOT here. It is the correlation
  * nonce `handleMemoryStackResult` uses to drop a superseded reply, and a `null`

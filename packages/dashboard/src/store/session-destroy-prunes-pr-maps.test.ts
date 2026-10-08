@@ -2923,7 +2923,8 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     // not for every connection-scoped collection. Object-typed daemon snapshots
     // (`credentialsStatus`, `orchestrationRuns`, …) are asked the same question by
     // the snapshot axis below (#7579); its own deferral bucket,
-    // `SNAPSHOT_LIFETIME_DEFERRED`, is not empty and says why (#8411).
+    // `SNAPSHOT_LIFETIME_DEFERRED`, was emptied by #8411 and stays as the place a
+    // future deferral is written down with its tracking issue.
     expect(
       Object.keys(CONNECTION_LIFECYCLE_DEFERRED),
       'a field was deferred again. That is allowed — but say which, cite the issue, and expect ' +
