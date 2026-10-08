@@ -165,6 +165,7 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     credentialTestResults: {},
     // #7594: the live-session destroy refusals, keyed by environment id.
     environmentDestroyRefusals: {},
+    environmentDestroyingIds: new Set<string>(),
     sessionStates: {},
     messages: [],
     terminalBuffer: '',
@@ -771,6 +772,63 @@ describe('dashboard message-handler dispatch', () => {
         handleMessage({ ...refusal, environmentId: 'env-2', sessions: ['sess-b'] }, ctx() as any)
         handleMessage({ type: 'environment_list', environments: [{ id: 'env-2' }] }, ctx() as any)
         expect((store.getState() as any).environmentDestroyRefusals).toEqual({ 'env-2': ['sess-b'] })
+      })
+
+      // #8407: the other way a refusal goes stale.
+      it('environment_list drops a refusal whose environment is listed with NO sessions (they exited)', () => {
+        handleMessage(refusal, ctx() as any)
+        handleMessage({ ...refusal, environmentId: 'env-2', sessions: ['sess-b'] }, ctx() as any)
+        handleMessage(
+          { type: 'environment_list', environments: [{ id: 'env-1', sessions: [] }, { id: 'env-2', sessions: ['sess-b'] }] },
+          ctx() as any,
+        )
+        // env-1's sessions are gone: its "live sessions running" text would be false.
+        expect((store.getState() as any).environmentDestroyRefusals).toEqual({ 'env-2': ['sess-b'] })
+      })
+
+      it('environment_list keeps a refusal whose environment still lists sessions, or lists none at all (negative controls)', () => {
+        handleMessage(refusal, ctx() as any)
+        handleMessage({ ...refusal, environmentId: 'env-2', sessions: ['sess-b'] }, ctx() as any)
+        handleMessage(
+          { type: 'environment_list', environments: [{ id: 'env-1', sessions: ['sess-a'] }, { id: 'env-2' }] },
+          ctx() as any,
+        )
+        expect((store.getState() as any).environmentDestroyRefusals).toEqual({ 'env-1': ['sess-a'], 'env-2': ['sess-b'] })
+      })
+    })
+
+    describe('clears the destroy-in-flight marker on the answer (#8407)', () => {
+      const arm = (...ids: string[]) =>
+        store.setState({ environmentDestroyingIds: new Set(ids) } as any)
+      const pending = () => [...(store.getState() as any).environmentDestroyingIds].sort()
+
+      it('a refusal naming the environment frees that card only', () => {
+        arm('env-1', 'env-2')
+        handleMessage(
+          { type: 'environment_error', environmentId: 'env-1', error: 'live', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: ['s'] },
+          ctx() as any,
+        )
+        expect(pending()).toEqual(['env-2'])
+        // ...and the refusal is recorded in the same step.
+        expect((store.getState() as any).environmentDestroyRefusals).toEqual({ 'env-1': ['s'] })
+      })
+
+      it('any other error naming the environment frees it too', () => {
+        arm('env-1', 'env-2')
+        handleMessage({ type: 'environment_error', environmentId: 'env-2', error: 'docker exploded' }, ctx() as any)
+        expect(pending()).toEqual(['env-1'])
+      })
+
+      it('an error naming no environment cannot be attributed, so it frees every card', () => {
+        arm('env-1', 'env-2')
+        handleMessage({ type: 'environment_error', error: 'environments are not enabled' }, ctx() as any)
+        expect(pending()).toEqual([])
+      })
+
+      it('environment_list frees an environment that left the roster and keeps one still listed', () => {
+        arm('env-1', 'env-2')
+        handleMessage({ type: 'environment_list', environments: [{ id: 'env-2', sessions: [] }] }, ctx() as any)
+        expect(pending()).toEqual(['env-2'])
       })
     })
 

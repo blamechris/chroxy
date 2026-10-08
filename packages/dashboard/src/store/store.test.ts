@@ -873,6 +873,64 @@ describe('useConnectionStore', () => {
     expect(useConnectionStore.getState().environmentDestroyRefusals).toEqual({});
   });
 
+  it('#8407: destroyEnvironment marks the destroy in flight (plain and Force) and a timeout clears it', async () => {
+    vi.useFakeTimers();
+    try {
+      const { useConnectionStore } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({ socket: openSocket, environmentDestroyingIds: new Set(['env-other']) });
+
+      useConnectionStore.getState().destroyEnvironment('env-1');
+      expect([...useConnectionStore.getState().environmentDestroyingIds].sort()).toEqual(['env-1', 'env-other']);
+      useConnectionStore.getState().destroyEnvironment('env-1', true);
+      expect(JSON.parse(send.mock.calls[1]![0] as string)).toEqual({ type: 'destroy_environment', environmentId: 'env-1', force: true });
+      expect(useConnectionStore.getState().environmentDestroyingIds.has('env-1')).toBe(true);
+
+      // The fallback: a reply that never names the id cannot strand the card.
+      vi.advanceTimersByTime(29_000);
+      expect(useConnectionStore.getState().environmentDestroyingIds.has('env-1')).toBe(true);
+      vi.advanceTimersByTime(2_000);
+      expect([...useConnectionStore.getState().environmentDestroyingIds]).toEqual(['env-other']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('#8407: an offline destroyEnvironment marks nothing in flight', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ socket: null, environmentDestroyingIds: new Set() });
+    useConnectionStore.getState().destroyEnvironment('env-1');
+    expect(useConnectionStore.getState().environmentDestroyingIds.size).toBe(0);
+  });
+
+  it('#8407: an inherited member name is not a recorded refusal or action result', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const refusals = { 'env-1': ['sess-a'] };
+    const results = { 'env-1': { action: 'destroy', status: null, error: 'x', liveSessions: true, at: 1 } };
+    useConnectionStore.setState({ environmentDestroyRefusals: refusals, containerActionResults: results });
+    for (const id of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      useConnectionStore.getState().dismissEnvironmentDestroyRefusal(id);
+      useConnectionStore.getState().dismissContainerActionResult(id);
+    }
+    // Neither was touched: the SAME objects are still in the store (a copy that
+    // re-set an equal map would pass a keys-only check), and no own key grew.
+    expect(useConnectionStore.getState().environmentDestroyRefusals).toBe(refusals);
+    expect(useConnectionStore.getState().containerActionResults).toBe(results);
+    expect(Object.keys(refusals)).toEqual(['env-1']);
+    expect(Object.keys(results)).toEqual(['env-1']);
+  });
+
+  it('#8407: dismissContainerActionResult forgets one environment\'s outcome and no other', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const r = { action: 'destroy', status: null, error: 'x', liveSessions: true, at: 1 };
+    useConnectionStore.setState({ containerActionResults: { 'env-1': r, 'env-2': r } });
+    useConnectionStore.getState().dismissContainerActionResult('env-1');
+    expect(Object.keys(useConnectionStore.getState().containerActionResults)).toEqual(['env-2']);
+    useConnectionStore.getState().dismissContainerActionResult('env-9');
+    expect(Object.keys(useConnectionStore.getState().containerActionResults)).toEqual(['env-2']);
+  });
+
   it('#6139: requestRepoRuntimeConfig sets loading and sends on the wire; no-op + no loading offline', async () => {
     const { useConnectionStore } = await import('./connection');
     const send = vi.fn();

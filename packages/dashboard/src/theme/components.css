@@ -11836,6 +11836,17 @@ button.sidebar-token-view-session-row:hover {
   filter: brightness(1.1);
 }
 
+/* #8407: a destroy_environment is on the wire — stands in for every destroy
+   control on the card until the daemon answers. Sized like the buttons it
+   replaces so the card does not jump. */
+.env-destroying {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-size: 0.85em;
+  color: var(--text-secondary);
+}
+
 /* Create form */
 .env-create-form {
   padding: 16px;
@@ -13405,6 +13416,13 @@ button.sidebar-token-view-session-row:hover {
 .cr-action:hover {
   border-color: var(--accent-blue);
   color: var(--text-primary);
+}
+
+/* #8407: dismiss control on a Control Room notice. The 44pt floor applies to it
+   even though the dense row actions above sit below it. */
+.cr-action-dismiss {
+  min-height: 44px;
+  min-width: 44px;
 }
 
 /* Verdict tags */

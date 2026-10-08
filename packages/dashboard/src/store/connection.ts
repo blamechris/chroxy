@@ -83,7 +83,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
-import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, getOwn, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -584,6 +584,8 @@ let pendingPairingId: string | null = null;
 // #8331: how long a Restart now / Postpone may wait for its reply before the
 // banner's buttons are released with an error.
 const DAEMON_UPDATE_ACTION_TIMEOUT_MS = 15_000;
+/** #8407: how long an unanswered destroy_environment keeps its card pending. */
+const ENVIRONMENT_DESTROY_PENDING_TIMEOUT_MS = 30_000;
 // #8331: the update banner's state describes ONE connection to ONE daemon. It is
 // cleared on an explicit disconnect, on transport loss (onclose), and at the start
 // of every new handshake (connect), because a reconnect can land on a DIFFERENT
@@ -1063,6 +1065,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // outcome per environment for inline display (same lifecycle as reindex).
   containerActioningIds: new Set<string>(),
   containerActionResults: {},
+  // #8407: Environments panel destroy in flight (plain or Force).
+  environmentDestroyingIds: new Set<string>(),
   // #6135 slice 3: BYOK pool action — in-flight target ids + last outcome per
   // target for inline display (same lifecycle as containerActioningIds).
   byokPoolActioningIds: new Set<string>(),
@@ -5749,16 +5753,36 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #7594: a fresh attempt supersedes the last refusal — the daemon's next
       // answer (a refusal again, or the destroy) is the one to act on.
       get().dismissEnvironmentDestroyRefusal(environmentId);
+      // #8407: mark the attempt in flight so the card shows a pending state
+      // rather than reverting to a clickable Destroy. The answer clears it
+      // (message-handler); the timeout is the fallback for a reply that never
+      // names this id, so a lost frame cannot strand the card disabled.
+      set({ environmentDestroyingIds: new Set(get().environmentDestroyingIds).add(environmentId) });
+      setTimeout(() => {
+        if (!get().environmentDestroyingIds.has(environmentId)) return;
+        const next = new Set(get().environmentDestroyingIds);
+        next.delete(environmentId);
+        set({ environmentDestroyingIds: next });
+      }, ENVIRONMENT_DESTROY_PENDING_TIMEOUT_MS);
       wsSend(socket, msg);
     }
   },
 
   dismissEnvironmentDestroyRefusal: (environmentId: string) => {
     const refusals = get().environmentDestroyRefusals;
-    if (!(environmentId in refusals)) return;
+    // #8407: own-key check — `in` also answers for `constructor` & co.
+    if (getOwn(refusals, environmentId) === undefined) return;
     const next = { ...refusals };
     delete next[environmentId];
     set({ environmentDestroyRefusals: next });
+  },
+
+  dismissContainerActionResult: (environmentId: string) => {
+    const results = get().containerActionResults;
+    if (getOwn(results, environmentId) === undefined) return;
+    const next = { ...results };
+    delete next[environmentId];
+    set({ containerActionResults: next });
   },
 
   fetchConversationHistory: () => {
