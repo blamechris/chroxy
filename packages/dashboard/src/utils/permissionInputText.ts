@@ -56,7 +56,8 @@ function flagValue(value: unknown): string | null {
   if (typeof value === 'number') return Number.isFinite(value) ? String(value) : null
   if (typeof value === 'string') {
     if (value.length === 0) return null
-    return value.length <= FLAG_VALUE_MAX_CHARS ? oneLine(value) : '<string>'
+    // Quoted (JSON-escaped) so a value can never read as a bare `key: value` flag of its own.
+    return value.length <= FLAG_VALUE_MAX_CHARS ? JSON.stringify(oneLine(value)) : '<string>'
   }
   if (Array.isArray(value)) return '<array>'
   if (value !== null && typeof value === 'object') return '<object>'

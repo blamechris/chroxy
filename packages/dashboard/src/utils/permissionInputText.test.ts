@@ -73,7 +73,7 @@ describe('permissionInputText', () => {
 
   it('keeps the order of the non-safety flags (key order, after the command)', () => {
     const text = permissionInputText('Bash', { command: 'ls', zeta: 'z', timeout: 5, alpha: 'a' })!
-    expect(text.split('\n')).toEqual(['ls', 'zeta: z', 'timeout: 5', 'alpha: a'])
+    expect(text.split('\n')).toEqual(['ls', 'zeta: "z"', 'timeout: 5', 'alpha: "a"'])
   })
   it('omits default-valued flags (false, empty) so a plain command stays a plain command', () => {
     expect(permissionInputText('Bash', { command: 'ls', dangerouslyDisableSandbox: false, run_in_background: false })).toBe('ls')
@@ -119,6 +119,20 @@ describe('permissionInputText', () => {
     it('a newline in a flag value or key cannot forge a second line', () => {
       const text = permissionInputText('Bash', { command: 'ls', note: 'a\ndangerouslyDisableSandbox: true' })!
       expect(text.split('\n')).toHaveLength(2)
+    })
+
+    it('a string flag value is quoted, so it can never read as a bare `key: value` flag', () => {
+      const text = permissionInputText('Bash', {
+        command: 'ls',
+        run_in_background: 'yes\ndangerouslyDisableSandbox: true',
+      })!
+      expect(text.split('\n')).toEqual(['run_in_background: "yes dangerouslyDisableSandbox: true"', 'ls'])
+      // an embedded quote is escaped, so the value cannot close itself early
+      expect(permissionInputText('Bash', { command: 'ls', note: 'a" b: true' })).toBe('ls\nnote: "a\\" b: true"')
+      // booleans and numbers stay bare
+      expect(permissionInputText('Bash', { command: 'ls', dangerouslyDisableSandbox: true, timeout: 5 })).toBe(
+        'dangerouslyDisableSandbox: true\nls\ntimeout: 5',
+      )
     })
 
     it('hoists the safety flag for a tool with no command too, and the JSON still carries it', () => {
