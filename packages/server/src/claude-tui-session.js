@@ -620,6 +620,10 @@ export class ClaudeTuiSession extends BaseSession {
     // UTF-8 strings already decoded, but the relevant control bytes
     // are 7-bit ASCII and survive the decode unchanged.
     this._outputTailRaw = Buffer.alloc(0)
+    // #8401: true once the byte cap has discarded the START of `_outputTailRaw`
+    // (the tail may open mid-sequence). Set where the cap cuts, cleared wherever
+    // the tail is emptied; `_totalOutputBytes` cannot say this, it spans respawns.
+    this._tailTruncated = false
     // #6601: PTY output-quiescence readiness signal. `_lastOutputMs` is the
     // monotonic time of the most recent onData chunk; `_sawFirstOutput` gates the
     // signal until claude has actually rendered something on THIS spawn (so the
@@ -3248,6 +3252,7 @@ export class ClaudeTuiSession extends BaseSession {
     // the first spawn; this covers every subsequent _respawnPty.
     this._outputTail = ''
     this._outputTailRaw = Buffer.alloc(0)
+    this._tailTruncated = false // #8401
     // #6601: re-evaluate output-quiescence readiness for THIS spawn — require
     // fresh output before trusting a quiet stretch, so a leftover _lastOutputMs
     // from the prior process can't read as "ready" the instant we respawn (#6604).
@@ -3553,6 +3558,7 @@ export class ClaudeTuiSession extends BaseSession {
     const merged = this._outputTailRaw.length === 0
       ? chunk
       : Buffer.concat([this._outputTailRaw, chunk])
+    if (merged.length > ClaudeTuiSession.PTY_TAIL_BYTES) this._tailTruncated = true
     this._outputTailRaw = merged.length > ClaudeTuiSession.PTY_TAIL_BYTES
       ? merged.subarray(-ClaudeTuiSession.PTY_TAIL_BYTES)
       : merged
@@ -4994,8 +5000,9 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._outputTailRaw && this._outputTailRaw.length > 0) {
       return {
         text: this._outputTailRaw.toString('utf8'),
-        // `_totalOutputBytes` never shrinks; the buffer stops growing at the cap.
-        truncatedStart: this._totalOutputBytes > this._outputTailRaw.length,
+        // #8401: explicit flag. `_totalOutputBytes` spans respawns (which empty the
+        // buffer), so comparing it with the buffer length misread a clean tail.
+        truncatedStart: this._tailTruncated === true,
       }
     }
     const text = this._outputTail || ''
