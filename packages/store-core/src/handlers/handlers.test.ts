@@ -38,7 +38,8 @@ import {
   restoreCanBranchConversation,
   findCheckpointName,
   stashPendingRestoreNotice,
-  takePendingRestoreNotice,
+  applyPendingRestoreNotice,
+  settlePendingRestoreNotice,
   clearPendingRestoreNotices,
   handleError,
   handleSessionError,
@@ -10430,23 +10431,76 @@ describe('findCheckpointName', () => {
 
 describe('pending restore notice (#6808)', () => {
   const msg = { id: 'm1', type: 'system', content: 'x', timestamp: 1 } as any
+  const other = { id: 'u1', type: 'user_input', content: 'hi', timestamp: 2 } as any
   beforeEach(() => clearPendingRestoreNotices())
 
-  it('is keyed by session id and consumed exactly once', () => {
-    stashPendingRestoreNotice('s2', msg, 1000)
-    expect(takePendingRestoreNotice('other', 1001)).toBeNull()
-    expect(takePendingRestoreNotice('s2', 1001)).toBe(msg)
-    expect(takePendingRestoreNotice('s2', 1002)).toBeNull()
+  describe('applyPendingRestoreNotice (session became active; a replay may or may not follow)', () => {
+    it('appends the parked notice to the transcript, keeping the others in order', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(applyPendingRestoreNotice('s2', [other], 1001)).toEqual([other, msg])
+    })
+
+    it('does not mutate the input array', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      const input = [other]
+      applyPendingRestoreNotice('s2', input, 1001)
+      expect(input).toEqual([other])
+    })
+
+    it('is idempotent: a transcript that already holds the notice is left alone', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(applyPendingRestoreNotice('s2', [msg], 1001)).toBeNull()
+    })
+
+    it('stays parked, so a replay that wipes the transcript can re-append it', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      applyPendingRestoreNotice('s2', [], 1001)
+      expect(settlePendingRestoreNotice('s2', [], 1002)).toEqual([msg])
+    })
+
+    it('ignores other sessions and a null id', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(applyPendingRestoreNotice('other', [], 1001)).toBeNull()
+      expect(applyPendingRestoreNotice(null, [], 1001)).toBeNull()
+    })
+
+    it('does not re-show a notice that expired unshown', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(applyPendingRestoreNotice('s2', [], 1000 + 5 * 60_000)).toBeNull()
+    })
   })
 
-  it('expires, so a stale notice cannot surface on a much later replay', () => {
-    stashPendingRestoreNotice('s2', msg, 1000)
-    expect(takePendingRestoreNotice('s2', 1000 + 5 * 60_000)).toBeNull()
-  })
+  describe('settlePendingRestoreNotice (history_replay_end)', () => {
+    it('appends when the transcript lacks the notice, then clears it', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(settlePendingRestoreNotice('s2', [other], 1001)).toEqual([other, msg])
+      expect(settlePendingRestoreNotice('s2', [other], 1002)).toBeNull()
+      expect(applyPendingRestoreNotice('s2', [other], 1003)).toBeNull()
+    })
 
-  it('a null session id never matches', () => {
-    stashPendingRestoreNotice('s2', msg, 1000)
-    expect(takePendingRestoreNotice(null, 1001)).toBeNull()
+    it('clears without duplicating when the notice is already in the transcript', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(settlePendingRestoreNotice('s2', [msg], 1001)).toBeNull()
+      expect(settlePendingRestoreNotice('s2', [], 1002)).toBeNull()
+    })
+
+    it('apply then settle over an intact transcript shows it exactly once', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      const shown = applyPendingRestoreNotice('s2', [], 1001)!
+      expect(settlePendingRestoreNotice('s2', shown, 1002)).toBeNull()
+    })
+
+    it('a notice shown but never settled expires, so a later reconnect replay cannot resurrect it', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      applyPendingRestoreNotice('s2', [], 1001)
+      expect(settlePendingRestoreNotice('s2', [], 1001 + 60_000)).toBeNull()
+    })
+
+    it('ignores other sessions and a null id', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(settlePendingRestoreNotice('other', [], 1001)).toBeNull()
+      expect(settlePendingRestoreNotice(null, [], 1001)).toBeNull()
+    })
   })
 })
 

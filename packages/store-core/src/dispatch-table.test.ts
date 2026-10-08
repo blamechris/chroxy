@@ -15,7 +15,7 @@ import type {
   Checkpoint,
 } from './types'
 import type { PermissionRule } from './handlers'
-import { clearPendingRestoreNotices, takePendingRestoreNotice } from './handlers'
+import { clearPendingRestoreNotices, settlePendingRestoreNotice } from './handlers'
 import { selectPermissionModesForProvider, type PermissionModesByProvider } from './permission-modes-by-provider'
 // #7420 — the replay window / live-arrival ledger the `user_question` case writes.
 import {
@@ -2743,7 +2743,7 @@ describe('shared dispatch table', () => {
         mode: 'both',
       })
       expect(env.switchedSessions).toEqual(['new-sid'])
-      const notice = takePendingRestoreNotice('new-sid')
+      const notice = settlePendingRestoreNotice('new-sid', [])?.[0]
       expect(notice?.type).toBe('system')
       expect(notice?.content).toBe(
         'Rewound to checkpoint "Before refactor": files restored and the conversation branched into this new session',
@@ -2759,13 +2759,13 @@ describe('shared dispatch table', () => {
         filesOnly: true,
         mode: 'both',
       })
-      expect(takePendingRestoreNotice('new-sid')?.content).toContain('(not rewound)')
+      expect(settlePendingRestoreNotice('new-sid', [])?.[0]?.content).toContain('(not rewound)')
     })
 
     it('a legacy payload (no mode, no filesOnly) never claims a rewind', () => {
       const env = makeAdapter({ activeSessionId: 'old', checkpoints: cps })
       dispatch(env, { type: 'checkpoint_restored', checkpointId: 'cp-1', newSessionId: 'new-sid' })
-      const c = takePendingRestoreNotice('new-sid')?.content ?? ''
+      const c = settlePendingRestoreNotice('new-sid', [])?.[0]?.content ?? ''
       expect(c).toContain('(not rewound)')
       expect(c).not.toContain('branched into')
     })
@@ -2779,13 +2779,13 @@ describe('shared dispatch table', () => {
         filesOnly: false,
         mode: 'both',
       })
-      expect(takePendingRestoreNotice('new-sid')?.content).toContain('the checkpoint')
+      expect(settlePendingRestoreNotice('new-sid', [])?.[0]?.content).toContain('the checkpoint')
     })
 
     it("a 'files' restore stashes nothing (its confirmation is appended directly)", () => {
       const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { messages: [] } as any }, checkpoints: cps })
       dispatch(env, { type: 'checkpoint_restored', checkpointId: 'cp-1', mode: 'files', filesOnly: true, name: 'Before refactor' })
-      expect(takePendingRestoreNotice('s1')).toBeNull()
+      expect(settlePendingRestoreNotice('s1', [])).toBeNull()
       expect(env.switchedSessions).toEqual([])
     })
   })

@@ -223,40 +223,81 @@ export function restoreCanBranchConversation(mode: RestoreMode, providerCanFork:
   return mode !== 'files' && providerCanFork
 }
 
-// The notice must land AFTER the new session's history replay. The restore
-// switches to a session this client has no transcript for; the switch asks the
-// server to replay it, and a full-history replay drops everything that was in the
-// transcript before `history_replay_start` (reconcileReplayEnd). So a notice
-// appended at `checkpoint_restored` time is wiped moments later. It is parked here,
-// keyed by the new session id, and the clients append it right after that
-// session's `history_replay_end` swap. Module state, like the replay window it
-// pairs with; bounded by a TTL so one that never meets a replay (socket dropped
-// mid-switch) cannot surface on a much later one.
+// When the notice lands. The restore switches to a session this client has no
+// transcript for. Two things can follow the switch, and the notice must survive
+// both:
+//  - NO replay: a restored session whose chroxy-side history is empty gets no
+//    `history_replay_start`/`end` at all (the server returns early). So the notice
+//    is appended as soon as the session becomes active (`session_switched`).
+//  - A full-history replay: it drops everything that was in the transcript before
+//    `history_replay_start` (reconcileReplayEnd), wiping that first append. So the
+//    notice stays parked after being shown and is re-appended at `history_replay_end`,
+//    which then clears it.
+// Idempotent by message id, so it shows exactly once either way. Module state,
+// bounded by TTLs so a parked notice that never meets its replay cannot resurface
+// on a much later one (a reconnect replay).
 const PENDING_RESTORE_NOTICE_TTL_MS = 60_000
-const pendingRestoreNotices = new Map<string, { message: ChatMessage; at: number }>()
+// Once shown, the only thing left to wait for is the replay that the same switch
+// burst sends right behind `session_switched`.
+const SHOWN_RESTORE_NOTICE_TTL_MS = 15_000
+const pendingRestoreNotices = new Map<string, { message: ChatMessage; at: number; ttl: number }>()
 
-/** Park a restore notice for `sessionId` until its history replay ends (#6808). */
+/** Park a restore notice for `sessionId` until it can be shown (#6808). */
 export function stashPendingRestoreNotice(
   sessionId: string,
   message: ChatMessage,
   now: number = Date.now(),
 ): void {
-  pendingRestoreNotices.set(sessionId, { message, at: now })
+  pendingRestoreNotices.set(sessionId, { message, at: now, ttl: PENDING_RESTORE_NOTICE_TTL_MS })
 }
 
-/**
- * Take (and clear) the parked restore notice for `sessionId`, or null when there
- * is none or it has expired (#6808). Call after the session's replay-end swap.
- */
-export function takePendingRestoreNotice(
-  sessionId: string | null | undefined,
-  now: number = Date.now(),
-): ChatMessage | null {
+function livePendingRestoreNotice(sessionId: string | null | undefined, now: number) {
   if (!sessionId) return null
   const entry = pendingRestoreNotices.get(sessionId)
   if (!entry) return null
+  if (now - entry.at > entry.ttl) {
+    pendingRestoreNotices.delete(sessionId)
+    return null
+  }
+  return entry
+}
+
+/**
+ * The transcript with `sessionId`'s parked restore notice appended, or null when
+ * there is nothing to add (#6808). Call when the session becomes active
+ * (`session_switched`). Does NOT consume the notice: a full-history replay may
+ * follow and wipe it, and {@link settlePendingRestoreNotice} re-appends it then.
+ */
+export function applyPendingRestoreNotice(
+  sessionId: string | null | undefined,
+  messages: readonly ChatMessage[],
+  now: number = Date.now(),
+): ChatMessage[] | null {
+  const entry = livePendingRestoreNotice(sessionId, now)
+  if (!entry) return null
+  // Shown (or about to be): start the short post-show window.
+  entry.at = now
+  entry.ttl = SHOWN_RESTORE_NOTICE_TTL_MS
+  if (messages.some((m) => m.id === entry.message.id)) return null
+  return [...messages, entry.message]
+}
+
+/**
+ * Like {@link applyPendingRestoreNotice}, but consumes the notice (#6808). Call
+ * after the session's `history_replay_end` swap: the replay is the last thing
+ * the switch sends, so the notice either is still in the transcript (null) or was
+ * wiped by the replay and is re-appended here.
+ */
+export function settlePendingRestoreNotice(
+  sessionId: string | null | undefined,
+  messages: readonly ChatMessage[],
+  now: number = Date.now(),
+): ChatMessage[] | null {
+  const entry = livePendingRestoreNotice(sessionId, now)
+  if (!entry || !sessionId) return null
   pendingRestoreNotices.delete(sessionId)
-  return now - entry.at <= PENDING_RESTORE_NOTICE_TTL_MS ? entry.message : null
+  if (messages.some((m) => m.id === entry.message.id)) return null
+  return [...messages, entry.message]
 }
 
 /** Drop every parked restore notice (test isolation, and a full store reset). */

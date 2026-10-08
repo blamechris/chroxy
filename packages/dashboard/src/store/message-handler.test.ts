@@ -10384,7 +10384,8 @@ describe('checkpoint_restored (session-creating) post-restore notice (#6808)', (
   })
 
   /** Drive the full wire sequence the server produces for a restore. */
-  function restoreAndSwitch(restored: Record<string, unknown>, newSid: string) {
+  function restoreAndSwitch(restored: Record<string, unknown>, newSid: string, opts: { replay?: boolean } = {}) {
+    const replay = opts.replay ?? true
     const switchSession = vi.fn()
     store = createMockStore(
       baseState({
@@ -10402,8 +10403,13 @@ describe('checkpoint_restored (session-creating) post-restore notice (#6808)', (
     expect(switchSession).toHaveBeenCalledWith(newSid, { allowUnlisted: true })
     // The switch round trip: session_switched, then a forced-full replay.
     handleMessage({ type: 'session_switched', sessionId: newSid, name: 'Rewind: Before refactor' } as any, ctx() as any)
-    handleMessage({ type: 'history_replay_start', sessionId: newSid, fullHistory: true } as any, ctx() as any)
-    handleMessage({ type: 'history_replay_end', sessionId: newSid, latestSeq: 0 } as any, ctx() as any)
+    handleMessage({ type: 'claude_ready', sessionId: newSid } as any, ctx() as any)
+    // A restored session whose chroxy history is empty gets NO replay frames from
+    // the server (replayHistory returns early), so the notice must not depend on one.
+    if (replay) {
+      handleMessage({ type: 'history_replay_start', sessionId: newSid, fullHistory: true } as any, ctx() as any)
+      handleMessage({ type: 'history_replay_end', sessionId: newSid, latestSeq: 0 } as any, ctx() as any)
+    }
     return (store.getState() as any).sessionStates[newSid].messages as Array<Record<string, unknown>>
   }
 
@@ -10421,6 +10427,31 @@ describe('checkpoint_restored (session-creating) post-restore notice (#6808)', (
     expect(messages).toHaveLength(1)
     expect(String(messages[0]!.content)).toContain('(not rewound)')
     expect(String(messages[0]!.content)).not.toContain('branched into')
+  })
+
+  it('shows the notice when NO replay follows the switch (empty restored history)', () => {
+    const messages = restoreAndSwitch({ mode: 'both', filesOnly: false }, 'rw-5', { replay: false })
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({ type: 'system' })
+    expect(String(messages[0]!.content)).toContain('conversation branched')
+    // the flat transcript the UI renders from carries it too
+    expect((store.getState() as any).messages.filter((m: any) => m.type === 'system')).toHaveLength(1)
+  })
+
+  it('keeps it exactly once when a wiping full replay follows a no-replay show', () => {
+    restoreAndSwitch({ mode: 'conversation', filesOnly: false }, 'rw-6', { replay: false })
+    handleMessage({ type: 'history_replay_start', sessionId: 'rw-6', fullHistory: true } as any, ctx() as any)
+    handleMessage({ type: 'history_replay_end', sessionId: 'rw-6', latestSeq: 0 } as any, ctx() as any)
+    const messages = (store.getState() as any).sessionStates['rw-6'].messages as Array<Record<string, unknown>>
+    expect(messages.filter((m) => m.type === 'system')).toHaveLength(1)
+  })
+
+  it('a later unrelated replay does not re-add a notice that was already settled', () => {
+    restoreAndSwitch({ mode: 'both', filesOnly: false }, 'rw-7')
+    handleMessage({ type: 'history_replay_start', sessionId: 'rw-7', fullHistory: true } as any, ctx() as any)
+    handleMessage({ type: 'history_replay_end', sessionId: 'rw-7', latestSeq: 0 } as any, ctx() as any)
+    const messages = (store.getState() as any).sessionStates['rw-7'].messages as Array<Record<string, unknown>>
+    expect(messages.filter((m) => m.type === 'system')).toHaveLength(0)
   })
 
   it('a legacy payload (no mode, no filesOnly) never claims a rewind', () => {
