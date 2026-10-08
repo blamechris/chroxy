@@ -1371,9 +1371,11 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // drop the answer -- the claude-tui form driver with no pending entry or no
     // terminal, its multi-select refuse branch, the CLI with `_waitingForAnswer`
     // false, a permission manager with nothing pending (SDK / BYOK). That is
-    // acceptable because nearly every such drop follows a turn teardown, which
-    // already records a synthetic `tool_result` for the question's tool, so
-    // marking it answered hides no real interrupted state.
+    // acceptable because such a drop is either a repeat of an answer already
+    // delivered, or follows (or, for the multi-select refuse branch, is) a turn
+    // teardown that has already recorded a `tool_result` for the question's
+    // tool, synthetic or the provider's own error result, so marking it
+    // answered hides no real interrupted state.
     const hasAnswers = msg.answers && typeof msg.answers === 'object' && Object.keys(msg.answers).length > 0
     if (msg.answer.length > 0 || hasAnswers) {
       ctx.sessions.sessionManager.recordQuestionAnswered?.(questionSessionId, msg.toolUseId)
