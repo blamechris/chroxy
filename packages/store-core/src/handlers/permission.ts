@@ -109,6 +109,12 @@ export function handlePermissionRequest(
 export interface PermissionResolvedPayload {
   requestId: string | null
   decision: string | null
+  /**
+   * #8374: why the server resolved the prompt (`'user'`, `'timeout'`, `'aborted'`,
+   * ...), or null when the frame carried none (the hook route and other-client
+   * broadcasts). Only {@link PERMISSION_STOPPED_REASON} is acted on.
+   */
+  reason: string | null
 }
 
 export function handlePermissionResolved(
@@ -117,7 +123,49 @@ export function handlePermissionResolved(
   return {
     requestId: parseRawStringField(msg, 'requestId'),
     decision: parseRawStringField(msg, 'decision'),
+    reason: parseRawStringField(msg, 'reason'),
   }
+}
+
+/**
+ * #8374: the `permission_resolved` reason for a prompt the user cancelled with
+ * Stop. The server resolves such a prompt as `decision: 'deny'` (the SDK's
+ * canUseTool needs a verdict), so the decision alone cannot tell it from a user
+ * Deny -- this is the only discriminator.
+ */
+export const PERMISSION_STOPPED_REASON = 'aborted'
+
+/**
+ * Apply a `permission_resolved` frame to the prompt message it resolves. The one
+ * place both clients' handlers do it, so the two cannot disagree about what a
+ * Stop-cancelled prompt looks like.
+ *
+ *   - Stop (`reason: 'aborted'`): no decision was made, so `answered` is cleared
+ *     and the message becomes a `stopped` record -- the same shape a replayed
+ *     `permission_outcome: stopped` produces (see `reconcileHeldPermissionCard`),
+ *     so a session switch changes nothing about it. A countdown still running is
+ *     closed; one that already ended keeps its time. The renderers read
+ *     `permissionOutcome` ahead of `answered`, so the card says "stopped".
+ *   - anything else: the decision is the answer, exactly as before.
+ *
+ * Returns a new message; the caller owns finding it.
+ */
+export function applyPermissionResolved(
+  m: ChatMessage,
+  resolved: PermissionResolvedPayload,
+  now: number,
+): ChatMessage {
+  if (resolved.reason === PERMISSION_STOPPED_REASON) {
+    return {
+      ...m,
+      permissionOutcome: 'stopped',
+      answered: undefined,
+      answeredAt: undefined,
+      options: undefined,
+      ...(m.expiresAt !== undefined ? { expiresAt: Math.min(m.expiresAt, now) } : {}),
+    }
+  }
+  return { ...m, answered: resolved.decision ?? undefined, answeredAt: now, options: undefined }
 }
 
 /**
@@ -140,7 +188,7 @@ export interface PermissionOutcomePayload {
   timestamp: number | null
 }
 
-const PERMISSION_OUTCOME_KINDS: readonly string[] = ['allowed', 'denied', 'expired']
+const PERMISSION_OUTCOME_KINDS: readonly string[] = ['allowed', 'denied', 'expired', 'stopped']
 
 export function handlePermissionOutcome(
   msg: Record<string, unknown>,
@@ -165,7 +213,8 @@ export function handlePermissionOutcome(
  * live card (`content` is `"<tool>: <description>"`) so the two read the same.
  * `allowed` / `denied` also stamp `answered` with the decision token, so every
  * "was this prompt answered?" check (`isPermissionRequestAnswered`) agrees with
- * a live card that was answered; `expired` made no decision and leaves it unset.
+ * a live card that was answered; `expired` and `stopped` made no decision and
+ * leave it unset.
  */
 export function buildPermissionOutcomeMessage(payload: PermissionOutcomePayload): ChatMessage {
   const { requestId, tool, description, outcome, sessionId, timestamp } = payload

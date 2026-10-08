@@ -754,6 +754,10 @@ export {
   // record for it (never a pending card).
   handlePermissionOutcome,
   buildPermissionOutcomeMessage,
+  // #8374 — a `permission_resolved` applied to its prompt message, the ONE place
+  // both clients decide that a Stop-cancelled prompt is `stopped`, not denied.
+  applyPermissionResolved,
+  PERMISSION_STOPPED_REASON,
   // #7380 — the one wording for the #2833 already-answered race, shared because
   // the two clients surface it through different channels (toast vs transcript).
   PERMISSION_ALREADY_ANSWERED_NOTICE,

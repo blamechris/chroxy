@@ -7,10 +7,16 @@ import {
   reconcileReplayEnd,
   sweepUnansweredPromptsAtReplayEnd,
 } from './replay-reconcile'
-import { handlePermissionOutcome, buildPermissionOutcomeMessage } from './handlers/permission'
+import {
+  handlePermissionOutcome,
+  buildPermissionOutcomeMessage,
+  handlePermissionResolved,
+  applyPermissionResolved,
+} from './handlers/permission'
 import {
   derivePendingPermissionCounts,
   isLivePermissionPrompt,
+  isExpiredUnansweredPermissionPrompt,
   isPermissionRequestAnswered,
 } from './pending-permissions'
 
@@ -347,5 +353,95 @@ describe('permission_outcome outside any replay window (#8348)', () => {
     dispatch(env, outcome({ sessionId: 'nope' }))
     expect(env.added).toHaveLength(1)
     expect(env.added[0]!.permissionOutcome).toBe('expired')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8374 -- a prompt the Stop button cancelled reads "stopped", not "Denied"
+// ---------------------------------------------------------------------------
+
+describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
+  const resolved = (over: Record<string, unknown> = {}) =>
+    handlePermissionResolved({ type: 'permission_resolved', requestId: 'perm-1', decision: 'deny', ...over })
+
+  it('permission_outcome accepts "stopped" and stamps no decision token on it', () => {
+    const payload = handlePermissionOutcome(outcome({ outcome: 'stopped' }))
+    expect(payload).not.toBeNull()
+    const msg = buildPermissionOutcomeMessage(payload!)
+    expect(msg.permissionOutcome).toBe('stopped')
+    expect(msg.answered).toBeUndefined()
+    expect(msg.options).toBeUndefined()
+    expect(isLivePermissionPrompt(msg, NOW)).toBe(false)
+  })
+
+  it('handlePermissionResolved hands the wire reason on', () => {
+    expect(resolved({ reason: 'aborted' })).toEqual({ requestId: 'perm-1', decision: 'deny', reason: 'aborted' })
+    expect(resolved({ reason: 'user' }).reason).toBe('user')
+    expect(resolved().reason).toBeNull()
+    expect(resolved({ reason: 7 }).reason).toBeNull()
+  })
+
+  it('a live deny that Stop caused becomes a stopped record: no decision, no options, closed countdown', () => {
+    const live = livePending()
+    const next = applyPermissionResolved(live, resolved({ reason: 'aborted' }), NOW)
+    expect(next.permissionOutcome).toBe('stopped')
+    expect(next.answered).toBeUndefined()
+    expect(next.options).toBeUndefined()
+    expect(next.expiresAt).toBe(NOW)
+    expect(next.id).toBe(live.id)
+    expect(next.content).toBe(live.content)
+    expect(isLivePermissionPrompt(next, NOW + 1)).toBe(false)
+    // Stopped is not "dropped by the clock": the end-of-turn expired summary
+    // must not count it.
+    expect(isExpiredUnansweredPermissionPrompt(next, NOW + 1)).toBe(false)
+  })
+
+  it('CONTROL: a user Deny is still a deny, and an allow is still an allow', () => {
+    const denied = applyPermissionResolved(livePending(), resolved({ reason: 'user' }), NOW)
+    expect(denied.answered).toBe('deny')
+    expect(denied.permissionOutcome).toBeUndefined()
+    expect(denied.options).toBeUndefined()
+    const noReason = applyPermissionResolved(livePending(), resolved(), NOW)
+    expect(noReason.answered).toBe('deny')
+    expect(noReason.permissionOutcome).toBeUndefined()
+    const allowed = applyPermissionResolved(livePending(), resolved({ decision: 'allow', reason: 'user' }), NOW)
+    expect(allowed.answered).toBe('allow')
+    expect(allowed.permissionOutcome).toBeUndefined()
+  })
+
+  it('keeps an already-past expiry rather than moving it forward', () => {
+    const next = applyPermissionResolved(livePending({ expiresAt: NOW - 5000 }), resolved({ reason: 'aborted' }), NOW)
+    expect(next.expiresAt).toBe(NOW - 5000)
+  })
+
+  it('a replayed "stopped" outcome relabels a card an older client stamped denied, with no duplicate', () => {
+    const held = livePending({ answered: 'deny', answeredAt: 5, options: undefined, expiresAt: 1 })
+    const env = makeEnv([user('u', 'go'), held])
+    expect(dispatch(env, outcome({ outcome: 'stopped' }))).toBe(true)
+    const records = prompts(env.sessions.s1!.messages)
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ id: 'live-perm', permissionOutcome: 'stopped' })
+    expect(records[0]!.answered).toBeUndefined()
+    expect(isPermissionRequestAnswered({ s1: env.sessions.s1! }, 'perm-1')).toBe(false)
+  })
+
+  it('a replayed "stopped" outcome collapses onto the card the live frame already stopped', () => {
+    const stopped = applyPermissionResolved(livePending(), resolved({ reason: 'aborted' }), NOW)
+    const env = makeEnv([stopped])
+    dispatch(env, outcome({ outcome: 'stopped' }))
+    expect(env.sessions.s1!.messages).toHaveLength(1)
+    expect(env.sessions.s1!.messages[0]).toBe(stopped)
+  })
+
+  it('a stopped record built from history alone survives a full-rebuild replay as one record', () => {
+    const env = makeEnv([user('old', 'earlier')])
+    reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+    env.adapter.updateSession('s1', (sess) => ({ messages: [...sess.messages, user('h1', 'run it')] }))
+    dispatch(env, outcome({ outcome: 'stopped' }))
+    const swapped = reconcileReplayEnd('s1', env.sessions.s1!.messages, 7).swappedMessages as ChatMessage[]
+    const records = prompts(swapped)
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ requestId: 'perm-1', permissionOutcome: 'stopped' })
+    expect(records[0]!.answered).toBeUndefined()
   })
 })

@@ -9,9 +9,10 @@ const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
 /**
  * #8348 -- the outcomes a permission prompt can end in, as recorded in history.
  * `expired` covers every way a prompt ended with NO decision: it timed out, the
- * turn behind it ended or was stopped, or the session cleared it.
+ * turn behind it ended, or the session cleared it. `stopped` (#8374) is the one
+ * of those with its own name: the user pressed Stop while the prompt was open.
  */
-export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'])
+export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired', 'stopped'])
 // Bounds on the two free-text fields of a `permission_outcome` entry. The
 // description already went to clients capped and redacted; these bound what the
 // ring buffer and the state file keep, so a long hook-path description (the hook

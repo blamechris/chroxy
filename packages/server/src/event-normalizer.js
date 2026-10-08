@@ -892,6 +892,11 @@ Object.assign(EVENT_MAP, {
           type: 'permission_resolved',
           requestId: data.requestId,
           decision: data.decision,
+          // #8374: WHY it was resolved. A Stop resolves a pending prompt as a deny
+          // with `reason: 'aborted'`; without the reason the clients cannot tell
+          // that from the user pressing Deny, and the card reads "Denied" for a
+          // tool nobody refused.
+          ...(typeof data.reason === 'string' && data.reason ? { reason: data.reason } : {}),
           sessionId: ctx.sessionId,
         },
       })

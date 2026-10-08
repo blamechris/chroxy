@@ -178,3 +178,53 @@ describe('permission_outcome on the mobile app (#8348)', () => {
     expect(prompts[0]!.expiresAt).toBeGreaterThan(Date.now());
   });
 });
+
+// #8374 -- Stop resolves a pending claude-sdk prompt as a deny with reason
+// 'aborted'. The card must read stopped, live and after a replay; a real Deny
+// must keep reading Denied.
+describe('a Stop-cancelled permission prompt (#8374)', () => {
+  const resolvedFrame = (over: Record<string, unknown> = {}) => ({
+    type: 'permission_resolved', sessionId: SID, requestId: REQ, decision: 'deny', ...over,
+  });
+
+  it('live: permission_resolved with reason "aborted" makes the card a stopped record, not an answered deny', () => {
+    const { read, send, store } = boot([livePrompt()]);
+    send(resolvedFrame({ reason: 'aborted' }));
+    const [card] = read().filter((m) => m.type === 'prompt');
+    expect(card).toMatchObject({ id: 'perm-live', permissionOutcome: 'stopped' });
+    expect(card!.answered).toBeUndefined();
+    expect(card!.options).toBeUndefined();
+    expect(derivePendingPermissionCounts(store.getState().sessionStates as any, Date.now() + 1)).toEqual({});
+  });
+
+  it('CONTROL: a user Deny stays an answered deny with no outcome record', () => {
+    const { read, send } = boot([livePrompt()]);
+    send(resolvedFrame({ reason: 'user' }));
+    const [card] = read().filter((m) => m.type === 'prompt');
+    expect(card).toMatchObject({ answered: 'deny' });
+    expect(card!.permissionOutcome).toBeUndefined();
+  });
+
+  it('a switch/reload replays the same card: the stopped outcome collapses onto the stopped card', () => {
+    const { read, send } = boot([livePrompt()]);
+    send(resolvedFrame({ reason: 'aborted' }));
+    const before = read().filter((m) => m.type === 'prompt')[0];
+    send({ type: 'history_replay_start', sessionId: SID, fullHistory: false, truncated: false, latestSeq: 9 });
+    send(outcomeFrame({ outcome: 'stopped' }));
+    send({ type: 'history_replay_end', sessionId: SID, latestSeq: 9 });
+    const prompts = read().filter((m) => m.type === 'prompt');
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({ permissionOutcome: 'stopped' });
+    expect(prompts[0]!.answered).toBeUndefined();
+    expect(prompts[0]).toBe(before);
+  });
+
+  it('a full rebuild builds the stopped record from history alone', () => {
+    const { read, send } = boot([]);
+    fullRebuild(send, [outcomeFrame({ outcome: 'stopped' })]);
+    const prompts = read().filter((m) => m.type === 'prompt');
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toMatchObject({ requestId: REQ, permissionOutcome: 'stopped', content: 'Bash: rm -rf build' });
+    expect(prompts[0]!.answered).toBeUndefined();
+  });
+});

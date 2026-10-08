@@ -60,6 +60,16 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     assert.equal(typeof entries[0]._seq, 'number', 'it is a numbered entry: a delta replay can reach it')
   })
 
+  it('#8374: records a "stopped" outcome (a prompt the Stop button cancelled)', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'permission_outcome', {
+      requestId: 'perm-1', tool: 'Bash', description: 'ls -la', outcome: 'stopped',
+    })
+    const entries = h.getHistory('s1')
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].outcome, 'stopped')
+  })
+
   it('persists a state-file write for it (a debounced save is scheduled)', () => {
     const h = new SessionMessageHistory()
     const r = h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed' })
@@ -242,7 +252,7 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     assert.equal(outcomes(mgr, 's1')[0].requestId, requestId)
   })
 
-  it('records "expired" when the prompt is aborted (Stop)', async () => {
+  it('records "stopped" when the prompt is aborted (Stop) -- not expired, not denied (#8374)', async () => {
     const { session, pm } = makeInProcessSession(mgr, 's1')
     pms.push(pm)
     const ac = new AbortController()
@@ -252,7 +262,7 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     ac.abort()
     await decided
     assert.equal(outcomes(mgr, 's1')[0].requestId, requestId)
-    assert.equal(outcomes(mgr, 's1')[0].outcome, 'expired')
+    assert.equal(outcomes(mgr, 's1')[0].outcome, 'stopped')
   })
 
   it('records "expired" for a session-level permission_expired event', () => {

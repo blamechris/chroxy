@@ -90,6 +90,7 @@ import {
   noteReplayMessagesUpdate,
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
+  applyPermissionResolved,
   handlePermissionExpired as sharedPermissionExpired,
   // #7380 — one wording for the #2833 already-answered race, shared with the
   // dashboard (which surfaces the same words as an info toast).
@@ -3374,13 +3375,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // Another client resolved this permission — dismiss the prompt on this client.
       // The permission_request may have been stored in ANY session state (whichever tab
       // was active when it arrived), so search all session states for the matching requestId.
-      const { requestId: resolvedRequestId, decision: resolvedDecision } =
-        sharedPermissionResolved(msg);
+      const resolved = sharedPermissionResolved(msg);
+      const { requestId: resolvedRequestId } = resolved;
       if (resolvedRequestId) {
+        // #8374: a prompt Stop cancelled becomes a `stopped` record, not an
+        // answered deny. Shared with the dashboard, so the two cannot disagree.
         const updater = (ss: { messages: ChatMessage[] }) => ({
           messages: ss.messages.map((m) =>
             m.requestId === resolvedRequestId && m.type === 'prompt'
-              ? { ...m, answered: resolvedDecision ?? undefined, answeredAt: Date.now(), options: undefined }
+              ? applyPermissionResolved(m, resolved, Date.now())
               : m
           ),
         });

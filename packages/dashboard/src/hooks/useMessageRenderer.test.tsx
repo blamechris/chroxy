@@ -408,7 +408,7 @@ describe('useMessageRenderer — pending AskUserQuestion permission (#8264)', ()
 // `permission_outcome` history entry on a session switch or reload; it renders as
 // the compact record, never as an actionable card.
 describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
-  function outcomeMsg(outcome: 'allowed' | 'denied' | 'expired', over: Partial<ChatMessage> = {}): ChatMessage {
+  function outcomeMsg(outcome: 'allowed' | 'denied' | 'expired' | 'stopped', over: Partial<ChatMessage> = {}): ChatMessage {
     return {
       id: 'o1',
       type: 'prompt',
@@ -437,6 +437,18 @@ describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
     expect(record).toHaveTextContent('Commit the restructured fix')
     expect(record).toHaveTextContent('dropped')
     expect(record.getAttribute('role')).toBe('status')
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
+  })
+
+  it('#8374: renders a stopped outcome as its own record: not "denied", not "expired", no controls', () => {
+    renderOutcome(outcomeMsg('stopped'))
+    const record = screen.getByTestId('perm-outcome-record')
+    expect(record).toHaveTextContent('Permission stopped')
+    expect(record).toHaveTextContent('Commit the restructured fix')
+    expect(record).toHaveTextContent('not run')
+    expect(record).not.toHaveTextContent(/denied|expired|dropped/i)
+    expect(record.getAttribute('data-outcome')).toBe('stopped')
     expect(screen.queryAllByRole('button')).toHaveLength(0)
     expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
   })

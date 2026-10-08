@@ -389,6 +389,65 @@ describe('permission_resolved flips answered + clears options (in-place)', () =>
     expect(bubble.answeredAt as number).toBeLessThanOrEqual(after)
     expect(bubble.options).toBeUndefined()
   })
+
+  // #8374: Stop resolves a pending claude-sdk prompt as a deny with reason
+  // 'aborted'. The decision alone cannot tell that from a user Deny, so the card
+  // read "Denied" for a tool nobody refused.
+  function resolveWith(extra: Record<string, unknown>) {
+    const store = createMockStore({
+      connectionPhase: 'connected',
+      socket: null,
+      sessions: [],
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+              expiresAt: Date.now() + 300_000,
+            },
+          ],
+        },
+      } as unknown as ConnectionState['sessionStates'],
+      messages: [],
+      sessionNotifications: [],
+      appendTerminalData: () => {},
+      addMessage: () => {},
+      addServerError: () => {},
+    } as unknown as ConnectionState)
+    setStore(store)
+    handleMessage(
+      { type: 'permission_resolved', requestId: 'req-1', decision: 'deny', ...extra },
+      ctx(mockSocket) as never,
+    )
+    const ss = (store.getState() as unknown as { sessionStates: Record<string, SessionState> })
+      .sessionStates['s1']
+    expect(ss!.messages).toHaveLength(1)
+    return ss!.messages[0] as unknown as Record<string, unknown>
+  }
+
+  it('#8374: a Stop-cancelled prompt (reason "aborted") becomes a stopped record, not an answered deny', () => {
+    const bubble = resolveWith({ reason: 'aborted' })
+    expect(bubble.id).toBe('prompt-req-1')
+    expect(bubble.permissionOutcome).toBe('stopped')
+    expect(bubble.answered).toBeUndefined()
+    expect(bubble.options).toBeUndefined()
+    expect(bubble.expiresAt as number).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('#8374 CONTROL: a user Deny (reason "user", or none) still reads as an answered deny', () => {
+    for (const extra of [{ reason: 'user' }, {}]) {
+      const bubble = resolveWith(extra)
+      expect(bubble.answered).toBe('deny')
+      expect(bubble.permissionOutcome).toBeUndefined()
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------

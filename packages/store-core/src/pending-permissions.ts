@@ -158,7 +158,11 @@ export function isExpiredUnansweredPermissionPrompt(m: ChatMessage, now: number)
     !!m.requestId &&
     !!m.expiresAt &&
     m.expiresAt <= now &&
-    !m.answered
+    !m.answered &&
+    // #8374: a prompt the user stopped was not dropped by the clock -- it has its
+    // own record, and counting it as "expired" would tell the user a permission
+    // timed out when they ended the turn themselves.
+    m.permissionOutcome !== 'stopped'
   )
 }
 

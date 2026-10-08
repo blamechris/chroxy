@@ -695,12 +695,19 @@ export const ServerPermissionExpiredSchema = z.object({
 //     present in the requestId variant.
 //   - `sessionId` — the owning chroxy session (stamped from `ctx.sessionId`;
 //     absent in single-session mode → OPTIONAL).
-//   The normalizer does NOT forward the internal `reason` field to the wire, so
-//   it is intentionally absent from this schema.
+//   - `reason` (#8374) — WHY it was resolved, when the server knows: `'user'`
+//     (someone answered), `'timeout'`, `'aborted'` (the user pressed Stop),
+//     `'cleared'`, `'auto_mode'`, ... A PLAIN string, like `decision`, so a new
+//     reason can't fail the parse; OPTIONAL because the hook-route and
+//     other-client broadcasts carry none. Clients read exactly one value:
+//     `'aborted'` marks the prompt Stopped rather than Denied, because Stop
+//     resolves the prompt as `decision: 'deny'` and nothing else tells the two
+//     apart.
 export const ServerPermissionResolvedSchema = z.object({
   type: z.literal('permission_resolved'),
   requestId: z.string(),
   decision: z.string(),
+  reason: z.string().optional(),
   sessionId: z.string().optional(),
 })
 
@@ -718,12 +725,13 @@ export const ServerPermissionResolvedSchema = z.object({
  *   - `tool` / `description` -- what the client was shown when the prompt was
  *     raised (the description was redacted and capped then; the server clips it
  *     again, to 100 / 500 characters). No raw tool input is recorded.
- *   - `outcome` -- `allowed`, `denied`, or `expired` (no decision was made: it
- *     timed out, the turn ended or was stopped, or the session cleared it).
+ *   - `outcome` -- `allowed`, `denied`, `stopped` (the user pressed Stop while it
+ *     was open, #8374), or `expired` (no decision was made: it timed out, the
+ *     turn ended, or the session cleared it).
  *   - `timestamp` -- when the server recorded it (ms since the epoch).
  *   - `sessionId` / `historySeq` -- stamped by the replay, like every entry.
  */
-export const PermissionOutcomeSchema = z.enum(['allowed', 'denied', 'expired'])
+export const PermissionOutcomeSchema = z.enum(['allowed', 'denied', 'expired', 'stopped'])
 
 export const ServerPermissionOutcomeSchema = z.object({
   type: z.literal('permission_outcome'),

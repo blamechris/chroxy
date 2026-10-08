@@ -271,7 +271,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `model_changed` | Active model updated by user |
 | `permission_expired` | Permission request expired or already handled |
 | `permission_mode_changed` | Permission mode changed by user |
-| `permission_outcome` | How a permission prompt ended (`allowed` / `denied` / `expired`), recorded in session history and sent only inside a history replay so a session switch or reload still shows it (#8348) |
+| `permission_outcome` | How a permission prompt ended (`allowed` / `denied` / `expired` / `stopped`), recorded in session history and sent only inside a history replay so a session switch or reload still shows it (#8348) |
 | `permission_request` | Permission prompt from hook/SDK |
 | `permission_resolved` | Permission resolved by another client — dismiss prompt |
 | `permission_rules_updated` | Session permission whitelist updated — broadcast to all session clients |
@@ -351,7 +351,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 - **Broadcast scoping (#1138):** `_broadcastToSession(sessionId, message)` defaults to `client.activeSessionId === sessionId || client.subscribedSessionIds.has(sessionId)`, delivering to clients viewing or subscribed to that session. Session-scoped messages: `stream_delta`, `model_changed`, `permission_mode_changed`, `budget_resumed`, `primary_changed`, `session_context`, `dev_preview`, `dev_preview_stopped`, and normalizer event messages. Global messages use `broadcast()`: `session_list`, `session_destroyed`, `session_activity`, `session_updated`, `client_joined`, `client_left`, `token_rotated`, `available_models`, `session_warning`, `session_timeout`, `server_error`, `server_status`, `server_shutdown`, `web_task_created`, `web_task_updated`, `web_task_error`.
 - `mcp_servers` lists connected MCP tool servers and their status
 - `auth_ok` includes `protocolVersion` (integer, currently `2`) — bumped on breaking wire-shape changes; the app stores this and logs unknown message types when the server version is newer, enabling graceful degradation when the app lags behind the server. v2 (#2849) introduced the structured `server_status { phase: 'tunnel_warming' | 'ready' }` form, gated to clients that advertised ≥ v2.
-- `permission_resolved` broadcast to all clients when another client approves or denies a `permission_request`; payload: `{ requestId, decision, sessionId }`; receiving clients should dismiss the corresponding prompt
+- `permission_resolved` broadcast to all clients when another client approves or denies a `permission_request`; payload: `{ requestId, decision, reason?, sessionId }`; receiving clients should dismiss the corresponding prompt. `reason: 'aborted'` (#8374) marks a prompt the user cancelled with Stop -- it arrives with `decision: 'deny'`, and clients show it as stopped rather than Denied
 - `subscribe_sessions` / `unsubscribe_sessions`: clients send these to receive session-scoped messages for non-active sessions (background monitoring); `subscriptions_updated` confirms the current set of subscribed session IDs
 - `session_activity` global broadcast on stream start/end: `{ sessionId, isBusy: true/false, lastCost }` — allows clients to show busy state for any session
 - `search_conversations` accepts `{ query }` and responds with `search_results`: `{ query, results: [{ conversationId, project, projectName, preview, cwd, snippet, matchCount }] }`

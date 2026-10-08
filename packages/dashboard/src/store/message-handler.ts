@@ -95,6 +95,7 @@ import {
   // both-sides duplicates
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
+  applyPermissionResolved,
   handlePermissionTimeout as sharedPermissionTimeout,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
@@ -3016,13 +3017,15 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   // #5454: payload parse shared via store-core (same handler the app uses);
   // the flat-messages fallback and #5008 mark-read banner draining below are
   // dashboard-specific.
-  const { requestId: resolvedRequestId, decision: resolvedDecision } =
-    sharedPermissionResolved(msg);
+  const resolved = sharedPermissionResolved(msg);
+  const { requestId: resolvedRequestId } = resolved;
   if (resolvedRequestId) {
+    // #8374: a prompt Stop cancelled becomes a `stopped` record, not an answered
+    // deny. Shared with the app, so the two cannot disagree.
     const updater = (ss: { messages: ChatMessage[] }) => ({
       messages: ss.messages.map((m) =>
         m.requestId === resolvedRequestId && m.type === 'prompt'
-          ? { ...m, answered: resolvedDecision ?? undefined, answeredAt: Date.now(), options: undefined }
+          ? applyPermissionResolved(m, resolved, Date.now())
           : m
       ),
     });
