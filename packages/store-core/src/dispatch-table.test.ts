@@ -856,6 +856,48 @@ describe('shared dispatch table', () => {
         }
       })
 
+      // Round 3 on #8360: an interrupted question is a correction, not a new
+      // question. It must not raise the "has a question" notification for a
+      // session the person is not looking at -- neither as the replayed in-place
+      // copy nor as the tail copy that collapses onto a card already held.
+      it('does not notify "question" for a replayed interrupted question (#8336)', () => {
+        const env = makeAdapter({ activeSessionId: 's2', sessions: { s1: { sessionId: 's1', messages: [] }, s2: { sessionId: 's2', messages: [] } } })
+        dispatch(env, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }], historySeq: 12, interrupted: true,
+        } as never)
+        expect(env.sessions.s1.messages[0].answered).toBe('(interrupted)')
+        expect(env.notifications).toEqual([])
+      })
+
+      it('does not notify "question" for an interrupted tail copy that collapses onto a held card (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({ activeSessionId: 's2', sessions: { s1: { sessionId: 's1', messages: [] }, s2: { sessionId: 's2', messages: [] } } })
+        // The card arrives LIVE (the person is told once), then the replay's tail
+        // copy delivers the verdict.
+        dispatch(env, { type: 'user_question', sessionId: 's1', toolUseId: 'ask-1', questions: [{ question: 'Which approach?' }] } as never)
+        expect(env.notifications).toHaveLength(1)
+        dispatch(env, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }], historySeq: 14, interrupted: true,
+        } as never)
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0].answered).toBe('(interrupted)')
+        expect(env.notifications).toHaveLength(1)
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      it('still notifies "question" for an ordinary question, interrupted: false included (#8336)', () => {
+        for (const interrupted of [undefined, false]) {
+          const env = makeAdapter({ activeSessionId: 's2', sessions: { s1: { sessionId: 's1', messages: [] }, s2: { sessionId: 's2', messages: [] } } })
+          dispatch(env, {
+            type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }], interrupted,
+          } as never)
+          expect(env.notifications).toEqual([{ sessionId: 's1', eventType: 'question', message: 'Which approach?' }])
+        }
+      })
+
       // Codex round 1 on #8360: identity is the id AND the questions. A full
       // replay is a rebuild of the whole history, so two DIFFERENT questions that
       // share an id must both survive it (before #8336 both appended).

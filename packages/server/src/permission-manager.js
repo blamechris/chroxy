@@ -874,6 +874,16 @@ export class PermissionManager extends EventEmitter {
       // session_destroyed cleanup.
       this._pendingUserAnswer = { resolve, input: questionInput, toolUseId }
       this._logInfo(`AskUserQuestion detected (${toolUseId})`)
+      // #8336: without the provider's id, the restore-time sweep cannot tell
+      // which `tool_start` this question belongs to, so a restart mid-question
+      // will leave it looking like any other replayed question ("(resolved)").
+      // Both providers that reach here (SDK, BYOK) are meant to supply it. Say so
+      // once, with the id the question WAS recorded under, and carry on.
+      if (typeof sourceToolUseId !== 'string' || sourceToolUseId.length === 0) {
+        this._logWarn(
+          `AskUserQuestion ${toolUseId} has no provider tool-use id; a restart while it is pending cannot mark it interrupted (#8336)`,
+        )
+      }
 
       // #8336: `toolUseId` here is chroxy's own `ask-...` id (what the answer
       // routes on), which is NOT the id the provider recorded the

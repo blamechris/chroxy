@@ -922,6 +922,41 @@ describe('SessionMessageHistory', () => {
       assert.equal(history.getHistory('s1')[2]._seq, 3)
     })
 
+    // #8336 -- sequence continuity across a restart.
+    it('setHistory continues numbering from firstSeq and leaves the counter past the end', () => {
+      history.setHistory('s1', [{ type: 'message', content: 'a' }, { type: 'message', content: 'b' }], { firstSeq: 7 })
+      assert.deepStrictEqual(history.getHistory('s1').map(e => e._seq), [7, 8])
+      assert.equal(history.getLastIssuedSeq('s1'), 8)
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'c', timestamp: 1 })
+      assert.equal(history.getLatestSeq('s1'), 9)
+    })
+
+    it('setHistory ignores a firstSeq that is not a positive integer', () => {
+      for (const firstSeq of [0, -3, 1.5, NaN, '9', null, Infinity]) {
+        history.setHistory('s1', [{ type: 'message', content: 'a' }], { firstSeq })
+        assert.deepStrictEqual(history.getHistory('s1').map(e => e._seq), [1], `firstSeq ${String(firstSeq)}`)
+      }
+    })
+
+    it('getLastIssuedSeq is 0 for an unknown session and survives a whole-buffer trim', () => {
+      assert.equal(history.getLastIssuedSeq('nope'), 0)
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'a', timestamp: 1 })
+      history.recordHistory('s1', 'message', { type: 'user_input', content: 'b', timestamp: 2 })
+      assert.equal(history.getLastIssuedSeq('s1'), 2)
+    })
+
+    it('setHistory trims to the cap, oldest first, keeps numbering, and flags truncation', () => {
+      const h = new SessionMessageHistory({ maxMessages: 3 })
+      const entries = [1, 2, 3, 4, 5].map(i => ({ type: 'message', content: `m${i}` }))
+      h.setHistory('s1', entries, { firstSeq: 10 })
+      assert.deepStrictEqual(h.getHistory('s1').map(e => e.content), ['m3', 'm4', 'm5'])
+      assert.deepStrictEqual(h.getHistory('s1').map(e => e._seq), [12, 13, 14])
+      assert.equal(h.getLastIssuedSeq('s1'), 14)
+      assert.equal(h.isHistoryTruncated('s1'), true)
+      h.setHistory('s2', entries.slice(0, 2).map(e => ({ ...e })))
+      assert.equal(h.isHistoryTruncated('s2'), false, 'within the cap: not truncated')
+    })
+
     it('truncateEntry strips _seq so it never reaches the persisted state file', () => {
       history.recordHistory('s1', 'message', { type: 'user_input', content: 'a', timestamp: 1 })
       const entry = history.getHistory('s1')[0]

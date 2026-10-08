@@ -2315,7 +2315,14 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // for a session the store holds nothing for — `noteLivePromptDuringReplay`
   // reads no store state, so only the statement order moved.
   if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, survivingId)
-  if (sessionId) adapter.pushSessionNotification(sessionId, 'question', questionText)
+  // #8336 — an interrupted question is a correction, not a new question: it
+  // arrives replayed (in place, or as the tail copy that carries the verdict past
+  // a delta cursor) for a question the person was already told about, and nothing
+  // is waiting on them. Notifying "has a question" for it, on a session they are
+  // not looking at, is a false alarm that fires again on every such replay.
+  if (sessionId && chatMessage.answered !== QUESTION_INTERRUPTED_PLACEHOLDER) {
+    adapter.pushSessionNotification(sessionId, 'question', questionText)
+  }
 }
 
 /**

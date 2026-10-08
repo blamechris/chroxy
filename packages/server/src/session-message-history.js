@@ -160,23 +160,61 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
+   * #8336 — the highest seq this session has handed out (0 when none). It is
+   * what a state file records so the NEXT run can keep numbering past it; the
+   * newest retained entry carries it, but the counter is the authority because
+   * it survives a front-trim of the whole buffer.
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  getLastIssuedSeq(sessionId) {
+    return (this._seqCounters.get(sessionId) || 1) - 1
+  }
+
+  /**
    * Set pre-existing history for a session (used during state restore).
+   *
+   * #8336 -- SEQUENCE CONTINUITY. Entries are stamped `firstSeq, firstSeq + 1, ...`
+   * and the counter is left just past the last one. The caller passes the first
+   * seq so that the entries the previous run persisted keep (roughly) the
+   * numbers that run served them under: a reconnecting client's cursor
+   * (`lastSeq`) then still means what it meant, and every entry added after the
+   * restore (a tail correction, the next turn) is numbered PAST every cursor the
+   * previous run issued. Restarting from 1 broke that: with the ring buffer
+   * already full, the restore's own additions plus the post-restart traffic could
+   * climb through the old cursor's value, and `resolveReplayPlan` then honoured a
+   * cursor that no longer pointed at what the client had seen.
+   *
+   * Without `firstSeq` (a state file from before this field, or a malformed one)
+   * numbering starts at 1: the pre-#8336 behaviour, where a cursor from the prior
+   * run is honoured only by accident and falls back to a full replay otherwise.
+   *
+   * The history is also trimmed to the ring-buffer cap, oldest first. A restore
+   * can add entries (synthetic tool results, a marked question copy) to a buffer
+   * that was already full, and `_pushHistory` only ever evicts one entry per push,
+   * so without this the buffer grew by the restore's additions on EVERY restart.
+   * The trimmed front is what falls off, so a cursor older than the new oldest
+   * entry takes the "trimmed past" full-replay fallback, as designed.
+   *
    * @param {string} sessionId
    * @param {Array} history
+   * @param {object} [opts]
+   * @param {number} [opts.firstSeq] - seq to give the first entry (integer >= 1)
    */
-  setHistory(sessionId, history) {
-    // #5555.3 — restored entries predate the seq scheme (it is server-internal
-    // and not persisted), so stamp them with a fresh 1..N sequence and advance
-    // the counter past the end. A reconnecting client's cursor from a PRIOR
-    // server process can't be honoured across a restart (seqs reset to 1), so
-    // it will simply fall through to a full replay — the safe default.
+  setHistory(sessionId, history, { firstSeq } = {}) {
     if (Array.isArray(history)) {
-      let seq = 1
+      const start = Number.isSafeInteger(firstSeq) && firstSeq >= 1 ? firstSeq : 1
+      let seq = start
       for (const entry of history) {
         if (entry && typeof entry === 'object') entry._seq = seq
         seq++
       }
       this._seqCounters.set(sessionId, seq)
+      const excess = history.length - this._maxHistory
+      if (excess > 0) {
+        history = history.slice(excess)
+        this._historyTruncated.set(sessionId, true)
+      }
     }
     this._messageHistory.set(sessionId, history)
   }
@@ -289,17 +327,21 @@ export class SessionMessageHistory extends EventEmitter {
       }
     }
     // #8336: the marked question is ALSO appended as a fresh entry at the tail.
-    // Marking it in place changes an entry a client may already be past: the
-    // restore renumbers history from 1, a reconnecting client's cursor is
-    // honoured when it falls inside the new range, and the delta replay then
-    // sends only what lies past it. A client whose cursor sits beyond the
-    // question's (shifted) position would never hear that it was cut off, and
-    // its replay-end sweep would stamp the card "(resolved)". A tail entry lies
-    // past every cursor the previous run could have issued (the restore adds at
-    // least this entry), so it always arrives. The client collapses it onto the
-    // card it holds (same `toolUseId`, same questions), so nobody sees two; a
-    // client rebuilding from scratch gets the question in place from the marked
-    // entry above and the copy merges onto it.
+    // Marking it in place changes an entry a client may already be past: a
+    // reconnecting client's cursor is honoured when it falls inside the restored
+    // range, and the delta replay then sends only what lies past it. A client
+    // whose cursor sits beyond the question's position would never hear that it
+    // was cut off, and its replay-end sweep would stamp the card "(resolved)".
+    // A tail entry is numbered past every cursor the previous run could have
+    // issued -- `setHistory` continues the previous run's numbering rather than
+    // restarting at 1, and the tail is beyond its last entry by construction --
+    // so it always arrives. The client collapses it onto the card it holds (same
+    // `toolUseId`, same questions), so nobody sees two; a client rebuilding from
+    // scratch gets the question in place from the marked entry above and the copy
+    // merges onto it. If the ring-buffer cap later evicts the in-place original
+    // first (oldest-first), the copy is what remains: a full replay then shows the
+    // question after newer messages rather than where it was asked, which is the
+    // price of never losing the verdict.
     for (const copy of redelivered) out.push(copy)
     return out
   }
