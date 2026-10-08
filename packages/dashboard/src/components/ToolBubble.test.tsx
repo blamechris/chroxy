@@ -27,6 +27,41 @@ describe('ToolBubble', () => {
     expect(screen.getByTestId('tool-input-summary')).toHaveTextContent('/path/to/file')
   })
 
+  // #7376 — a tool cut off by a terminated turn says so, visibly, without
+  // expanding; a normal tool shows nothing extra.
+  it('shows a terminated note (and withholds the synthesized result text) for a terminated tool (#7376)', () => {
+    render(
+      <ToolBubble
+        {...baseProps}
+        toolName="Bash"
+        result="synthesized placeholder text"
+        terminatedReason="permission_mode_switch"
+        isTail
+      />,
+    )
+    const note = screen.getByTestId('tool-bubble-terminated-tool-1')
+    expect(note).toHaveTextContent('Turn terminated (permission-mode switch)')
+    expect(note).toHaveTextContent('Re-send to retry')
+    expect(screen.getByTestId('tool-bubble-tool-1')).toHaveAttribute('data-terminated', 'true')
+    // not pulsing as "still running" -- it has resolved, just not successfully
+    expect(screen.queryByTestId('tool-bubble-pulse-tool-1')).toBeNull()
+    // the raw synthesized text is replaced by the note, even expanded (isTail)
+    expect(screen.getByTestId('tool-bubble-tool-1')).not.toHaveTextContent('synthesized placeholder text')
+  })
+
+  it('POSITIVE CONTROL: an ordinary tool shows no terminated note and keeps its result (#7376)', () => {
+    render(<ToolBubble {...baseProps} isTail />)
+    expect(screen.queryByTestId('tool-bubble-terminated-tool-1')).toBeNull()
+    expect(screen.getByTestId('tool-bubble-tool-1')).not.toHaveAttribute('data-terminated')
+    expect(screen.getByTestId('tool-bubble-tool-1')).toHaveTextContent('file contents here')
+  })
+
+  it('a still-running tool is not shown as terminated (#7376)', () => {
+    render(<ToolBubble toolName="Bash" toolUseId="tool-9" input="ls" terminatedReason="permission_mode_switch" />)
+    expect(screen.queryByTestId('tool-bubble-terminated-tool-9')).toBeNull()
+    expect(screen.getByTestId('tool-bubble-pulse-tool-9')).toBeInTheDocument()
+  })
+
   it('uses a button element for the toggle', () => {
     render(<ToolBubble {...baseProps} />)
     const toggle = screen.getByRole('button')

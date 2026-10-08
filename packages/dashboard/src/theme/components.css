@@ -4168,6 +4168,43 @@ button.sidebar-token-view-session-row:hover {
   border-left: 2px solid var(--accent-red, #d6685f);
 }
 
+/* #7376 — a tool cut off because its TURN was terminated under it (permission-
+   mode switch, Stop, crash, watchdog). Deliberately NOT the failure red: the
+   command never reported, so it did not "fail", and the right next step (re-send)
+   differs. Amber, the same family as the other "needs your attention, nothing is
+   broken" states (expired permission, stream stall). */
+.tool-group-entry-marker--terminated {
+  color: var(--accent-orange);
+}
+
+.tool-group-entry--terminated {
+  background: var(--accent-orange-light);
+  border-left: 2px solid var(--accent-orange);
+}
+
+.tool-group-entry-terminated {
+  flex-shrink: 0;
+  color: var(--accent-orange);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.tool-group-entry-terminated-note,
+.tool-bubble-terminated-note {
+  color: var(--accent-orange);
+  font-size: var(--text-xs);
+}
+
+.tool-bubble-terminated-note {
+  margin-top: 6px;
+}
+
+.tool-bubble--terminated {
+  border-left: 2px solid var(--accent-orange);
+}
+
 .tool-group-entry-name {
   color: var(--accent-purple);
   font-weight: 500;

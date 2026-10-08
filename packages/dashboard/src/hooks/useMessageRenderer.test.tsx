@@ -311,3 +311,38 @@ describe('useMessageRenderer — permission-expired-summary wiring (#7365 review
     expect(node).toBeNull()
   })
 })
+
+// #7376 — the singleton tool bubble must be handed the terminated reason the
+// store attached, or a lone terminated tool (the common shape of a turn killed
+// by a permission-mode switch) renders as an ordinary completed tool.
+describe('useMessageRenderer — terminated singleton tool bubble (#7376)', () => {
+  function toolMsg(extra: Partial<ChatMessage>): ChatMessage {
+    return {
+      id: 'tool-tu-1',
+      type: 'tool_use',
+      tool: 'Bash',
+      toolUseId: 'tu-1',
+      toolInput: { command: 'sleep 100' },
+      toolResult: 'placeholder',
+      timestamp: 0,
+      ...extra,
+    } as ChatMessage
+  }
+
+  it('hands toolResultTerminatedReason to the ToolBubble', () => {
+    const msg = toolMsg({ toolResultIsError: true, toolResultTerminatedReason: 'permission_mode_switch' })
+    const args = makeArgs({ storeMsgMap: new Map([[msg.id, msg]]) })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    render(<>{result.current({ id: msg.id, type: 'tool_use', content: '', timestamp: 0 } as ChatViewMessage)}</>)
+    expect(screen.getByTestId('tool-bubble-terminated-tu-1')).toHaveTextContent('Re-send to retry')
+  })
+
+  it('POSITIVE CONTROL: an ordinary singleton tool renders no terminated note', () => {
+    const msg = toolMsg({})
+    const args = makeArgs({ storeMsgMap: new Map([[msg.id, msg]]) })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    render(<>{result.current({ id: msg.id, type: 'tool_use', content: '', timestamp: 0 } as ChatViewMessage)}</>)
+    expect(screen.queryByTestId('tool-bubble-terminated-tu-1')).toBeNull()
+    expect(screen.getByTestId('tool-bubble-tu-1')).toBeInTheDocument()
+  })
+})

@@ -2181,7 +2181,12 @@ export class SdkSession extends BaseSession {
           }
         }
       }
-      if (!supersededByNewerTurn()) this._clearMessageState()
+      // #7376: a Stop that aborted the query leaves its in-flight tools "stopped",
+      // not failed. Any other throw has no considered cause and keeps the
+      // generic sweep.
+      if (!supersededByNewerTurn()) {
+        this._clearMessageState(wasIntentionalStop ? { terminatedReason: 'user_stop' } : undefined)
+      }
     } finally {
       // #8300: whatever ended the loop — the prompt's result, a throw, a
       // destroy() break — the streaming input is released here, so the SDK
@@ -3099,7 +3104,9 @@ export class SdkSession extends BaseSession {
     // into a cleared message. Best-effort — the SDK's generator may not
     // support .return()/.throw() uniformly.
     this._abortActiveQuery()
-    this._clearMessageState()
+    // #7376: name the cause so a tool left in flight reads as "the turn was
+    // terminated under it", not as a failed command.
+    this._clearMessageState({ terminatedReason: 'hard_timeout' })
     this.emit('error', { message: `Response timed out after ${friendly} of inactivity` })
   }
 
@@ -3136,7 +3143,7 @@ export class SdkSession extends BaseSession {
     // #4616: snapshot sessionId BEFORE _clearMessageState wipes it so the
     // synthetic `result` event below carries the correct identifier.
     const sessionId = this._sdkSessionId || this._sessionId
-    this._clearMessageState()
+    this._clearMessageState({ terminatedReason: 'stream_stall' }) // #7376
     // #4616: emit a synthetic `result` so event-normalizer fans it to
     // `agent_idle`. Per #4308 handleAgentIdle clears `activeTools: []`
     // as a safety net, which is what stops the dashboard's footer pill

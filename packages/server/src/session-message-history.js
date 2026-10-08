@@ -242,6 +242,9 @@ export class SessionMessageHistory extends EventEmitter {
           isError: true,
           synthetic: true,
           reason: 'session_restored',
+          // #7376: the restore-time sweep is the one termination whose OUTCOME is
+          // unknown (the daemon went down mid-tool) -- say so distinctly.
+          terminatedReason: 'daemon_restart',
           timestamp: baseTs + 1,
         })
         // Mark this toolUseId resolved so a malformed history with two
@@ -408,6 +411,14 @@ export class SessionMessageHistory extends EventEmitter {
           toolUseId: data.toolUseId,
           result: data.result,
           truncated: data.truncated,
+          // #7376: persist the failed / terminated markers, not just the text.
+          // This entry is what a reconnect, session switch or Sync Full History
+          // replays raw -- without them the live "turn terminated" (or "failed")
+          // state silently reverted to a plain green result on replay. Only the
+          // meaningful values are stored (`isError: true`, a string reason), so
+          // entries for ordinary successful results are byte-for-byte unchanged.
+          ...(data.isError === true ? { isError: true } : {}),
+          ...(typeof data.terminatedReason === 'string' ? { terminatedReason: data.terminatedReason } : {}),
           timestamp: Date.now(),
         }, sessionId)
         break

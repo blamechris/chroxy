@@ -2016,6 +2016,43 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    // #7376 — a tool cut off by a terminated turn (permission-mode switch, Stop,
+    // crash, watchdog) is NOT a failed command. The server tags the synthetic
+    // result with `terminatedReason`; both clients must attach it onto the
+    // tool_use bubble so each renders "re-send" instead of the failure styling.
+    name: 'tool_result carries terminatedReason onto the tool_use bubble',
+    type: 'tool_result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'tool-tu-3', type: 'tool_use', tool: 'Bash', toolUseId: 'tu-3', content: '' } as unknown as ChatMessage,
+          ],
+          activeTools: [{ toolUseId: 'tu-3', tool: 'Bash', startedAt: 1 }],
+        },
+      },
+    },
+    message: {
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'tu-3',
+      result: 'Turn terminated (permission-mode switch) — this tool did not finish. Re-send to retry.',
+      isError: true,
+      terminatedReason: 'permission_mode_switch',
+      truncated: false,
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { type: 'tool_use', toolUseId: 'tu-3', toolResultIsError: true, toolResultTerminatedReason: 'permission_mode_switch', toolResultTruncated: false },
+          ],
+        },
+      },
+    },
+  },
+  {
     // budget_exceeded is a DOCUMENTED divergence (#5619): both append a
     // "session paused" system note, but the dashboard auto-resumes and tacks
     // ". Budget will auto-resume." onto the same bubble (the app does not — it

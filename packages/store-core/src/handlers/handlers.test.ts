@@ -8273,6 +8273,29 @@ describe('handleToolResult', () => {
     expect(handleToolResult({ toolUseId: 'tu-1', result: 'ok', isError: 'true' as unknown as boolean }, 's')!.patch.toolResultIsError).toBe(false)
   })
 
+  // #7376 — a tool cut off because its TURN was terminated carries the reason,
+  // so the renderers can show "re-send" instead of the failure styling.
+  it('patches toolResultTerminatedReason from a string msg.terminatedReason', () => {
+    const p = handleToolResult(
+      { toolUseId: 'tu-1', result: 'cut off', isError: true, terminatedReason: 'permission_mode_switch' },
+      's',
+    )!.patch
+    expect(p.toolResultTerminatedReason).toBe('permission_mode_switch')
+    // the failure flag is left as sent: the RENDERER decides precedence
+    expect(p.toolResultIsError).toBe(true)
+  })
+
+  it('POSITIVE CONTROL: no toolResultTerminatedReason key for a genuine failure or a success', () => {
+    for (const msg of [
+      { toolUseId: 'tu-1', result: 'boom', isError: true },
+      { toolUseId: 'tu-1', result: 'ok' },
+      { toolUseId: 'tu-1', result: 'ok', terminatedReason: '' },
+      { toolUseId: 'tu-1', result: 'ok', terminatedReason: 7 as unknown as string },
+    ]) {
+      expect('toolResultTerminatedReason' in handleToolResult(msg, 's')!.patch).toBe(false)
+    }
+  })
+
   it('resolves sessionId from message when present', () => {
     const out = handleToolResult(
       { toolUseId: 'tu-1', sessionId: 'sess-1', result: 'ok' },

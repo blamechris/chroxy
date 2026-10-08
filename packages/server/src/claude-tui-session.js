@@ -4788,9 +4788,19 @@ export class ClaudeTuiSession extends BaseSession {
     // accumulation. See companion sites above.
     // #4628: sweep orphan tool_starts before result so the dashboard's
     // activeTools clears as part of the same error burst.
+    //
+    // #7376: a turn that ended because the user pressed Stop, or because the
+    // PTY died under it, left its in-flight tools CUT OFF, not failed. Name the
+    // cause (read before `_clearTurnEndState` nulls the turn) so the synthetic
+    // tool_result says so; any other error keeps the generic sweep reason.
+    const sweepReason = this._activeTurn?.aborted
+      ? 'user_stop'
+      : this._ptyExited
+        ? 'process_exit'
+        : 'turn_finished_with_error'
     this._emitResult(
       { cost: null, duration, usage: null, sessionId: this._sessionId },
-      'turn_finished_with_error',
+      sweepReason,
     )
     // Shared per-turn teardown: timers, pre-first-output watchdog, attachment
     // dir (#4022), the busy-state triple, the AskUserQuestion sibling lock

@@ -87,4 +87,5 @@ export type { IntegrationActionMessage } from './schemas/client.ts';
 export type { SkillsInventoryRequestMessage } from './schemas/client.ts';
 export type { Attachment, BinaryAttachment, FileRefAttachment } from './schemas/client.ts';
 export * from './error-categories.ts';
+export * from './turn-termination.ts';
 export * from './scheduled-task-health.ts';

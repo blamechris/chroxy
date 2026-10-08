@@ -23,6 +23,7 @@ import { ALLOWED_PERMISSION_MODE_IDS } from './handler-utils.js'
 import { assertProviderPermissionModeSupported, getProviderPermissionModeSupport } from './permission-mode-support.js'
 import { AGENT_DESCRIPTION_MAX } from './claude-stream-parser.js'
 import { sanitizeToolInput } from './redaction.js'
+import { isTurnTerminationReason, describeTurnTermination } from '@chroxy/protocol'
 
 const log = createLogger('base-session')
 
@@ -1958,6 +1959,16 @@ export class BaseSession extends EventEmitter {
    * are diagnostic hints — the wire schema strips them on parse but
    * they stay grep-able on disk in the persisted history.
    *
+   * #7376: when `reason` is a turn-TERMINATION reason (a permission-mode
+   * switch, Stop, a crash, a watchdog — see `TURN_TERMINATION_REASONS`), the
+   * tool did not fail, its turn was ended underneath it. The result then also
+   * carries `terminatedReason` (the one diagnostic-adjacent field that IS on
+   * the wire, `ServerToolResultSchema.terminatedReason`) and says so in its
+   * text, so a client can render "the turn was terminated, re-send" instead of
+   * the failure styling. Every other sweep reason (the natural turn end that
+   * simply never saw a result) keeps the original wording and no
+   * `terminatedReason`: those really are indistinguishable from a failure.
+   *
    * @param {string} reason — short identifier for the sweep cause
    * @returns {number} count of sweeps emitted
    */
@@ -1973,14 +1984,18 @@ export class BaseSession extends EventEmitter {
       if (exempt && exempt.has(toolUseId)) continue
       count++
       this._inFlightToolStarts.delete(toolUseId)
+      const terminated = isTurnTerminationReason(reason)
       this.emit('tool_result', {
         toolUseId,
-        result: `Tool ${entry.tool} did not emit a result before the turn ended (reason: ${reason}). Chroxy synthesized this result to clear the stale activeTools entry.`,
+        result: terminated
+          ? `${describeTurnTermination(reason).summary} (${entry.tool}; Chroxy synthesized this result to clear the stale activeTools entry.)`
+          : `Tool ${entry.tool} did not emit a result before the turn ended (reason: ${reason}). Chroxy synthesized this result to clear the stale activeTools entry.`,
         truncated: false,
         synthetic: true,
         interrupted: true,
         isError: true,
         reason,
+        ...(terminated ? { terminatedReason: reason } : {}),
       })
     }
     return count
@@ -2318,8 +2333,19 @@ export class BaseSession extends EventEmitter {
    *   Subclasses that override this MUST forward the opts to `super`. One that
    *   drops them fails safe (it sweeps), which is why the forwarding is a
    *   correctness nicety here rather than a hazard.
+   *
+   * @param {{ turnEndedCleanly?: boolean, terminatedReason?: string }} [opts]
+   *   `terminatedReason` (#7376) is WHY the turn is being ended underneath
+   *   whatever tool is still in flight -- a `TURN_TERMINATION_REASONS` value
+   *   (`permission_mode_switch`, `user_stop`, `process_exit`, ...). It becomes
+   *   the orphan sweep's reason, so the synthetic `tool_result` of each such
+   *   tool says "the turn was terminated" rather than looking like a failed
+   *   command. The CALLER supplies it, never this method: it is shared by every
+   *   death path (and Stop, where the user already knows why), so inferring it
+   *   here would mislabel. Omitted on the paths that have no considered cause --
+   *   those keep the generic `message_state_cleared` sweep.
    */
-  _clearMessageState({ turnEndedCleanly = false } = {}) {
+  _clearMessageState({ turnEndedCleanly = false, terminatedReason } = {}) {
     // #7382 (review): expire HERE, so inheriting the bookkeeping also inherits
     // the BEHAVIOUR. Hoisting the API alone bought a new provider the methods
     // and none of the wiring — and the roster guard, which only checked that
@@ -2367,7 +2393,10 @@ export class BaseSession extends EventEmitter {
       )
       : null
 
-    this._sweepUnresolvedToolStarts('message_state_cleared', survivingAgents)
+    this._sweepUnresolvedToolStarts(
+      isTurnTerminationReason(terminatedReason) ? terminatedReason : 'message_state_cleared',
+      survivingAgents,
+    )
 
     // #7340: complete the tracked subagents this turn end owns, and no more.
     // A confirmed-backgrounded subagent deliberately outlives its turn, so

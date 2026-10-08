@@ -1095,7 +1095,7 @@ export class CliSession extends BaseSession {
     // #4828: session-scoped (hard-cap fires from active turn).
     ;(this._log || log).warn(`Hard-cap timeout (${friendly}) — force-clearing busy state`)
     this._expirePendingPermissions('Permission request expired (session timeout)')
-    this._emitInterruptedTurnResult(this._hardTimeoutMs)
+    this._emitInterruptedTurnResult(this._hardTimeoutMs, 'hard_timeout')
     this.emit('error', { message: `Response timed out after ${friendly}` })
   }
 
@@ -1164,7 +1164,7 @@ export class CliSession extends BaseSession {
     ;(this._log || log).warn(
       `Stream stalled (${friendly}, messageId=${this._currentMessageId}) — clearing busy state for retry`,
     )
-    this._emitInterruptedTurnResult(this._streamStallTimeoutMs)
+    this._emitInterruptedTurnResult(this._streamStallTimeoutMs, 'stream_stall')
     this.emit('error', {
       code: 'stream_stall',
       message: `Stream stalled — no response for ${friendly}. Try sending again.`,
@@ -1871,8 +1871,14 @@ export class CliSession extends BaseSession {
   /**
    * Kill the current child process (if any) and respawn.
    * Suppresses auto-respawn during the kill, clears timers, and starts fresh.
+   *
+   * @param {string} [terminatedReason] #7376: why the turn is being ended
+   *   (`permission_mode_switch` / `model_switch`). Passed in by each caller
+   *   rather than inferred -- this is shared by the panic-button and a mid-turn
+   *   model change -- and stamped onto the synthetic `tool_result` of every tool
+   *   the dying turn left in flight.
    */
-  _killAndRespawn() {
+  _killAndRespawn(terminatedReason) {
     // #7335: retire the prompts the dying turn was blocked on BEFORE
     // _emitInterruptedTurnResult, which reaches _clearMessageState and wipes
     // `_pendingPermissionIds` silently. Ordering is the whole fix: after that
@@ -1898,7 +1904,7 @@ export class CliSession extends BaseSession {
     // otherwise the _handleChildClose guard short-circuits and the dashboard
     // never receives `agent_idle` — Stop stays stuck on panic-button +
     // mid-turn setModel paths.
-    this._emitInterruptedTurnResult()
+    this._emitInterruptedTurnResult(0, terminatedReason)
 
     this._respawning = true
     this._processReady = false
@@ -2031,7 +2037,7 @@ export class CliSession extends BaseSession {
   _onModelChanged() {
     // #4828: session-scoped if init has fired before the model change.
     ;(this._log || log).info(`Model changed to ${this.model || 'default'}, restarting process`)
-    this._killAndRespawn()
+    this._killAndRespawn('model_switch')
   }
 
   /**
@@ -2169,7 +2175,7 @@ export class CliSession extends BaseSession {
     // covers claude's own flag.
     // #4828: session-scoped if init has fired.
     ;(this._log || log).info(`Permission mode changed to ${mode}, restarting process`)
-    this._killAndRespawn()
+    this._killAndRespawn('permission_mode_switch')
   }
 
   getRestartBlockers() {
@@ -2237,14 +2243,19 @@ export class CliSession extends BaseSession {
   // the dashboard's streamingMessageId/isIdle. Without it, an interrupted
   // turn leaves Stop stuck visible and "Thinking…" permanent.
   // Mirrors TUI #4010. cost:null skips session-manager billing.
-  _emitInterruptedTurnResult(duration = 0) {
+  //
+  // #7376: `terminatedReason` says WHY, so the tools this turn left in flight
+  // are reported as "the turn was terminated under it" rather than as failed
+  // commands. Supplied by each caller -- this is shared by the panic-button,
+  // mid-turn setModel, Stop, a crash and both watchdogs -- and never inferred.
+  _emitInterruptedTurnResult(duration = 0, terminatedReason) {
     if (!this._isBusy || !this._currentMessageId) return
     const messageId = this._currentMessageId
     const sessionId = this._sessionId
     if (this._currentCtx?.hasStreamStarted) {
       this.emit('stream_end', { messageId })
     }
-    this._clearMessageState()
+    this._clearMessageState({ terminatedReason })
     this.emit('result', { cost: null, duration, usage: null, sessionId })
   }
 
@@ -2299,7 +2310,9 @@ export class CliSession extends BaseSession {
     // unconditional sweep covers the busy case.
     this._completeAgents()
 
-    this._emitInterruptedTurnResult()
+    // #7376: Stop (SIGINT -> the child exits here) and a crash both reach this
+    // point; the tools they leave in flight are worded differently.
+    this._emitInterruptedTurnResult(0, wasIntentionalStop ? 'user_stop' : 'process_exit')
 
     // #4602: user-initiated Stop sent SIGINT via interrupt(). The child
     // exited cleanly as a result — do NOT show "exited unexpectedly" and
@@ -2566,7 +2579,7 @@ export class CliSession extends BaseSession {
       if (this._isBusy) {
         // #4828: session-scoped.
         ;(this._log || log).warn('Interrupt safety timeout — force-clearing busy state')
-        this._emitInterruptedTurnResult()
+        this._emitInterruptedTurnResult(0, 'user_stop')
       }
     }, 5000)
     // #6043: fire-and-forget busy-state safety net — never gate process exit on

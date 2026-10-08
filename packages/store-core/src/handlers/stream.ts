@@ -578,7 +578,9 @@ export interface ToolResultPayload {
  * - `sessionId`: resolved from string-typed `msg.sessionId` falling back to
  *   `activeSessionId`. Non-string values are ignored.
  * - `patch`: `{ toolResult, toolResultTruncated, toolResultIsError }`, plus
- *   `toolResultImages` only when `msg.images` is a non-empty array.
+ *   `toolResultImages` only when `msg.images` is a non-empty array, and
+ *   `toolResultTerminatedReason` only when the server sent a `terminatedReason`
+ *   (#7376).
  * - `resultText`: the raw result string (string-validated) for the caller's
  *   terminal preview.
  * - `applyTo(messages)`: locates the matching `tool_use` entry by
@@ -612,6 +614,12 @@ export function handleToolResult(
     toolResultIsError: isError,
   }
   if (images?.length) patch.toolResultImages = images
+  // #7376: the tool was cut off by a terminated turn, not by its own failure.
+  // Only a non-empty string counts; anything else (old server, junk) leaves the
+  // patch without the key so the bubble keeps its ordinary ok/error rendering.
+  if (typeof msg.terminatedReason === 'string' && msg.terminatedReason) {
+    patch.toolResultTerminatedReason = msg.terminatedReason
+  }
   // #7346: backfill `toolInput` from the finalized input the server
   // attaches once known (CliSession / SdkSession — see
   // base-session.js's `_getTrackedToolInput`), so a completed call whose

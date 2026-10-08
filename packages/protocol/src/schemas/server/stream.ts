@@ -240,6 +240,15 @@ export const ServerToolResultSchema = z.object({
   // missing value as false. Older servers and non-mcp tools omit it; codex
   // mcpToolCall emits it explicitly (`false` on success).
   isError: z.boolean().optional(),
+  // #7376: present when the tool was cut off because the TURN it belonged to was
+  // terminated underneath it (a permission-mode switch, Stop, a crash, a
+  // watchdog, a daemon restart) -- the command did not report, which is not the
+  // same as the command failing. One of `TURN_TERMINATION_REASONS`
+  // (turn-termination.ts), but deliberately a plain string: a reason added by a
+  // newer server must not make an older client reject the whole `tool_result`.
+  // Optional and additive -- older servers never send it, older clients strip it
+  // and fall back to the `isError` styling they already have.
+  terminatedReason: z.string().optional(),
   // #7346: the finalized tool input, backfilled by CliSession (parsed from
   // the buffered `content_block_stop` input_json_delta chunks) / SdkSession
   // (the full assistant-message `block.input`, already parsed) — see

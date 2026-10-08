@@ -125,6 +125,64 @@ describe('ToolGroup', () => {
     expect(ok).not.toHaveAttribute('data-error')
   })
 
+  // #7376 — a tool cut off because its TURN was terminated is not "the command
+  // ran and failed". The server marks the synthetic result isError too, so the
+  // terminated state must WIN over the failure styling, and a genuine failure
+  // must still render as one.
+  it('renders a terminated tool as terminated, not as a failure (#7376)', () => {
+    const messages = [
+      tool('1', 'Bash', {
+        toolResult: 'Turn terminated (permission-mode switch) — this tool did not finish. Re-send to retry.',
+        toolResultIsError: true,
+        toolResultTerminatedReason: 'permission_mode_switch',
+      }),
+      tool('2', 'db/query', { toolResult: 'connection refused', toolResultIsError: true }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    const cut = screen.getByTestId('tool-group-entry-1')
+    expect(cut).toHaveAttribute('data-terminated', 'true')
+    expect(cut).toHaveClass('tool-group-entry--terminated')
+    expect(cut).not.toHaveClass('tool-group-entry--error')
+    expect(cut).not.toHaveAttribute('data-error')
+    expect(cut).toHaveTextContent('⊘')
+    expect(cut).not.toHaveTextContent('✕')
+    expect(screen.getByTestId('tool-group-entry-terminated-1')).toBeInTheDocument()
+    // Positive control: the genuine failure in the same group is still red.
+    const failed = screen.getByTestId('tool-group-entry-2')
+    expect(failed).toHaveAttribute('data-error', 'true')
+    expect(failed).toHaveClass('tool-group-entry--error')
+    expect(failed).not.toHaveAttribute('data-terminated')
+    expect(screen.queryByTestId('tool-group-entry-terminated-2')).toBeNull()
+  })
+
+  it('a terminated tool states the reason and the next step when expanded, instead of the raw result (#7376)', () => {
+    const messages = [
+      tool('1', 'Bash', {
+        toolResult: 'synthesized placeholder text',
+        toolResultIsError: true,
+        toolResultTerminatedReason: 'permission_mode_switch',
+      }),
+      tool('2', 'Read', { toolResult: 'ok' }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+    const note = screen.getByTestId('tool-group-entry-terminated-note-1')
+    expect(note).toHaveTextContent('Turn terminated (permission-mode switch)')
+    expect(note).toHaveTextContent('Re-send to retry')
+    expect(screen.getByTestId('tool-group-entry-detail-1')).not.toHaveTextContent('synthesized placeholder text')
+  })
+
+  it('an unrecognised reason from a newer server still renders as terminated, with generic wording (#7376)', () => {
+    const messages = [
+      tool('1', 'Bash', { toolResult: 'x', toolResultIsError: true, toolResultTerminatedReason: 'from_the_future' }),
+      tool('2', 'Read', { toolResult: 'ok' }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    expect(screen.getByTestId('tool-group-entry-1')).toHaveAttribute('data-terminated', 'true')
+    fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+    expect(screen.getByTestId('tool-group-entry-terminated-note-1')).toHaveTextContent('Re-send to retry')
+  })
+
   it('counts an empty toolResult as complete (server may emit "")', () => {
     const messages = [
       tool('1', 'Bash', { toolResult: '' }),
