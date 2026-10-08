@@ -715,6 +715,30 @@ describe('shared dispatch table', () => {
         expect(env.sessions.s1.messages[0].answered).toBeUndefined()
       })
 
+      // #8470 -- the two more no-answer tokens are non-decisions too: a LIVE
+      // re-delivery proves the question is pending again, so it clears them like
+      // '(resolved)' and '(interrupted)'. A real decision is still carried across.
+      it('a live re-delivery clears the superseded / not-delivered tokens, but not a real answer (#8470)', () => {
+        for (const [answered, expected] of [
+          ['(superseded)', undefined],
+          ['(not delivered)', undefined],
+          ['Round', 'Round'],
+        ] as const) {
+          const env = makeAdapter({
+            activeSessionId: 's1',
+            sessions: { s1: { sessionId: 's1', messages: [held({ answered })] } },
+          })
+          dispatch(env, {
+            type: 'user_question',
+            sessionId: 's1',
+            toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }],
+          })
+          expect(env.sessions.s1.messages).toHaveLength(1)
+          expect(env.sessions.s1.messages[0].answered).toBe(expected)
+        }
+      })
+
       it('keeps the held id and timestamp so the prompt does not jump position or age', () => {
         const env = makeAdapter({
           activeSessionId: 's1',
