@@ -121,7 +121,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   MockWebSocket.instances = []
   resetReconnectAttempt()
-  useConnectionStore.setState({ socket: null, connectionPhase: 'disconnected', userDisconnected: false, ...RESET } as Partial<State>)
+  useConnectionStore.setState({ socket: null, connectionPhase: 'disconnected', userDisconnected: false, serverCapabilities: { ide: true }, ...RESET } as Partial<State>)
 })
 
 afterEach(() => {
@@ -293,5 +293,158 @@ describe('#8404 SymbolSearchPalette after a transport drop', () => {
     expect(screen.getByTestId('symbol-search-offline')).toBeTruthy()
     const ws = await openConnected()
     expect(ws.sentOfType('list_symbols').length).toBe(1)
+  })
+})
+
+describe('#8404 review: a close disarms the re-ask (close -> reconnect -> reopen sends only what the palette itself sends)', () => {
+  it('symbol search: the reopen sends one list_symbols, not two', async () => {
+    const ws = await openConnected()
+    const view = render(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    view.rerender(<SymbolSearchPalette isOpen={false} onClose={() => {}} />)
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('list_symbols'), 'a reconnect while closed sends nothing').toEqual([])
+    view.rerender(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    expect(ws2.sentOfType('list_symbols').length, 'the open request plus a leaked re-ask would be 2').toBe(1)
+  })
+
+  it('references: the reopen sends nothing, so the click\'s file-ranked request is never overwritten', async () => {
+    const ws = await openConnected()
+    act(() => { useConnectionStore.getState().requestFindReferences('widget', 'src/a.ts') })
+    expect(ws.sentOfType('find_references')[0]).toMatchObject({ symbol: 'widget', file: 'src/a.ts' })
+    const view = render(<ReferencesPalette isOpen onClose={() => {}} />)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    view.rerender(<ReferencesPalette isOpen={false} onClose={() => {}} />)
+    const ws2 = await reconnect()
+    view.rerender(<ReferencesPalette isOpen onClose={() => {}} />)
+    expect(ws2.sentOfType('find_references'), 'a leaked re-ask would arrive without the file').toEqual([])
+  })
+
+  it('code search: the reopen does not re-send the stale pre-close query', async () => {
+    const ws = await openConnected()
+    const view = render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: 'target' } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    view.rerender(<CodeSearchPalette isOpen={false} onClose={() => {}} />)
+    const ws2 = await reconnect()
+    view.rerender(<CodeSearchPalette isOpen onClose={() => {}} />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    expect(ws2.sentOfType('search_content'), 'a leaked re-ask would carry the old query').toEqual([])
+  })
+})
+
+describe('#8404 review: connected with nothing outstanding and a result that is not current is still "searching"', () => {
+  it('references', async () => {
+    await openConnected()
+    act(() => { useConnectionStore.getState().requestFindReferences('widget') })
+    render(<ReferencesPalette isOpen onClose={() => {}} />)
+    act(() => {
+      useConnectionStore.setState({
+        referencesLoading: false,
+        referencesResult: { type: 'references_result', symbol: 'other', truncated: false, error: null, results: [] },
+      } as Partial<State>)
+    })
+    expect(screen.getByText(SPINNER_TEXT)).toBeTruthy()
+    expect(screen.queryByTestId('references-empty')).toBeNull()
+  })
+
+  it('code search (the debounce window before the request goes out)', async () => {
+    await openConnected()
+    useConnectionStore.setState({
+      codeSearchResults: { type: 'code_search_results', query: 'other', truncated: false, error: null, results: [] },
+    } as Partial<State>)
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: 'target' } })
+    expect(useConnectionStore.getState().codeSearchLoading, 'control: nothing sent yet').toBe(false)
+    expect(screen.getByText(SPINNER_TEXT)).toBeTruthy()
+    expect(screen.queryByTestId('code-search-empty')).toBeNull()
+  })
+
+  it('symbol search', async () => {
+    await openConnected()
+    render(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    act(() => { useConnectionStore.setState({ workspaceSymbolsLoading: false } as Partial<State>) })
+    expect(useConnectionStore.getState().workspaceSymbols, 'control: no table yet').toBeNull()
+    expect(screen.getByText(SPINNER_TEXT)).toBeTruthy()
+    expect(screen.queryByTestId('symbol-search-empty')).toBeNull()
+  })
+})
+
+describe('#8404 review: a result that is already current is not re-asked, and stays on screen', () => {
+  it('references', async () => {
+    const ws = await openConnected()
+    act(() => { useConnectionStore.getState().requestFindReferences('widget') })
+    render(<ReferencesPalette isOpen onClose={() => {}} />)
+    reply(ws, REFERENCES_REPLY)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('find_references')).toEqual([])
+    expect(screen.getByTestId('references-item-0')).toBeTruthy()
+  })
+
+  it('code search', async () => {
+    const ws = await openConnected()
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: 'target' } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    reply(ws, SEARCH_REPLY)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('search_content')).toEqual([])
+    expect(screen.getByTestId('code-search-item-0')).toBeTruthy()
+  })
+
+  it('symbol search', async () => {
+    const ws = await openConnected()
+    render(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    reply(ws, SYMBOLS_REPLY)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('list_symbols')).toEqual([])
+    expect(screen.getByTestId('symbol-search-item-Widget')).toBeTruthy()
+  })
+})
+
+describe('#8404 review: a daemon that comes back with the IDE surface off is not asked, and does not leave a palette spinning', () => {
+  const ideOff = (): void => { useConnectionStore.setState({ serverCapabilities: {} } as Partial<State>) }
+  const ideOn = (): void => { act(() => { useConnectionStore.setState({ serverCapabilities: { ide: true } } as Partial<State>) }) }
+
+  it('symbol search: offline while ide is off, asks once when it comes on', async () => {
+    const ws = await openConnected()
+    render(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    ideOff()
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('list_symbols')).toEqual([])
+    expect(screen.queryByText(SPINNER_TEXT)).toBeNull()
+    expect(screen.getByTestId('symbol-search-offline')).toBeTruthy()
+    ideOn()
+    expect(ws2.sentOfType('list_symbols').length).toBe(1)
+  })
+
+  it('code search', async () => {
+    const ws = await openConnected()
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: 'target' } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    ideOff()
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('search_content')).toEqual([])
+    expect(screen.queryByText(SPINNER_TEXT)).toBeNull()
+    expect(screen.getByTestId('code-search-offline')).toBeTruthy()
+  })
+
+  it('references', async () => {
+    const ws = await openConnected()
+    act(() => { useConnectionStore.getState().requestFindReferences('widget') })
+    render(<ReferencesPalette isOpen onClose={() => {}} />)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    ideOff()
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('find_references')).toEqual([])
+    expect(screen.queryByText(SPINNER_TEXT)).toBeNull()
+    expect(screen.getByTestId('references-offline')).toBeTruthy()
   })
 })

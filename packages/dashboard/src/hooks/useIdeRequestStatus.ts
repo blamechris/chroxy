@@ -14,21 +14,31 @@
  *
  * ## The rule
  *
- * A reply can only arrive on a live, authenticated connection. So:
+ * A reply can only arrive on a live, authenticated connection to a daemon whose
+ * IDE surface is on (`serverCapabilities.ide`; with it off the handlers fail
+ * closed WITHOUT replying, so a request could never clear its spinner). So:
  *
- *  - connected: `loading || !current` is a request genuinely outstanding (or about
- *    to be issued) → `'searching'`; otherwise `'ready'`.
- *  - NOT connected: nothing can be outstanding. A result that is already current
- *    is kept → `'ready'`; anything else → `'offline'`, a settled state with no
+ *  - available (connected AND ide): `loading || !current` is a request genuinely
+ *    outstanding (or about to be issued) -> `'searching'`; otherwise `'ready'`.
+ *  - NOT available: nothing can be outstanding. A result that is already current
+ *    is kept -> `'ready'`; anything else -> `'offline'`, a settled state with no
  *    spinner.
  *
  * ## The retry path
  *
- * Going offline while the palette is open arms a re-request, and the next
- * connection edge (`connectionPhase` becomes `'connected'`) fires `reissue`
- * once. It is edge/flag based, not "connected and nothing current", because each
- * palette already issues its own first request (on open, or debounced on typing)
- * and a state-based rule would double it.
+ * Going unavailable while the palette is open arms a re-request, and the first
+ * moment it is available again (the connection edge) fires `reissue` once. It is
+ * edge/flag based, not "available and nothing current", because each palette
+ * already issues its own first request (on open, or debounced on typing) and a
+ * state-based rule would double it.
+ *
+ *  - Closing the palette DISARMS it. The palettes stay mounted, so an armed flag
+ *    would otherwise outlive the close and fire on the reopen, on top of the
+ *    palette's own open request (and, for references, over the file-ranked one
+ *    the click carried). A palette reopened while still unavailable re-arms.
+ *  - A result that is already current is not re-asked. The rows stay on screen
+ *    through the outage and the reconnect (a references re-ask would blank them
+ *    until the reply landed); a new query or a reopen refreshes as it always did.
  */
 import { useEffect, useRef } from 'react'
 import { useConnectionStore } from '../store/connection'
@@ -48,22 +58,26 @@ export interface UseIdeRequestStatusOptions {
 
 export function useIdeRequestStatus({ active, loading, isCurrent, reissue }: UseIdeRequestStatusOptions): IdeRequestStatus {
   const connected = useConnectionStore(s => s.connectionPhase === 'connected')
+  const ideOn = useConnectionStore(s => s.serverCapabilities?.ide === true)
+  const available = connected && ideOn
   // Always call the latest closure (it captures the current query / symbol)
   // without making the effect below re-run when its identity changes.
   const reissueRef = useRef(reissue)
   reissueRef.current = reissue
+  const isCurrentRef = useRef(isCurrent)
+  isCurrentRef.current = isCurrent
   const reissueArmed = useRef(false)
 
   useEffect(() => {
-    if (!active) return
-    if (!connected) {
+    if (!active) { reissueArmed.current = false; return }
+    if (!available) {
       reissueArmed.current = true
     } else if (reissueArmed.current) {
       reissueArmed.current = false
-      reissueRef.current()
+      if (!isCurrentRef.current) reissueRef.current()
     }
-  }, [active, connected])
+  }, [active, available])
 
-  if (connected) return loading || !isCurrent ? 'searching' : 'ready'
+  if (available) return loading || !isCurrent ? 'searching' : 'ready'
   return isCurrent ? 'ready' : 'offline'
 }

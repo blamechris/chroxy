@@ -127,7 +127,7 @@ export function SymbolSearchPalette({ isOpen, onClose }: SymbolSearchPaletteProp
           {isLoading && <div className="file-open-palette-status">Indexing symbols…</div>}
           {offline && (
             <div className="file-open-palette-status" data-testid="symbol-search-offline">
-              Not connected — symbols will reload when the connection is back
+              Unavailable — symbols will reload when the connection is back
             </div>
           )}
           {status === 'ready' && filtered.length === 0 && (

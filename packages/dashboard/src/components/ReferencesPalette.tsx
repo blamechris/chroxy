@@ -109,7 +109,7 @@ export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
           {searching && <div className="file-open-palette-status">Searching…</div>}
           {offline && (
             <div className="file-open-palette-status" data-testid="references-offline">
-              Not connected — references will reload when the connection is back
+              Unavailable — references will reload when the connection is back
             </div>
           )}
           {status === 'ready' && results.length === 0 && (

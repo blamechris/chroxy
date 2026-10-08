@@ -141,7 +141,7 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
           )}
           {offline && (
             <div className="file-open-palette-status" data-testid="code-search-offline">
-              Not connected — the search will run again when the connection is back
+              Unavailable — the search will run again when the connection is back
             </div>
           )}
           {trimmed.length >= MIN_QUERY && status === 'ready' && results.length === 0 && (
