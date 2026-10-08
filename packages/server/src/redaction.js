@@ -234,19 +234,75 @@ export function redactBounded(text, maxScan = MAX_REDACT_SCAN) {
 }
 
 /**
+ * How much of a permission prompt's identifying field the permission transcript
+ * keeps. Applied where the field is produced (so the copy held with a pending
+ * prompt is bounded too), and again by the history layer as it records.
+ */
+export const RECORD_DESCRIPTION_MAX = 500
+
+/** How much of a serialized input a description shows when no field names the call. */
+const SERIALIZED_DESCRIPTION_MAX = 200
+
+/**
+ * The identifying field of a tool input that a permission prompt is described
+ * by: the one precedence every producer shares.
+ *
+ * @param {unknown} rawInput
+ * @returns {unknown} the field's value, or undefined when the input has none
+ */
+function namedField(rawInput) {
+  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) return undefined
+  return rawInput.description || rawInput.command || rawInput.file_path || rawInput.pattern || rawInput.query || undefined
+}
+
+/**
  * The identifying field of a RAW tool input that a permission prompt is
- * described by (the same precedence the producers use for the description the
- * clients see), redacted; `undefined` when the input has none. Read from the raw
- * input on purpose: the broadcast copy of a large input is replaced by a
- * truncation wrapper that no longer has the field.
+ * described by, redacted and clipped to `RECORD_DESCRIPTION_MAX`; `undefined`
+ * when the input has none. Read from the raw input on purpose: the broadcast
+ * copy of a large input is replaced by a truncation wrapper that no longer has
+ * the field. Redacted before it is clipped, never after.
  *
  * @param {unknown} rawInput
  * @returns {string|undefined}
  */
 export function describeByNamedField(rawInput) {
-  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) return undefined
-  const named = rawInput.description || rawInput.command || rawInput.file_path || rawInput.pattern || rawInput.query
-  return named ? redactBounded(String(named)) : undefined
+  const named = namedField(rawInput)
+  return named ? redactBounded(String(named)).slice(0, RECORD_DESCRIPTION_MAX) : undefined
+}
+
+/**
+ * The human-readable `description` of a permission prompt, derived from its
+ * tool input. The ONE place a producer (in-process sdk/byok/codex, hook-routed
+ * claude-tui/claude-cli) builds it, so what a description may carry is decided
+ * once.
+ *
+ * - An input with an identifying field (command, file_path, ...) is described by
+ *   that field, run through the same value redaction `sanitizeToolInput` applies
+ *   to every string.
+ * - Anything else is described by the SANITIZED input, serialized: a value under
+ *   a sensitive key reads `[REDACTED]` exactly as it does in the prompt's
+ *   `input`. The raw input is never serialized, because the value redactor does
+ *   not recognise a secret behind a quoted JSON key.
+ *
+ * Redaction always runs before any clipping. The result is not clipped to the
+ * length a client shows; the producer does that.
+ *
+ * @param {unknown} rawInput
+ * @param {string} [emptyFallback] returned when the input has nothing to describe
+ * @returns {string}
+ */
+export function describeToolInput(rawInput, emptyFallback = '') {
+  const named = namedField(rawInput)
+  if (named) {
+    const text = redactBounded(String(named))
+    if (text) return text
+  }
+  if (rawInput && typeof rawInput === 'object' && Object.keys(rawInput).length > 0) {
+    const sanitized = sanitizeToolInput(rawInput)
+    const text = sanitized._truncated === true ? String(sanitized.summary ?? '') : JSON.stringify(sanitized)
+    return text.slice(0, SERIALIZED_DESCRIPTION_MAX)
+  }
+  return emptyFallback
 }
 
 export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }

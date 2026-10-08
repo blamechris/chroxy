@@ -5,7 +5,7 @@ import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 import { settlePush } from './push.js'
 import { createPermissionResolver } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
-import { redactValue, sanitizeToolInput, describeByNamedField } from './redaction.js'
+import { sanitizeToolInput, describeByNamedField, describeToolInput } from './redaction.js'
 // #7004: the protected-path / secret-read FLOOR. Imported from permission-floor.js
 // — the leaf module that is the SINGLE source of the floor — so the hook-routed
 // path applies the byte-identical predicate the in-process path
@@ -99,22 +99,16 @@ export function evaluateHookFloorRequest(hookData, sessionCwd) {
 
 /**
  * Build the human-readable `description` broadcast alongside a permission
- * request. #6029: the description is derived from RAW toolInput and broadcast
- * next to the sanitized `input`, so a secret in command/url/etc. would leak here
- * even though `input` is clean. The final string is run through `redactValue` so
- * the broadcast description can never carry a secret-shaped value.
+ * request. The description is derived from the RAW tool input and broadcast next
+ * to the sanitized `input`, so it is built by `describeToolInput` (redaction.js),
+ * the one place a description is derived: from the identifying field, or else
+ * from the SANITIZED input, so a masked field reads the same in both (#8384).
  *
  * @param {object} toolInput
  * @returns {string}
  */
 function buildPermissionDescription(toolInput) {
-  const raw = toolInput.description
-    || toolInput.command
-    || toolInput.file_path
-    || toolInput.pattern
-    || toolInput.query
-    || JSON.stringify(toolInput).slice(0, 200)
-  return redactValue(raw)
+  return describeToolInput(toolInput, '{}')
 }
 
 /**

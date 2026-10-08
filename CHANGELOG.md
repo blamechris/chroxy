@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A permission prompt's description matches its input (#8384, #8397).**
+  - When a prompt has no identifying field (command, file_path, ...), its
+    description is now built from the sanitized input, on every provider path
+    (claude-sdk, codex, byok, claude-tui, claude-cli). A masked field reads
+    `[REDACTED]` in the description exactly as it does in `input`.
+  - The description kept for the permission transcript is clipped to its
+    persisted length where it is produced.
+  - It is no longer included when a BYOK Task subagent's prompt is relayed to
+    the parent session.
+
 - **A permission prompt that expired or was answered no longer vanishes from
   the transcript when you switch sessions or reload (#8348).**
   - Permission prompts are live-only frames and are not kept in a session's

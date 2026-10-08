@@ -2372,10 +2372,19 @@ export class ClaudeByokSession extends BaseSession {
    * @param {object} payload
    */
   _emitAgentEvent(parentToolUseId, type, payload) {
+    let wirePayload = payload ?? {}
+    // #8397: `recordDescription` is an in-process field of the child's
+    // `permission_request` (read by the session that owns the prompt to record
+    // its outcome), not part of the wire shape. Every child relay passes through
+    // here, so it is dropped here, once.
+    if (type === 'permission_request' && wirePayload && typeof wirePayload === 'object' && 'recordDescription' in wirePayload) {
+      const { recordDescription: _internal, ...rest } = wirePayload
+      wirePayload = rest
+    }
     this.emit('agent_event', {
       parentToolUseId,
       type,
-      payload: payload ?? {},
+      payload: wirePayload,
     })
   }
 

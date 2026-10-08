@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
-import { redactBounded } from './redaction.js'
+import { redactBounded, RECORD_DESCRIPTION_MAX } from './redaction.js'
 
 const log = createLogger('session-message-history')
 const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
@@ -17,7 +17,7 @@ export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'
 // ring buffer and the state file keep, so a long hook-path description (the hook
 // route broadcasts it uncapped) cannot bloat either.
 export const PERMISSION_OUTCOME_TOOL_MAX = 100
-export const PERMISSION_OUTCOME_DESCRIPTION_MAX = 500
+export const PERMISSION_OUTCOME_DESCRIPTION_MAX = RECORD_DESCRIPTION_MAX
 
 function clipText(value, max) {
   const text = typeof value === 'string' ? value : ''
