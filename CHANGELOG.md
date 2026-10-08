@@ -30,8 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A BYOK turn that spends its tool-round cap is marked cut off; its closing
     summary used to read as a clean finish. A `pause_turn` stop is now cut off too
     (the model had not finished).
-  - A Stop you press on claude-sdk or claude-cli no longer leaves a "Stopped" chip:
-    every provider answers a requested Stop with the quiet stopped confirmation only.
+  - A requested Stop (yours, the scheduler's or the watchdog's) on claude-sdk or
+    claude-cli no longer leaves a "Stopped" chip. They answer the Stop with a normal
+    result, which used to read as an agent-side cancel; it now gets the same quiet
+    "stopped" confirmation as every other provider, exactly once.
 
 - **A permission prompt's description matches its input (#8384, #8397).**
   - When a prompt has no identifying field (command, file_path, ...), its

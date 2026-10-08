@@ -507,6 +507,12 @@ export class BaseSession extends EventEmitter {
     // `_clearMessageState`. It is what lets a Stop that COMPLETES normally still
     // tag the tools it cut off as `user_stop`.
     this._stopRequestedThisTurn = false
+    // #8461: per Stop REQUEST (reset by `markIntentionalStop`, not per turn): a
+    // `stopped` event has gone out for it, and the one `emit('result')` sent in
+    // place of the Stopped chip, which a later `stopped` for the same Stop (the
+    // CLI child's exit, a late abort rejection) must not repeat.
+    this._stoppedSinceStopRequest = false
+    this._stopAckedByResult = false
     // #4307/#5177/#5247/#5265: pending background-shell tracking + the reaping
     // sweep live in BackgroundShellTracker (#5376). BaseSession composes one and
     // delegates the public surface (trackBackgroundShell / clearBackgroundShell /
@@ -1518,6 +1524,9 @@ export class BaseSession extends EventEmitter {
    */
   markIntentionalStop() {
     this._intentionalStop = true
+    // #8461: a new Stop request is acknowledged on its own.
+    this._stoppedSinceStopRequest = false
+    this._stopAckedByResult = false
   }
 
   /**
@@ -2148,6 +2157,15 @@ export class BaseSession extends EventEmitter {
    * @returns {boolean} whether the event had listeners (EventEmitter contract)
    */
   emit(event, ...args) {
+    if (event === 'stopped') {
+      // #8461: this Stop was already confirmed in place of the chip; not twice.
+      if (this._stopAckedByResult) {
+        this._stopAckedByResult = false
+        return false
+      }
+      this._stoppedSinceStopRequest = true
+    }
+    let ackStop = false
     if (event === 'result') {
       let payload = args[0]
       if (payload && typeof payload === 'object' && payload.queueLength === undefined) {
@@ -2161,17 +2179,23 @@ export class BaseSession extends EventEmitter {
         const { turnOutcome: _dropped, ...rest } = payload
         payload = rest
       }
-      // #8461: a Stop the user asked for is acknowledged by `session_stopped` on
-      // every provider whose `interrupt()` ends the turn with a `stopped` event
-      // (ACP, Codex, Gemini, ...). claude-sdk and claude-cli can instead answer
-      // the interrupt with a NORMAL `result` carrying `terminal_reason: aborted_*`,
-      // which maps to `stopped`. Left alone, only those two providers would show a
-      // "Stopped" chip for the very action the user took. The chip is for a turn
-      // that ended UNDER the user, so it is dropped for a requested Stop and
-      // survives for an agent that cancelled on its own (ACP `cancelled`).
+      // #8461: a requested Stop (the user's, or the scheduler's / orchestration
+      // watchdog's, which also call `interrupt()`) is acknowledged by
+      // `session_stopped` on every provider whose `interrupt()` ends the turn with
+      // a `stopped` event (ACP, Codex, Gemini, ...). claude-sdk and claude-cli can
+      // instead answer it with a NORMAL `result` carrying `terminal_reason:
+      // aborted_*`, which maps to `stopped`; and then the SDK's catch branch (the
+      // `stopped` emit) never runs. Left alone, only those two providers would
+      // show a "Stopped" chip for a Stop that was asked for. The chip is for a turn
+      // that ended UNDER the caller, so it is dropped and the quiet `stopped`
+      // confirmation is sent in its place (once per Stop request, see
+      // `_stoppedSinceStopRequest`). An agent that cancelled on its own (ACP
+      // `cancelled`) keeps its chip.
+      this._stopAckedByResult = false
       if (payload && typeof payload === 'object' && payload.turnOutcome === 'stopped' && this._stopRequestedThisTurn) {
         const { turnOutcome: _userStop, ...rest } = payload
         payload = rest
+        ackStop = !this._stoppedSinceStopRequest
       }
       // #7326: a marked outcome (anything but `completed`) becomes a chip in the
       // transcript, and the chip needs an identity that the live `result` frame
@@ -2185,7 +2209,13 @@ export class BaseSession extends EventEmitter {
       }
       if (payload !== args[0]) args[0] = payload
     }
-    return super.emit(event, ...args)
+    const delivered = super.emit(event, ...args)
+    if (ackStop) {
+      this._stoppedSinceStopRequest = true
+      this._stopAckedByResult = true
+      super.emit('stopped', {})
+    }
+    return delivered
   }
 
   /**

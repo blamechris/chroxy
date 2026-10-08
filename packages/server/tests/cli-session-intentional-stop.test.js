@@ -276,3 +276,55 @@ describe('_respawning vs _intentionalStop independence', () => {
     assert.equal(session._respawning, false, '_respawning untouched by intentional stop')
   })
 })
+
+// #8461 -- a requested Stop that the child answers with a NORMAL aborted `result`
+// (it survived the SIGINT) leaves no chip, and is acknowledged by exactly one
+// `stopped`. The child-close `stopped` for the same Stop is not a second one.
+describe('a Stop answered by an aborted result (#8461)', () => {
+  const abortedResult = {
+    type: 'result', subtype: 'error_during_execution', is_error: true, terminal_reason: 'aborted_streaming',
+    session_id: 'sess-1', total_cost_usd: 0, duration_ms: 5, usage: {},
+  }
+
+  function stoppedBusySession() {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg-1'
+    const results = []
+    const stopped = []
+    session.on('result', (r) => results.push(r))
+    session.on('stopped', (e) => stopped.push(e))
+    session.interrupt()
+    clearTimeout(session._interruptTimer)
+    session._interruptTimer = null
+    return { session, results, stopped }
+  }
+
+  it('drops the Stopped chip and emits one stopped', () => {
+    const { session, results, stopped } = stoppedBusySession()
+    session._handleEvent(abortedResult)
+    assert.equal(results.length, 1)
+    assert.equal('turnOutcome' in results[0], false, 'no chip for a requested Stop')
+    assert.equal(stopped.length, 1, 'the confirmation that replaces the chip')
+  })
+
+  it('does not repeat it when the child then exits for the same Stop', () => {
+    const { session, stopped } = stoppedBusySession()
+    session._handleEvent(abortedResult)
+    session._handleChildClose(0)
+    assert.equal(stopped.length, 1)
+  })
+
+  it('an abort nobody asked for keeps its chip and emits no stopped', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg-1'
+    const results = []
+    const stopped = []
+    session.on('result', (r) => results.push(r))
+    session.on('stopped', (e) => stopped.push(e))
+    session._handleEvent(abortedResult)
+    assert.equal(results[0].turnOutcome, 'stopped')
+    assert.equal(stopped.length, 0)
+  })
+})
