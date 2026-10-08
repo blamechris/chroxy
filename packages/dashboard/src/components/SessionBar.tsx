@@ -18,12 +18,19 @@
  * "Dropped X at position 2 of 3", "Cancelled"). Each draggable tab also
  * carries `aria-describedby` pointing at a hidden hint that explains the
  * reorder shortcut, so SR users discover it on focus.
+ *
+ * #7329 — rename was double-click-only. Right-clicking a tab (or pressing the
+ * ContextMenu key / Shift+F10 on a focused tab) now opens the shared
+ * `SessionContextMenu` with Rename and Close; Rename starts the same inline
+ * editor as double-click. The sidebar's session-row menu reaches that editor
+ * through the `renameRequest` prop.
  */
-import { useState, useCallback, useRef, useEffect, useId } from 'react'
+import { useState, useCallback, useRef, useEffect, useId, useMemo } from 'react'
 import type { SessionVisualStatus } from '@chroxy/store-core'
 import { getProviderInfo } from '../lib/provider-labels'
 import { isImeComposing } from '../utils/ime'
 import { repoDisplayName } from '../utils/repoLabel'
+import { SessionContextMenu, type ContextMenuItem } from './SessionContextMenu'
 
 export type SessionStatus = SessionVisualStatus
 
@@ -106,6 +113,22 @@ export interface SessionBarProps {
   pendingPermissionTotal?: number
   /** #5693 (PR-3) — focus the next session with a pending permission. */
   onJumpToPending?: () => void
+  /**
+   * #7329 — ask the bar to start the inline rename on a tab from outside it
+   * (the sidebar session row's context menu). `nonce` makes repeat requests
+   * for the same session distinct. The bar consumes the request and calls
+   * `onRenameRequestHandled` so the owner can clear it.
+   */
+  renameRequest?: { sessionId: string; nonce: number } | null
+  onRenameRequestHandled?: () => void
+}
+
+/** #7329 — the tooltip on a tab name; rename was previously undiscoverable. */
+const RENAME_HINT = 'Double-click or right-click to rename'
+
+/** #7329 — ContextMenu key / Shift+F10: the keyboard way to open a context menu. */
+function isContextMenuKey(e: { key: string; shiftKey: boolean }): boolean {
+  return e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)
 }
 
 function shortenModel(model: string): string {
@@ -162,7 +185,7 @@ export function reorderTabs(ids: string[], fromIndex: number, toIndex: number): 
   return next
 }
 
-export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession, onReorder, controlRoom, pendingPermissionTotal = 0, onJumpToPending }: SessionBarProps) {
+export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession, onReorder, controlRoom, pendingPermissionTotal = 0, onJumpToPending, renameRequest, onRenameRequestHandled }: SessionBarProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -218,6 +241,38 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
     cancelledRef.current = true
     setRenamingId(null)
   }, [])
+
+  // #7329 — per-tab context menu (right-click, ContextMenu key, Shift+F10).
+  const [tabMenu, setTabMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null)
+  const dismissTabMenu = useCallback(() => setTabMenu(null), [])
+  const tabMenuItems = useMemo<ContextMenuItem[]>(() => {
+    if (!tabMenu) return []
+    const session = sessions.find(s => s.sessionId === tabMenu.sessionId)
+    if (!session) return []
+    return [
+      { id: 'rename', label: 'Rename', onClick: () => startRename(session) },
+      {
+        // Mirrors the tab's × button: only offered while there is more than
+        // one session. The close-confirmation stays with the caller.
+        id: 'close',
+        label: 'Close',
+        destructive: true,
+        separatorAbove: true,
+        onClick: showClose ? () => onClose(session.sessionId) : undefined,
+      },
+    ]
+  }, [tabMenu, sessions, showClose, startRename, onClose])
+
+  // #7329 — an outside request (sidebar row → Rename) starts the same inline
+  // editor. Consumed once; an unknown session id is dropped, not queued.
+  useEffect(() => {
+    if (!renameRequest) return
+    const target = sessions.find(s => s.sessionId === renameRequest.sessionId)
+    if (target) startRename(target)
+    onRenameRequestHandled?.()
+    // Keyed on the request object: a new request is a new object (nonce).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renameRequest])
 
   // #4831 — emit a reorder. `from` and `to` are sessionIds, not indices,
   // so we look up indices from the live `sessions` array (which already
@@ -433,6 +488,15 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               setDraggingId(null)
               setDragOverId(null)
             }}
+            onContextMenu={e => {
+              // #7329 — leave the native text menu alone while this tab's
+              // name is being edited.
+              if (renamingId === session.sessionId) return
+              e.preventDefault()
+              // Focus the tab first so the menu's focus-return lands here.
+              e.currentTarget.focus()
+              setTabMenu({ sessionId: session.sessionId, x: e.clientX, y: e.clientY })
+            }}
             onClick={() => {
               // Use the CR-aware `isActive`: while the Control Room is the
               // focused view, even the underlying-active session should fire
@@ -441,6 +505,15 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             }}
             onKeyDown={e => {
               if (renamingId === session.sessionId) return
+              // #7329 — keyboard route to the context menu (ContextMenu key /
+              // Shift+F10). Not while the tab is lifted for reorder.
+              if (isContextMenuKey(e) && keyboardLiftId !== session.sessionId) {
+                e.preventDefault()
+                e.stopPropagation()
+                const rect = e.currentTarget.getBoundingClientRect()
+                setTabMenu({ sessionId: session.sessionId, x: rect.left, y: rect.bottom })
+                return
+              }
               // #4831 — keyboard reorder ladder. Both Space (matches the
               // #4831 acceptance criteria + WAI-ARIA grid pattern) and
               // Shift+Space toggle "lift" mode when reorder is wired.
@@ -586,6 +659,7 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
             ) : (
               <span
                 className="tab-name"
+                title={RENAME_HINT}
                 onDoubleClick={e => {
                   e.preventDefault()
                   e.stopPropagation()
@@ -711,6 +785,17 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
       >
         {reorderAnnouncement}
       </div>
+
+      {/* #7329 — position:fixed overlay, so the bar's overflow:hidden does
+          not clip it. */}
+      {tabMenu && (
+        <SessionContextMenu
+          x={tabMenu.x}
+          y={tabMenu.y}
+          items={tabMenuItems}
+          onDismiss={dismissTabMenu}
+        />
+      )}
     </div>
   )
 }

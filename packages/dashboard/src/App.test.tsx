@@ -2613,6 +2613,63 @@ describe('App', () => {
     })
   })
 
+  // #7329 — rename used to be double-click-on-the-tab only. The sidebar row's
+  // context menu now offers Rename and drives the SAME inline editor in the
+  // tab strip (one editor, two entry points).
+  describe('sidebar row Rename starts the tab-strip inline rename (#7329)', () => {
+    const twoSessionState = () => ({
+      connectionPhase: 'connected' as const,
+      sessions: [
+        { sessionId: 's1', name: 'Alpha', cwd: '/tmp/repo', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+        { sessionId: 's2', name: 'Beta', cwd: '/tmp/repo', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+      ],
+      activeSessionId: 's1',
+    })
+
+    it('sidebar right-click → Rename opens the inline input on that session tab; Enter renames', () => {
+      const renameSession = vi.fn()
+      stateOverrides = { ...twoSessionState(), renameSession }
+      render(<App />)
+      fireEvent.contextMenu(screen.getByTestId('session-item-s2'))
+      const menu = screen.getByRole('menu')
+      fireEvent.click(within(menu).getByRole('menuitem', { name: 'Rename' }))
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      const input = within(screen.getByTestId('session-tab-s2')).getByDisplayValue('Beta')
+      expect(document.activeElement).toBe(input)
+      fireEvent.change(input, { target: { value: 'Gamma' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(renameSession).toHaveBeenCalledWith('s2', 'Gamma')
+    })
+
+    it('a consumed request does not re-open the editor when the tab strip remounts', () => {
+      stateOverrides = { ...twoSessionState(), renameSession: vi.fn() }
+      const { rerender } = render(<App />)
+      fireEvent.contextMenu(screen.getByTestId('session-item-s2'))
+      fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename' }))
+      fireEvent.keyDown(within(screen.getByTestId('session-tab-s2')).getByDisplayValue('Beta'), { key: 'Escape' })
+      // Tab strip unmounts with no sessions, then remounts when they return.
+      stateOverrides = { ...twoSessionState(), sessions: [], activeSessionId: null, renameSession: vi.fn() }
+      rerender(<App />)
+      expect(screen.queryByTestId('session-bar')).toBeNull()
+      stateOverrides = { ...twoSessionState(), renameSession: vi.fn() }
+      rerender(<App />)
+      expect(screen.getByTestId('session-tab-s2')).toBeInTheDocument()
+      expect(document.querySelector('.tab-rename-input')).toBeNull()
+    })
+
+    it('a second sidebar Rename on the same session after cancelling re-opens the editor', () => {
+      stateOverrides = { ...twoSessionState(), renameSession: vi.fn() }
+      render(<App />)
+      for (let i = 0; i < 2; i++) {
+        fireEvent.contextMenu(screen.getByTestId('session-item-s2'))
+        fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename' }))
+        const input = within(screen.getByTestId('session-tab-s2')).getByDisplayValue('Beta')
+        fireEvent.keyDown(input, { key: 'Escape' })
+        expect(document.querySelector('.tab-rename-input')).toBeNull()
+      }
+    })
+  })
+
   // #4796 — wiring guard for `useVoiceInput({ mode })`. Audit Tester #2
   // flagged that the chain `SettingsPanel.tsx -> updateInputSettings ->
   // inputSettings.voiceInputMode -> App.tsx selector -> useVoiceInput({ mode })`

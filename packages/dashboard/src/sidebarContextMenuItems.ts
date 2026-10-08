@@ -6,7 +6,7 @@
  * useMemo inside App.tsx now just calls this with the live dependencies.
  *
  * Per-branch items:
- *   - `session` — Duplicate Session, Copy transcript (#5547), Summarize & start
+ *   - `session` — Rename (#7329), Duplicate Session, Copy transcript (#5547), Summarize & start
  *     new session (#5547), Open in Finder (Tauri+cwd), Close Session
  *   - `repo`    — New Session Here, Summarize & start new session targeting the
  *     group's most-recent session (or one item per live session when several,
@@ -81,6 +81,12 @@ export interface BuildSidebarContextMenuItemsArgs {
    * (the session-row Close action must not destroy without confirmation).
    */
   confirmCloseSession: (sessionId: string) => void
+  /**
+   * #7329: start the inline rename editor for a session. The editor lives in
+   * the tab strip (SessionBar), so this only requests it; it is the same
+   * editor a double-click on the tab opens.
+   */
+  requestRenameSession: (sessionId: string) => void
 }
 
 export function buildSidebarContextMenuItems(
@@ -101,6 +107,7 @@ export function buildSidebarContextMenuItems(
     copySessionTranscript,
     summarizeAndCreateSession,
     confirmCloseSession,
+    requestRenameSession,
   } = args
 
   // Reveal helper that mirrors the App.tsx error-toast pattern so each
@@ -117,6 +124,11 @@ export function buildSidebarContextMenuItems(
     const session = sessions.find(s => s.sessionId === target.sessionId)
     if (!session) return []
     return [
+      {
+        id: 'rename',
+        label: 'Rename',
+        onClick: () => requestRenameSession(session.sessionId),
+      },
       {
         id: 'duplicate',
         label: 'Duplicate Session',

@@ -70,6 +70,7 @@ function makeArgs(
     copySessionTranscript: vi.fn(),
     summarizeAndCreateSession: vi.fn(),
     confirmCloseSession: vi.fn(),
+    requestRenameSession: vi.fn(),
     ...overrides,
   }
 }
@@ -289,6 +290,22 @@ describe('buildSidebarContextMenuItems', () => {
       expect(createSession).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'API', cwd: '/home/user/projects/api', worktree: true }),
       )
+    })
+
+    it('#7329 — Rename is the first item and requests an inline rename of that session', () => {
+      const requestRenameSession = vi.fn()
+      const session = makeSession({ sessionId: 's42' })
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'session', sessionId: 's42' },
+          sessions: [session],
+          requestRenameSession,
+        }),
+      )
+      expect(items[0]?.id).toBe('rename')
+      expect(items[0]?.label).toBe('Rename')
+      items[0]?.onClick?.()
+      expect(requestRenameSession).toHaveBeenCalledWith('s42')
     })
 
     it('Close calls confirmCloseSession (not destroySession directly)', () => {

@@ -1078,6 +1078,17 @@ a.dev-preview-chip__link:focus-visible {
   padding-top: 8px;
 }
 
+/* #7329 — touch hit area: on a coarse pointer the menu rows (now the only way
+ * to reach Rename from a touch/pen device) meet the 44px minimum. */
+@media (pointer: coarse) {
+  .session-context-menu-item {
+    min-height: 44px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+  }
+}
+
 .sidebar-session-dot {
   width: 6px;
   height: 6px;
