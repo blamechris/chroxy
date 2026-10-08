@@ -1187,6 +1187,15 @@ anything re-arms it per frame. And a threshold band is a precondition too: a
 guard that needs N pixels of movement is unreachable if something else resets the
 movement more often than the user can produce N.
 
+**Epilogue (`#7405`).** The per-frame loop is gone: the pin now runs on content
+change (a `ResizeObserver` on the rows plus a coalesced `MutationObserver` / `load`
+net), which removes the continuously-held `programmaticScrollRef` this entry turns
+on. The gesture-derived intent stays authoritative, and the pin re-reads the REF
+when it runs, not when it was scheduled — pinned by a test that handles a wheel and
+a row resize in one task, before React has re-rendered. When changing what *drives*
+a write loop, change what its tests treat as the trigger too: a scroll shim that
+grows `scrollHeight` with no DOM change models something a browser never does.
+
 ### 19. The test runner that reported fewer tests than it ran — `#7400`
 
 Every other entry here is a guard inside the repo. This one is the *instrument*:
