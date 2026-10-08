@@ -22,6 +22,12 @@ describe('chroxy service', () => {
     }
   })
 
+  it('service install --help documents --force (#7161)', async () => {
+    const r = await runCli(['service', 'install', '--help'], { home })
+    assert.equal(r.code, 0, `stderr: ${r.stderr}`)
+    assert.ok(/--force/.test(r.stdout), 'install --help must list --force')
+  })
+
   it('service status reports "Installed: No" on a fresh HOME', async () => {
     const r = await runCli(['service', 'status'], { home })
     // Status prints the banner and exits 0 even when not installed.

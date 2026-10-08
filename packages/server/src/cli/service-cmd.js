@@ -15,23 +15,17 @@ export function registerServiceCommand(program) {
     .description('Register Chroxy as a system daemon (launchd / systemd / Windows Task Scheduler)')
     .option('--cwd <path>', 'Working directory for Claude sessions')
     .option('--start-at-login', 'Start automatically on login')
+    .option('--force', 'Re-point an already-installed service at THIS working copy (#7161)')
     .action(async (options) => {
       const {
         getServicePaths,
         resolveNode22Path,
         resolveChroxyBin,
         resolveClaudeBin,
-        loadServiceState,
+        assertReinstallAllowed,
+        assertChroxyTreeReady,
         installService,
       } = await import('../service.js')
-
-      const existing = loadServiceState()
-      if (existing) {
-        console.error('Chroxy service is already installed.')
-        console.error(`  Service file: ${existing.servicePath}`)
-        console.error('  Run "chroxy service uninstall" first to remove it.')
-        process.exit(1)
-      }
 
       let nodePath
       try {
@@ -44,6 +38,24 @@ export function registerServiceCommand(program) {
       let chroxyBin
       try {
         chroxyBin = resolveChroxyBin()
+      } catch (err) {
+        console.error(`Error: ${err.message}`)
+        process.exit(1)
+      }
+
+      // #7161: an existing service is never re-pointed at this working copy
+      // without --force. Checked before the (slower) preflight and before any write.
+      try {
+        assertReinstallAllowed({ chroxyBin, force: options.force === true })
+      } catch (err) {
+        console.error(err.message)
+        process.exit(1)
+      }
+
+      // #7161: fail here, offline, if the target tree cannot start, rather than
+      // letting launchd KeepAlive discover it as a crash loop.
+      try {
+        assertChroxyTreeReady(chroxyBin)
       } catch (err) {
         console.error(`Error: ${err.message}`)
         process.exit(1)
@@ -76,6 +88,7 @@ export function registerServiceCommand(program) {
           claudeBin,
           cwd,
           startAtLogin,
+          force: options.force === true,
         })
 
         const paths = getServicePaths()
@@ -201,7 +214,7 @@ export function registerServiceCommand(program) {
     .command('status')
     .description('Show daemon status')
     .action(async () => {
-      const { getFullServiceStatus, getWindowsTaskStatus } = await import('../service.js')
+      const { getFullServiceStatus, getWindowsTaskStatus, inspectInstalledService } = await import('../service.js')
       const status = await getFullServiceStatus()
 
       console.log('\nChroxy Service Status\n')
@@ -213,6 +226,16 @@ export function registerServiceCommand(program) {
       }
 
       console.log('  Installed:  Yes')
+
+      // #7161: surface a service.json / wrapper disagreement instead of hiding it.
+      const target = inspectInstalledService()
+      const pinned = target.wrapperBin || target.recordedBin
+      if (pinned) console.log('  Runs from:  ' + pinned)
+      if (target.drift) {
+        console.log('  WARNING:    service.json records ' + target.recordedBin)
+        console.log('              but the wrapper execs  ' + target.wrapperBin)
+        console.log('              Re-run "chroxy service install --force" from the intended tree.')
+      }
 
       // On Windows, surface the scheduled task's registration/run state
       // (schtasks /Query /V) alongside the daemon-liveness (PID) check (#6647).
