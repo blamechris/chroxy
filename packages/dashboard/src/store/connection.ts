@@ -582,6 +582,30 @@ const EMPTY_TRANSCRIPT_VIEWER: TranscriptViewerState = {
 // requests (path-agnostic correlation), instead of tail-matching the path.
 let fileContentRequestNonce = 0;
 
+// #8485 — the ONE socket this store is currently speaking to (set when a socket
+// is built, cleared by `disconnect()`). The store's own `socket` field is written
+// at `auth_ok`, so it cannot answer "which socket is live" during a handshake,
+// and `connect()` / `disconnect()` retiring only that field left a socket
+// mid-handshake, or one whose handlers were only partly nulled, able to deliver
+// frames into the NEXT connection's state. `onmessage` drops any frame whose
+// socket is not this one, and `retireSocket` detaches the rest.
+let liveSocket: WebSocket | null = null;
+
+/**
+ * #8485 — detach every handler from a superseded socket and close it. Nulls all
+ * four (a socket still CONNECTING would otherwise open and send `auth`, and a
+ * closing one would otherwise run `onclose`'s reconnect against the new
+ * connection) BEFORE closing, so nothing the close itself fires reaches the store.
+ */
+function retireSocket(sock: WebSocket | null): void {
+  if (!sock) return;
+  sock.onopen = null;
+  sock.onclose = null;
+  sock.onerror = null;
+  sock.onmessage = null;
+  try { sock.close(); } catch { /* already closing */ }
+}
+
 // #5281 ③ PR 2 — one-shot pairing id for the next socket open. When set, the
 // auth handshake sends `{type:'pair', pairingId}` instead of `{type:'auth',
 // token}`; it's cleared right after that first send so a later reconnect uses
@@ -2788,14 +2812,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     const myAttemptId = connectionAttemptId;
 
-    // Close any existing socket first
+    // Close any existing socket first. #8485: the store's `socket` is only set at
+    // `auth_ok`, so also retire the live socket — one still mid-handshake is not
+    // in the store yet but must not deliver into this connection.
     const { socket: existing } = get();
-    if (existing) {
-      existing.onclose = null;
-      existing.onerror = null;
-      existing.onmessage = null;
-      existing.close();
-    }
+    retireSocket(existing);
+    if (liveSocket !== existing) retireSocket(liveSocket);
+    liveSocket = null;
     // #8268 — the daemon that served this page (or, in the desktop app, a loopback
     // daemon) is this machine's own process: an update restarts it for minutes, and
     // giving up there loses the session view after every update. Retry with no cap,
@@ -2966,6 +2989,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // leak a second pending timer (the key leak-prevention site).
     clearHandshakeTimer();
     const socket = new WebSocket(url);
+    liveSocket = socket;
 
     // #3624: shared reconnect scheduler used by both onclose and onerror.
     // Browsers fire `error` → `close` for the same transport drop, so without
@@ -3127,6 +3151,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
     setConnectionContext(socketCtx);
     socket.onmessage = (event) => {
+      // #8485 — a frame from a superseded socket (a switch, or a same-daemon
+      // reconnect whose old socket delivers late) must neither dispatch nor touch
+      // the NEW connection's encryption state: decrypting it below would advance
+      // `recvNonce` and the failure path would close the wrong socket.
+      if (socket !== liveSocket) return;
       let msg;
       try {
         msg = JSON.parse(event.data);
@@ -3383,11 +3412,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     failAllSchedulerRequests(SCHEDULER_DISCONNECT_ERROR);
     // #6999: ditto for any in-flight add_mcp_server / remove_mcp_server.
     clearPendingMcpServerOps();
+    // #8485: null ALL the handlers (not just onclose) and also retire a socket
+    // that never reached auth_ok — it is `liveSocket`, not the store's `socket`.
     const { socket } = get();
-    if (socket) {
-      socket.onclose = null;
-      socket.close();
-    }
+    retireSocket(socket);
+    if (liveSocket !== socket) retireSocket(liveSocket);
+    liveSocket = null;
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
     // #7592 — the module-level connection-scoped trackers, ONE helper shared

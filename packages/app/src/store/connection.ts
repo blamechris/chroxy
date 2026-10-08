@@ -415,6 +415,28 @@ const EMPTY_QUEUED: QueuedSessionMessage[] = [];
 export const selectQueuedMessages = (s: ConnectionState): QueuedSessionMessage[] =>
   activeSession(s)?.queuedMessages ?? EMPTY_QUEUED;
 
+// #8485 — the ONE socket this store is currently speaking to (set when a socket
+// is built, cleared by `disconnect()`). The store's own `socket` field is written
+// at `auth_ok`, so it cannot answer "which socket is live" during a handshake, and
+// `connect()` / `disconnect()` retiring only that field left a socket mid-handshake,
+// or one whose handlers were only partly nulled, able to deliver frames into the
+// NEXT connection's state. `onmessage` drops any frame whose socket is not this
+// one, and `retireSocket` detaches the rest. Dashboard parity (connection.ts).
+let liveSocket: WebSocket | null = null;
+
+/**
+ * #8485 — detach every handler from a superseded socket and close it. Nulls all
+ * four BEFORE closing, so nothing the close itself fires reaches the store.
+ */
+function retireSocket(sock: WebSocket | null): void {
+  if (!sock) return;
+  sock.onopen = null;
+  sock.onclose = null;
+  sock.onerror = null;
+  sock.onmessage = null;
+  try { sock.close(); } catch { /* already closing */ }
+}
+
 // Search request tracking — prevents stale timeout/response races
 let searchNonce = 0;
 let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -1058,14 +1080,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     const myAttemptId = connectionAttemptId;
 
-    // Close any existing socket first
+    // Close any existing socket first. #8485: the store's `socket` is only set at
+    // `auth_ok`, so also retire the live socket — one still mid-handshake is not
+    // in the store yet but must not deliver into this connection.
     const { socket: existing } = get();
-    if (existing) {
-      existing.onclose = null;
-      existing.onerror = null;
-      existing.onmessage = null;
-      existing.close();
-    }
+    retireSocket(existing);
+    if (liveSocket !== existing) retireSocket(liveSocket);
+    liveSocket = null;
     // #6286 — re-dialing over a still-`connected` phase (the resume/network
     // liveness paths, or switching servers while connected) is a RECONNECT, not
     // a fresh connect: `connected → connecting` is an illegal FSM exit and the
@@ -1277,6 +1298,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // this fresh attempt.
     clearHandshakeTimer();
     const socket = new WebSocket(url);
+    liveSocket = socket;
 
     // #3624 (ported from dashboard) — per-socket reconnect scheduler for both
     // onclose and onerror. A single transport drop fires `error` → `close` on
@@ -1420,6 +1442,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
     setConnectionContext(socketCtx);
     socket.onmessage = (event) => {
+      // #8485 — a frame from a superseded socket (a switch, or a same-daemon
+      // reconnect whose old socket delivers late) must neither dispatch nor touch
+      // the NEW connection's encryption state (decrypting it would advance
+      // `recvNonce`, and the failure path would close the wrong socket).
+      if (socket !== liveSocket) return;
       let msg;
       try {
         msg = JSON.parse(event.data);
@@ -1607,11 +1634,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // #5962 (#5721 parity) — user-initiated disconnect nulls socket.onclose
     // below, so the onclose handshake-timer clear never runs; clear it here.
     clearHandshakeTimer();
+    // #8485: null ALL the handlers (not just onclose) and also retire a socket
+    // that never reached auth_ok — it is `liveSocket`, not the store's `socket`.
     const { socket } = get();
-    if (socket) {
-      socket.onclose = null;
-      socket.close();
-    }
+    retireSocket(socket);
+    if (liveSocket !== socket) retireSocket(liveSocket);
+    liveSocket = null;
     // #3899: same warning-sweep as onclose — user-initiated disconnect
     // nulls socket.onclose above, so the onclose cleanup never runs
     // and any outstanding check-in chip would survive into the next

@@ -1324,6 +1324,31 @@ describe('SettingsPanel', () => {
       expect(refreshNotificationPrefs).toHaveBeenCalled()
     })
 
+    // #8485: keyed on the completed handshake, like the credentials effects above.
+    // A constant `isOpen` (Control Room Settings tab) plus capabilities that stay
+    // advertised across the switch used to leave the new daemon unasked.
+    it('asks once per completed handshake, and nothing while the connection is down', () => {
+      const refreshNotificationPrefs = vi.fn()
+      setMockState({ refreshNotificationPrefs })
+      const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshNotificationPrefs).toHaveBeenCalledTimes(1)
+
+      setMockState({ refreshNotificationPrefs, connectionPhase: 'reconnecting' })
+      rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshNotificationPrefs).toHaveBeenCalledTimes(1)
+
+      setMockState({ refreshNotificationPrefs, connectionPhase: 'connected' })
+      rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshNotificationPrefs).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not ask while the connection is down', () => {
+      const refreshNotificationPrefs = vi.fn()
+      setMockState({ refreshNotificationPrefs, connectionPhase: 'reconnecting' })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshNotificationPrefs).not.toHaveBeenCalled()
+    })
+
     it('renders only categories present in the snapshot — unknown server keys are surfaced too', () => {
       // The wire schema is permissive (z.record(string, boolean)) — if a
       // future server adds a category the UI doesn't know about, render it
