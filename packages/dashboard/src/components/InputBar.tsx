@@ -5,7 +5,7 @@
  * Supports file picker (@ trigger), attachment chips, slash command picker (/ trigger),
  * image paste/drag-drop (#1288), and image preview thumbnails (#1289).
  */
-import { useState, useEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent, type UIEvent } from 'react'
+import { useState, useEffect, useLayoutEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent, type UIEvent, type SyntheticEvent } from 'react'
 import { FilePicker, FILE_PICKER_DISPLAY_CAP, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
@@ -200,6 +200,20 @@ function isEditableElement(el: Element | null): boolean {
   return (el as HTMLElement).isContentEditable === true
 }
 
+// #8433 — the `@` file/resource trigger is the token AT THE CARET: scan back
+// from the caret to the nearest qualifying `@` (at the start, or after
+// whitespace), stopping at whitespace. Text after the caret never takes part,
+// so typing `@R` in the middle of a draft filters on `R`, not `R and more…`.
+// Returns the index of that `@`, or -1 when the caret is not inside one.
+function findAtTrigger(text: string, caret: number): number {
+  for (let i = Math.min(caret, text.length) - 1; i >= 0; i--) {
+    const ch = text[i]!
+    if (/\s/.test(ch)) return -1
+    if (ch === '@' && (i === 0 || /\s/.test(text[i - 1]!))) return i
+  }
+  return -1
+}
+
 export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, chatActivityState, queuedCount, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
@@ -222,6 +236,12 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
   const pttArmableRef = useRef(false)
   pttArmableRef.current = Boolean(voiceInput?.isAvailable) && !disabled && !voiceInput?.isRecording
   const [filePickerOpen, setFilePickerOpen] = useState(false)
+  // #8433 — last known caret, fed from onChange/onSelect (null = unknown, treated
+  // as the end of the value) and clamped at use because a controlled parent can
+  // replace the value (draft restore on a session switch) without any event.
+  const [caret, setCaret] = useState<number | null>(null)
+  // Caret to apply once the value we just wrote has been committed to the DOM.
+  const pendingCaretRef = useRef<{ value: string; caret: number } | null>(null)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -296,20 +316,15 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     textareaRef.current?.focus()
   }, [setValue])
 
-  // Find the last qualifying @ (at start or after whitespace)
-  const triggerAtIdx = useMemo(() => {
-    for (let i = value.length - 1; i >= 0; i--) {
-      if (value[i] === '@' && (i === 0 || /\s/.test(value[i - 1]!))) return i
-    }
-    return -1
-  }, [value])
+  // The qualifying @ nearest the caret (#8433) and the filter between it and the caret.
+  const effectiveCaret = Math.min(caret ?? value.length, value.length)
+  const triggerAtIdx = useMemo(() => findAtTrigger(value, effectiveCaret), [value, effectiveCaret])
 
-  // Extract filter text after @ trigger
   const fileFilter = useMemo(() => {
     if (!filePickerOpen) return ''
     if (triggerAtIdx < 0) return ''
-    return value.slice(triggerAtIdx + 1)
-  }, [filePickerOpen, value, triggerAtIdx])
+    return value.slice(triggerAtIdx + 1, effectiveCaret)
+  }, [filePickerOpen, value, triggerAtIdx, effectiveCaret])
 
   // Filtered files for keyboard navigation bounds
   const filteredFiles = useMemo(() => {
@@ -337,15 +352,33 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
   const visibleFileCount = Math.min(filteredFiles.length, FILE_PICKER_DISPLAY_CAP)
   const pickerItemCount = visibleFileCount + filteredResources.length
 
+  // Replaces only the token under the caret (the `@` through the end of that
+  // whitespace-delimited word) and parks the caret right after the inserted text.
   const insertAtTrigger = useCallback((text: string) => {
-    if (triggerAtIdx >= 0) {
-      const before = value.slice(0, triggerAtIdx)
-      const afterAt = value.slice(triggerAtIdx + 1)
-      const nextWs = afterAt.search(/\s/)
-      const suffix = nextWs === -1 ? '' : afterAt.slice(nextWs)
-      setValue(before + text + (suffix || ' '))
-    }
-  }, [value, triggerAtIdx, setValue])
+    if (triggerAtIdx < 0) return
+    const before = value.slice(0, triggerAtIdx)
+    const afterCaret = value.slice(effectiveCaret)
+    const nextWs = afterCaret.search(/\s/)
+    const suffix = nextWs === -1 ? '' : afterCaret.slice(nextWs)
+    const next = before + text + (suffix || ' ')
+    // With no text after the token a trailing space is added; the caret sits
+    // after it (the end), as before. Otherwise it sits right after the path.
+    const nextCaret = before.length + text.length + (suffix ? 0 : 1)
+    pendingCaretRef.current = { value: next, caret: nextCaret }
+    setValue(next)
+    setCaret(nextCaret)
+    textareaRef.current?.focus()
+  }, [value, triggerAtIdx, effectiveCaret, setValue])
+
+  // Apply the caret once the new value has reached the textarea. Runs after the
+  // commit (controlled parent included), unlike a call made inside the handler.
+  useLayoutEffect(() => {
+    const pending = pendingCaretRef.current
+    if (!pending) return
+    pendingCaretRef.current = null
+    const t = textareaRef.current
+    if (t && t.value === pending.value) t.setSelectionRange(pending.caret, pending.caret)
+  }, [value])
 
   const selectFile = useCallback((path: string) => {
     insertAtTrigger(path)
@@ -455,14 +488,14 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, onSend, dedupedAttachments, canSubmit])
+  }, [value, onSend, dedupedAttachments, canSubmit, setValue])
 
   const selectCommand = useCallback((name: string) => {
     setValue(`/${name} `)
     setPickerOpen(false)
     setSelectedIndex(0)
     textareaRef.current?.focus()
-  }, [])
+  }, [setValue])
 
   const closePicker = useCallback(() => {
     setPickerOpen(false)
@@ -962,24 +995,18 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
       }
     }
 
-    // Detect @ trigger: find last @ that's at start or after whitespace
-    if (filePickerFiles !== undefined && newValue.includes('@')) {
-      let foundAt = false
-      for (let i = newValue.length - 1; i >= 0; i--) {
-        if (newValue[i] === '@' && (i === 0 || /\s/.test(newValue[i - 1]!))) {
-          foundAt = true
-          break
-        }
-      }
-      if (foundAt && !filePickerOpen) {
-        setFilePickerOpen(true)
-        setFileSelectedIndex(0)
-        onFileTrigger?.()
-      }
+    // Detect @ trigger: the qualifying @ at the caret (#8433)
+    const caretNow = e.target.selectionStart ?? newValue.length
+    setCaret(caretNow)
+    const atCaret = findAtTrigger(newValue, caretNow) >= 0
+    if (filePickerFiles !== undefined && atCaret && !filePickerOpen) {
+      setFilePickerOpen(true)
+      setFileSelectedIndex(0)
+      onFileTrigger?.()
     }
 
-    // Close file picker if @ is removed
-    if (filePickerOpen && !newValue.includes('@')) {
+    // Close file picker once the caret is no longer inside an @ token
+    if (filePickerOpen && !atCaret) {
       setFilePickerOpen(false)
       setFileSelectedIndex(0)
     }
@@ -1003,6 +1030,18 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
       : outerHeight - paddingY - borderY
     el.style.height = assignedHeight + 'px'
   }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger, historyIndex, userMessageHistory, setValue])
+
+  // #8433 — caret moves without an edit (arrows, click): keep the filter in step
+  // and close the picker once the caret leaves its @ token. Reads the live
+  // textarea value, not a render closure that may not have caught up yet.
+  const handleSelect = useCallback((e: SyntheticEvent<HTMLTextAreaElement>) => {
+    const { value: text, selectionStart } = e.currentTarget
+    setCaret(selectionStart)
+    if (filePickerOpen && findAtTrigger(text, selectionStart) < 0) {
+      setFilePickerOpen(false)
+      setFileSelectedIndex(0)
+    }
+  }, [filePickerOpen])
 
   // Merge voice transcript into input value via effect (not during render)
   const prevTranscriptRef = useRef('')
@@ -1283,6 +1322,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
           ref={textareaRef}
           value={value}
           onChange={handleChange}
+          onSelect={handleSelect}
           onKeyDown={handleKeyDown}
           onKeyUp={handleControlPttKeyUp}
           onBlur={handleControlPttBlur}
