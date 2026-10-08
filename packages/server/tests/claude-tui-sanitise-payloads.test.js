@@ -132,8 +132,36 @@ describe('ClaudeTuiSession hook payloads take the shared redaction floor (#8373)
       const [q] = events[0].questions
       assert.equal(typeof q.question, 'string', 'the question text field is still there to render')
       assert.equal(q.options.length, 1)
-      assert.equal(typeof q.options[0].label === 'string' && q.options[0].label.length > 0, true, 'the option keeps a label to answer with')
+      assert.equal(q.options[0].label, 'A', 'an option whose label + description overflow shows its label, not a JSON blob')
       assert.ok(JSON.stringify(events[0]).length < 60 * 1024)
+    })
+
+    it('keeps multiSelect and header when the question text alone is over the cap, and still arms the denied-shape reaper', () => {
+      const events = []
+      session.on('user_question', (e) => events.push(e))
+      askQuestion('toolu_q5b', {
+        questions: [{
+          // The token starts just inside the scan bound, so a clip made before the
+          // redaction would leave its front half behind.
+          question: 'word '.repeat(1636) + SECRET + ' tail ' + 'word '.repeat(60 * 1024),
+          header: 'Pick any',
+          multiSelect: true,
+          options: [{ label: 'A' }, { label: 'B' }],
+        }],
+      })
+      const [q] = events[0].questions
+      assert.equal(q.multiSelect, true, 'multiSelect survives the overflow')
+      assert.equal(q.header, 'Pick any', 'the header survives, sanitised')
+      assert.ok(q.question.startsWith('word word') && q.question.length < 12 * 1024, 'the question text is clipped, not dropped')
+      assert.ok(!JSON.stringify(events[0]).includes('sk-ant-'), 'no piece of the token survives the clip')
+      assert.ok(session._deniedQuestionReapers.has('toolu_q5b'), 'a multi-select question is a denied shape, so its reaper is armed')
+    })
+
+    it('shows a readable placeholder, not nothing, when an over-cap question text has no whitespace to cut at', () => {
+      const events = []
+      session.on('user_question', (e) => events.push(e))
+      askQuestion('toolu_q5c', { questions: [{ question: 'x'.repeat(200 * 1024), options: [{ label: 'A' }] }] })
+      assert.equal(events[0].questions[0].question, '[too large to display]')
     })
 
     it('does not keep a raw copy for answer routing or the pending-question replay', () => {
@@ -195,6 +223,38 @@ describe('ClaudeTuiSession hook payloads take the shared redaction floor (#8373)
       const entry = session._pendingUserAnswers.get('toolu_q9')
       assert.ok(entry.options.some((o) => o.label === shown[0]), 'the label a client sends back is found in the routing entry')
       assert.ok(!shown[0].includes(SECRET_4))
+    })
+  })
+
+  describe('options that redact to the same label', () => {
+    const SECRET_A = 'sk-ant-api03-' + 'E'.repeat(48)
+    const SECRET_B = 'sk-ant-api03-' + 'F'.repeat(48)
+
+    it('gives each option a distinct label, so the pick that comes back routes by position', async () => {
+      const events = []
+      session.on('user_question', (e) => events.push(e))
+      askQuestion('toolu_dup', {
+        questions: [{
+          question: 'Which key?',
+          options: [{ label: SECRET_A }, { label: SECRET_B }, { label: 'None' }],
+        }],
+      })
+      const labels = events[0].questions[0].options.map((o) => o.label)
+      assert.equal(new Set(labels).size, 3, `labels are unique: ${JSON.stringify(labels)}`)
+      assert.ok(!labels.join('|').includes('sk-ant-'))
+
+      const writes = []
+      session._term = { write: (data) => { writes.push(data) }, kill: () => {} }
+      await session.respondToQuestion(labels[1], undefined, 'toolu_dup')
+
+      assert.equal(writes[1], '2', 'the second option is driven as "2", not "1"')
+    })
+
+    it('leaves raw labels that were already identical alone', () => {
+      const events = []
+      session.on('user_question', (e) => events.push(e))
+      askQuestion('toolu_dup2', { questions: [{ question: 'Q', options: [{ label: 'Same' }, { label: 'Same' }] }] })
+      assert.deepEqual(events[0].questions[0].options.map((o) => o.label), ['Same', 'Same'])
     })
   })
 
