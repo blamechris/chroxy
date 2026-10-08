@@ -196,10 +196,13 @@ export class SessionMessageHistory extends EventEmitter {
    * downstream consumers that sort by timestamp stay monotonic without
    * pretending the tool completed "now".
    *
-   * #8336: a `user_question` entry whose toolUseId is one of the swept
-   * `tool_start`s is returned as a COPY carrying `interrupted: true` (the
-   * question was cut off, not answered), so a replaying client can say so
-   * instead of stamping it "(resolved)". Other entries are passed through.
+   * #8336: a `user_question` entry for one of the swept `tool_start`s (matched
+   * on its `sourceToolUseId` when it has one, else its `toolUseId`) is returned
+   * as a COPY carrying `interrupted: true` (the question was cut off, not
+   * answered), so a replaying client can say so instead of stamping it
+   * "(resolved)". A second marked copy is appended at the END of the history so
+   * that a delta replay for a client whose cursor is already past the question
+   * still delivers the mark. Other entries are passed through.
    *
    * Safe to call on:
    *   - empty / non-array input (returns the input unchanged)
@@ -234,19 +237,22 @@ export class SessionMessageHistory extends EventEmitter {
         interruptedIds.add(entry.toolUseId)
       }
     }
+    // #8336: the marked copies to re-append at the tail, see below.
+    const redelivered = []
     for (const rawEntry of history) {
       // `user_question` is copied, never mutated: the input array is the
       // caller's, and the contract above says it is not modified. The set was
       // collected up front, so the question is marked whichever side of its
-      // tool_start it was recorded on.
-      const entry = (
-        rawEntry
-        && rawEntry.type === 'user_question'
-        && typeof rawEntry.toolUseId === 'string'
-        && interruptedIds.has(rawEntry.toolUseId)
-      )
+      // tool_start it was recorded on. A question names its tool by
+      // `sourceToolUseId` when it has one (SDK, BYOK: `toolUseId` is chroxy's
+      // own `ask-...` id there), else by `toolUseId` itself (CLI, TUI).
+      const questionToolId = rawEntry && rawEntry.type === 'user_question'
+        ? (typeof rawEntry.sourceToolUseId === 'string' ? rawEntry.sourceToolUseId : rawEntry.toolUseId)
+        : undefined
+      const entry = (typeof questionToolId === 'string' && interruptedIds.has(questionToolId))
         ? { ...rawEntry, interrupted: true }
         : rawEntry
+      if (entry !== rawEntry) redelivered.push({ ...entry })
       out.push(entry)
       if (
         entry
@@ -282,6 +288,19 @@ export class SessionMessageHistory extends EventEmitter {
         resolved.add(entry.toolUseId)
       }
     }
+    // #8336: the marked question is ALSO appended as a fresh entry at the tail.
+    // Marking it in place changes an entry a client may already be past: the
+    // restore renumbers history from 1, a reconnecting client's cursor is
+    // honoured when it falls inside the new range, and the delta replay then
+    // sends only what lies past it. A client whose cursor sits beyond the
+    // question's (shifted) position would never hear that it was cut off, and
+    // its replay-end sweep would stamp the card "(resolved)". A tail entry lies
+    // past every cursor the previous run could have issued (the restore adds at
+    // least this entry), so it always arrives. The client collapses it onto the
+    // card it holds (same `toolUseId`, same questions), so nobody sees two; a
+    // client rebuilding from scratch gets the question in place from the marked
+    // entry above and the copy merges onto it.
+    for (const copy of redelivered) out.push(copy)
     return out
   }
 
@@ -461,6 +480,13 @@ export class SessionMessageHistory extends EventEmitter {
           type: 'user_question',
           toolUseId: data.toolUseId,
           questions: data.questions,
+          // #8336: the provider's id for the AskUserQuestion tool call, when it
+          // differs from `toolUseId` (the SDK and BYOK route the answer on a
+          // chroxy-minted `ask-...` id). It is how the restore-time sweep finds
+          // the `tool_start` this question belongs to.
+          ...(typeof data.sourceToolUseId === 'string' && data.sourceToolUseId.length > 0
+            ? { sourceToolUseId: data.sourceToolUseId }
+            : {}),
           timestamp: Date.now(),
         }, sessionId)
         break

@@ -137,6 +137,7 @@ import {
   type QueuedMessagesBuilder,
   // --- user_question (#5618) — byte-identical parse + append + notify ---
   handleUserQuestion,
+  OTHER_OPTION_VALUE,
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
   handleMultiQuestionIntervention,
   applyInterventionBuilder,
@@ -172,6 +173,7 @@ import { handleRawOutput } from './handlers/stream'
 // non-decision value of `answered` a re-delivery is allowed to clear.
 import {
   noteLivePromptDuringReplay,
+  wasPromptLiveDuringReplay,
   replayDedupCache,
   REPLAY_RESOLVED_PLACEHOLDER,
   QUESTION_INTERRUPTED_PLACEHOLDER,
@@ -2108,6 +2110,35 @@ function dispatchCheckpointList<S extends DispatchSessionBase>(
 }
 
 /**
+ * What a person sees of a question form: each question's text, its option
+ * labels and whether it is multi-select. The synthetic "Other" sentinel the
+ * normalizer appends is left out, so a card built before it existed (or by a
+ * client that dropped it) still matches.
+ */
+function questionSignature(questions: unknown): string | null {
+  if (!Array.isArray(questions)) return null
+  return JSON.stringify(
+    questions.map((q) => {
+      const qq = (q ?? {}) as { question?: unknown; options?: unknown; multiSelect?: unknown }
+      const options = Array.isArray(qq.options) ? qq.options : []
+      return [
+        qq.question,
+        options
+          .filter((o) => (o as { value?: unknown })?.value !== OTHER_OPTION_VALUE)
+          .map((o) => (o as { label?: unknown })?.label),
+        qq.multiSelect === true,
+      ]
+    }),
+  )
+}
+
+/** Do two prompts ask the same thing? See {@link questionSignature}. */
+function sameQuestions(a: unknown, b: unknown): boolean {
+  const sa = questionSignature(a)
+  return sa !== null && sa === questionSignature(b)
+}
+
+/**
  * `user_question` (#5618) — append the question prompt to its (resolved)
  * session, falling back to the global log, then raise a background-session
  * notification. Byte-identical between the two clients' switches: both parsed
@@ -2199,9 +2230,21 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
       // The view is either the array itself or a tail slice of it, so the
       // difference in length IS the offset back into `ss.messages`.
       const offset = ss.messages.length - searchable.length
+      // Identity. A LIVE re-send is matched on `toolUseId` alone (#7457: the
+      // same id IS the same question, and a re-emitting model may reword it).
+      // A REPLAYED copy must also carry the same questions (#8336): a replay is
+      // a rebuild of the whole history, where two DIFFERENT questions that
+      // happen to share an id would otherwise collapse into the first and the
+      // second would vanish. The server mints `ask-<uuid>-<n>-<ms>` per
+      // PermissionManager and providers mint their own tool ids, so a clash is
+      // not expected -- but a dropped question is silent and unrecoverable,
+      // while one extra card is not, so the replayed branch pays for the check.
       const found = hasToolUseId
         ? searchable.findIndex(
-            (m) => m.type === 'prompt' && m.toolUseId === toolUseId,
+            (m) =>
+              m.type === 'prompt' &&
+              m.toolUseId === toolUseId &&
+              (!deliveredByReplay || sameQuestions(m.questions, chatMessage.questions)),
           )
         : -1
       const idx = found === -1 ? -1 : found + offset
@@ -2215,9 +2258,16 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         // The one thing a replayed copy may add is the server's verdict that the
         // question was cut off, and only over a bubble that carries no decision
         // (unanswered, or the sweep's placeholder).
+        //
+        // Not over a bubble the live ledger vouches for (#7420): a copy that
+        // arrived LIVE inside this replay window is evidence the question is
+        // pending, and a replayed "interrupted" is older than that. The
+        // post-replay `resendPendingQuestions` frame would repair it, but the
+        // answer controls would be gone until it landed.
         if (
           chatMessage.answered === QUESTION_INTERRUPTED_PLACEHOLDER &&
-          (heldAnswered === undefined || heldAnswered === REPLAY_RESOLVED_PLACEHOLDER)
+          (heldAnswered === undefined || heldAnswered === REPLAY_RESOLVED_PLACEHOLDER) &&
+          !wasPromptLiveDuringReplay(sessionId, held.id)
         ) {
           const next = ss.messages.slice()
           next[idx] = { ...held, answered: QUESTION_INTERRUPTED_PLACEHOLDER }

@@ -856,6 +856,52 @@ describe('shared dispatch table', () => {
         }
       })
 
+      // Codex round 1 on #8360: identity is the id AND the questions. A full
+      // replay is a rebuild of the whole history, so two DIFFERENT questions that
+      // share an id must both survive it (before #8336 both appended).
+      it('a full replay holding two different questions under one id keeps both (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+        dispatch(env, { type: 'user_question', sessionId: 's1', toolUseId: 'ask-1', questions: [{ question: 'First turn?' }], historySeq: 1 } as never)
+        dispatch(env, { type: 'user_question', sessionId: 's1', toolUseId: 'ask-1', questions: [{ question: 'Second turn?' }], historySeq: 4 } as never)
+        expect(env.sessions.s1.messages.map((m) => m.content)).toEqual(['First turn?', 'Second turn?'])
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      it('the same question delivered twice in one full replay still collapses (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+        for (const historySeq of [3, 9]) {
+          dispatch(env, {
+            type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }], historySeq, interrupted: true,
+          } as never)
+        }
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0].answered).toBe('(interrupted)')
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      // Codex round 1 on #8360 (nonblocking): `start -> live Q -> stale replay Q
+      // -> end`. The ledger (#7420) says the question arrived live inside this
+      // window; a replayed "interrupted" is older evidence and must not take its
+      // answer controls away.
+      it('a replayed interrupted copy does not mark a question the ledger saw arrive live (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+        dispatch(env, { type: 'user_question', sessionId: 's1', toolUseId: 'ask-1', questions: [{ question: 'Which approach?' }] } as never)
+        dispatch(env, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }], historySeq: 7, interrupted: true,
+        } as never)
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0].answered).toBeUndefined()
+        resetReplayReconcile({ clearCursors: true })
+      })
+
       // #7508 F2 — the supersede must never reach into the PRE-BASELINE PREFIX.
       //
       // During a full rebuild `reconcileReplayEnd` swaps in `messages.slice(base)`,

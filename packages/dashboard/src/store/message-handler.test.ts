@@ -5328,6 +5328,38 @@ describe('dashboard message-handler dispatch', () => {
       expect(messagesOf().filter((m: any) => m.type === 'tool_use')).toHaveLength(1)
     })
 
+    // Codex round 1 on #8360: a tab whose cursor is already past the question
+    // is sent only the entries beyond it. The server re-appends the marked
+    // question at the tail, so that is all this tab receives of it.
+    it('a tab whose cursor is past the question hears the verdict from the tail copy alone', () => {
+      seed([heldToolRow(), heldCard()])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: false, latestSeq: 7 }, ctx() as any)
+      handleMessage(
+        { type: 'user_question', toolUseId: 'Q', questions, timestamp: 11, interrupted: true, sessionId: 's1', historySeq: 7 } as any,
+        ctx() as any,
+      )
+      handleMessage({ type: 'history_replay_end', sessionId: 's1', latestSeq: 7 }, ctx() as any)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(interrupted)')
+      expect(cards()[0].id).toBe('question-live')
+    })
+
+    it('a reloaded tab sent both the in-place entry and the tail copy still shows one card', () => {
+      seed([])
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true, latestSeq: 6 }, ctx() as any)
+      for (const historySeq of [3, 6]) {
+        handleMessage(
+          { type: 'user_question', toolUseId: 'Q', questions, timestamp: 11, interrupted: true, sessionId: 's1', historySeq } as any,
+          ctx() as any,
+        )
+      }
+      handleMessage({ type: 'history_replay_end', sessionId: 's1', latestSeq: 6 }, ctx() as any)
+
+      expect(cards()).toHaveLength(1)
+      expect(cards()[0].answered).toBe('(interrupted)')
+    })
+
     it('a reloaded tab (full rebuild): one card, marked interrupted', () => {
       seed([])
       replayAfterRestart(true)

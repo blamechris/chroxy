@@ -693,11 +693,14 @@ export class PermissionManager extends EventEmitter {
    *   echo back via `updatedPermissions` when the user picks "allow
    *   always". Per the Agent SDK 'Always allow' flow, these are the
    *   correct shape of rule to persist for this tool in this session.
+   * @param {string} [sourceToolUseId] - #8336: the PROVIDER's id for this
+   *   tool call (the SDK's `toolUseID`, BYOK's `block.id`) -- the id its
+   *   `tool_start` is recorded under. Only AskUserQuestion reads it.
    * @returns {Promise<{behavior: string, updatedInput?: Object, message?: string, updatedPermissions?: Array}>}
    */
-  handlePermission(toolName, input, signal, permissionMode, suggestions = undefined) {
+  handlePermission(toolName, input, signal, permissionMode, suggestions = undefined, sourceToolUseId = undefined) {
     if (toolName === 'AskUserQuestion') {
-      return this._handleAskUserQuestion(input, signal)
+      return this._handleAskUserQuestion(input, signal, sourceToolUseId)
     }
 
     // #6794 — protected-path floor. A path-carrying tool aimed at a protected
@@ -857,7 +860,7 @@ export class PermissionManager extends EventEmitter {
    * Emits user_question and waits for respondToQuestion() to deliver the
    * user's answer, then resolves with structured updatedInput.
    */
-  _handleAskUserQuestion(input, signal) {
+  _handleAskUserQuestion(input, signal, sourceToolUseId = undefined) {
     return new Promise((resolve) => {
       const questionInput = input || {}
       this._waitingForAnswer = true
@@ -872,9 +875,18 @@ export class PermissionManager extends EventEmitter {
       this._pendingUserAnswer = { resolve, input: questionInput, toolUseId }
       this._logInfo(`AskUserQuestion detected (${toolUseId})`)
 
+      // #8336: `toolUseId` here is chroxy's own `ask-...` id (what the answer
+      // routes on), which is NOT the id the provider recorded the
+      // AskUserQuestion `tool_start` under. Carry the provider's id alongside
+      // it so the restore-time sweep can tell which question a swept tool start
+      // belongs to. Never on the live wire: the event normalizer picks
+      // `toolUseId` and `questions` only.
       this.emit('user_question', {
         toolUseId,
         questions: questionInput.questions,
+        ...(typeof sourceToolUseId === 'string' && sourceToolUseId.length > 0
+          ? { sourceToolUseId }
+          : {}),
       })
 
       // Auto-deny on abort signal
