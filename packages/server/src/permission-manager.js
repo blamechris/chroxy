@@ -926,6 +926,13 @@ export class PermissionManager extends EventEmitter {
   _handleAskUserQuestion(input, signal, sourceToolUseId = undefined) {
     return new Promise((resolve) => {
       const questionInput = input || {}
+      // #8470: this manager holds ONE pending question. A second one arriving
+      // while the first is still open used to overwrite the slot, so the first
+      // `canUseTool` promise never settled (the tool call hung until the turn
+      // ended), its timer kept running against the NEW question, and its card
+      // read pending on every client. End it as a deny, tell the clients, and
+      // only then take the slot.
+      this._supersedePendingQuestion()
       this._waitingForAnswer = true
       const toolUseId = `ask-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
       // #3975: stash toolUseId on the pending entry so clearAll() can
@@ -935,7 +942,8 @@ export class PermissionManager extends EventEmitter {
       // questionSessionMap entry — small leak (~80 bytes) per
       // message-completion-while-question-pending event, bounded only by
       // session_destroyed cleanup.
-      this._pendingUserAnswer = { resolve, input: questionInput, toolUseId, sourceToolUseId }
+      const entry = { resolve, input: questionInput, toolUseId, sourceToolUseId }
+      this._pendingUserAnswer = entry
       this._logInfo(`AskUserQuestion detected (${toolUseId})`)
       // #8336: without the provider's id, the restore-time sweep cannot tell
       // which `tool_start` this question belongs to, so a restart mid-question
@@ -965,7 +973,10 @@ export class PermissionManager extends EventEmitter {
       // Auto-deny on abort signal
       if (signal) {
         signal.addEventListener('abort', () => {
-          if (this._pendingUserAnswer) {
+          // #8470: identity, not "something is pending". A superseded question's
+          // listener stays on the (shared) turn signal; without this it would
+          // cancel the question that replaced it.
+          if (this._pendingUserAnswer === entry) {
             this._clearQuestionTimer()
             this._pendingUserAnswer = null
             this._waitingForAnswer = false
@@ -987,6 +998,24 @@ export class PermissionManager extends EventEmitter {
         }
       }, this._timeoutMs)
     })
+  }
+
+  /**
+   * #8470: end the pending AskUserQuestion, if any, because a newer one is about
+   * to replace it. Resolves its `canUseTool` promise as a deny (the tool call
+   * ends and the agent hears why), stops its timer, and emits the question
+   * variant of `permission_resolved` with `reason: 'superseded'` so the clients
+   * stop showing it as waiting. Not an answer: nothing is recorded as answered.
+   */
+  _supersedePendingQuestion() {
+    const superseded = this._pendingUserAnswer
+    if (!superseded) return
+    this._clearQuestionTimer()
+    this._pendingUserAnswer = null
+    this._waitingForAnswer = false
+    this._logInfo(`Question ${superseded.toolUseId} superseded by a newer question`)
+    superseded.resolve({ behavior: 'deny', message: 'Superseded by a newer question' })
+    this.emit('permission_resolved', { toolUseId: superseded.toolUseId, decision: 'deny', reason: 'superseded' })
   }
 
   /**

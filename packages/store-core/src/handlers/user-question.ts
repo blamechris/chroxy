@@ -14,7 +14,13 @@
 import type { ChatMessage, ChatMessageQuestion } from '../types'
 import { nextMessageId } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
-import { QUESTION_INTERRUPTED_PLACEHOLDER } from '../replay-reconcile'
+import {
+  QUESTION_INTERRUPTED_PLACEHOLDER,
+  QUESTION_SUPERSEDED_PLACEHOLDER,
+  QUESTION_NOT_DELIVERED_PLACEHOLDER,
+  REPLAY_RESOLVED_PLACEHOLDER,
+  isQuestionNoAnswerToken,
+} from '../replay-reconcile'
 
 // ---------------------------------------------------------------------------
 // user_question
@@ -197,6 +203,113 @@ export function handleUserQuestion(
   const sessionId = msgSessionId ?? activeSessionId
   const questionText = questionContent.slice(0, 60)
   return { sessionId, chatMessage, questionText }
+}
+
+// ---------------------------------------------------------------------------
+// A question that ended with no answer (#8470)
+//
+// Two server signals end a card without anyone having answered it:
+//   - `permission_resolved { toolUseId, reason: 'superseded' }`, broadcast to the
+//     session: a newer question replaced this one, so it is no longer waiting.
+//   - `error { code: 'QUESTION_NOT_DELIVERED', toolUseId }`, sent to the ANSWERING
+//     client only: it marked the card answered when it sent, and the server says
+//     the answer reached nothing.
+// Both clients apply them through `markQuestionEnded`, and render the result
+// through `questionEndedNotice`, so the two cannot disagree on either.
+// ---------------------------------------------------------------------------
+
+/** The `error` frame code the server sends when it drops a question answer. */
+export const QUESTION_NOT_DELIVERED_CODE = 'QUESTION_NOT_DELIVERED'
+
+/**
+ * Parse a `QUESTION_NOT_DELIVERED` error frame: the question id the answer was
+ * for, or `null` when the frame is not that error or carries no id.
+ */
+export function handleQuestionNotDelivered(
+  msg: Record<string, unknown>,
+): { toolUseId: string } | null {
+  if (msg.code !== QUESTION_NOT_DELIVERED_CODE) return null
+  const toolUseId = msg.toolUseId
+  if (typeof toolUseId !== 'string' || toolUseId.length === 0) return null
+  return { toolUseId }
+}
+
+/**
+ * End a question card without an answer. Returns a new messages array, or `null`
+ * when no card changed (no such question, or the card already says something
+ * truer), so a caller writes the store only on a change.
+ *
+ *   - `superseded`: only a card still waiting (no `answered`, or the replay
+ *     sweep's '(resolved)') changes. A card that holds a real answer keeps it: the
+ *     person did answer it; and one already ended keeps its first reason.
+ *   - `notDelivered`: the card DOES hold an answer (the client marked it on send);
+ *     that is the thing being retracted. Cleared with it: `answeredAt` and the
+ *     structured `answeredAnswers`, which would otherwise render the lost answer.
+ *     A card already ended without an answer keeps its first reason.
+ *
+ * Only a question card matches: `type === 'prompt'`, no `requestId` (a permission
+ * prompt), and the `toolUseId` the question was raised under.
+ */
+export function markQuestionEnded(
+  messages: ChatMessage[],
+  toolUseId: string,
+  kind: 'superseded' | 'notDelivered',
+): ChatMessage[] | null {
+  let changed = false
+  const next = messages.map((m) => {
+    if (m.type !== 'prompt' || m.requestId || m.toolUseId !== toolUseId) return m
+    if (isQuestionNoAnswerToken(m.answered)) return m
+    if (kind === 'superseded' && m.answered != null && m.answered !== REPLAY_RESOLVED_PLACEHOLDER) return m
+    changed = true
+    const { answeredAnswers: _dropped, ...rest } = m
+    return {
+      ...rest,
+      answered: kind === 'superseded' ? QUESTION_SUPERSEDED_PLACEHOLDER : QUESTION_NOT_DELIVERED_PLACEHOLDER,
+      answeredAt: undefined,
+    }
+  })
+  return changed ? next : null
+}
+
+/**
+ * {@link markQuestionEnded} over every session a client holds: the card may sit in
+ * ANY session's transcript (a question for a background session, an answer sent
+ * from another tab). Returns the session that changed and its new messages, or
+ * `null` when no session holds a card that needed the change. The caller owns the
+ * store write, since the two clients' stores are shaped differently.
+ */
+export function endQuestionInSessions(
+  sessions: Record<string, { messages: ChatMessage[] } | undefined>,
+  toolUseId: string,
+  kind: 'superseded' | 'notDelivered',
+): { sessionId: string; messages: ChatMessage[] } | null {
+  for (const sessionId of Object.keys(sessions)) {
+    const ss = sessions[sessionId]
+    if (!ss) continue
+    const messages = markQuestionEnded(ss.messages, toolUseId, kind)
+    if (messages) return { sessionId, messages }
+  }
+  return null
+}
+
+/**
+ * What a card whose `answered` is one of the no-answer tokens says, or `null` for
+ * every other value (a real answer, a pending card, the replay sweep's
+ * '(resolved)'). `kind` is a stable key for test ids / styling.
+ */
+export function questionEndedNotice(
+  answered: unknown,
+): { kind: 'interrupted' | 'superseded' | 'notDelivered'; label: string } | null {
+  if (answered === QUESTION_INTERRUPTED_PLACEHOLDER) {
+    return { kind: 'interrupted', label: 'Interrupted — chroxy restarted before this was answered' }
+  }
+  if (answered === QUESTION_SUPERSEDED_PLACEHOLDER) {
+    return { kind: 'superseded', label: 'Replaced by a newer question — not answered' }
+  }
+  if (answered === QUESTION_NOT_DELIVERED_PLACEHOLDER) {
+    return { kind: 'notDelivered', label: 'Answer not delivered — this question was no longer waiting' }
+  }
+  return null
 }
 
 // ---------------------------------------------------------------------------

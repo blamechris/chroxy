@@ -108,6 +108,11 @@ export function handlePermissionRequest(
  */
 export interface PermissionResolvedPayload {
   requestId: string | null
+  /**
+   * #8470: the resolved QUESTION's id, on the question variant (a question a newer
+   * one superseded). Mutually exclusive with `requestId` on the wire.
+   */
+  toolUseId: string | null
   decision: string | null
   /**
    * #8374: why the server resolved the prompt (`'user'`, `'timeout'`, `'stopped'`, `'aborted'`,
@@ -123,6 +128,7 @@ export function handlePermissionResolved(
 ): PermissionResolvedPayload {
   return {
     requestId: parseRawStringField(msg, 'requestId'),
+    toolUseId: parseRawStringField(msg, 'toolUseId'),
     decision: parseRawStringField(msg, 'decision'),
     reason: parseRawStringField(msg, 'reason'),
   }
@@ -143,6 +149,13 @@ export const PERMISSION_STOPPED_REASON = 'stopped'
  * the meaning history gives it (`session-manager.js` journals it `expired`).
  */
 export const PERMISSION_ABORTED_REASON = 'aborted'
+
+/**
+ * #8470: the `permission_resolved` reason for a QUESTION a newer question
+ * replaced. Unlike the two above it is acted on only on the question variant
+ * (`toolUseId`, no `requestId`).
+ */
+export const QUESTION_SUPERSEDED_REASON = 'superseded'
 
 /**
  * Apply a `permission_resolved` frame to the prompt message it resolves. The one

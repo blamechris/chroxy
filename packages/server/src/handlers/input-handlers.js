@@ -1265,6 +1265,33 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #8470: the wire code of the error frame that tells the ANSWERING client its
+ * `user_question_response` reached nothing. Without it the answer is dropped
+ * silently, and both clients have already marked the card answered on send.
+ */
+const QUESTION_NOT_DELIVERED_CODE = 'QUESTION_NOT_DELIVERED'
+
+/**
+ * Tell the answering client (only) that its answer to `msg.toolUseId` was not
+ * delivered. Reuses the `error` envelope (a coded frame, `toolUseId` and
+ * `sessionId` ride along as the envelope's passthrough fields) rather than a new
+ * wire type: the clients already surface an error frame, and key the card off the
+ * `toolUseId`. The wording covers every cause without claiming one: the question
+ * was already answered, timed out, or replaced by a newer one.
+ */
+function sendQuestionNotDelivered(ws, msg, sessionId, ctx) {
+  sendError(
+    ws,
+    null,
+    QUESTION_NOT_DELIVERED_CODE,
+    'Your answer was not delivered: that question is no longer waiting (it was already answered, timed out, or replaced by a newer question).',
+    // `fatal: false`: the session is fine, one answer was lost (a warning, not an error toast).
+    { toolUseId: msg.toolUseId, fatal: false, ...(sessionId ? { sessionId } : {}) },
+    ctx,
+  )
+}
+
 function handleUserQuestionResponse(ws, client, msg, ctx) {
   // #5753 — route by toolUseId when one is supplied. `_registerQuestionRoute`
   // maps every question that has a toolUseId at DISPATCH time (before the
@@ -1293,6 +1320,9 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
       sessionLogger(client.activeSessionId || undefined).info(
         `user_question_response dropped: stale/unknown toolUseId=${msg.toolUseId} (question already resolved or its session is gone)`,
       )
+      // #8470: the sender marked its card answered when it sent; say it was not.
+      // Nothing about the question is revealed: the id is the sender's own.
+      sendQuestionNotDelivered(ws, msg, client.activeSessionId || undefined, ctx)
       return
     }
     questionSessionId = ctx.permissions.questionSessionMap.get(msg.toolUseId)
@@ -1379,7 +1409,10 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // (SDK / BYOK / codex) refused because its toolUseId is not the pending
     // question's -- returns `false`. That answer was for a question that is no
     // longer the one being asked, so it must not mark anything answered.
-    if (delivered !== false && (msg.answer.length > 0 || hasAnswers)) {
+    if (delivered === false) {
+      // #8470: and the sender must be told, or its card keeps reading answered.
+      sendQuestionNotDelivered(ws, msg, questionSessionId || undefined, ctx)
+    } else if (msg.answer.length > 0 || hasAnswers) {
       ctx.sessions.sessionManager.recordQuestionAnswered?.(questionSessionId, msg.toolUseId)
     }
   }

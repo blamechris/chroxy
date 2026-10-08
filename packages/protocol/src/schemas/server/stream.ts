@@ -711,11 +711,18 @@ export const ServerPermissionExpiredSchema = z.object({
 // #6891: a permission prompt was RESOLVED (via any path — user response, abort,
 // timeout, auto-mode, clearAll); the client dismisses the prompt on every
 // connected client and marks the bubble answered. Emitted by the
-// event-normalizer `permission_resolved` mapping (event-normalizer.js) ONLY for
-// the `requestId` (permission-prompt) variant; the AskUserQuestion `toolUseId`
-// variant emits NO wire message (routing-map cleanup only), so this schema
-// covers just the requestId shape.
-//   - `requestId` — the resolved permission's id (always present here).
+// event-normalizer `permission_resolved` mapping (event-normalizer.js) for the
+// `requestId` (permission-prompt) variant, and, since #8470, for ONE
+// AskUserQuestion case: a question a newer one superseded (`toolUseId` set,
+// `reason: 'superseded'`), because nobody answered it and no round-trip is coming
+// to dismiss its card. Every other question resolution (answered / timeout /
+// aborted / cleared) still emits NO wire message (routing-map cleanup only).
+//   - `requestId` — the resolved permission's id; present on the permission-prompt
+//     variant, absent on the question variant.
+//   - `toolUseId` (#8470) — the resolved QUESTION's id (the `ask-...` id on its
+//     `user_question` frame); present only on the question variant. Exactly one of
+//     `requestId` / `toolUseId` is set, and a client keys the card off whichever
+//     it finds.
 //   - `decision` — the resolution outcome, a free-form string that varies by
 //     path/provider ('allow' / 'deny' / the user's raw choice); a PLAIN string,
 //     NOT a closed enum, so a new decision value can't fail the parse. Always
@@ -733,10 +740,13 @@ export const ServerPermissionExpiredSchema = z.object({
 //     apart.
 export const ServerPermissionResolvedSchema = z.object({
   type: z.literal('permission_resolved'),
-  requestId: z.string(),
+  requestId: z.string().optional(),
+  toolUseId: z.string().optional(),
   decision: z.string(),
   reason: z.string().optional(),
   sessionId: z.string().optional(),
+}).refine((m) => m.requestId !== undefined || m.toolUseId !== undefined, {
+  message: 'permission_resolved needs a requestId (permission prompt) or a toolUseId (question)',
 })
 
 /**

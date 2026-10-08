@@ -20,6 +20,21 @@ const Q2 = { questions: [{ question: 'Second?', options: [{ label: 'A2' }, { lab
 const silentLog = { info() {}, warn() {} }
 const settled = (p) => Promise.race([p.then(() => true), new Promise((r) => setImmediate(() => r(false)))])
 
+/**
+ * #8470: await a promise that MUST settle, failing instead of hanging. A mutant of
+ * the id comparison (`!==` -> `==`) refuses the matching answer, leaves the promise
+ * pending, and used to wedge the run until an outer alarm killed it (exit 142, no
+ * `not ok`): detected, but as a hang, which reads as a flake.
+ */
+async function within(p, ms = 2000) {
+  let t
+  try {
+    return await Promise.race([p, new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`still pending after ${ms}ms`)), ms) })])
+  } finally {
+    clearTimeout(t)
+  }
+}
+
 /** Ask Q1, answer it, then ask Q2: Q1's answer is now "late". */
 function twoQuestionsInSequence(pm) {
   const ids = []
@@ -38,7 +53,7 @@ describe('a late question answer is not delivered to the pending question (#8460
   it('PermissionManager: question 1 answer arriving while question 2 is pending is dropped', async () => {
     const pm = manager()
     const { ids, p1, p2 } = twoQuestionsInSequence(pm)
-    assert.equal((await p1).behavior, 'allow', 'premise: question 1 was answered')
+    assert.equal((await within(p1)).behavior, 'allow', 'premise: question 1 was answered')
     assert.notEqual(ids[0], ids[1])
 
     const resolved = []
@@ -53,7 +68,7 @@ describe('a late question answer is not delivered to the pending question (#8460
     assert.equal(resolved.length, 0, 'no permission_resolved for a refused answer')
 
     pm.respondToQuestion('A2', undefined, ids[1])
-    const r2 = await p2
+    const r2 = await within(p2)
     assert.equal(r2.behavior, 'allow')
     assert.deepEqual(r2.updatedInput.answers, { 'Second?': 'A2' }, 'question 2 got its own answer, never the late one')
   })
@@ -62,14 +77,14 @@ describe('a late question answer is not delivered to the pending question (#8460
     const pm = manager()
     const { p2 } = twoQuestionsInSequence(pm)
     assert.equal(pm.respondToQuestion('A2'), undefined)
-    assert.deepEqual((await p2).updatedInput.answers, { 'Second?': 'A2' })
+    assert.deepEqual((await within(p2)).updatedInput.answers, { 'Second?': 'A2' })
   })
 
   it('an answer carrying the pending id is delivered', async () => {
     const pm = manager()
     const { ids, p2 } = twoQuestionsInSequence(pm)
     pm.respondToQuestion('B2', undefined, ids[1])
-    assert.deepEqual((await p2).updatedInput.answers, { 'Second?': 'B2' })
+    assert.deepEqual((await within(p2)).updatedInput.answers, { 'Second?': 'B2' })
   })
 
   it('an empty-string toolUseId is an id, and is not the pending question\'s', async () => {
@@ -78,7 +93,7 @@ describe('a late question answer is not delivered to the pending question (#8460
     assert.equal(pm.respondToQuestion('X', undefined, ''), false)
     assert.equal(await settled(p2), false)
     pm.respondToQuestion('A2', undefined, ids[1])
-    await p2
+    await within(p2)
   })
 
   it('a refused answer with an unknown id never cancels the timer or the question', async () => {
@@ -90,7 +105,7 @@ describe('a late question answer is not delivered to the pending question (#8460
     assert.equal(await settled(p), false)
     assert.ok(pm._questionTimer !== null)
     pm.respondToQuestion('A1', undefined, ids[0])
-    assert.equal((await p).behavior, 'allow')
+    assert.equal((await within(p)).behavior, 'allow')
   })
 
   for (const [name, make] of [
@@ -104,13 +119,13 @@ describe('a late question answer is not delivered to the pending question (#8460
       s._permissions.on('user_question', (d) => ids.push(d.toolUseId))
       const p1 = s._permissions.handlePermission('AskUserQuestion', Q1, null, 'approve', undefined, 'toolu_1')
       assert.equal(s.respondToQuestion('A1', undefined, ids[0]), undefined)
-      await p1
+      await within(p1)
       const p2 = s._permissions.handlePermission('AskUserQuestion', Q2, null, 'approve', undefined, 'toolu_2')
 
       assert.equal(s.respondToQuestion('LATE', undefined, ids[0]), false)
       assert.equal(await settled(p2), false, 'question 2 is still blocked')
       s.respondToQuestion('A2', undefined, ids[1])
-      assert.deepEqual((await p2).updatedInput.answers, { 'Second?': 'A2' })
+      assert.deepEqual((await within(p2)).updatedInput.answers, { 'Second?': 'A2' })
     })
   }
 
@@ -125,7 +140,7 @@ describe('a late question answer is not delivered to the pending question (#8460
     assert.equal(CodexAppServerSession.prototype.respondToQuestion.call(host, 'LATE', undefined, 'ask-old-1-1'), false)
     assert.equal(await settled(p), false)
     CodexAppServerSession.prototype.respondToQuestion.call(host, 'A2', undefined, ids[0])
-    assert.equal((await p).behavior, 'allow')
+    assert.equal((await within(p)).behavior, 'allow')
   })
 })
 
@@ -171,14 +186,14 @@ describe('the WS handler does not record a refused answer as answered (#8460)', 
     const { ids, p2, marked, ctx, client } = setup()
     ctx.permissions.questionSessionMap.set(ids[1], 's1')
     inputHandlers.user_question_response(null, client, { type: 'user_question_response', toolUseId: ids[1], answer: 'A2' }, ctx)
-    assert.equal((await p2).behavior, 'allow')
+    assert.equal((await within(p2)).behavior, 'allow')
     assert.deepEqual(marked, [ids[1]])
   })
 
   it('control: an answer with no toolUseId is delivered and recorded as before', async () => {
     const { ids, p2, marked, ctx, client } = setup()
     inputHandlers.user_question_response(null, client, { type: 'user_question_response', answer: 'A2' }, ctx)
-    assert.deepEqual((await p2).updatedInput.answers, { 'Second?': 'A2' })
+    assert.deepEqual((await within(p2)).updatedInput.answers, { 'Second?': 'A2' })
     assert.deepEqual(marked, [undefined])
     assert.equal(ids.length, 2)
   })

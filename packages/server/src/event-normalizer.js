@@ -770,6 +770,21 @@ Object.assign(EVENT_MAP, {
       // normalizer never saw it; widening the gate would now have emitted
       // a malformed broadcast if we kept the unconditional messages entry.
       out.registrations = [{ map: 'question', key: data.toolUseId, action: 'delete' }]
+      // #8470: the one exception. A question a NEWER one replaced was not
+      // answered by anyone, so no round-trip is coming to dismiss its card on any
+      // client: say so, keyed by the question's `toolUseId`. Every other reason
+      // (answered / timeout / aborted / cleared) still emits nothing here.
+      if (data.reason === 'superseded') {
+        out.messages.push({
+          msg: {
+            type: 'permission_resolved',
+            toolUseId: data.toolUseId,
+            decision: 'deny',
+            reason: 'superseded',
+            sessionId: ctx.sessionId,
+          },
+        })
+      }
     }
     return out
   },

@@ -235,6 +235,21 @@ describe('QuestionPrompt', () => {
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 
+  // #8470 — the two more ways a question ends with no answer.
+  it.each([
+    ['(superseded)', 'question-superseded', /Replaced by a newer question/],
+    ['(not delivered)', 'question-notDelivered', /Answer not delivered/],
+  ])('reads as ended, not answered, for %s (#8470)', (token, testId, label) => {
+    render(
+      <QuestionPrompt question="Which shape?" options={options} answered={token} onSelect={vi.fn()} />
+    )
+    expect(screen.getByText('Which shape?')).toBeInTheDocument()
+    expect(screen.getByTestId(testId)).toHaveTextContent(label)
+    expect(screen.queryByTestId('question-answered-summary')).not.toBeInTheDocument()
+    expect(screen.queryByText(token)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  })
+
   it('an ordinary answer is not shown as interrupted (#8336)', () => {
     render(
       <QuestionPrompt question="Which shape?" options={options} answered="a" onSelect={vi.fn()} />

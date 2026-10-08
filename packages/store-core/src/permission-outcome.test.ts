@@ -375,7 +375,7 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
   })
 
   it('handlePermissionResolved hands the wire reason on', () => {
-    expect(resolved({ reason: 'stopped' })).toEqual({ requestId: 'perm-1', decision: 'deny', reason: 'stopped' })
+    expect(resolved({ reason: 'stopped' })).toEqual({ requestId: 'perm-1', toolUseId: null, decision: 'deny', reason: 'stopped' })
     expect(resolved({ reason: 'user' }).reason).toBe('user')
     expect(resolved().reason).toBeNull()
     expect(resolved({ reason: 7 }).reason).toBeNull()

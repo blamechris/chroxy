@@ -3665,6 +3665,17 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal('reason' in without.data, false)
     })
 
+    it('#8470: ServerPermissionResolvedSchema accepts the question variant (toolUseId) and needs one id', async () => {
+      const { ServerPermissionResolvedSchema } = await import('../src/schemas/server/stream.ts')
+      const question = { type: 'permission_resolved', toolUseId: 'ask-1', decision: 'deny', reason: 'superseded', sessionId: 's1' }
+      const parsed = ServerPermissionResolvedSchema.safeParse(question)
+      assert.ok(parsed.success, 'a superseded question resolves by toolUseId')
+      assert.equal(parsed.data.toolUseId, 'ask-1', 'the toolUseId survives parsing, not stripped')
+      assert.equal(parsed.data.reason, 'superseded')
+      assert.ok(ServerPermissionResolvedSchema.safeParse({ type: 'permission_resolved', requestId: 'req-1', decision: 'allow' }).success, 'the permission-prompt variant is unchanged')
+      assert.equal(ServerPermissionResolvedSchema.safeParse({ type: 'permission_resolved', decision: 'deny' }).success, false, 'a frame naming neither a prompt nor a question is malformed')
+    })
+
     it('ServerPermissionOutcomeSchema rejects an unknown outcome and a missing requestId', async () => {
       const { ServerPermissionOutcomeSchema } = await import('../src/schemas/server/stream.ts')
       const base = { type: 'permission_outcome', requestId: 'perm-1', tool: 'Bash', description: 'ls', outcome: 'expired' }

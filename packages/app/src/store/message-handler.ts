@@ -95,6 +95,11 @@ import {
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   applyPermissionResolved,
+  // #8470 — a question that ended with no answer: replaced by a newer one
+  // (permission_resolved, question variant) or answered into nothing (error).
+  QUESTION_SUPERSEDED_REASON,
+  handleQuestionNotDelivered,
+  endQuestionInSessions,
   handlePermissionExpired as sharedPermissionExpired,
   // #7380 — one wording for the #2833 already-answered race, shared with the
   // dashboard (which surfaces the same words as an info toast).
@@ -1884,6 +1889,18 @@ function enforceEncryptionGateOrRefuse(ctx: ConnectionContext, encryptionMode: s
 // ---------------------------------------------------------------------------
 
 /**
+ * #8470: end a question card without an answer, wherever it sits (any session's
+ * transcript). Reports whether a card changed, so a caller can fall back to an
+ * alert when no card holds the question.
+ */
+function endQuestionCard(toolUseId: string, kind: 'superseded' | 'notDelivered', get: () => ConnectionState): boolean {
+  const hit = endQuestionInSessions(get().sessionStates, toolUseId, kind);
+  if (!hit) return false;
+  updateSession(hit.sessionId, () => ({ messages: hit.messages }));
+  return true;
+}
+
+/**
  * Handles a parsed WebSocket message. Extracted from the socket.onmessage
  * closure so it can be tested directly with raw JSON payloads.
  *
@@ -3409,6 +3426,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // was active when it arrived), so search all session states for the matching requestId.
       const resolved = sharedPermissionResolved(msg);
       const { requestId: resolvedRequestId } = resolved;
+      // #8470: the question variant. Only a SUPERSEDED question is announced
+      // (nobody answered it, so no round-trip will dismiss its card).
+      if (!resolvedRequestId && resolved.toolUseId && resolved.reason === QUESTION_SUPERSEDED_REASON) {
+        endQuestionCard(resolved.toolUseId, 'superseded', get);
+        break;
+      }
       if (resolvedRequestId) {
         // #8374: a prompt Stop cancelled becomes a `stopped` record, not an
         // answered deny. Shared with the dashboard, so the two cannot disagree.
@@ -4003,6 +4026,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // the generic fallback both surface the partial-cost line.
       const alertBody = partialCostLine ? `${errMsg}\n\n${partialCostLine}` : errMsg;
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
+
+      // #8470: the server dropped a question answer this client sent. The card was
+      // marked answered on send; retract that, in place, so it reads "not
+      // delivered". The card is the signal when it is found; the generic alert
+      // below only when it is not, so the news is never lost.
+      const notDelivered = handleQuestionNotDelivered(msg);
+      if (notDelivered && endQuestionCard(notDelivered.toolUseId, 'notDelivered', get)) break;
 
       // Match against an in-flight set_permission_mode request — if the
       // requestId lines up, revert the optimistic UI state and show a

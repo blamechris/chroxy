@@ -179,6 +179,7 @@ import {
   replayDedupCache,
   REPLAY_RESOLVED_PLACEHOLDER,
   QUESTION_INTERRUPTED_PLACEHOLDER,
+  isQuestionNoAnswerToken,
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
 import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
@@ -2321,19 +2322,21 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
       // failure mode) collapses the same way.
       const next = ss.messages.slice()
       // #7508 F3 — `answered` is a decision TOKEN with exactly one non-decision
-      // value (#6222/#6223), and since #8336 a second ("interrupted"). Clearing
+      // value (#6222/#6223), and since #8336 more ("interrupted", and since #8470
+      // "superseded" and "not delivered"). Clearing
       // the sweep's placeholder IS #7457's fix; clearing a REAL decision is not.
       // A second device can answer after the server's pending-set read and
       // before this frame lands, and nothing on the wire un-sticks a prompt
       // revived on top of that answer — the question variant of
-      // `permission_resolved` emits no message, only a route-map delete, and the
+      // `permission_resolved` emits no message (bar #8470's superseded case,
+      // which is never an answer), only a route-map delete, and the
       // late second answer is dropped as an unmapped toolUseId. So carry a real
       // token across, and clear only the placeholder. A LIVE frame proves the
       // question is pending again, which is why it may also clear "interrupted".
       const keepAnswered =
         heldAnswered !== undefined &&
         heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER &&
-        heldAnswered !== QUESTION_INTERRUPTED_PLACEHOLDER
+        !isQuestionNoAnswerToken(heldAnswered)
       next[idx] = {
         ...chatMessage,
         id: held.id,
