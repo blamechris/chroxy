@@ -307,6 +307,33 @@ export class BackgroundShellTracker {
   }
 
   /**
+   * #7611: forget EVERY pending shell, but leave the tracker usable.
+   *
+   * For the moment the process that owned the shells is gone while the session
+   * lives on (a respawn that signalled its whole process tree, #7608). Nothing
+   * can ever poll those shells or hear their completion again, and the entries
+   * would otherwise pin `size` — and with it the session's `isRunning` — above
+   * zero until the hard-quiesce reap, four hours later (`BACKGROUND_SHELL_HARD_
+   * QUIESCE_MS`), keeping the session immune to the idle timeout.
+   *
+   * Not `destroy()`: that is the end-of-session teardown. This is the same
+   * state as if each shell had been cleared one by one — the sweep is stopped
+   * (it re-arms on the next `trackBackgroundShell`) and the dashboard banner is
+   * told, once, with the empty snapshot. A tracker with nothing pending is a
+   * no-op, so no `background_work_changed` is emitted for an idle respawn.
+   *
+   * @returns {number} how many pending shells were forgotten
+   */
+  clearAll() {
+    const forgotten = this._pendingBackgroundShells.size
+    if (forgotten === 0) return 0
+    this._pendingBackgroundShells.clear()
+    this._stopBackgroundShellSweep()
+    this._emitBackgroundWorkChanged()
+    return forgotten
+  }
+
+  /**
    * #4307: stop the sweep and clear the pending map on session destroy. The
    * session-level companions (`_pendingBackgroundCommands`, the activity
    * registry) are torn down by BaseSession around this call.
