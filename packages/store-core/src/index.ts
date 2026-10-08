@@ -1181,6 +1181,16 @@ export type { TurnOutcomeEvent } from './turn-outcome-marker'
 export type { ExpiredPermissionTurnSummary, TurnBoundarySource } from './permission-turn-summary'
 export { getExpiredPermissionTurnSummaries } from './permission-turn-summary'
 
+// #6894 -- grouping of consecutive identical RESOLVED permission prompts into one
+// compact line with a count. Pure; dashboard-only consumer today. A pending prompt
+// never groups.
+export type { ResolvedPermissionRun } from './permission-groups'
+export {
+  resolvedPermissionOutcome,
+  resolvedPermissionGroupKey,
+  findResolvedPermissionRuns,
+} from './permission-groups'
+
 // #6542 (IDE P3.1): client-side line hunk diff + per-hunk apply — the shared
 // foundation for the edit-in-place / per-hunk-review surfaces (#6543 feature B,
 // #6544 feature A). The server's git getDiff can't produce a pre-write diff, so

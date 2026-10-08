@@ -1512,6 +1512,7 @@ export function App() {
     storeMsgMap,
     stalledPromptIds,
     permissionExpiredSummaries,
+    permissionPromptGroups,
   } = useChatMessages({
     storeMessages,
     streamingMessageId,
@@ -2462,6 +2463,8 @@ export function App() {
     storeMsgMap,
     chatToolGroupPayloads,
     permissionExpiredSummaries,
+    // #6894 — synthetic `permission-group` row payloads (resolved-prompt runs).
+    permissionPromptGroups,
     chatTailMessageId,
     // #5786 — wrapped so approve/answer also snaps the chat to the bottom.
     sendPermissionResponse: respondToPermission,

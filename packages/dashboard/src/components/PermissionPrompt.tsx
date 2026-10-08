@@ -37,7 +37,7 @@ import { isMacPlatform } from '../utils/platform'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
 import { PermissionCommandEdit, isEditableCommandTool } from './PermissionCommandEdit'
 import { ASK_USER_QUESTION_TOOL, AskUserQuestionPermissionBody, askUserQuestionSummary } from './AskUserQuestionPermissionBody'
-import { PermissionOutcomeRecord } from './PermissionOutcomeRecord'
+import { PermissionOutcomeRecord, permissionDecisionLabel } from './PermissionOutcomeRecord'
 import { stripExpiredNote } from '../utils/stripExpiredNote'
 import type { PermissionEditedInput } from '@chroxy/store-core'
 
@@ -493,13 +493,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
 
       {answered && (
         <div className="perm-answer" data-testid="perm-answer">
-          {answered === 'deny'
-            ? 'Denied'
-            : answered === 'allowSession'
-              ? 'Allowed for session'
-              : answered === 'allowAlways'
-                ? 'Always allowed (project)'
-                : 'Allowed'}
+          {permissionDecisionLabel(answered)}
         </div>
       )}
     </div>

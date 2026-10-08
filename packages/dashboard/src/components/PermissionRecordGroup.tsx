@@ -1,0 +1,91 @@
+/**
+ * PermissionRecordGroup -- one compact line for a run of identical RESOLVED
+ * permission prompts (#6894, follow-up to #6626).
+ *
+ * "Permission allowed ×3 — shell: Do you want to allow npm registry lookup?"
+ * stands in for three identical records. It is expandable: the members are the
+ * individual records, in order, each still the line (and, for a prompt answered
+ * live, the expandable record) it would have been on its own, so nothing is lost
+ * to the grouping -- only collapsed.
+ *
+ * Which prompts group is decided in `@chroxy/store-core`
+ * (`findResolvedPermissionRuns`); a pending prompt never reaches this component,
+ * so a group has no countdown and no Allow / Deny.
+ *
+ * Anchor: while collapsed the line carries the FIRST member's `perm-desc-<id>`
+ * anchor (the end-of-turn expired summary's "Jump to prompt" link lands there);
+ * expanded, that anchor belongs to the first member again, so the id is never on
+ * the page twice.
+ */
+import { useState, type ReactNode } from 'react'
+import type { PermissionOutcomeKind } from '@chroxy/store-core'
+import { PERMISSION_OUTCOME_LEAD, permissionOutcomeSuffix } from './PermissionOutcomeRecord'
+import { useInitialExpanded } from './chatExpandRegistry'
+
+export interface PermissionRecordGroupProps {
+  /** The synthetic row id; keys the persisted expand state. */
+  groupId: string
+  /** `requestId` of the first member -- the jump-link anchor while collapsed. */
+  firstRequestId: string
+  tool: string
+  description: string
+  outcome: PermissionOutcomeKind
+  /** How many prompts the line stands for (>= 2). */
+  count: number
+  /** The member records. Called only while expanded, so a collapsed group mounts none. */
+  renderMembers: () => ReactNode
+}
+
+export function PermissionRecordGroup({
+  groupId,
+  firstRequestId,
+  tool,
+  description,
+  outcome,
+  count,
+  renderMembers,
+}: PermissionRecordGroupProps) {
+  const { initial, persist } = useInitialExpanded(`perm-group:${groupId}`, false)
+  const [expanded, setExpanded] = useState(initial)
+  const membersId = `perm-group-members-${groupId}`
+  return (
+    <div
+      className="perm-group"
+      data-testid="perm-group"
+      data-outcome={outcome}
+      data-count={count}
+    >
+      <button
+        type="button"
+        className="perm-group-toggle"
+        data-testid="perm-group-toggle"
+        // The jump-link anchor while collapsed (a button takes focus() as is);
+        // once expanded the first member carries it.
+        id={expanded ? undefined : `perm-desc-${firstRequestId}`}
+        aria-expanded={expanded}
+        aria-controls={membersId}
+        aria-label={`${expanded ? 'Hide' : 'Show'} all ${count} ${tool} permissions`}
+        title={`${tool}: ${description}`}
+        onClick={() => {
+          const next = !expanded
+          setExpanded(next)
+          persist(next)
+        }}
+      >
+        <span className="perm-group-chevron" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+        <span className="perm-dropped-text">
+          {PERMISSION_OUTCOME_LEAD[outcome]}{' '}
+          <span className="perm-group-count" data-testid="perm-group-count">×{count}</span>
+          {' — '}
+          <span className="perm-tool">{tool}</span>: {description}
+          {permissionOutcomeSuffix(outcome)}
+        </span>
+      </button>
+      {expanded && (
+        <div className="perm-group-members" id={membersId} data-testid="perm-group-members">
+          {renderMembers()}
+        </div>
+      )}
+    </div>
+  )
+}

@@ -1,7 +1,7 @@
-import { useCallback } from 'react'
+import { useCallback, Fragment } from 'react'
 import type { ReactNode } from 'react'
 import type { ChatMessage, SessionInfo, ExpiredPermissionTurnSummary } from '@chroxy/store-core'
-import { providerSupportsSingleMultiSelect, isRetryableAskUserQuestionError, permissionOutcomeFromDecision } from '@chroxy/store-core'
+import { providerSupportsSingleMultiSelect, isRetryableAskUserQuestionError, resolvedPermissionOutcome } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import type { ConnectionState } from '../store/connection'
 import type { ProviderCapabilities } from '../store/types'
@@ -10,6 +10,7 @@ import { ToolBubble } from '../components/ToolBubble'
 import { PermissionPrompt } from '../components/PermissionPrompt'
 import { stripExpiredNote } from '../utils/stripExpiredNote'
 import { PermissionOutcomeRecord } from '../components/PermissionOutcomeRecord'
+import { PermissionRecordGroup } from '../components/PermissionRecordGroup'
 import { PermissionExpiredSummary } from '../components/PermissionExpiredSummary'
 import { QuestionPrompt } from '../components/QuestionPrompt'
 import { EvaluatorRewriteBanner } from '../components/EvaluatorPrompts'
@@ -32,6 +33,12 @@ export interface UseMessageRendererArgs {
    * up in `storeMsgMap`, so it is handled before that lookup.
    */
   permissionExpiredSummaries: Map<string, ExpiredPermissionTurnSummary>
+  /**
+   * #6894 — synthetic `permission-group` row id -> the store message ids of the
+   * identical resolved prompts it stands for. Same shape as
+   * `chatToolGroupPayloads`' lookup; absent/empty means no group rows exist.
+   */
+  permissionPromptGroups?: Map<string, string[]>
   chatTailMessageId: string | null
   sendPermissionResponse: ConnectionState['sendPermissionResponse']
   sendUserQuestionResponse: ConnectionState['sendUserQuestionResponse']
@@ -92,6 +99,56 @@ export function permissionPromptDescription(content: string, tool?: string): str
 }
 
 /**
+ * #6894 — the description a resolved-permission record shows.
+ *
+ * A prompt answered AFTER it expired (the #2833 race) carries the "(Expired ...)"
+ * note `permission_expired` appended; the record states the outcome itself, so the
+ * note is stripped as `PermissionPrompt` does for its own record. A recorded
+ * `permissionOutcome` (a replay, a Stop) is shown as stored.
+ */
+function resolvedPermissionDescription(m: ChatMessage): string {
+  const raw = permissionPromptDescription(m.content, m.tool)
+  return (m.permissionOutcome ? raw : stripExpiredNote(raw)) || 'Permission requested'
+}
+
+/**
+ * The compact record for a permission prompt that has ENDED, or `null` if `m`
+ * has not (pending, a question, a placeholder, not a permission prompt).
+ *
+ * Two sources, one line:
+ *   - #8348: rebuilt from the server's durable `permission_outcome` history entry
+ *     (a session switch or a reload — the live card is not replayed);
+ *   - #6630: ANSWERED while live — the `permission_resolved` echo stamps `answered`.
+ * The same event, so the same collapsed DOM (`replay-parity-dom.test.tsx` pins it).
+ *
+ * #6894: every record expands to the full detail (the line clamps a long command
+ * at three lines; the detail does not). Mobile's answered pill expands and its
+ * replayed record does not, but here the two must stay byte-identical, so the
+ * control is on both; a replayed record just knows less to show (`allowed`, not
+ * "allowed for session").
+ *
+ * Never actionable, never pending, whatever fields a later write leaves on it.
+ */
+function renderResolvedPermissionRecord(m: ChatMessage, sessions: SessionInfo[]): ReactNode | null {
+  const outcome = resolvedPermissionOutcome(m)
+  if (!outcome) return null
+  return (
+    <PermissionOutcomeRecord
+      requestId={m.requestId!}
+      tool={m.tool || 'Unknown'}
+      description={resolvedPermissionDescription(m)}
+      outcome={outcome}
+      detail={{
+        // Only a decision outcome has a decision to name; a no-decision outcome
+        // (expired, stopped) never reads one off a stray `answered`.
+        decision: outcome === 'allowed' || outcome === 'denied' ? m.answered : undefined,
+        sessionLabel: buildSessionLabel(m.originSessionId, sessions),
+      }}
+    />
+  )
+}
+
+/**
  * The custom chat-message renderer (#5560): permission prompts, question
  * prompts, tool bubbles/groups, the evaluator-rewrite banner, and the
  * stream-stall / ask-user-question-stall / resume-unknown chips.
@@ -105,6 +162,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     storeMsgMap,
     chatToolGroupPayloads,
     permissionExpiredSummaries,
+    permissionPromptGroups,
     chatTailMessageId,
     sendPermissionResponse,
     sendUserQuestionResponse,
@@ -152,49 +210,52 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
         />
       )
     }
-    const storeMsg = storeMsgMap.get(msg.id)
-    if (!storeMsg) return null
-
-    // #8348: a permission prompt that has ENDED, rebuilt from the server's
-    // durable `permission_outcome` history entry (a session switch or a reload —
-    // the live card is not replayed). A compact record: never actionable, never
-    // pending. Ahead of the live-prompt branch so a record can never be read as
-    // one, whatever fields a later write leaves on it.
-    if (storeMsg.type === 'prompt' && storeMsg.requestId && storeMsg.permissionOutcome) {
+    // #6894 — one counted line for a run of identical RESOLVED permission
+    // prompts (synthetic row, payload lookup like `tool_group`). Members are
+    // re-checked here: a pending prompt is never drawn as a record, so a payload
+    // that has drifted from the store degrades to fewer lines, not a wrong one.
+    if (msg.type === 'permission-group') {
+      const ids = permissionPromptGroups?.get(msg.id)
+      if (!ids) return null
+      const members: ChatMessage[] = []
+      for (const id of ids) {
+        const m = storeMsgMap.get(id)
+        if (m && resolvedPermissionOutcome(m)) members.push(m)
+      }
+      const first = members[0]
+      if (!first) return null
+      if (members.length === 1) return renderResolvedPermissionRecord(first, sessions)
       return (
-        <PermissionOutcomeRecord
-          requestId={storeMsg.requestId}
-          tool={storeMsg.tool || 'Unknown'}
-          description={permissionPromptDescription(storeMsg.content, storeMsg.tool) || 'Permission requested'}
-          outcome={storeMsg.permissionOutcome}
+        <PermissionRecordGroup
+          groupId={msg.id}
+          firstRequestId={first.requestId!}
+          tool={first.tool || 'Unknown'}
+          description={resolvedPermissionDescription(first)}
+          outcome={resolvedPermissionOutcome(first)!}
+          count={members.length}
+          renderMembers={() => (
+            <>
+              {members.map((m) => (
+                <Fragment key={m.id}>{renderResolvedPermissionRecord(m, sessions)}</Fragment>
+              ))}
+            </>
+          )}
         />
       )
     }
+    const storeMsg = storeMsgMap.get(msg.id)
+    if (!storeMsg) return null
 
-    // #6630: a prompt the user ANSWERED while it was live. The server's
-    // `permission_resolved` echo stamps `answered` on the card, and nothing below
-    // matches an answered permission prompt, so it fell through to the default
-    // row -- an assistant-styled bubble reading "Bash: rm -rf build", text the
-    // assistant never said -- while the same prompt rebuilt from history is the
-    // compact record above. Same line for both: it IS the same event. Only a real
-    // decision token qualifies (`'(resolved)'` and the like are not one).
+    // A permission prompt that has ENDED -- rebuilt from a replayed
+    // `permission_outcome` (#8348) or answered while live (#6630) -- is a compact
+    // record. Ahead of the live-prompt branch so a record can never be read as
+    // one, and ahead of everything else because nothing below matches an answered
+    // prompt: it used to fall through to the default assistant-styled row reading
+    // "Bash: rm -rf build", text the assistant never said. Only a real decision
+    // token qualifies as answered (`'(resolved)'` and the like are not one).
     {
-      const answeredOutcome = storeMsg.type === 'prompt' && storeMsg.requestId
-        ? permissionOutcomeFromDecision(storeMsg.answered)
-        : null
-      if (answeredOutcome) {
-        return (
-          <PermissionOutcomeRecord
-            requestId={storeMsg.requestId!}
-            tool={storeMsg.tool || 'Unknown'}
-            // A prompt answered AFTER it expired (the #2833 race) carries the
-            // "(Expired ...)" note `permission_expired` appended; the record states the
-            // outcome itself, so strip it as PermissionPrompt does for its own record.
-            description={stripExpiredNote(permissionPromptDescription(storeMsg.content, storeMsg.tool)) || 'Permission requested'}
-            outcome={answeredOutcome}
-          />
-        )
-      }
+      const record = renderResolvedPermissionRecord(storeMsg, sessions)
+      if (record) return record
     }
 
     // Permission prompt
@@ -445,5 +506,5 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, permissionExpiredSummaries, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, activeSessionCaps, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission, sessions])
+  }, [storeMsgMap, chatToolGroupPayloads, permissionExpiredSummaries, permissionPromptGroups, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, activeSessionCaps, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission, sessions])
 }

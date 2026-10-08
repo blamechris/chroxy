@@ -9,7 +9,7 @@
  * special-cased, so the new codes fell through to a dead generic bubble.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, cleanup, renderHook } from '@testing-library/react'
+import { render, screen, cleanup, renderHook, fireEvent, within } from '@testing-library/react'
 import type { ChatMessage } from '@chroxy/store-core'
 import { useMessageRenderer, permissionPromptDescription, type UseMessageRendererArgs } from './useMessageRenderer'
 import type { ChatViewMessage } from '../components/ChatView'
@@ -437,7 +437,8 @@ describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
     expect(record).toHaveTextContent('Commit the restructured fix')
     expect(record).toHaveTextContent('dropped')
     expect(record.getAttribute('role')).toBe('status')
-    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    expect(screen.queryByText('Allow')).not.toBeInTheDocument()
+    expect(screen.queryByText('Deny')).not.toBeInTheDocument()
     expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
   })
 
@@ -449,7 +450,8 @@ describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
     expect(record).toHaveTextContent('not run')
     expect(record).not.toHaveTextContent(/denied|expired|dropped/i)
     expect(record.getAttribute('data-outcome')).toBe('stopped')
-    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    // No Allow / Deny: the only control a record may carry is its expand toggle (#6894).
+    expect(screen.queryAllByRole('button').filter((b) => b.getAttribute('data-testid') !== 'perm-record-toggle')).toHaveLength(0)
     expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
   })
 
@@ -466,7 +468,8 @@ describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
     unmount()
     renderOutcome(outcomeMsg('denied'))
     expect(screen.getByTestId('perm-outcome-record')).toHaveTextContent('Permission denied')
-    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    // No Allow / Deny: the only control a record may carry is its expand toggle (#6894).
+    expect(screen.queryAllByRole('button').filter((b) => b.getAttribute('data-testid') !== 'perm-record-toggle')).toHaveLength(0)
   })
 
   it('is never an actionable card, even if a stray expiresAt is left on it', () => {
@@ -525,5 +528,137 @@ describe('useMessageRenderer — a prompt answered live (#6630)', () => {
     unmount()
     renderAnswered(answered('(resolved)', 'Bash: ls'))
     expect(screen.queryByTestId('perm-outcome-record')).not.toBeInTheDocument()
+  })
+})
+
+// #6894: a resolved prompt (answered live or replayed) is a compact record that
+// expands to the full detail; a run of identical resolved prompts collapses to
+// ONE group line with a count.
+describe('useMessageRenderer -- compact resolved prompts + groups (#6894)', () => {
+  const live = (id: string, over: Partial<ChatMessage> = {}): ChatMessage => ({
+    id,
+    type: 'prompt',
+    content: 'shell: Do you want to allow npm registry lookup?',
+    tool: 'shell',
+    requestId: `req-${id}`,
+    answered: 'allowSession',
+    answeredAt: 5,
+    originSessionId: 's1',
+    timestamp: 0,
+    ...over,
+  } as ChatMessage)
+  const replayed = (id: string, outcome: 'allowed' | 'denied' | 'expired' | 'stopped'): ChatMessage => ({
+    id,
+    type: 'prompt',
+    content: 'shell: Do you want to allow npm registry lookup?',
+    tool: 'shell',
+    requestId: `req-${id}`,
+    permissionOutcome: outcome,
+    ...(outcome === 'allowed' ? { answered: 'allow' } : {}),
+    ...(outcome === 'denied' ? { answered: 'deny' } : {}),
+    timestamp: 0,
+  } as ChatMessage)
+
+  function renderRow(msgs: ChatMessage[], row: ChatViewMessage, groups?: Map<string, string[]>) {
+    const args = makeArgs({
+      storeMsgMap: new Map(msgs.map((m) => [m.id, m])),
+      storeMessages: msgs,
+      permissionPromptGroups: groups,
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    return render(<>{result.current(row)}</>)
+  }
+  const promptRow = (m: ChatMessage): ChatViewMessage => ({ id: m.id, type: 'response', content: m.content, timestamp: 0 })
+  const groupRow = (id: string): ChatViewMessage => ({ id, type: 'permission-group', content: '', timestamp: 0 })
+
+  it('a prompt answered live renders compact, with an expand control', () => {
+    const m = live('a1')
+    renderRow([m], promptRow(m))
+    expect(screen.getByTestId('perm-outcome-record')).toHaveTextContent('Permission allowed')
+    expect(screen.getByTestId('perm-record-toggle')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByTestId('perm-record-detail')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
+  })
+
+  it('expanding shows the full detail: the decision it was answered with', () => {
+    const m = live('a1')
+    renderRow([m], promptRow(m))
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    expect(screen.getByTestId('perm-record-detail')).toHaveTextContent('Allowed for session')
+    expect(screen.getByTestId('perm-record-detail')).toHaveTextContent('npm registry lookup')
+  })
+
+  it('a replayed outcome record collapses and expands the same way (live and replay render alike)', () => {
+    const m = replayed('r1', 'allowed')
+    renderRow([m], promptRow(m))
+    expect(screen.getByTestId('perm-outcome-record')).toHaveTextContent('Permission allowed')
+    expect(screen.getByTestId('perm-record-toggle')).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    // A replay only knows allowed / denied, never "for session".
+    expect(screen.getByTestId('perm-record-detail')).toHaveTextContent('Allowed')
+    expect(screen.getByTestId('perm-record-detail')).not.toHaveTextContent('for session')
+  })
+
+  it('an expired or stopped record names no decision when expanded', () => {
+    for (const outcome of ['expired', 'stopped'] as const) {
+      const m = replayed('r1', outcome)
+      const { unmount } = renderRow([m], promptRow(m))
+      fireEvent.click(screen.getByTestId('perm-record-toggle'))
+      expect(screen.getByTestId('perm-record-detail')).toHaveTextContent('npm registry lookup')
+      expect(screen.getByTestId('perm-record-detail')).not.toHaveTextContent(/Allowed|Denied/)
+      unmount()
+    }
+  })
+
+  it('a PENDING prompt stays the full actionable card', () => {
+    const m = promptMsg('p1', 'shell: Do you want to allow npm registry install?', 'shell', 'req-p1')
+    renderRow([m], promptRow(m))
+    expect(screen.getByTestId('permission-prompt')).toBeInTheDocument()
+    expect(screen.queryByTestId('perm-outcome-record')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
+  })
+
+  it('a group row renders ONE line with the count and the outcome, not N lines', () => {
+    const msgs = [live('a1'), live('a2'), live('a3')]
+    renderRow(msgs, groupRow('permission-group-a1'), new Map([['permission-group-a1', ['a1', 'a2', 'a3']]]))
+    expect(screen.getAllByTestId('perm-group')).toHaveLength(1)
+    expect(screen.getByTestId('perm-group-count')).toHaveTextContent('×3')
+    expect(screen.getByTestId('perm-group')).toHaveTextContent('Permission allowed')
+    expect(screen.getByTestId('perm-group')).toHaveTextContent('npm registry lookup')
+    expect(screen.queryAllByTestId('perm-outcome-record')).toHaveLength(0)
+  })
+
+  it('expanding a group shows each member as its own record, each still expandable', () => {
+    const msgs = [live('a1'), live('a2')]
+    renderRow(msgs, groupRow('permission-group-a1'), new Map([['permission-group-a1', ['a1', 'a2']]]))
+    fireEvent.click(screen.getByTestId('perm-group-toggle'))
+    const members = within(screen.getByTestId('perm-group-members')).getAllByTestId('perm-outcome-record')
+    expect(members).toHaveLength(2)
+    expect(screen.getAllByTestId('perm-record-toggle')).toHaveLength(2)
+  })
+
+  it('a group of replayed outcomes still shows the outcome after a replay (denied, expired, stopped)', () => {
+    for (const [outcome, lead] of [['denied', 'Permission denied'], ['expired', 'Permission expired'], ['stopped', 'Permission stopped']] as const) {
+      const msgs = [replayed('r1', outcome), replayed('r2', outcome)]
+      const { unmount } = renderRow(msgs, groupRow('permission-group-r1'), new Map([['permission-group-r1', ['r1', 'r2']]]))
+      expect(screen.getByTestId('perm-group')).toHaveTextContent(lead)
+      expect(screen.getByTestId('perm-group-count')).toHaveTextContent('×2')
+      unmount()
+    }
+  })
+
+  it('a group row with no payload renders nothing (rather than a blank card)', () => {
+    const { container } = renderRow([], groupRow('permission-group-zz'), new Map())
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it('a group never renders a member that is still pending: it is dropped, not shown as a record', () => {
+    const pendingMsg = promptMsg('p9', 'shell: Do you want to allow npm registry lookup?', 'shell', 'req-p9')
+    const msgs = [live('a1'), live('a2'), pendingMsg]
+    renderRow(msgs, groupRow('permission-group-a1'), new Map([['permission-group-a1', ['a1', 'a2', 'p9']]]))
+    fireEvent.click(screen.getByTestId('perm-group-toggle'))
+    expect(within(screen.getByTestId('perm-group-members')).getAllByTestId('perm-outcome-record')).toHaveLength(2)
+    expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
+    expect(screen.getByTestId('perm-group-count')).toHaveTextContent('×2')
   })
 })

@@ -36,6 +36,7 @@ import {
 } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import { insertPermissionExpiredSummaryRows } from '../utils/permissionExpiredSummaryRows'
+import { collapseResolvedPermissionRuns } from '../utils/permissionGroupRows'
 
 // The dashboard re-exports its own `ChatViewMessage` for component prop
 // typing; the store-core type is structurally identical (same fields,
@@ -85,6 +86,13 @@ export interface UseChatMessagesProps {
    * rationale for each mode.
    */
   turnBoundarySource?: TurnBoundarySource
+  /**
+   * #6894 — collapse runs of identical RESOLVED permission prompts into one
+   * `permission-group` row. Default `true`. `TranscriptViewer` passes `false`:
+   * a closed conversation has no resolved-prompt state and its renderer has no
+   * group payloads to draw a group row from.
+   */
+  groupResolvedPermissions?: boolean
 }
 
 export interface UseChatMessagesResult {
@@ -109,6 +117,12 @@ export interface UseChatMessagesResult {
    * transcript has an expired-unanswered permission prompt.
    */
   permissionExpiredSummaries: Map<string, ExpiredPermissionTurnSummary>
+  /**
+   * #6894 — synthetic `permission-group` row id -> the store message ids of the
+   * identical resolved prompts it stands for, in transcript order. Empty when
+   * nothing groups. A pending prompt is never in one.
+   */
+  permissionPromptGroups: Map<string, string[]>
 }
 
 // Re-export so existing dashboard call sites (App.tsx imports
@@ -123,6 +137,7 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
     hideToolAndThinking = false,
     isSessionIdle = true,
     turnBoundarySource = 'marker',
+    groupResolvedPermissions = true,
   } = props
 
   const result = useMemo(
@@ -168,7 +183,7 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
   // `isTail` expand-state and the stream-stall retry button), and shifting it
   // to a synthetic summary row would silently collapse a trailing tool group
   // the moment its turn's permission expired.
-  const { chatMessages, permissionExpiredSummaries } = useMemo(() => {
+  const { chatMessages: summarizedRows, permissionExpiredSummaries } = useMemo(() => {
     const summaries = getExpiredPermissionTurnSummaries(storeMessages, Date.now(), isSessionIdle, turnBoundarySource)
     if (summaries.length === 0) {
       return { chatMessages: baseChatMessages, permissionExpiredSummaries: new Map<string, ExpiredPermissionTurnSummary>() }
@@ -182,6 +197,18 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
     return { chatMessages: rows, permissionExpiredSummaries: payloads }
   }, [storeMessages, baseChatMessages, chatToolGroupPayloads, isSessionIdle, turnBoundarySource])
 
+  // #6894 — dashboard-only: fold each run of ADJACENT identical resolved
+  // permission prompts into one counted row. After the summary splice (which
+  // anchors on raw row ids a group would hide); a pending prompt never joins a
+  // run. Like the summary rows, it leaves `chatTailMessageId` alone.
+  const { rows: chatMessages, groups: permissionPromptGroups } = useMemo(
+    () =>
+      groupResolvedPermissions
+        ? collapseResolvedPermissionRuns(summarizedRows, storeMsgMap)
+        : { rows: summarizedRows, groups: new Map<string, string[]>() },
+    [summarizedRows, storeMsgMap, groupResolvedPermissions],
+  )
+
   return {
     chatMessages,
     chatToolGroupPayloads,
@@ -189,5 +216,6 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
     storeMsgMap,
     stalledPromptIds,
     permissionExpiredSummaries,
+    permissionPromptGroups,
   }
 }
