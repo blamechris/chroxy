@@ -142,7 +142,9 @@ function assertExpectation(result: AdapterResult, exp: FixtureExpectation, fx: C
     }
     for (const [id, session] of Object.entries(result.sessions)) {
       const baseline: Record<string, unknown> = { sessionId: id, messages: [], ...(seeded[id] ?? {}) }
-      const extraKeys = Object.keys(session).filter((k) => !(k in baseline))
+      // Own keys only: `in` would also match an inherited Object.prototype name
+      // (`constructor`, `toString`, ...), so such a gained key would slip through.
+      const extraKeys = Object.keys(session).filter((k) => !Object.hasOwn(baseline, k))
       expect(extraKeys, `${fx.name}: session ${id} gained keys on a no-op`).toEqual([])
       for (const [key, value] of Object.entries(baseline)) {
         expect(session[key], `${fx.name}: session ${id}.${key} overwritten on a no-op`).toEqual(value)
@@ -401,6 +403,13 @@ describe('noop fixtures see a same-key overwrite (#7531)', () => {
   it('still fails when a handler ADDS a key (the original check is kept)', () => {
     const result = runWithHandler((_msg, adapter) => {
       adapter.updateSession('s1', () => ({ someUnrelatedFlag: true }))
+    })
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/gained keys/)
+  })
+
+  it('fails when a handler adds a key named like an Object.prototype member', () => {
+    const result = runWithHandler((_msg, adapter) => {
+      adapter.updateSession('s1', () => ({ constructor: 'x' }) as never)
     })
     expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/gained keys/)
   })
