@@ -50,7 +50,19 @@ function makeGatedSession({ spawnPreflight, ctorOpts = {} } = {}) {
         // No pid: destroy() arms its SIGKILL escalation only for an integer
         // pid, and a made-up one could name a real process on this machine.
         pid: undefined,
-        write: (data) => writes.push(data),
+        write: (data) => {
+          writes.push(data)
+          // Stand in for claude finishing the turn. `sendMessage` resolves only
+          // when its hook poll sees a Stop, and without one it waits out the 90s
+          // first-output watchdog (#8380) -- three tests here each spent 90s,
+          // and the poll outlived the test so the file hung past a bounded run.
+          // Only once a test has pointed the session at a real sink dir.
+          if (s._sinkDir) {
+            try {
+              writeFileSync(join(s._sinkDir, 'stop-fake.json'), JSON.stringify({ last_assistant_message: 'ok' }))
+            } catch { /* sink dir absent: a test of the write-failure path */ }
+          }
+        },
         kill: () => {},
         onData: () => {},
         onExit: () => {},
