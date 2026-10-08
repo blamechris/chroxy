@@ -1806,6 +1806,15 @@ export interface ConnectionState {
    */
   environmentDestroyRefusals: Record<string, string[]>;
   /**
+   * #8407: environment ids with a `destroy_environment` (plain or Force) on the
+   * wire and unanswered. Lets the card show a pending state instead of
+   * reverting to a clickable Destroy while the daemon works. Cleared by the
+   * answer (an `environment_error` naming the id, or an `environment_list`
+   * that no longer lists it), by a 30s safety timeout, and on disconnect — it
+   * is an in-flight marker, so it lives in `createEmptyInFlightMarkers()`.
+   */
+  environmentDestroyingIds: Set<string>;
+  /**
    * #7625: the parked failed-restore roster, as the daemon sent it.
    *
    * The WHOLE reply message is stored, exactly like every other Control Room
@@ -2768,6 +2777,11 @@ export interface ConnectionState {
   // #7594: forget a recorded destroy refusal (the operator cancelled the Force
   // escalation). A new destroy attempt clears it too.
   dismissEnvironmentDestroyRefusal: (environmentId: string) => void;
+  /**
+   * #8407: drop one environment's recorded container action outcome (the
+   * operator dismissed the "no longer in the survey" refusal notice).
+   */
+  dismissContainerActionResult: (environmentId: string) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;

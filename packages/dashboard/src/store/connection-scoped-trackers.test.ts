@@ -147,6 +147,8 @@ const TRACKERS_EXPECTED = [
   'resetTranscriptFetchTracking',
   'clearDeltaBuffers',
   'clearTerminalWriteBatching',
+  // #8407: the destroy-in-flight safety timers.
+  'cancelAllEnvironmentDestroyTimers',
 ] as const
 
 /**

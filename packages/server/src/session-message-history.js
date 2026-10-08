@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
-import { redactBounded } from './redaction.js'
+import { redactBounded, RECORD_DESCRIPTION_MAX } from './redaction.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
 
@@ -20,7 +20,7 @@ export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'
 // ring buffer and the state file keep, so a long hook-path description (the hook
 // route broadcasts it uncapped) cannot bloat either.
 export const PERMISSION_OUTCOME_TOOL_MAX = 100
-export const PERMISSION_OUTCOME_DESCRIPTION_MAX = 500
+export const PERMISSION_OUTCOME_DESCRIPTION_MAX = RECORD_DESCRIPTION_MAX
 
 // `<turnId>-thinking-<n>` (sdk, byok) and `<turnId>-thinking` (acp).
 const LEGACY_THINKING_ID = /-thinking(?:-\d+)?$/

@@ -40,6 +40,14 @@ describe('ServerToolResultSchema.terminatedReason (#7376)', () => {
 })
 
 describe('describeTurnTermination (#7376)', () => {
+  it('a usage limit names itself, and is a termination (not a Stop) (#8400)', () => {
+    assert.ok(isTurnTerminationReason('usage_limit'))
+    const d = describeTurnTermination('usage_limit')
+    assert.equal(d.cause, 'usage limit')
+    assert.equal(d.label, 'terminated')
+    assert.ok(d.summary.includes('usage limit'), d.summary)
+  })
+
   it('every known reason is recognised and worded', () => {
     for (const reason of TURN_TERMINATION_REASONS) {
       assert.ok(isTurnTerminationReason(reason), reason)

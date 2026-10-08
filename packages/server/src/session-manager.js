@@ -305,10 +305,8 @@ function permissionOutcomeForEvent(event, data) {
  *      broadcast and already redacted. A large input is broadcast as a truncation
  *      wrapper that has lost those fields, so only the producer can supply it;
  *   3. the SANITIZED input, serialized: values under sensitive keys are masked in
- *      it. This is the case the producer's own description was built by
- *      serializing the raw input, which still carries them, so that string is NOT
- *      used and redacting it again does not recover the key context. The
- *      truncation wrapper is never serialized: it carries nothing worth showing;
+ *      it. The truncation wrapper is never serialized: it carries nothing worth
+ *      showing;
  *   4. the producer's description, only when there is no input at all.
  *
  * @param {string|undefined} tool

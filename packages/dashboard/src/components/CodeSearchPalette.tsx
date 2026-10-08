@@ -15,6 +15,7 @@ import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent }
 import { useConnectionStore } from '../store/connection'
 import type { SearchResultEntry } from '@chroxy/protocol'
 import { isImeComposing } from '../utils/ime'
+import { useIdeRequestStatus } from '../hooks/useIdeRequestStatus'
 
 export interface CodeSearchPaletteProps {
   isOpen: boolean
@@ -64,6 +65,16 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
     return snapshot!.results
   }, [snapshot, isCurrent, trimmed])
 
+  // #8404 — a reply in flight when the socket dropped never arrives, so
+  // `!isCurrent` alone must not mean "Searching…". The shared hook settles to
+  // 'offline' while disconnected and re-asks the current query once on reconnect.
+  const status = useIdeRequestStatus({
+    active: isOpen,
+    loading,
+    isCurrent,
+    reissue: () => { if (trimmed.length >= MIN_QUERY) requestSearchContent(trimmed) },
+  })
+
   useEffect(() => {
     setSelectedIndex(i => (results.length === 0 ? 0 : Math.min(i, Math.min(results.length, DISPLAY_CAP) - 1)))
   }, [results.length])
@@ -99,7 +110,8 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
   const display = overflow > 0 ? results.slice(0, DISPLAY_CAP) : results
   // "Searching…" while a query is in flight OR results haven't caught up to the
   // current query yet, so a stale set never renders as if it were fresh.
-  const searching = trimmed.length >= MIN_QUERY && (loading || !isCurrent)
+  const searching = trimmed.length >= MIN_QUERY && status === 'searching'
+  const offline = trimmed.length >= MIN_QUERY && status === 'offline'
 
   return (
     <div
@@ -127,7 +139,12 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
           {trimmed.length >= MIN_QUERY && searching && (
             <div className="file-open-palette-status">Searching…</div>
           )}
-          {trimmed.length >= MIN_QUERY && !searching && results.length === 0 && (
+          {offline && (
+            <div className="file-open-palette-status" data-testid="code-search-offline">
+              Unavailable — the search will run again when the connection is back
+            </div>
+          )}
+          {trimmed.length >= MIN_QUERY && status === 'ready' && results.length === 0 && (
             <div className="file-open-palette-status" data-testid="code-search-empty">No matches</div>
           )}
           {display.map((r, i) => (

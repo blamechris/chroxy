@@ -12,6 +12,7 @@
 //! I/O: the periodic probe thread and applying a [`TrayPlan`] to the real menu
 //! items.
 
+use crate::health_proof;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -74,11 +75,16 @@ pub enum HealthOutcome {
     NoHttp { tcp_open: bool },
 }
 
-/// Classify one probe. An occupied port that does not answer as chroxy is
-/// `Foreign`, never `Chroxy`.
-pub fn classify_probe(port: u16, outcome: &HealthOutcome) -> PortState {
+/// Classify one probe. An occupied port is `Chroxy` only when it answers 200 with
+/// a chroxy-shaped body AND `proves_daemon(body)` accepts that body's proof;
+/// every other occupied port is `Foreign`.
+pub fn classify_probe(
+    port: u16,
+    outcome: &HealthOutcome,
+    proves_daemon: impl FnOnce(&str) -> bool,
+) -> PortState {
     match outcome {
-        HealthOutcome::Ok(body) if is_chroxy_health(body) => PortState::Chroxy(port),
+        HealthOutcome::Ok(body) if is_chroxy_health(body) && proves_daemon(body) => PortState::Chroxy(port),
         HealthOutcome::Ok(_) | HealthOutcome::BadStatus(_) => PortState::Foreign(port),
         HealthOutcome::NoHttp { tcp_open: true } => PortState::Foreign(port),
         HealthOutcome::NoHttp { tcp_open: false } => PortState::Free,
@@ -250,10 +256,225 @@ pub fn run_guarded_stop(
     }
 }
 
-/// Probe `/health` on loopback once and classify what holds `port`.
+/// What an AUTOMATIC start (launch-time auto-start, crash auto-restart) does about
+/// the configured port (#8388). Unlike a user click it has nobody to ask, so it
+/// must never stop a process the app did not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchDecision {
+    /// Nothing holds the port: spawn.
+    Spawn,
+    /// The holder is a server THIS app spawned in an earlier run and lost track
+    /// of (the app was killed, the node child was reparented): stop it, spawn.
+    ReclaimOwnOrphan,
+    /// A healthy chroxy daemon the app did not start owns the port: use it.
+    /// Nothing is spawned and nothing is stopped.
+    Adopt(u16),
+    /// Something that is neither holds the port: spawn nothing, stop nothing.
+    Refuse(PortState),
+}
+
+/// `(what answers on the port, whether the holder is verifiably this app's own
+/// earlier server) -> what to do`.
+///
+/// "Own" outranks everything the probe says: an orphan of ours that is wedged and
+/// no longer answers `/health` is still ours to reclaim, and a healthy one is
+/// reclaimed rather than adopted because the app's child handle is what lets it
+/// stop and restart the server. Without proof of ownership a holder is somebody
+/// else's, whatever it answers.
+pub fn launch_start_decision(held: PortState, holder_is_own_server: bool) -> LaunchDecision {
+    match held {
+        PortState::Free => LaunchDecision::Spawn,
+        _ if holder_is_own_server => LaunchDecision::ReclaimOwnOrphan,
+        PortState::Chroxy(p) => LaunchDecision::Adopt(p),
+        PortState::Foreign(_) => LaunchDecision::Refuse(held),
+    }
+}
+
+/// User-facing explanation of a refused automatic start.
+pub fn launch_refusal_message(held: PortState) -> String {
+    match held {
+        PortState::Foreign(p) => format!(
+            "Port {} is in use by another program, so the server was not started. Free the port, or change it in config.json.",
+            p
+        ),
+        // Not reachable through `launch_start_decision`; kept total so a future
+        // caller gets a sentence rather than a panic.
+        PortState::Chroxy(p) => format!("A chroxy daemon already serves port {}.", p),
+        PortState::Free => "The port is free.".to_string(),
+    }
+}
+
+/// A flag that lets one Start or Restart run at a time. The operations take the
+/// server-manager lock for different stretches, so the lock alone does not stop
+/// the second from tearing down the child the first just spawned.
+pub struct OpGate(std::sync::atomic::AtomicBool);
+
+/// Held while an operation runs; releases the gate on drop, panic included.
+pub struct OpPermit<'a>(&'a OpGate);
+
+impl OpGate {
+    pub const fn new() -> Self {
+        Self(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// `Some` for the one caller that gets in, `None` for everyone while it runs.
+    pub fn try_acquire(&self) -> Option<OpPermit<'_>> {
+        use std::sync::atomic::Ordering;
+        self.0
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| OpPermit(self))
+    }
+}
+
+impl Default for OpGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for OpPermit<'_> {
+    fn drop(&mut self) {
+        self.0 .0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Run `run` only if no other Start/Restart holds `gate`; otherwise `busy`.
+pub fn run_exclusive(gate: &OpGate, busy: impl FnOnce(), run: impl FnOnce()) {
+    match gate.try_acquire() {
+        Some(_permit) => run(),
+        None => busy(),
+    }
+}
+
+/// Read what a setter needs under `mutex`, release it, THEN act. Tauri's menu
+/// setters called off the main thread block until the main thread has run them,
+/// and the main-thread render takes the same lock, so a setter called with the
+/// lock held can deadlock (#8393).
+pub fn pick_then_act<T, U>(mutex: &std::sync::Mutex<T>, pick: impl FnOnce(&T) -> U, act: impl FnOnce(U)) {
+    let picked = {
+        let guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        pick(&guard)
+    };
+    act(picked)
+}
+
+/// Probe `/health` on loopback and classify what holds `port`, challenging it with
+/// the access token the app holds for it ([`crate::config::proof_token`]). A proof
+/// that does not verify is tried once more with a freshly loaded token, so a daemon
+/// whose token was rotated since the app last read it is not mistaken for a
+/// foreign holder.
+///
+/// This is the one place a holder is classified as an adoptable chroxy daemon:
+/// every route that adopts a daemon (the launch-time start, the crash restart, the
+/// client-mode adopt, the tray's external-daemon state) goes through it. A holder
+/// that answers like chroxy is adoptable only when a fresh challenge returns a
+/// proof bound to the API token and to this port; any other answer is foreign.
 pub fn probe_port(port: u16, timeout: Duration) -> PortState {
-    let url = format!("http://127.0.0.1:{}/health", port);
-    let outcome = match ureq::get(&url).timeout(timeout).call() {
+    probe_effective(port, timeout, &REAL_TOKEN_SOURCES, probe_port_outcome).0
+}
+
+/// The token that makes the daemon on `port` prove itself now, or `None`.
+///
+/// Call this immediately before every handoff of the access token to a daemon
+/// (navigating the window to it, opening the dashboard, asking it for the QR
+/// connection info, returning the token over IPC), and hand over the token it
+/// returns: the one that proved, not a copy read earlier. The state the tray
+/// cached from an earlier probe never authorises a handoff.
+pub fn prove_daemon(port: u16, timeout: Duration) -> Option<String> {
+    match probe_effective(port, timeout, &REAL_TOKEN_SOURCES, probe_port_outcome) {
+        (PortState::Chroxy(_), token) => token,
+        _ => None,
+    }
+}
+
+/// Where the tokens come from: the one the app holds (read through its cache) and
+/// a fresh load for the retry.
+pub struct TokenSources {
+    pub first: fn() -> Option<String>,
+    pub fresh: fn() -> Option<String>,
+}
+
+/// The app's real token sources. [`probe_port`] and [`prove_daemon`] both read them.
+pub const REAL_TOKEN_SOURCES: TokenSources = TokenSources {
+    first: crate::config::proof_token,
+    fresh: crate::config::fresh_token,
+};
+
+/// [`probe_with_retry`] over `sources`: the first token is read once, and the
+/// fresh one only if the retry is needed.
+pub fn probe_effective(
+    port: u16,
+    timeout: Duration,
+    sources: &TokenSources,
+    probe: impl Fn(u16, Duration, Option<&str>) -> ProbeResult,
+) -> (PortState, Option<String>) {
+    probe_with_retry(port, timeout, (sources.first)(), sources.fresh, probe)
+}
+
+/// What one probe found, and whether the holder answered like chroxy with a proof
+/// that did not verify (the only case a different token could change).
+pub type ProbeResult = (PortState, bool);
+
+/// Probe with `first`; if the holder answered like chroxy with a proof that does
+/// not verify, probe once more with the token `fresh` loads (when that is a
+/// different one). A holder that is not chroxy, or gave no proof, never reads
+/// `fresh`: the credential store is not touched on its account. Returns the state
+/// and, for `Chroxy`, the token that proved it.
+pub fn probe_with_retry(
+    port: u16,
+    timeout: Duration,
+    first: Option<String>,
+    fresh: impl FnOnce() -> Option<String>,
+    probe: impl Fn(u16, Duration, Option<&str>) -> ProbeResult,
+) -> (PortState, Option<String>) {
+    let (state, proof_failed) = probe(port, timeout, first.as_deref());
+    if !matches!(state, PortState::Foreign(_)) {
+        return (state, first);
+    }
+    if proof_failed {
+        if let Some(retry) = fresh().filter(|t| !t.is_empty() && Some(t) != first.as_ref()) {
+            let (second, _) = probe(port, timeout, Some(&retry));
+            if second == PortState::Chroxy(port) {
+                return (second, Some(retry));
+            }
+        }
+    }
+    (state, None)
+}
+
+/// [`probe_port`] with the token passed in and no retry. With no token, or if the
+/// OS RNG fails, no proof can be checked and a chroxy-shaped holder is foreign.
+pub fn probe_port_with_token(port: u16, timeout: Duration, token: Option<&str>) -> PortState {
+    probe_port_outcome(port, timeout, token).0
+}
+
+/// [`probe_port_with_token`], also saying whether the holder gave a chroxy-shaped
+/// body whose `proof` did not verify.
+pub fn probe_port_outcome(port: u16, timeout: Duration, token: Option<&str>) -> ProbeResult {
+    let nonce = health_proof::fresh_nonce();
+    let path = match &nonce {
+        Some(n) => health_proof::challenge_path(n),
+        None => "/health".to_string(),
+    };
+    let outcome = request_health(port, &path, timeout);
+    let mut proof_failed = false;
+    let state = classify_probe(port, &outcome, |body| {
+        let proved = match (token, nonce.as_deref()) {
+            (Some(t), Some(n)) => health_proof::body_proves_daemon(body, t, port, n),
+            _ => false,
+        };
+        proof_failed = !proved && health_proof::proof_field(body).is_some();
+        proved
+    });
+    (state, proof_failed)
+}
+
+fn request_health(port: u16, path: &str, timeout: Duration) -> HealthOutcome {
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+    // No redirects: the answer has to come from the port that was asked.
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    match agent.get(&url).timeout(timeout).call() {
         Ok(resp) if resp.status() == 200 => {
             // Bounded read: the port may belong to something that streams forever.
             let mut body = String::new();
@@ -265,8 +486,7 @@ pub fn probe_port(port: u16, timeout: Duration) -> PortState {
         Err(ureq::Error::Transport(_)) => HealthOutcome::NoHttp {
             tcp_open: tcp_connects(port, timeout),
         },
-    };
-    classify_probe(port, &outcome)
+    }
 }
 
 /// True if something accepts a TCP connection on loopback `port`.
@@ -348,7 +568,7 @@ mod tests {
     #[test]
     fn chroxy_health_body_reads_as_external_daemon() {
         assert_eq!(
-            classify_probe(9000, &HealthOutcome::Ok(GOOD.to_string())),
+            classify_probe(9000, &HealthOutcome::Ok(GOOD.to_string()), |_| true),
             PortState::Chroxy(9000)
         );
     }
@@ -363,14 +583,14 @@ mod tests {
             HealthOutcome::BadStatus(503),
             HealthOutcome::NoHttp { tcp_open: true },
         ] {
-            assert_eq!(classify_probe(9000, &outcome), PortState::Foreign(9000), "{:?}", outcome);
+            assert_eq!(classify_probe(9000, &outcome, |_| true), PortState::Foreign(9000), "{:?}", outcome);
         }
     }
 
     #[test]
     fn closed_port_is_free() {
         assert_eq!(
-            classify_probe(9000, &HealthOutcome::NoHttp { tcp_open: false }),
+            classify_probe(9000, &HealthOutcome::NoHttp { tcp_open: false }, |_| true),
             PortState::Free
         );
     }
@@ -505,52 +725,481 @@ mod tests {
         assert!(refusal_message(UserAction::Start, PortState::Foreign(7)).contains("another program"));
     }
 
-    // --- probe_port against real sockets -----------------------------------
+    // --- automatic start (#8388) ------------------------------------------
 
-    /// Serve `reply` (a full HTTP response) to every connection until dropped.
-    fn serve(reply: &'static str) -> u16 {
+    #[test]
+    fn automatic_start_spawns_on_a_free_port() {
+        // The ownership flag is irrelevant when nothing holds the port.
+        for own in [false, true] {
+            assert_eq!(launch_start_decision(PortState::Free, own), LaunchDecision::Spawn);
+        }
+    }
+
+    #[test]
+    fn automatic_start_adopts_a_chroxy_daemon_it_did_not_start() {
+        assert_eq!(
+            launch_start_decision(PortState::Chroxy(8765), false),
+            LaunchDecision::Adopt(8765)
+        );
+    }
+
+    #[test]
+    fn automatic_start_refuses_a_foreign_holder_and_never_reclaims_it() {
+        assert_eq!(
+            launch_start_decision(PortState::Foreign(8765), false),
+            LaunchDecision::Refuse(PortState::Foreign(8765))
+        );
+    }
+
+    #[test]
+    fn automatic_start_reclaims_only_a_holder_proven_to_be_its_own() {
+        for held in [PortState::Chroxy(8765), PortState::Foreign(8765)] {
+            assert_eq!(launch_start_decision(held, true), LaunchDecision::ReclaimOwnOrphan, "{:?}", held);
+        }
+    }
+
+    #[test]
+    fn only_proven_ownership_ever_reaches_the_reclaim() {
+        // The kill is reachable from exactly one cell of the table.
+        for held in [PortState::Free, PortState::Chroxy(1), PortState::Foreign(1)] {
+            for own in [false, true] {
+                let reclaims = launch_start_decision(held, own) == LaunchDecision::ReclaimOwnOrphan;
+                assert_eq!(reclaims, own && held.is_occupied(), "{:?} own={}", held, own);
+            }
+        }
+    }
+
+    #[test]
+    fn launch_refusal_names_the_port_and_the_way_out() {
+        let m = launch_refusal_message(PortState::Foreign(7));
+        assert!(m.contains('7') && m.contains("another program") && m.contains("config.json"), "{}", m);
+    }
+
+    // --- Start/Restart exclusion (#8393) ----------------------------------
+
+    #[test]
+    fn a_second_operation_is_refused_while_the_first_runs() {
+        let gate = OpGate::new();
+        let (mut outer_ran, mut inner_ran, mut inner_busy) = (false, false, false);
+        run_exclusive(
+            &gate,
+            || panic!("the first operation must get in"),
+            || {
+                outer_ran = true;
+                run_exclusive(&gate, || inner_busy = true, || inner_ran = true);
+            },
+        );
+        assert!(outer_ran && inner_busy && !inner_ran, "the second run must not start");
+    }
+
+    #[test]
+    fn the_gate_reopens_after_the_operation_finishes() {
+        let gate = OpGate::new();
+        run_exclusive(&gate, || panic!("busy"), || {});
+        let mut ran = false;
+        run_exclusive(&gate, || panic!("must be free again"), || ran = true);
+        assert!(ran);
+    }
+
+    #[test]
+    fn the_gate_reopens_after_the_operation_panics() {
+        let gate = OpGate::new();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_exclusive(&gate, || {}, || panic!("boom"));
+        }));
+        assert!(r.is_err());
+        assert!(gate.try_acquire().is_some(), "a panic must not wedge Start/Restart forever");
+    }
+
+    #[test]
+    fn concurrent_threads_never_both_run() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::mpsc;
+        let gate = std::sync::Arc::new(OpGate::new());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let g = gate.clone();
+        let first = thread::spawn(move || {
+            run_exclusive(
+                &g,
+                || panic!("first must get in"),
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            );
+        });
+        entered_rx.recv().unwrap();
+        let ran = AtomicU32::new(0);
+        let busy = AtomicU32::new(0);
+        run_exclusive(&gate, || { busy.fetch_add(1, Ordering::SeqCst); }, || { ran.fetch_add(1, Ordering::SeqCst); });
+        release_tx.send(()).unwrap();
+        first.join().unwrap();
+        assert_eq!((ran.load(Ordering::SeqCst), busy.load(Ordering::SeqCst)), (0, 1));
+    }
+
+    // --- pick_then_act: no lock across a setter (#8393) -------------------
+
+    #[test]
+    fn pick_then_act_releases_the_lock_before_acting() {
+        let m = std::sync::Mutex::new(7u32);
+        let mut act_saw_free_lock = false;
+        pick_then_act(&m, |v| *v + 1, |picked| {
+            assert_eq!(picked, 8);
+            act_saw_free_lock = m.try_lock().is_ok();
+        });
+        assert!(act_saw_free_lock, "the setter must run with the lock released");
+    }
+
+    #[test]
+    fn pick_then_act_recovers_a_poisoned_lock() {
+        let m = std::sync::Arc::new(std::sync::Mutex::new(1u32));
+        let m2 = m.clone();
+        let _ = thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("poison");
+        })
+        .join();
+        let mut got = 0;
+        pick_then_act(&m, |v| *v, |v| got = v);
+        assert_eq!(got, 1);
+    }
+
+    // --- classify_probe with a proof -----------------------------------------
+
+    #[test]
+    fn a_chroxy_shaped_body_without_an_accepted_proof_is_foreign() {
+        assert_eq!(
+            classify_probe(9000, &HealthOutcome::Ok(GOOD.to_string()), |_| false),
+            PortState::Foreign(9000)
+        );
+    }
+
+    #[test]
+    fn the_proof_is_checked_only_for_a_chroxy_shaped_body() {
+        for outcome in [
+            HealthOutcome::Ok("OK".to_string()),
+            HealthOutcome::Ok(r#"{"status":"ok"}"#.to_string()),
+            HealthOutcome::BadStatus(404),
+            HealthOutcome::NoHttp { tcp_open: true },
+            HealthOutcome::NoHttp { tcp_open: false },
+        ] {
+            classify_probe(9000, &outcome, |_| panic!("no proof to check for {:?}", outcome));
+        }
+    }
+
+    // --- probes against real sockets -----------------------------------------
+
+    const TOKEN: &str = "test-token";
+
+    /// Answer each connection with `reply(request_line, listening_port)`.
+    fn serve_with(reply: impl Fn(&str, u16) -> String + Send + 'static) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut s) = stream else { break };
-                let mut buf = [0u8; 1024];
-                let _ = s.read(&mut buf);
-                let _ = s.write_all(reply.as_bytes());
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let line = request.lines().next().unwrap_or("").to_string();
+                let _ = s.write_all(reply(&line, port).as_bytes());
             }
         });
         port
     }
 
-    fn http_200(body: &str) -> &'static str {
-        Box::leak(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .into_boxed_str(),
+    fn http_200(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
         )
+    }
+
+    /// The nonce in `GET /health?challenge=<nonce> HTTP/1.1`.
+    fn nonce_of(line: &str) -> Option<String> {
+        let rest = line.split("challenge=").nth(1)?;
+        Some(rest.split_whitespace().next()?.to_string())
+    }
+
+    /// A chroxy daemon holding `token` that proves with `claimed_port_of(port)`.
+    fn serve_daemon(token: &'static str, claimed_port_of: fn(u16) -> u16) -> u16 {
+        serve_with(move |line, port| {
+            let proof = nonce_of(line)
+                .map(|n| health_proof::compute_proof_hex(token, claimed_port_of(port), &n));
+            let body = match proof {
+                Some(p) => format!(r#"{{"status":"ok","mode":"cli","version":"0.11.4","proof":"{}"}}"#, p),
+                None => GOOD.to_string(),
+            };
+            http_200(&body)
+        })
+    }
+
+    fn same_port(p: u16) -> u16 {
+        p
+    }
+
+    fn probe(port: u16, token: Option<&str>) -> PortState {
+        probe_port_with_token(port, T, token)
     }
 
     const T: Duration = Duration::from_millis(400);
 
     #[test]
-    fn probe_recognises_a_chroxy_daemon() {
-        let port = serve(http_200(GOOD));
-        assert_eq!(probe_port(port, T), PortState::Chroxy(port));
+    fn a_daemon_that_answers_the_challenge_with_a_valid_proof_is_chroxy() {
+        let port = serve_daemon(TOKEN, same_port);
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Chroxy(port));
+    }
+
+    // --- a rotated token: one retry with a freshly loaded token -----------
+
+    /// A fake probe: chroxy for `good`, otherwise foreign with `proof_failed`.
+    fn chroxy_only_for(good: &'static str, proof_failed: bool) -> impl Fn(u16, Duration, Option<&str>) -> ProbeResult {
+        move |port, _, token| {
+            if token == Some(good) {
+                (PortState::Chroxy(port), false)
+            } else {
+                (PortState::Foreign(port), proof_failed)
+            }
+        }
+    }
+
+    #[test]
+    fn a_proof_that_fails_with_the_cached_token_is_retried_once_with_a_fresh_one() {
+        let (state, token) = probe_with_retry(9000, T, Some("old".into()), || Some("new".into()), chroxy_only_for("new", true));
+        assert_eq!(state, PortState::Chroxy(9000));
+        assert_eq!(token.as_deref(), Some("new"), "the token that proved is the one handed back");
+    }
+
+    #[test]
+    fn a_proof_that_verifies_the_first_time_does_not_read_a_fresh_token() {
+        let (state, token) = probe_with_retry(9000, T, Some("cur".into()), || panic!("read again"), chroxy_only_for("cur", true));
+        assert_eq!((state, token.as_deref()), (PortState::Chroxy(9000), Some("cur")));
+    }
+
+    #[test]
+    fn a_holder_that_is_not_chroxy_never_reads_the_credential_store() {
+        // Foreign without a failed proof: not chroxy-shaped, or no proof field.
+        let reads = std::cell::Cell::new(0);
+        for _ in 0..3 {
+            let (state, token) = probe_with_retry(
+                9000,
+                T,
+                Some("cached".into()),
+                || {
+                    reads.set(reads.get() + 1);
+                    Some("fresh".into())
+                },
+                chroxy_only_for("fresh", false),
+            );
+            assert_eq!((state, token), (PortState::Foreign(9000), None));
+        }
+        assert_eq!(reads.get(), 0, "a foreign holder triggers no fresh read");
+    }
+
+    #[test]
+    fn a_rotated_token_triggers_exactly_one_fresh_read() {
+        let reads = std::cell::Cell::new(0);
+        let (state, token) = probe_with_retry(
+            9000,
+            T,
+            Some("old".into()),
+            || {
+                reads.set(reads.get() + 1);
+                Some("new".into())
+            },
+            chroxy_only_for("new", true),
+        );
+        assert_eq!((state, token.as_deref()), (PortState::Chroxy(9000), Some("new")));
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn no_retry_is_made_for_an_unchanged_missing_or_empty_fresh_token_or_a_free_port() {
+        let calls = std::cell::Cell::new(0);
+        let counting = |p: u16, _: Duration, _: Option<&str>| {
+            calls.set(calls.get() + 1);
+            (PortState::Foreign(p), true)
+        };
+        for fresh in [Some("same".to_string()), None, Some(String::new())] {
+            calls.set(0);
+            let (state, token) = probe_with_retry(9000, T, Some("same".into()), || fresh.clone(), counting);
+            assert_eq!((state, token), (PortState::Foreign(9000), None));
+            assert_eq!(calls.get(), 1, "{:?}", fresh);
+        }
+        let free = |_: u16, _: Duration, _: Option<&str>| (PortState::Free, false);
+        assert_eq!(probe_with_retry(9000, T, None, || panic!("free port"), free).0, PortState::Free);
+        let still_wrong = |p: u16, _: Duration, _: Option<&str>| (PortState::Foreign(p), true);
+        assert_eq!(probe_with_retry(9000, T, Some("a".into()), || Some("b".into()), still_wrong).0, PortState::Foreign(9000));
+    }
+
+    #[test]
+    fn a_daemon_whose_token_was_rotated_is_recognised_through_a_real_probe() {
+        let port = serve_daemon("rotated-token", same_port);
+        let (state, token) = probe_with_retry(
+            port,
+            T,
+            Some("token-before-the-rotation".into()),
+            || Some("rotated-token".into()),
+            probe_port_outcome,
+        );
+        assert_eq!(state, PortState::Chroxy(port));
+        assert_eq!(token.as_deref(), Some("rotated-token"));
+        // A holder that cannot prove with either token stays foreign.
+        let port = serve_daemon("a-third-token", same_port);
+        let (state, token) = probe_with_retry(port, T, Some("x".into()), || Some("y".into()), probe_port_outcome);
+        assert_eq!((state, token), (PortState::Foreign(port), None));
+    }
+
+    #[test]
+    fn a_real_holder_that_is_not_chroxy_or_has_no_proof_reads_no_fresh_token() {
+        let reads = std::cell::Cell::new(0);
+        let fresh = || {
+            reads.set(reads.get() + 1);
+            Some("fresh".to_string())
+        };
+        // Not chroxy-shaped.
+        let port = serve_with(|_, _| http_200("hello"));
+        assert_eq!(probe_with_retry(port, T, Some("a".into()), fresh, probe_port_outcome).0, PortState::Foreign(port));
+        // Chroxy-shaped with no proof field.
+        let port = serve_with(|_, _| http_200(GOOD));
+        assert_eq!(probe_with_retry(port, T, Some("a".into()), fresh, probe_port_outcome).0, PortState::Foreign(port));
+        // A closed port and a refusal.
+        let port = serve_with(|_, _| "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string());
+        assert_eq!(probe_with_retry(port, T, Some("a".into()), fresh, probe_port_outcome).0, PortState::Foreign(port));
+        assert_eq!(reads.get(), 0);
+    }
+
+    #[test]
+    fn a_chroxy_shaped_body_with_a_proof_that_does_not_verify_is_reported_as_such() {
+        let port = serve_daemon("someone-elses-token", same_port);
+        assert_eq!(probe_port_outcome(port, T, Some(TOKEN)), (PortState::Foreign(port), true));
+        let port = serve_with(|_, _| http_200(GOOD));
+        assert_eq!(probe_port_outcome(port, T, Some(TOKEN)), (PortState::Foreign(port), false));
+        let port = serve_daemon(TOKEN, same_port);
+        assert_eq!(probe_port_outcome(port, T, Some(TOKEN)), (PortState::Chroxy(port), false));
+    }
+
+    // --- the real token sources -------------------------------------------
+
+    #[test]
+    fn probe_port_and_prove_daemon_read_the_real_token_sources() {
+        // Both go through REAL_TOKEN_SOURCES, which must be the app's own readers.
+        let first: fn() -> Option<String> = crate::config::proof_token;
+        let fresh: fn() -> Option<String> = crate::config::fresh_token;
+        assert_eq!(REAL_TOKEN_SOURCES.first as usize, first as usize);
+        assert_eq!(REAL_TOKEN_SOURCES.fresh as usize, fresh as usize);
+    }
+
+    #[test]
+    fn probe_effective_reads_the_first_token_once_and_the_fresh_one_only_on_a_failed_proof() {
+        thread_local! {
+            static FIRST: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+            static FRESH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn first() -> Option<String> {
+            FIRST.with(|c| c.set(c.get() + 1));
+            Some("old".into())
+        }
+        fn fresh() -> Option<String> {
+            FRESH.with(|c| c.set(c.get() + 1));
+            Some("new".into())
+        }
+        let sources = TokenSources { first, fresh };
+        let port = serve_daemon("new", same_port);
+        let (state, token) = probe_effective(port, T, &sources, probe_port_outcome);
+        assert_eq!((state, token.as_deref()), (PortState::Chroxy(port), Some("new")));
+        assert_eq!((FIRST.with(|c| c.get()), FRESH.with(|c| c.get())), (1, 1));
+        // A daemon that proves with the first token never reads the fresh one.
+        let port = serve_daemon("old", same_port);
+        FRESH.with(|c| c.set(0));
+        let (state, _) = probe_effective(port, T, &sources, probe_port_outcome);
+        assert_eq!(state, PortState::Chroxy(port));
+        assert_eq!(FRESH.with(|c| c.get()), 0);
+    }
+
+    #[test]
+    fn a_chroxy_shaped_holder_without_a_proof_is_foreign() {
+        let port = serve_with(|_, _| http_200(GOOD));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn a_proof_made_with_another_token_is_foreign() {
+        let port = serve_daemon("someone-elses-token", same_port);
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn a_proof_bound_to_another_port_is_foreign() {
+        let port = serve_daemon(TOKEN, |p| p.wrapping_add(1));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn a_replayed_or_malformed_proof_is_foreign() {
+        // A fixed proof does not answer a fresh nonce.
+        let stale = health_proof::compute_proof_hex(TOKEN, 0, &"ab".repeat(32));
+        let body = format!(r#"{{"status":"ok","mode":"cli","version":"0.11.4","proof":"{}"}}"#, stale);
+        let port = serve_with(move |_, _| http_200(&body));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+        let port = serve_with(|_, _| http_200(r#"{"status":"ok","mode":"cli","version":"0.11.4","proof":"zz"}"#));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+        let port = serve_with(|_, _| http_200(r#"{"status":"ok","mode":"cli","version":"0.11.4","proof":7}"#));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn without_a_token_a_daemon_cannot_be_proven() {
+        let port = serve_daemon(TOKEN, same_port);
+        assert_eq!(probe(port, None), PortState::Foreign(port));
+        assert_eq!(probe(port, Some("")), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn every_probe_sends_a_fresh_challenge() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let port = serve_with(move |line, _| {
+            sink.lock().unwrap().push(nonce_of(line));
+            http_200(GOOD)
+        });
+        probe(port, Some(TOKEN));
+        probe(port, Some(TOKEN));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let (a, b) = (seen[0].clone().expect("challenge sent"), seen[1].clone().expect("challenge sent"));
+        assert!(health_proof::is_valid_nonce(&a) && health_proof::is_valid_nonce(&b));
+        assert_ne!(a, b, "a nonce is never reused");
+    }
+
+    #[test]
+    fn a_redirect_is_not_followed() {
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let counter = hits.clone();
+        let target = serve_with(move |_, _| {
+            *counter.lock().unwrap() += 1;
+            http_200(GOOD)
+        });
+        let location = format!("http://127.0.0.1:{}/health", target);
+        let port = serve_with(move |_, _| {
+            format!("HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", location)
+        });
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+        assert_eq!(*hits.lock().unwrap(), 0, "the redirect target was never asked");
     }
 
     #[test]
     fn probe_treats_a_200_that_is_not_chroxy_as_foreign() {
-        let port = serve(http_200("hello"));
-        assert_eq!(probe_port(port, T), PortState::Foreign(port));
+        let port = serve_with(|_, _| http_200("hello"));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
     }
 
     #[test]
     fn probe_treats_a_404_as_foreign() {
-        let port = serve("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        assert_eq!(probe_port(port, T), PortState::Foreign(port));
+        let port = serve_with(|_, _| "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string());
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
     }
 
     #[test]
@@ -558,7 +1207,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         // Accept into the backlog and say nothing: HTTP times out, TCP connects.
-        assert_eq!(probe_port(port, T), PortState::Foreign(port));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
         drop(listener);
     }
 
@@ -568,6 +1217,6 @@ mod tests {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        assert_eq!(probe_port(port, T), PortState::Free);
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Free);
     }
 }

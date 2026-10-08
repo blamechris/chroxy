@@ -13,6 +13,7 @@ import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent }
 import { useConnectionStore } from '../store/connection'
 import type { SymbolEntry } from '@chroxy/protocol'
 import { isImeComposing } from '../utils/ime'
+import { useIdeRequestStatus } from '../hooks/useIdeRequestStatus'
 
 export interface SymbolSearchPaletteProps {
   isOpen: boolean
@@ -46,6 +47,16 @@ export function SymbolSearchPalette({ isOpen, onClose }: SymbolSearchPaletteProp
   }, [isOpen, requestWorkspaceSymbols])
 
   const symbols = snapshot?.symbols ?? null
+
+  // #8404 — `symbols === null` (no table yet) used to mean "Indexing…" forever
+  // when the scan's reply was lost to a transport drop. The shared hook settles
+  // to 'offline' while disconnected and re-requests the scan once on reconnect.
+  const status = useIdeRequestStatus({
+    active: isOpen,
+    loading,
+    isCurrent: symbols !== null,
+    reissue: requestWorkspaceSymbols,
+  })
 
   const filtered = useMemo<SymbolEntry[]>(() => {
     if (!symbols) return []
@@ -90,7 +101,8 @@ export function SymbolSearchPalette({ isOpen, onClose }: SymbolSearchPaletteProp
   // #6476 review — show "Indexing…" while a (re)scan is in flight so a reopen never
   // renders the previous scan's table as if it were fresh (workspaceSymbolsLoading
   // is set on request, cleared on snapshot).
-  const isLoading = loading || symbols === null
+  const isLoading = status === 'searching'
+  const offline = status === 'offline'
 
   return (
     <div
@@ -113,7 +125,12 @@ export function SymbolSearchPalette({ isOpen, onClose }: SymbolSearchPaletteProp
         />
         <div ref={listRef} className="file-open-palette-list" role="listbox" aria-label="Symbols">
           {isLoading && <div className="file-open-palette-status">Indexing symbols…</div>}
-          {!isLoading && filtered.length === 0 && (
+          {offline && (
+            <div className="file-open-palette-status" data-testid="symbol-search-offline">
+              Unavailable — symbols will reload when the connection is back
+            </div>
+          )}
+          {status === 'ready' && filtered.length === 0 && (
             <div className="file-open-palette-status" data-testid="symbol-search-empty">No symbols</div>
           )}
           {display.map((s, i) => (

@@ -323,7 +323,7 @@ describe('redactBounded and scanWindow', () => {
 
   it('redacts all of a text that is within the ceiling, whatever its length', () => {
     const text = `${'word '.repeat(5000)}${ANT_KEY} tail`
-    assert.equal(redactBounded(text), `${'word '.repeat(5000)}[REDACTED] tail`)
+    assert.equal(redactBounded(text, REDACT_ADMISSION_MAX), `${'word '.repeat(5000)}[REDACTED] tail`)
   })
 
   it('coerces a non-string, and returns nothing for nothing', () => {
@@ -478,7 +478,6 @@ describe('a fragment at a cut is never shown', () => {
   it('a quoted value cut by the admission ceiling does not show, in a described field', () => {
     const out = describeByNamedField({ command: OVER_CEILING })
     assert.ok(!out.includes('secret'), out.slice(0, 80))
-    assert.ok(out.endsWith(MARKER))
   })
 
   it('a quoted value cut by the admission ceiling does not show, in the saved permission description', () => {

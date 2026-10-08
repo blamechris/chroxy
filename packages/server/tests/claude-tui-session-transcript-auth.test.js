@@ -266,7 +266,7 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
     await waitFor(() => turnPolling(s), 'the turn to be busy with a baseline')
     appendJournal(transcript, [
       assistantTextLine('If you see "Please run /login · API Error: 401 OAuth access token is invalid." re-authenticate.'),
-      JSON.stringify({ type: 'assistant', isApiErrorMessage: true, error: 'rate_limit', message: { role: 'assistant', content: [{ type: 'text', text: 'slow down' }] } }),
+      JSON.stringify({ type: 'assistant', isApiErrorMessage: true, error: 'invalid_request', message: { role: 'assistant', content: [{ type: 'text', text: 'slow down' }] } }),
     ])
     await afterScans(events, 2, 'two poll passes to have read the appended entries')
     assert.equal(s._isBusy, true)

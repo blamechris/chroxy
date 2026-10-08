@@ -32,6 +32,8 @@ const dismissEnvironmentDestroyRefusal = vi.fn()
 let environments: any[] = []
 // #7594: the live-session refusals the daemon answered, keyed by environment id.
 let environmentDestroyRefusals: Record<string, string[]> = {}
+// #8407: environment ids with an unanswered destroy_environment.
+let environmentDestroyingIds: Set<string> = new Set()
 
 // The production component reads `environments` via `useShallow`. Stub the hook
 // to the identity function (the same move ActivityIndicator's tests make, #4336)
@@ -48,6 +50,7 @@ vi.mock('../store/connection', () => ({
       requestEnvironments,
       destroyEnvironment,
       environmentDestroyRefusals,
+      environmentDestroyingIds,
       dismissEnvironmentDestroyRefusal,
       createEnvironment,
       connectionPhase: 'connected',
@@ -85,6 +88,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   environments = []
   environmentDestroyRefusals = {}
+  environmentDestroyingIds = new Set()
 })
 
 describe('EnvironmentPanel Destroy escalation (#7568, #7594)', () => {
@@ -171,5 +175,58 @@ describe('EnvironmentPanel Destroy escalation (#7568, #7594)', () => {
     // Not force:true — the mock recorded exactly one arg.
     expect(destroyEnvironment).toHaveBeenCalledTimes(1)
     expect(destroyEnvironment.mock.calls[0]).toEqual(['env-1'])
+  })
+})
+
+describe('EnvironmentPanel destroy in flight (#8407)', () => {
+  it('a Force in flight shows a pending state, not a clickable plain Destroy', () => {
+    // destroyEnvironment(id, true) clears the refusal and marks the id pending.
+    environments = [serverEnv(['sess-a'])]
+    environmentDestroyingIds = new Set(['env-1'])
+    render(<EnvironmentPanel />)
+
+    expect(screen.getByTestId('env-destroying-env-1')).toHaveTextContent('Destroying')
+    // Nothing on the card can send a second (plain) destroy meanwhile.
+    expect(screen.queryByRole('button', { name: 'Destroy' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Force destroy' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('env-force-confirm-env-1')).not.toBeInTheDocument()
+  })
+
+  it('the pending state is per environment', () => {
+    environments = [serverEnv([])]
+    environmentDestroyingIds = new Set(['env-other'])
+    render(<EnvironmentPanel />)
+    expect(screen.queryByTestId('env-destroying-env-1')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Destroy' })).toBeInTheDocument()
+  })
+
+  it('a new refusal wins once the pending state has cleared', () => {
+    environments = [serverEnv([])]
+    environmentDestroyRefusals = { 'env-1': ['sess-a'] }
+    render(<EnvironmentPanel />)
+    expect(screen.queryByTestId('env-destroying-env-1')).not.toBeInTheDocument()
+    expect(screen.getByTestId('env-force-confirm-env-1')).toBeInTheDocument()
+  })
+
+  it('an inherited member name is not a refusal (id "constructor")', () => {
+    environments = [{ ...serverEnv([]), id: 'constructor' }]
+    render(<EnvironmentPanel />)
+    expect(screen.queryByTestId('env-force-confirm-constructor')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Destroy' })).toBeInTheDocument()
+  })
+})
+
+describe('EnvironmentPanel plain confirm resets once answered (#8407)', () => {
+  it('after Yes the confirm row is closed, so a non-refusal answer lands on a plain Destroy', () => {
+    environments = [serverEnv([])]
+    const { rerender } = render(<EnvironmentPanel />)
+    fireEvent.click(screen.getByRole('button', { name: 'Destroy' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+    expect(destroyEnvironment).toHaveBeenCalledWith('env-1')
+    // The store's mock does not move on its own; rerender is the next frame.
+    rerender(<EnvironmentPanel />)
+    // Not left on the "Destroy this environment?" prompt for a request already sent.
+    expect(screen.queryByText('Destroy this environment?')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Destroy' })).toBeInTheDocument()
   })
 })

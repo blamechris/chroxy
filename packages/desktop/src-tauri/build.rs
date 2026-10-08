@@ -11,6 +11,7 @@ use tauri_build::{AppManifest, Attributes};
 // origin (issue #3741).
 const APP_COMMANDS: &[&str] = &[
     "get_server_info",
+    "open_settings",
     "get_server_logs",
     "get_startup_logs",
     "start_server",

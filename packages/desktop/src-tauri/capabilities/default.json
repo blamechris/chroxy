@@ -19,6 +19,7 @@
     "clipboard-manager:allow-read-text",
     "dialog:allow-open",
     "allow-get-server-info",
+    "allow-open-settings",
     "allow-get-server-logs",
     "allow-get-startup-logs",
     "allow-start-server",

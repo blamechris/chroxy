@@ -530,6 +530,7 @@ dependencies = [
  "mdns-sd",
  "objc",
  "qrcode",
+ "ring",
  "serde",
  "serde_json",
  "tauri",

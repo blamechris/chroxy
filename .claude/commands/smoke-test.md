@@ -7,7 +7,10 @@ Run an automated visual smoke test of the application using Playwright. Launches
 - `$ARGUMENTS` - Optional flags:
   - `--headed` — Show the browser window (useful for debugging)
   - `--keep-screenshots` — Don't clean up screenshots after the run
-  - If empty, runs headless and cleans up screenshots
+  - `--preview <preview.json>` — Smoke an already-running preview daemon described by that record (`{port, configDir, …}`) instead of starting one in step 1
+  - If empty, starts its own throwaway daemon, runs headless and cleans up screenshots
+
+The skill never attaches to a daemon it did not start or was not handed. `tests/smoke-test.mjs` has no default target (#8225): it exits 2 with usage when none is given and refuses port 8765 and a `~/.chroxy` config dir (exit 3). Never pass `--i-mean-production` from this skill.
 
 ## Instructions
 
@@ -30,32 +33,61 @@ test -f packages/server/tests/smoke-test.mjs || {
 }
 ```
 
-### 1. Ensure Application is Running
+### 1. Start an Isolated Application
 
-The smoke test connects to a running application instance. Check if one is already running, or start one:
+The smoke test drives a running application, and the application must be one this skill owns. Do NOT probe ports and do NOT run `npx chroxy start` with the operator's config: that attaches to the daily daemon with the real token (#8225). If `--preview <preview.json>` was passed, use that record and skip to step 2. Otherwise start a throwaway daemon with its own config dir, its own token and a free port:
 
 ```bash
-# Probe for running server on common ports
-for port in 8765 3131 8080 3000; do
-  if curl -s http://localhost:$port/health >/dev/null 2>&1; then
-    echo "Server already running on port $port"
-    exit 0
-  fi
-done
+# Scratch dir: absolute, directly under $HOME (a relative CHROXY_CONFIG_DIR is refused
+# and the daemon falls back to ~/.chroxy). It holds the token: removed in step 5.
+SMOKE=$(mktemp -d "$HOME/chroxy-smoke.XXXXXX")
+mkdir -p "$SMOKE/fixture" "$SMOKE/config"
+git -C "$SMOKE/fixture" init -q
+echo "# fixture" > "$SMOKE/fixture/README.md"
+git -C "$SMOKE/fixture" add README.md
+git -C "$SMOKE/fixture" -c user.name=smoke -c user.email=smoke@localhost commit -q -m init
 
-# No server found — start one
-echo "Starting chroxy server..."
-npx chroxy start &
-SERVER_PID=$!
-sleep 2
+PORT=$(PATH="/opt/homebrew/opt/node@22/bin:$PATH" node -e 'const s=require("net").createServer().listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
+TOKEN=$(openssl rand -hex 24)
+( umask 077; printf '{"apiToken":"%s","port":%s,"host":"127.0.0.1","tunnel":"none","cwd":"%s","workspaceRoots":["%s"],"sessionCi":{"watch":false},"controlRoomRunnerIncludeGithub":false}\n' \
+    "$TOKEN" "$PORT" "$SMOKE/fixture" "$SMOKE/fixture" > "$SMOKE/config/config.json" )
 
-# Verify it started
-if ! curl -s http://localhost:8765/health >/dev/null 2>&1; then
-  echo "Failed to start server"
-  kill $SERVER_PID 2>/dev/null
-  exit 1
-fi
+# Rebuild the dashboard first: dist is gitignored and a stale bundle gives a false pass.
+npm run build -w @chroxy/dashboard
+
+# Allowlisted environment: environment beats config.json, and the OS keychain is
+# machine-global, so a denylist cannot protect the production token or identity key.
+env -i HOME="$HOME" USER="$USER" TERM=xterm-256color LANG=en_US.UTF-8 TMPDIR="$TMPDIR" \
+  PATH="/opt/homebrew/opt/node@22/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin" \
+  CHROXY_CONFIG_DIR="$SMOKE/config" CHROXY_DISABLE_KEYCHAIN=1 CHROXY_CRED_DISABLE_KEYCHAIN=1 \
+  node packages/server/src/cli.js start -c "$SMOKE/config/config.json" --skip-checks --no-supervisor \
+  > "$SMOKE/daemon.log" 2>&1 &
+PID=$!
+
+# Any failure from here stops OUR daemon (SIGTERM only, bounded wait, never SIGKILL) and
+# removes the scratch dir, which holds the token. A daemon that will not exit is left
+# running, with its scratch dir, and reported.
+abort() {
+  kill -TERM "$PID" 2>/dev/null
+  for i in $(seq 1 30); do kill -0 "$PID" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$PID" 2>/dev/null; then echo "daemon $PID still running after 30s; scratch kept at $SMOKE" >&2
+  else rm -rf -- "${SMOKE:?}"; fi
+  echo "$1" >&2; exit 1
+}
+
+# Wait for /health, then prove it is OUR daemon on OUR port with OUR config.
+for i in $(seq 1 40); do curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
+curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 || abort "daemon did not answer /health"
+test "$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t)" = "$PID" || abort "port $PORT is not held by our daemon"
+case "$(grep -m1 'Config/state root:' "$SMOKE/daemon.log")" in
+  *"Config/state root: $SMOKE/config (from CHROXY_CONFIG_DIR)"*) ;;
+  *) abort "daemon is not using the scratch config" ;;
+esac
+printf '{"smoke":"%s","pid":%s,"port":%s,"configDir":"%s/config","fixture":"%s/fixture"}\n' "$SMOKE" "$PID" "$PORT" "$SMOKE" "$SMOKE" > "$SMOKE/preview.json"
+echo "$SMOKE/preview.json"
 ```
+
+Shell variables do not survive between Bash calls: the last line printed is the `preview.json` path; read `smoke`, `pid` and `port` back from it in every later call. Stop the daemon by that PID only (step 5), never with `pkill`, `killall` or a pattern kill. `scripts/preview-daemon.sh` (#8305) will replace this recipe with one tested script.
 
 ### 2. Run the Smoke Test
 
@@ -70,6 +102,7 @@ for arg in $ARGUMENTS; do
   case "$arg" in
     --headed) PW_FLAGS="$PW_FLAGS --headed" ;;
     --keep-screenshots) KEEP_SCREENSHOTS=true ;;  # skill-level, NOT passed to Playwright
+    --preview) ;;  # skill-level: set PREVIEW=<its value> yourself (step 2 below)
     *) ;;  # ignore unknown flags rather than forwarding them
   esac
 done
@@ -79,8 +112,9 @@ done
 # serves its compiled dist/. There is no `dashboard:build` script.
 npm run build -w @chroxy/dashboard
 
-# Run the smoke test
-cd packages/server && node tests/smoke-test.mjs $PW_FLAGS
+# Run the smoke test against the daemon from step 1 (or the --preview record passed in)
+# PREVIEW is the --preview file when one was passed, otherwise "$SMOKE/preview.json" from step 1.
+cd packages/server && node tests/smoke-test.mjs --preview "$PREVIEW" $PW_FLAGS
 ```
 
 The test script should:
@@ -121,7 +155,8 @@ Output a summary table:
 **Visual issues found:** M (describe any issues)
 
 If the test failed, check:
-- Is the server running? (`curl http://localhost:8765/health`)
+- Is the throwaway daemon up? (`curl http://127.0.0.1:$PORT/health`, with `$PORT` read from the preview record)
+- A run against a daemon without the IDE feature (`features.ide` off, no `SMOKE_REQUIRE_IDE`) records 16 cases and exits 1 with `HARNESS BROKEN: ran 16 cases, expected at least 18` although every case passed. That is the floor, not a regression (#8435); judge the PASS/FAIL lines, not the exit code, until it is fixed.
 - Did the dashboard rebuild? (`npm run build -w @chroxy/dashboard`)
 - Are there console errors in the browser? (check screenshots or run with `--headed`)
 ```
@@ -136,7 +171,20 @@ if [ "$KEEP_SCREENSHOTS" != "true" ]; then
 fi
 ```
 
-If the application was started by this skill (not already running), stop it.
+Stop the daemon this skill started (step 1) and remove its scratch directory, which holds the token. Skip this when `--preview` was passed: that daemon belongs to whoever started it.
+
+```bash
+# PREVIEW is the preview.json path step 1 printed.
+SMOKE=$(node -p "require('$PREVIEW').smoke"); PID=$(node -p "require('$PREVIEW').pid")
+case "$SMOKE" in "$HOME"/chroxy-smoke.?*) ;; *) echo "not a smoke scratch dir: $SMOKE" >&2; exit 1 ;; esac
+if kill -0 "$PID" 2>/dev/null; then
+  case "$(ps -o command= -p "$PID")" in *"$SMOKE"*) ;; *) echo "PID $PID is not ours; leaving it" >&2; exit 1 ;; esac
+  kill -TERM "$PID"                      # SIGTERM only: never SIGKILL, it skips the state flush
+  for i in $(seq 1 30); do kill -0 "$PID" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$PID" 2>/dev/null; then echo "daemon $PID still running after 30s; report it, scratch kept at $SMOKE" >&2; exit 1; fi
+fi
+rm -rf -- "$SMOKE"
+```
 
 ## Writing the Smoke Test Script
 
@@ -235,4 +283,5 @@ Organize checks into logical groups:
 6. **Idempotent** — Safe to run repeatedly. Don't create persistent state (sessions, data, etc.) that would affect the next run.
 7. **Rebuild dashboard before testing** — Dashboard serves compiled Vite bundles. Source changes are NOT visible without `npm run build -w @chroxy/dashboard`.
 8. **`?` shortcut quirk** — Test fails if textarea has focus (keystroke goes to input, not shortcut handler). Click body first to ensure focus is not in the input bar.
+9. **Never the production daemon** — Only attach to a daemon this skill started or was handed via `--preview`. Never port 8765, never a token read from `~/.chroxy`, never `--i-mean-production` (#8225).
 <!-- skill-templates: smoke-test 21fa678 2026-06-03 -->

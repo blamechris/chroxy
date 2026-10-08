@@ -399,6 +399,11 @@ export function createEmptyInFlightMarkers() {
     // #6134-#6140: in-flight lifecycle actions on a container / BYOK pool /
     // host prune / simulator / emulator / WSL distro.
     containerActioningIds: new Set<string>(),
+    // #8407: a `destroy_environment` (plain or Force) sent from the Environments
+    // panel and not yet answered. The reply is an `environment_list` without the
+    // environment, or an `environment_error`, neither of which exists on a dead
+    // socket.
+    environmentDestroyingIds: new Set<string>(),
     byokPoolActioningIds: new Set<string>(),
     hostPruneActioningIds: new Set<string>(),
     simulatorActioningIds: new Set<string>(),
@@ -559,6 +564,18 @@ export function pruneSessionScopedKeySet(
     next.delete(key);
   }
   return next ?? keys;
+}
+
+/**
+ * #8407: read a record that is keyed by a SERVER-SUPPLIED id, counting only an
+ * OWN key. A plain `rec[id]` also answers for `constructor`, `toString`,
+ * `__proto__`... — inherited members that would read as a recorded entry. The
+ * ids are server-generated so this is unreachable today; it is cheap enough to
+ * make unreachable by construction. (`Object.hasOwn` is ES2022; this package
+ * targets ES2020.)
+ */
+export function getOwn<T>(rec: Readonly<Record<string, T>> | null | undefined, key: string): T | undefined {
+  return rec && Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined;
 }
 
 /**

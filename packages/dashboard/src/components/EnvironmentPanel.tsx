@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { useShallow } from 'zustand/react/shallow'
+import { getOwn } from '../store/utils'
 import type { EnvironmentInfo } from '../store/types'
 
 const STATUS_COLORS: Record<string, string> = {
@@ -23,6 +24,7 @@ function StatusBadge({ status }: { status: string }) {
 function EnvironmentCard({
   env,
   refusal,
+  destroying,
   onDestroy,
   onDismissRefusal,
 }: {
@@ -37,6 +39,13 @@ function EnvironmentCard({
    * Destroy straight to a cascade.
    */
   refusal: string[] | undefined
+  /**
+   * #8407: a `destroy_environment` (plain or Force) is on the wire and the
+   * daemon has not answered. The card shows a pending state in place of every
+   * destroy control, so the card cannot revert to a clickable plain Destroy
+   * (which a second click would send) while the request is in flight.
+   */
+  destroying: boolean
   /**
    * #7568: `force` cascades — the plain path (`force` omitted) sends a normal
    * destroy that the server refuses when sessions are live; only the
@@ -79,7 +88,11 @@ function EnvironmentCard({
         </div>
       </div>
       <div className="env-card-actions">
-        {refusal !== undefined ? (
+        {destroying ? (
+          <span className="env-destroying" data-testid={`env-destroying-${env.id}`} role="status">
+            Destroying…
+          </span>
+        ) : refusal !== undefined ? (
           // #7594: the daemon REFUSED the destroy because sessions are live.
           // Name the sessions it reported (the payload, not our local roster)
           // and offer the cascade. Takes precedence over the plain confirm.
@@ -118,7 +131,7 @@ function EnvironmentCard({
         ) : (
           <div className="env-confirm-row">
             <span>Destroy this environment?</span>
-            <button className="btn-env-confirm-yes" onClick={() => onDestroy(env.id)}>Yes</button>
+            <button className="btn-env-confirm-yes" onClick={() => { onDestroy(env.id); setConfirming(false) }}>Yes</button>
             <button className="btn-env-confirm-no" onClick={() => setConfirming(false)}>No</button>
           </div>
         )}
@@ -220,6 +233,7 @@ export function EnvironmentPanel() {
   const requestEnvironments = useConnectionStore(s => s.requestEnvironments)
   const destroyEnvironment = useConnectionStore(s => s.destroyEnvironment)
   const destroyRefusals = useConnectionStore(s => s.environmentDestroyRefusals)
+  const destroyingIds = useConnectionStore(s => s.environmentDestroyingIds)
   const dismissRefusal = useConnectionStore(s => s.dismissEnvironmentDestroyRefusal)
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
 
@@ -259,7 +273,8 @@ export function EnvironmentPanel() {
           <EnvironmentCard
             key={env.id}
             env={env}
-            refusal={destroyRefusals?.[env.id]}
+            refusal={getOwn(destroyRefusals, env.id)}
+            destroying={destroyingIds?.has(env.id) ?? false}
             onDestroy={destroyEnvironment}
             onDismissRefusal={dismissRefusal}
           />

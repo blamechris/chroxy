@@ -11,6 +11,8 @@
  *   - Refresh dispatches the request (and is disabled while loading)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import type { ServerContainersStatusSnapshotMessage } from '@chroxy/protocol'
 
@@ -395,6 +397,67 @@ describe('ContainersStatusSection — lifecycle actions (#6134)', () => {
       it('shows no gone-notice for a refusal whose container is still listed (negative control)', () => {
         renderWith({ actionResults: refusal })
         expect(screen.queryByTestId('container-gone-env-1')).toBeNull()
+      })
+
+      // #8407
+      it('the gone-notice has a Dismiss that drops that environment\'s outcome only', () => {
+        const onDismissActionResult = vi.fn()
+        const onAction = renderWith({ actionResults: goneRefusal, onDismissActionResult })
+        fireEvent.click(screen.getByTestId('container-gone-dismiss-env-gone'))
+        expect(onDismissActionResult).toHaveBeenCalledTimes(1)
+        expect(onDismissActionResult).toHaveBeenCalledWith('env-gone')
+        // Dismissing is not an escalation.
+        expect(onAction).not.toHaveBeenCalled()
+        expect(screen.queryByTestId('confirm-dialog')).toBeNull()
+      })
+
+      it('each Dismiss names its environment for assistive tech', () => {
+        renderWith({
+          actionResults: {
+            ...goneRefusal,
+            'env-gone-2': { ...goneRefusal['env-gone'], error: 'Environment "gone2" has 1 live session(s).' },
+          },
+        })
+        expect(screen.getByTestId('container-gone-dismiss-env-gone').getAttribute('aria-label')).toBe('Dismiss notice for env-gone')
+        expect(screen.getByTestId('container-gone-dismiss-env-gone-2').getAttribute('aria-label')).toBe('Dismiss notice for env-gone-2')
+      })
+
+      it('a row whose id is an inherited member name shows no action outcome (own-key read)', () => {
+        renderWith({
+          snapshot: snapshot({ containers: [container({ id: 'constructor', name: 'ctor' })] }),
+          actionResults: {},
+        })
+        expect(screen.getByTestId('container-row-constructor')).toBeTruthy()
+        expect(screen.queryByTestId('container-action-ok-constructor')).toBeNull()
+        expect(screen.queryByTestId('container-action-error-constructor')).toBeNull()
+      })
+
+      it('the Dismiss control meets the 44pt floor', () => {
+        renderWith({ actionResults: goneRefusal })
+        expect(screen.getByTestId('container-gone-dismiss-env-gone').className).toContain('cr-action-dismiss')
+        const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf8')
+        const rule = /\.cr-action-dismiss\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+        expect(/min-height:\s*44px/.test(rule) && /min-width:\s*44px/.test(rule), '.cr-action-dismiss rule').toBe(true)
+      })
+
+      it('a FAILED survey (no containers) says the survey failed, not that the container is gone', () => {
+        renderWith({
+          snapshot: snapshot({
+            containers: [],
+            summary: { total: 0, running: 0, stopped: 0, other: 0 },
+            error: { code: 'SURVEY_FAILED', message: 'docker daemon unreachable' },
+          }),
+          actionResults: goneRefusal,
+        })
+        const notice = screen.getByTestId('container-gone-env-gone')
+        expect(notice.textContent).toContain('survey failed')
+        expect(notice.textContent).toContain('could not be checked')
+        expect(notice.textContent).not.toContain('no longer in the latest survey')
+        // The refusal still stands, so Force stays available — and its dialog is as honest.
+        fireEvent.click(screen.getByTestId('container-force-destroy-env-gone'))
+        const dialog = screen.getByTestId('confirm-dialog').textContent ?? ''
+        expect(dialog).toContain('could not be checked')
+        expect(dialog).not.toContain('is no longer in the latest survey')
       })
 
       it('an ordinary failure for a departed container raises no Force notice (negative control)', () => {

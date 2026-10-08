@@ -36,12 +36,15 @@ import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
+import { classifyUsageLimit } from './claude-tui/usage-limit.js'
 import { writePermissionModeSidecarAtomic } from './utils/permission-mode-sidecar.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { nodePtyImportFailureError } from './utils/node-pty-support.js'
+import { redactBounded } from './redaction.js'
+import { sanitizeQuestionsForClients } from './claude-tui/sanitize-question-payload.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration, formatWatchdogDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -620,6 +623,10 @@ export class ClaudeTuiSession extends BaseSession {
     // UTF-8 strings already decoded, but the relevant control bytes
     // are 7-bit ASCII and survive the decode unchanged.
     this._outputTailRaw = Buffer.alloc(0)
+    // #8401: true once the byte cap has discarded the START of `_outputTailRaw`
+    // (the tail may open mid-sequence). Set where the cap cuts, cleared wherever
+    // the tail is emptied; `_totalOutputBytes` cannot say this, it spans respawns.
+    this._tailTruncated = false
     // #6601: PTY output-quiescence readiness signal. `_lastOutputMs` is the
     // monotonic time of the most recent onData chunk; `_sawFirstOutput` gates the
     // signal until claude has actually rendered something on THIS spawn (so the
@@ -780,6 +787,17 @@ export class ClaudeTuiSession extends BaseSession {
     this._authFailureBaseline = null
     this._lastAuthTranscriptScanMs = 0
     this._authTranscriptScanMs = ClaudeTuiSession.AUTH_TRANSCRIPT_SCAN_MS
+    // #8400: usage-limit / rate-limit / overload, read from the same transcript.
+    // `_usageLimitBaseline` is the cumulative count at turn start (null until a
+    // scan could read it), `_lastUsageLimitScanMs` throttles the poll-loop scan on
+    // the `_authTranscriptScanMs` cadence. `_usageLimitEpisode` is the limit already
+    // reported ({ key, at }), so a repeat inside its window ends the turn without
+    // saying it again; `_usageLimitEpisodeMs` is an instance field so a test can
+    // move the window without waiting for it.
+    this._usageLimitBaseline = null
+    this._lastUsageLimitScanMs = 0
+    this._usageLimitEpisode = null
+    this._usageLimitEpisodeMs = ClaudeTuiSession.USAGE_LIMIT_EPISODE_MS
   }
 
   /**
@@ -1977,6 +1995,11 @@ export class ClaudeTuiSession extends BaseSession {
   // is what bounds how long an expired login takes to surface (vs the 90s
   // first-output watchdog).
   static get AUTH_TRANSCRIPT_SCAN_MS() { return 1_000 }
+  // #8400: how long a reported usage limit shortens a repeat of itself to one line. The
+  // longest window claude names is the 5-hour session, so a retry inside six
+  // hours of the message is the same episode; past that, the message is a
+  // reminder, not spam. A successful turn ends the episode at once.
+  static get USAGE_LIMIT_EPISODE_MS() { return 6 * 60 * 60 * 1000 }
   // #6178: per-call timeout for the hot-path hook-drain fs ops (readdir/readFile/
   // unlink). A healthy sink read is sub-ms; this generous 2s bound only trips on
   // a genuinely stuck mount (FUSE/NFS freeze), letting the poll loop re-check its
@@ -3248,6 +3271,7 @@ export class ClaudeTuiSession extends BaseSession {
     // the first spawn; this covers every subsequent _respawnPty.
     this._outputTail = ''
     this._outputTailRaw = Buffer.alloc(0)
+    this._tailTruncated = false // #8401
     // #6601: re-evaluate output-quiescence readiness for THIS spawn — require
     // fresh output before trusting a quiet stretch, so a leftover _lastOutputMs
     // from the prior process can't read as "ready" the instant we respawn (#6604).
@@ -3553,6 +3577,7 @@ export class ClaudeTuiSession extends BaseSession {
     const merged = this._outputTailRaw.length === 0
       ? chunk
       : Buffer.concat([this._outputTailRaw, chunk])
+    if (merged.length > ClaudeTuiSession.PTY_TAIL_BYTES) this._tailTruncated = true
     this._outputTailRaw = merged.length > ClaudeTuiSession.PTY_TAIL_BYTES
       ? merged.subarray(-ClaudeTuiSession.PTY_TAIL_BYTES)
       : merged
@@ -4416,6 +4441,17 @@ export class ClaudeTuiSession extends BaseSession {
         this._handleTranscriptAuthFailure()
         break
       }
+      // #8400: a usage limit hits at turn start OR mid-turn, and either way claude
+      // returns to its prompt without a Stop hook, so the turn would sit until a
+      // watchdog and then say "try sending again". The transcript names it; read it
+      // for the whole turn. A Stop already found wins (the response is delivered).
+      if (!stopPayload) {
+        const limit = this._checkTranscriptForUsageLimit()
+        if (limit) {
+          this._handleUsageLimit(limit)
+          break
+        }
+      }
       // Wedge instrumentation (#4678 follow-up): if the loop has been
       // running >= HOOK_HEARTBEAT_MS since the last heartbeat with no
       // stop-hook, emit a progress line. Sized at 5s so a healthy
@@ -4511,6 +4547,8 @@ export class ClaudeTuiSession extends BaseSession {
     // path, matching the one _finishTurnError emits on error paths so
     // every turn lands one grep-able line regardless of outcome.
     this._logSendMessageSummary('success')
+    // #8400: an answered turn ends any reported usage-limit episode.
+    this._endUsageLimitEpisode()
     // Per-turn teardown: inactivity timers (#3920, #4638, #4732), pre-first-output
     // watchdog, per-turn attachment dir (#4022 — Read results are already in the
     // model's context window), the busy-state triple, and — previously MISSING on
@@ -4610,8 +4648,11 @@ export class ClaudeTuiSession extends BaseSession {
       // behaviour as sdk-session.js _handleToolUseBlock — keeps TUI
       // parity for the dashboard "waiting on …" chip.
       if (isRunInBackgroundInput(toolName, payload.tool_input)) {
+        // #8373: this text becomes the chip's `command` on the wire and in
+        // history, so redact it here, before anything clips it (a clip first
+        // can leave a token prefix the patterns no longer recognise).
         const cmd = typeof payload.tool_input?.command === 'string'
-          ? payload.tool_input.command : ''
+          ? redactBounded(payload.tool_input.command) : ''
         this._pendingBackgroundCommands.set(toolUseId, cmd)
       }
       // #4307: a BashOutput call means the agent has acknowledged the
@@ -4656,9 +4697,14 @@ export class ClaudeTuiSession extends BaseSession {
       // (collapsed bubble + standalone QuestionPrompt) as MVP; #4279
       // makes the bubble usefully expandable so this is acceptable.
       if (toolName === 'AskUserQuestion') {
-        const questions = (payload.tool_input && Array.isArray(payload.tool_input.questions))
-          ? payload.tool_input.questions
-          : []
+        // #8373: redact + cap every string BEFORE anything keeps or forwards
+        // it. This one copy feeds the live `user_question`, the history entry,
+        // the pending-question replay (`getPendingQuestions`) and the answer
+        // routing below, so there is no second, raw copy to leak. Answer
+        // routing matches the label the client sends back against these same
+        // options, and the form is driven by option position, so nothing
+        // needs the raw text.
+        const questions = sanitizeQuestionsForClients(payload.tool_input?.questions)
         // #4290 / #4604 Chunk B: stash the FULL questions array (not just
         // q[0].options) so respondToQuestion can drive multi-question
         // forms keystroke-by-keystroke. `options` is kept on the entry
@@ -4994,8 +5040,9 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._outputTailRaw && this._outputTailRaw.length > 0) {
       return {
         text: this._outputTailRaw.toString('utf8'),
-        // `_totalOutputBytes` never shrinks; the buffer stops growing at the cap.
-        truncatedStart: this._totalOutputBytes > this._outputTailRaw.length,
+        // #8401: explicit flag. `_totalOutputBytes` spans respawns (which empty the
+        // buffer), so comparing it with the buffer length misread a clean tail.
+        truncatedStart: this._tailTruncated === true,
       }
     }
     const text = this._outputTail || ''
@@ -5387,6 +5434,8 @@ export class ClaudeTuiSession extends BaseSession {
     // (see AUTH_FAILURE_PATTERNS) — a model merely DISCUSSING auth won't match.
     // #8223: scans only what THIS turn printed, never the older tail.
     const authFail = this._scanTurnOutputForAuthFailure()
+    // #8400: a stall that is really a usage limit says so (retrying cannot help).
+    const limit = authFail ? null : this._detectTurnUsageLimit()
     // #4641: shared teardown helper. See companion call in _handleHardTimeout
     // for the meaning of the asymmetric flags — preserved here as-is so this
     // refactor introduces no behaviour change.
@@ -5394,11 +5443,13 @@ export class ClaudeTuiSession extends BaseSession {
       duration,
       errorPayload: authFail
         ? { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE }
-        : {
-          code: 'stream_stall',
-          message: `Stream stalled — no response for ${friendly}. Try sending again.`,
-          timeoutMs: this._streamStallTimeoutMs,
-        },
+        : limit
+          ? this._usageLimitPayload(limit)
+          : {
+            code: 'stream_stall',
+            message: `Stream stalled — no response for ${friendly}. Try sending again.`,
+            timeoutMs: this._streamStallTimeoutMs,
+          },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
     })
@@ -5414,6 +5465,10 @@ export class ClaudeTuiSession extends BaseSession {
     this._authFailureBaseline = null
     this._lastAuthTranscriptScanMs = this._nowMonotonic()
     this._checkTranscriptForAuthFailure({ force: true })
+    // #8400: and the same for usage limits.
+    this._usageLimitBaseline = null
+    this._lastUsageLimitScanMs = this._nowMonotonic()
+    this._checkTranscriptForUsageLimit({ force: true })
   }
 
   /**
@@ -5457,6 +5512,102 @@ export class ClaudeTuiSession extends BaseSession {
       ;(this._log || log).debug?.(`transcript auth-failure check failed: ${err?.message} — no fast path this pass`)
       return false
     }
+  }
+
+  /**
+   * #8400 — has the transcript gained a usage-limit / rate-limit / overload
+   * entry since this turn's baseline? Same shape as
+   * `_checkTranscriptForAuthFailure` (the baseline is the first scan that can read
+   * the transcript, a scan that cannot leaves it unset, throttled to
+   * `_authTranscriptScanMs`, `force` bypasses the throttle, never throws) and the
+   * same shared incremental scanner, so it moves no poll bookkeeping.
+   * @returns {import('./claude-tui/usage-limit.js').UsageLimit|null} the limit,
+   *   when a NEW entry has appeared
+   */
+  _checkTranscriptForUsageLimit({ force = false } = {}) {
+    try {
+      const now = this._nowMonotonic()
+      if (!force && now - this._lastUsageLimitScanMs < this._authTranscriptScanMs) return null
+      this._lastUsageLimitScanMs = now
+      const snapshot = this._scanTranscript()
+      const count = snapshot?.usageLimitCount
+      if (typeof count !== 'number') return null
+      if (this._usageLimitBaseline === null) {
+        this._usageLimitBaseline = count
+        return null
+      }
+      return count > this._usageLimitBaseline ? (snapshot.lastUsageLimit ?? null) : null
+    } catch (err) {
+      ;(this._log || log).debug?.(`transcript usage-limit check failed: ${err?.message} — no fast path this pass`)
+      return null
+    }
+  }
+
+  /**
+   * #8400 — the limit THIS turn ran into, for the watchdog handlers that fire
+   * when a turn went quiet: the transcript's structured entry first (it does not
+   * depend on terminal width), then this turn's PTY output. Never the whole 4KB
+   * tail, which a `--resume` fills with re-rendered history (#8223).
+   * @returns {import('./claude-tui/usage-limit.js').UsageLimit|null}
+   */
+  _detectTurnUsageLimit() {
+    return this._checkTranscriptForUsageLimit({ force: true })
+      ?? classifyUsageLimit(this._outputSinceTurnStart())
+  }
+
+  /**
+   * #8400 — the `error` payload that says the limit. The first report of a quota
+   * limit (session / weekly / usage / credits) is the full message; a repeat of the
+   * same one inside its window (the user sent again and nothing changed) is its
+   * one-line `repeatMessage`, so a send is never met with silence and the first
+   * card is not duplicated. A limit without an `episodeKey` (a rate limit or an
+   * overload) is per request and is always said in full. The turn is torn down once
+   * per send, so this is one notice per send, not per poll. Recording the episode
+   * here keeps the "said in full once" decision next to the thing that says it.
+   * @param {import('./claude-tui/usage-limit.js').UsageLimit} limit
+   * @returns {{ code: string, message: string }}
+   */
+  _usageLimitPayload(limit) {
+    if (limit.episodeKey !== null) {
+      const now = this._nowMonotonic()
+      const prior = this._usageLimitEpisode
+      if (prior && prior.key === limit.episodeKey && now - prior.at < this._usageLimitEpisodeMs) {
+        ;(this._log || log).info(`usage limit repeated (${limit.episodeKey}) — turn ended with the short notice`)
+        return { code: limit.code, message: limit.repeatMessage }
+      }
+      this._usageLimitEpisode = { key: limit.episodeKey, at: now }
+    }
+    return { code: limit.code, message: limit.message }
+  }
+
+  /**
+   * #8400 — a successful turn means the limit has lifted (or was never the
+   * reason): the next limit is a new episode and gets its own message.
+   */
+  _endUsageLimitEpisode() {
+    this._usageLimitEpisode = null
+  }
+
+  /**
+   * #8400 — the transcript says this turn ran into a usage limit: end it now with
+   * one plain message instead of letting it sit for a watchdog. Same `_teardownTurn`
+   * shape as `_handleTranscriptAuthFailure`; the caller breaks out of the poll
+   * loop, so this must always end the turn.
+   * @param {import('./claude-tui/usage-limit.js').UsageLimit} limit
+   */
+  _handleUsageLimit(limit) {
+    if (!this._isBusy) return
+    this._assertBusyHasMessageId('_handleUsageLimit')
+    ;(this._log || log).warn(`transcript recorded a new ${limit.kind} limit entry (baseline ${this._usageLimitBaseline}) — ending the turn`)
+    const duration = this._activeTurn
+      ? this._nowMonotonic() - this._activeTurn.startedAt
+      : 0
+    this._teardownTurn('usage_limit', {
+      duration,
+      errorPayload: this._usageLimitPayload(limit),
+      errorBeforeResult: false,
+      gateStreamEndOnMessageId: true,
+    })
   }
 
   /**
@@ -5535,6 +5686,8 @@ export class ClaudeTuiSession extends BaseSession {
     // having stalled. #8223: only what THIS turn printed — right after a
     // `--resume` the tail still holds re-rendered history.
     const authFail = this._scanTurnOutputForAuthFailure()
+    // #8400: silence that is really a usage limit says so (retrying cannot help).
+    const limit = authFail ? null : this._detectTurnUsageLimit()
     // Mirrors _handleStreamStall's `_teardownTurn` call shape (result
     // before error, gate stream_end on messageId) so the dashboard sees
     // the same fan-out it already handles for the inter-stream stall.
@@ -5542,11 +5695,13 @@ export class ClaudeTuiSession extends BaseSession {
       duration,
       errorPayload: authFail
         ? { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE }
-        : {
-          code: 'stream_stall',
-          message: `No response from claude TUI within ${friendly}. Try sending again.`,
-          timeoutMs: this._firstOutputTimeoutMs,
-        },
+        : limit
+          ? this._usageLimitPayload(limit)
+          : {
+            code: 'stream_stall',
+            message: `No response from claude TUI within ${friendly}. Try sending again.`,
+            timeoutMs: this._firstOutputTimeoutMs,
+          },
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
     })

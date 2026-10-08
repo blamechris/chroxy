@@ -166,17 +166,26 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Falls back to OS keychain for apiToken if not present in config file.
 pub fn load_config() -> ChroxyConfig {
     let mut config = load_config_file();
-
-    // Fallback: if apiToken is missing from config file, check OS keychain.
-    // The server migrates tokens from config.json to keychain on first run.
-    if config.api_token.is_none() {
-        if let Some(token) = get_keychain_token() {
+    config.api_token = token_or_store(config.api_token.take(), || {
+        let token = get_keychain_token();
+        if token.is_some() {
             println!("[config] Loaded API token from OS keychain");
-            config.api_token = Some(token);
         }
-    }
-
+        token
+    });
     config
+}
+
+/// The file token, or if the file has none (a missing or empty one), the
+/// credential store's. The server migrates tokens from config.json to the store
+/// on first run. An empty token is no token, here and in [`proof_token`].
+fn token_or_store(file_token: Option<String>, read_store: impl FnOnce() -> Option<String>) -> Option<String> {
+    non_empty(file_token).or_else(|| non_empty(read_store()))
+}
+
+/// `None` for a missing or empty token.
+fn non_empty(token: Option<String>) -> Option<String> {
+    token.filter(|t| !t.is_empty())
 }
 
 /// The configured daemon port, read from `config.json` only. Unlike
@@ -187,6 +196,101 @@ pub fn load_port() -> u16 {
         0 => default_port(),
         p => p,
     }
+}
+
+/// How long [`proof_token`] reuses an answer from the OS credential store.
+const PROOF_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A [`fresh_token`] read this recently is reused rather than read again.
+const FRESH_TOKEN_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One answer from the OS credential store and when it was read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TokenCache {
+    entry: Option<(std::time::Instant, Option<String>)>,
+}
+
+impl TokenCache {
+    pub(crate) const fn new() -> Self {
+        Self { entry: None }
+    }
+
+    /// The cached answer if it was read less than `max_age` before `now`.
+    pub(crate) fn get(&self, now: std::time::Instant, max_age: std::time::Duration) -> Option<Option<String>> {
+        let (at, token) = self.entry.as_ref()?;
+        (now.saturating_duration_since(*at) < max_age).then(|| token.clone())
+    }
+
+    pub(crate) fn put(&mut self, now: std::time::Instant, token: Option<String>) {
+        self.entry = Some((now, token));
+    }
+}
+
+static KEYCHAIN_CACHE: std::sync::Mutex<TokenCache> = std::sync::Mutex::new(TokenCache::new());
+
+/// The effective token read through `cache`: the file token, else the credential
+/// store's answer when it was read less than `max_age` ago, else read it now.
+fn effective_token(
+    file_token: Option<String>,
+    cache: &mut TokenCache,
+    now: std::time::Instant,
+    max_age: std::time::Duration,
+    read_store: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if let Some(t) = non_empty(file_token) {
+        return Some(t);
+    }
+    if let Some(cached) = cache.get(now, max_age) {
+        return cached;
+    }
+    let token = non_empty(read_store());
+    cache.put(now, token.clone());
+    token
+}
+
+/// How old an answer from the credential store may be when it is reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenRead {
+    /// The tray's periodic probe: reuse an answer up to [`PROOF_TOKEN_TTL`] old.
+    Cached,
+    /// A retry after a proof failed: read again unless the answer is under
+    /// [`FRESH_TOKEN_MIN_AGE`] old.
+    Fresh,
+}
+
+impl TokenRead {
+    fn max_age(self) -> std::time::Duration {
+        match self {
+            TokenRead::Cached => PROOF_TOKEN_TTL,
+            TokenRead::Fresh => FRESH_TOKEN_MIN_AGE,
+        }
+    }
+}
+
+fn read_token(kind: TokenRead) -> Option<String> {
+    let mut cache = KEYCHAIN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    effective_token(
+        load_config_file().api_token,
+        &mut cache,
+        std::time::Instant::now(),
+        kind.max_age(),
+        get_keychain_token,
+    )
+}
+
+/// The access token to challenge a daemon with when the tray probes the port:
+/// the `config.json` token, else the credential store's answer from the last
+/// [`PROOF_TOKEN_TTL`]. The tray probes every few seconds, and spawning the
+/// credential tool each time would prompt over and over.
+pub fn proof_token() -> Option<String> {
+    read_token(TokenRead::Cached)
+}
+
+/// The same source as [`proof_token`], read again: it bypasses the cache (except
+/// for an answer read within the last [`FRESH_TOKEN_MIN_AGE`]). A daemon whose
+/// token was rotated since the cache was filled proves with the new one.
+pub fn fresh_token() -> Option<String> {
+    read_token(TokenRead::Fresh)
 }
 
 /// Parse `config.json` without the keychain fallback. Returns the default config
@@ -276,10 +380,123 @@ fn get_keychain_token() -> Option<String> {
         None
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        get_dpapi_token()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         None
     }
+}
+
+// -- Windows credential store (#6644) ------------------------------------------
+//
+// On Windows the daemon protects its API token with the per-user DPAPI key and
+// stores the base64 ciphertext at `%LOCALAPPDATA%\Chroxy\<service>__<account>.dpapi`
+// (`packages/server/src/keychain.js`), removing it from `config.json` once stored.
+// The read here is the same one the server does: run the same PowerShell script
+// with the ciphertext on stdin. A drift test pins the script and the file name
+// against `keychain.js`.
+
+/// `keychain.js` `PS_UNPROTECT`: base64 ciphertext on stdin, plaintext on stdout.
+#[cfg(any(windows, test))]
+const WIN_PS_UNPROTECT: &str = "$ErrorActionPreference='Stop';Add-Type -AssemblyName System.Security;$b=[Convert]::FromBase64String(([Console]::In.ReadToEnd()).Trim());$d=[Security.Cryptography.ProtectedData]::Unprotect($b,$null,'CurrentUser');[Console]::Out.Write([Text.Encoding]::UTF8.GetString($d))";
+
+/// `keychain.js` `_winCredFile` name: anything outside `[A-Za-z0-9._-]` becomes `_`.
+#[cfg(any(windows, test))]
+fn win_cred_file_name(service: &str, account: &str) -> String {
+    let safe = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+            .collect()
+    };
+    format!("{}__{}.dpapi", safe(service), safe(account))
+}
+
+/// `keychain.js` `winCredDir`: `%LOCALAPPDATA%\Chroxy`, else `<home>\AppData\Local\Chroxy`.
+#[cfg(any(windows, test))]
+fn win_cred_dir(local_app_data: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
+    match local_app_data.filter(|v| !v.is_empty()) {
+        Some(dir) => Some(Path::new(dir).join("Chroxy")),
+        None => home.map(|h| h.join("AppData").join("Local").join("Chroxy")),
+    }
+}
+
+/// The ciphertext in a `.dpapi` file: its trimmed text, or `None` when empty.
+#[cfg(any(windows, test))]
+fn parse_dpapi_ciphertext(file: &str) -> Option<String> {
+    let c = file.trim();
+    (!c.is_empty()).then(|| c.to_string())
+}
+
+/// The token in the PowerShell output: one trailing line break removed, `None`
+/// when nothing is left.
+#[cfg(any(windows, test))]
+fn parse_dpapi_plaintext(out: &str) -> Option<String> {
+    let t = out.strip_suffix("\r\n").or_else(|| out.strip_suffix('\n')).unwrap_or(out);
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+#[cfg(windows)]
+fn get_dpapi_token() -> Option<String> {
+    use std::io::{Read, Write};
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+
+    let dir = win_cred_dir(std::env::var("LOCALAPPDATA").ok().as_deref(), dirs::home_dir().as_deref())?;
+    let file = dir.join(win_cred_file_name("chroxy", "api-token"));
+    let cipher = parse_dpapi_ciphertext(&fs::read_to_string(file).ok()?)?;
+
+    let root = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("windir"))
+        .unwrap_or_else(|_| "C:\\Windows".to_string());
+    let powershell = format!("{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", root);
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut child = Command::new(powershell)
+        .args(["-NoProfile", "-NonInteractive", "-Command", WIN_PS_UNPROTECT])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Every way out below the spawn ends the child first.
+    let reap = |child: &mut std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        reap(&mut child);
+        return None;
+    };
+    if stdin.write_all(cipher.as_bytes()).is_err() {
+        reap(&mut child);
+        return None;
+    }
+    drop(stdin);
+
+    // Bounded, like the server's own read (5 s).
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => return None,
+            Ok(None) if start.elapsed() > std::time::Duration::from_secs(5) => {
+                reap(&mut child);
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(_) => {
+                reap(&mut child);
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    parse_dpapi_plaintext(&out)
 }
 
 /// Parse config from a JSON string. Test-only helper.
@@ -291,6 +508,146 @@ pub(crate) fn parse_config(json: &str) -> Result<ChroxyConfig, serde_json::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- the effective token ---------------------------------------------
+
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn an_empty_token_is_no_token() {
+        assert_eq!(non_empty(Some(String::new())), None);
+        assert_eq!(non_empty(None), None);
+        assert_eq!(non_empty(Some("t".into())), Some("t".into()));
+    }
+
+    #[test]
+    fn load_config_treats_an_empty_file_token_like_a_missing_one() {
+        assert_eq!(token_or_store(Some("f".into()), || panic!("not read")).as_deref(), Some("f"));
+        assert_eq!(token_or_store(Some(String::new()), || Some("s".into())).as_deref(), Some("s"));
+        assert_eq!(token_or_store(None, || Some("s".into())).as_deref(), Some("s"));
+        assert_eq!(token_or_store(Some(String::new()), || Some(String::new())), None);
+        assert_eq!(token_or_store(None, || None), None);
+    }
+
+    #[test]
+    fn the_file_token_wins_and_an_empty_one_falls_through_to_the_store() {
+        let t0 = Instant::now();
+        let mut cache = TokenCache::new();
+        let got = effective_token(Some("from-file".into()), &mut cache, t0, PROOF_TOKEN_TTL, || panic!("not read"));
+        assert_eq!(got.as_deref(), Some("from-file"));
+        let got = effective_token(Some(String::new()), &mut cache, t0, PROOF_TOKEN_TTL, || Some("from-store".into()));
+        assert_eq!(got.as_deref(), Some("from-store"), "an empty file token reads the store, as load_config does");
+        let got = effective_token(Some(String::new()), &mut TokenCache::new(), t0, PROOF_TOKEN_TTL, || Some(String::new()));
+        assert_eq!(got, None, "an empty store answer is no token");
+    }
+
+    #[test]
+    fn the_store_answer_is_reused_until_it_is_older_than_the_limit() {
+        let t0 = Instant::now();
+        let mut cache = TokenCache::new();
+        let read = |v: &'static str| move || Some(v.to_string());
+        assert_eq!(effective_token(None, &mut cache, t0, PROOF_TOKEN_TTL, read("old")).as_deref(), Some("old"));
+        let later = t0 + Duration::from_secs(30);
+        assert_eq!(effective_token(None, &mut cache, later, PROOF_TOKEN_TTL, read("new")).as_deref(), Some("old"), "cached");
+        let stale = t0 + Duration::from_secs(61);
+        assert_eq!(effective_token(None, &mut cache, stale, PROOF_TOKEN_TTL, read("new")).as_deref(), Some("new"), "expired");
+    }
+
+    #[test]
+    fn a_fresh_read_has_a_short_age_limit_and_the_tray_read_a_long_one() {
+        assert_eq!(TokenRead::Cached.max_age(), Duration::from_secs(60));
+        assert_eq!(TokenRead::Fresh.max_age(), Duration::from_secs(2));
+        // An answer 10 s old is reused by the tray's read and not by a fresh one.
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(10);
+        let mut cache = TokenCache::new();
+        cache.put(t0, Some("old".into()));
+        let read = |kind: TokenRead, cache: &mut TokenCache| {
+            effective_token(None, cache, later, kind.max_age(), || Some("new".into()))
+        };
+        assert_eq!(read(TokenRead::Cached, &mut cache.clone()).as_deref(), Some("old"));
+        assert_eq!(read(TokenRead::Fresh, &mut cache).as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn a_fresh_read_bypasses_a_stale_cache_but_not_one_just_read() {
+        let t0 = Instant::now();
+        let mut cache = TokenCache::new();
+        let read = |v: &'static str| move || Some(v.to_string());
+        assert_eq!(effective_token(None, &mut cache, t0, PROOF_TOKEN_TTL, read("old")).as_deref(), Some("old"));
+        // 10 s later the normal cache would still answer "old"; a fresh read does not.
+        let later = t0 + Duration::from_secs(10);
+        assert_eq!(effective_token(None, &mut cache, later, PROOF_TOKEN_TTL, read("new")).as_deref(), Some("old"));
+        assert_eq!(effective_token(None, &mut cache, later, FRESH_TOKEN_MIN_AGE, read("new")).as_deref(), Some("new"));
+        // An answer read a moment ago is not read again.
+        assert_eq!(
+            effective_token(None, &mut cache, later + Duration::from_millis(100), FRESH_TOKEN_MIN_AGE, || panic!("read again")).as_deref(),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn an_absent_store_answer_is_cached_like_any_other() {
+        let t0 = Instant::now();
+        let mut cache = TokenCache::new();
+        assert_eq!(effective_token(None, &mut cache, t0, PROOF_TOKEN_TTL, || None), None);
+        assert_eq!(effective_token(None, &mut cache, t0 + Duration::from_secs(1), PROOF_TOKEN_TTL, || panic!("read again")), None);
+    }
+
+    // --- the Windows credential store ------------------------------------
+
+    #[test]
+    fn the_dpapi_file_is_named_the_way_the_server_names_it() {
+        assert_eq!(win_cred_file_name("chroxy", "api-token"), "chroxy__api-token.dpapi");
+        assert_eq!(win_cred_file_name("chroxy discord/webhook", "a:b"), "chroxy_discord_webhook__a_b.dpapi");
+    }
+
+    #[test]
+    fn the_dpapi_directory_follows_localappdata_then_the_home_directory() {
+        assert_eq!(
+            win_cred_dir(Some(r"C:\Users\me\AppData\Local"), None),
+            Some(Path::new(r"C:\Users\me\AppData\Local").join("Chroxy"))
+        );
+        assert_eq!(
+            win_cred_dir(None, Some(Path::new("/home/me"))),
+            Some(Path::new("/home/me").join("AppData").join("Local").join("Chroxy"))
+        );
+        assert_eq!(win_cred_dir(Some(""), Some(Path::new("/home/me"))), win_cred_dir(None, Some(Path::new("/home/me"))));
+        assert_eq!(win_cred_dir(None, None), None);
+    }
+
+    #[test]
+    fn the_dpapi_ciphertext_is_the_trimmed_file_text() {
+        assert_eq!(parse_dpapi_ciphertext("AQAAANCM\r\n").as_deref(), Some("AQAAANCM"));
+        assert_eq!(parse_dpapi_ciphertext("  AQAA  ").as_deref(), Some("AQAA"));
+        assert_eq!(parse_dpapi_ciphertext(""), None);
+        assert_eq!(parse_dpapi_ciphertext(" \r\n"), None);
+    }
+
+    #[test]
+    fn the_dpapi_plaintext_loses_one_trailing_line_break_and_may_not_be_empty() {
+        assert_eq!(parse_dpapi_plaintext("tok-123").as_deref(), Some("tok-123"));
+        assert_eq!(parse_dpapi_plaintext("tok-123\r\n").as_deref(), Some("tok-123"));
+        assert_eq!(parse_dpapi_plaintext("tok-123\n").as_deref(), Some("tok-123"));
+        assert_eq!(parse_dpapi_plaintext(""), None);
+        assert_eq!(parse_dpapi_plaintext("\r\n"), None);
+    }
+
+    /// The Windows read must stay the server's read. These pin the script and the
+    /// file name against `packages/server/src/keychain.js`.
+    #[test]
+    fn the_windows_read_matches_the_servers_keychain_module() {
+        let js = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../server/src/keychain.js"),
+        )
+        .expect("read keychain.js");
+        let quoted = format!("const PS_UNPROTECT = \"{}\"", WIN_PS_UNPROTECT);
+        assert!(js.contains(&quoted), "WIN_PS_UNPROTECT differs from keychain.js PS_UNPROTECT");
+        assert!(js.contains("`${safe(service)}__${safe(account)}.dpapi`"), "credential file name pattern changed");
+        assert!(js.contains("join(winCredDir(), "), "credential directory changed");
+        assert!(js.contains("'Chroxy'") && js.contains("'AppData', 'Local'"), "credential directory changed");
+        assert!(js.contains("const ACCOUNT = 'api-token'") && js.contains("const DEFAULT_SERVICE = 'chroxy'"));
+    }
 
     #[test]
     fn a_repeated_parse_failure_is_logged_once_and_a_change_logs_again() {

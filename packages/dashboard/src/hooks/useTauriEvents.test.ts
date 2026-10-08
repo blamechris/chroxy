@@ -126,7 +126,9 @@ describe('useTauriEvents', () => {
     renderHook(() => useTauriEvents())
     emit('server_ready', { port: 9333, token: 'newtoken', url: 'http://localhost:9333/dashboard?token=newtoken' })
 
-    expect(connectSpy).toHaveBeenCalledWith('ws://localhost:9333/ws', 'newtoken')
+    expect(connectSpy).toHaveBeenCalledWith('ws://127.0.0.1:9333/ws', 'newtoken')
+    // The token is never sent to `localhost`, which can resolve to a different socket.
+    expect(connectSpy.mock.calls.every(([url]) => !String(url).includes('localhost'))).toBe(true)
 
     // Restore location
     Object.defineProperty(window, 'location', {
