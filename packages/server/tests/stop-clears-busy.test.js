@@ -87,6 +87,19 @@ function lastBusyClaim(globalFrames) {
   return last
 }
 
+/**
+ * The session lists a client that only sees GLOBAL frames got AFTER `index` (the
+ * length of the frame log when the Stop was announced). Judging the list by
+ * position, not just by whether one exists, is what stops an earlier list (the
+ * `stream_start` one) from standing in for the one the Stop owes.
+ */
+function listRowsAfter(globalFrames, index) {
+  return globalFrames.slice(index)
+    .filter((f) => f.type === 'session_list')
+    .map((f) => (f.sessions || []).find((x) => x.sessionId === SID))
+    .filter(Boolean)
+}
+
 const count = (frames, type) => frames.filter((f) => f.type === type).length
 const idleActivity = (frames) => frames.filter((f) => f.type === 'session_activity' && f.isBusy === false)
 const nextTick = () => new Promise((resolve) => setImmediate(resolve))
@@ -219,9 +232,13 @@ describe('#8497 a requested Stop leaves busy on the client', () => {
     })
     const s = new Klass({ cwd: tmpdir(), skillsDir: sk, repoSkillsDir: null, resultTimeoutMs: 5000 })
     live = s
+    let stoppedAt = -1
     try {
       for (const ev of ['stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'stopped', 'error']) {
-        s.on(ev, (data) => h.emit(ev, data))
+        s.on(ev, (data) => {
+          if (ev === 'stopped') stoppedAt = h.globalFrames.length
+          h.emit(ev, data)
+        })
       }
       await s.start()
       const waiting = new Promise((resolve) => {
@@ -241,7 +258,13 @@ describe('#8497 a requested Stop leaves busy on the client', () => {
     }
 
     assert.equal(s.isRunning, false, 'precondition: the session is idle once the Stop settled')
-    assert.ok(h.globalFrames.some((f) => f.type === 'session_list'), 'a session list was still published')
+    // The list must be the one sent AFTER the Stop: the `stream_start` list that
+    // went out when the turn began says busy and would satisfy a bare "was a
+    // list published" check even with the Stop's own list deleted.
+    assert.ok(stoppedAt >= 0, 'precondition: the Stop reached the forwarder')
+    const rows = listRowsAfter(h.globalFrames, stoppedAt)
+    assert.ok(rows.length >= 1, 'a session list was published after the Stop')
+    assert.equal(rows.at(-1).isBusy, false, 'and it reports the session idle')
     assert.equal(lastBusyClaim(h.globalFrames), false, 'the last busy-bearing global frame says idle')
   })
 
@@ -250,10 +273,14 @@ describe('#8497 a requested Stop leaves busy on the client', () => {
     const h = harness({ listSessions: () => [{ sessionId: SID, isBusy: busy }] })
     h.emit('stream_start', { messageId: 'm1' })
     // The provider shape: emit('stopped') first, THEN clear busy, in one call stack.
+    const at = h.globalFrames.length
     h.emit('stopped', {})
     busy = false
     await nextTick()
     h.normalizer.destroy()
+    const rows = listRowsAfter(h.globalFrames, at)
+    assert.equal(rows.length, 1, 'exactly one list follows the Stop')
+    assert.equal(rows[0].isBusy, false, 'and it was built after the teardown, not inside the emit')
     assert.equal(lastBusyClaim(h.globalFrames), false)
   })
 
