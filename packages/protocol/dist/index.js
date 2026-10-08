@@ -101,6 +101,7 @@ export * from "./codex.js";
 export * from "./thinking-levels.js";
 // #7822: one canonical serializer keeps the dashboard and mobile wire shape
 // identical as optional selected-context fields are negotiated.
+export { computeHunks, splitContentLines, DEFAULT_CONTEXT_LINES, MAX_DIFF_LINES } from "./hunk-diff.js";
 export { buildInputMessage } from "./input.js";
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from "./schemas/index.js";

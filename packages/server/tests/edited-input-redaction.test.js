@@ -10,6 +10,7 @@ import { createPermissionResolver } from '../src/permission-resolver.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { EditedInputRefusedError, DROPPED_HUNKS_KEY, KEPT_HUNKS_KEY } from '../src/edited-input.js'
 import { sanitizeToolInput, PULL_MAX_INPUT_CHARS } from '../src/redaction.js'
+import { computeHunks } from '@chroxy/protocol'
 import { createSpy, nsCtx } from './test-helpers.js'
 
 /**
@@ -86,7 +87,7 @@ function harness(tool, rawInput, { mode = 'default', cwd, audit = null } = {}) {
   const sent = () => ctx.transport.send.calls.map((c) => c[1])
 
   return {
-    dir, requestId, outcome, sent, pm,
+    dir, requestId, outcome, sent, pm, permissionSessionMap,
     /** What the reviewing client is shown. */
     pull() {
       settingsHandlers.get_permission_input(ws, client, { type: 'get_permission_input', requestId }, ctx)
@@ -164,19 +165,88 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     assert.ok(!result.updatedInput.new_string.includes('[REDACTED'))
   })
 
-  it('a key rotated between old and new (both redact to the same text) keeps the PROPOSED line', async () => {
-    const f = fixture({ secretAt: 12, rotate: true })
+  describe('a difference that redaction hid from the review', () => {
+    const HIDDEN = /hid from the review/
+    const rotated = (secretAt) => {
+      const f = fixture({ secretAt, rotate: true })
+      return { f, raw: { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string } }
+    }
+
+    it('a key rotated in a gap reads the same on both sides to the client', async () => {
+      const { raw } = rotated(12)
+      const h = harness('Edit', raw)
+      const shown = h.pull()
+      assert.equal(shown.input.old_string.split('\n')[12], shown.input.new_string.split('\n')[12])
+      h.respond(null, 'deny')
+      await h.outcome
+    })
+
+    for (const [name, secretAt, dropped] of [
+      ['in a gap, one visible hunk dropped', 12, [HUNK_B]],
+      ['in a gap, every visible hunk dropped', 12, [HUNK_A, HUNK_B]],
+      ['in a dropped hunk\'s context', 3, [HUNK_A]],
+      ['in a kept hunk\'s context, the other hunk dropped', 3, [HUNK_B]],
+    ]) {
+      it(`${name}: denied, and nothing is written`, async () => {
+        const { raw } = rotated(secretAt)
+        const h = harness('Edit', raw)
+        h.pull()
+        h.respond({ ...decide(dropped) })
+        const result = await h.outcome
+        assert.equal(result.behavior, 'deny')
+        assert.equal(result.updatedInput, undefined)
+        assert.ok(HIDDEN.test(result.message), 'the agent is told why')
+        const err = h.sent().find((m) => m.type === 'error')
+        assert.equal(err.code, 'PERMISSION_EDIT_REFUSED')
+        assert.ok(HIDDEN.test(err.message))
+        assert.ok(!err.message.includes(ROTATED) && !err.message.includes(SECRET))
+      })
+    }
+
+    it('a key rotated after the last hunk (the tail) is refused the same way', () => {
+      const oldLines = Array.from({ length: 12 }, (_, i) => `l${i}`)
+      oldLines[10] = `const apiKey = "${SECRET}"`
+      const newLines = [...oldLines]
+      newLines[0] = 'l0 CHANGED'
+      newLines[10] = `const apiKey = "${ROTATED}"`
+      const raw = { file_path: '/a', old_string: oldLines.join('\n'), new_string: newLines.join('\n') }
+      const hunk = { oldStart: 1, oldCount: 4, newStart: 1, newCount: 4 }
+      assert.throws(
+        () => mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [hunk], [KEPT_HUNKS_KEY]: [] }, 'Edit'),
+        (err) => err instanceof EditedInputRefusedError && HIDDEN.test(err.message),
+      )
+    })
+
+    it('with no hunk dropped a plain approve is unchanged: the rotation is written whole', async () => {
+      const { f, raw } = rotated(12)
+      const h = harness('Edit', raw)
+      h.pull()
+      h.respond(null)
+      const result = await h.outcome
+      assert.equal(result.behavior, 'allow')
+      assert.equal(result.updatedInput.new_string, f.new_string)
+    })
+
+    it('an empty droppedHunks list is the same whole approve', async () => {
+      const { f, raw } = rotated(12)
+      const h = harness('Edit', raw)
+      h.pull()
+      h.respond({ [DROPPED_HUNKS_KEY]: [], [KEPT_HUNKS_KEY]: [HUNK_A, HUNK_B] })
+      const result = await h.outcome
+      assert.equal(result.updatedInput.new_string, f.new_string)
+    })
+  })
+
+  it('narrowing with Allow Always writes the narrowed content too', async () => {
+    const f = fixture()
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
-    const shown = h.pull()
-    // The client cannot see the rotation: both sides read the same to it.
-    assert.equal(shown.input.old_string.split('\n')[12], shown.input.new_string.split('\n')[12])
-    h.respond({ ...decide([HUNK_B]) })
+    h.pull()
+    h.respond({ ...decide([HUNK_B]) }, 'allowAlways')
     const result = await h.outcome
+    assert.equal(result.behavior, 'allow')
     const expected = [...f.newLines]
     expected[27] = f.oldLines[27]
     assert.equal(result.updatedInput.new_string, expected.join('\n'))
-    assert.ok(result.updatedInput.new_string.includes(ROTATED))
-    assert.ok(!result.updatedInput.new_string.includes('[REDACTED'))
   })
 
   it('an input past the 10K broadcast cap is still narrowed: the review is drawn over the larger pull cap', async () => {
@@ -357,22 +427,64 @@ describe('#8446 a decision the server cannot map back to the raw text is refused
     EditedInputRefusedError,
   )
 
-  it('malformed ranges', () => {
+  it('malformed ranges, with the OTHER hunk listed correctly so only the malformed one can be the reason', () => {
     const { raw } = edit()
-    refused(raw, 'all')
-    refused(raw, [null])
-    refused(raw, [{ oldStart: 1, oldCount: 5, newStart: 1 }])
-    refused(raw, [{ ...HUNK_A, newCount: -1 }])
-    refused(raw, [{ ...HUNK_A, oldStart: 1.5 }])
-    refused(raw, [{ ...HUNK_A, newCount: '5' }])
-    refused(raw, Array.from({ length: 1001 }, () => HUNK_A))
+    refused(raw, 'all', [HUNK_A, HUNK_B])
+    refused(raw, [null], [HUNK_A])
+    refused(raw, [{ oldStart: 25, oldCount: 6, newStart: 25 }], [HUNK_A])
+    refused(raw, [{ ...HUNK_B, newCount: -1 }], [HUNK_A])
+    refused(raw, [{ ...HUNK_B, oldStart: 25.5 }], [HUNK_A])
+    refused(raw, [{ ...HUNK_B, oldStart: NaN }], [HUNK_A])
+    // A string "6" prints like the number 6: the header would match, so only the type check refuses it.
+    refused(raw, [{ ...HUNK_B, newCount: '6' }], [HUNK_A])
+    refused(raw, [HUNK_B], 'kept')
   })
 
-  it('ranges outside the content, or overlapping each other', () => {
+  it('the partition must be exactly the diff\'s hunks: none missing, none extra, none repeated', () => {
     const { raw } = edit()
-    refused(raw, [{ oldStart: 28, oldCount: 9, newStart: 28, newCount: 9 }])
-    refused(raw, [{ oldStart: 1, oldCount: 5, newStart: 2, newCount: 5 }, HUNK_A])
-    refused(raw, [HUNK_A, HUNK_A])
+    refused(raw, [HUNK_B], []) // a real hunk missing
+    refused(raw, [HUNK_B], [HUNK_A, { oldStart: 10, oldCount: 3, newStart: 10, newCount: 3 }]) // an invented extra
+    refused(raw, [HUNK_B, HUNK_B], [HUNK_A]) // repeated
+    refused(raw, [HUNK_A, HUNK_B], [HUNK_B]) // listed as both
+    refused(raw, [HUNK_B], [{ ...HUNK_A, oldCount: 4 }]) // off by one line
+    refused(raw, [{ oldStart: 28, oldCount: 9, newStart: 28, newCount: 9 }], [HUNK_A]) // past the end
+    refused(raw, Array.from({ length: 1001 }, (_, i) => ({ oldStart: i + 1, oldCount: 1, newStart: i + 1, newCount: 1 })), [])
+    assert.deepEqual(
+      mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [HUNK_B], [KEPT_HUNKS_KEY]: [HUNK_A] }, 'Edit').new_string.split('\n').slice(24, 30),
+      raw.old_string.split('\n').slice(24, 30),
+      'the exact list is accepted',
+    )
+  })
+
+  it('a partition that fits the sizes but is not the diff writes nothing: it would delete a line both sides share', () => {
+    // The only real hunk is line 1 (A -> a). This pair of ranges covers the same lines
+    // between them, and would write A,C.
+    const raw = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'a\nB\nC' }
+    refused(raw,
+      [{ oldStart: 1, oldCount: 1, newStart: 1, newCount: 2 }],
+      [{ oldStart: 2, oldCount: 2, newStart: 3, newCount: 1 }])
+    // The real one is a single hunk over all three lines.
+    assert.equal(
+      mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }], [KEPT_HUNKS_KEY]: [] }, 'Edit').new_string,
+      'A\nB\nC',
+    )
+  })
+
+  it('a range that is not a real hunk: off by one line on one side', () => {
+    const raw = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nX\nC' }
+    refused(raw, [{ oldStart: 1, oldCount: 1, newStart: 2, newCount: 1 }])
+    refused(raw, [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }]) // the changed line alone: hunks carry context
+  })
+
+  it('a zero-count side cannot fabricate an insertion or a deletion', () => {
+    const same = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nB\nC' }
+    refused(same, [{ oldStart: 1, oldCount: 0, newStart: 2, newCount: 1 }]) // invent a deletion of B
+    refused(same, [{ oldStart: 2, oldCount: 1, newStart: 1, newCount: 0 }]) // invent an insertion of B
+    const changed = { file_path: '/a', old_string: 'A\nC', new_string: 'A\nB\nC' }
+    // The real hunk: B was inserted between A and C. Dropping it restores A,C.
+    assert.equal(mergeEditedInput(changed, { [DROPPED_HUNKS_KEY]: [{ oldStart: 1, oldCount: 2, newStart: 1, newCount: 3 }], [KEPT_HUNKS_KEY]: [] }, 'Edit').new_string, 'A\nC')
+    refused(changed, [{ oldStart: 1, oldCount: 0, newStart: 2, newCount: 1 }])
+    refused(changed, [{ oldStart: 2, oldCount: 0, newStart: 2, newCount: 1 }])
   })
 
   it('redaction that removes a line break: the client\'s line numbers no longer match the raw text', () => {
@@ -383,7 +495,7 @@ describe('#8446 a decision the server cannot map back to the raw text is refused
       new_string: 'a\npassword:\n  hunter2hunter2\nB',
     }
     assert.notEqual(sanitizeToolInput(raw).old_string.split('\n').length, raw.old_string.split('\n').length)
-    refused(raw, [{ oldStart: 3, oldCount: 1, newStart: 3, newCount: 1 }])
+    refused(raw, [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }])
   })
 
   it('an input too large to have been shown whole', () => {
@@ -391,53 +503,19 @@ describe('#8446 a decision the server cannot map back to the raw text is refused
     refused({ file_path: '/a', old_string: 'a', new_string: big }, [{ oldStart: 1, oldCount: 1, newStart: 1, newCount: 1 }])
   })
 
-  it('a range that is not a real hunk: the lines outside the ranges must agree between original and proposal', () => {
-    // The reviewed diff of A,B,C -> A,X,C has one hunk (1,3,1,3 or just B->X). This range
-    // skips line 1 on one side only, and would write A,A,C.
-    const raw = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nX\nC' }
-    refused(raw, [{ oldStart: 1, oldCount: 1, newStart: 2, newCount: 1 }])
-    // A real range for the same change is fine.
-    assert.equal(mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }], [KEPT_HUNKS_KEY]: [] }, 'Edit').new_string, 'A\nB\nC')
-  })
-
-  it('a zero-count side cannot fabricate an insertion or a deletion', () => {
-    const same = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nB\nC' }
-    refused(same, [{ oldStart: 1, oldCount: 0, newStart: 2, newCount: 1 }]) // invent a deletion of B
-    refused(same, [{ oldStart: 2, oldCount: 1, newStart: 1, newCount: 0 }]) // invent an insertion of B
-    const changed = { file_path: '/a', old_string: 'A\nC', new_string: 'A\nB\nC' }
-    // The real hunk: B was inserted after line 1. Dropping it restores A,C.
-    assert.equal(mergeEditedInput(changed, { [DROPPED_HUNKS_KEY]: [{ oldStart: 1, oldCount: 0, newStart: 2, newCount: 1 }], [KEPT_HUNKS_KEY]: [] }, 'Edit').new_string, 'A\nC')
-    // The same insertion claimed one line late.
-    refused(changed, [{ oldStart: 2, oldCount: 0, newStart: 2, newCount: 1 }])
-  })
-
-  it('lines outside every listed hunk that differ are refused; listing the hunk that changed them makes it valid', () => {
-    const raw = { file_path: '/a', old_string: 'A\nB\nC\nD', new_string: 'A\nX\nC\nY' }
-    const drop = [{ oldStart: 4, oldCount: 1, newStart: 4, newCount: 1 }]
-    const keep = [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }]
-    refused(raw, drop) // line 2 differs and is not listed
-    const out = mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: drop, [KEPT_HUNKS_KEY]: keep }, 'Edit')
-    assert.equal(out.new_string, 'A\nX\nC\nD')
-  })
-
-  it('a kept range that is not a real hunk is refused just like a dropped one', () => {
-    const raw = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nX\nC' }
-    refused(raw, [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }], [{ oldStart: 1, oldCount: 1, newStart: 2, newCount: 1 }])
-  })
-
   it('droppedHunks without keptHunks cannot be checked and is refused', () => {
     const raw = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nX\nC' }
     assert.throws(
-      () => mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }] }, 'Edit'),
+      () => mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }] }, 'Edit'),
       EditedInputRefusedError,
     )
+    refused(raw, null)
   })
 
   it('a droppedHunks key that is present, empty included, puts the field in hunk mode: client text is ignored', () => {
     const raw = { file_path: '/a', old_string: 'A\nB', new_string: 'A\nX' }
     assert.equal(mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [], new_string: 'UNRELATED' }, 'Edit').new_string, 'A\nX')
     assert.equal(mergeEditedInput({ file_path: '/a', content: 'raw' }, { [DROPPED_HUNKS_KEY]: [], content: 'UNRELATED' }, 'Write').content, 'raw')
-    refused(raw, null)
   })
 
   it('a 150001-line hunk is restored without a stack-size failure', () => {
@@ -446,6 +524,62 @@ describe('#8446 a decision the server cannot map back to the raw text is refused
     const raw = { file_path: '/a', old_string: '\n'.repeat(lines - 1), new_string: 'x' }
     const out = mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [{ oldStart: 1, oldCount: lines, newStart: 1, newCount: 1 }], [KEPT_HUNKS_KEY]: [] }, 'Edit')
     assert.equal(out.new_string, raw.old_string)
+  })
+
+  it('every random diff and selection equals an independent reconstruction from the old-side positions', () => {
+    let seed = 8446
+    const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed >> 8) % n }
+    const alphabet = ['a', 'b', 'c', 'd', 'e', '', 'f f']
+    let cases = 0
+    for (let t = 0; t < 400; t++) {
+      const oldLines = Array.from({ length: rnd(16) }, () => alphabet[rnd(alphabet.length)])
+      const newLines = [...oldLines]
+      for (let k = rnd(5); k > 0; k--) {
+        const at = rnd(newLines.length + 1)
+        const op = rnd(3)
+        if (op === 0) newLines.splice(at, 0, alphabet[rnd(alphabet.length)])
+        else if (op === 1 && at < newLines.length) newLines.splice(at, 1)
+        else if (at < newLines.length) newLines[at] = alphabet[rnd(alphabet.length)]
+      }
+      const oldText = oldLines.join('\n')
+      const newText = newLines.join('\n')
+      const hunks = computeHunks(oldText, newText)
+      if (hunks.length === 0) continue
+      const dropIt = hunks.map(() => rnd(2) === 1)
+      if (!dropIt.some(Boolean)) dropIt[0] = true
+      const range = (hd) => {
+        const m = /^@@ -(\d+),(\d+) \+(\d+),(\d+) @@$/.exec(hd)
+        return { oldStart: +m[1], oldCount: +m[2], newStart: +m[3], newCount: +m[4] }
+      }
+      // Oracle: walk the OLD side; a gap is the old lines between hunks, a hunk is the
+      // side of its own lines the operator chose.
+      const expected = []
+      let oldAt = 0
+      hunks.forEach((hunk, i) => {
+        const r = range(hunk.header)
+        const first = r.oldCount === 0 ? r.oldStart : r.oldStart - 1
+        expected.push(...oldLines.slice(oldAt, first))
+        for (const l of hunk.lines) {
+          if (l.type === 'context' || l.type === (dropIt[i] ? 'deletion' : 'addition')) expected.push(l.content)
+        }
+        oldAt = first + r.oldCount
+      })
+      expected.push(...oldLines.slice(oldAt))
+      const droppedHunks = hunks.filter((_, i) => dropIt[i]).map((h) => range(h.header))
+      const keptHunks = hunks.filter((_, i) => !dropIt[i]).map((h) => range(h.header))
+      const raw = { file_path: '/a', old_string: oldText, new_string: newText }
+      const out = mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: droppedHunks, [KEPT_HUNKS_KEY]: keptHunks }, 'Edit')
+      assert.equal(out.new_string, expected.join('\n'), `case ${t}`)
+      cases++
+    }
+    assert.ok(cases > 150, `enough cases had a diff (${cases})`)
+  })
+
+  it('text over the 10K broadcast cap that redaction did not change is accepted', () => {
+    const big = 'ordinary line of code\n'.repeat(700) // ~15K
+    assert.ok(big.length > 10_240)
+    const raw = { file_path: '/a', old_string: big, new_string: big + 'tail' }
+    assert.equal(mergeEditedInput(raw, { new_string: big }, 'Edit').new_string, big)
   })
 
   it('any unexpected failure while applying an edit denies the request instead of leaving it pending', async () => {
@@ -479,6 +613,7 @@ describe('#8446 a decision the server cannot map back to the raw text is refused
     assert.equal(entry.decision, 'deny')
     assert.equal(entry.reason, 'edit_refused')
     assert.equal(entry.tool, 'Edit')
+    assert.equal(h.permissionSessionMap.has(h.requestId), false, 'the route is consumed once the request is answered')
   })
 
   it('a deny never reads the edit at all', async () => {

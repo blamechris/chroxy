@@ -695,8 +695,10 @@ export const PermissionResponseSchema = z.object({
   // of { oldStart, oldCount, newStart, newCount }, the `@@` header numbers of EVERY
   // hunk it was shown) and never content (#8446): the diff it drew is over the
   // REDACTED tool input, so the server rebuilds the narrowed content from the raw
-  // input it holds (edited-input.js), after checking that the lines outside all the
-  // listed hunks are unchanged lines. A `droppedHunks` key, an empty list included,
+  // input it holds (edited-input.js), after recomputing the diff itself over the same
+  // redacted copy and requiring the two lists to be exactly its hunks. A change the
+  // redaction hid (a rotated key) can only be approved or denied whole. A
+  // `droppedHunks` key, an empty list included,
   // puts the field in hunk mode and any text sent for it is ignored. A client that
   // tweaked a Bash command before approving sends the edited `command`. The server
   // merges ONLY the whitelisted content field(s) per tool (Write→content,

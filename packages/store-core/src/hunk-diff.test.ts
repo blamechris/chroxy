@@ -5,6 +5,7 @@
  * subset application, edge cases, and the size guard.
  */
 import { describe, it, expect } from 'vitest'
+import { computeHunks as protocolComputeHunks } from '@chroxy/protocol'
 import { computeHunks, applyHunks, hunkDecisions, MAX_DIFF_LINES } from './hunk-diff'
 
 /** Assert the two round-trip invariants for a case. */
@@ -193,5 +194,11 @@ describe('hunkDecisions (#8446)', () => {
   it('never carries text: only numbers leave the client', () => {
     const json = JSON.stringify(hunkDecisions(hunks, new Set([0])))
     expect(json.includes('line') || json.includes('REDACTED')).toBe(false)
+  })
+})
+
+describe('the differ is shared with the server (#8446)', () => {
+  it('store-core\'s computeHunks IS @chroxy/protocol\'s: the server recomputes the client\'s hunks with the same function', () => {
+    expect(computeHunks).toBe(protocolComputeHunks)
   })
 })

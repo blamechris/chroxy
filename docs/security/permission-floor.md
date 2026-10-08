@@ -377,11 +377,19 @@ an approve with edits can do, and it lives in `edited-input.js` and
   a secret was. The client sends `editedInput.droppedHunks` and `keptHunks`, the `@@`
   ranges of every hunk it was shown, and the server rebuilds the written text from the
   RAW input it holds: the proposed text with each dropped hunk's lines replaced by the
-  original's. The lines outside all listed hunks must be the same lines on both sides,
-  in count and content (compared over the shown copy), which is what makes each range a
-  region of the real diff and stops a zero-count side from inventing an insertion or a
-  deletion. A `droppedHunks` key, an empty list included, puts the field in hunk mode,
-  and any text the client also sends for that field is ignored.
+  original's. The server computes the diff itself over the same redacted copy, with the
+  same differ the clients use (`computeHunks`, one implementation in `@chroxy/protocol`),
+  and requires `droppedHunks` plus `keptHunks` to be exactly that list of hunks: the same
+  headers, each once, none missing, none extra. That is what stops a range landing off
+  its hunk, a zero-count side inventing an insertion or a deletion, or a partition that
+  covers the right lines in the wrong pieces and deletes a line both sides share. A
+  `droppedHunks` key, an empty list included, puts the field in hunk mode, and any text
+  the client also sends for that field is ignored.
+- **A change redaction hid can only be approved or denied whole.** If the raw original
+  and proposal differ at a line the shown copy reads as unchanged (a rotated key, in a gap
+  or in a hunk's context) and the client dropped any hunk, the edit is refused: writing it
+  would apply a change the operator never saw. With no hunk dropped a plain approve is
+  unchanged.
 - **Text from a client is a base only where redaction changed nothing.** An older
   client's narrowed text, or an edited Bash command, is refused outright when redaction
   changed the copy it was drawn from (the field, and for an Edit the text it replaces),
