@@ -9,7 +9,7 @@
  * wire frames so the fixture cannot drift from what the handlers actually record.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, renderHook, cleanup, screen } from '@testing-library/react'
+import { render, renderHook, cleanup, screen, fireEvent } from '@testing-library/react'
 import { useChatMessages } from './useChatMessages'
 import { useMessageRenderer, type UseMessageRendererArgs } from './useMessageRenderer'
 import { ChatView } from '../components/ChatView'
@@ -124,6 +124,58 @@ describe('resolved permission groups -- a real interleaved turn through the mess
     ])
     const { result } = renderHook(() => useChatMessages({ storeMessages: msgs, streamingMessageId: null }))
     expect(result.current.chatMessages.map((r) => r.type)).toEqual(['permission-group', 'tool_group'])
+  })
+
+  // The wire frames a thinking block arrives as (store-core handlers/thinking.test.ts):
+  // stream_start / stream_delta / stream_end, each tagged `thinking: true` on a distinct id.
+  const thinkingFrames = (n: number) => [
+    { type: 'stream_start', messageId: `m1-thinking-${n}`, thinking: true },
+    { type: 'stream_delta', messageId: `m1-thinking-${n}`, delta: 'I should touch the file.', thinking: true },
+    { type: 'stream_end', messageId: `m1-thinking-${n}`, thinking: true, thinkingDurationMs: 300 },
+  ]
+  // The order seen on a real claude-sdk Haiku turn: P, thinking, T, P, T, P, T.
+  const haikuTurn = [
+    ...permFrames(1), ...thinkingFrames(0), ...toolFrames(1),
+    ...permFrames(2), ...toolFrames(2),
+    ...permFrames(3), ...toolFrames(3),
+  ]
+
+  it('the recorded Haiku turn really has a thinking row between the approvals', () => {
+    const msgs = drive(haikuTurn)
+    expect(msgs.map((m) => m.type)).toEqual(['prompt', 'thinking', 'tool_use', 'prompt', 'tool_use', 'prompt', 'tool_use'])
+  })
+
+  it('groups all three approvals into ×3 across the thinking row (P, thinking, T, P, T, P, T)', () => {
+    const msgs = drive(haikuTurn)
+    mount(msgs)
+    expect(screen.getAllByTestId('perm-group')).toHaveLength(1)
+    expect(screen.getByTestId('perm-group-count')).toHaveTextContent('×3')
+    expect(screen.queryAllByTestId('perm-outcome-record')).toHaveLength(0)
+  })
+
+  it('the audit trail names WHAT was approved: the group line and an expanded member show the command from the wire input', () => {
+    mount(drive(haikuTurn))
+    expect(screen.getByTestId('perm-group-input')).toHaveTextContent('touch smoke-perm.txt')
+    fireEvent.click(screen.getByTestId('perm-group-toggle'))
+    fireEvent.click(screen.getAllByTestId('perm-record-toggle')[1]!)
+    expect(screen.getByTestId('perm-record-input')).toHaveTextContent('touch smoke-perm.txt')
+  })
+
+  it('with the third approval still PENDING the first two group (×2) and the pending card stays full', () => {
+    const msgs = drive([
+      ...permFrames(1), ...thinkingFrames(0), ...toolFrames(1),
+      ...permFrames(2), ...toolFrames(2),
+      { type: 'permission_request', requestId: 'req-3', tool: 'Bash', description: DESC, input: CMD, remainingMs: 120000 },
+    ])
+    mount(msgs)
+    expect(screen.getByTestId('perm-group-count')).toHaveTextContent('×2')
+    expect(screen.getAllByTestId('permission-prompt')).toHaveLength(1)
+  })
+
+  it('the thinking row is still shown (only the prompt records fold)', () => {
+    const msgs = drive(haikuTurn)
+    const { result } = renderHook(() => useChatMessages({ storeMessages: msgs, streamingMessageId: null }))
+    expect(result.current.chatMessages.map((r) => r.type)).toEqual(['permission-group', 'thinking', 'tool_use', 'tool_use', 'tool_use'])
   })
 
   it('renders ×3 in the DOM from the real pipeline', () => {

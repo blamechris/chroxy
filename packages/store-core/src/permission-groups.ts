@@ -16,9 +16,10 @@
  *     is `null` for it, a `null` key breaks any run, and so each pending approval
  *     stays its own actionable card.
  *   - A run lives inside ONE turn and is separated only by tool runs of the same
- *     tool. A turn records each approved prompt next to the tool run it gated, so
- *     requiring literal adjacency would never group a real turn; anything else
- *     between two prompts (text, a user message, another tool) ends the run.
+ *     tool and thinking rows. A turn records each approved prompt next to the tool
+ *     run it gated (and the model reasons in between), so requiring literal
+ *     adjacency would never group a real turn; anything else between two prompts
+ *     (text, a user message, another tool) ends the run.
  *   - "Identical" means the same session, tool, description, tool input AND
  *     outcome. Folding an allowed request and a denied one into one line, or two
  *     different commands that share a rationale, would lose exactly what the
@@ -82,33 +83,44 @@ export interface ResolvedPermissionRun<T> {
 }
 
 /**
- * Whether an item is a tool run of `tool` -- the only thing allowed to sit
- * BETWEEN two members of a run. A turn records an approved prompt together with
- * the tool run it gated (`prompt, tool bubble, prompt, tool bubble, ...`), so
- * identical prompts of one turn are never adjacent. The tool bubble must be the
- * SAME tool (a `Read` between two `Bash` approvals is a different story), every
- * message of a collapsed tool group must be, and a turn boundary on it means the
- * next prompt belongs to the next turn.
+ * Whether an item is a transparent separator: something that sits BETWEEN two
+ * members of a run without ending it. Two kinds, either mixed in one item:
+ *
+ *   - a tool run of `tool` -- a turn records an approved prompt together with the
+ *     tool run it gated (`prompt, tool bubble, prompt, tool bubble, ...`), so
+ *     identical prompts of one turn are never adjacent. It must be the SAME tool
+ *     (a `Read` between two `Bash` approvals is a different story);
+ *   - a `thinking` row -- Haiku and Sonnet reason between tool calls
+ *     (`prompt, thinking, tool bubble, prompt, ...`), and the reasoning says
+ *     nothing about whether the approvals repeat. Thinking stays a standalone row
+ *     (#6756), so it is shown where it was either way.
+ *
+ * Every message of an item must qualify, and a `turnBoundary` on any of them means
+ * the next prompt belongs to the next turn. Text, a user message, an error, another
+ * tool, a pending prompt or a synthetic row (no messages) is not transparent.
  */
-function isToolRunOf(messages: readonly ChatMessage[], tool: string | undefined): boolean {
-  if (!tool || messages.length === 0) return false
-  return messages.every((m) => m.type === 'tool_use' && m.tool === tool && !m.turnBoundary)
+function isTransparentRun(messages: readonly ChatMessage[], tool: string | undefined): boolean {
+  if (messages.length === 0) return false
+  return messages.every(
+    (m) =>
+      !m.turnBoundary &&
+      (m.type === 'thinking' || (!!tool && m.type === 'tool_use' && m.tool === tool)),
+  )
 }
 
 /**
  * The runs of identical resolved permission prompts, in one turn, separated by at
- * most tool runs of the same tool.
+ * most tool runs of the same tool and thinking rows.
  *
  * `getMessages` maps an item (a transcript row) to the store messages it stands
  * for: `[m]` for a plain row, the members of a collapsed tool group, `[]` for a
  * synthetic row. Anything that is not a resolved prompt or a same-tool tool run
  * ends the run: a pending prompt, a different request, an assistant text block, a
- * user message, a thinking block, an error, a tool run of another tool, a
- * synthetic row. A `turnBoundary` on a member ends the run after it, so a run
+ * user message, an error, a tool run of another tool, a synthetic row. A `turnBoundary` on a member ends the run after it, so a run
  * never spans two turns. Runs shorter than `minRunLength` (default 2) are not
  * reported: a lone resolved prompt stays its own line.
  *
- * The separating tool runs are NOT part of a run: the caller leaves them where
+ * The separating rows are NOT part of a run: the caller leaves them where
  * they are and moves only the members.
  */
 export function findResolvedPermissionRuns<T>(
@@ -138,7 +150,7 @@ export function findResolvedPermissionRuns<T>(
         current = { key, items: [item], indices: [i], startIndex: i, tool: member.tool }
       }
       if (member.turnBoundary) flush()
-    } else if (current && isToolRunOf(msgs, current.tool)) {
+    } else if (current && isTransparentRun(msgs, current.tool)) {
       continue
     } else {
       flush()

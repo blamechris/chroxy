@@ -610,6 +610,22 @@ describe('useMessageRenderer -- compact resolved prompts + groups (#6894)', () =
     }
   })
 
+  it('expanding a live-answered record shows WHAT was approved: the command from the tool input', () => {
+    const m = live('a1', { toolInput: { command: 'touch smoke-perm.txt' } })
+    renderRow([m], promptRow(m))
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    expect(screen.getByTestId('perm-record-input')).toHaveTextContent('touch smoke-perm.txt')
+  })
+
+  it('a group line shows the shared command, and each expanded member shows it in its detail', () => {
+    const msgs = [live('a1', { toolInput: { command: 'touch smoke-perm.txt' } }), live('a2', { toolInput: { command: 'touch smoke-perm.txt' } })]
+    renderRow(msgs, groupRow('permission-group-a1'), new Map([['permission-group-a1', ['a1', 'a2']]]))
+    expect(screen.getByTestId('perm-group-input')).toHaveTextContent('touch smoke-perm.txt')
+    fireEvent.click(screen.getByTestId('perm-group-toggle'))
+    fireEvent.click(screen.getAllByTestId('perm-record-toggle')[0]!)
+    expect(screen.getByTestId('perm-record-input')).toHaveTextContent('touch smoke-perm.txt')
+  })
+
   it('a PENDING prompt stays the full actionable card', () => {
     const m = promptMsg('p1', 'shell: Do you want to allow npm registry install?', 'shell', 'req-p1')
     renderRow([m], promptRow(m))

@@ -143,6 +143,7 @@ function renderResolvedPermissionRecord(m: ChatMessage, sessions: SessionInfo[])
         // (expired, stopped) never reads one off a stray `answered`.
         decision: outcome === 'allowed' || outcome === 'denied' ? m.answered : undefined,
         sessionLabel: buildSessionLabel(m.originSessionId, sessions),
+        toolInput: m.toolInput,
       }}
     />
   )
@@ -233,6 +234,8 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           description={resolvedPermissionDescription(first)}
           outcome={resolvedPermissionOutcome(first)!}
           count={members.length}
+          // The key includes the tool input, so every member has the same one.
+          toolInput={first.toolInput}
           renderMembers={() => (
             <>
               {members.map((m) => (

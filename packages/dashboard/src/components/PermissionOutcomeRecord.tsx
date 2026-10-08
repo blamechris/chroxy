@@ -31,12 +31,19 @@
 import { useState } from 'react'
 import type { PermissionOutcomeKind } from '@chroxy/store-core'
 import { useInitialExpanded } from './chatExpandRegistry'
+import { permissionInputText } from '../utils/permissionInputText'
 
 export interface PermissionRecordDetail {
   /** The decision token the user answered with (`allow`, `allowSession`, `allowAlways`, `deny`). */
   decision?: string | null
   /** "Which session asked" label, when more than one session exists. */
   sessionLabel?: string
+  /**
+   * What was approved: the (server-sanitized) tool input the live prompt carried.
+   * Absent on a record rebuilt from history -- the server journals the
+   * description, not the input. Shown as text, bounded.
+   */
+  toolInput?: Record<string, unknown>
 }
 
 export interface PermissionOutcomeRecordProps {
@@ -87,6 +94,7 @@ export function PermissionOutcomeRecord({ requestId, tool, description, outcome,
   const { initial, persist } = useInitialExpanded(`perm-record:${requestId}`, false)
   const [expanded, setExpanded] = useState(initial)
   const detailId = `perm-record-detail-${requestId}`
+  const inputText = detail ? permissionInputText(tool, detail.toolInput) : null
   return (
     <div
       className={`permission-prompt permission-prompt-dropped${detail ? ' perm-record-expandable' : ''}`}
@@ -122,6 +130,9 @@ export function PermissionOutcomeRecord({ requestId, tool, description, outcome,
           <div className="perm-record-full">
             <span className="perm-tool">{tool}</span>: {description}
           </div>
+          {inputText && (
+            <pre className="perm-record-input" data-testid="perm-record-input">{inputText}</pre>
+          )}
           {detail.decision && <div className="perm-record-decision">{permissionDecisionLabel(detail.decision)}</div>}
           {detail.sessionLabel && <div className="perm-record-session">{detail.sessionLabel}</div>}
         </div>

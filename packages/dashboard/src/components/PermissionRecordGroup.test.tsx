@@ -91,6 +91,21 @@ describe('PermissionRecordGroup (#6894)', () => {
     expect(document.activeElement).toBe(anchor)
   })
 
+  it('shows the shared tool input on the group line (the members are identical in it)', () => {
+    renderGroup({ toolInput: { command: 'touch smoke-perm.txt' } })
+    expect(screen.getByTestId('perm-group-input')).toHaveTextContent('touch smoke-perm.txt')
+  })
+
+  it('renders the group-line input as text, not markup', () => {
+    renderGroup({ toolInput: { command: '<b>x</b>' } })
+    expect(screen.getByTestId('perm-group-input').querySelector('b')).toBeNull()
+  })
+
+  it('has no input line when the members carry none (replayed history)', () => {
+    renderGroup()
+    expect(screen.queryByTestId('perm-group-input')).not.toBeInTheDocument()
+  })
+
   it('has no Allow / Deny: a group is never actionable', () => {
     renderGroup()
     fireEvent.click(screen.getByTestId('perm-group-toggle'))

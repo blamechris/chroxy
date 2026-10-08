@@ -238,10 +238,56 @@ describe('findResolvedPermissionRuns -- the real interleaving of a turn (#6894)'
   it.each([
     ['an assistant text block', { id: 'x', type: 'response', content: 'working on it' }],
     ['a user message', { id: 'x', type: 'user_input', content: 'continue' }],
-    ['a thinking block', { id: 'x', type: 'thinking', content: 'hmm' }],
     ['an error', { id: 'x', type: 'error', content: 'boom' }],
   ] as const)('%s between two prompts breaks the run', (_label, over) => {
     const msgs = [resolved('p1'), toolUse('t1'), { ...toolUse('x'), ...over } as ChatMessage, resolved('p2')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  // The real order of a Haiku / Sonnet turn (#6894 smoke): the model reasons between
+  // tool calls, so `thinking` rows sit among the prompts and tool bubbles.
+  const thinking = (id: string, over: Partial<ChatMessage> = {}): ChatMessage => ({
+    id, type: 'thinking', content: 'Let me touch the file.', thinkingStreaming: false, thinkingDurationMs: 300, timestamp: NOW, ...over,
+  } as ChatMessage)
+
+  it('a thinking row is transparent: P, thinking, T, P, T, P, T is ONE run of three', () => {
+    const msgs = [resolved('p1'), thinking('k1'), toolUse('t1'), resolved('p2'), toolUse('t2'), resolved('p3'), toolUse('t3')]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs).toHaveLength(1)
+    expect(ids(runs[0]!)).toEqual(['p1', 'p2', 'p3'])
+    expect(runs[0]!.indices).toEqual([0, 3, 5])
+  })
+
+  it('thinking rows between prompts with no tool bubble at all, and several in a row, do not end it', () => {
+    const msgs = [resolved('p1'), thinking('k1'), thinking('k2'), resolved('p2')]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs.map(ids)).toEqual([['p1', 'p2']])
+  })
+
+  it('a thinking row inside a collapsed tool group payload is transparent too', () => {
+    const msgs = [resolved('p1'), thinking('k1'), toolUse('t1'), resolved('p2')]
+    const rows = [{ id: 'p1' }, { id: 'activity-k1' }, { id: 'p2' }]
+    const runs = findResolvedPermissionRuns(rows, lookup(msgs, { 'activity-k1': [msgs[1]!, msgs[2]!] }))
+    expect(runs).toHaveLength(1)
+  })
+
+  it('thinking does not rescue a break: thinking + assistant text still ends the run', () => {
+    const text = { ...toolUse('x'), type: 'response', content: 'done' } as ChatMessage
+    const msgs = [resolved('p1'), thinking('k1'), text, resolved('p2')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('thinking does not rescue a pending prompt, a different tool, or a different request', () => {
+    const cases = [
+      [resolved('p1'), thinking('k1'), pending('p2'), resolved('p3')],
+      [resolved('p1'), thinking('k1'), toolUse('t1', { tool: 'Read' }), resolved('p2')],
+      [resolved('p1'), thinking('k1'), resolved('p2', { content: 'shell: other' })],
+    ]
+    for (const msgs of cases) expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('a turn boundary on a thinking row ends the run (the next prompt is another turn)', () => {
+    const msgs = [resolved('p1'), thinking('k1', { turnBoundary: true } as Partial<ChatMessage>), resolved('p2')]
     expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
   })
 

@@ -22,6 +22,7 @@ import { useState, type ReactNode } from 'react'
 import type { PermissionOutcomeKind } from '@chroxy/store-core'
 import { PERMISSION_OUTCOME_LEAD, permissionOutcomeSuffix } from './PermissionOutcomeRecord'
 import { useInitialExpanded } from './chatExpandRegistry'
+import { permissionInputText } from '../utils/permissionInputText'
 
 export interface PermissionRecordGroupProps {
   /** The synthetic row id; keys the persisted expand state. */
@@ -31,6 +32,11 @@ export interface PermissionRecordGroupProps {
   tool: string
   description: string
   outcome: PermissionOutcomeKind
+  /**
+   * The tool input every member shares (the group key includes it): shown on the
+   * line so the group says what was approved. Absent for members rebuilt from history.
+   */
+  toolInput?: Record<string, unknown>
   /** How many prompts the line stands for (>= 2). */
   count: number
   /** The member records. Called only while expanded, so a collapsed group mounts none. */
@@ -44,10 +50,12 @@ export function PermissionRecordGroup({
   description,
   outcome,
   count,
+  toolInput,
   renderMembers,
 }: PermissionRecordGroupProps) {
   const { initial, persist } = useInitialExpanded(`perm-group:${groupId}`, false)
   const [expanded, setExpanded] = useState(initial)
+  const inputText = permissionInputText(tool, toolInput)
   const membersId = `perm-group-members-${groupId}`
   return (
     <div
@@ -80,6 +88,9 @@ export function PermissionRecordGroup({
           {' — '}
           <span className="perm-tool">{tool}</span>: {description}
           {permissionOutcomeSuffix(outcome)}
+          {inputText && (
+            <span className="perm-group-input" data-testid="perm-group-input">{inputText}</span>
+          )}
         </span>
       </button>
       {!expanded && requestIds.slice(1).map((requestId) => (

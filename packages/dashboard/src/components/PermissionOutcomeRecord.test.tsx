@@ -90,6 +90,52 @@ describe('PermissionOutcomeRecord -- expandable (#6894)', () => {
   })
 })
 
+describe('PermissionOutcomeRecord -- what was approved (#6894)', () => {
+  it('expanded, shows the tool input (the command) as well as the description', () => {
+    renderRecord({ tool: 'Bash', description: 'Touch smoke file', detail: { decision: 'allow', toolInput: { command: 'touch smoke-perm.txt' } } })
+    expect(screen.queryByTestId('perm-record-input')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    expect(screen.getByTestId('perm-record-input')).toHaveTextContent('touch smoke-perm.txt')
+    expect(screen.getByTestId('perm-record-detail')).toHaveTextContent('Touch smoke file')
+  })
+
+  it('renders the input as TEXT: markup in a command creates no element', () => {
+    renderRecord({ detail: { decision: 'allow', toolInput: { command: '<img src=x onerror=alert(1)><b>bold</b>' } } })
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    const box = screen.getByTestId('perm-record-input')
+    expect(box.textContent).toBe('<img src=x onerror=alert(1)><b>bold</b>')
+    expect(box.querySelector('img, b')).toBeNull()
+  })
+
+  it('bounds a huge command and marks the cut', () => {
+    renderRecord({ detail: { decision: 'allow', toolInput: { command: 'z'.repeat(50_000) } } })
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    const text = screen.getByTestId('perm-record-input').textContent!
+    expect(text.length).toBeLessThan(2000)
+    expect(text).toMatch(/truncated/)
+  })
+
+  it('shows no input block without a tool input (a replayed record carries none)', () => {
+    renderRecord({ detail: { decision: 'allow' } })
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    expect(screen.getByTestId('perm-record-detail')).toBeInTheDocument()
+    expect(screen.queryByTestId('perm-record-input')).not.toBeInTheDocument()
+  })
+
+  it('never shows the raw input of an AskUserQuestion', () => {
+    renderRecord({ tool: 'AskUserQuestion', detail: { decision: 'allow', toolInput: { questions: [{ question: 'secret?' }] } } })
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    expect(screen.queryByTestId('perm-record-input')).not.toBeInTheDocument()
+  })
+
+  it('wraps long unbroken text instead of overflowing (css contract)', () => {
+    const css = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+    const rule = /\.perm-record-input[^{]*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(rule).toMatch(/white-space:\s*pre-wrap/)
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/)
+  })
+})
+
 describe('permissionDecisionLabel', () => {
   it('names each decision token the way the live card did', () => {
     expect(permissionDecisionLabel('deny')).toBe('Denied')
