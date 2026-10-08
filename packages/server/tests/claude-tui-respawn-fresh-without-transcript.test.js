@@ -21,6 +21,7 @@ const SESSION_ID = '0f8239aa-0000-4000-8000-000000000001'
 
 let fakeHome
 let realHome
+let realUserProfile
 let realConfigDir
 let cwd
 let cwdReal
@@ -28,6 +29,8 @@ const cleanups = []
 
 beforeEach(() => {
   realHome = process.env.HOME
+  // os.homedir() reads USERPROFILE on Windows, not HOME.
+  realUserProfile = process.env.USERPROFILE
   realConfigDir = process.env.CLAUDE_CONFIG_DIR
   // A developer's own override must not leak into the probe under test.
   delete process.env.CLAUDE_CONFIG_DIR
@@ -35,10 +38,13 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), 'chroxy-8239-cwd-'))
   cwdReal = realpathSync(cwd)
   process.env.HOME = fakeHome
+  process.env.USERPROFILE = fakeHome
 })
 
 afterEach(async () => {
   process.env.HOME = realHome
+  if (realUserProfile === undefined) delete process.env.USERPROFILE
+  else process.env.USERPROFILE = realUserProfile
   if (realConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
   else process.env.CLAUDE_CONFIG_DIR = realConfigDir
   for (const fn of cleanups.splice(0)) await fn()
