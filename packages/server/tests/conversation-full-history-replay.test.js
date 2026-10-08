@@ -72,6 +72,8 @@ function build(historyEntries, { ws = makeOpenWs(), managerOverrides = {}, sourc
     reseedActiveAgents: (_ws, sid) => reseeds.push(sid),
     // #7457: same post-replay repair lane as the re-seed.
     resendPendingQuestions: (_ws, sid) => resends.push(sid),
+    // #8340: the permission-card repair lane.
+    resendPendingPermissions: () => {},
   })
   return { ctx, sends, ws, reseeds, resends }
 }
@@ -781,6 +783,7 @@ describe('#7507 — the JSONL heal is gated on LIVENESS, and a pending backgroun
       sessionManager: manager,
       reseedActiveAgents: () => {},
       resendPendingQuestions: () => {},
+      resendPendingPermissions: () => {},
     })
     return { ctx, sends, session, ws: makeOpenWs() }
   }

@@ -19,8 +19,9 @@
  */
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createSpy, createMockSessionManager } from './test-helpers.js'
-import { replayHistory } from '../src/ws-history.js'
+import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
+import { replayHistory, resendPendingPermissionsForSession } from '../src/ws-history.js'
+import { conversationHandlers } from '../src/handlers/conversation-handlers.js'
 import { createPermissionHandler } from '../src/ws-permissions.js'
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
@@ -462,5 +463,110 @@ describe('resendPendingPermissions — a session-bound client gets only its boun
     replayHistory(ctx, ws, 'sess-a')
     await settle()
     assert.deepEqual(ids(ctx), ['perm-sdk-a'])
+  })
+})
+
+// ── Sync Full History (request_full_history) re-sends too (#8340) ──────────
+
+describe('request_full_history — pending permission re-send (#8340)', () => {
+  const bound = (id) => ({ id: 'client-1', boundSessionId: id, activeSessionId: id })
+
+  /**
+   * The REAL request_full_history handler over a ctx whose
+   * `transport.resendPendingPermissions` is wired the way ws-server wires it —
+   * to `resendPendingPermissionsForSession` over the same permission handler —
+   * so the test fails if the handler never calls it, and cannot pass on a stub.
+   */
+  function buildHandlerCtx(opts) {
+    const base = makeCtx(opts)
+    base.sessionManager.getFullHistoryAsync = async () => ({
+      entries: [{ type: 'response', content: 'hello', _seq: 1 }],
+      source: 'ring',
+      truncated: false,
+    })
+    const ctx = nsCtx({
+      send: base.send,
+      sessionManager: base.sessionManager,
+      permissions: base.permissions,
+      clients: base.clients,
+      reseedActiveAgents: () => {},
+      resendPendingQuestions: () => {},
+      resendPendingPermissions: (ws, sid) => resendPendingPermissionsForSession(base, ws, sid),
+    })
+    return { ctx, base }
+  }
+
+  async function press(ctx, ws, client, msg = {}) {
+    await conversationHandlers.request_full_history(ws, client, { type: 'request_full_history', ...msg }, ctx)
+    await settle()
+    await settle()
+  }
+
+  it('re-sends the blocked session\'s permission AFTER the end frame', async () => {
+    const { ctx, base } = buildHandlerCtx({ sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    const ws = makeFakeWs()
+    const client = { id: 'client-1', activeSessionId: 'sess-b' }
+    base.clients.set(ws, client)
+
+    await press(ctx, ws, client, { sessionId: 'sess-b' })
+
+    const { endIdx, tail } = afterEnd(base._sends)
+    assert.ok(endIdx >= 0, `precondition: the replay finished; got ${JSON.stringify(base._sends.map((m) => m.type))}`)
+    const frames = permFrames(tail)
+    assert.equal(frames.length, 1, `one permission_request after history_replay_end; got ${JSON.stringify(base._sends.map((m) => m.type))}`)
+    assert.equal(frames[0].requestId, 'perm-sdk-b')
+    assert.equal(frames[0].sessionId, 'sess-b')
+    assert.equal(permFrames(base._sends.slice(0, endIdx)).length, 0, 'nothing is sent before the end frame')
+  })
+
+  it('re-sends a hook-routed (claude-tui) permission the same way', async () => {
+    const { ctx, base } = buildHandlerCtx({ hooks: [{ requestId: 'perm-hook-b', owner: 'sess-b' }] })
+    const ws = makeFakeWs()
+    const client = { id: 'client-1', activeSessionId: 'sess-b' }
+    base.clients.set(ws, client)
+
+    await press(ctx, ws, client)
+
+    const frames = permFrames(afterEnd(base._sends).tail)
+    assert.deepEqual(frames.map((m) => m.requestId), ['perm-hook-b'])
+  })
+
+  it('does not re-send a sibling session\'s permission', async () => {
+    const { ctx, base } = buildHandlerCtx({ sdk: { 'sess-a': [sdkEntry('perm-sdk-a')], 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    const ws = makeFakeWs()
+    const client = { id: 'client-1', activeSessionId: 'sess-b' }
+    base.clients.set(ws, client)
+
+    await press(ctx, ws, client)
+
+    assert.deepEqual(permFrames(base._sends).map((m) => m.requestId), ['perm-sdk-b'])
+  })
+
+  it('a bound client syncing its own session gets its own prompt and not a sibling\'s', async () => {
+    const { ctx, base } = buildHandlerCtx({ sdk: { 'sess-a': [sdkEntry('perm-sdk-a')], 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    const ws = makeFakeWs()
+    const client = bound('sess-a')
+    base.clients.set(ws, client)
+
+    await press(ctx, ws, client)
+
+    assert.deepEqual(permFrames(afterEnd(base._sends).tail).map((m) => m.requestId), ['perm-sdk-a'])
+  })
+
+  it('a client bound to another session gets no permission through this path (#8342)', async () => {
+    const { ctx, base } = buildHandlerCtx({ sdk: { 'sess-b': [sdkEntry('perm-sdk-b')] } })
+    const ws = makeFakeWs()
+    const client = bound('sess-a')
+    base.clients.set(ws, client)
+
+    // The handler refuses a cross-session request outright...
+    await press(ctx, ws, client, { sessionId: 'sess-b' })
+    assert.deepEqual(permFrames(base._sends), [])
+
+    // ...and the transport function itself holds the line if it is ever reached:
+    // the single implementation's binding guard, applied through the new ctx key.
+    ctx.transport.resendPendingPermissions(ws, 'sess-b')
+    await settle()
+    assert.deepEqual(permFrames(base._sends), [])
   })
 })

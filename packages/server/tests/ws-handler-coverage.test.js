@@ -55,6 +55,7 @@ function createMockCtx(sessionManager, opts = {}) {
     replayHistory: replayHistorySpy,
     reseedActiveAgents: reseedActiveAgentsSpy,
     resendPendingQuestions: createSpy(), // #7457
+    resendPendingPermissions: createSpy(), // #8340
     broadcastToSession: broadcastToSessionSpy,
     broadcastSessionList: broadcastSessionListSpy,
     checkpointManager,

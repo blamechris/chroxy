@@ -50,6 +50,7 @@
  * @property {(ws: any, sessionId: string) => void} replayHistory - Replay a session's history to a client.
  * @property {(ws: any, sessionId: string) => void} reseedActiveAgents - Re-assert a session's live subagents after a replay wiped the client's list (#7340).
  * @property {(ws: any, sessionId: string) => void} resendPendingQuestions - Re-assert the AskUserQuestions a session is still blocked on, after a replay's `history_replay_end` let the client's sweep stamp them '(resolved)' (#7457).
+ * @property {(ws: any, sessionId: string) => void} resendPendingPermissions - Re-assert the permission prompts a session is still blocked on, after a full-rebuild replay's `history_replay_end` swapped away the live card (#8328, #8340). Honours the session-bound-client guard (#8342).
  * @property {Map} clients - WebSocket → client-state Map (the WsClientManager's Map).
  *
  * @typedef {Object} WsHandlerSessions
@@ -136,6 +137,7 @@ export const CTX_NAMESPACES = {
     'replayHistory',
     'reseedActiveAgents',
     'resendPendingQuestions',
+    'resendPendingPermissions',
     'clients',
   ],
   sessions: [

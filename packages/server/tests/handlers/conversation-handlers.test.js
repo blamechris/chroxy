@@ -29,6 +29,9 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     // #7457: the second post-replay repair — re-assert the questions the session
     // is still blocked on, after the end frame ran the client's sweep.
     resendPendingQuestions: createSpy((_ws, sid) => { sent.push({ type: '__resend_questions', sessionId: sid }) }),
+    // #8340: the third post-replay repair — the live permission card, which a
+    // full rebuild swaps away and the replay (transient frame) cannot restore.
+    resendPendingPermissions: createSpy((_ws, sid) => { sent.push({ type: '__resend_permissions', sessionId: sid }) }),
     // Default test stubs — never touch real ~/.claude/projects
     scanConversations: createSpy(async () => []),
     searchConversations: createSpy(async () => []),
@@ -921,6 +924,26 @@ describe('conversation-handlers', () => {
       assert.ok(
         types.indexOf('__resend_questions') > types.indexOf('history_replay_end'),
         'the re-send must FOLLOW the end frame — before it, the sweep the end frame triggers would stamp the question we just re-sent',
+      )
+    })
+
+    // #8340 — the permission card has the same hole: `permission_request` is
+    // transient, so a full rebuild drops it and the turn hangs at "Running...".
+    it("re-asserts the session's still-pending permissions after the replay (#8340)", async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await conversationHandlers.request_full_history(makeWs(), client, {}, ctx)
+
+      assert.equal(ctx.transport.resendPendingPermissions.callCount, 1)
+      assert.equal(ctx.transport.resendPendingPermissions.calls[0][1], 's1',
+        'the re-send must target the session that was just replayed')
+      const types = ctx._sent.map((m) => m.type)
+      assert.ok(
+        types.indexOf('__resend_permissions') > types.indexOf('history_replay_end'),
+        'the re-send must FOLLOW the end frame — a card sent before it is swapped away by the rebuild',
       )
     })
   })

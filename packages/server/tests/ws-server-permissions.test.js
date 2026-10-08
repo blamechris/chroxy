@@ -794,6 +794,75 @@ describe('permission/question routing to originating session', () => {
       ws.close()
     })
 
+    // #8340 — Sync Full History (`request_full_history`) ends its own
+    // `history_replay_end`, so it re-sends the permission card too. Through the
+    // REAL WsServer transport ctx: `_resendPendingPermissions` was defined twice
+    // on the class, the later `(ws)` test-compat delegate shadowed the per-session
+    // wrapper, and this path silently ran the UNFILTERED connect-time resend.
+    describe('pending permission survives request_full_history (#8340)', () => {
+      function pendingPerm(session, requestId) {
+        session._pendingPermissions = new Map([[requestId, {}]])
+        session._lastPermissionData = new Map([[requestId, {
+          requestId, tool: 'Bash', description: 'ls', input: {}, remainingMs: 300_000, createdAt: Date.now(), floored: false,
+        }]])
+      }
+      const isPerm = (id) => (m) => m.type === 'permission_request' && m.requestId === id
+
+      it('re-sends only the synced session\'s pending permission, after history_replay_end', async () => {
+        const { manager, sessionsMap } = twoSessionsWithHistory()
+        pendingPerm(sessionsMap.get('sess-a').session, 'perm-sdk-a')
+        pendingPerm(sessionsMap.get('sess-b').session, 'perm-sdk-b')
+        server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+        const port = await startServerAndGetPort(server)
+        const { ws, messages } = await createClient(port, true)
+        // Connect re-sends every session's prompts (unfiltered, intended). Wait for both,
+        // then look only at what the sync produces.
+        await waitForMessageMatch(messages, isPerm('perm-sdk-a'), 2000, 'connect-time resend of A')
+        await waitForMessageMatch(messages, isPerm('perm-sdk-b'), 2000, 'connect-time resend of B')
+        const base = messages.length
+
+        send(ws, { type: 'request_full_history', sessionId: 'sess-b' })
+        await waitFor(() => messages.slice(base).some(isPerm('perm-sdk-b')), { label: 'permission_request after sync' })
+        // Round trip so any (wrongly) co-sent frame has been delivered too.
+        send(ws, { type: 'request_full_history', sessionId: 'sess-b' })
+        await waitFor(() => messages.slice(base).filter(isPerm('perm-sdk-b')).length >= 2, { label: 'second sync' })
+
+        const after = messages.slice(base)
+        const endIdx = after.findIndex((m) => m.type === 'history_replay_end' && m.sessionId === 'sess-b')
+        const permIdx = after.findIndex(isPerm('perm-sdk-b'))
+        assert.ok(endIdx >= 0 && permIdx > endIdx, `permission_request must follow history_replay_end (end=${endIdx}, perm=${permIdx})`)
+        assert.equal(after.some(isPerm('perm-sdk-a')), false, 'sess-a\'s prompt must not ride a sess-b sync')
+
+        ws.close()
+      })
+
+      it('does not re-subscribe a client that unsubscribed from the synced session', async () => {
+        const { manager, sessionsMap } = twoSessionsWithHistory()
+        pendingPerm(sessionsMap.get('sess-b').session, 'perm-sdk-b')
+        server = new WsServer({ port: 0, apiToken: TOKEN, sessionManager: manager, defaultSessionId: 'sess-a', authRequired: false })
+        const port = await startServerAndGetPort(server)
+
+        const x = await createClient(port, true)
+        await waitForMessageMatch(x.messages, isPerm('perm-sdk-b'), 2000, 'connect-time resend to X')
+        const y = await createClient(port, true)
+        await waitForMessageMatch(y.messages, isPerm('perm-sdk-b'), 2000, 'connect-time resend to Y')
+        const xClient = [...server.clients.values()][0]
+        assert.ok(xClient.subscribedSessionIds.has('sess-b'), 'precondition: X subscribed to sess-b')
+        send(x.ws, { type: 'unsubscribe_sessions', sessionIds: ['sess-b'] })
+        await waitForMessageMatch(x.messages, (m) => m.type === 'subscriptions_updated', 2000, 'X unsubscribed')
+        assert.equal(xClient.subscribedSessionIds.has('sess-b'), false, 'precondition: X unsubscribed')
+
+        const base = y.messages.length
+        send(y.ws, { type: 'request_full_history', sessionId: 'sess-b' })
+        await waitFor(() => y.messages.slice(base).some(isPerm('perm-sdk-b')), { label: 'Y gets the re-sent permission' })
+
+        assert.equal(xClient.subscribedSessionIds.has('sess-b'), false, 'X must not be silently re-subscribed by Y\'s sync resend')
+
+        x.ws.close()
+        y.ws.close()
+      })
+    })
+
     // A client paired to ONE session (share-a-session token) is re-sent only that
     // session's pending prompts on connect. The sibling session's SDK prompt, its
     // hook-held prompt and an ownerless hook-held prompt all stay unsent.
