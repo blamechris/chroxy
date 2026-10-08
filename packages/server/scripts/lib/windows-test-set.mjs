@@ -177,7 +177,7 @@ export const WINDOWS_EXEMPT = [
     symptom: 'timeout',
     note: 'drives a real PTY for the claude TUI trust dialog; on Windows the ConPTY session never reaches the expected state and the file does not terminate',
   },
-  // ── spawns a POSIX shell or a .sh script (7)
+  // ── spawns a POSIX shell or a .sh script (8)
   {
     file: 'tests/permission-hook-failclosed.test.js',
     reason: 'posix-shell-spawn',
@@ -219,6 +219,12 @@ export const WINDOWS_EXEMPT = [
     reason: 'posix-shell-spawn',
     symptom: 'fail',
     note: 'spawns hooks/permission-hook.sh via /bin/bash to exercise sidecar newline and CRLF handling',
+  },
+  {
+    file: 'tests/permission-hook-tui-user-level.test.js',
+    reason: 'posix-shell-spawn',
+    symptom: 'fail',
+    note: 'spawns hooks/permission-hook.sh via /bin/bash and /bin/sh -c to prove an unmarked user-level copy stays inert in a claude-tui child while the marked copy keeps enforcing the floor (#8263)',
   },
   // ── passes a POSIX shell command string (3)
   {
