@@ -49,15 +49,19 @@ fn lifecycle_notifications_and_the_dashboard_command_share_deliver_notification(
 }
 
 #[test]
-fn the_command_validates_before_delivering() {
+fn the_command_sanitizes_before_delivering_and_never_rejects() {
     let src = lib_rs();
     let command = fn_body(&src, "send_session_notification");
-    let validate = command.find("validate_request(");
+    let validate = command.find("sanitize_request(");
     let deliver = command.find("deliver_notification(");
     assert!(
         matches!((validate, deliver), (Some(v), Some(d)) if v < d),
-        "send_session_notification must call validate_request before deliver_notification"
+        "send_session_notification must call sanitize_request before deliver_notification"
     );
+    // A rejection routes the dashboard to the plugin, which replaces the
+    // app-owned delegate; the command must have no error exit of its own.
+    assert!(!command.contains("Err("), "send_session_notification must not return Err");
+    assert!(!command.contains('?'), "send_session_notification must not propagate errors");
 }
 
 /// The dashboard half of the contract lives in another package, and a typo on
@@ -81,4 +85,23 @@ fn dashboard_uses_the_same_event_command_and_payload_field() {
     assert!(event_in_ts, "dashboard event name differs from Rust");
     assert!(command_in_rust && command_in_ts, "command name differs between Rust and the dashboard");
     assert!(field_in_rust && field_in_ts, "click payload field differs between Rust and the dashboard");
+}
+
+/// The delegate has to exist from launch, not from the first notification: a
+/// click on a card left over from before a relaunch lands on whatever delegate the
+/// centre has, and without ours there is none. `setup` is Tauri glue a unit test
+/// cannot run, so pin that it installs the delegate and the click sink, gated on
+/// the same `available()` check the delivery route uses.
+#[test]
+fn setup_installs_the_delegate_behind_the_delivery_gate() {
+    let src = lib_rs();
+    let setup_at = src.find(".setup(|app| {").expect(".setup closure not found");
+    let window: String = src[setup_at..].chars().take(1200).collect();
+    let gate = window.find("notification_click::macos::available()");
+    let sink = window.find("install_notification_click_sink(");
+    let delegate = window.find("notification_click::macos::install_delegate()");
+    assert!(
+        matches!((gate, sink, delegate), (Some(g), Some(s), Some(d)) if g < s && g < d),
+        "setup must install the click sink and delegate behind notification_click::macos::available()"
+    );
 }

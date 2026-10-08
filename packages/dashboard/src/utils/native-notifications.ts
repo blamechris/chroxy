@@ -284,16 +284,22 @@ function ensureClickListener(): Promise<void> {
   if (clickListener) return clickListener
   const listen = getTauriListen()
   if (!listen) return Promise.resolve()
-  clickListener = listen<{ session_id?: unknown }>(NOTIFICATION_CLICKED_EVENT, (event) => {
-    const id = event?.payload?.session_id
-    if (typeof id !== 'string') return
-    clickHandlers.get(id)?.()
-  }).then(
-    () => undefined,
-    () => {
-      clickListener = null
-    },
-  )
+  try {
+    clickListener = listen<{ session_id?: unknown }>(NOTIFICATION_CLICKED_EVENT, (event) => {
+      const id = event?.payload?.session_id
+      if (typeof id !== 'string') return
+      clickHandlers.get(id)?.()
+    }).then(
+      () => undefined,
+      () => {
+        clickListener = null
+      },
+    )
+  } catch {
+    // A synchronously throwing `listen` is the same outcome: no click routing.
+    clickListener = null
+    return Promise.resolve()
+  }
   return clickListener
 }
 
@@ -321,26 +327,31 @@ export function sendNativeNotification(title: string, options: NativeNotificatio
         clickHandlers.set(options.sessionId, options.onClick)
       }
       const plugin = tauriApi
+      const fallBackToPlugin = () => {
+        // An older desktop binary has no such command (the dashboard is served
+        // by the daemon and can be newer than the app that hosts it), or the ACL
+        // refused it. The notification is still worth showing, without the click.
+        try {
+          plugin.sendNotification({ title, body: options.body })
+        } catch {
+          // Nothing left to try.
+        }
+      }
+      // Subscribe to clicks, but do NOT wait for it: the notification goes out
+      // now. A `listen` that never settles must cost a click at worst, never the
+      // notification (the click takes a human far longer than the registration).
       void ensureClickListener()
-        .then(() =>
-          invoke('send_session_notification', {
-            title,
-            body: options.body,
-            sessionId: options.sessionId,
-            tag: options.tag,
-          }),
-        )
-        .catch(() => {
-          // An older desktop binary has no such command (the dashboard is served
-          // by the daemon and can be newer than the app that hosts it), or the
-          // ACL refused it. The notification is still worth showing, without the
-          // click.
-          try {
-            plugin.sendNotification({ title, body: options.body })
-          } catch {
-            // Nothing left to try.
-          }
-        })
+      try {
+        // No `tag`: the native card deliberately does not collapse (see the Rust
+        // side), so there is nothing for it to key on.
+        invoke('send_session_notification', {
+          title,
+          body: options.body,
+          sessionId: options.sessionId,
+        }).catch(fallBackToPlugin)
+      } catch {
+        fallBackToPlugin()
+      }
       return true
     }
     try {

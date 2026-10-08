@@ -326,7 +326,9 @@ describe('sendNativeNotification — Tauri click routing (#7367)', () => {
   /** Let the listener registration and the invoke (a promise chain) settle. */
   const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
 
-  function install(opts: { invokeImpl?: () => Promise<unknown>; withListen?: boolean } = {}) {
+  function install(
+    opts: { invokeImpl?: () => Promise<unknown>; withListen?: boolean; neverSettleListen?: boolean; throwingListen?: boolean } = {},
+  ) {
     listeners = new Map()
     invoke = vi.fn(opts.invokeImpl ?? (() => Promise.resolve(true)))
     const api = {
@@ -337,10 +339,12 @@ describe('sendNativeNotification — Tauri click routing (#7367)', () => {
     const listen =
       opts.withListen === false
         ? undefined
-        : vi.fn(async (event: string, handler: Listener) => {
+        : vi.fn((event: string, handler: Listener) => {
+            if (opts.throwingListen) throw new Error('listen blew up')
+            if (opts.neverSettleListen) return new Promise<() => void>(() => {})
             if (!listeners.has(event)) listeners.set(event, [])
             listeners.get(event)!.push(handler)
-            return () => {}
+            return Promise.resolve(() => {})
           })
     // @ts-expect-error — test double
     window.__TAURI__ = { notification: api, event: listen ? { listen } : undefined }
@@ -374,9 +378,30 @@ describe('sendNativeNotification — Tauri click routing (#7367)', () => {
       title: 'Chroxy: api',
       body: 'Finished',
       sessionId: 's1',
-      tag: 'chroxy-turn-s1',
     })
     expect(api.sendNotification).not.toHaveBeenCalled()
+  })
+
+  it('sends immediately even when the click subscription never settles', async () => {
+    const { api } = install({ neverSettleListen: true })
+    await refreshNotificationPermission()
+    const onClick = vi.fn()
+
+    expect(sendNativeNotification('Chroxy: api', { body: 'Finished', sessionId: 's1', onClick })).toBe(true)
+    // No settle(): the command must already have been called, synchronously, with
+    // the listener promise still pending.
+    expect(invoke).toHaveBeenCalledOnce()
+    expect(api.sendNotification).not.toHaveBeenCalled()
+    // And the next notification is not held up behind the same stuck promise.
+    sendNativeNotification('Chroxy: web', { sessionId: 's2', onClick: vi.fn() })
+    expect(invoke).toHaveBeenCalledTimes(2)
+  })
+
+  it('sends even when listen throws synchronously', async () => {
+    install({ throwingListen: true })
+    await refreshNotificationPermission()
+    expect(sendNativeNotification('Chroxy: api', { sessionId: 's1', onClick: vi.fn() })).toBe(true)
+    expect(invoke).toHaveBeenCalledOnce()
   })
 
   it('calls the handler of the session named by a notification_clicked event', async () => {

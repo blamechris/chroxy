@@ -48,8 +48,8 @@ use serde::Serialize;
 /// Tauri event the dashboard listens for.
 pub const NOTIFICATION_CLICKED_EVENT: &str = "notification_clicked";
 
-/// Longest title / body / id / tag accepted from the webview. The values come
-/// from the dashboard, which is trusted, but they end up in an OS surface that
+/// Longest title / body / session id kept from the webview. The values come from
+/// the dashboard, which is trusted, but they end up in an OS surface that
 /// truncates unpredictably, so bound them rather than pass a megabyte along.
 pub const MAX_FIELD_LEN: usize = 1024;
 
@@ -83,7 +83,7 @@ pub fn choose_delivery_path(is_macos: bool, is_dev: bool, bundle_id: Option<&str
     }
 }
 
-/// A notification request, validated.
+/// A notification request, sanitized.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SessionNotification {
     pub title: String,
@@ -91,48 +91,38 @@ pub struct SessionNotification {
     /// The session a click should select. `None` for notifications that are not
     /// about one session (server lifecycle): a click still raises the window.
     pub session_id: Option<String>,
-    /// Collapse key: delivering a second notification with the same tag
-    /// replaces the first rather than stacking.
-    pub tag: Option<String>,
 }
 
-fn field_ok(s: &str) -> bool {
-    s.chars().count() <= MAX_FIELD_LEN && !s.chars().any(|c| c.is_control() && c != '\n')
+/// Title shown when the webview sent nothing displayable.
+pub const FALLBACK_TITLE: &str = "Chroxy";
+
+/// Replace control characters with a space (keeping `\n` when `keep_newline`)
+/// and cut to [`MAX_FIELD_LEN`] characters.
+fn clean(s: &str, keep_newline: bool) -> String {
+    s.chars()
+        .map(|c| if c.is_control() && !(keep_newline && c == '\n') { ' ' } else { c })
+        .take(MAX_FIELD_LEN)
+        .collect()
 }
 
-/// Validate what the webview sent. An empty `session_id` / `tag` is treated as
-/// absent (the dashboard never sends one, but "" must not become a key that every
-/// card shares).
-pub fn validate_request(
-    title: String,
-    body: Option<String>,
-    session_id: Option<String>,
-    tag: Option<String>,
-) -> Result<SessionNotification, String> {
-    if title.is_empty() {
-        return Err("notification title is empty".to_string());
-    }
-    if title.chars().count() > MAX_FIELD_LEN || title.chars().any(|c| c.is_control()) {
-        return Err("notification title is too long or has control characters".to_string());
-    }
-    if let Some(b) = &body {
-        if b.chars().count() > MAX_FIELD_LEN {
-            return Err("notification body is too long".to_string());
-        }
-    }
-    let session_id = session_id.filter(|s| !s.is_empty());
-    if let Some(s) = &session_id {
-        if !field_ok(s) || s.contains('\n') {
-            return Err("session id is too long or has control characters".to_string());
-        }
-    }
-    let tag = tag.filter(|s| !s.is_empty());
-    if let Some(t) = &tag {
-        if !field_ok(t) || t.contains('\n') {
-            return Err("notification tag is too long or has control characters".to_string());
-        }
-    }
-    Ok(SessionNotification { title, body, session_id, tag })
+/// Turn whatever the webview sent into something that can always be shown.
+///
+/// This never rejects. A rejection would send the dashboard to the plugin
+/// fallback, and on macOS the plugin installs its own notification-centre
+/// delegate, orphaning the click handler of every card already on screen. So an
+/// over-long field is truncated, control characters become spaces, an empty
+/// title becomes [`FALLBACK_TITLE`], and a session id that cannot be trusted as
+/// an id (too long, or holding control characters) is dropped, since a truncated
+/// id would name a different session; the card then simply has no session to
+/// select and the click only raises the window.
+pub fn sanitize_request(title: String, body: Option<String>, session_id: Option<String>) -> SessionNotification {
+    let title = clean(&title, false).trim().to_string();
+    let title = if title.is_empty() { FALLBACK_TITLE.to_string() } else { title };
+    let body = body.map(|b| clean(&b, true)).filter(|b| !b.trim().is_empty());
+    let session_id = session_id.filter(|s| {
+        !s.is_empty() && s.chars().count() <= MAX_FIELD_LEN && !s.chars().any(|c| c.is_control())
+    });
+    SessionNotification { title, body, session_id }
 }
 
 // `cocoa` is deprecated in favour of objc2 and the `objc` 0.2 macros trip
@@ -144,17 +134,21 @@ pub fn validate_request(
 pub mod macos {
     //! The `NSUserNotificationCenter` half. Uses the `objc` 0.2 + `cocoa` pair the
     //! crate already uses for the dock badge and window menu; no new dependency.
+    //!
+    //! Every class is looked up with `Class::get` and a missing one is an `Err`
+    //! (the caller then takes the plugin fallback). The `class!` macro panics on a
+    //! missing class, and this code runs inside `run_on_main_thread`, where a
+    //! panic is not a recoverable error.
 
     use super::SessionNotification;
     use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString;
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel};
-    use objc::{class, msg_send, sel, sel_impl};
-    use std::ffi::CStr;
+    use objc::{msg_send, sel, sel_impl};
+    use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, Once};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     /// `userInfo` key holding the session id.
     const SESSION_KEY: &str = "chroxySessionId";
@@ -166,6 +160,10 @@ pub mod macos {
     /// The delegate instance, as a raw address (it is retained for the life of
     /// the process; `NSUserNotificationCenter` only holds it weakly).
     static DELEGATE: AtomicUsize = AtomicUsize::new(0);
+
+    fn class(name: &str) -> Result<&'static Class, String> {
+        Class::get(name).ok_or_else(|| format!("Objective-C class {name} is not available"))
+    }
 
     /// Install what a click does. Replaces any earlier sink.
     pub fn set_click_sink(sink: impl Fn(Option<String>) + Send + Sync + 'static) {
@@ -179,9 +177,13 @@ pub mod macos {
         }
     }
 
+    /// An autoreleased `NSString`, or `nil` if the class is missing or `s` holds
+    /// an interior NUL (a nil title/body is harmless to the notification centre).
     unsafe fn ns_string(s: &str) -> id {
-        let ns: id = NSString::alloc(nil).init_str(s);
-        msg_send![ns, autorelease]
+        let (Ok(cls), Ok(c)) = (class("NSString"), CString::new(s)) else {
+            return nil;
+        };
+        msg_send![cls, stringWithUTF8String: c.as_ptr()]
     }
 
     unsafe fn rust_string(ns: id) -> Option<String> {
@@ -217,32 +219,69 @@ pub mod macos {
         dispatch_click(session_id);
     }
 
-    fn delegate_class() -> &'static Class {
-        static REGISTER: Once = Once::new();
-        REGISTER.call_once(|| {
-            let mut decl = ClassDecl::new(DELEGATE_CLASS, class!(NSObject))
-                .expect("ChroxyNotificationDelegate registered twice");
-            unsafe {
-                decl.add_method(
-                    sel!(userNotificationCenter:didActivateNotification:),
-                    did_activate as extern "C" fn(&Object, Sel, id, id),
-                );
-            }
-            decl.register();
-        });
-        Class::get(DELEGATE_CLASS).expect("ChroxyNotificationDelegate not registered")
+    fn delegate_class() -> Result<&'static Class, String> {
+        static REGISTERED: OnceLock<Result<&'static Class, String>> = OnceLock::new();
+        REGISTERED
+            .get_or_init(|| {
+                let mut decl = ClassDecl::new(DELEGATE_CLASS, class("NSObject")?)
+                    .ok_or_else(|| format!("{DELEGATE_CLASS} is already registered"))?;
+                unsafe {
+                    decl.add_method(
+                        sel!(userNotificationCenter:didActivateNotification:),
+                        did_activate as extern "C" fn(&Object, Sel, id, id),
+                    );
+                }
+                Ok(decl.register())
+            })
+            .clone()
+    }
+
+    /// The one delegate instance, created on first use and kept for the life of
+    /// the process. Idempotent: every call returns the same pointer.
+    fn ensure_delegate() -> Result<id, String> {
+        let existing = DELEGATE.load(Ordering::Acquire) as id;
+        if existing != nil {
+            return Ok(existing);
+        }
+        let created: id = unsafe { msg_send![delegate_class()?, new] };
+        if created == nil {
+            return Err("could not create the notification delegate".to_string());
+        }
+        match DELEGATE.compare_exchange(0, created as usize, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => Ok(created),
+            // Lost a race; the winner's instance is the one in use.
+            Err(winner) => Ok(winner as id),
+        }
     }
 
     /// A fresh delegate instance (separate from the installed one) for tests.
     #[cfg(test)]
     fn new_delegate() -> id {
-        unsafe { msg_send![delegate_class(), new] }
+        unsafe { msg_send![delegate_class().unwrap(), new] }
+    }
+
+    /// Attach the delegate to the notification centre. Idempotent, and cheap
+    /// enough to repeat on every delivery.
+    ///
+    /// Call it at app setup (so a click on a card left over from before a
+    /// relaunch has a delegate to land on) and again before each delivery (so a
+    /// stray plugin delivery cannot leave the centre pointing at the plugin's
+    /// delegate). Main thread.
+    pub fn install_delegate() -> Result<(), String> {
+        unsafe {
+            let center: id = msg_send![class("NSUserNotificationCenter")?, defaultUserNotificationCenter];
+            if center == nil {
+                return Err("NSUserNotificationCenter unavailable".to_string());
+            }
+            let _: () = msg_send![center, setDelegate: ensure_delegate()?];
+        }
+        Ok(())
     }
 
     /// The main bundle identifier, or `None` for an unbundled binary.
     pub fn bundle_identifier() -> Option<String> {
         unsafe {
-            let bundle: id = msg_send![class!(NSBundle), mainBundle];
+            let bundle: id = msg_send![class("NSBundle").ok()?, mainBundle];
             if bundle == nil {
                 return None;
             }
@@ -260,8 +299,11 @@ pub mod macos {
 
     /// Build the `NSUserNotification` for `n` (autoreleased). Split from
     /// [`deliver`] so the test builds exactly what is delivered.
-    unsafe fn build_card(n: &SessionNotification) -> id {
-        let note: id = msg_send![class!(NSUserNotification), new];
+    unsafe fn build_card(n: &SessionNotification) -> Result<id, String> {
+        let note: id = msg_send![class("NSUserNotification")?, new];
+        if note == nil {
+            return Err("could not create an NSUserNotification".to_string());
+        }
         let note: id = msg_send![note, autorelease];
         let _: () = msg_send![note, setTitle: ns_string(&n.title)];
         if let Some(body) = &n.body {
@@ -270,40 +312,32 @@ pub mod macos {
         // Without this a banner-style card is given a "Show" button whose
         // activation type differs; contents-click is the one path we handle.
         let _: () = msg_send![note, setHasActionButton: false];
-        if let Some(tag) = &n.tag {
-            let _: () = msg_send![note, setIdentifier: ns_string(tag)];
-        }
+        // Deliberately NO `setIdentifier:`. The plugin never set one, so every
+        // completion used to stack its own card. An identifier makes the centre
+        // REPLACE an earlier card with the same one, and a replacement may arrive
+        // without a banner, which would hide a repeat turn-complete or permission
+        // notification. Keep the stacking behaviour; a tag from the webview is
+        // not even accepted.
         if let Some(session) = &n.session_id {
             let info: id = msg_send![
-                class!(NSDictionary),
+                class("NSDictionary")?,
                 dictionaryWithObject: ns_string(session)
                 forKey: ns_string(SESSION_KEY)
             ];
             let _: () = msg_send![note, setUserInfo: info];
         }
-        note
+        Ok(note)
     }
 
     /// Deliver `n` through `NSUserNotificationCenter` with our delegate attached.
     ///
-    /// Call on the main thread. Re-asserts the delegate every time: it is one
-    /// pointer write, and it means a stray plugin delivery (the dev-build
-    /// fallback) cannot leave the centre pointing at someone else's delegate.
+    /// Call on the main thread. Any `Err` (missing class, no centre) means
+    /// nothing was delivered and the caller should use the plugin.
     pub fn deliver(n: &SessionNotification) -> Result<(), String> {
         objc::rc::autoreleasepool(|| unsafe {
-            let center: id = msg_send![class!(NSUserNotificationCenter), defaultUserNotificationCenter];
-            if center == nil {
-                return Err("NSUserNotificationCenter unavailable".to_string());
-            }
-
-            let mut delegate = DELEGATE.load(Ordering::Acquire) as id;
-            if delegate == nil {
-                delegate = msg_send![delegate_class(), new];
-                DELEGATE.store(delegate as usize, Ordering::Release);
-            }
-            let _: () = msg_send![center, setDelegate: delegate];
-
-            let _: () = msg_send![center, deliverNotification: build_card(n)];
+            install_delegate()?;
+            let center: id = msg_send![class("NSUserNotificationCenter")?, defaultUserNotificationCenter];
+            let _: () = msg_send![center, deliverNotification: build_card(n)?];
             Ok(())
         })
     }
@@ -321,14 +355,13 @@ pub mod macos {
                 title: "Chroxy: api".to_string(),
                 body: Some("Finished".to_string()),
                 session_id: session.map(str::to_string),
-                tag: Some("chroxy-turn-x".to_string()),
             }
         }
 
         /// The card `deliver` would hand to the notification centre (there is no
         /// centre in a bare test binary, so it cannot be delivered here).
         unsafe fn card(session: Option<&str>) -> id {
-            build_card(&request(session))
+            build_card(&request(session)).unwrap()
         }
 
         fn click(note: id) -> Vec<Option<String>> {
@@ -372,15 +405,32 @@ pub mod macos {
         }
 
         #[test]
-        fn card_carries_title_body_tag_and_no_action_button() {
+        fn card_carries_title_and_body_but_no_identifier_and_no_action_button() {
             objc::rc::autoreleasepool(|| unsafe {
                 let note = card(Some("s"));
                 assert_eq!(rust_string(msg_send![note, title]).as_deref(), Some("Chroxy: api"));
                 assert_eq!(rust_string(msg_send![note, informativeText]).as_deref(), Some("Finished"));
-                assert_eq!(rust_string(msg_send![note, identifier]).as_deref(), Some("chroxy-turn-x"));
+                // No identifier: a repeat completion must stack a new card, not
+                // replace the last one (a replacement can arrive without a banner).
+                let ident: id = msg_send![note, identifier];
+                assert_eq!(ident, nil);
                 let has_button: bool = msg_send![note, hasActionButton];
                 assert!(!has_button);
             });
+        }
+
+        #[test]
+        fn a_missing_class_is_an_error_not_a_panic() {
+            assert!(class("ChroxyNoSuchClass7367").is_err());
+            assert!(class("NSUserNotification").is_ok());
+        }
+
+        #[test]
+        fn the_delegate_is_created_once_however_often_it_is_asked_for() {
+            let first = ensure_delegate().unwrap();
+            let second = ensure_delegate().unwrap();
+            assert!(first != nil);
+            assert_eq!(first, second);
         }
 
         #[test]
@@ -421,39 +471,57 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_a_normal_request() {
-        let n = validate_request(
+    fn sanitize_keeps_a_normal_request() {
+        let n = sanitize_request(
             "Chroxy: api".into(),
             Some("Finished — awaiting your input.".into()),
             Some("sess-1".into()),
-            Some("chroxy-turn-sess-1".into()),
-        )
-        .unwrap();
+        );
+        assert_eq!(n.title, "Chroxy: api");
+        assert_eq!(n.body.as_deref(), Some("Finished — awaiting your input."));
         assert_eq!(n.session_id.as_deref(), Some("sess-1"));
-        assert_eq!(n.tag.as_deref(), Some("chroxy-turn-sess-1"));
     }
 
     #[test]
-    fn validate_treats_empty_session_and_tag_as_absent() {
-        let n = validate_request("t".into(), None, Some(String::new()), Some(String::new())).unwrap();
-        assert_eq!(n.session_id, None);
-        assert_eq!(n.tag, None);
+    fn sanitize_never_rejects_an_empty_title() {
+        assert_eq!(sanitize_request(String::new(), None, None).title, FALLBACK_TITLE);
+        assert_eq!(sanitize_request("  \n\t ".into(), None, None).title, FALLBACK_TITLE);
     }
 
     #[test]
-    fn validate_rejects_empty_title() {
-        assert!(validate_request(String::new(), None, None, None).is_err());
+    fn sanitize_truncates_instead_of_rejecting() {
+        let long = "x".repeat(MAX_FIELD_LEN + 500);
+        let n = sanitize_request(long.clone(), Some(long), None);
+        assert_eq!(n.title.chars().count(), MAX_FIELD_LEN);
+        assert_eq!(n.body.unwrap().chars().count(), MAX_FIELD_LEN);
     }
 
     #[test]
-    fn validate_rejects_oversized_and_control_fields() {
-        let long = "x".repeat(MAX_FIELD_LEN + 1);
-        assert!(validate_request(long.clone(), None, None, None).is_err());
-        assert!(validate_request("t".into(), Some(long.clone()), None, None).is_err());
-        assert!(validate_request("t".into(), None, Some(long.clone()), None).is_err());
-        assert!(validate_request("t".into(), None, None, Some(long)).is_err());
-        assert!(validate_request("t\u{0}".into(), None, None, None).is_err());
-        assert!(validate_request("t".into(), None, Some("a\nb".into()), None).is_err());
+    fn sanitize_truncates_on_character_boundaries() {
+        // Multi-byte characters must not be cut mid-sequence (a byte slice would
+        // panic here).
+        let n = sanitize_request("é".repeat(MAX_FIELD_LEN + 10), None, None);
+        assert_eq!(n.title.chars().count(), MAX_FIELD_LEN);
+    }
+
+    #[test]
+    fn sanitize_replaces_control_characters_and_keeps_body_newlines() {
+        let n = sanitize_request("a\u{0}b\nc".into(), Some("l1\nl2\u{7}".into()), None);
+        assert_eq!(n.title, "a b c");
+        assert_eq!(n.body.as_deref(), Some("l1\nl2 "));
+    }
+
+    #[test]
+    fn sanitize_drops_a_blank_body() {
+        assert_eq!(sanitize_request("t".into(), Some("  ".into()), None).body, None);
+    }
+
+    #[test]
+    fn sanitize_drops_an_untrustworthy_session_id_rather_than_truncating_it() {
+        // A truncated id would name a different session.
+        for bad in ["".to_string(), "x".repeat(MAX_FIELD_LEN + 1), "a\nb".to_string(), "a\u{0}b".to_string()] {
+            assert_eq!(sanitize_request("t".into(), None, Some(bad)).session_id, None);
+        }
     }
 
     #[test]

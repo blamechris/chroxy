@@ -505,9 +505,10 @@ fn send_session_notification(
     title: String,
     body: Option<String>,
     session_id: Option<String>,
-    tag: Option<String>,
 ) -> Result<bool, String> {
-    let request = notification_click::validate_request(title, body, session_id, tag)?;
+    // Sanitized, never rejected: a rejection would send the dashboard to the
+    // plugin fallback, which replaces the app-owned notification delegate.
+    let request = notification_click::sanitize_request(title, body, session_id);
     Ok(deliver_notification(&app, request))
 }
 
@@ -1171,6 +1172,17 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // #7367 — own the notification centre's delegate from launch, not from
+            // the first notification, so a click on a card left over from before
+            // a relaunch has a delegate (and the click sink) to land on. Same gate
+            // as the delivery route; idempotent with the per-delivery re-assert.
+            #[cfg(target_os = "macos")]
+            if notification_click::macos::available() {
+                install_notification_click_sink(app.handle());
+                if let Err(e) = notification_click::macos::install_delegate() {
+                    eprintln!("[notifications] could not install the click delegate: {e}");
+                }
+            }
             // App menu bar — required for macOS Sequoia window tiling keyboard shortcuts.
             // macOS routes fn+ctrl+arrow through the Window menu's "Move & Resize" items.
             // Without a Window submenu, those shortcuts silently do nothing.
@@ -2857,7 +2869,6 @@ fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
             title: title.to_string(),
             body: Some(body.to_string()),
             session_id: None,
-            tag: None,
         },
     );
 }
