@@ -247,9 +247,6 @@ function runCutThenCursorReplay(live: ReplayParityFrame[], replay: ReplayParityF
 const isResponseEnd = (f: ReplayParityFrame) => f.type === 'stream_end' && f.thinking !== true;
 const replyText = (model: ReturnType<typeof replayParityModel>) =>
   model.filter((r) => r.type === 'response').map((r) => r.content).join('');
-/** Tool cards reduced to id and type (see the note on the reply-cut suite). */
-const shape = (model: ReturnType<typeof replayParityModel>) =>
-  model.map((r) => (r.type === 'tool_use' ? { id: r.id, type: r.type } : r));
 
 describe('live vs replayed transcript -- app (#6630)', () => {
   beforeEach(() => {
@@ -368,7 +365,10 @@ describe('live vs replayed transcript -- app (#6630)', () => {
         expect(new Set(messages.map((m) => m.id)).size).toBe(messages.length);
         const tools = (rows: typeof full) => rows.filter((r) => r.type === 'tool_use').length;
         const splitByATool = full.filter((r) => r.type === 'response').length > 1;
-        if (!splitByATool || tools(atCut) === tools(full)) expect(shape(model)).toEqual(shape(full));
+        // Tool cards are compared on every cut, including the split-reply cuts the
+        // whole-transcript check skips: input and result must match a connected client.
+        expect(model.filter((r) => r.type === 'tool_use')).toEqual(full.filter((r) => r.type === 'tool_use'));
+        if (!splitByATool || tools(atCut) === tools(full)) expect(model).toEqual(full);
       });
     }
   }

@@ -79,10 +79,6 @@ const isResponseEnd = (f: ReplayParityFrame) => f.type === 'stream_end' && f.thi
 const replyText = (model: ReturnType<typeof replayParityModel>) =>
   model.filter((r) => r.type === 'response').map((r) => r.content).join('')
 
-/** Tool cards reduced to id and type (see the note on the cut suite). */
-const shape = (model: ReturnType<typeof replayParityModel>) =>
-  model.map((r) => (r.type === 'tool_use' ? { id: r.id, type: r.type } : r))
-
 describe('a connection cut mid-reply is completed by the cursor replay -- dashboard (#8444)', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -112,9 +108,9 @@ describe('a connection cut mid-reply is completed by the cursor replay -- dashbo
   // repeat. The transcript must also equal the one a connected client has, except for
   // a reply a tool splits in two when the client had not yet seen all the tools: the
   // history keeps one entry per stream and no boundary inside it (#8438), so the replay
-  // cannot say where those tools fell in the text. (Tool cards are compared by id and
-  // type only: a card held without its input is not completed by the replay, a
-  // separate gap this suite does not cover.)
+  // cannot say where those tools fell in the text. Tool cards are compared in full,
+  // input included: a card held from its tool_start without the tool_result that
+  // carries the input is completed by the replayed start (#8455).
   for (const fx of scenarios) {
     const endIdx = fx.live.findIndex(isResponseEnd)
     for (let cut = 1; cut <= endIdx; cut++) {
@@ -126,7 +122,10 @@ describe('a connection cut mid-reply is completed by the cursor replay -- dashbo
         expect(new Set(messages.map((m) => m.id)).size, 'a bubble id appears twice').toBe(messages.length)
         const tools = (rows: typeof full) => rows.filter((r) => r.type === 'tool_use').length
         const splitByATool = full.filter((r) => r.type === 'response').length > 1
-        if (!splitByATool || tools(atCut) === tools(full)) expect(shape(model)).toEqual(shape(full))
+        // Tool cards are compared on every cut, including the split-reply cuts the
+        // whole-transcript check skips: input and result must match a connected client.
+        expect(model.filter((r) => r.type === 'tool_use')).toEqual(full.filter((r) => r.type === 'tool_use'))
+        if (!splitByATool || tools(atCut) === tools(full)) expect(model).toEqual(full)
       })
     }
   }

@@ -3056,7 +3056,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         toolStartIsReplay,
         cached,
       );
-      if (!result.shouldDispatch || !result.chatMessage) break;
+      if (!result.shouldDispatch || !result.chatMessage) {
+        // #8455: a replayed start for a card held without its input fills it in.
+        const reconcile = result.reconcile;
+        if (reconcile && result.sessionId && get().sessionStates[result.sessionId]) {
+          updateSession(result.sessionId, (ss) => applyMessageReconcileToSession(ss, reconcile));
+        }
+        break;
+      }
       const toolMsg = result.chatMessage;
       const effectiveId = (result.sessionId && get().sessionStates[result.sessionId])
         ? result.sessionId
