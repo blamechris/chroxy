@@ -606,6 +606,7 @@ describe('ClaudeTuiSession — native endpoint-marker refusal on a respawn (#805
       session._freshRetryPending = true
       session._resumedFromPersisted = false
       session._didFallbackFromUnknownResume = true
+      session._conversationEverPersisted = true // the conversation being abandoned had been saved (#8418)
       const launchedId = session._sessionId
 
       await session._respawnPty()
@@ -616,6 +617,7 @@ describe('ClaudeTuiSession — native endpoint-marker refusal on a respawn (#805
       assert.equal(session._spawnRefusal?.code, 'NATIVE_ENDPOINT_ROUTE_MISMATCH')
       assert.equal(session._freshRetryPending, true, 'the fresh retry is still owed')
       assert.notEqual(session._sessionId, launchedId, 'but with a new uuid, not the one claude may now hold')
+      assert.equal(session._conversationEverPersisted, false, 'and the new id inherits no "a conversation was saved" (#8418)')
 
       // Route fixed: the revival starts a new conversation with the NEW id.
       control.markerMode = 'clean'

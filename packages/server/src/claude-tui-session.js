@@ -422,7 +422,7 @@ export class ClaudeTuiSession extends BaseSession {
   constructor(opts = {}) {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-tui' }))
     // ClaudeTuiSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
-    const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId, monotonicNow } = opts
+    const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId, conversationPersisted, monotonicNow } = opts
     this._connectionChildEnv = opts.connectionChildEnv && typeof opts.connectionChildEnv === 'object'
       ? { ...opts.connectionChildEnv }
       : null
@@ -515,10 +515,23 @@ export class ClaudeTuiSession extends BaseSession {
     // conversation until a turn has completed. Resuming it makes claude exit
     // with "No conversation found" and the user sees a bogus "could not be
     // resumed" notice. Latched true by a completed turn (Stop hook) or by
-    // seeing the transcript on disk (`_conversationPersisted`); never cleared,
-    // so a transcript that existed and later vanishes still takes the
-    // `--resume` -> #5348/#7847 classifier path with its honest message.
-    this._conversationEverPersisted = false
+    // seeing the transcript on disk (`_conversationPersisted`); never cleared
+    // for the same id, so a transcript that existed and later vanishes mid-run
+    // still takes the `--resume` -> #5348/#7847 classifier path with its honest
+    // message. It describes ONE id: wherever `_sessionId` is replaced with a
+    // fresh uuid the latch is reset with it.
+    //
+    // #8418 — a restored session carries the bit its previous run serialized
+    // (`conversationPersisted`), so a daemon restart no longer erases whether a
+    // turn ever completed. Seeded true ONLY for a session restored from a
+    // persisted id; `_restoredConversationUnverified` makes the first spawn
+    // check that claim against the disk (see `_spawnPty`) instead of trusting a
+    // seed over a transcript that may since have been removed.
+    this._conversationEverPersisted = this._sessionId !== null && conversationPersisted === true
+    this._restoredConversationUnverified = this._conversationEverPersisted
+    // #8418 — the loss notice, decided in `_spawnPty` (a seeded claim, no
+    // transcript) and delivered by start() once the fresh PTY is up.
+    this._wipedConversationNotice = null
     // #5348 — one-shot latch for the retry-FRESH fallback (mirrors
     // cli-session.js's `_didFallbackFromUnknownResume`). Re-armed by a respawn
     // that survives warmup, so a FUTURE doomed-resume window can fall back
@@ -2030,9 +2043,12 @@ export class ClaudeTuiSession extends BaseSession {
    * @param {string} cwdReal - realpath of the dir claude is launched in
    * @param {Record<string, string|undefined>} env - the env claude is spawned
    *   with, so the probe reads the same `CLAUDE_CONFIG_DIR` claude writes to
+   * @param {{verifyDisk?: boolean}} [opts] - #8418: check the disk even when the
+   *   latch is already set (a latch seeded from saved state is a claim, not a
+   *   sighting)
    */
-  _conversationPersisted(cwdReal, env) {
-    if (this._conversationEverPersisted) return true
+  _conversationPersisted(cwdReal, env, { verifyDisk = false } = {}) {
+    if (this._conversationEverPersisted && !verifyDisk) return true
     if (!hasPersistedTranscript(cwdReal, this._sessionId, env)) return false
     this._conversationEverPersisted = true
     return true
@@ -2046,6 +2062,65 @@ export class ClaudeTuiSession extends BaseSession {
   // context-amnesia bug, audit TUI-AUDIT-001). Mirrors cli-session.js:386.
   get resumeSessionId() {
     return this._sessionId
+  }
+
+  /**
+   * #8418 — whether claude has ever saved a conversation for `resumeSessionId`.
+   * SessionManager persists it beside the id, so a restart can tell a session
+   * that never completed a turn (nothing to lose) from one whose transcript has
+   * since been removed (the model is about to forget everything).
+   */
+  get conversationPersisted() {
+    return this._conversationEverPersisted
+  }
+
+  /**
+   * #8418 — saved state says claude held a conversation for this session, and
+   * the transcript is no longer on disk (wiped or moved ~/.claude/projects, an
+   * unmounted or different config root, a state file carried to another
+   * machine). Spawning `--resume` would only be rejected, and spawning fresh in
+   * silence would leave the user believing the model remembers. So spawn fresh
+   * on the SAME id, exactly as the no-transcript path already does (#8239), and
+   * queue a visible notice (the existing `resume_unknown` frame) for start() to
+   * deliver once the fresh PTY is up.
+   *
+   * The same id on purpose: this check cannot tell a removed transcript from one
+   * it merely failed to find (another root, a retargeted symlink, an unmounted
+   * volume), and starting fresh on the same id can never abandon a conversation
+   * — put the environment back and the next restart resumes it. A false alarm
+   * costs one notice. Nothing is persisted differently until the fresh
+   * conversation completes a turn, so `conversationPersisted` stays true (and a
+   * failed start is retried from the same saved state, announcing again) until
+   * the notice has actually been emitted.
+   */
+  _queueWipedConversationNotice() {
+    this._wipedConversationNotice = {
+      code: 'resume_unknown',
+      message: 'Previous Claude conversation could not be resumed (its transcript is no longer on this machine — ' +
+        'it may have been removed from ~/.claude/projects/). Started a fresh conversation; the model will not ' +
+        'see the earlier transcript.',
+      attemptedResumeId: this._sessionId,
+    }
+    ;(this._log || log).warn(
+      `restored conversation ${this._sessionId} was persisted but its transcript is not on disk — ` +
+      'starting fresh on the same id and telling the user (#8418)',
+    )
+  }
+
+  /**
+   * #8418 — deliver the queued notice, once. The latch drops first: this
+   * conversation now holds nothing claude has saved, so a respawn before its
+   * first turn starts fresh (not `--resume`), and the next save says
+   * `conversationPersisted:false`, so a restart before any new turn is an
+   * ordinary silent fresh start. The notice is recorded in history by
+   * SessionManager, which is what a later replay shows.
+   */
+  _deliverWipedConversationNotice() {
+    const notice = this._wipedConversationNotice
+    if (!notice) return
+    this._wipedConversationNotice = null
+    this._conversationEverPersisted = false
+    this.emit('error', notice)
   }
 
   async start() {
@@ -2220,6 +2295,12 @@ export class ClaudeTuiSession extends BaseSession {
       throw new Error('claude PTY failed to spawn (no live process after _spawnPty)')
     }
 
+    // #8418 — told here, once the fresh conversation has actually started, not
+    // from `_spawnPty` where it is decided: a start that fails in between leaves
+    // the saved claim untouched and the retry announces it. Past SessionManager's
+    // seeding of the restored history, so the notice is recorded after the
+    // history it explains and a client that connects later, or replays, sees it.
+    this._deliverWipedConversationNotice()
     this._processReady = true
     this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
     this._emitConfiguredMcpServers()
@@ -2473,6 +2554,7 @@ export class ClaudeTuiSession extends BaseSession {
         // time the fallback attempt fails, _sessionId is already the new uuid.
         this._abandonedResumeId = abandonedId
         this._sessionId = randomUUID()
+        this._conversationEverPersisted = false // the latch describes one id (#8418)
         this._resumedFromPersisted = false
         // Rebind the session-scoped logger to the new conversation uuid so
         // subsequent lines route under the id the dashboard will see on the
@@ -2639,6 +2721,7 @@ export class ClaudeTuiSession extends BaseSession {
         if (wasFreshRetry) {
           this._freshRetryPending = true
           this._sessionId = randomUUID()
+          this._conversationEverPersisted = false // the latch describes one id (#8418)
           this._log = loggerForSession('claude-tui-session', this._sessionId)
         }
         // The PTY that died before this attempt is still dead and no new one
@@ -3169,9 +3252,19 @@ export class ClaudeTuiSession extends BaseSession {
     // "claude holds a conversation for the id". Only `--resume` an id claude has
     // actually persisted; otherwise relaunch fresh on the SAME id (nothing was
     // ever saved under it, so claude cannot call it "already in use").
-    const resumeExisting = this._resumedFromPersisted && this._conversationPersisted(cwdReal, env)
+    // #8418: a restored session whose saved state says a turn DID complete gets
+    // its first spawn checked against the disk even though the latch is already
+    // set, because the latch came from a file and the transcript may be gone.
+    const verifySeed = this._restoredConversationUnverified
+    this._restoredConversationUnverified = false
+    const resumeExisting = this._resumedFromPersisted
+      && this._conversationPersisted(cwdReal, env, { verifyDisk: verifySeed })
     if (this._resumedFromPersisted && !resumeExisting) {
-      log.info(`no persisted claude transcript for ${this._sessionId.slice(0, 8)} (no turn completed) — spawning fresh with --session-id instead of --resume (#8239)`)
+      if (verifySeed) {
+        this._queueWipedConversationNotice()
+      } else {
+        log.info(`no persisted claude transcript for ${this._sessionId.slice(0, 8)} (no turn completed) — spawning fresh with --session-id instead of --resume (#8239)`)
+      }
     }
     const args = resumeExisting
       ? ['--resume', this._sessionId]
