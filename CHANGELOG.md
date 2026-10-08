@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A resolved permission record still shows what was approved after a session
+  switch or a reload (#8503).** The dashboard's compact permission record and its
+  counted group (`Permission allowed ×3`) showed the command or file that was
+  approved while the prompt was answered live, but lost that line once the
+  transcript was rebuilt from history, because the daemon kept only the
+  description. The daemon now also keeps the tool input the prompt was shown with:
+  the same redacted copy, with the same 10,240-character cap, that the live prompt
+  sent, so a replayed record reveals nothing the live one did not. Repeated approvals
+  group again after a rebuild when their input matches. History saved before this
+  change has no input to show and renders as it did.
+
 - **Web fetch and web search results render as cards on the default provider
   (#6987).** A WebFetch on a claude-tui session showed its raw JSON envelope
   (`{"bytes":...,"result":...}`) instead of the page text. The dashboard and the

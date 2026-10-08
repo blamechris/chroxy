@@ -166,3 +166,46 @@ describe('permission_outcome through the real dashboard store (#8348)', () => {
     expect(derivePendingPermissionCounts(store.getState().sessionStates, Date.now())).toEqual({ [SID]: 1 })
   })
 })
+
+describe('permission_outcome carries the approved tool input through the real dashboard store (#8503)', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('a full rebuild holds the journaled input on the record, as the live card held it', async () => {
+    const { read, send } = await boot([])
+    const input = { command: 'touch smoke-perm.txt', dangerouslyDisableSandbox: true }
+    fullRebuild(send, [userEntry, outcomeFrame({ outcome: 'allowed', input, description: 'Touch smoke file' })])
+    const records = read().filter((m) => m.type === 'prompt')
+    expect(records).toHaveLength(1)
+    expect(records[0]!.toolInput).toEqual(input)
+    expect(records[0]!.permissionOutcome).toBe('allowed')
+  })
+
+  it('an entry journaled before the field (no input) rebuilds a record with no toolInput', async () => {
+    const { read, send } = await boot([])
+    fullRebuild(send, [userEntry, outcomeFrame({ outcome: 'allowed' })])
+    const [record] = read().filter((m) => m.type === 'prompt')
+    expect(record).toBeDefined()
+    expect('toolInput' in record!).toBe(false)
+  })
+
+  it('a malformed input (not an object) is dropped: the record is built without it', async () => {
+    const { read, send } = await boot([])
+    fullRebuild(send, [userEntry, outcomeFrame({ outcome: 'allowed', input: 'rm -rf /' })])
+    const [record] = read().filter((m) => m.type === 'prompt')
+    expect(record).toBeDefined()
+    expect('toolInput' in record!).toBe(false)
+  })
+
+  it('a live card the client already holds keeps ITS tool input; the record does not replace it', async () => {
+    const live = livePrompt({ toolInput: { command: 'the live one' } })
+    const { read, send } = await boot([live])
+    send({ type: 'history_replay_start', sessionId: SID, fullHistory: false, truncated: false, latestSeq: 3 })
+    send(outcomeFrame({ outcome: 'allowed', input: { command: 'the journaled one' } }))
+    send({ type: 'history_replay_end', sessionId: SID, latestSeq: 3 })
+    const prompts = read().filter((m) => m.type === 'prompt')
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]!.toolInput).toEqual({ command: 'the live one' })
+  })
+})

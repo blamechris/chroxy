@@ -233,19 +233,51 @@ describe('resolved permission groups -- a real interleaved turn through the mess
     expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
   })
 
-  it('rebuilt from replayed history (permission_outcome entries) the approvals stay individual records: the server journals the description, not the command', () => {
+  const replayOutcomes = (outcomeExtra: Record<string, unknown>) => {
     vi.useFakeTimers()
     reset()
     send({ type: 'history_replay_start', fullHistory: true, truncated: false, latestSeq: 9 })
     for (const n of [1, 2, 3]) {
       for (const f of toolFrames(n)) send(f)
-      send({ type: 'permission_outcome', requestId: `req-${n}`, tool: 'Bash', description: DESC, outcome: 'allowed' })
+      send({ type: 'permission_outcome', requestId: `req-${n}`, tool: 'Bash', description: DESC, outcome: 'allowed', ...outcomeExtra })
+    }
+    send({ type: 'history_replay_end', latestSeq: 9 })
+    vi.runAllTimers()
+    vi.useRealTimers()
+    return storeMessages()
+  }
+
+  it('rebuilt from replayed history entries that journaled NO input (older history) the approvals stay individual records, with no input line', () => {
+    mount(replayOutcomes({}))
+    expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
+    expect(screen.getAllByTestId('perm-outcome-record')).toHaveLength(3)
+    fireEvent.click(screen.getAllByTestId('perm-record-toggle')[0]!)
+    expect(screen.queryByTestId('perm-record-input')).not.toBeInTheDocument()
+  })
+
+  it('#8503: rebuilt from replayed history entries that journaled the input, the three approvals group into ×3 and the group names the command, as live does', () => {
+    mount(replayOutcomes({ input: CMD }))
+    expect(screen.getAllByTestId('perm-group')).toHaveLength(1)
+    expect(screen.getByTestId('perm-group-count')).toHaveTextContent('×3')
+    expect(screen.getByTestId('perm-group-input')).toHaveTextContent('touch smoke-perm.txt')
+    fireEvent.click(screen.getByTestId('perm-group-toggle'))
+    fireEvent.click(screen.getAllByTestId('perm-record-toggle')[1]!)
+    expect(screen.getByTestId('perm-record-input')).toHaveTextContent('touch smoke-perm.txt')
+  })
+
+  it('#8503: replayed approvals that share a description but journaled different commands stay separate records', () => {
+    vi.useFakeTimers()
+    reset()
+    send({ type: 'history_replay_start', fullHistory: true, truncated: false, latestSeq: 9 })
+    for (const [n, command] of [[1, 'rm a'], [2, 'rm -rf ~']] as const) {
+      for (const f of toolFrames(n)) send(f)
+      send({ type: 'permission_outcome', requestId: `req-${n}`, tool: 'Bash', description: DESC, outcome: 'allowed', input: { command } })
     }
     send({ type: 'history_replay_end', latestSeq: 9 })
     vi.runAllTimers()
     vi.useRealTimers()
     mount(storeMessages())
     expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
-    expect(screen.getAllByTestId('perm-outcome-record')).toHaveLength(3)
+    expect(screen.getAllByTestId('perm-outcome-record')).toHaveLength(2)
   })
 })

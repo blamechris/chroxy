@@ -86,8 +86,35 @@ describe('handlePermissionOutcome / buildPermissionOutcomeMessage (#8348)', () =
   it('parses the wire shape', () => {
     expect(handlePermissionOutcome(outcome({ timestamp: 99 }))).toEqual({
       requestId: 'perm-1', tool: 'Bash', description: 'ls -la', outcome: 'expired',
-      sessionId: 's1', timestamp: 99,
+      input: null, sessionId: 's1', timestamp: 99,
     })
+  })
+
+  // #8503 -- the journaled tool input rides the entry and is parsed by the SAME
+  // rule as the live `permission_request` (a plain, non-array object; anything
+  // else is no input), so a replayed record holds what a live one does.
+  it('#8503: parses the journaled input like the live permission_request does', () => {
+    const input = { command: 'touch smoke-perm.txt', run_in_background: true }
+    expect(handlePermissionOutcome(outcome({ input }))!.input).toEqual(input)
+    for (const bad of ['rm -rf /', ['x'], 7, true, null, undefined]) {
+      expect(handlePermissionOutcome(outcome({ input: bad }))!.input, JSON.stringify(bad)).toBeNull()
+    }
+  })
+
+  it('#8503: the rebuilt record holds the input as toolInput; an entry without one holds none', () => {
+    const input = { command: 'touch smoke-perm.txt' }
+    const withInput = buildPermissionOutcomeMessage(handlePermissionOutcome(outcome({ input, outcome: 'allowed' }))!)
+    expect(withInput.toolInput).toEqual(input)
+    const without = buildPermissionOutcomeMessage(handlePermissionOutcome(outcome({ outcome: 'allowed' }))!)
+    expect('toolInput' in without).toBe(false)
+  })
+
+  it('#8503: the dispatched record carries the input into the session transcript', () => {
+    const env = makeEnv([])
+    const input = { command: 'git status', dangerouslyDisableSandbox: true }
+    expect(dispatch(env, outcome({ outcome: 'allowed', input }))).toBe(true)
+    const [record] = prompts(env.sessions.s1!.messages)
+    expect(record!.toolInput).toEqual(input)
   })
 
   it('drops a payload with no requestId or an outcome no renderer can label', () => {

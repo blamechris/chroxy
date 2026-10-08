@@ -1037,6 +1037,8 @@ export interface DispatchMessageMap {
     tool?: string
     description?: string
     outcome?: string
+    // #8503 — the sanitized tool input the prompt was shown with.
+    input?: Record<string, unknown>
     timestamp?: number
     historySeq?: number
   }

@@ -425,6 +425,14 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
   // so the client rebuilds the thinking bubble the live stream showed rather than
   // an answer. One classifier; the client reads the field and derives nothing.
   if (streamKindOf(entry) === 'thinking') wireEntry.kind = 'thinking'
+  // #8503: a `permission_outcome` carries the tool input its prompt was shown with
+  // (already sanitized and capped when recorded). A restored entry whose `input`
+  // is not a plain object (a damaged or hand-edited state file) is sent without
+  // it rather than as something a client would have to defend against.
+  if (wireEntry.type === 'permission_outcome' && 'input' in wireEntry
+    && !(wireEntry.input && typeof wireEntry.input === 'object' && !Array.isArray(wireEntry.input))) {
+    delete wireEntry.input
+  }
   if (wireEntry.type === 'permission_outcome' && wireEntry.outcome === 'stopped'
     && !(client?.clientCapabilities?.has?.(CAPABILITY_PERMISSION_OUTCOME_STOPPED) ?? false)) {
     wireEntry.outcome = 'expired'

@@ -4310,8 +4310,9 @@ export class SessionManager extends EventEmitter {
    * Two feeders, one per pipeline: the session's own `permission_request` event
    * (the in-process providers, via `_wireSessionEvents`) and ws-permissions.js
    * (the hook-routed providers, whose prompts never pass through a session
-   * event). Only what the clients were already shown is kept: the tool, and the
-   * description they received (clipped by the history layer on recording).
+   * event). Only what the clients were already shown is kept: the tool, the
+   * description they received (clipped by the history layer on recording) and, since
+   * #8503, the sanitized `input` the `permission_request` carried.
    *
    * @param {string} sessionId
    * @param {{ requestId?: string, tool?: string, description?: string, input?: object }} request
@@ -4326,6 +4327,10 @@ export class SessionManager extends EventEmitter {
       sessionId,
       tool: typeof request.tool === 'string' ? request.tool : '',
       description: describePermissionForOutcome(request.tool, request.description, request.input, request.recordDescription),
+      // #8503: the input the clients were shown, held by reference (it is the
+      // sanitized copy the broadcast carries, never the raw one) so the outcome
+      // can journal it. The history layer bounds and re-checks it on recording.
+      input: request.input,
     })
     while (this._permissionRequests.size > MAX_TRACKED_PERMISSION_REQUESTS) {
       const oldest = this._permissionRequests.keys().next().value
@@ -4366,6 +4371,7 @@ export class SessionManager extends EventEmitter {
         tool: pending.tool,
         description: pending.description,
         outcome,
+        input: pending.input,
       })
       return true
     } catch (err) {

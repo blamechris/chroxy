@@ -182,6 +182,24 @@ describe('permission_outcome on the mobile app (#8348)', () => {
 // #8374 -- Stop resolves a pending claude-sdk prompt as a deny with reason
 // 'aborted'. The card must read stopped, live and after a replay; a real Deny
 // must keep reading Denied.
+describe('permission_outcome carries the approved tool input on the mobile app (#8503)', () => {
+  it('a full rebuild holds the journaled input on the record, as the live card held it', () => {
+    const { read, send } = boot([]);
+    const input = { command: 'touch smoke-perm.txt', run_in_background: true };
+    fullRebuild(send, [userEntry, outcomeFrame({ outcome: 'allowed', input, description: 'Touch smoke file' })]);
+    const [record] = read().filter((m) => m.type === 'prompt');
+    expect(record!.toolInput).toEqual(input);
+    expect(record!.permissionOutcome).toBe('allowed');
+  });
+
+  it('an entry journaled before the field rebuilds a record with no toolInput', () => {
+    const { read, send } = boot([]);
+    fullRebuild(send, [userEntry, outcomeFrame({ outcome: 'allowed' })]);
+    const [record] = read().filter((m) => m.type === 'prompt');
+    expect('toolInput' in record!).toBe(false);
+  });
+});
+
 describe('a Stop-cancelled permission prompt (#8374)', () => {
   const resolvedFrame = (over: Record<string, unknown> = {}) => ({
     type: 'permission_resolved', sessionId: SID, requestId: REQ, decision: 'deny', ...over,

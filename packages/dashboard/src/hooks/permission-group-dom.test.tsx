@@ -54,10 +54,11 @@ function liveAnswered(i: number): ChatMessage {
   } as ChatMessage
 }
 
-function replayedOutcome(i: number): ChatMessage {
+/** A record rebuilt from a replayed `permission_outcome`; `input` is what the server journaled (null = an entry from before #8503). */
+function replayedOutcome(i: number, input: Record<string, unknown> | null = null): ChatMessage {
   return {
     ...buildPermissionOutcomeMessage({
-      requestId: `req-${i}`, tool: TOOL, description: DESC, outcome: 'allowed', sessionId: null, timestamp: i,
+      requestId: `req-${i}`, tool: TOOL, description: DESC, outcome: 'allowed', input, sessionId: null, timestamp: i,
     }),
     id: `replay-${i}`,
   }
@@ -112,11 +113,19 @@ describe('resolved permission groups -- rendered through the chat pipeline (#689
     expect(screen.queryAllByTestId('perm-outcome-record')).toHaveLength(0)
   })
 
-  it('rebuilt from replayed permission_outcome history the same prompts stay INDIVIDUAL compact records (their input is unknown)', () => {
+  it('rebuilt from replayed permission_outcome history that journaled NO input (older history) the same prompts stay INDIVIDUAL compact records', () => {
     mount([replayedOutcome(1), replayedOutcome(2), replayedOutcome(3)])
     expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
     expect(screen.getAllByTestId('perm-outcome-record')).toHaveLength(3)
     for (const rec of screen.getAllByTestId('perm-outcome-record')) expect(rec).toHaveTextContent('Permission allowed')
+  })
+
+  it('#8503: rebuilt from replayed history that journaled the input, they group into one ×3 line that names the command', () => {
+    const input = { command: 'npm view @chroxy/server version' }
+    mount([replayedOutcome(1, input), replayedOutcome(2, input), replayedOutcome(3, input)])
+    expect(screen.getAllByTestId('perm-group')).toHaveLength(1)
+    expect(screen.getByTestId('perm-group-count')).toHaveTextContent('×3')
+    expect(screen.getByTestId('perm-group-input')).toHaveTextContent('npm view @chroxy/server version')
   })
 
   it('a pending approval between resolved ones stays its own full card and splits the run', () => {

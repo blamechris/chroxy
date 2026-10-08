@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
-import { redactBounded, RECORD_DESCRIPTION_MAX } from './redaction.js'
+import { redactBounded, sanitizeToolInput, MAX_INPUT_CHARS, RECORD_DESCRIPTION_MAX } from './redaction.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
@@ -22,6 +22,63 @@ export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'
 // route broadcasts it uncapped) cannot bloat either.
 export const PERMISSION_OUTCOME_TOOL_MAX = 100
 export const PERMISSION_OUTCOME_DESCRIPTION_MAX = RECORD_DESCRIPTION_MAX
+
+/**
+ * #8503: the most the journaled tool input of a `permission_outcome` may weigh, in the
+ * broadcast's own measure: the serialized length of a plain input (`sanitizeToolInput`
+ * never returns one over `MAX_INPUT_CHARS`), or the length of a truncation wrapper's
+ * `summary` (cut to `MAX_INPUT_CHARS` plus its marker). It is the largest input
+ * `sanitizeToolInput` ever sends a client, so the journal can never hold more than a
+ * client was shown.
+ *
+ * What that weighs on disk: a wrapper's summary is itself JSON text, so serializing
+ * the wrapper escapes its quotes again and it can take about twice that (~21 KB).
+ * `truncateEntry` caps any entry's `input` at 50 KB regardless, and the ring buffer
+ * holds 1000 entries per session, the same bound a `tool_start` entry's input has.
+ */
+const TRUNCATION_MARKER = '... [truncated]'
+export const PERMISSION_OUTCOME_INPUT_MAX = MAX_INPUT_CHARS + TRUNCATION_MARKER.length
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * #8503: the tool input a `permission_outcome` may keep, or `undefined` for none.
+ *
+ * Its contract is "what the clients were shown": the callers hand over the value
+ * `sanitizeToolInput` produced for the live `permission_request` broadcast, and
+ * this keeps it unchanged. It still re-applies the same sanitizer rather than
+ * trusting the caller, because the journal is persisted to disk and replayed to
+ * every client of the session: a RAW input that reached it by a future caller's
+ * mistake must come out exactly as redacted and capped as the broadcast would
+ * have sent it. `sanitizeToolInput` is idempotent on its own output, so the
+ * normal path pays nothing in fidelity.
+ *
+ * The one shape it is not idempotent on is the truncation wrapper itself (a
+ * wrapper re-sanitized is wrapped again), so a wrapper is rebuilt instead: only
+ * its two known keys, the summary re-redacted and cut to the broadcast cap.
+ *
+ * Not an object (a string, an array, a number, null) or absent: no input is kept
+ * and the entry reads like one from before the field. A cycle is cut by the
+ * sanitizer, as in the broadcast.
+ *
+ * @param {unknown} input
+ * @returns {object|undefined}
+ */
+export function boundPermissionOutcomeInput(input) {
+  if (!isPlainObject(input)) return undefined
+  try {
+    const kept = input._truncated === true ? input : sanitizeToolInput(input)
+    if (kept._truncated === true) {
+      const summary = typeof kept.summary === 'string' ? kept.summary : ''
+      return { _truncated: true, summary: clipRedacted(summary, PERMISSION_OUTCOME_INPUT_MAX) }
+    }
+    return kept
+  } catch {
+    return undefined
+  }
+}
 
 // `<turnId>-thinking-<n>` (sdk, byok) and `<turnId>-thinking` (acp).
 const LEGACY_THINKING_ID = /-thinking(?:-\d+)?$/
@@ -46,6 +103,11 @@ export function streamKindOf(entry) {
   if (entry.kind === 'thinking') return 'thinking'
   if (typeof entry.messageId === 'string' && LEGACY_THINKING_ID.test(entry.messageId)) return 'thinking'
   return undefined
+}
+
+/** `{ input }` when there is one, else nothing: an absent input is an absent key. */
+function inputField(input) {
+  return input === undefined ? {} : { input }
 }
 
 function clipText(value, max) {
@@ -730,6 +792,10 @@ export class SessionMessageHistory extends EventEmitter {
           tool: clipRedacted(data.tool, PERMISSION_OUTCOME_TOOL_MAX),
           description: clipRedacted(data.description, PERMISSION_OUTCOME_DESCRIPTION_MAX),
           outcome: data.outcome,
+          // #8503: the tool input the clients were shown, so a replayed record
+          // and group read the same as a live one. Omitted when there is none,
+          // which is also every entry from before this field.
+          ...inputField(boundPermissionOutcomeInput(data.input)),
           timestamp: Date.now(),
         }, sessionId)
         persistNeeded = true

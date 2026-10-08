@@ -3654,6 +3654,28 @@ describe('@chroxy/protocol schemas', () => {
       }
     })
 
+    it('#8503: ServerPermissionOutcomeSchema carries the journaled tool input through parsing, and an entry without one still parses', async () => {
+      const { ServerPermissionOutcomeSchema } = await import('../src/schemas/server/stream.ts')
+      const base = { type: 'permission_outcome', requestId: 'perm-1', tool: 'Bash', description: 'Touch smoke file', outcome: 'allowed' }
+      const input = { command: 'touch smoke-perm.txt', run_in_background: true, nested: { a: [1, 2] } }
+      const withInput = ServerPermissionOutcomeSchema.safeParse({ ...base, input })
+      assert.ok(withInput.success)
+      assert.deepEqual(withInput.data.input, input, 'the input must survive parsing, not be stripped')
+      const without = ServerPermissionOutcomeSchema.safeParse(base)
+      assert.ok(without.success, 'an entry from before the field is still valid')
+      assert.equal('input' in without.data, false)
+      const wrapper = ServerPermissionOutcomeSchema.safeParse({ ...base, input: { _truncated: true, summary: '{"a":1}... [truncated]' } })
+      assert.ok(wrapper.success, 'the truncation wrapper is an object like any other input')
+    })
+
+    it('#8503: ServerPermissionOutcomeSchema rejects an input that is not an object (a client never gets one from the server)', async () => {
+      const { ServerPermissionOutcomeSchema } = await import('../src/schemas/server/stream.ts')
+      const base = { type: 'permission_outcome', requestId: 'perm-1', tool: 'Bash', description: 'x', outcome: 'allowed' }
+      for (const bad of ['rm -rf /', ['x'], 7, true]) {
+        assert.equal(ServerPermissionOutcomeSchema.safeParse({ ...base, input: bad }).success, false, JSON.stringify(bad))
+      }
+    })
+
     it('#8374: ServerPermissionResolvedSchema carries an optional reason through parsing', async () => {
       const { ServerPermissionResolvedSchema } = await import('../src/schemas/server/stream.ts')
       const base = { type: 'permission_resolved', requestId: 'req-1', decision: 'deny', sessionId: 's1' }
