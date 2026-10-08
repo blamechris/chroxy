@@ -175,6 +175,61 @@ export const FS_PROMISES_EXEMPTIONS = {
   stat: 'read', statfs: 'read', watch: 'read',
 }
 
+/**
+ * #8352 — the daemon bases that live under the OS tmpdir, by directory name.
+ *
+ * `~/.chroxy` and `~/.claude` are not the only real state a test can destroy.
+ * A running daemon keeps its own per-session scratch under `tmpdir()`, and it
+ * VALIDATES the base it created (dev/ino): a test that `rmSync`s the real
+ * `tmpdir()/chroxy-claude-tui` and lets `start()` recreate it makes every live
+ * claude-tui session on that daemon refuse its next tool event with
+ * `sink_base_compromised` — on 2026-10-07 the full server suite did exactly
+ * that to the owner's always-on daemon, which shares the machine's `TMPDIR`.
+ * The #4633 guard did not notice because `tmpdir()` was never protected.
+ *
+ * Each name is the leaf of one `static get <X>_BASE()` in `packages/server/src`
+ * (`join(tmpdir(), '<name>')`). This list is a LIST beside a set that grows, so
+ * `packages/server/tests/setup-sandbox-tmp-daemon-bases.test.js` cross-checks it against
+ * the source in BOTH directions: a new `join(tmpdir(), 'chroxy-…')` base in
+ * `src/` with no row here fails, and a row here that no source getter produces
+ * fails. It is not derived by importing the getters because this module is
+ * linked into every `_setup.mjs`, and pulling a session module in there would
+ * ESM-import `node:fs` and disarm the whole sandbox (#7262).
+ *
+ * `chroxy-pr-body-<random>.md` (ws-file-ops/git.js) is deliberately absent: it
+ * is a per-call random FILE, not a base a daemon validates or sweeps.
+ */
+export const TMP_DAEMON_BASE_NAMES = [
+  'chroxy-claude-tui', // ClaudeTuiSession.SINK_BASE — hook sink + permission sidecar
+  'chroxy-claude-cli', // CliSession.PERMISSION_MODE_SIDECAR_BASE
+  'chroxy-codex-attach', // CodexAppServerSession.ATTACH_BASE
+  'chroxy-byok', // DockerByokSession.ENV_FILE_BASE
+]
+
+/**
+ * The protected roots for {@link TMP_DAEMON_BASE_NAMES} under `tmpRoot`, spelled
+ * BOTH lexically and through `realpath`. The second spelling is not optional:
+ * the sweeps resolve the base with `realpathSync` before they delete anything
+ * (`sweepStaleOwnedDirs(realpathSync(SINK_BASE), …)`), and on macOS `tmpdir()`
+ * is `/var/folders/…` while its realpath is `/private/var/folders/…`.
+ * `path.resolve` does not follow links, so a guard that only knew the first
+ * spelling would let the sweep's `rmSync` through while looking armed.
+ */
+export function tmpDaemonBaseRoots (tmpRoot) {
+  const roots = []
+  let realRoot = null
+  try {
+    realRoot = require('node:fs').realpathSync(tmpRoot)
+  } catch {
+    // tmpRoot cannot be resolved; the lexical spelling still guards.
+  }
+  for (const name of TMP_DAEMON_BASE_NAMES) {
+    roots.push(resolve(tmpRoot, name))
+    if (realRoot !== null) roots.push(resolve(realRoot, name))
+  }
+  return roots
+}
+
 export const SANDBOX_ERROR_CODE = 'CHROXY_TEST_SANDBOX'
 
 /** Marks a patched function so a test can enumerate what was ACTUALLY installed. */

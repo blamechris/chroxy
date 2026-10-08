@@ -12,6 +12,7 @@ import { CliSession } from '../src/cli-session.js'
 import { ensureOwnedBaseDir } from '../src/utils/stale-session-dirs.js'
 import { writePermissionModeSidecarAtomic } from '../src/utils/permission-mode-sidecar.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const hookPath = join(__dirname, '../hooks/permission-hook.sh')
@@ -153,8 +154,14 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     'CHROXY_HOOK_UNREACHABLE_DECISION',
   ]
   let ambient
+  // #8352 — every start() here creates a sidecar under
+  // `CliSession.PERMISSION_MODE_SIDECAR_BASE`, and the sweep tests delete under
+  // it. The real `tmpdir()/chroxy-claude-cli` belongs to a live daemon, so each
+  // test gets its own base; `_setup.mjs` throws CHROXY_TEST_SANDBOX otherwise.
+  let unpinSidecarBase
 
   beforeEach(() => {
+    unpinSidecarBase = pinTmpDaemonBase(CliSession, 'PERMISSION_MODE_SIDECAR_BASE')
     tmp = mkdtempSync(join(tmpdir(), 'cli-perm-sidecar-test-'))
     ambient = {}
     for (const k of AMBIENT_KEYS) {
@@ -176,6 +183,8 @@ describe('CliSession permission-mode sidecar (#7337)', () => {
     }
     created.length = 0
     rmSync(tmp, { recursive: true, force: true })
+    if (unpinSidecarBase) unpinSidecarBase()
+    unpinSidecarBase = null
   })
 
   /**

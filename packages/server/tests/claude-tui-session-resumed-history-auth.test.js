@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { AUTH_REQUIRED_MESSAGE } from '../src/claude-tui/pty-driver.js'
+import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 
 /**
  * #8223 — `claude --resume <id>` re-renders the conversation's history at
@@ -47,6 +48,14 @@ const FOOTER_LOGGED_OUT = '\x1b[93G\x1b[38;5;211mNot\x1b[97Glogged\x1b[104Gin\x1
 // A live expired-login banner at the dashboard Chat tab's 10-column PTY (#8254).
 const BANNER_EXPIRED_10COL = ['⏺ Login', '\x1b[2Cexpired ·', '\x1b[2CPlease', '\x1b[2Crun', '\x1b[2C/login'].join('\r\x1b[1B')
 const BANNER_EXPIRED_120COL = '\r\x1b[1B\x1b[38;5;220m⏺\x1b[39m \x1b[38;5;220mPlease run /login · API Error: 401 OAuth access token is invalid.\x1b[39m\x1b[K\r\x1b[2C\x1b[1B\x1b[K'
+
+// #8352 — these tests run the REAL start(), which mkdirs under
+// `ClaudeTuiSession.SINK_BASE`. The real one belongs to a live daemon that
+// validates its dev/ino, so pin it to a per-test temp base (the sandbox guard
+// in `_setup.mjs` throws CHROXY_TEST_SANDBOX if a test touches the real one).
+let unpinSinkBase
+beforeEach(() => { unpinSinkBase = pinTmpDaemonBase(ClaudeTuiSession, 'SINK_BASE') })
+afterEach(() => { if (unpinSinkBase) unpinSinkBase(); unpinSinkBase = null })
 
 describe('ClaudeTuiSession — resumed history is not a login failure (#8223)', () => {
   let fakeHome

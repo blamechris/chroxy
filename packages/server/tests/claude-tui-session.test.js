@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url'
 import { ClaudeTuiSession, SINK_BASE_UNTRUSTED_CODE, buildNativeRouteCheckHook, withHookFsTimeout, _resetLoginProbeWarningForTests } from '../src/claude-tui-session.js'
 import { AUTH_FAILURE_PATTERNS, AUTH_FAILURE_COMPACT_PATTERNS } from '../src/claude-tui/pty-driver.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 import {
@@ -87,6 +88,18 @@ function makeSinkDir(prefix) {
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   return dir
 }
+
+// #8352 — EVERY test in this file runs on a per-test hook-sink base. `start()`
+// mkdirs under `ClaudeTuiSession.SINK_BASE` and the boot-sweep tests delete it,
+// and the real one (`tmpdir()/chroxy-claude-tui`) belongs to a LIVE daemon that
+// validates its dev/ino: recreating it made every running claude-tui session
+// refuse its next tool event (`sink_base_compromised`, 2026-10-07). The sandbox
+// guard in `_setup.mjs` now throws CHROXY_TEST_SANDBOX on any mutation of the
+// real base; this root hook is how the tests stay off it. File-level (not per
+// describe) so a describe added later is covered without remembering to pin.
+let unpinSinkBase
+beforeEach(() => { unpinSinkBase = pinTmpDaemonBase(ClaudeTuiSession, 'SINK_BASE') })
+afterEach(() => { if (unpinSinkBase) unpinSinkBase(); unpinSinkBase = null })
 
 describe('ClaudeTuiSession', () => {
   let emptySkillsDir
