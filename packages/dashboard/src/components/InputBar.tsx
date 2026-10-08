@@ -1137,7 +1137,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
 
   return (
     <div
-      className={`input-bar${dragging ? ' dragging' : ''}`}
+      className={`input-bar${dragging ? ' dragging' : ''}${lozengeText ? ' input-bar--with-lozenge' : ''}`}
       data-testid="input-bar"
       data-activity-state={chatActivityState}
       onDragOver={handleDragOver}

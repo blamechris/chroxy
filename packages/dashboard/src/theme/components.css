@@ -6015,7 +6015,25 @@ button.sidebar-token-view-session-row:hover {
    mounts this element when `formatComposerLozenge` returns non-null (never
    at idle), so there's no `display: none` state to gate here — the color
    rules below just tint the already-rendered badge per state, mirroring
-   the hairline's color mapping one row up so the two read as one signal. */
+   the hairline's color mapping one row up so the two read as one signal.
+
+   #7368: "never participates in flex layout" also meant nothing above the
+   composer knew the lozenge's upper half was drawn into its strip, so it
+   covered the ActivityIndicator / CheckInChip row. `.input-bar--with-lozenge`
+   (set by InputBar only while the lozenge is mounted) reserves that overhang
+   as margin-top on the composer. The trade-off: this is a one-off ~10px shift
+   when a turn starts. It lands in the same frame the ActivityIndicator row
+   mounts above the composer (they share the busy gate), so it is absorbed
+   into a shift that already happens rather than adding a second one, and it
+   does not change while the turn runs or the lozenge text changes. The
+   lozenge itself stays out of flow, so the text swap is still jitter-free. */
+.input-bar {
+  --input-bar-lozenge-height: calc(var(--text-xs) * 1.4 + 4px); /* line-height 1.4 + 2x 1px padding + 2x 1px border */
+}
+.input-bar--with-lozenge {
+  /* half the lozenge sits above the composer, plus the composer's 1px border */
+  margin-top: calc(var(--input-bar-lozenge-height) / 2 + 1px);
+}
 .input-bar-lozenge {
   position: absolute;
   top: 0;
