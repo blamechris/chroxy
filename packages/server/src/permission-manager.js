@@ -466,6 +466,11 @@ export class PermissionManager extends EventEmitter {
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
     this._permissionCounter = 0
+    // #8430: the user pressed Stop on the turn that is running. Turn-scoped, set
+    // by `markUserStopInFlight()` and cleared by `clearUserStopInFlight()` at turn
+    // end. The abort listener reads it, so a prompt raised AFTER the Stop but
+    // before the provider's abort lands is a Stop's too.
+    this._userStopInFlight = false
     // Per-instance (per-session) nonce so requestIds are globally unique
     // across sessions. Without it the id was `perm-${counter}-${ms}` with a
     // counter that restarts at 0 every session — two sessions could mint the
@@ -852,14 +857,16 @@ export class PermissionManager extends EventEmitter {
 
       // Auto-deny on abort signal. WHY the signal aborted is not on the signal --
       // a user Stop and a failed turn (a dead app-server, a stalled stream) abort
-      // the same controller -- so the user's Stop entry point marks the prompts
-      // pending at that moment (`markPendingStopped`, #8374) and this reads the
-      // mark: `stopped` for a Stop, `aborted` for everything else.
+      // the same controller -- so the user's Stop entry point sets the turn's
+      // "user Stop in flight" flag (`markUserStopInFlight`, #8374/#8430) and this
+      // reads it when the abort lands: `stopped` for a Stop, `aborted` for
+      // everything else. The flag, not a mark on each prompt, so a prompt raised
+      // in the window between the Stop and the abort is covered too.
       if (signal) {
         signal.addEventListener('abort', () => {
           const pending = this._pendingPermissions.get(requestId)
           if (pending) {
-            const reason = pending.stopRequested ? 'stopped' : 'aborted'
+            const reason = this._userStopInFlight ? 'stopped' : 'aborted'
             this._pendingPermissions.delete(requestId)
             this._lastPermissionData.delete(requestId)
             this._clearPermissionTimer(requestId)
@@ -885,20 +892,31 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
-   * #8374: the user pressed Stop. Mark every permission prompt waiting RIGHT NOW
-   * as cancelled by that Stop, so the abort that follows resolves it with
-   * `reason: 'stopped'` instead of `'aborted'`.
+   * #8374/#8430: the user pressed Stop. Record that for the rest of the turn, so
+   * the abort that follows resolves every open prompt -- including one raised
+   * between this call and the abort -- with `reason: 'stopped'` instead of
+   * `'aborted'`.
    *
    * Called only from the user's Stop entry point (the `interrupt` message
    * handler), never from `interrupt()` itself: the scheduler and teardown call
    * that too, and a turn failed by a stalled stream or a dead app-server aborts
    * the same controller. Those are not Stops.
    *
-   * The mark lives on the pending entry, so it dies with the prompt: a prompt
-   * raised after the Stop, or one answered before the abort lands, is unaffected.
+   * Ends with the turn (`clearUserStopInFlight`, called from the session's turn
+   * teardown), so a later turn's failure is not mislabelled.
    */
-  markPendingStopped() {
-    for (const entry of this._pendingPermissions.values()) entry.stopRequested = true
+  markUserStopInFlight() {
+    this._userStopInFlight = true
+  }
+
+  /** #8430: the turn is over; a Stop pressed during it must not label the next. */
+  clearUserStopInFlight() {
+    this._userStopInFlight = false
+  }
+
+  /** #8430: has the user pressed Stop on the turn that is running? */
+  isUserStopInFlight() {
+    return this._userStopInFlight
   }
 
   /**

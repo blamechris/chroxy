@@ -40,7 +40,7 @@ function makePm() {
   return { pm, resolved }
 }
 
-describe('PermissionManager.markPendingStopped (#8374)', () => {
+describe('PermissionManager.markUserStopInFlight (#8374)', () => {
   it('an abort with no mark is "aborted" (a failure or a teardown, not a Stop)', async () => {
     const { pm, resolved } = makePm()
     const ac = new AbortController()
@@ -57,7 +57,7 @@ describe('PermissionManager.markPendingStopped (#8374)', () => {
     const { pm, resolved } = makePm()
     const ac = new AbortController()
     const decided = pm.handlePermission('Bash', { command: 'ls' }, ac.signal, 'approve')
-    pm.markPendingStopped()
+    pm.markUserStopInFlight()
     ac.abort()
     assert.equal((await decided).behavior, 'deny')
     assert.equal(resolved[0].reason, 'stopped')
@@ -65,17 +65,41 @@ describe('PermissionManager.markPendingStopped (#8374)', () => {
     pm.destroy()
   })
 
-  it('the mark covers only prompts pending when Stop was pressed, not a later one', async () => {
+  it('a prompt raised AFTER the Stop but before the abort lands is a Stop\'s too (#8430)', async () => {
     const { pm, resolved } = makePm()
     const acA = new AbortController()
     const a = pm.handlePermission('Bash', { command: 'a' }, acA.signal, 'approve')
-    pm.markPendingStopped()
+    pm.markUserStopInFlight()
     const acB = new AbortController()
     const b = pm.handlePermission('Bash', { command: 'b' }, acB.signal, 'approve')
     acA.abort()
     acB.abort()
     await Promise.all([a, b])
-    assert.deepEqual(resolved.map((r) => r.reason), ['stopped', 'aborted'])
+    assert.deepEqual(resolved.map((r) => r.reason), ['stopped', 'stopped'])
+    pm.destroy()
+  })
+
+  it('CONTROL: a prompt raised before the Stop, with no Stop, stays aborted (a failed turn, #8430)', async () => {
+    const { pm, resolved } = makePm()
+    const ac = new AbortController()
+    const b = pm.handlePermission('Bash', { command: 'b' }, ac.signal, 'approve')
+    ac.abort()
+    await b
+    assert.deepEqual(resolved.map((r) => r.reason), ['aborted'])
+    pm.destroy()
+  })
+
+  it('once the turn ends and the flag is cleared, the next turn\'s abort is aborted again (#8430)', async () => {
+    const { pm, resolved } = makePm()
+    pm.markUserStopInFlight()
+    assert.equal(pm.isUserStopInFlight(), true)
+    pm.clearUserStopInFlight()
+    assert.equal(pm.isUserStopInFlight(), false)
+    const ac = new AbortController()
+    const decided = pm.handlePermission('Bash', { command: 'ls' }, ac.signal, 'approve')
+    ac.abort()
+    await decided
+    assert.deepEqual(resolved.map((r) => r.reason), ['aborted'])
     pm.destroy()
   })
 
@@ -85,7 +109,7 @@ describe('PermissionManager.markPendingStopped (#8374)', () => {
     let requestId
     pm.once('permission_request', (d) => { requestId = d.requestId })
     const decided = pm.handlePermission('Bash', { command: 'ls' }, ac.signal, 'approve')
-    pm.markPendingStopped()
+    pm.markUserStopInFlight()
     pm.respondToPermission(requestId, 'allow')
     assert.equal((await decided).behavior, 'allow')
     ac.abort()
@@ -102,22 +126,40 @@ describe('PermissionManager.markPendingStopped (#8374)', () => {
       return { pm, resolved }
     })()
     const decided = pm.handlePermission('Bash', { command: 'ls' }, new AbortController().signal, 'approve')
-    pm.markPendingStopped()
+    pm.markUserStopInFlight()
     await decided
     assert.equal(resolved[0].reason, 'timeout')
     pm.destroy()
   })
 })
 
-describe('BaseSession.markPendingPermissionsStopped (#8374)', () => {
-  it('marks the prompts of the session\'s PermissionManager', () => {
-    const fake = { _permissions: { markPendingStopped: mock.fn() } }
-    BaseSession.prototype.markPendingPermissionsStopped.call(fake)
-    assert.equal(fake._permissions.markPendingStopped.mock.callCount(), 1)
+describe('BaseSession.markUserStopInFlight (#8374)', () => {
+  it('records the Stop on the session\'s PermissionManager while a turn is running', () => {
+    const fake = { _isBusy: true, _permissions: { markUserStopInFlight: mock.fn() } }
+    BaseSession.prototype.markUserStopInFlight.call(fake)
+    assert.equal(fake._permissions.markUserStopInFlight.mock.callCount(), 1)
+  })
+
+  it('records nothing when no turn is running: a Stop between turns must not label the next one (#8430)', () => {
+    const fake = { _isBusy: false, _permissions: { markUserStopInFlight: mock.fn() } }
+    BaseSession.prototype.markUserStopInFlight.call(fake)
+    assert.equal(fake._permissions.markUserStopInFlight.mock.callCount(), 0)
+  })
+
+  it('every turn end clears it: _clearMessageState reaches the permission manager (#8430)', () => {
+    const pm = new PermissionManager({ log: quiet })
+    const s = new BaseSession({ cwd: '/tmp' })
+    s._permissions = pm
+    s._isBusy = true
+    s.markUserStopInFlight()
+    assert.equal(s.isUserStopInFlight(), true)
+    s._clearMessageState()
+    assert.equal(s.isUserStopInFlight(), false)
+    pm.destroy()
   })
 
   it('is a no-op for a session with no in-process permission manager', () => {
-    assert.doesNotThrow(() => BaseSession.prototype.markPendingPermissionsStopped.call({}))
+    assert.doesNotThrow(() => BaseSession.prototype.markUserStopInFlight.call({}))
   })
 })
 
@@ -131,7 +173,8 @@ describe('the user Stop entry point marks the open prompt (#8374)', () => {
     pm = new PermissionManager({ log: quiet })
     wirePermissionManager(session, pm)
     session._permissions = pm
-    session.markPendingPermissionsStopped = BaseSession.prototype.markPendingPermissionsStopped
+    session.markUserStopInFlight = BaseSession.prototype.markUserStopInFlight
+    session._isBusy = true
     ac = new AbortController()
     // What every in-process provider's interrupt() does to a pending prompt:
     // abort the controller its handlePermission was given.
@@ -167,6 +210,23 @@ describe('the user Stop entry point marks the open prompt (#8374)', () => {
     assert.equal(outcomes().length, 1)
     assert.equal(outcomes()[0].requestId, requestId)
     assert.equal(outcomes()[0].outcome, 'stopped')
+  })
+
+  it('a prompt raised between the Stop and the abort is recorded as stopped too, in the journal (#8430)', async () => {
+    const acLate = new AbortController()
+    let late
+    // The provider's interrupt is not instant: a parallel tool asks first, then
+    // the abort lands on both.
+    session.interrupt = async () => {
+      late = pm.handlePermission('Bash', { command: 'late' }, acLate.signal, 'approve')
+      await Promise.resolve()
+      ac.abort()
+      acLate.abort()
+    }
+    const first = pm.handlePermission('Bash', { command: 'ls' }, ac.signal, 'approve')
+    await handleSessionMessage({}, client, { type: 'interrupt' }, ctx)
+    await Promise.all([first, late])
+    assert.deepEqual(outcomes().map((o) => o.outcome), ['stopped', 'stopped'])
   })
 
   it('CONTROL: the same abort with no user Stop (a failed turn) is recorded as expired', async () => {

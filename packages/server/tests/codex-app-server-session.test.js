@@ -1443,7 +1443,8 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
       const { s, cleanup } = mkApprovalSession()
       const reasons = resolvedReasons(s)
       raise(s)
-      s.markPendingPermissionsStopped() // what the user-Stop entry point does
+      s._isBusy = true // a prompt is only ever pending inside a running turn
+      s.markUserStopInFlight() // what the user-Stop entry point does
       await s.interrupt()
       await tick()
       assert.deepEqual(reasons, ['stopped'])

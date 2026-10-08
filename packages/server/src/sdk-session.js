@@ -946,6 +946,9 @@ export class SdkSession extends BaseSession {
     // #7376: a turn starts with no Stop requested, whatever the last one did.
     this._stopRequestedThisTurn = false
     this._stopCancelledToolUseIds.clear() // #8363
+    // #8430: ...and with no user Stop in flight, whatever the last turn left (a
+    // turn superseded before its teardown never reaches `_clearMessageState`).
+    this._permissions.clearUserStopInFlight()
     // #8300: a per-session monotonic turn token. `supersededByNewerTurn`
     // compares against it: unlike a handle comparison it never reverts once
     // a follow-up turn has started and ended.
@@ -2814,6 +2817,11 @@ export class SdkSession extends BaseSession {
   _trackPermissionDecision(toolUseId, decision) {
     if (typeof toolUseId !== 'string' || toolUseId.length === 0) return decision
     this._pendingPermissionToolUseIds.add(toolUseId)
+    // #8430: asked AFTER the user's Stop but before the SDK's abort landed. The
+    // snapshot in `interrupt()` could not see it; the abort that is coming will
+    // cancel it all the same, so it joins the set here. One flag serves this and
+    // the permission manager's `stopped` reason.
+    if (this._permissions.isUserStopInFlight()) this._stopCancelledToolUseIds.add(toolUseId)
     const settled = (result) => {
       this._pendingPermissionToolUseIds.delete(toolUseId)
       if (result?.behavior === 'allow') this._stopCancelledToolUseIds.delete(toolUseId)
