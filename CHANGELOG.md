@@ -25,7 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - dropped", or "Permission allowed / denied - ...". It collapses onto a
     card the client already holds, never doubles up, and never becomes a
     pending card.
-  - A prompt that was open when the daemon restarted has no recorded outcome.
+  - "Sync Full History" keeps the records: they are merged into the rebuilt
+    transcript by time.
+  - The recorded description is built from the sanitised tool input, so values
+    under sensitive keys are masked in it.
+  - Prompts raised by a BYOK Task subagent are recorded too.
+  - A card the client already holds is corrected to the recorded outcome (for
+    example, a timed-out prompt shown as denied is relabelled expired).
+  - A prompt that was open when the daemon crashed has no recorded outcome.
 
 ## [0.11.4] - 2026-10-07
 

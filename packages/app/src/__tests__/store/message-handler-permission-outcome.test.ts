@@ -124,7 +124,7 @@ describe('permission_outcome on the mobile app (#8348)', () => {
     send({ type: 'history_replay_end', sessionId: SID, latestSeq: 9 });
     const prompts = read().filter((m) => m.type === 'prompt');
     expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toBe(held);
+    expect(prompts[0]).toMatchObject({ id: held.id, answered: 'allow', permissionOutcome: 'allowed' });
   });
 
   it('a stale permission_request for a recorded outcome does not turn the record into a pending card', () => {
@@ -134,6 +134,40 @@ describe('permission_outcome on the mobile app (#8348)', () => {
     send({ type: 'permission_request', sessionId: SID, requestId: REQ, tool: 'Bash', description: 'rm -rf build', remainingMs: 120_000 });
     expect(read()).toBe(before);
     expect(derivePendingPermissionCounts(store.getState().sessionStates as any, Date.now())).toEqual({});
+  });
+
+  it('a stale permission_request after an outcome merged into a LIVE card does not make it actionable', () => {
+    const { read, send, store } = boot([livePrompt()]);
+    send({ type: 'history_replay_start', sessionId: SID, fullHistory: false, truncated: false, latestSeq: 9 });
+    send(outcomeFrame());
+    send({ type: 'history_replay_end', sessionId: SID, latestSeq: 9 });
+    const merged = read().filter((m) => m.type === 'prompt');
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ id: 'perm-live', permissionOutcome: 'expired' });
+    expect(merged[0]!.options).toBeUndefined();
+
+    send({ type: 'permission_request', sessionId: SID, requestId: REQ, tool: 'Bash', description: 'rm -rf build', remainingMs: 120_000 });
+
+    expect(read().filter((m) => m.type === 'prompt')[0]).toBe(merged[0]);
+    expect(derivePendingPermissionCounts(store.getState().sessionStates as any, Date.now())).toEqual({});
+  });
+
+  it('relabels a card an SDK timeout stamped denied when the replay says the prompt expired', () => {
+    const { read, send } = boot([livePrompt({ options: undefined, answered: 'deny', answeredAt: 5, expiresAt: Date.now() - 1000 })]);
+    send({ type: 'history_replay_start', sessionId: SID, fullHistory: false, truncated: false, latestSeq: 9 });
+    send(outcomeFrame());
+    send({ type: 'history_replay_end', sessionId: SID, latestSeq: 9 });
+    const [card] = read().filter((m) => m.type === 'prompt');
+    expect(card).toMatchObject({ permissionOutcome: 'expired' });
+    expect(card!.answered).toBeUndefined();
+  });
+
+  it('a locally expired card accepts an authoritative allowed', () => {
+    const { read, send } = boot([livePrompt({ options: undefined, expiresAt: Date.now() - 1000 })]);
+    send({ type: 'history_replay_start', sessionId: SID, fullHistory: false, truncated: false, latestSeq: 9 });
+    send(outcomeFrame({ outcome: 'allowed' }));
+    send({ type: 'history_replay_end', sessionId: SID, latestSeq: 9 });
+    expect(read().filter((m) => m.type === 'prompt')[0]).toMatchObject({ permissionOutcome: 'allowed', answered: 'allow' });
   });
 
   it('POSITIVE CONTROL: a permission_request for a prompt with no recorded outcome still raises a pending card', () => {

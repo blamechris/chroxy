@@ -645,7 +645,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
   {
-    name: 'permission_outcome collapses onto a live card the client already answered (no duplicate)',
+    name: 'permission_outcome collapses onto a live card the client already answered (no duplicate, stamped)',
     type: 'permission_outcome',
     init: {
       sessions: {
@@ -661,7 +661,57 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1',
       tool: 'Bash', description: 'ls', outcome: 'allowed',
     },
-    expect: { noop: true },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'perm-live', type: 'prompt', answered: 'allow', permissionOutcome: 'allowed' }] },
+      },
+    },
+  },
+  {
+    name: 'permission_outcome relabels a card an in-process timeout stamped denied as expired',
+    type: 'permission_outcome',
+    init: {
+      sessions: {
+        s1: {
+          messages: [{
+            id: 'perm-live', type: 'prompt', content: 'Bash: ls', tool: 'Bash',
+            requestId: 'perm-1', answered: 'deny', answeredAt: 5, expiresAt: 1, timestamp: 1,
+          }],
+        },
+      },
+    },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1',
+      tool: 'Bash', description: 'ls', outcome: 'expired',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'perm-live', type: 'prompt', permissionOutcome: 'expired' }] },
+      },
+    },
+  },
+  {
+    name: 'permission_outcome lets a locally expired card accept an authoritative allowed',
+    type: 'permission_outcome',
+    init: {
+      sessions: {
+        s1: {
+          messages: [{
+            id: 'perm-live', type: 'prompt', content: 'Bash: ls', tool: 'Bash',
+            requestId: 'perm-1', expiresAt: 1, timestamp: 1,
+          }],
+        },
+      },
+    },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1',
+      tool: 'Bash', description: 'ls', outcome: 'allowed',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'perm-live', type: 'prompt', answered: 'allow', permissionOutcome: 'allowed' }] },
+      },
+    },
   },
   {
     name: 'permission_outcome falls back to addMessage when no session resolves',

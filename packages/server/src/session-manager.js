@@ -285,15 +285,22 @@ function permissionOutcomeForEvent(event, data) {
 }
 
 /**
- * #8348: the description the transcript keeps for a permission prompt. Normally
- * the description the clients already received. An AskUserQuestion prompt is the
- * exception: its description is the tool input as truncated JSON, which reads as
- * noise in a one-line record, so it is replaced by the question that was asked
- * (taken from the same already-sanitized input the clients received).
+ * #8348: the description the transcript keeps for a permission prompt.
+ *
+ * It is built from the SANITIZED tool input (the one the clients received, with
+ * values under sensitive keys masked and strings pattern-redacted) whenever the
+ * input is available, using the same field precedence the producers use for the
+ * description the clients see. The description string a producer passes is only
+ * used when there is no input to build from: when it was derived from the input
+ * as a JSON fallback, it was serialized BEFORE sanitizing, so a value under a
+ * sensitive key would still be in it, and redacting that string again does not
+ * recover the key context.
+ *
+ * An AskUserQuestion prompt names the question that was asked instead.
  *
  * @param {string|undefined} tool
  * @param {string|undefined} description
- * @param {object|undefined} input
+ * @param {object|undefined} input the sanitized tool input
  * @returns {string}
  */
 function describePermissionForOutcome(tool, description, input) {
@@ -302,7 +309,61 @@ function describePermissionForOutcome(tool, description, input) {
     const question = first && typeof first.question === 'string' ? first.question.trim() : ''
     if (question) return question
   }
-  return typeof description === 'string' ? description : ''
+  const fallback = typeof description === 'string' ? description : ''
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return fallback
+  const named = input.description || input.command || input.file_path || input.pattern || input.query
+  const source = named
+    || (Object.keys(input).length > 0 ? JSON.stringify(input) : fallback)
+  return String(source)
+}
+
+/**
+ * #8348: fold the daemon's saved permission outcomes into a provider-transcript
+ * (JSONL) rebuild.
+ *
+ * A permission outcome is recorded only by the daemon, so it exists in the ring
+ * buffer and the state file and never in the provider's own transcript. "Sync
+ * Full History" replaces the client's transcript with the JSONL slice; without
+ * this the outcome records a session switch just showed would be erased by it.
+ *
+ * Ordered by timestamp into the slice (an outcome lands after any entry with the
+ * same or an earlier time), one per requestId, and, when the slice is the
+ * truncated tail of a longer transcript, only those no older than its first
+ * entry: an outcome for a call outside the window would sit at the top with
+ * nothing around it.
+ *
+ * The copies carry NO `_seq`. The full-history handler derives the reconnect
+ * cursor from the entries it sends, and a ring seq on an entry of a JSONL slice
+ * would advertise a cursor the client never received, stranding it on the lossy
+ * rebuild (#7484). Returns the input slice itself when there is nothing to add.
+ *
+ * @param {Array} transcript the JSONL entries
+ * @param {Array} ring the session's ring-buffer history
+ * @param {boolean} truncated whether the slice is a truncated tail
+ * @returns {Array}
+ */
+function withRetainedPermissionOutcomes(transcript, ring, truncated) {
+  const seen = new Set()
+  let outcomes = []
+  for (const entry of ring) {
+    if (!entry || entry.type !== 'permission_outcome' || seen.has(entry.requestId)) continue
+    seen.add(entry.requestId)
+    const { _seq: _ringSeq, ...copy } = entry
+    outcomes.push(copy)
+  }
+  if (outcomes.length === 0) return transcript
+  const first = transcript[0]?.timestamp
+  if (truncated && typeof first === 'number') {
+    outcomes = outcomes.filter((o) => typeof o.timestamp === 'number' && o.timestamp >= first)
+  }
+  const merged = []
+  let next = 0
+  for (const entry of transcript) {
+    while (next < outcomes.length && outcomes[next].timestamp < entry.timestamp) merged.push(outcomes[next++])
+    merged.push(entry)
+  }
+  while (next < outcomes.length) merged.push(outcomes[next++])
+  return merged
 }
 
 export class SessionManager extends EventEmitter {
@@ -3959,6 +4020,11 @@ export class SessionManager extends EventEmitter {
    *    `'jsonl'`. Reporting the ring's flag next to a JSONL slice is a statement
    *    about a collection the caller never received.
    *
+   * #8348 — the daemon's saved `permission_outcome` records are folded into a
+   * `'jsonl'` slice (they exist only in the ring buffer and the state file, never
+   * in the provider's transcript), without their ring `_seq`, so the slice still
+   * advertises no cursor.
+   *
    * @returns {Promise<{ entries: Array<{ type, content, tool?, timestamp, messageId? }>, source: 'jsonl'|'ring', truncated: boolean }>}
    */
   async getFullHistoryAsync(sessionId) {
@@ -3973,7 +4039,13 @@ export class SessionManager extends EventEmitter {
       try {
         const filePath = resolveJsonlPath(entry.cwd, conversationId)
         const { messages, truncated } = await readConversationHistoryWithMetaAsync(filePath)
-        if (messages.length > 0) return { entries: messages, source: 'jsonl', truncated }
+        if (messages.length > 0) {
+          return {
+            entries: withRetainedPermissionOutcomes(messages, this.getHistory(sessionId), truncated),
+            source: 'jsonl',
+            truncated,
+          }
+        }
       } catch (err) {
         log.error(`Failed to read JSONL history for session ${sessionId}: ${err?.message || err}`)
       }
@@ -4524,6 +4596,18 @@ export class SessionManager extends EventEmitter {
         } else if (event === 'permission_resolved' || event === 'permission_expired') {
           const outcome = permissionOutcomeForEvent(event, data)
           if (outcome) this.recordPermissionOutcome(data.requestId, outcome)
+        } else if (event === 'agent_event') {
+          // A BYOK Task subagent's permission prompts reach this session wrapped
+          // in `agent_event { type, payload }` (a grandchild's too: each level
+          // re-emits to its parent, so this session sees one event per prompt).
+          // They are shown to the user and answered through THIS session, so
+          // they are journaled under it.
+          if (data?.type === 'permission_request') {
+            this.notePermissionRequest(sessionId, data.payload)
+          } else if (data?.type === 'permission_resolved') {
+            const outcome = permissionOutcomeForEvent('permission_resolved', data.payload)
+            if (outcome) this.recordPermissionOutcome(data.payload.requestId, outcome)
+          }
         }
         this.emit('session_event', { sessionId, event, data })
       })

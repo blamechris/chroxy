@@ -184,7 +184,6 @@ import {
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
 import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
 import { applyInputAcknowledgement, type InputDeliveryMap } from './input-delivery'
-import { isPermissionDecision } from './pending-permissions'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -2343,6 +2342,60 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   }
 }
 
+const ALLOW_TOKENS: readonly string[] = ['allow', 'allowAlways', 'allowSession']
+
+/**
+ * #8348: bring a card the client already holds into line with the server's
+ * recorded outcome, keeping the card's identity (id, position, timestamp, tool
+ * input).
+ *
+ * The result always carries `permissionOutcome` (what makes the renderers show a
+ * finished-prompt record and the stale-request guard ignore a late
+ * `permission_request`), the clean `"<tool>: <description>"` content (dropping
+ * the "(Expired ...)" note a live expiry appended), and NO actionable fields
+ * (`options`). Then, by outcome:
+ *
+ *   - `allowed` / `denied`: `answered` is the decision. A more specific allow
+ *     the user chose (`allowSession`, `allowAlways`) is kept; anything else,
+ *     including a card that merely ran out its own countdown, takes the plain
+ *     token. `answeredAt` is kept when the card had one.
+ *   - `expired`: no decision was made, so `answered` is cleared, and with it a
+ *     deny the client inferred from a timeout. A countdown still running is
+ *     closed (`expiresAt` moves to now); one that already ended keeps its time.
+ *
+ * Returns `held` itself when it already is exactly that, so a repeat delivery
+ * does not rewrite the message.
+ */
+function reconcileHeldPermissionCard(held: ChatMessage, record: ChatMessage, now: number): ChatMessage {
+  const outcome = record.permissionOutcome!
+  const base: ChatMessage = {
+    ...held,
+    content: record.content,
+    ...(record.tool ? { tool: record.tool } : {}),
+    permissionOutcome: outcome,
+    options: undefined,
+  }
+  if (outcome === 'expired') {
+    base.answered = undefined
+    base.answeredAt = undefined
+    if (held.expiresAt !== undefined) base.expiresAt = Math.min(held.expiresAt, now)
+  } else {
+    base.answered =
+      outcome === 'allowed'
+        ? (held.answered && ALLOW_TOKENS.includes(held.answered) ? held.answered : 'allow')
+        : 'deny'
+    base.answeredAt = held.answeredAt ?? now
+  }
+  const same =
+    held.permissionOutcome === base.permissionOutcome &&
+    held.content === base.content &&
+    held.tool === base.tool &&
+    held.options === undefined &&
+    held.answered === base.answered &&
+    held.expiresAt === base.expiresAt
+  return same ? held : base
+}
+
 /**
  * `permission_outcome` (#8348) — the server's durable record of how a permission
  * prompt ended, replayed so a session switch or a reload can still show it.
@@ -2360,15 +2413,16 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
  *     view a rebuild will KEEP (#7508): in a delta replay that is everything, so a
  *     card the client watched live collapses the outcome into itself; in a full
  *     rebuild it is the appended tail only, so the live card in the discarded
- *     prefix does not suppress the outcome that has to replace it. A record
- *     already in the tail (the same entry replayed twice) is left as it is.
- *   - NEVER A PENDING CARD. A held card that is already answered, or already past
- *     its `expiresAt`, is left exactly as it is (it IS the record). A held card
- *     still showing live Allow/Deny controls for a prompt the server says is over
- *     (the client missed the `permission_resolved` while disconnected) is retired:
- *     answered with the recorded decision, or marked expired — the same two
- *     transitions the live frames make, because leaving it actionable would put
- *     a button on a dead prompt.
+ *     prefix does not suppress the outcome that has to replace it.
+ *   - THE RECORDED OUTCOME IS AUTHORITATIVE. What a held card says is only what
+ *     the client inferred from the live frames, and that can be wrong: an
+ *     in-process provider resolves a TIMED-OUT or stopped prompt as a deny, so
+ *     the card was stamped `answered: 'deny'` for a prompt nobody refused; a card
+ *     that ran out its own countdown never learned that the user had answered it
+ *     from another device. Every matched card is therefore reconciled with the
+ *     outcome (see {@link reconcileHeldPermissionCard}), whatever it held, and
+ *     stamped with it, so the stale-request guard in the clients' `permission_request`
+ *     handlers recognises it as finished.
  *
  * No notification, unlike a live prompt: this is history, not an event.
  */
@@ -2393,23 +2447,10 @@ function dispatchPermissionOutcome<S extends DispatchSessionBase>(
     if (found === -1) return { messages: [...ss.messages, record] } as Partial<S>
     const idx = found + offset
     const held = ss.messages[idx]!
-    // The same entry replayed again: the record is already here.
-    if (held.permissionOutcome) return {} as Partial<S>
-    // A live card that already carries its outcome (answered, or past its
-    // countdown) IS the record of this prompt.
-    if (isPermissionDecision(held.answered)) return {} as Partial<S>
-    if (held.expiresAt !== undefined && held.expiresAt <= Date.now()) return {} as Partial<S>
-    // A live card still offering controls for a prompt the server says is over.
+    const reconciled = reconcileHeldPermissionCard(held, record, Date.now())
+    if (reconciled === held) return {} as Partial<S>
     const next = ss.messages.slice()
-    next[idx] =
-      payload.outcome === 'expired'
-        ? { ...held, options: undefined, expiresAt: Date.now() }
-        : {
-            ...held,
-            answered: payload.outcome === 'allowed' ? 'allow' : 'deny',
-            answeredAt: Date.now(),
-            options: undefined,
-          }
+    next[idx] = reconciled
     return { messages: next } as Partial<S>
   })
 }

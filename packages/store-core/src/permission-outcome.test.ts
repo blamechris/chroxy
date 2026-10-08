@@ -164,7 +164,7 @@ describe('permission_outcome through a FULL-REBUILD replay (session switch / rel
     expect(derivePendingPermissionCounts({ s1: { messages: swapped } }, NOW)).toEqual({})
   })
 
-  it('keeps the live resolved card that raced into the rebuilt tail, with no second record', () => {
+  it('keeps the live resolved card that raced into the rebuilt tail, stamped with the outcome and with no second record', () => {
     const env = makeEnv([])
     reconcileReplayStart('s1', true, [])
     // A LIVE frame landed mid-replay (so it is in the tail the swap keeps)...
@@ -174,7 +174,7 @@ describe('permission_outcome through a FULL-REBUILD replay (session switch / rel
     dispatch(env, outcome({ outcome: 'denied' }))
     const swapped = reconcileReplayEnd('s1', env.sessions.s1!.messages, 7).swappedMessages as ChatMessage[]
     expect(prompts(swapped)).toHaveLength(1)
-    expect(prompts(swapped)[0]).toBe(raced)
+    expect(prompts(swapped)[0]).toMatchObject({ id: 'live-perm', answered: 'deny', answeredAt: NOW, permissionOutcome: 'denied' })
   })
 
   it('is idempotent: the same entry replayed twice leaves one record, untouched by the second', () => {
@@ -205,23 +205,78 @@ describe('permission_outcome through a FULL-REBUILD replay (session switch / rel
 })
 
 describe('permission_outcome through a DELTA replay (reconnect with a cursor) (#8348)', () => {
-  it('collapses onto the card the client already holds, resolved: nothing changes', () => {
+  it('collapses onto the card the client already holds, resolved: one card, stamped with the outcome', () => {
     const resolved = livePending({ options: undefined, answered: 'allow', answeredAt: NOW })
     const env = makeEnv([user('h1', 'run it'), resolved])
     reconcileReplayStart('s1', false, env.sessions.s1!.messages)
     dispatch(env, outcome({ outcome: 'allowed' }))
     const after = env.sessions.s1!.messages
     expect(after).toHaveLength(2)
-    expect(after[1]).toBe(resolved)
+    expect(after[1]).toMatchObject({ id: 'live-perm', answered: 'allow', answeredAt: NOW, permissionOutcome: 'allowed', content: 'Bash: ls -la' })
   })
 
-  it('collapses onto an expired card the client holds (it already says "Timed out")', () => {
+  it('keeps the more specific allow the user chose (allowSession)', () => {
+    const env = makeEnv([livePending({ options: undefined, answered: 'allowSession', answeredAt: NOW })])
+    reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+    dispatch(env, outcome({ outcome: 'allowed' }))
+    expect(env.sessions.s1!.messages[0]).toMatchObject({ answered: 'allowSession', permissionOutcome: 'allowed' })
+  })
+
+  it('RELABELS a card an in-process timeout stamped denied when the server recorded it expired', () => {
+    // permission_resolved{decision:'deny', reason:'timeout'} -> the client stored answered:'deny'.
+    const timedOut = livePending({ options: undefined, answered: 'deny', answeredAt: NOW, expiresAt: NOW - 1 })
+    const env = makeEnv([timedOut])
+    reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+    dispatch(env, outcome({ outcome: 'expired' }))
+    const [card] = env.sessions.s1!.messages
+    expect(env.sessions.s1!.messages).toHaveLength(1)
+    expect(card!.permissionOutcome).toBe('expired')
+    expect(card!.answered).toBeUndefined()
+    expect(card!.answeredAt).toBeUndefined()
+    expect(isPermissionRequestAnswered({ s1: env.sessions.s1! }, 'perm-1')).toBe(false)
+  })
+
+  it('a card that ran out its own countdown accepts an authoritative allowed', () => {
+    const locallyExpired = livePending({ options: undefined, expiresAt: NOW - 1 })
+    const env = makeEnv([locallyExpired])
+    reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+    dispatch(env, outcome({ outcome: 'allowed' }))
+    const [card] = env.sessions.s1!.messages
+    expect(card).toMatchObject({ id: 'live-perm', permissionOutcome: 'allowed', answered: 'allow' })
+    expect(card!.options).toBeUndefined()
+  })
+
+  it('a card marked allowed locally is corrected to denied when the server says denied', () => {
+    const env = makeEnv([livePending({ options: undefined, answered: 'allow', answeredAt: NOW })])
+    reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+    dispatch(env, outcome({ outcome: 'denied' }))
+    expect(env.sessions.s1!.messages[0]).toMatchObject({ answered: 'deny', permissionOutcome: 'denied' })
+  })
+
+  it('drops the "(Expired ...)" note a live expiry appended: the content is the clean record text', () => {
+    const noted = livePending({ options: undefined, expiresAt: NOW - 1, content: 'Bash: ls -la\n(Expired \u2014 this permission was already handled or timed out)' })
+    const env = makeEnv([noted])
+    reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+    dispatch(env, outcome())
+    expect(env.sessions.s1!.messages[0]!.content).toBe('Bash: ls -la')
+  })
+
+  it('collapses onto an expired card the client holds: it keeps its time and gains the stamp', () => {
     const expired = livePending({ options: undefined, expiresAt: NOW - 1 })
     const env = makeEnv([expired])
     reconcileReplayStart('s1', false, env.sessions.s1!.messages)
     dispatch(env, outcome())
-    expect(env.sessions.s1!.messages).toEqual([expired])
-    expect(env.sessions.s1!.messages[0]).toBe(expired)
+    expect(env.sessions.s1!.messages).toHaveLength(1)
+    expect(env.sessions.s1!.messages[0]).toMatchObject({ id: 'live-perm', permissionOutcome: 'expired', expiresAt: NOW - 1 })
+  })
+
+  it('a repeat delivery after the merge leaves the merged card untouched', () => {
+    const env = makeEnv([livePending()])
+    reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+    dispatch(env, outcome())
+    const merged = env.sessions.s1!.messages[0]!
+    dispatch(env, outcome())
+    expect(env.sessions.s1!.messages[0]).toBe(merged)
   })
 
   it('retires a still-pending card for a prompt the server says is over (a missed permission_resolved)', () => {
@@ -231,6 +286,7 @@ describe('permission_outcome through a DELTA replay (reconnect with a cursor) (#
     const [card] = env.sessions.s1!.messages
     expect(env.sessions.s1!.messages).toHaveLength(1)
     expect(card!.answered).toBe('allow')
+    expect(card!.permissionOutcome).toBe('allowed')
     expect(card!.options).toBeUndefined()
     expect(isLivePermissionPrompt(card!, NOW)).toBe(false)
     expect(isPermissionRequestAnswered({ s1: env.sessions.s1! }, 'perm-1')).toBe(true)
@@ -243,6 +299,7 @@ describe('permission_outcome through a DELTA replay (reconnect with a cursor) (#
     const [card] = env.sessions.s1!.messages
     expect(card!.options).toBeUndefined()
     expect(card!.answered).toBeUndefined()
+    expect(card!.permissionOutcome).toBe('expired')
     expect(isLivePermissionPrompt(card!, Date.now() + 1)).toBe(false)
     expect(derivePendingPermissionCounts({ s1: env.sessions.s1! }, Date.now() + 1)).toEqual({})
   })
@@ -260,6 +317,7 @@ describe('permission_outcome outside any replay window (#8348)', () => {
     const env = makeEnv([livePending({ options: undefined, answered: 'allow', answeredAt: NOW })])
     dispatch(env, outcome({ outcome: 'allowed' }))
     expect(env.sessions.s1!.messages).toHaveLength(1)
+    expect(env.sessions.s1!.messages[0]!.permissionOutcome).toBe('allowed')
   })
 
   it('addMessage fallback when the session is unknown', () => {

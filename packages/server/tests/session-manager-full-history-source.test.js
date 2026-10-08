@@ -7,6 +7,8 @@ import { EventEmitter } from 'node:events'
 import { SessionManager } from '../src/session-manager.js'
 import { BaseSession } from '../src/base-session.js'
 import { encodeProjectPath, MAX_MESSAGES } from '../src/jsonl-reader.js'
+import { conversationHandlers } from '../src/handlers/conversation-handlers.js'
+import { nsCtx } from './test-helpers.js'
 
 /**
  * #7484 — the PRODUCER contract for `getFullHistoryAsync`'s descriptor.
@@ -383,5 +385,115 @@ describe('#7507 — isSessionBusy is LIVENESS (isRunning), not mid-turn (_isBusy
     } finally {
       session._destroyPendingBackgroundShells()
     }
+  })
+})
+
+/**
+ * #8348 -- "Sync Full History" rebuilds the client's transcript from the
+ * provider's JSONL file, which never contains the daemon's own permission
+ * outcome records. They have to be folded back in or the sync erases them.
+ */
+describe('#8348 -- the JSONL rebuild keeps the saved permission outcomes', () => {
+  const at = (iso) => new Date(iso).getTime()
+  const transcript = () => ([
+    { type: 'user', uuid: 'u1', timestamp: '2026-01-15T00:00:01.000Z', message: { content: [{ type: 'text', text: 'run it' }] } },
+    { type: 'user', uuid: 'u2', timestamp: '2026-01-15T00:00:10.000Z', message: { content: [{ type: 'text', text: 'and again' }] } },
+  ])
+
+  function setup(cwdTag, convId, opts = {}) {
+    const mgr = newManager(opts)
+    const cwd = `/repo/${cwdTag}`
+    writeTranscript(cwd, convId, opts.transcript || transcript())
+    mgr._sessions.set('s1', { session: fakeSession({ resumeSessionId: convId }), name: 'S', cwd })
+    return mgr
+  }
+
+  function outcome(mgr, requestId, timestampMs, kind = 'expired') {
+    mgr._history.recordHistory('s1', 'permission_outcome', { requestId, tool: 'Bash', description: requestId, outcome: kind })
+    const entry = mgr.getHistory('s1').find((e) => e.requestId === requestId)
+    entry.timestamp = timestampMs
+  }
+
+  it('orders each outcome into the transcript by time, and says the source is still jsonl', async () => {
+    const mgr = setup('outcome-order', 'conv-o-1')
+    outcome(mgr, 'perm-a', at('2026-01-15T00:00:05.000Z'))
+    outcome(mgr, 'perm-b', at('2026-01-15T00:00:20.000Z'), 'allowed')
+
+    const result = await mgr.getFullHistoryAsync('s1')
+
+    assert.equal(result.source, 'jsonl')
+    assert.deepEqual(
+      result.entries.map((e) => e.type === 'permission_outcome' ? `outcome:${e.requestId}` : e.content),
+      ['run it', 'outcome:perm-a', 'and again', 'outcome:perm-b'],
+    )
+  })
+
+  it('never lets a ring seq ride along: the JSONL cursor must not advance', async () => {
+    const mgr = setup('outcome-seq', 'conv-o-2')
+    outcome(mgr, 'perm-a', at('2026-01-15T00:00:05.000Z'))
+    assert.equal(typeof mgr.getHistory('s1')[0]._seq, 'number', 'precondition: the ring entry has a seq')
+
+    const { entries } = await mgr.getFullHistoryAsync('s1')
+
+    assert.ok(entries.every((e) => !('_seq' in e)), 'no entry of a JSONL slice carries a ring seq')
+    assert.ok(typeof mgr.getHistory('s1')[0]._seq === 'number', 'and the ring entry itself is untouched')
+  })
+
+  it('carries one record per requestId and leaves the ring buffer unchanged', async () => {
+    const mgr = setup('outcome-dedupe', 'conv-o-3')
+    outcome(mgr, 'perm-a', at('2026-01-15T00:00:05.000Z'))
+    mgr.getHistory('s1').push({ ...mgr.getHistory('s1')[0] }) // a duplicate that slipped in
+    const ringLength = mgr.getHistory('s1').length
+
+    const { entries } = await mgr.getFullHistoryAsync('s1')
+
+    assert.equal(entries.filter((e) => e.type === 'permission_outcome').length, 1)
+    assert.equal(mgr.getHistory('s1').length, ringLength)
+  })
+
+  it('on a truncated tail, drops an outcome older than the window', async () => {
+    const turns = userTurns(MAX_MESSAGES + 40).map((t, i) => ({ ...t, timestamp: new Date(Date.UTC(2026, 0, 15, 0, 0, i)).toISOString() }))
+    const mgr = setup('outcome-trunc', 'conv-o-4', { transcript: turns })
+    outcome(mgr, 'perm-old', Date.UTC(2026, 0, 15, 0, 0, 3)) // before message 40
+    outcome(mgr, 'perm-new', Date.UTC(2026, 0, 15, 0, 0, 100))
+
+    const result = await mgr.getFullHistoryAsync('s1')
+
+    assert.equal(result.truncated, true)
+    assert.deepEqual(result.entries.filter((e) => e.type === 'permission_outcome').map((e) => e.requestId), ['perm-new'])
+  })
+
+  it('leaves a transcript with no outcomes exactly as read', async () => {
+    const mgr = setup('outcome-none', 'conv-o-5')
+    const result = await mgr.getFullHistoryAsync('s1')
+    assert.equal(result.entries.length, 2)
+  })
+
+  it('request_full_history sends the outcome and advertises no cursor from it', async () => {
+    const mgr = setup('outcome-wire', 'conv-o-6')
+    outcome(mgr, 'perm-a', at('2026-01-15T00:00:05.000Z'))
+    const sends = []
+    const ctx = nsCtx({
+      send: (_t, msg) => sends.push(msg),
+      sessionManager: mgr,
+      reseedActiveAgents: () => {},
+      resendPendingQuestions: () => {},
+      resendPendingPermissions: () => {},
+    })
+    await conversationHandlers.request_full_history(
+      { readyState: 1, bufferedAmount: 0 }, { id: 'c1', activeSessionId: 's1' }, { type: 'request_full_history' }, ctx,
+    )
+    for (let i = 0; i < 6; i++) await new Promise((r) => setImmediate(r))
+
+    const start = sends.find((m) => m.type === 'history_replay_start')
+    assert.equal(start.fullHistory, true)
+    assert.equal('latestSeq' in start, false, 'a JSONL rebuild advertises no ring cursor')
+    const frame = sends.find((m) => m.type === 'permission_outcome')
+    assert.ok(frame, 'the outcome record was sent')
+    assert.equal(frame.requestId, 'perm-a')
+    assert.equal(frame.sessionId, 's1')
+    assert.equal('historySeq' in frame, false)
+    const order = sends.map((m) => m.type)
+    assert.ok(order.indexOf('permission_outcome') < order.indexOf('history_replay_end'))
   })
 })

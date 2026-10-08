@@ -6,6 +6,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { APIUserAbortError } from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from '../src/byok-session.js'
+import { SessionManager } from '../src/session-manager.js'
 import { BUILTIN_TOOLS } from '../src/byok-tools.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
@@ -5136,8 +5137,9 @@ describe('ClaudeByokSession', () => {
      * subscribes to those child events and re-emits `agent_event` —
      * which is what these tests exercise.
      */
-    async function runTaskAndDriveChild(driveChild) {
+    async function runTaskAndDriveChild(driveChild, { beforeRun } = {}) {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
+      beforeRun?.(session)
       session.setPermissionMode('auto')
       // Force-allow any parent permission check (mirrors the override
       // tests). These cases focus on event forwarding inside
@@ -5316,6 +5318,103 @@ describe('ClaudeByokSession', () => {
       assert.equal(resolved.parentToolUseId, 'tu_task_5016')
       assert.equal(resolved.payload.requestId, 'perm-child-2')
       assert.equal(resolved.payload.decision, 'allow')
+    })
+
+    // #8348 -- a subagent's prompts reach the parent session only as
+    // `agent_event`, so the durable permission transcript has to read them from
+    // there. These drive the REAL relay (child -> parent, and child -> its own
+    // child -> parent) under a real SessionManager.
+    describe('permission outcome transcript (#8348)', () => {
+      async function runUnderManager(driveChild) {
+        const dir = mkdtempSync(join(tmpdir(), 'byok-outcome-'))
+        const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: join(dir, 'state.json') })
+        try {
+          await runTaskAndDriveChild(driveChild, {
+            beforeRun: (session) => {
+              mgr._sessions.set('p1', { session, name: 'P', cwd: '/tmp' })
+              mgr._wireSessionEvents('p1', session)
+            },
+          })
+          return mgr.getHistory('p1').filter((e) => e.type === 'permission_outcome')
+        } finally {
+          mgr._sessions.delete('p1')
+          mgr.destroyAll()
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }
+
+      const raised = (requestId, over = {}) => ({
+        requestId, tool: 'mcp__foo__bar', description: 'mcp__foo__bar', input: {}, remainingMs: 60000, createdAt: Date.now(), ...over,
+      })
+
+      it('records a child prompt the user answered', async () => {
+        const out = await runUnderManager((child) => {
+          child.emit('permission_request', raised('perm-c-1', { description: 'call bar' }))
+          child.emit('permission_resolved', { requestId: 'perm-c-1', decision: 'allow', reason: 'user' })
+        })
+        assert.equal(out.length, 1)
+        assert.deepEqual([out[0].requestId, out[0].tool, out[0].description, out[0].outcome], ['perm-c-1', 'mcp__foo__bar', 'call bar', 'allowed'])
+      })
+
+      it('records a child prompt that timed out as expired, not denied', async () => {
+        const out = await runUnderManager((child) => {
+          child.emit('permission_request', raised('perm-c-2'))
+          child.emit('permission_resolved', { requestId: 'perm-c-2', decision: 'deny', reason: 'timeout' })
+        })
+        assert.deepEqual(out.map((e) => [e.requestId, e.outcome]), [['perm-c-2', 'expired']])
+      })
+
+      it('records a grandchild prompt relayed through the child, under the outermost session', async () => {
+        const out = await runUnderManager((child) => {
+          child.emit('agent_event', { parentToolUseId: 'tu_gc', type: 'permission_request', payload: raised('perm-gc-1') })
+          child.emit('agent_event', { parentToolUseId: 'tu_gc', type: 'permission_resolved', payload: { requestId: 'perm-gc-1', decision: 'deny', reason: 'user' } })
+        })
+        assert.deepEqual(out.map((e) => [e.requestId, e.outcome]), [['perm-gc-1', 'denied']])
+      })
+
+      it('records one outcome per prompt when a resolution is relayed twice', async () => {
+        const out = await runUnderManager((child) => {
+          child.emit('permission_request', raised('perm-c-3'))
+          child.emit('permission_resolved', { requestId: 'perm-c-3', decision: 'allow', reason: 'user' })
+          child.emit('permission_resolved', { requestId: 'perm-c-3', decision: 'deny', reason: 'cleared' })
+        })
+        assert.deepEqual(out.map((e) => [e.requestId, e.outcome]), [['perm-c-3', 'allowed']])
+      })
+
+      it('keeps values under sensitive keys out of a child prompt\'s recorded description', async () => {
+        const out = await runUnderManager((child) => {
+          child.emit('permission_request', raised('perm-c-4', {
+            description: '{"password":"ordinarySecret123","region":"eu"}',
+            input: { password: '[REDACTED]', region: 'eu' },
+          }))
+          child.emit('permission_resolved', { requestId: 'perm-c-4', decision: 'deny', reason: 'user' })
+        })
+        assert.equal(out[0].description.includes('ordinarySecret123'), false)
+        assert.ok(out[0].description.includes('eu'))
+      })
+
+      it('records an expired outcome for a child prompt still open at shutdown', async () => {
+        const dir = mkdtempSync(join(tmpdir(), 'byok-outcome-sd-'))
+        const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: join(dir, 'state.json') })
+        try {
+          await runTaskAndDriveChild((child) => {
+            child.emit('permission_request', raised('perm-c-5'))
+          }, {
+            beforeRun: (session) => {
+              mgr._sessions.set('p1', { session, name: 'P', cwd: '/tmp' })
+              mgr._wireSessionEvents('p1', session)
+            },
+          })
+          assert.ok(mgr._permissionRequests.has('perm-c-5'), 'the open child prompt is tracked')
+          mgr.destroyAll()
+          const saved = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))
+          const out = saved.sessions[0].history.filter((e) => e.type === 'permission_outcome')
+          assert.deepEqual(out.map((e) => [e.requestId, e.outcome]), [['perm-c-5', 'expired']])
+        } finally {
+          mgr.destroyAll()
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
     })
 
     it('#5056: parent.respondToPermission routes a child requestId to the child PermissionManager', async () => {

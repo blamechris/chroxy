@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
+import { redactValue } from './redaction.js'
 
 const log = createLogger('session-message-history')
 const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
@@ -21,6 +22,17 @@ export const PERMISSION_OUTCOME_DESCRIPTION_MAX = 500
 function clipText(value, max) {
   const text = typeof value === 'string' ? value : ''
   return text.length > max ? text.slice(0, max - 1) + '\u2026' : text
+}
+
+// Upper bound on the text handed to the pattern redactor, so a multi-megabyte
+// field cannot make the scan expensive; far above the clipped length, so it
+// never splits a secret inside what is kept.
+const MAX_REDACT_INPUT = 8192
+
+/** Pattern-redact, THEN clip: clipping first could leave a partial secret the patterns miss. */
+function clipRedacted(value, max) {
+  const text = typeof value === 'string' ? value.slice(0, MAX_REDACT_INPUT) : ''
+  return clipText(redactValue(text), max)
 }
 
 /**
@@ -557,8 +569,8 @@ export class SessionMessageHistory extends EventEmitter {
         this._pushHistory(history, {
           type: 'permission_outcome',
           requestId: data.requestId,
-          tool: clipText(data.tool, PERMISSION_OUTCOME_TOOL_MAX),
-          description: clipText(data.description, PERMISSION_OUTCOME_DESCRIPTION_MAX),
+          tool: clipRedacted(data.tool, PERMISSION_OUTCOME_TOOL_MAX),
+          description: clipRedacted(data.description, PERMISSION_OUTCOME_DESCRIPTION_MAX),
           outcome: data.outcome,
           timestamp: Date.now(),
         }, sessionId)

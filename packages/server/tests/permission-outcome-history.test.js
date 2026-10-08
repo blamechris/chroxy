@@ -279,6 +279,37 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     assert.equal(outcomes(mgr, 's1')[0].description, 'Which shape?')
   })
 
+  it('keeps values under sensitive keys out of the recorded description and the serialized state', async () => {
+    const { pm, requestId, decided } = raise('s1', 'mcp__svc__call', {
+      password: 'ordinarySecret123', config: { api_key: 'nestedSecret456' }, region: 'eu-west-1',
+    })
+    pm.respondToPermission(requestId, 'deny')
+    await decided
+    const [e] = outcomes(mgr, 's1')
+    assert.ok(e, 'an outcome was recorded')
+    assert.ok(e.description.includes('eu-west-1'), 'the non-sensitive input is still described')
+    assert.equal(e.description.includes('ordinarySecret123'), false)
+    assert.equal(e.description.includes('nestedSecret456'), false)
+    assert.ok(e.description.includes('[REDACTED]'))
+    const serialized = JSON.stringify(mgr.serializeState())
+    assert.equal(serialized.includes('ordinarySecret123'), false, 'not in the state file payload')
+    assert.equal(serialized.includes('nestedSecret456'), false)
+  })
+
+  it('redacts before it clips: a key straddling the length cap is not left as an unmatched partial', () => {
+    // The key starts ~29 characters before the cap, so only a prefix of it survives
+    // clipping; a pattern with a length floor no longer matches that prefix.
+    mgr.notePermissionRequest('s1', {
+      requestId: 'perm-cap', tool: 'Bash',
+      description: `${'x'.repeat(470)} sk-${'A'.repeat(45)}`,
+    })
+    mgr._sessions.set('s1', mgr._sessions.get('s1') || { session: new EventEmitter(), name: 's1', cwd: '/tmp' })
+    mgr.recordPermissionOutcome('perm-cap', 'allowed')
+    const [e] = outcomes(mgr, 's1')
+    assert.equal(e.description.includes('sk-AAAA'), false)
+    assert.ok(e.description.length <= PERMISSION_OUTCOME_DESCRIPTION_MAX)
+  })
+
   it('records into the OWNING session only', async () => {
     const a = raise('s1')
     const b = raise('s2')
@@ -480,22 +511,64 @@ describe('SessionManager records permission outcomes: hook-routed providers (#83
     assert.equal(mgr._permissionRequests.size, 0)
   })
 
-  it('still answers the hook when the session manager lacks the recording methods', async () => {
-    const stubbed = createPermissionHandler({
-      sendFn: mock.fn(),
-      broadcastFn: mock.fn(),
-      validateBearerAuth: mock.fn(() => true),
-      pushManager: null,
-      pendingPermissions: new Map(),
-      permissionSessionMap: new Map(),
-      getSessionManager: () => ({}),
-      findSessionByHookSecret: () => ({ session: {}, sessionId: 's1' }),
+  // The recording is best-effort: whatever the session manager does (no such
+  // methods, or methods that throw), the hook is still answered and cleaned up.
+  for (const [label, sessionManager] of [
+    ['lacks the recording methods', () => ({})],
+    ['throws from the recording methods', () => ({
+      notePermissionRequest() { throw new Error('boom') },
+      recordPermissionOutcome() { throw new Error('boom') },
+    })],
+  ]) {
+    it(`still answers the hook when the session manager ${label}`, async () => {
+      const pending = new Map()
+      const routes = new Map()
+      const stubbed = createPermissionHandler({
+        sendFn: mock.fn(),
+        broadcastFn: mock.fn(),
+        validateBearerAuth: mock.fn(() => true),
+        pushManager: null,
+        pendingPermissions: pending,
+        permissionSessionMap: routes,
+        getSessionManager: sessionManager,
+        findSessionByHookSecret: () => ({ session: {}, sessionId: 's1' }),
+      })
+      const res = makeRes()
+      stubbed.handlePermissionRequest(makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }), { authorization: 'Bearer x' }), res)
+      await new Promise((r) => setImmediate(r))
+      assert.equal(pending.size, 1, 'the request became pending')
+      const [requestId] = [...pending.keys()]
+      assert.equal(routes.get(requestId), 's1', 'and is routed to its session')
+      assert.equal(res.statusCode, null, 'nothing is written until it is answered')
+
+      stubbed.resolvePermission(requestId, 'allow')
+
+      assert.equal(res.statusCode, 200)
+      assert.deepEqual(JSON.parse(res.body), { decision: 'allow' })
+      assert.equal(pending.size, 0, 'the pending entry is cleaned up')
+      assert.equal(routes.size, 0, 'and so is its route')
+      stubbed.destroy()
     })
-    const res = makeRes()
-    stubbed.handlePermissionRequest(makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }), { authorization: 'Bearer x' }), res)
-    await new Promise((r) => setImmediate(r))
+  }
+
+  // #8348 -- the description the transcript keeps is built from the SANITIZED
+  // input, so a value under a sensitive key never reaches history or the state file.
+  it('keeps values under sensitive keys out of the recorded description and the serialized state', async () => {
+    const { res, requestId } = await raise({
+      tool_name: 'mcp__svc__call',
+      tool_input: { password: 'ordinarySecret123', config: { api_key: 'nestedSecret456' }, region: 'eu-west-1' },
+    })
+    resolver.resolve(requestId, 'deny', null, { clientId: 'c1' })
     res.emit('close')
-    stubbed.destroy()
+    const [e] = outcomes(mgr, 's1')
+    assert.ok(e, 'an outcome was recorded')
+    assert.ok(e.description.includes('eu-west-1'), 'the non-sensitive input is still described')
+    assert.equal(e.description.includes('ordinarySecret123'), false)
+    assert.equal(e.description.includes('nestedSecret456'), false)
+    assert.ok(e.description.includes('[REDACTED]'))
+    const serialized = JSON.stringify(mgr.serializeState())
+    assert.equal(serialized.includes('ordinarySecret123'), false, 'not in the state file payload')
+    assert.equal(serialized.includes('nestedSecret456'), false)
   })
 })
 
