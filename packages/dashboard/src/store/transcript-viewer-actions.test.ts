@@ -11,6 +11,7 @@
  * traffic takes).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { REPLAY_BACKPRESSURE_MAX_WAIT_MS, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
 
 function createMockSocket() {
   return {
@@ -104,7 +105,7 @@ describe('requestConversationTranscript / closeTranscriptViewer (#6863)', () => 
     useConnectionStore.getState().requestConversationTranscript('conv-5')
     expect(useConnectionStore.getState().transcriptViewer.status).toBe('loading')
 
-    vi.advanceTimersByTime(15_000)
+    vi.advanceTimersByTime(TRANSCRIPT_INACTIVITY_MS)
 
     const viewer = useConnectionStore.getState().transcriptViewer
     expect(viewer.status).toBe('error')
@@ -124,7 +125,7 @@ describe('requestConversationTranscript / closeTranscriptViewer (#6863)', () => 
     handleMessage({ type: 'history_replay_end', sessionId: 'conv-6' }, ctx() as never)
     expect(useConnectionStore.getState().transcriptViewer.status).toBe('ready')
 
-    vi.advanceTimersByTime(15_000)
+    vi.advanceTimersByTime(TRANSCRIPT_INACTIVITY_MS)
 
     // Still ready — the (cleared) watchdog must not clobber a completed fetch.
     expect(useConnectionStore.getState().transcriptViewer.status).toBe('ready')
@@ -306,7 +307,7 @@ describe('transcript frames stay intercepted until their own history_replay_end 
     handleMessage({ type: 'history_replay_start', sessionId: CONV_ID, conversationId: CONV_ID }, ctx() as never)
 
     // Stream stalls long enough for the watchdog to surface an error...
-    vi.advanceTimersByTime(15_000)
+    vi.advanceTimersByTime(TRANSCRIPT_INACTIVITY_MS)
     expect(useConnectionStore.getState().transcriptViewer.status).toBe('error')
 
     // ...then the server's frames finally show up.
@@ -413,7 +414,7 @@ describe('transcript watchdog is inactivity-based (#7000 C3)', () => {
     const { useConnectionStore, handleMessage } = await startFetch()
     handleMessage({ type: 'history_replay_start', sessionId: CONV_ID, conversationId: CONV_ID }, ctx() as never)
 
-    // 5 × 12s of steady progress = 60s total, well past the 15s window.
+    // 5 × 12s of steady progress = 60s total, well past the inactivity window.
     for (let i = 0; i < 5; i++) {
       vi.advanceTimersByTime(12_000)
       handleMessage(
@@ -436,11 +437,56 @@ describe('transcript watchdog is inactivity-based (#7000 C3)', () => {
     const { useConnectionStore, handleMessage } = await startFetch()
     handleMessage({ type: 'history_replay_start', sessionId: CONV_ID, conversationId: CONV_ID }, ctx() as never)
 
-    vi.advanceTimersByTime(14_999)
+    vi.advanceTimersByTime(TRANSCRIPT_INACTIVITY_MS - 1)
     expect(useConnectionStore.getState().transcriptViewer.status).toBe('loading')
     vi.advanceTimersByTime(1)
     expect(useConnectionStore.getState().transcriptViewer.status).toBe('error')
     expect(useConnectionStore.getState().transcriptViewer.error).toMatch(/timed out/i)
+    vi.useRealTimers()
+  })
+
+  // #7496 — the server parks a congested replay for up to
+  // REPLAY_BACKPRESSURE_MAX_WAIT_MS and emits NOTHING for the id meanwhile. A park
+  // that then drains is a healthy replay, so the viewer must still be loading
+  // when the server resumes. The silence length comes from the server's own
+  // ceiling (imported, not restated), and the assertions are on observable state,
+  // so raising the server cap or lowering the watchdog goes red here.
+  it('silence as long as the server\'s longest back-pressure park is NOT an error, and the stream completes after it (#7496)', async () => {
+    vi.useFakeTimers()
+    const { useConnectionStore, handleMessage } = await startFetch()
+    handleMessage({ type: 'history_replay_start', sessionId: CONV_ID, conversationId: CONV_ID }, ctx() as never)
+
+    vi.advanceTimersByTime(REPLAY_BACKPRESSURE_MAX_WAIT_MS)
+    expect(useConnectionStore.getState().transcriptViewer.status).toBe('loading')
+    expect(useConnectionStore.getState().transcriptViewer.error).toBeNull()
+
+    // The drain completes and the replay resumes.
+    handleMessage(
+      { type: 'message', messageType: 'response', content: 'after the park', sessionId: CONV_ID, timestamp: 1 },
+      ctx() as never,
+    )
+    handleMessage({ type: 'history_replay_end', sessionId: CONV_ID }, ctx() as never)
+    const viewer = useConnectionStore.getState().transcriptViewer
+    expect(viewer.status).toBe('ready')
+    expect(viewer.error).toBeNull()
+    expect(viewer.messages).toHaveLength(1)
+    vi.useRealTimers()
+  })
+
+  it('a park that repeats (each shorter than the ceiling, with a frame between) never accumulates into a timeout (#7496)', async () => {
+    vi.useFakeTimers()
+    const { useConnectionStore, handleMessage } = await startFetch()
+    handleMessage({ type: 'history_replay_start', sessionId: CONV_ID, conversationId: CONV_ID }, ctx() as never)
+
+    for (let i = 0; i < 3; i++) {
+      vi.advanceTimersByTime(REPLAY_BACKPRESSURE_MAX_WAIT_MS)
+      expect(useConnectionStore.getState().transcriptViewer.status).toBe('loading')
+      handleMessage(
+        { type: 'message', messageType: 'response', content: `chunk ${i}`, sessionId: CONV_ID, timestamp: i },
+        ctx() as never,
+      )
+    }
+    expect(useConnectionStore.getState().transcriptViewer.error).toBeNull()
     vi.useRealTimers()
   })
 
