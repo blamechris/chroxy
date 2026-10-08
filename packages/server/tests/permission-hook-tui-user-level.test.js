@@ -54,8 +54,12 @@ function runCommand({ file, args, shellCommand, env, payload, timeout = 15000 })
       clearTimeout(timer)
       resolve({ status, signal, stdout, stderr })
     })
-    child.stdin.write(JSON.stringify(payload))
-    child.stdin.end()
+    // #8263: the inert (unmarked) copy exits BEFORE reading stdin, by design, so
+    // writing the payload can race its exit and raise EPIPE on the pipe. That is
+    // the behaviour under test, not a harness failure: swallow the pipe errors and
+    // let the exit status and the request counters decide the assertions.
+    child.stdin.on('error', (err) => { if (err?.code !== 'EPIPE' && err?.code !== 'ERR_STREAM_DESTROYED') reject(err) })
+    child.stdin.end(JSON.stringify(payload))
   })
 }
 
