@@ -10,7 +10,7 @@ import { listProviders, getProvider, resolveDaemonDefaultProvider } from './prov
 import { createLogger } from './logger.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
-import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { MAX_SANE_DURATION_MS, REPLAY_BACKPRESSURE_MAX_WAIT_MS } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
@@ -50,9 +50,18 @@ function permissionModesForProvider(provider) {
 // from scratch, rather than silently leaking a timer against a dead peer. The
 // cap is comfortably longer than a healthy slow-link drain but far short of
 // "forever".
+//
+// #7496: the cap is single-sourced in @chroxy/protocol because a client reads it
+// too. While parked this loop emits NOTHING for the stream, so the dashboard's
+// transcript inactivity watchdog (derived from this value there) must be longer
+// than the longest park or it reports a timeout against a healthy replay.
+// A keepalive frame is not the answer: it would queue behind the bytes that are
+// not draining and arrive only after the park had ended. Do not hardcode a
+// number here — `tests/ws-history-backpressure-cap.test.js` pins that the socket
+// is closed at exactly the shared value.
 const BACKPRESSURE_PAUSE_THRESHOLD = 256 * 1024
 const BACKPRESSURE_POLL_INTERVAL_MS = 20
-const BACKPRESSURE_MAX_WAIT_MS = 30_000
+const BACKPRESSURE_MAX_WAIT_MS = REPLAY_BACKPRESSURE_MAX_WAIT_MS
 
 // #5622 — bound the eager X25519 key derivations done SYNCHRONOUSLY per
 // event-loop iteration.

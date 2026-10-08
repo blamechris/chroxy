@@ -101,3 +101,6 @@ export * from "./turn-termination.js";
 // second copy would be free to drift toward reporting a never-run / refused /
 // paused / quarantined schedule as healthy.
 export * from "./scheduled-task-health.js";
+// #7496: the replay back-pressure park ceiling and the dashboard transcript
+// watchdog derived above it, in one module so they cannot be moved independently.
+export * from "./replay-timing.js";

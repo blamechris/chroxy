@@ -184,7 +184,7 @@ import {
   // #8224 — file a permission-mode roster under the provider it describes.
   mergePermissionModesByProvider,
 } from '@chroxy/store-core'
-import { PROTOCOL_VERSION } from '@chroxy/protocol'
+import { PROTOCOL_VERSION, TRANSCRIPT_INACTIVITY_MS } from '@chroxy/protocol'
 import type { ServerFailedRestoresListMessage } from '@chroxy/protocol'
 import { clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
 import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerGithubWebhookConfigSchema, ServerPermissionInputSchema, ServerPermissionAuditResultSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema, ServerOrchestrationRunsSnapshotSchema, ServerOrchestrationRunSnapshotSchema, ServerOrchestrationRunDeltaSchema, ServerOrchestrationActionAckSchema, ServerGitCreatePrResultSchema, ServerMemoryStackResultSchema, ServerScheduledTasksSchema, ServerDaemonUpdateStatusSchema, ServerDaemonUpdateConfirmRequiredSchema, ServerDaemonUpdateActionResultSchema } from '@chroxy/protocol/schemas'
@@ -1100,7 +1100,16 @@ const LIVE_SESSION_ID_SHAPE = /^[0-9a-f]{32}$/i;
 // it, so a healthy large transcript streaming for longer than the window is
 // never mislabeled an error. Cleared on `history_replay_end` (success), on
 // close, on a failed send, and on reset — no path leaves it armed (#6933).
-const TRANSCRIPT_INACTIVITY_MS = 15000;
+//
+// The window MUST outlast the server's back-pressure park (#7496): while the
+// server waits for a congested socket to drain it emits nothing for the id, up
+// to REPLAY_BACKPRESSURE_MAX_WAIT_MS, and then closes the socket (which resets
+// this watchdog). At the old 15 s a 15-30 s park that went on to drain
+// successfully raised a spurious "Timed out" against a healthy replay. The
+// value is DERIVED from that ceiling in @chroxy/protocol, not restated here.
+// A server-sent keepalive was rejected: it would queue behind the undrained
+// bytes and reach this client only after the park had already ended.
+// (`TRANSCRIPT_INACTIVITY_MS` is imported above.)
 let _transcriptWatchdog: {
   conversationId: string;
   timer: ReturnType<typeof setTimeout>;
