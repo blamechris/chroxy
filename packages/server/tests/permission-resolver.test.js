@@ -175,6 +175,26 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () =
     assert.deepEqual(legacyResolved, [{ requestId: 'perm-held', decision: 'allow' }])
     assert.equal(fallback.respondToPermission.mock.callCount(), 0, 'the in-process session is never asked about an id it did not issue')
     assert.equal(audited.length, 1)
+    assert.equal(audited[0].sessionId, null, 'audited without a session: the fallback is not the request\'s owner')
+    assert.equal(audited[0].requestId, 'perm-held')
+    assert.equal(audited[0].decision, 'allow')
+  })
+
+  it('a MAPPED legacy request is audited under its mapped session, whatever the fallback names (#8359 control)', () => {
+    const { resolver, audited } = build({ map: [['perm-mapped', OWNER]], legacy: ['perm-mapped'], ownerSession: {} })
+    const r = resolver.resolve('perm-mapped', 'deny', null, { clientId: 'c1', dispatchFallbackSessionId: OTHER })
+    assert.equal(r.via, 'legacy')
+    assert.equal(audited.length, 1)
+    assert.equal(audited[0].sessionId, OWNER)
+  })
+
+  it('an unmapped legacy request is audited the same with and without a dispatch fallback (#8359)', () => {
+    const withFallback = build({ map: [], legacy: ['perm-a'] })
+    withFallback.resolver.resolve('perm-a', 'allow', null, { clientId: 'x', dispatchFallbackSessionId: OTHER })
+    const without = build({ map: [], legacy: ['perm-a'] })
+    without.resolver.resolve('perm-a', 'allow', null, { clientId: 'x' })
+    assert.deepEqual(withFallback.audited, without.audited)
+    assert.equal(without.audited[0].sessionId, null)
   })
 
   it('a MAPPED SDK request that respondToPermission reports gone is still `expired`, never legacy (#8359 control)', () => {

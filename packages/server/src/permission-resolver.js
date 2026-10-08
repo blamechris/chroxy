@@ -198,7 +198,14 @@ export function createPermissionResolver({
       resolveLegacyPermission(requestId, decision)
       // Legacy (non-SDK) sessions have no PermissionManager/rule store, so
       // 'allowAlways' here is never durable — tool is the only enrichment.
-      audit(clientId, originSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})
+      // #8359: attributed to the request's own mapping, never to the dispatch
+      // fallback. For an unmapped request `originSessionId` is only the session the
+      // answering client happens to be on, a hint for where to dispatch; it says
+      // nothing about whom the request belongs to. Matches the HTTP path, which
+      // passes no fallback and so records null. (The SDK branch above keeps
+      // `originSessionId`: there that session's own `respondToPermission` accepted
+      // the id, which is what makes it the owner.)
+      audit(clientId, mappedSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})
       return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null, mapped: mappedSessionId != null }
     }
 
