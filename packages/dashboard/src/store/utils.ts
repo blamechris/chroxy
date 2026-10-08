@@ -333,6 +333,21 @@ export function createEmptyInFlightMarkers() {
     sessionPrThreadsLoading: {},
     // #6472: the IDE symbol-table request.
     symbolsLoading: false,
+    // #8378: the request/reply spinners that used to be cleared ONLY by a user
+    // `disconnect()` (as hand-written literals) and not by a transport drop, so a
+    // daemon restart or a network loss mid-request left the panel spinning
+    // forever. Each is armed by a send on the live socket and cleared by its
+    // reply; neither can arrive on the dead one. Only the flag clears: the
+    // results beside each (`workspaceSymbols`, `codeSearchResults`,
+    // `referencesResult`, `permissionAudit`, `memoryStackEntries`, `searchResults`)
+    // are data, and stay.
+    workspaceSymbolsLoading: false,
+    codeSearchLoading: false,
+    referencesLoading: false,
+    permissionAuditLoading: false,
+    memoryStackLoading: false,
+    conversationHistoryLoading: false,
+    searchLoading: false,
     // #6153: every Control Room survey *Loading flag. Each section computes
     // refreshDisabled = loading || !connected, so a refresh in flight when the
     // socket dies would leave loading=true forever. The stale snapshots are KEPT.

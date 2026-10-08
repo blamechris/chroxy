@@ -104,6 +104,11 @@ const ROSTER_EXPECTED = [
   'sessionPrStatusLoading', 'sessionPrThreadsLoading', 'sessionPrStatusRequestedAt',
   'orchestrationRunDetailLoading', 'orchestrationPendingActions',
   'cancellingActivityIds', 'retryingRestoreIds', 'symbolsLoading',
+  // #8378: seven spinners `disconnect()` cleared as hand-written literals and a
+  // transport drop did not. Each is armed by a send on the live socket and
+  // cleared by its reply, so a daemon restart mid-request stranded it.
+  'memoryStackLoading', 'workspaceSymbolsLoading', 'codeSearchLoading', 'referencesLoading',
+  'permissionAuditLoading', 'conversationHistoryLoading', 'searchLoading',
 ] as const
 
 /**
@@ -391,13 +396,10 @@ describe('#7586 the roster is the ONLY place a marker is added', () => {
       kind: 'scheduler-registry',
       reason: 'armed through armSchedulerRequest; failAllSchedulerRequests() fires its onFail on onclose AND disconnect() (#6871)',
     },
-    memoryStackLoading: { kind: 'disconnect-literal', reason: '#6996 — cleared by disconnect(); onclose does not (follow-on, not a user-Disconnect gap)' },
-    workspaceSymbolsLoading: { kind: 'disconnect-literal', reason: 'cleared by disconnect(); onclose does not (follow-on)' },
-    codeSearchLoading: { kind: 'disconnect-literal', reason: 'cleared by disconnect(); onclose does not (follow-on)' },
-    referencesLoading: { kind: 'disconnect-literal', reason: 'cleared by disconnect(); onclose does not (follow-on)' },
-    permissionAuditLoading: { kind: 'disconnect-literal', reason: 'cleared by disconnect(); onclose does not (follow-on)' },
-    conversationHistoryLoading: { kind: 'disconnect-literal', reason: 'cleared by disconnect(); onclose does not (follow-on)' },
-    searchLoading: { kind: 'disconnect-literal', reason: 'cleared by disconnect(); onclose does not (follow-on)' },
+    // #8378: the seven that used to be listed here as 'disconnect-literal' (memoryStack,
+    // workspaceSymbols, codeSearch, references, permissionAudit, conversationHistory,
+    // search) were transient request markers, not survivors, and now live in the roster.
+    // The map is empty of survivors except the scheduler's, which its own registry clears.
   }
 
   it('control: the checker found the real declarations', () => {
