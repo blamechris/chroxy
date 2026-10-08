@@ -47,10 +47,11 @@ export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
   // `!isCurrent` alone must not mean "Searching…". The shared hook settles to
   // 'offline' while disconnected and re-asks once on reconnect. (The originating
   // file is not retained, so the re-ask loses only the same-file ranking tie-break.)
-  const status = useIdeRequestStatus({
+  const { status, unavailable } = useIdeRequestStatus({
     active: isOpen,
     loading,
     isCurrent,
+    result: snapshot,
     reissue: () => { if (symbol) requestFindReferences(symbol) },
   })
 
@@ -107,9 +108,14 @@ export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
           onKeyDown={handleKeyDown}
         >
           {searching && <div className="file-open-palette-status">Searching…</div>}
-          {offline && (
+          {offline && unavailable === 'disconnected' && (
             <div className="file-open-palette-status" data-testid="references-offline">
               Unavailable — references will reload when the connection is back
+            </div>
+          )}
+          {offline && unavailable === 'ide-off' && (
+            <div className="file-open-palette-status" data-testid="references-ide-off">
+              References are off — IDE features are not enabled on this daemon
             </div>
           )}
           {status === 'ready' && results.length === 0 && (

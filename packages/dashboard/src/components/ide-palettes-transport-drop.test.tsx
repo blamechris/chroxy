@@ -418,7 +418,7 @@ describe('#8404 review: a daemon that comes back with the IDE surface off is not
     const ws2 = await reconnect()
     expect(ws2.sentOfType('list_symbols')).toEqual([])
     expect(screen.queryByText(SPINNER_TEXT)).toBeNull()
-    expect(screen.getByTestId('symbol-search-offline')).toBeTruthy()
+    expect(screen.getByTestId('symbol-search-ide-off')).toBeTruthy()
     ideOn()
     expect(ws2.sentOfType('list_symbols').length).toBe(1)
   })
@@ -433,7 +433,7 @@ describe('#8404 review: a daemon that comes back with the IDE surface off is not
     const ws2 = await reconnect()
     expect(ws2.sentOfType('search_content')).toEqual([])
     expect(screen.queryByText(SPINNER_TEXT)).toBeNull()
-    expect(screen.getByTestId('code-search-offline')).toBeTruthy()
+    expect(screen.getByTestId('code-search-ide-off')).toBeTruthy()
   })
 
   it('references', async () => {
@@ -445,6 +445,237 @@ describe('#8404 review: a daemon that comes back with the IDE surface off is not
     const ws2 = await reconnect()
     expect(ws2.sentOfType('find_references')).toEqual([])
     expect(screen.queryByText(SPINNER_TEXT)).toBeNull()
-    expect(screen.getByTestId('references-offline')).toBeTruthy()
+    expect(screen.getByTestId('references-ide-off')).toBeTruthy()
+  })
+})
+
+/**
+ * #8429 — a result can be "current" and stale. #8427 skipped the reconnect re-ask
+ * whenever the palette already showed a current result, which suppressed the only
+ * refresh in two cases: the request that was in flight at the drop, and the
+ * request that was attempted while offline (the store's sender is a no-op on a
+ * dead socket). The re-ask is now owed by what happened to the request, not by
+ * how the stored result looks.
+ */
+describe('#8429 symbol search: a retained table does not hide an owed refresh', () => {
+  it('reopened with a retained table, the refresh is in flight when the socket drops: reconnect re-asks once', async () => {
+    const ws = await openConnected()
+    const view = render(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    reply(ws, SYMBOLS_REPLY)
+    view.rerender(<SymbolSearchPalette isOpen={false} onClose={() => {}} />)
+    view.rerender(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    expect(ws.sentOfType('list_symbols').length, 'control: the reopen asked for a refresh').toBe(2)
+    expect(useConnectionStore.getState().workspaceSymbols, 'control: the old table is retained').not.toBeNull()
+
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    expect(useConnectionStore.getState().workspaceSymbolsLoading, 'control: #8402 cleared the flag').toBe(false)
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('list_symbols').length, 'the lost refresh is re-asked, once').toBe(1)
+    expect(screen.getByText(SPINNER_TEXT)).toBeTruthy()
+    reply(ws2, SYMBOLS_REPLY)
+    expect(screen.queryByText(SPINNER_TEXT)).toBeNull()
+  })
+
+  it('closed, dropped, reopened while offline: the open request was a no-op, so reconnect asks once', async () => {
+    const ws = await openConnected()
+    const view = render(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    reply(ws, SYMBOLS_REPLY)
+    view.rerender(<SymbolSearchPalette isOpen={false} onClose={() => {}} />)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const sentBefore = ws.sentOfType('list_symbols').length
+    view.rerender(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    expect(ws.sentOfType('list_symbols').length, 'control: nothing can go out on the dead socket').toBe(sentBefore)
+    expect(useConnectionStore.getState().workspaceSymbols, 'control: the table is retained, so it looks current').not.toBeNull()
+
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('list_symbols').length, 'the refresh the open request owed is sent, once').toBe(1)
+  })
+
+  it('a table fetched and answered before the drop is still not re-asked (the #8427 intent)', async () => {
+    const ws = await openConnected()
+    const view = render(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    reply(ws, SYMBOLS_REPLY)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('list_symbols')).toEqual([])
+    view.rerender(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    expect(ws2.sentOfType('list_symbols'), 'one reconnect, no extra request').toEqual([])
+    expect(screen.getByTestId('symbol-search-item-Widget')).toBeTruthy()
+  })
+
+  it('an attempt made while offline is forgotten when the palette closes (it does not fire on a later drop)', async () => {
+    const ws = await openConnected()
+    const view = render(<SymbolSearchPalette isOpen={false} onClose={() => {}} />)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    view.rerender(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    view.rerender(<SymbolSearchPalette isOpen={false} onClose={() => {}} />)
+    const ws2 = await reconnect()
+    view.rerender(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    expect(ws2.sentOfType('list_symbols').length, 'control: the reopen asked on its own').toBe(1)
+    reply(ws2, SYMBOLS_REPLY)
+    act(() => { ws2.onclose?.({ code: 1006 }) })
+    const ws3 = await reconnect()
+    expect(ws3.sentOfType('list_symbols'), 'the closed-over offline attempt was spent by the close').toEqual([])
+  })
+
+  it('an answered refresh is not owed after a later drop', async () => {
+    const ws = await openConnected()
+    const view = render(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    reply(ws, SYMBOLS_REPLY)
+    view.rerender(<SymbolSearchPalette isOpen={false} onClose={() => {}} />)
+    view.rerender(<SymbolSearchPalette isOpen onClose={() => {}} />)
+    reply(ws, SYMBOLS_REPLY)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('list_symbols')).toEqual([])
+  })
+})
+
+describe('#8429 code search: an unchanged query does not hide an owed refresh', () => {
+  const type = async (q: string): Promise<void> => {
+    fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: q } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+  }
+
+  it('the same query is in flight when the socket drops: reconnect re-asks it once', async () => {
+    const ws = await openConnected()
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    await type('target')
+    reply(ws, SEARCH_REPLY)
+    await type('targetx')
+    await type('target')
+    expect(ws.sentOfType('search_content').map((m) => m.query), 'control: the same query was asked again').toEqual(['target', 'targetx', 'target'])
+    expect(useConnectionStore.getState().codeSearchResults?.query, 'control: the retained result is for this query').toBe('target')
+
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('search_content').map((m) => m.query)).toEqual(['target'])
+  })
+
+  it('closed, dropped, reopened offline and the same query typed: reconnect asks it once', async () => {
+    const ws = await openConnected()
+    const view = render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    await type('target')
+    reply(ws, SEARCH_REPLY)
+    view.rerender(<CodeSearchPalette isOpen={false} onClose={() => {}} />)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    view.rerender(<CodeSearchPalette isOpen onClose={() => {}} />)
+    const sentBefore = ws.sentOfType('search_content').length
+    await type('target')
+    expect(ws.sentOfType('search_content').length, 'control: nothing can go out on the dead socket').toBe(sentBefore)
+    expect(screen.getByTestId('code-search-item-0'), 'control: the retained result looks current').toBeTruthy()
+
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('search_content').map((m) => m.query)).toEqual(['target'])
+  })
+
+  it('a result answered before the drop is still not re-asked (the #8427 intent)', async () => {
+    const ws = await openConnected()
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    await type('target')
+    reply(ws, SEARCH_REPLY)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('search_content')).toEqual([])
+  })
+
+  it('typing ~100 ms before the connect edge sends the query once, not the re-ask plus the debounce', async () => {
+    const ws = await openConnected()
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    await type('target')
+    expect(ws.sentOfType('search_content').length, 'control: a request is in flight at the drop').toBe(1)
+    act(() => { ws.onclose?.({ code: 1006 }) })
+
+    // Step to the moment the store builds the retry socket, type, and let the
+    // connection come up with the debounce still pending.
+    const before = MockWebSocket.instances.length
+    for (let i = 0; i < 400 && MockWebSocket.instances.length === before; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+    }
+    const ws2 = MockWebSocket.instances[before]
+    if (!ws2) throw new Error('the drop armed no reconnect attempt')
+    fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: 'targets' } })
+    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    await act(async () => {
+      ws2.readyState = 1
+      ws2.onopen?.()
+      await vi.advanceTimersByTimeAsync(0)
+      useConnectionStore.setState({ socket: ws2 as unknown as WebSocket, connectionPhase: 'connected', userDisconnected: false })
+    })
+    expect(ws2.sentOfType('search_content'), 'control: the debounce had not fired at the edge, so only the re-ask could have gone out').toEqual([])
+    await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    expect(ws2.sentOfType('search_content').map((m) => m.query)).toEqual(['targets'])
+  })
+})
+
+describe('#8429 the unavailable copy says which kind of unavailable it is', () => {
+  const WILL_RELOAD = /when the connection is back/
+  const palettes = [
+    { name: 'symbol search', ui: () => <SymbolSearchPalette isOpen onClose={() => {}} />, offline: 'symbol-search-offline', ideOff: 'symbol-search-ide-off' },
+    { name: 'references', ui: () => <ReferencesPalette isOpen onClose={() => {}} />, offline: 'references-offline', ideOff: 'references-ide-off' },
+  ]
+
+  for (const p of palettes) {
+    it(`${p.name}: disconnected says it will reload; a connected daemon with the IDE off does not promise that`, async () => {
+      useConnectionStore.setState({ referencesSymbol: 'widget', referencesOpen: true } as Partial<State>)
+      const view = render(p.ui())
+      expect(screen.getByTestId(p.offline).textContent, 'disconnected').toMatch(WILL_RELOAD)
+      expect(screen.queryByTestId(p.ideOff)).toBeNull()
+
+      view.unmount()
+      useConnectionStore.setState({ connectionPhase: 'connected', serverCapabilities: {} } as Partial<State>)
+      render(p.ui())
+      const text = screen.getByTestId(p.ideOff).textContent ?? ''
+      expect(WILL_RELOAD.test(text), `IDE-off copy must not promise a reload: ${text}`).toBe(false)
+      expect(screen.queryByTestId(p.offline)).toBeNull()
+    })
+  }
+
+  it('code search', async () => {
+    const view = render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: 'target' } })
+    expect(screen.getByTestId('code-search-offline').textContent).toMatch(/when the connection is back/)
+    expect(screen.queryByTestId('code-search-ide-off')).toBeNull()
+
+    view.unmount()
+    useConnectionStore.setState({ connectionPhase: 'connected', serverCapabilities: {} } as Partial<State>)
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: 'target' } })
+    const text = screen.getByTestId('code-search-ide-off').textContent ?? ''
+    expect(/when the connection is back/.test(text), `IDE-off copy must not promise a reload: ${text}`).toBe(false)
+    expect(screen.queryByTestId('code-search-offline')).toBeNull()
+  })
+})
+
+/**
+ * #8429 review: a reply to an OLDER request replaces `result` and clears `*Loading`
+ * while a NEWER request is still outstanding. The in-flight mark must not be the
+ * only thing owing the re-ask, or the palette is left on "Searching…" for ever.
+ */
+describe('#8429 review: a reply to an older request does not hide the newer one that was lost', () => {
+  it('code search: ab, abc, the reply for ab lands, drop, reconnect re-asks abc', async () => {
+    const ws = await openConnected()
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    for (const q of ['ab', 'abc']) {
+      fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: q } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    }
+    expect(ws.sentOfType('search_content').map((m) => m.query), 'control: both were asked').toEqual(['ab', 'abc'])
+    reply(ws, { ...SEARCH_REPLY, query: 'ab' })
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('search_content').map((m) => m.query)).toEqual(['abc'])
+  })
+
+  it('references: alpha, beta, the reply for alpha lands, drop, reconnect re-asks beta', async () => {
+    const ws = await openConnected()
+    act(() => { useConnectionStore.getState().requestFindReferences('alpha') })
+    render(<ReferencesPalette isOpen onClose={() => {}} />)
+    act(() => { useConnectionStore.getState().requestFindReferences('beta') })
+    expect(ws.sentOfType('find_references').map((m) => m.symbol), 'control: both were asked').toEqual(['alpha', 'beta'])
+    reply(ws, { ...REFERENCES_REPLY, symbol: 'alpha' })
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('find_references').map((m) => m.symbol)).toEqual(['beta'])
   })
 })

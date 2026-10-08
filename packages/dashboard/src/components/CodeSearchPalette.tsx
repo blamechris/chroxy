@@ -45,15 +45,14 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
     return () => window.clearTimeout(id)
   }, [isOpen])
 
-  // Debounced server-side search on query change (content grep can't run client-side).
-  useEffect(() => {
-    if (!isOpen) return
-    if (debounceRef.current) window.clearTimeout(debounceRef.current)
-    const q = query.trim()
-    if (q.length < MIN_QUERY) return
-    debounceRef.current = window.setTimeout(() => requestSearchContent(q), DEBOUNCE_MS)
-    return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current) }
-  }, [query, isOpen, requestSearchContent])
+  // `debounceRef` is non-null exactly while a debounced request is scheduled and
+  // has not gone out (#8429): the reconnect re-ask reads it.
+  const clearDebounce = useCallback(() => {
+    if (debounceRef.current !== null) {
+      window.clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+  }, [])
 
   const trimmed = query.trim()
   // Only trust the stored results if they're for the CURRENT query — the server
@@ -68,12 +67,33 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
   // #8404 — a reply in flight when the socket dropped never arrives, so
   // `!isCurrent` alone must not mean "Searching…". The shared hook settles to
   // 'offline' while disconnected and re-asks the current query once on reconnect.
-  const status = useIdeRequestStatus({
+  // #8429 — the debounced request goes through `ask` (an attempt made while
+  // offline is remembered even when a retained result for the same query looks
+  // current), and a request still scheduled at the connect edge sends itself, so
+  // the edge's re-ask stands down instead of sending the query twice.
+  const { status, unavailable, ask } = useIdeRequestStatus({
     active: isOpen,
     loading,
     isCurrent,
-    reissue: () => { if (trimmed.length >= MIN_QUERY) requestSearchContent(trimmed) },
+    result: snapshot,
+    reissue: () => {
+      if (debounceRef.current !== null) return
+      if (trimmed.length >= MIN_QUERY) requestSearchContent(trimmed)
+    },
   })
+
+  // Debounced server-side search on query change (content grep can't run client-side).
+  useEffect(() => {
+    if (!isOpen) return
+    clearDebounce()
+    const q = query.trim()
+    if (q.length < MIN_QUERY) return
+    debounceRef.current = window.setTimeout(() => {
+      debounceRef.current = null
+      ask(() => requestSearchContent(q))
+    }, DEBOUNCE_MS)
+    return clearDebounce
+  }, [query, isOpen, requestSearchContent, ask, clearDebounce])
 
   useEffect(() => {
     setSelectedIndex(i => (results.length === 0 ? 0 : Math.min(i, Math.min(results.length, DISPLAY_CAP) - 1)))
@@ -139,9 +159,14 @@ export function CodeSearchPalette({ isOpen, onClose }: CodeSearchPaletteProps) {
           {trimmed.length >= MIN_QUERY && searching && (
             <div className="file-open-palette-status">Searching…</div>
           )}
-          {offline && (
+          {offline && unavailable === 'disconnected' && (
             <div className="file-open-palette-status" data-testid="code-search-offline">
               Unavailable — the search will run again when the connection is back
+            </div>
+          )}
+          {offline && unavailable === 'ide-off' && (
+            <div className="file-open-palette-status" data-testid="code-search-ide-off">
+              Search in files is off — IDE features are not enabled on this daemon
             </div>
           )}
           {trimmed.length >= MIN_QUERY && status === 'ready' && results.length === 0 && (
