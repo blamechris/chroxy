@@ -48,6 +48,7 @@ import {
   isWebFetchToolName,
   parseWebSearchResults,
   parseWebFetchResult,
+  formatWebFetchStatus,
 } from '@chroxy/store-core';
 import type { ParsedWebSearchResults, ParsedWebFetchResult } from '@chroxy/store-core';
 import { COLORS } from '../../constants/colors';
@@ -222,8 +223,19 @@ export interface WebFetchResultProps {
  *  as a link above it when the result carried a safe one. */
 export function WebFetchResult({ parsed }: WebFetchResultProps) {
   const safeUrl = isSafeWebUrl(parsed.url) ? parsed.url : undefined;
+  // #6987: HTTP status + size, present only for an Agent SDK `WebFetchOutput`.
+  const status = formatWebFetchStatus(parsed);
   return (
     <View style={styles.container} testID="web-fetch-result">
+      {status ? (
+        <Text
+          style={status.ok ? styles.fetchStatus : styles.fetchStatusError}
+          testID="web-fetch-status"
+          accessibilityLabel={status.ok ? status.text : `${status.text}, request failed`}
+        >
+          {status.text}
+        </Text>
+      ) : null}
       {safeUrl ? (
         <Pressable
           onPress={() => openWebResultUrl(safeUrl)}
@@ -309,6 +321,18 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     textDecorationLine: 'underline',
+  },
+  fetchStatus: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    marginBottom: 2,
+  },
+  // A non-2xx fetch is flagged so an error-page body isn't read as content.
+  fetchStatusError: {
+    color: COLORS.accentOrange,
+    fontSize: 11,
+    fontWeight: '600',
+    marginBottom: 2,
   },
   fetchContent: {
     color: COLORS.textSecondary,

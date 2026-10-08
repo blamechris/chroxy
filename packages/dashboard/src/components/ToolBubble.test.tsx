@@ -976,6 +976,62 @@ describe('ToolBubble — WebSearch/WebFetch structured render (#6757)', () => {
     expect(screen.getByTestId('web-fetch-content')).toHaveTextContent('Just fetched body text.')
   })
 
+  describe('Agent SDK result shapes (#6987)', () => {
+    // claude-tui forwards the hook's tool_response as JSON.stringify(WebFetchOutput).
+    const fetchOutput = (over: Record<string, unknown> = {}) => ({
+      bytes: 1497,
+      code: 200,
+      codeText: 'OK',
+      result: 'A job that is **skipped** reports Success.',
+      durationMs: 2568,
+      url: 'https://docs.github.com/en/actions/using-jobs',
+      ...over,
+    })
+
+    it('renders a WebFetchOutput as source link + markdown body + status, not a JSON dump', () => {
+      render(<ToolBubble toolName="WebFetch" toolUseId="wf-sdk-1" result={JSON.stringify(fetchOutput())} isTail />)
+      const source = screen.getByTestId('web-fetch-source')
+      expect(source.querySelector('a')).toHaveAttribute('href', 'https://docs.github.com/en/actions/using-jobs')
+      expect(screen.getByTestId('web-fetch-content').querySelector('strong')).toHaveTextContent('skipped')
+      expect(screen.getByTestId('web-fetch-status')).toHaveTextContent('HTTP 200 OK')
+      expect(document.body.textContent).not.toContain('"durationMs"')
+      expect(document.querySelector('pre')).not.toBeInTheDocument()
+    })
+
+    it('flags a non-2xx WebFetchOutput', () => {
+      const r = JSON.stringify(fetchOutput({ code: 503, codeText: 'Service Unavailable', result: 'Try later.' }))
+      render(<ToolBubble toolName="WebFetch" toolUseId="wf-sdk-2" result={r} isTail />)
+      expect(screen.getByTestId('web-fetch-status')).toHaveAttribute('data-ok', 'false')
+      expect(screen.getByTestId('web-fetch-content')).toHaveTextContent('Try later.')
+    })
+
+    it('never makes a link of a hostile WebFetchOutput url', () => {
+      const r = JSON.stringify(fetchOutput({ url: 'javascript:alert(document.cookie)' }))
+      render(<ToolBubble toolName="WebFetch" toolUseId="wf-sdk-3" result={r} isTail />)
+      expect(screen.queryByTestId('web-fetch-source')).not.toBeInTheDocument()
+      expect(document.querySelector('a[href^="javascript:"]')).not.toBeInTheDocument()
+      expect(screen.getByTestId('web-fetch-content')).toHaveTextContent('reports Success')
+    })
+
+    it('shows the readable body of an oversized WebFetchOutput cut at the 10KB cap', () => {
+      const wire = JSON.stringify(fetchOutput({ result: 'Sentence here. '.repeat(2000) })).slice(0, 10240)
+      render(<ToolBubble toolName="WebFetch" toolUseId="wf-sdk-4" result={wire} isTail />)
+      expect(screen.getByTestId('web-fetch-content')).toHaveTextContent('Sentence here. Sentence here.')
+      expect(document.body.textContent).not.toContain('"result"')
+      expect(screen.getByTestId('web-fetch-status')).toHaveTextContent('HTTP 200 OK')
+    })
+
+    it('renders the flattened SDK/CLI WebSearch text (header + Links: line) as a result list', () => {
+      const r = 'Web search results for query: "actions skipped job"\n\n' +
+        'Links: ' + JSON.stringify([{ title: 'Using conditions', url: 'https://docs.github.com/en/actions' }]) +
+        '\n\nCommentary.\n\nREMINDER: You MUST include the sources above.'
+      render(<ToolBubble toolName="WebSearch" toolUseId="ws-sdk-1" result={r} isTail />)
+      expect(screen.getByTestId('web-search-query')).toHaveTextContent('actions skipped job')
+      expect(screen.getByTestId('web-search-result-link-0')).toHaveAttribute('href', 'https://docs.github.com/en/actions')
+      expect(document.querySelector('pre')).not.toBeInTheDocument()
+    })
+  })
+
   it('leaves other tools on the existing raw <pre> render (only WebSearch/WebFetch get structured treatment)', () => {
     const result = JSON.stringify([{ title: 'Not a search result', url: 'https://example.com/' }])
     render(<ToolBubble toolName="Bash" toolUseId="bash-1" result={result} isTail />)

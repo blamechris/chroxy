@@ -552,6 +552,7 @@ export {
   isWebFetchToolName,
   parseWebSearchResults,
   parseWebFetchResult,
+  formatWebFetchStatus,
 } from './web-tool-results'
 export type {
   WebSearchResultItem,
