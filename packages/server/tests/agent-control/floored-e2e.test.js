@@ -97,6 +97,17 @@ function inProcessFixture(sessionId, cwd) {
   return { manager, pm }
 }
 
+/** Count the permission_resolved frames a client receives, keyed by requestId (#7976). */
+function countResolvedFrames(client) {
+  const counts = new Map()
+  const original = client._dispatch.bind(client)
+  client._dispatch = (msg, ...rest) => {
+    if (msg?.type === 'permission_resolved') counts.set(msg.requestId, [...(counts.get(msg.requestId) ?? []), msg])
+    return original(msg, ...rest)
+  }
+  return counts
+}
+
 describe('#7968 end to end: agent-control against the daemon\'s real floor verdict', () => {
   let server
   let clients = []
@@ -154,9 +165,14 @@ describe('#7968 end to end: agent-control against the daemon\'s real floor verdi
       assert.ok(pm._pendingPermissions.has(id), 'a refused allow must leave the prompt pending for a human')
     }
 
+    const sdkFrames = countResolvedFrames(client)
     const allowed = await client.respondPermission(sessionId, ordinaryId, 'allow')
     assert.equal(allowed.status, 'resolved', JSON.stringify(allowed))
     assert.equal((await ordinary).behavior, 'allow', 'an ordinary owned prompt must be approvable end to end')
+    // #7976: the unified pipeline already announces an in-process answer; the WS
+    // handler must not add a second one.
+    await new Promise((r) => setTimeout(r, 100))
+    assert.equal(sdkFrames.get(ordinaryId)?.length, 1, 'an in-process answer produces exactly ONE permission_resolved')
 
     // deny is never floor-gated: the planner may still refuse a floored prompt.
     const denied = await client.respondPermission(sessionId, hookId, 'deny')
@@ -251,22 +267,32 @@ describe('#7968 end to end: agent-control against the daemon\'s real floor verdi
     assert.equal(refused.reason, 'floored', JSON.stringify(refused))
     assert.ok(server._pendingPermissions.has(floorId), 'the hook prompt must stay pending for a human')
 
-    // The decision REACHES the hook (the held HTTP response carries it) — that
-    // is the end-to-end effect. The status agent-control reports is a
-    // characterization of today's daemon: a WS permission_response that
-    // resolves a SESSION-MAPPED hook-routed prompt broadcasts no
-    // permission_resolved (settings-handlers.js only broadcasts for the
-    // unmapped legacy case), so the planner can only report `uncertain`. That
-    // is fail-safe (never "not applied", never a retry), and it is filed as a
-    // daemon follow-up; when that lands these two assertions flip to
-    // 'resolved' and must be updated.
+    // The decision REACHES the hook (the held HTTP response carries it), and the
+    // WS answer to a SESSION-MAPPED hook-routed prompt now broadcasts
+    // permission_resolved (#7976), so the planner sees the correlated
+    // confirmation and reports `resolved` instead of `uncertain`.
+    // A second client that did not answer: the whole point of #7976 is that it
+    // stops showing the prompt too.
+    const observer = await connect(port, new Set([sessionId]), 400)
+    await observer.getEvents(sessionId)
+    await waitFor(() => observer._observedPermissions.has(ordinaryId), 'observer also holds the pending prompt')
+    const observerFrames = countResolvedFrames(observer)
+    const answererFrames = countResolvedFrames(client)
+
     const allowed = await client.respondPermission(sessionId, ordinaryId, 'allow')
     assert.deepEqual((await ordinaryHttp).body, { decision: 'allow' }, 'an ordinary owned hook prompt must be approvable end to end')
-    assert.equal(allowed.status, 'uncertain', JSON.stringify(allowed))
-    assert.equal(allowed.ackTimedOut, true)
+    assert.equal(allowed.status, 'resolved', JSON.stringify(allowed))
+    assert.equal(allowed.ackTimedOut, undefined, JSON.stringify(allowed))
+    await waitFor(() => !observer._observedPermissions.has(ordinaryId), 'the observer is told the prompt was resolved')
+    await new Promise((r) => setTimeout(r, 100))
+    for (const [who, frames] of [['observer', observerFrames], ['answerer', answererFrames]]) {
+      assert.equal(frames.get(ordinaryId)?.length, 1, `${who} must get exactly ONE permission_resolved`)
+      assert.equal(frames.get(ordinaryId)[0].sessionId, sessionId, `${who}: the frame carries the owning session`)
+      assert.equal(frames.get(ordinaryId)[0].decision, 'allow')
+    }
 
     const denied = await client.respondPermission(sessionId, floorId, 'deny')
     assert.deepEqual((await floorHttp).body, { decision: 'deny' }, 'deny is never floor-gated')
-    assert.equal(denied.status, 'uncertain', JSON.stringify(denied))
+    assert.equal(denied.status, 'resolved', JSON.stringify(denied))
   })
 })

@@ -571,7 +571,8 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // #3048: SDK-session broadcasts go through the unified pipeline
   // (PermissionManager → SdkSession → SessionManager → EventNormalizer →
   // broadcast). Legacy non-SDK sessions (no PermissionManager) keep an inline
-  // broadcast for the unmapped case only — mirrors the prior `!originSessionId`.
+  // broadcast: tagless for the unmapped case (the prior `!originSessionId`),
+  // session-tagged for a mapped hook-routed prompt (#7976).
   if (!result.sessionId) {
     // #6590: broadcast to ALL clients INCLUDING the resolver (no `c.id !==
     // client.id` exclusion). The resolving client needs its own
@@ -588,6 +589,26 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     // The frame carries no sessionId (the request maps to no session), so it goes
     // to unbound clients only; a session-bound client has no session to match.
     ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision }, (c) => !isBoundClient(c))
+  } else if (result.via === 'legacy' && mappedSessionId != null) {
+    // #7976: a hook-routed prompt (claude-tui / claude-cli / claude-channel) maps
+    // to its owning session but has NO PermissionManager, so the resolver
+    // dispatched it through the legacy store and nothing else will announce the
+    // resolution. Without this, every OTHER client keeps a stale Allow/Deny card
+    // (and agent-control reports `uncertain`) until the prompt expires or they
+    // reload. Mirrors POST /permission-response (ws-permissions.js), which
+    // broadcasts the same frame for `via === 'legacy'` with the session id.
+    //
+    // Gated on `via === 'legacy'`: an in-process (SDK/BYOK) answer already
+    // broadcasts through the unified pipeline (#3048), so adding it here would
+    // double-deliver. Gated on the RAW mapping, not `result.sessionId`: the
+    // latter can be the resolver's `client.activeSessionId` fallback for an
+    // UNMAPPED prompt, and tagging that frame with a session the prompt never
+    // belonged to would be wrong (those keep the pre-existing no-broadcast
+    // behaviour). No filter, as on the request side (the hook prompt was sent to
+    // every client); a session-bound client still only receives its own
+    // session's frames because the broadcaster checks the frame's sessionId at
+    // delivery (#8342). Includes the resolver (#6590).
+    ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision, sessionId: result.sessionId })
   }
 
   // #6771 — an `allowAlways` that resolved on an in-process session just
