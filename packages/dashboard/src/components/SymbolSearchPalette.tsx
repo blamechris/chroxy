@@ -37,26 +37,29 @@ export function SymbolSearchPalette({ isOpen, onClose }: SymbolSearchPaletteProp
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    if (!isOpen) return
-    requestWorkspaceSymbols()
-    setQuery('')
-    setSelectedIndex(0)
-    const id = window.setTimeout(() => inputRef.current?.focus(), 0)
-    return () => window.clearTimeout(id)
-  }, [isOpen, requestWorkspaceSymbols])
-
   const symbols = snapshot?.symbols ?? null
 
   // #8404 — `symbols === null` (no table yet) used to mean "Indexing…" forever
   // when the scan's reply was lost to a transport drop. The shared hook settles
   // to 'offline' while disconnected and re-requests the scan once on reconnect.
-  const status = useIdeRequestStatus({
+  // #8429 — the open request goes through `ask`, so one made while offline (a
+  // no-op in the store) is remembered even though a retained table looks current.
+  const { status, unavailable, ask } = useIdeRequestStatus({
     active: isOpen,
     loading,
     isCurrent: symbols !== null,
+    result: snapshot,
     reissue: requestWorkspaceSymbols,
   })
+
+  useEffect(() => {
+    if (!isOpen) return
+    ask(requestWorkspaceSymbols)
+    setQuery('')
+    setSelectedIndex(0)
+    const id = window.setTimeout(() => inputRef.current?.focus(), 0)
+    return () => window.clearTimeout(id)
+  }, [isOpen, requestWorkspaceSymbols, ask])
 
   const filtered = useMemo<SymbolEntry[]>(() => {
     if (!symbols) return []
@@ -125,9 +128,14 @@ export function SymbolSearchPalette({ isOpen, onClose }: SymbolSearchPaletteProp
         />
         <div ref={listRef} className="file-open-palette-list" role="listbox" aria-label="Symbols">
           {isLoading && <div className="file-open-palette-status">Indexing symbols…</div>}
-          {offline && (
+          {offline && unavailable === 'disconnected' && (
             <div className="file-open-palette-status" data-testid="symbol-search-offline">
               Unavailable — symbols will reload when the connection is back
+            </div>
+          )}
+          {offline && unavailable === 'ide-off' && (
+            <div className="file-open-palette-status" data-testid="symbol-search-ide-off">
+              Symbol search is off — IDE features are not enabled on this daemon
             </div>
           )}
           {status === 'ready' && filtered.length === 0 && (
