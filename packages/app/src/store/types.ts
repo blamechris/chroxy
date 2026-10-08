@@ -354,12 +354,18 @@ export interface ModelsAndPermissionsData {
   // `selectModelsForProvider(modelsByProvider, <active session's provider>)`,
   // never by picking a key directly.
   modelsByProvider: Record<string, ProviderModelRoster>;
-  // Available permission modes from server (CLI mode).
+  // Available permission modes from server, keyed by the PROVIDER whose roster
+  // it is (#8224). Plan/Auto support and the mode copy differ per provider, and
+  // a single flat list refreshed only on `switch_session` left a session
+  // created beside a claude-tui one showing "Plan (unavailable)" for as long as
+  // the tab was not re-selected. Read it with
+  // `selectPermissionModesForProvider(permissionModesByProvider, <active
+  // session's provider>)`, never by picking a key directly.
   // #4213: typed PermissionMode from store-core; the optional `description`
   // field flows through to the SettingsBar hint so the mobile picker shares
   // one source of truth with the server's PERMISSION_MODES table (matches
   // the dashboard #4019 plumbing).
-  availablePermissionModes: PermissionMode[];
+  permissionModesByProvider: Record<string, PermissionMode[]>;
   // Available providers from server (for session creation UI)
   availableProviders: ProviderInfo[];
   // Pending auto permission mode confirmation from server

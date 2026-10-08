@@ -774,6 +774,9 @@ export class PermissionManager extends EventEmitter {
       }
       this._pendingPermissions.set(requestId, {
         resolve,
+        // #8363: the provider's id for this tool call, so `hasPendingForToolUse`
+        // can say whether its prompt is STILL waiting (not merely was asked).
+        toolUseId: sourceToolUseId,
         input: input || {},
         // Preserve the single floor verdict made above. A later mode switch
         // may drain ordinary prompts, but it must not turn an already pending
@@ -866,6 +869,23 @@ export class PermissionManager extends EventEmitter {
    * Emits user_question and waits for respondToQuestion() to deliver the
    * user's answer, then resolves with structured updatedInput.
    */
+  /**
+   * #8363: is a permission prompt (or AskUserQuestion) for this PROVIDER tool-use
+   * id still waiting for a decision? Reads the live pending state, which a
+   * response clears synchronously -- unlike a promise continuation, which runs a
+   * microtask later.
+   * @param {string} toolUseId
+   * @returns {boolean}
+   */
+  hasPendingForToolUse(toolUseId) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return false
+    if (this._pendingUserAnswer?.sourceToolUseId === toolUseId) return true
+    for (const entry of this._pendingPermissions.values()) {
+      if (entry.toolUseId === toolUseId) return true
+    }
+    return false
+  }
+
   _handleAskUserQuestion(input, signal, sourceToolUseId = undefined) {
     return new Promise((resolve) => {
       const questionInput = input || {}
@@ -878,7 +898,7 @@ export class PermissionManager extends EventEmitter {
       // questionSessionMap entry — small leak (~80 bytes) per
       // message-completion-while-question-pending event, bounded only by
       // session_destroyed cleanup.
-      this._pendingUserAnswer = { resolve, input: questionInput, toolUseId }
+      this._pendingUserAnswer = { resolve, input: questionInput, toolUseId, sourceToolUseId }
       this._logInfo(`AskUserQuestion detected (${toolUseId})`)
       // #8336: without the provider's id, the restore-time sweep cannot tell
       // which `tool_start` this question belongs to, so a restart mid-question

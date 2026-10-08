@@ -27,6 +27,58 @@ describe('ToolBubble', () => {
     expect(screen.getByTestId('tool-input-summary')).toHaveTextContent('/path/to/file')
   })
 
+  // #7376 — a tool cut off by a terminated turn says so, visibly, without
+  // expanding; a normal tool shows nothing extra.
+  it('shows a terminated note (and withholds the synthesized result text) for a terminated tool (#7376)', () => {
+    render(
+      <ToolBubble
+        {...baseProps}
+        toolName="Bash"
+        result="synthesized placeholder text"
+        terminatedReason="permission_mode_switch"
+        isTail
+      />,
+    )
+    const note = screen.getByTestId('tool-bubble-terminated-tool-1')
+    expect(note).toHaveTextContent('Turn ended (permission-mode switch) before this tool returned a result')
+    expect(note).toHaveTextContent('Check whether it took effect before retrying')
+    expect(screen.getByTestId('tool-bubble-tool-1')).toHaveAttribute('data-terminated', 'true')
+    // not pulsing as "still running" -- it has resolved, just not successfully
+    expect(screen.queryByTestId('tool-bubble-pulse-tool-1')).toBeNull()
+    // the raw synthesized text is replaced by the note, even expanded (isTail)
+    expect(screen.getByTestId('tool-bubble-tool-1')).not.toHaveTextContent('synthesized placeholder text')
+  })
+
+  // #8363 -- Stop pressed while the tool's permission prompt was pending. The
+  // provider's own result text says the user declined; the row must say stopped.
+  it('a Stop on a pending permission reads as stopped, not as a refusal (#8363)', () => {
+    render(
+      <ToolBubble
+        {...baseProps}
+        toolName="Bash"
+        result="Stopped before this tool ran -- the turn was stopped while it was waiting for approval, so it was never approved."
+        terminatedReason="user_stop_before_run"
+        isTail
+      />,
+    )
+    const note = screen.getByTestId('tool-bubble-terminated-tool-1')
+    expect(note).toHaveTextContent('Stopped before this tool ran')
+    expect(note).not.toHaveTextContent(/doesn't want|refus|denied/i)
+  })
+
+  it('POSITIVE CONTROL: an ordinary tool shows no terminated note and keeps its result (#7376)', () => {
+    render(<ToolBubble {...baseProps} isTail />)
+    expect(screen.queryByTestId('tool-bubble-terminated-tool-1')).toBeNull()
+    expect(screen.getByTestId('tool-bubble-tool-1')).not.toHaveAttribute('data-terminated')
+    expect(screen.getByTestId('tool-bubble-tool-1')).toHaveTextContent('file contents here')
+  })
+
+  it('a still-running tool is not shown as terminated (#7376)', () => {
+    render(<ToolBubble toolName="Bash" toolUseId="tool-9" input="ls" terminatedReason="permission_mode_switch" />)
+    expect(screen.queryByTestId('tool-bubble-terminated-tool-9')).toBeNull()
+    expect(screen.getByTestId('tool-bubble-pulse-tool-9')).toBeInTheDocument()
+  })
+
   it('uses a button element for the toggle', () => {
     render(<ToolBubble {...baseProps} />)
     const toggle = screen.getByRole('button')

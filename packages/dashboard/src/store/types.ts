@@ -12,6 +12,7 @@
 // #4019: PermissionMode imported for local use at line 466 (re-export below
 // puts it on the public surface but doesn't bring it into this file's
 // type-name scope).
+import type { StaleBundleInfo } from '../utils/stale-bundle'
 import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
@@ -1533,11 +1534,18 @@ export interface ConnectionState {
   // session-lifetime question.
   modelsByProvider: Record<string, ProviderModelRoster>;
 
-  // Available permission modes from server (CLI mode).
+  // Available permission modes from server, keyed by the PROVIDER whose
+  // roster it is (#8224). Which modes a provider can honour (Plan on claude-sdk
+  // but not claude-tui, Auto where there is a permission floor) and the copy
+  // differ per provider, and the server used to refresh a single flat list only
+  // on an explicit `switch_session` — a created session that auto-switched the
+  // creator inherited the PREVIOUS session's roster ("Plan (unavailable)").
+  // Read it with `selectPermissionModesForProvider(permissionModesByProvider,
+  // <active session's provider>)`, never by picking a key directly.
   // #4019: PermissionMode is the typed shape from store-core; the optional
   // `description` field flows through to the chat dropdown + creation modal
   // so the two surfaces share one source of truth.
-  availablePermissionModes: PermissionMode[];
+  permissionModesByProvider: Record<string, PermissionMode[]>;
 
   // Previous permission mode (for Shift+Tab plan mode toggle)
   previousPermissionMode: string | null;
@@ -1557,6 +1565,20 @@ export interface ConnectionState {
   // Connection error feedback
   connectionError: string | null;
   connectionRetryCount: number;
+  /**
+   * #8268 — the dashboard is talking to the daemon that served it (or, in the desktop
+   * app, to a loopback daemon), so the reconnect ladder never gives up. False for a
+   * registry server and anywhere else, where the #5698 cap applies.
+   */
+  reconnectUncapped: boolean;
+  /** #8268 — epoch ms of the next armed reconnect attempt, for a visible "retrying in Ns". Null when none is armed. */
+  reconnectRetryAt: number | null;
+  /**
+   * #8268 — set when this page's bundle differs from what the daemon that served it
+   * now serves (an update landed under an open window). Persistent: only a reload
+   * clears it, so it survives transport drops.
+   */
+  staleBundle: StaleBundleInfo | null;
 
   // Server startup logs (fetched via Tauri IPC on startup failure)
   serverStartupLogs: string[] | null;

@@ -70,8 +70,12 @@ let capturedOnRestart: ((sessionId: string) => void) | null = null
 // shallow stub keeps the App tests focused on App behaviour while
 // MultiTerminalView's own tests cover its production wiring.
 vi.mock('./components/MultiTerminalView', () => ({
-  MultiTerminalView: (props: { className?: string }) => (
-    <div data-testid="multi-terminal-view-mock" className={props.className} />
+  MultiTerminalView: (props: { className?: string; visible?: boolean }) => (
+    <div
+      data-testid="multi-terminal-view-mock"
+      className={props.className}
+      data-visible={String(props.visible)}
+    />
   ),
 }))
 
@@ -189,7 +193,7 @@ vi.mock('./store/connection', () => {
     availableProviders: [],
     // #7728 — rosters are keyed by the provider that broadcast them.
     modelsByProvider: {},
-    availablePermissionModes: [],
+    permissionModesByProvider: {},
     serverErrors: [],
     connectionRetryCount: 0,
     terminalRawBuffer: '',
@@ -363,6 +367,76 @@ describe('App', () => {
   it('does not show reconnect banner when disconnected (not reconnecting)', () => {
     render(<App />)
     expect(screen.queryByTestId('reconnect-banner')).not.toBeInTheDocument()
+  })
+
+  // #8268 — the wiring from the store into the banners and the unsaved-work probe.
+  it('shows "retrying in Ns" and no attempt counter for an uncapped reconnect', () => {
+    stateOverrides = { connectionPhase: 'reconnecting', reconnectUncapped: true, reconnectRetryAt: Date.now() + 8_000, connectionRetryCount: 30 }
+    render(<App />)
+    const text = screen.getByTestId('reconnect-banner').textContent ?? ''
+    expect(text).toMatch(/retrying in \d+s/)
+    expect(text).not.toContain('attempt')
+  })
+
+  it('keeps the attempt counter for a capped reconnect', () => {
+    stateOverrides = { connectionPhase: 'reconnecting', reconnectUncapped: false, connectionRetryCount: 2 }
+    render(<App />)
+    expect(screen.getByTestId('reconnect-banner').textContent).toContain('attempt 2/5')
+  })
+
+  it('shows the persistent "Chroxy was updated" banner and the client version when the page is stale', () => {
+    stateOverrides = {
+      connectionPhase: 'connected', sessions: [], serverVersion: '99.0.0',
+      staleBundle: { clientVersion: '0.11.4', clientBuildId: 'a', serverVersion: '99.0.0', serverBuildId: 'b' },
+    }
+    render(<App />)
+    expect(screen.getByTestId('stale-bundle-banner')).toBeInTheDocument()
+    expect(screen.getByTestId('client-version-badge')).toBeInTheDocument()
+  })
+
+  it('shows neither for a current page', () => {
+    stateOverrides = { connectionPhase: 'connected', sessions: [], staleBundle: null }
+    render(<App />)
+    expect(screen.queryByTestId('stale-bundle-banner')).not.toBeInTheDocument()
+  })
+
+  // #8268 — App feeds its own refs and attachment state to the unsaved-work check the
+  // stale-bundle auto-reload consults. composerHasUnsavedWork has the per-branch unit
+  // tests; these pin that App passes the right data into it. In each, the visible
+  // textarea is EMPTY at the moment of the check, so the DOM scan cannot be what
+  // answers, and the ref is the only thing that knows.
+  describe('the composer feeds the unsaved-work check (#8268)', () => {
+    const mk = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null })
+    const two = { connectionPhase: 'connected', sessions: [mk('s1'), mk('s2')] }
+
+    it('is false for a clean composer', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      render(<App />)
+      expect(hasUnsavedWork()).toBe(false)
+    })
+
+    it('a draft for a session that is not the visible tab counts', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      const { rerender } = render(<App />)
+      fireEvent.change(screen.getByRole('textbox', { name: /message input/i }), { target: { value: 'unsent thought' } })
+      stateOverrides = { ...two, activeSessionId: 's2' }
+      rerender(<App />)
+      expect((screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement).value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+
+    it('a pasted-text chip counts even after its marker was deleted from the textarea', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      render(<App />)
+      const box = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.paste(box, { clipboardData: { getData: (t: string) => (t === 'text/plain' ? 'line\n'.repeat(50) : ''), items: [], files: [] } })
+      fireEvent.change(box, { target: { value: '' } })
+      expect((box as HTMLTextAreaElement).value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
   })
 
   it('shows welcome screen when connected with no sessions', () => {
@@ -779,7 +853,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-tui'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-tui': permissionModes },
         permissionMode: 'approve',
       }
       const { container } = render(<App />)
@@ -795,7 +869,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-sdk'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-sdk', capabilities: { planMode: true } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-sdk': permissionModes },
         permissionMode: 'approve',
       }
       const { container } = render(<App />)
@@ -809,7 +883,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-sdk'),
         activeSessionId: 's1',
         availableProviders: [],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-sdk': permissionModes },
         permissionMode: 'approve',
       }
       const { container } = render(<App />)
@@ -824,7 +898,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-tui'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-tui': permissionModes },
         permissionMode: 'approve',
         setPermissionMode,
       }
@@ -840,7 +914,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-sdk'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-sdk', capabilities: { planMode: true } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-sdk': permissionModes },
         permissionMode: 'approve',
         setPermissionMode,
       }
@@ -860,7 +934,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-tui'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-tui': permissionModes },
         permissionMode: 'plan',
         previousPermissionMode: 'approve',
         setPermissionMode,
@@ -1472,6 +1546,19 @@ describe('App', () => {
       rerender(<App />)
       expect(screen.getByTestId('chat-pane')).toBeInTheDocument()
       expect(screen.getByTestId('terminal-pane')).toBeInTheDocument()
+    })
+
+    // #8254: the terminal pane stays mounted under display:none on the Chat tab,
+    // and a hidden pane that measured itself resized the real claude PTY to 10x6.
+    it('tells the terminal view it is hidden on the Chat tab and shown on the Output tab', () => {
+      stateOverrides = { ...connectedState, viewMode: 'chat' }
+      const { rerender } = render(<App />)
+      const terminalPane = screen.getByTestId('terminal-pane')
+      expect(within(terminalPane).getByTestId('multi-terminal-view-mock').dataset.visible).toBe('false')
+
+      stateOverrides = { ...connectedState, viewMode: 'terminal' }
+      rerender(<App />)
+      expect(within(terminalPane).getByTestId('multi-terminal-view-mock').dataset.visible).toBe('true')
     })
 
     it('hides the inactive pane with display:none and shows the active one', () => {
@@ -2885,10 +2972,10 @@ describe('App', () => {
           { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200000 },
           { id: 'opus', label: 'Opus 4.7', fullId: 'claude-opus-4-7', contextWindow: 200000 },
           ], defaultModelId: null } },
-      availablePermissionModes: [
+      permissionModesByProvider: { 'claude-sdk': [
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto Approve' },
-      ],
+      ] },
     }
 
     it('renders the model dropdown, permission select, bell, overflow, and cost slot together', () => {

@@ -408,6 +408,15 @@ export interface ToolStartPayload {
 }
 
 /**
+ * A tool input as `ChatMessage.toolInput` types it: a non-null, non-array
+ * object. Every real tool input serializes as one; anything else (`null` on a
+ * live SDK/CLI/BYOK `tool_start`, a stray string or array) stays unset.
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== undefined && value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
  * Validate, dedup, and normalize a `tool_start` message.
  *
  * - Resolves `sessionId` from `msg.sessionId` (string-typed) falling back to
@@ -499,6 +508,19 @@ export function handleToolStart(
     serverName,
     timestamp: wireTimestamp,
   }
+  // #8251 — the structured input, when the server already knows it at
+  // `tool_start` time. claude-tui sends it here (its PreToolUse hook payload
+  // carries the whole `tool_input`) and never sends `tool_result.input`, and a
+  // history replay forwards the persisted `tool_start` entry — whose `input`
+  // the server backfilled once the result landed (#7346) — but not a
+  // `tool_result` that repeats it. Without this the INPUT panel read
+  // "(no input)" for every claude-tui tool call and for every claude-sdk call
+  // after a session switch or reload. `tool_result.input` (below) still wins
+  // when it lands later. Same plain-object guard as that backfill: arrays,
+  // primitives and `null` (SDK/CLI/BYOK live starts) leave `toolInput` unset.
+  if (isPlainObject(msg.input)) {
+    chatMessage.toolInput = msg.input
+  }
 
   // #4308 — build the ActiveTool entry. Skip when `toolUseId` is missing
   // (non-string / absent): the wire schema requires it (#121 server.ts),
@@ -578,7 +600,9 @@ export interface ToolResultPayload {
  * - `sessionId`: resolved from string-typed `msg.sessionId` falling back to
  *   `activeSessionId`. Non-string values are ignored.
  * - `patch`: `{ toolResult, toolResultTruncated, toolResultIsError }`, plus
- *   `toolResultImages` only when `msg.images` is a non-empty array.
+ *   `toolResultImages` only when `msg.images` is a non-empty array, and
+ *   `toolResultTerminatedReason` only when the server sent a `terminatedReason`
+ *   (#7376).
  * - `resultText`: the raw result string (string-validated) for the caller's
  *   terminal preview.
  * - `applyTo(messages)`: locates the matching `tool_use` entry by
@@ -612,6 +636,12 @@ export function handleToolResult(
     toolResultIsError: isError,
   }
   if (images?.length) patch.toolResultImages = images
+  // #7376: the tool was cut off by a terminated turn, not by its own failure.
+  // Only a non-empty string counts; anything else (old server, junk) leaves the
+  // patch without the key so the bubble keeps its ordinary ok/error rendering.
+  if (typeof msg.terminatedReason === 'string' && msg.terminatedReason) {
+    patch.toolResultTerminatedReason = msg.terminatedReason
+  }
   // #7346: backfill `toolInput` from the finalized input the server
   // attaches once known (CliSession / SdkSession — see
   // base-session.js's `_getTrackedToolInput`), so a completed call whose
@@ -624,13 +654,8 @@ export function handleToolResult(
   // and the only shape a real tool input is ever serialized as; BYOK
   // never sends this field, so `msg.input` stays `undefined` there and
   // this is a no-op (unchanged from before).
-  if (
-    msg.input !== undefined
-    && msg.input !== null
-    && typeof msg.input === 'object'
-    && !Array.isArray(msg.input)
-  ) {
-    patch.toolInput = msg.input as Record<string, unknown>
+  if (isPlainObject(msg.input)) {
+    patch.toolInput = msg.input
   }
 
   return {
@@ -645,7 +670,15 @@ export function handleToolResult(
       while (idx >= 0 && !(messages[idx]!.type === 'tool_use' && messages[idx]!.toolUseId === toolUseId)) idx--
       if (idx === -1) return messages
       const updated = [...messages]
-      updated[idx] = { ...updated[idx]!, ...patch }
+      const merged: ChatMessage = { ...updated[idx]!, ...patch }
+      // #7376 (review): an authoritative result WITHOUT a termination reason
+      // replaces the synthetic "turn ended" one. A CLI hard-timeout / stall
+      // clears local state without killing the child, so the real result (a
+      // success or a genuine `is_error`) can still follow for the same id --
+      // and the renderers give the marker precedence, so a stale one would
+      // hide it. The spread above only ever ADDS keys; drop it explicitly.
+      if (!('toolResultTerminatedReason' in patch)) delete merged.toolResultTerminatedReason
+      updated[idx] = merged
       return updated
     },
     // #4308 — remove the in-flight ActiveTool entry by toolUseId.

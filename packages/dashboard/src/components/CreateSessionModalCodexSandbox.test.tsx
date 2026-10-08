@@ -39,7 +39,7 @@ function mockStore(defaultProvider: string, providers = [CODEX_PROVIDER, SDK_PRO
         defaultModel: null,
         modelsByProvider: {},
         availableProviders: providers,
-        availablePermissionModes: [],
+        permissionModesByProvider: {},
         environments: [],
         requestDirectoryListing: () => {},
         setDirectoryListingCallback: () => {},

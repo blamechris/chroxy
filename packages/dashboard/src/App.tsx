@@ -23,6 +23,8 @@ import {
   // #7728 — the model roster is keyed by PROVIDER; this reads the one the
   // active session's provider offers (never "whichever roster arrived last").
   selectModelsForProvider,
+  // #8224 — the permission-mode roster is keyed by PROVIDER too.
+  selectPermissionModesForProvider,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -59,6 +61,7 @@ import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { ExposureWarningBanner } from './components/ExposureWarningBanner'
 import { DaemonUpdateBanner } from './components/DaemonUpdateBanner'
+import { StaleBundleBanner } from './components/StaleBundleBanner'
 import { BillingWarningBanner } from './components/BillingWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
@@ -81,6 +84,8 @@ import { useTrayBadgeSync } from './hooks/useTrayBadgeSync'
 import { useChatKeyboard } from './hooks/useChatKeyboard'
 import { useTauriMenuWiring } from './hooks/useTauriMenuWiring'
 import { isTauri } from './utils/tauri'
+import { composerHasUnsavedWork, registerUnsavedWorkProbe } from './utils/unsaved-work'
+import { getClientVersion, reloadPage } from './utils/stale-bundle'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { useNotificationPermission } from './hooks/useNotificationPermission'
@@ -245,9 +250,18 @@ export function App() {
   )
   const availableModels = activeProviderModels.models
   const defaultModelId = activeProviderModels.defaultModelId
+  const permissionModesByProvider = useConnectionStore(s => s.permissionModesByProvider)
+  // #8224 — the permission-mode roster the ACTIVE session's provider offers,
+  // derived here at read time. The server used to refresh one flat list only on
+  // an explicit session switch, so a session created beside an active
+  // claude-tui one inherited that roster's "Plan (unavailable)" until the tab
+  // was re-selected; keyed by provider, there is no refresh to miss.
+  const availablePermissionModes = useMemo(
+    () => selectPermissionModesForProvider(permissionModesByProvider, activeSessionProvider),
+    [permissionModesByProvider, activeSessionProvider],
+  )
   // #5184: header cost-badge display mode (Settings-driven, persisted).
   const costBadgeMode = useConnectionStore(s => s.costBadgeMode)
-  const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const availableProviders = useConnectionStore(s => s.availableProviders)
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const infoNotifications = useConnectionStore(s => s.infoNotifications ?? [])
@@ -273,6 +287,11 @@ export function App() {
   const dismissBillingBanner = useConnectionStore(s => s.dismissBillingBanner)
   const serverStartupLogs = useConnectionStore(s => s.serverStartupLogs)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
+  // #8268 — no retry budget for the daemon that served this page; show when the next attempt is.
+  const reconnectUncapped = useConnectionStore(s => s.reconnectUncapped)
+  const reconnectRetryAt = useConnectionStore(s => s.reconnectRetryAt)
+  // #8268 — this page's bundle is not what the daemon serves now.
+  const staleBundle = useConnectionStore(s => s.staleBundle)
   // #5556 — restart-countdown parity with mobile: feed the ETA/anchor/reason
   // through to ReconnectBanner so it can render a live ~M:SS countdown.
   const shutdownReason = useConnectionStore(s => s.shutdownReason)
@@ -1956,6 +1975,18 @@ export function App() {
   const [pastedTextBlocks, setPastedTextBlocks] = useState<PastedTextBlock[]>([])
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null)
 
+  // #8268 — composer drafts live in these refs and attachments in state, none of it
+  // persisted, so the stale-bundle auto-reload must know about them. Read through a
+  // ref so the probe registers once and always sees the latest values.
+  const unsavedComposerRef = useRef<() => boolean>(() => false)
+  unsavedComposerRef.current = () => composerHasUnsavedWork({
+    drafts: inputDraftsRef.current.values(),
+    pastedBlocks: pastedTextBlocksRef.current.values(),
+    fileAttachments,
+    imageAttachments,
+  })
+  useEffect(() => registerUnsavedWorkProbe(() => unsavedComposerRef.current()), [])
+
   // #3800 / #3977: single eviction point for the three per-session composer
   // refs above. Called from `handleCloseSession` / `handleRestartSession` /
   // `handleSend` (synchronous user actions) AND from the sessions-list
@@ -2574,7 +2605,8 @@ export function App() {
       <ReconnectBanner
         visible={isReconnecting || isServerDown}
         attempt={connectionRetryCount}
-        maxAttempts={5}
+        maxAttempts={reconnectUncapped ? null : 5}
+        nextRetryAt={reconnectRetryAt}
         message={
           isServerDown
             ? 'Server appears to be down'
@@ -2619,6 +2651,10 @@ export function App() {
         />
       )}
 
+      {/* #8268 — this window runs a bundle from before the daemon's last update and
+          could not reload itself without losing work: persistent Reload prompt. */}
+      <StaleBundleBanner stale={staleBundle} onReload={reloadPage} />
+
       {/* #8331 — "update ready" for the daily daemon (Restart now / Postpone 1h),
           the confirm dialog for busy sessions, and the one-time "Updated to
           <sha>" notice. Renders nothing for a client the server did not tell. */}
@@ -2648,6 +2684,8 @@ export function App() {
           <AppHeader>. App owns the state + the shared `formatContext`. */}
       <AppHeader
         serverVersion={serverVersion}
+        clientVersion={getClientVersion()}
+        bundleStale={staleBundle !== null}
         connectionPhase={connectionPhase}
         chatActivityState={chatActivity.state}
         serverPhase={serverPhase}
@@ -3049,6 +3087,9 @@ export function App() {
                         sessions={sessions}
                         activeSessionId={activeSessionId}
                         className="terminal-container"
+                        // #8254: this pane is display:none unless the Output tab is
+                        // showing; a hidden pane must not size the real PTY.
+                        visible={viewMode === 'terminal'}
                       />
                     </div>
                   </>

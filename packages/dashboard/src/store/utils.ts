@@ -176,9 +176,9 @@ export function createEmptyFlatSessionMirror(): Pick<SessionState, FlatSessionFi
  * `serverCapabilities` is the FAIL-OPEN one: an empty map is the "fail-closed
  * for any capability-gated affordance" state (#3272 review), so server A's
  * advertised capabilities gating server B's UI is the failure this clear
- * prevents. `availablePermissionModes` is the SHARP one: `auth_ok` re-sets it
+ * prevents. `permissionModesByProvider` is the SHARP one: `auth_ok` re-sets it
  * only CONDITIONALLY (`message-handler.ts`, `if (auth.availablePermissionModes)`),
- * so an older server B that omits the field leaves server A's mode list driving
+ * so an older server B that omits the field leaves server A's mode rosters driving
  * the permission-mode picker — nothing else overwrites it (#7564 review).
  *
  * ## This roster is the STORE-STATE portion, not all connection-scoped state
@@ -219,9 +219,9 @@ export function createEmptyConnectionScope() {
     availableProviders: [],
     // The model rosters are per daemon/provider (#7728: one per provider).
     modelsByProvider: {},
-    // The mode enum is advertised per daemon, and `auth_ok` re-sets it only
-    // when the server sends it — see the docstring above.
-    availablePermissionModes: [],
+    // The mode rosters are advertised per daemon (#8224: one per provider), and
+    // `auth_ok` re-sets one only when the server sends it — see the docstring.
+    permissionModesByProvider: {},
     // The presence roster belongs to the dropped socket.
     connectedClients: [],
     // Web-task list is per daemon.
@@ -263,6 +263,94 @@ export function createEmptyConnectionScope() {
  * from — and no production-unreferenced export for
  * `scripts/lint-write-only-ctx-fields.mjs` to warn about.
  */
+
+/**
+ * #7586 — the IN-FLIGHT marker roster: every store field that records "a
+ * request is outstanding on this socket" (a spinner, a disabled control, a
+ * throttle stamp), so that the reply which would clear it can never arrive once
+ * the socket is gone.
+ *
+ * ## Why it is a roster
+ *
+ * These were cleared by `socket.onclose`, one `if (size > 0) set(...)` block per
+ * field, and by nothing else on the user-initiated path: `disconnect()` nulls
+ * `socket.onclose` to suppress auto-reconnect, so the sweep never ran for a
+ * user Disconnect. A container action started, then Disconnect → Connect to
+ * the same server, left the row stuck "actioning" forever (#7586). #7572 fixed
+ * the two orchestration markers by copying them into `disconnect()`; this is
+ * the rest, done once.
+ *
+ * `socket.onclose` (through `staleInFlightMarkers` in `connection.ts`),
+ * `disconnect()`, `forgetSession` and `_resetSessionMemory` all take their set
+ * from THIS factory, so a marker added here is cleared on every path that ends
+ * a connection, and a marker that is NOT added here is cleared on none of them
+ * — which a roster test (`connection-inflight-markers.test.ts`) can see, where
+ * four hand-copied lists drifting apart could not.
+ *
+ * ## What is deliberately NOT in it
+ *
+ * Records that stay TRUE of the same daemon across Disconnect → Connect: the
+ * `*Results` maps beside each marker (the outcome of an action that already
+ * finished), the survey snapshots (kept so the "generated Nm ago" line can
+ * signal staleness), and the #7557 family (`orchestrationRunDetails`,
+ * `credentialTestResults`, `serverStartupLogs`, `pendingPairRequests`, …).
+ * #7572 / #7570 settled that split; this roster is only the request markers.
+ *
+ * A fresh object per call: these are mutable collections handed to the store.
+ */
+export function createEmptyInFlightMarkers() {
+  return {
+    // #5277: an in-flight cancel_activity's ack/failure is socket-scoped. The
+    // tree re-seeds from activity_snapshot on resubscribe.
+    cancellingActivityIds: new Set<string>(),
+    // #5500 / #5502: in-flight reindex / relay re-run requests. The server-side
+    // work keeps running; the next survey refresh shows its effect.
+    reindexingRepoPaths: new Set<string>(),
+    relayRerunningRepoPaths: new Set<string>(),
+    // #6134-#6140: in-flight lifecycle actions on a container / BYOK pool /
+    // host prune / simulator / emulator / WSL distro.
+    containerActioningIds: new Set<string>(),
+    byokPoolActioningIds: new Set<string>(),
+    hostPruneActioningIds: new Set<string>(),
+    simulatorActioningIds: new Set<string>(),
+    emulatorActioningIds: new Set<string>(),
+    wslActioningIds: new Set<string>(),
+    // #7625: a pending restore retry can never be acked on a dead socket.
+    retryingRestoreIds: new Set<string>(),
+    // #6691 (S-3): an in-flight orchestration detail request and a pending
+    // mutating action.
+    orchestrationRunDetailLoading: new Set<string>(),
+    orchestrationPendingActions: {},
+    // #7344 / #7430: the session-keyed PR/CI request markers, and the auto-pull
+    // throttle window (per CONNECTION: a request made on a socket that no longer
+    // exists must not suppress the first re-survey after a reconnect).
+    sessionPrStatusLoading: {},
+    sessionPrStatusRequestedAt: {},
+    sessionPrThreadsLoading: {},
+    // #6472: the IDE symbol-table request.
+    symbolsLoading: false,
+    // #6153: every Control Room survey *Loading flag. Each section computes
+    // refreshDisabled = loading || !connected, so a refresh in flight when the
+    // socket dies would leave loading=true forever. The stale snapshots are KEPT.
+    hostStatusLoading: false,
+    runnerStatusLoading: false,
+    containersStatusLoading: false,
+    repoRuntimeConfigLoading: false,
+    byokPoolStatusLoading: false,
+    hostPruneStatusLoading: false,
+    simulatorStatusLoading: false,
+    emulatorStatusLoading: false,
+    wslStatusLoading: false,
+    integrationStatusLoading: false,
+    skillsInventoryLoading: false,
+    mailboxStatusLoading: false,
+    externalSessionsLoading: false,
+    repoEventsLoading: false,
+    githubWebhookConfigLoading: false,
+    orchestrationRunsLoading: false,
+    failedRestoresLoading: false,
+  } satisfies Partial<ConnectionState>;
+}
 
 /**
  * #7470 — drop every id in `removedIds` from a session-keyed map, returning a

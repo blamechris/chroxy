@@ -76,4 +76,45 @@ describe('CopyButton (#6631)', () => {
     expect(btn).not.toHaveClass('msg-copy-btn')
     expect(screen.queryByTestId('msg-copy-button')).toBeNull()
   })
+
+  // #7338 — the control's hover chrome used to paint over the bubble's own text
+  // with a see-through background. jsdom has no layout, so assert the
+  // stylesheet declarations that keep it clear of the text and opaque.
+  describe('chrome vs message text (#7338)', () => {
+    const readCss = async () => {
+      const { readFileSync } = await import('node:fs')
+      const { resolve } = await import('node:path')
+      return readFileSync(resolve(__dirname, '../theme/components.css'), 'utf8')
+    }
+    const decl = (rule: string, prop: string) =>
+      rule.match(new RegExp(`(?:^|[\\s;{])${prop}:\\s*([^;]+);`))?.[1]?.trim()
+
+    // Every top-level rule for exactly this selector, so a later duplicate that
+    // wins the cascade cannot hide behind the first match.
+    const rulesFor = (css: string, selector: string) => {
+      const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      return [...css.matchAll(new RegExp(`\\n${esc}\\s*\\{([^}]+)\\}`, 'g'))].map((m) => m[1]!)
+    }
+
+    it.each(['.msg-copy-btn', '.code-copy-btn'])('%s paints an opaque, defined surface (no see-through fallback)', async (selector) => {
+      const css = await readCss()
+      const backgrounds = rulesFor(css, selector).map((r) => decl(r, 'background')).filter((v) => v !== undefined)
+      expect(backgrounds, `${selector} sets its background in exactly one rule`).toEqual(['var(--bg-card)'])
+    })
+
+    it('assistant bubbles reserve a right gutter at least as wide as the control footprint', async () => {
+      const css = await readCss()
+      const btn = css.match(/\n\.msg-copy-btn\s*\{([^}]+)\}/)?.[1] ?? ''
+      const bubbles = rulesFor(css, '.msg.assistant').filter((r) => /(?:^|[\s;{])padding(?:-right)?:/.test(r))
+      expect(bubbles.length, '.msg.assistant sets its padding in exactly one rule').toBe(1)
+      const bubble = bubbles[0]!
+      const width = parseFloat(decl(btn, 'width') ?? 'NaN')
+      const right = parseFloat(decl(btn, 'right') ?? 'NaN')
+      // `padding: <top> <right> <bottom> <left>` — the second value is the right.
+      const padding = (decl(bubble, 'padding') ?? '').split(/\s+/).map(parseFloat)
+      expect(Number.isFinite(width) && Number.isFinite(right), 'control footprint is parseable').toBe(true)
+      expect(padding.length, 'bubble padding is the 4-value form').toBe(4)
+      expect(padding[1]! >= width + right).toBe(true)
+    })
+  })
 })

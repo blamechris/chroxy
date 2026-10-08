@@ -29,8 +29,9 @@
   display: grid;
   grid-template-columns: auto 1fr;
   /* Rows: reconnect-banner, tunnel-warming-banner, exposure-warning-banner,
-     daemon-update-region (#8331), header, content (sidebar+main), footer-bar. */
-  grid-template-rows: auto auto auto auto auto 1fr auto;
+     stale-bundle-banner (#8268), daemon-update-region (#8331), header,
+     content (sidebar+main), footer-bar. */
+  grid-template-rows: auto auto auto auto auto auto 1fr auto;
 }
 
 #app.with-sidebar > .reconnect-banner {
@@ -54,25 +55,31 @@
   grid-column: 1 / -1;
 }
 
-/* Daemon update banner (#8331) — full width above the header; the row collapses
-   to 0 when nothing is queued. */
-#app.with-sidebar > .daemon-update-region {
+/* Stale-bundle banner (#8268) — full width, collapses to 0 when the page is current. */
+#app.with-sidebar > .stale-bundle-banner {
   grid-row: 4;
   grid-column: 1 / -1;
 }
 
-#app.with-sidebar > header {
+/* Daemon update banner (#8331) — full width above the header; the row collapses
+   to 0 when nothing is queued. */
+#app.with-sidebar > .daemon-update-region {
   grid-row: 5;
   grid-column: 1 / -1;
 }
 
-#app.with-sidebar > .sidebar {
+#app.with-sidebar > header {
   grid-row: 6;
+  grid-column: 1 / -1;
+}
+
+#app.with-sidebar > .sidebar {
+  grid-row: 7;
   grid-column: 1;
 }
 
 #app.with-sidebar > .main-wrapper {
-  grid-row: 6;
+  grid-row: 7;
   grid-column: 2;
   display: flex;
   flex-direction: column;
@@ -83,7 +90,7 @@
 /* Explicit last-row placement so future in-flow children don't accidentally
    shift the footer's auto-placement target (Copilot review #3177). */
 #app.with-sidebar > .footer-bar {
-  grid-row: 7;
+  grid-row: 8;
   grid-column: 1 / -1;
 }
 
@@ -625,6 +632,14 @@ a.dev-preview-chip__link:focus-visible {
   padding: 1px 6px;
   border-radius: 4px;
   font-weight: 500;
+}
+
+/* #8268 — the bundle this page runs is not the server's (a different version, or
+   the same version rebuilt). Orange, like the other "this is not what you think"
+   signals, so it does not read as part of the server version beside it. */
+.version-badge--client {
+  color: var(--accent-orange);
+  margin-left: 4px;
 }
 
 .status-dot {
@@ -3150,7 +3165,13 @@ button.sidebar-token-view-session-row:hover {
      `.msg` descendants, not the bubble background. */
   background: transparent;
   align-self: flex-start;
-  padding: 2px 0;
+  /* #7338: the right padding is a gutter for the absolutely-positioned copy
+     control (`.msg-copy-btn`: 22px wide + 8px from the edge = 30px, plus 4px of
+     air). Without it the control painted over the last words of the first
+     line, and its see-through chrome read as a stray box around that text. It
+     applies to every assistant row, streaming or not, so the text does not
+     re-wrap when the control mounts at the end of the turn. */
+  padding: 2px 34px 2px 0;
   border-radius: 0;
 }
 
@@ -3546,9 +3567,11 @@ button.sidebar-token-view-session-row:hover {
   font-size: 12px;
   line-height: 1;
   color: var(--text-muted);
-  /* theme-neutral fallbacks (match the repo's --surface-raised fallback at
-     .cr-* usage) so the control reads correctly in BOTH light and dark. */
-  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  /* #7338: an OPAQUE themed surface. `--surface-raised` is not defined by any
+     theme, so the old `var(--surface-raised, rgba(127, 127, 127, 0.12))` always
+     resolved to its 12% grey fallback: text showed straight through the control
+     and the hover chrome looked like a corrupted box over the message. */
+  background: var(--bg-card);
   border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
   border-radius: var(--radius-sm, 6px);
   cursor: pointer;
@@ -3662,9 +3685,10 @@ button.sidebar-token-view-session-row:hover {
   font-size: 12px;
   line-height: 1;
   color: var(--text-muted);
-  /* theme-neutral fallbacks (matches .msg-copy-btn, #6631) so the control
-     reads correctly in both light and dark. */
-  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  /* #7338: an opaque themed surface, as on .msg-copy-btn. `--surface-raised`
+     is defined by no theme, so its rgba fallback always applied and the code
+     underneath showed through the control. */
+  background: var(--bg-card);
   border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
   border-radius: var(--radius-sm, 6px);
   cursor: pointer;
@@ -4166,6 +4190,43 @@ button.sidebar-token-view-session-row:hover {
 .tool-group-entry--error {
   background: var(--accent-red-light);
   border-left: 2px solid var(--accent-red, #d6685f);
+}
+
+/* #7376 — a tool cut off because its TURN was terminated under it (permission-
+   mode switch, Stop, crash, watchdog). Deliberately NOT the failure red: the
+   command never reported, so it did not "fail", and the right next step (check
+   whether it took effect, then retry) differs. Amber, the same family as the other "needs your attention, nothing is
+   broken" states (expired permission, stream stall). */
+.tool-group-entry-marker--terminated {
+  color: var(--accent-orange);
+}
+
+.tool-group-entry--terminated {
+  background: var(--accent-orange-light);
+  border-left: 2px solid var(--accent-orange);
+}
+
+.tool-group-entry-terminated {
+  flex-shrink: 0;
+  color: var(--accent-orange);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.tool-group-entry-terminated-note,
+.tool-bubble-terminated-note {
+  color: var(--accent-orange);
+  font-size: var(--text-xs);
+}
+
+.tool-bubble-terminated-note {
+  margin-top: 6px;
+}
+
+.tool-bubble--terminated {
+  border-left: 2px solid var(--accent-orange);
 }
 
 .tool-group-entry-name {
@@ -6059,7 +6120,29 @@ button.sidebar-token-view-session-row:hover {
    mounts this element when `formatComposerLozenge` returns non-null (never
    at idle), so there's no `display: none` state to gate here — the color
    rules below just tint the already-rendered badge per state, mirroring
-   the hairline's color mapping one row up so the two read as one signal. */
+   the hairline's color mapping one row up so the two read as one signal.
+
+   #7368: "never participates in flex layout" also meant nothing above the
+   composer knew the lozenge's upper half was drawn into its strip, so it
+   covered the ActivityIndicator / CheckInChip row. `.input-bar--with-lozenge`
+   (set by InputBar only while the lozenge is mounted) reserves that overhang
+   as margin-top on the composer. The trade-off: this is a one-off ~10px shift
+   when a turn starts. Usually it lands in the same frame the
+   ActivityIndicator row mounts above the composer, so it is absorbed into a
+   shift that already happens rather than adding a second one. The gates are
+   close but not identical: the lozenge follows deriveChatActivity, where a
+   pending permission or plan reads as `waiting` even while the session is
+   idle, and the indicator follows !isIdle. In that case the 10px shift
+   happens on its own. It never changes while the turn runs or the lozenge
+   text changes. The
+   lozenge itself stays out of flow, so the text swap is still jitter-free. */
+.input-bar {
+  --input-bar-lozenge-height: calc(var(--text-xs) * 1.4 + 4px); /* line-height 1.4 + 2x 1px padding + 2x 1px border */
+}
+.input-bar--with-lozenge {
+  /* half the lozenge sits above the composer, plus the composer's 1px border */
+  margin-top: calc(var(--input-bar-lozenge-height) / 2 + 1px);
+}
 .input-bar-lozenge {
   position: absolute;
   top: 0;
@@ -14246,4 +14329,35 @@ a.session-ci-chip__pr:focus-visible {
   margin: 0;
   font-size: 12px;
   color: var(--text-error);
+}
+
+/* #8268 — "Chroxy was updated — Reload". Persistent (no dismiss): the page is running
+   code from before the update, so the only honest resolution is a reload. The button
+   is a 44px tap target (CLAUDE.md). */
+.stale-bundle-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  padding: 4px 12px;
+  font-size: var(--text-base);
+  background: color-mix(in srgb, var(--accent-orange, #ff9f43) 16%, var(--bg-secondary, #1a1a2e));
+  color: var(--text-primary, #e8e8e8);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-orange, #ff9f43) 35%, transparent);
+}
+
+.stale-bundle-message {
+  font-weight: 600;
+}
+
+.stale-bundle-detail {
+  opacity: 0.75;
+  font-size: var(--text-sm);
+}
+
+.stale-bundle-banner .btn-retry {
+  min-height: 44px;
+  min-width: 44px;
 }

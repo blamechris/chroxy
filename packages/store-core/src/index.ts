@@ -43,6 +43,16 @@ export {
   selectOwnModelsForProvider,
 } from './models-by-provider'
 export type { ModelsByProvider, ProviderModelRoster } from './models-by-provider'
+
+// #8224: provider-keyed permission-mode rosters — the same fix for the same
+// defect (a flat slot that only some events refresh). The active session's
+// roster is derived at read time via `selectPermissionModesForProvider`.
+export {
+  EMPTY_PERMISSION_MODES,
+  mergePermissionModesByProvider,
+  selectPermissionModesForProvider,
+} from './permission-modes-by-provider'
+export type { PermissionModesByProvider } from './permission-modes-by-provider'
 export type { AgentConnection, AgentConnectionAuthRoute } from '@chroxy/protocol'
 
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an
@@ -71,6 +81,12 @@ export type {
   InputDeliveryStatus,
 } from './input-delivery'
 export { buildInputMessage } from '@chroxy/protocol'
+// #7376: the shared wording for a tool cut off by a terminated turn, re-exported
+// so the dashboard and the mobile app import it beside the `toolResultTerminatedReason`
+// field it describes (single source: @chroxy/protocol, also used by the server's
+// fallback result text).
+export { describeTurnTermination, isTurnTerminationReason } from '@chroxy/protocol'
+export type { TurnTerminationReason, TurnTerminationDescription } from '@chroxy/protocol'
 export type { BuildInputMessageOptions } from '@chroxy/protocol'
 
 // #6774 — combined "approve plan + auto-accept edits" action. Shared so both
@@ -934,6 +950,7 @@ export {
   selectReconnectEndpoint,
   CONNECT_MAX_RETRIES,
   CONNECT_RETRY_DELAYS,
+  UNCAPPED_RETRY_DELAYS,
   RECONNECT_MAX_RUNG,
   LAN_FALLBACK_THRESHOLD,
 } from './connect-flow'

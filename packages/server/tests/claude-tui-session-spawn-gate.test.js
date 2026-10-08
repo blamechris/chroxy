@@ -319,6 +319,68 @@ describe('ClaudeTuiSession — respawn spawn gate (#8038)', () => {
   })
 })
 
+// #8254: a respawn re-uses the tracked PTY size. resizeTerminal clamps, so a
+// degenerate size can only be there from some other writer (legacy state, a future
+// code path), and a 10x6 spawn wraps claude's output into fragments the recovery
+// classifiers cannot match. These drive the REAL spawn path, not the helper.
+describe('ClaudeTuiSession — spawn size floor (#8254)', () => {
+  const MIN = { cols: 80, rows: 24 }
+
+  it('a respawn with a stored sub-minimum size spawns the PTY at the default, not 10x6', async () => {
+    const { session, spawnCalls, cleanup } = makeGatedSession({})
+    try {
+      session._sessionId = 'fixture-uuid-8254a'
+      session._settingsPath = join(tmpdir(), 'fixture-settings.json')
+      session._resumedFromPersisted = true
+      session._ptyCols = 10
+      session._ptyRows = 6
+
+      await session._respawnPty()
+
+      assert.equal(spawnCalls.length, 1)
+      assert.ok(spawnCalls[0].opts.cols >= MIN.cols && spawnCalls[0].opts.rows >= MIN.rows,
+        `spawned at ${spawnCalls[0].opts.cols}x${spawnCalls[0].opts.rows}`)
+      assert.deepEqual(session.getTerminalSize(), { cols: spawnCalls[0].opts.cols, rows: spawnCalls[0].opts.rows })
+    } finally {
+      await cleanup()
+    }
+  })
+
+  it('a stored sub-minimum size on either axis alone is also repaired', async () => {
+    for (const [cols, rows] of [[10, 40], [200, 6]]) {
+      const { session, spawnCalls, cleanup } = makeGatedSession({})
+      try {
+        session._sessionId = 'fixture-uuid-8254b'
+        session._settingsPath = join(tmpdir(), 'fixture-settings.json')
+        session._resumedFromPersisted = true
+        session._ptyCols = cols
+        session._ptyRows = rows
+        await session._respawnPty()
+        assert.ok(spawnCalls[0].opts.cols >= MIN.cols && spawnCalls[0].opts.rows >= MIN.rows, `${cols}x${rows} -> ${spawnCalls[0].opts.cols}x${spawnCalls[0].opts.rows}`)
+      } finally {
+        await cleanup()
+      }
+    }
+  })
+
+  it('a legitimate stored size survives a respawn untouched', async () => {
+    const { session, spawnCalls, cleanup } = makeGatedSession({})
+    try {
+      session._sessionId = 'fixture-uuid-8254c'
+      session._settingsPath = join(tmpdir(), 'fixture-settings.json')
+      session._resumedFromPersisted = true
+      session.resizeTerminal(160, 48)
+
+      await session._respawnPty()
+
+      assert.equal(spawnCalls.length, 1)
+      assert.deepEqual([spawnCalls[0].opts.cols, spawnCalls[0].opts.rows], [160, 48])
+    } finally {
+      await cleanup()
+    }
+  })
+})
+
 describe('ClaudeTuiSession — native auth-status refusal on a respawn (#8044)', () => {
   it('a hook-settings write failure before the auth check is NOT a refusal: it keeps the backoff and blocks readiness', async () => {
     let authCalls = 0

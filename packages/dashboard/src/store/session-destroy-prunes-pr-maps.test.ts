@@ -75,7 +75,7 @@ vi.mock('./crypto', () => ({
 vi.mock('./persistence', () => ({ clearPersistedSession: vi.fn() }))
 
 import { handleMessage, setStore, clearDeltaBuffers, clearPermissionSplits, stopHeartbeat, resetReplayFlags } from './message-handler'
-import { createEmptyConnectionScope, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
+import { createEmptyConnectionScope, createEmptyInFlightMarkers, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
 
 /**
  * The #7559 roster's field names, derived from the ONE factory the fix spreads
@@ -83,6 +83,15 @@ import { createEmptyConnectionScope, createEmptySessionState, pruneSessionKeyedM
  * is the defect class this whole file is about.
  */
 const CONNECTION_SCOPED_RESET_FIELDS: readonly string[] = Object.keys(createEmptyConnectionScope())
+
+/**
+ * #7586 — the in-flight request-marker roster (`utils.ts`), derived the same way.
+ * `forgetSession`, `_resetSessionMemory` and `disconnect()` take it by spread, so
+ * `assigns` has to resolve it exactly as it resolves the connection-scoped one,
+ * or a `reindexingRepoPaths` the stores really do clear reads as "cleared by
+ * nothing".
+ */
+const IN_FLIGHT_MARKER_FIELDS: readonly string[] = Object.keys(createEmptyInFlightMarkers())
 import type { ConnectionState } from './types'
 import { createEmptyActivityState } from '@chroxy/store-core'
 import type { ActivityState } from '@chroxy/store-core'
@@ -1247,9 +1256,9 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     modelsByProvider:
       'Record<provider, {models, defaultModelId}> — keyed by PROVIDER (#7728). The server\'s model ' +
       'rosters, connection-wide; one per provider that broadcast one.',
-    availablePermissionModes:
-      'PermissionMode[] — keyed by `id`. The server\'s PERMISSION_MODES table, connection-wide ' +
-      '(#4019).',
+    permissionModesByProvider:
+      'Record<provider, PermissionMode[]> — keyed by PROVIDER (#8224). The server\'s PERMISSION_MODES ' +
+      'table as each provider reports it, connection-wide; one per provider that sent one (#4019).',
     connectedClients:
       'ConnectedClient[] — keyed by `clientId`. Clients, not sessions; replaced wholesale from ' +
       'each `auth_ok` / clients broadcast.',
@@ -2296,7 +2305,7 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * weakest: `auth_ok` full-replaces it unconditionally on BOTH branches, and
  * store-core's auth handler normalises an omitted `capabilities` to `{}`, so
  * even an older server B overwrites the stale map. The genuinely sharp one is
- * `availablePermissionModes`, re-set only CONDITIONALLY (`message-handler.ts`,
+ * `permissionModesByProvider`, re-set only CONDITIONALLY (`message-handler.ts`,
  * `if (auth.availablePermissionModes)`).
  *
  * The fix did NOT touch the phase guard. What that guard protects is the SOCKET
@@ -2378,6 +2387,9 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
    */
   const SPREAD_ROSTERS: ReadonlyArray<readonly [string, readonly string[]]> = [
     ['createEmptyConnectionScope()', CONNECTION_SCOPED_RESET_FIELDS],
+    // #7586 — the in-flight request markers, spread by BOTH full-reset sites and
+    // by `disconnect()`. Imported, never transcribed, for the same reason.
+    ['createEmptyInFlightMarkers()', IN_FLIGHT_MARKER_FIELDS],
   ]
 
   /**
@@ -2562,7 +2574,7 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
       'cannot have its UI gates left enabled by stale state (empty = fail-closed)',
     availableProviders: 'disconnect() — the provider registry is per daemon',
     modelsByProvider: 'disconnect() — the model rosters are per daemon/provider',
-    availablePermissionModes: 'disconnect() — the mode enum is advertised per daemon',
+    permissionModesByProvider: 'disconnect() — the mode rosters are advertised per daemon/provider',
     connectedClients: 'disconnect() — the presence roster belongs to the dropped socket',
     webTasks: 'disconnect() — web-task list is per daemon',
     slashCommands: 'disconnect() — project commands differ per daemon and per session cwd',

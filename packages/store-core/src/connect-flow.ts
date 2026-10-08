@@ -70,6 +70,22 @@ export const RECONNECT_MAX_RUNG = 10
 export const CONNECT_RETRY_DELAYS: readonly number[] = [1000, 2000, 3000, 5000, 8000]
 
 /**
+ * #8268 — the ladder for a client that retries with NO cap (the dashboard talking to
+ * the daemon that served it). The head is the ordinary ladder, so the common case, a
+ * daemon that is back within a few minutes, is found within ~8-12 s of its return
+ * (8 s plus up to 50% jitter). Left at 8 s for good, a tab on a dead tunnel would
+ * probe every 8-12 s for as long as it stays open (~8,000 attempts a day), so the
+ * tail backs off: 8 s for ~2 min, 15 s for ~2 min, then 30 s indefinitely. Clamped at
+ * the last rung by {@link retryDelayForAttempt}.
+ */
+export const UNCAPPED_RETRY_DELAYS: readonly number[] = [
+  ...CONNECT_RETRY_DELAYS,
+  ...Array<number>(15).fill(8000),
+  ...Array<number>(8).fill(15000),
+  30000,
+]
+
+/**
  * Pick the backoff delay for a given attempt/rung index, clamping past the end
  * of the ladder to the final rung. The raw (un-jittered) value — the caller
  * applies `withJitter` so tests can pin `Math.random` and assert exact delays.
@@ -124,6 +140,11 @@ export type ProbeResult =
   // immediately and latch the terminal `server_down` state, rather than spinning
   // the full retry budget against a host that has explicitly given up.
   | { kind: 'terminal_down'; reason: string }
+  // #8268: the host answered 401/403 — a proxy or access gate in front of it, or a
+  // rejected token. Retrying cannot change that, so a client with no retry cap must
+  // stop here or it would retry for ever. Only a client that wires `onAuthFailed`
+  // acts on it; any other treats it as a plain failed probe (the pre-#8268 ladder).
+  | { kind: 'auth_failed'; reason: string }
 
 /**
  * The endpoint to connect to for a given attempt. Returned by
@@ -246,6 +267,13 @@ export interface RunConnectAttemptOptions {
   onRestartGaveUp: () => void
 
   /**
+   * #8268: the probe was refused with 401/403. Write the terminal `disconnected`
+   * phase with the auth error and STOP, scheduling nothing. Optional: omitted, an
+   * `auth_failed` result falls back to a failed probe.
+   */
+  onAuthFailed?: (info: { reason: string }) => void
+
+  /**
    * Retries are exhausted because the host was unreachable. Write the terminal
    * `disconnected` phase + the "could not reach server" copy/UX.
    */
@@ -292,6 +320,7 @@ export function runConnectAttempt(options: RunConnectAttemptOptions): Promise<vo
     onRestartGaveUp,
     onProbeGaveUp,
     onTerminalDown,
+    onAuthFailed,
     scheduleRetry,
     jitter = defaultJitter,
   } = options
@@ -319,6 +348,22 @@ export function runConnectAttempt(options: RunConnectAttemptOptions): Promise<vo
       if (result.kind === 'terminal_down') {
         if (onTerminalDown) {
           onTerminalDown({ reason: result.reason })
+          return
+        }
+        onProbeFailed(result.reason)
+        if (attempt < maxRetries) {
+          scheduleRetry(attempt + 1, delayFor(attempt))
+        } else {
+          onProbeGaveUp()
+        }
+        return
+      }
+
+      // #8268: refused by a gate in front of the host — terminal when the client
+      // opted in; otherwise the generic failed-probe ladder below.
+      if (result.kind === 'auth_failed') {
+        if (onAuthFailed) {
+          onAuthFailed({ reason: result.reason })
           return
         }
         onProbeFailed(result.reason)
@@ -408,6 +453,12 @@ export interface CreateReconnectSchedulerOptions {
    * here. Must be idempotent. No-op when `maxRung` is omitted.
    */
   onGaveUp?: () => void
+  /**
+   * Called each time a reconnect timer is armed, with the (jittered) delay it was
+   * armed for. Lets a client show a visible "retrying in Ns" instead of a bare
+   * "reconnecting" (#8268). Not called on the give-up path, where no timer is armed.
+   */
+  onScheduled?: (delayMs: number) => void
 }
 
 /**
@@ -452,6 +503,7 @@ export function createReconnectScheduler(
     jitter = defaultJitter,
     maxRung,
     onGaveUp,
+    onScheduled,
   } = options
 
   let scheduled = false
@@ -477,6 +529,7 @@ export function createReconnectScheduler(
       if (isStale()) return
       reconnect()
     }, delayMs)
+    if (onScheduled) onScheduled(delayMs)
     return true
   }
 

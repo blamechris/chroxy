@@ -2,7 +2,11 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { sessionHandlers } from '../../src/handlers/session-handlers.js'
 import { createSpy, createMockSession, waitFor, makeSessionIndexCtx, nsCtx } from '../test-helpers.js'
-import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+import { DEFAULT_PROVIDER, CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ClaudeTuiSession } from '../../src/claude-tui-session.js'
 // #7759 — the codex registry must resolve to the real CodexSession class, which
 // importing providers.js registers.
 import '../../src/providers.js'
@@ -165,40 +169,22 @@ describe('session-handlers', () => {
       })
     })
 
-    it('re-sends provider-scoped permission modes on switch (codex → codex copy) (#6638)', () => {
+    // #6638/#7811/#8224 — the permission-mode roster (codex copy, daemon-default
+    // copy for a provider-less entry, provider tag) is produced by
+    // `sendSessionInfo`; its content is asserted in ws-history.test.js. What this
+    // handler owns is calling it AFTER `setActiveSession`, because the roster is
+    // sent only to the client's active session, and NOT sending a second copy.
+    it('delegates the permission-mode roster to sendSessionInfo, once, after the session is active (#8224)', () => {
       const ctx = makeCtx()
-      const session = createMockSession()
-      ctx._sessions.set('sess-cx', { session, name: 'Codex', cwd: '/tmp', provider: 'codex' })
-      sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-cx' }, ctx)
-      const modesMsg = ctx._sent.find(m => m.type === 'available_permission_modes')
-      assert.ok(modesMsg, 'available_permission_modes re-sent on switch')
-      const acceptEdits = modesMsg.modes.find(m => m.id === 'acceptEdits')
-      assert.match(acceptEdits.description, /apply_patch/, 'switch to codex → codex-tuned mode copy')
-    })
+      ctx._sessions.set('sess-cx', { session: createMockSession(), name: 'Codex', cwd: '/tmp', provider: 'codex' })
+      const ws = makeWs()
+      const client = makeClient()
+      sessionHandlers.switch_session(ws, client, { sessionId: 'sess-cx' }, ctx)
 
-    // #7811 — the permission-mode re-send derived its copy from
-    // `entry.provider` directly (`switchProvider`), unlike the `available_models`
-    // roster sent moments earlier in the SAME switch, which already falls
-    // through to the daemon default when the entry records no provider
-    // (#7759, "tags the daemon default when the entry reports no provider"
-    // above). A provider-less entry on a codex-default daemon therefore paired
-    // a codex `available_models` roster with the CLAUDE mode-picker copy.
-    // Assert on the DESCRIPTIONS, not the ids — every provider exposes the
-    // same `approve`/`acceptEdits`/… ids, so an id-only comparison passes
-    // whether or not the fix is applied and proves nothing.
-    it('re-sends the DAEMON DEFAULT permission-mode copy when the entry reports no provider (#7811)', () => {
-      const ctx = makeCtx({ config: { provider: 'codex' } })
-      ctx._sessions.set('sess-np', { session: createMockSession(), name: 'NoProvider', cwd: '/tmp' })
-
-      sessionHandlers.switch_session(makeWs(), makeClient(), { sessionId: 'sess-np' }, ctx)
-
-      const modesMsg = ctx._sent.find(m => m.type === 'available_permission_modes')
-      assert.ok(modesMsg, 'available_permission_modes not sent on switch')
-      const acceptEdits = modesMsg.modes.find(m => m.id === 'acceptEdits')
-      assert.match(acceptEdits.description, /apply_patch/,
-        "a provider-less entry on a codex-default daemon must get codex's copy")
-      const auto = modesMsg.modes.find(m => m.id === 'auto')
-      assert.doesNotMatch(auto.description, /dangerously-skip-permissions/, 'must not fall back to the Claude copy')
+      assert.equal(client.activeSessionId, 'sess-cx', 'active session is set before the roster is requested')
+      assert.deepEqual(ctx.transport.sendSessionInfo.calls.map(([w, sid]) => [w, sid]), [[ws, 'sess-cx']])
+      assert.equal(ctx._sent.filter(m => m.type === 'available_permission_modes').length, 0,
+        'the handler itself no longer sends a duplicate roster')
     })
 
     it('sends session_error when session not found', () => {
@@ -1246,6 +1232,137 @@ describe('session-handlers', () => {
       const observer = makeClient({ id: 'client-1', activeSessionId: 'sess-1' })
       sessionHandlers.terminal_resize(makeWs(), observer, { type: 'terminal_resize', sessionId: 'sess-1', cols: 200, rows: 60 }, ctx)
       assert.equal(calls.length, 0)
+    })
+
+    // #8254: the dashboard sends terminal_resize BEFORE terminal_subscribe when its
+    // Output tab is shown again, and the server resets the PTY to the default when
+    // the last viewer unsubscribes. These drive the REAL ClaudeTuiSession through
+    // the real handlers in the order the dashboard sends them.
+    describe('hide then show again (#8254)', () => {
+      const PANE = { cols: 146, rows: 42 }
+      const DEFAULT = { cols: CLAUDE_TUI_PTY_SIZE.cols, rows: CLAUDE_TUI_PTY_SIZE.rows }
+
+      function liveSession() {
+        const skillsDir = mkdtempSync(join(tmpdir(), 'tui-8254-skills-'))
+        const session = new ClaudeTuiSession({ cwd: '/tmp', port: 0, skillsDir, repoSkillsDir: null })
+        const ptyCalls = []
+        session._term = { resize: (c, r) => ptyCalls.push([c, r]) }
+        session._ptyExited = false
+        const ctx = makeCtx()
+        ctx._sessions.set('sess-1', { session, cwd: '/tmp', name: 'S1' })
+        // The real WsServer._syncTerminalMirror: the gate is on while ANY client
+        // is subscribed to the session's terminal.
+        const clients = []
+        ctx.transport.syncTerminalMirror = (sid) => {
+          session.setTerminalMirrorActive(clients.some((c) => c.terminalSessionIds?.has(sid)))
+        }
+        return { ctx, session, ptyCalls, clients, cleanup: () => rmSync(skillsDir, { recursive: true, force: true }) }
+      }
+
+      // What the dashboard sends on showing the Output tab: the measured size
+      // (TerminalView), then the mirror opt-in + repaint (App effect).
+      function show(ctx, client, sid = 'sess-1') {
+        sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: sid, ...PANE }, ctx)
+        sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: sid }, ctx)
+        sessionHandlers.terminal_resync(makeWs(), client, { type: 'terminal_resync', sessionId: sid }, ctx)
+      }
+      function hide(ctx, client, sid = 'sess-1') {
+        sessionHandlers.terminal_unsubscribe(makeWs(), client, { type: 'terminal_unsubscribe', sessionId: sid }, ctx)
+      }
+
+      it('the pane size is applied on every visit, after the reset that comes with leaving', () => {
+        const { ctx, session, clients, cleanup } = liveSession()
+        try {
+          const client = makeClient({ activeSessionId: 'sess-1' })
+          clients.push(client)
+          show(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), PANE, 'first visit follows the pane')
+          hide(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), DEFAULT, 'leaving puts the PTY back at the default')
+          show(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), PANE, 'second visit follows the pane again')
+          hide(ctx, client)
+          show(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), PANE, 'and a third')
+        } finally { cleanup() }
+      })
+
+      it('the live PTY itself ends at the pane size, not only the tracked size', () => {
+        const { ctx, ptyCalls, clients, cleanup } = liveSession()
+        try {
+          const client = makeClient({ activeSessionId: 'sess-1' })
+          clients.push(client)
+          show(ctx, client)
+          hide(ctx, client)
+          ptyCalls.length = 0
+          show(ctx, client)
+          assert.deepEqual(ptyCalls.at(-1), [PANE.cols, PANE.rows])
+        } finally { cleanup() }
+      })
+
+      it('switching A -> B -> A on the Output tab: A is reset when it is left and follows the pane when it is back', () => {
+        // The dashboard's wire order on a session switch: the App effect cleanup
+        // unsubscribes the old session, then the new pane's measure and the new
+        // subscribe go out.
+        const { ctx, session: a, clients, cleanup } = liveSession()
+        const skillsDirB = mkdtempSync(join(tmpdir(), 'tui-8254-skills-'))
+        const b = new ClaudeTuiSession({ cwd: '/tmp', port: 0, skillsDir: skillsDirB, repoSkillsDir: null })
+        b._term = { resize: () => {} }
+        b._ptyExited = false
+        ctx._sessions.set('sess-2', { session: b, cwd: '/tmp', name: 'S2' })
+        ctx.transport.syncTerminalMirror = (sid) => {
+          const target = ctx._sessions.get(sid).session
+          target.setTerminalMirrorActive(clients.some((c) => c.terminalSessionIds?.has(sid)))
+        }
+        try {
+          const client = makeClient({ activeSessionId: 'sess-1', subscribedSessionIds: new Set(['sess-1', 'sess-2']) })
+          clients.push(client)
+          show(ctx, client, 'sess-1')
+          assert.deepEqual(a.getTerminalSize(), PANE)
+          hide(ctx, client, 'sess-1')
+          assert.deepEqual(a.getTerminalSize(), DEFAULT, 'A is reset the moment its mirror is unsubscribed')
+          client.activeSessionId = 'sess-2'
+          show(ctx, client, 'sess-2')
+          assert.deepEqual(b.getTerminalSize(), PANE)
+          hide(ctx, client, 'sess-2')
+          client.activeSessionId = 'sess-1'
+          show(ctx, client, 'sess-1')
+          assert.deepEqual(a.getTerminalSize(), PANE, 'A follows the pane again when it is switched back to')
+          assert.deepEqual(b.getTerminalSize(), DEFAULT, 'and B was reset when it was left')
+        } finally { cleanup(); rmSync(skillsDirB, { recursive: true, force: true }) }
+      })
+
+      it('two viewers: the size holds while either remains, and resets only when the last one leaves', () => {
+        const { ctx, session, clients, cleanup } = liveSession()
+        try {
+          const first = makeClient({ id: 'client-1', activeSessionId: 'sess-1' })
+          const second = makeClient({ id: 'client-2', activeSessionId: 'sess-1' })
+          clients.push(first, second)
+          show(ctx, first)
+          sessionHandlers.terminal_subscribe(makeWs(), second, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
+          assert.deepEqual(session.getTerminalSize(), PANE)
+          hide(ctx, second)
+          assert.deepEqual(session.getTerminalSize(), PANE, 'one viewer leaving does not reset the size another is using')
+          hide(ctx, first)
+          assert.deepEqual(session.getTerminalSize(), DEFAULT, 'the last viewer leaving does')
+        } finally { cleanup() }
+      })
+
+      it('a viewer that is an OBSERVER cannot size the PTY on re-show — it stays at the default', () => {
+        // The smoke driver's own control socket sent `input` and claimed primary, so the
+        // dashboard became "Read-only — another device is driving this session" and its
+        // resize was (correctly) ignored. This is the authority gate, not a reset race.
+        const { ctx, session, clients, cleanup } = liveSession()
+        try {
+          const client = makeClient({ id: 'client-1', activeSessionId: 'sess-1' })
+          clients.push(client)
+          show(ctx, client)
+          hide(ctx, client)
+          ctx.transport.claimPrimary('sess-1', 'other-client')
+          show(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), DEFAULT)
+        } finally { cleanup() }
+      })
     })
 
     it('resize to a non-existent session is a no-op', () => {

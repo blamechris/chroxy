@@ -2,7 +2,7 @@
  * CreateSessionModal permission-mode hint precedence (#4214 / #4019 follow-up)
  *
  * PR #4211 wired the hint paragraph under the Permission Mode picker to
- * prefer `availablePermissionModes[].description` (server-provided) over
+ * prefer the roster's `description` (server-provided) over
  * the pre-#4019 hardcoded fallback strings. Without these tests the
  * precedence is not pinned: a future refactor could re-break the order
  * (e.g. "always use fallback") and only show up on a customer report.
@@ -43,7 +43,7 @@ import { CreateSessionModal, type CreateSessionModalProps } from './CreateSessio
 beforeEach(() => {
   // Reset to a known-empty baseline. Individual tests overwrite the
   // fields they care about. Without this reset the second test would
-  // inherit the first test's availablePermissionModes value.
+  // inherit the first test's permissionModesByProvider value.
   for (const k of Object.keys(mockStoreState)) delete mockStoreState[k]
   Object.assign(mockStoreState, {
     defaultProvider: 'claude-sdk',
@@ -53,7 +53,7 @@ beforeEach(() => {
       name: 'claude-sdk',
       capabilities: { permissionFloor: true, autoPermissionMode: true },
     }],
-    availablePermissionModes: [],
+    permissionModesByProvider: {},
     sessions: [{ sessionId: 'active-session', provider: 'claude-sdk' }],
     activeSessionId: 'active-session',
     environments: [],
@@ -64,6 +64,16 @@ beforeEach(() => {
 })
 
 afterEach(cleanup)
+
+/**
+ * Seed the permission-mode roster the way the server delivers it (#8224): under
+ * the provider it describes, which here is the ACTIVE session's — the modal
+ * reads the active session's roster. Call after `sessions` is set.
+ */
+function setActiveRoster(modes: unknown[]) {
+  const sessions = (mockStoreState.sessions ?? []) as Array<{ provider?: string }>
+  mockStoreState.permissionModesByProvider = { [sessions[0]?.provider ?? 'claude-sdk']: modes }
+}
 
 function renderModal(props: Partial<CreateSessionModalProps> = {}) {
   const onCreate = vi.fn()
@@ -113,10 +123,10 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
       { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true } },
       { name: 'codex', label: 'Codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
       { id: 'auto', label: 'Auto', supported: true, enforcement: 'chroxy' },
-    ]
+    ])
     const { container } = renderModal()
     expandAdvanced(container)
     const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
@@ -131,10 +141,10 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
       { name: 'claude-sdk', label: 'Claude SDK', capabilities: { permissionFloor: true, autoPermissionMode: true } },
       { name: 'codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
       { id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' },
-    ]
+    ])
     const { container } = renderModal()
     expandAdvanced(container)
     const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
@@ -145,10 +155,10 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
     // Custom description that does NOT overlap with any hardcoded
     // fallback substring — proves the description path produced the
     // text, not the fallback (which would have its own distinct copy).
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'approve', label: 'Approve', description: 'SERVER-PROVIDED DESCRIPTION FOR APPROVE.', supported: true, enforcement: 'chroxy' },
       { id: 'plan',    label: 'Plan',    description: 'SERVER-PROVIDED DESCRIPTION FOR PLAN.', supported: true, enforcement: 'chroxy' },
-    ]
+    ])
     const { container } = renderModal()
 
     selectPermissionMode(container, 'approve')
@@ -162,12 +172,12 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
     // Mode is enumerated by the server but `description` is missing —
     // this is the pre-#4018 server shape. Verifies the fallback chain
     // is still wired and matches each mode id.
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'approve',     label: 'Approve' },
       { id: 'auto',        label: 'Auto' },
       { id: 'acceptEdits', label: 'Accept Edits' },
       { id: 'plan',        label: 'Plan' },
-    ]
+    ])
     const { container } = renderModal()
 
     selectPermissionMode(container, 'auto')
@@ -189,12 +199,12 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
       { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true } },
       { name: 'codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'approve', label: 'Approve', description: 'STALE SDK APPROVE', supported: true, enforcement: 'chroxy' },
       { id: 'acceptEdits', label: 'Accept Edits', description: 'STALE SDK EDIT', supported: true, enforcement: 'chroxy' },
       { id: 'auto', label: 'Auto', description: 'STALE SDK AUTO', supported: true, enforcement: 'chroxy' },
       { id: 'plan', label: 'Plan', description: 'STALE SDK PLAN', supported: true, enforcement: 'chroxy' },
-    ]
+    ])
     const { container } = renderModal()
 
     for (const [mode, expected] of [
@@ -220,12 +230,12 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
       { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true } },
       { name: 'codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'approve', label: 'Approve', description: 'STALE CODEX APPROVE', supported: true, enforcement: 'unknown' },
       { id: 'acceptEdits', label: 'Accept Edits', description: 'STALE CODEX EDIT', supported: true, enforcement: 'unknown' },
       { id: 'auto', label: 'Auto (unavailable)', description: 'STALE CODEX AUTO', supported: false, enforcement: 'unsupported' },
       { id: 'plan', label: 'Plan', description: 'STALE CODEX PLAN', supported: true, enforcement: 'unknown' },
-    ]
+    ])
     const { container } = renderModal()
 
     for (const mode of ['approve', 'acceptEdits', 'auto', 'plan']) {
@@ -245,9 +255,9 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
       { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true } },
       { name: 'future-provider', capabilities: { autoPermissionMode: true } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'auto', label: 'Auto', description: 'STALE SDK AUTO', supported: true, enforcement: 'chroxy' },
-    ]
+    ])
     const { container } = renderModal()
 
     selectPermissionMode(container, 'auto')
@@ -265,7 +275,7 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
       { name: 'codex', capabilities: { permissionFloor: false, autoPermissionMode: false } },
       { name: 'future-provider', capabilities: { autoPermissionMode: true } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       {
         id: 'approve',
         label: 'Approve',
@@ -273,7 +283,7 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
         supported: true,
         enforcement: 'unknown',
       },
-    ]
+    ])
     const { container } = renderModal()
 
     selectPermissionMode(container, 'approve')
@@ -287,7 +297,7 @@ describe('CreateSessionModal permission-mode hint (#4214)', () => {
     // server's --default-permission-mode was. This is the initial
     // state — the user hasn't picked anything yet — and the hint must
     // explain it rather than render blank.
-    mockStoreState.availablePermissionModes = []
+    setActiveRoster([])
     const { container } = renderModal()
     expandAdvanced(container)
     expect(getHint(container)).toMatch(/Uses whatever the server.s --default-permission-mode/)
@@ -307,10 +317,10 @@ describe('CreateSessionModal disables Plan for a provider with planMode: false (
       { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true, planMode: true } },
       { name: 'claude-tui', label: 'Claude TUI', capabilities: { permissionFloor: true, autoPermissionMode: true, planMode: false } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
       { id: 'plan', label: 'Plan', supported: true, enforcement: 'chroxy' },
-    ]
+    ])
     const { container } = renderModal()
     expandAdvanced(container)
     const plan = container.querySelector('option[value="plan"]') as HTMLOptionElement | null
@@ -323,10 +333,10 @@ describe('CreateSessionModal disables Plan for a provider with planMode: false (
     mockStoreState.availableProviders = [
       { name: 'claude-sdk', capabilities: { permissionFloor: true, autoPermissionMode: true, planMode: true } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'approve', label: 'Approve', supported: true, enforcement: 'chroxy' },
       { id: 'plan', label: 'Plan', supported: true, enforcement: 'chroxy' },
-    ]
+    ])
     const { container } = renderModal()
     expandAdvanced(container)
     const plan = container.querySelector('option[value="plan"]') as HTMLOptionElement | null
@@ -339,9 +349,9 @@ describe('CreateSessionModal disables Plan for a provider with planMode: false (
     mockStoreState.availableProviders = [
       { name: 'future-provider', capabilities: { autoPermissionMode: true } },
     ]
-    mockStoreState.availablePermissionModes = [
+    setActiveRoster([
       { id: 'plan', label: 'Plan', supported: true, enforcement: 'chroxy' },
-    ]
+    ])
     const { container } = renderModal()
     expandAdvanced(container)
     const plan = container.querySelector('option[value="plan"]') as HTMLOptionElement | null

@@ -157,12 +157,14 @@ describe('banner states', () => {
     const { resolve } = await import('node:path')
     const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf8')
     const row = (sel: string) => css.match(new RegExp(`#app\\.with-sidebar\\s*>\\s*${sel}\\s*\\{([^}]+)\\}`))?.[1]?.match(/grid-row:\s*(\d+)/)?.[1]
-    expect(row('\\.daemon-update-region')).toBe('4')
-    expect(row('header')).toBe('5')
-    expect(row('\\.sidebar')).toBe('6')
-    expect(row('\\.main-wrapper')).toBe('6')
-    expect(row('\\.footer-bar')).toBe('7')
-    expect(css.match(/grid-template-rows:\s*auto auto auto auto auto 1fr auto;/)).toBeTruthy()
+    // #8268 added the stale-bundle row (4) above this one, so everything from here down moved by one.
+    expect(row('\\.stale-bundle-banner')).toBe('4')
+    expect(row('\\.daemon-update-region')).toBe('5')
+    expect(row('header')).toBe('6')
+    expect(row('\\.sidebar')).toBe('7')
+    expect(row('\\.main-wrapper')).toBe('7')
+    expect(row('\\.footer-bar')).toBe('8')
+    expect(css.match(/grid-template-rows:\s*auto auto auto auto auto auto 1fr auto;/)).toBeTruthy()
   })
 })
 

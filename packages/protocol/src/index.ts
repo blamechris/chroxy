@@ -79,6 +79,17 @@ export const USER_SHELL_PROVIDER = 'user-shell'
  */
 export const CLAUDE_TUI_PTY_SIZE = Object.freeze({ cols: 120, rows: 30 })
 
+/**
+ * #8254: the smallest grid a viewer may drive the claude-tui PTY to. Below this
+ * claude wraps its output a few characters per line, which hides the recovery
+ * banners (unknown-resume #7847, logged-out #8223) from every classifier that
+ * reads the screen. The server clamps any resize request up to this floor, so a
+ * viewer that measured a collapsed or hidden pane (10x6 in the field) cannot
+ * blind the daemon. 80 columns is also the narrowest grid that keeps claude's
+ * "No conversation found with session ID: <uuid>" line unwrapped.
+ */
+export const CLAUDE_TUI_PTY_MIN_SIZE = Object.freeze({ cols: 80, rows: 24 })
+
 // #6689: Codex sandbox constants (modes, default, provider id, UI metadata).
 // Single-sourced so the wire schema, the server, and both clients agree. Kept
 // in a dedicated module so `./schemas/client.ts` can import the mode list for
@@ -202,6 +213,10 @@ export type { Attachment, BinaryAttachment, FileRefAttachment } from './schemas/
 
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'
+
+// #7376: why a turn was terminated under an in-flight tool call, and the shared
+// wording the clients and the server's fallback result text agree on.
+export * from './turn-termination.ts'
 
 // #6871: shared scheduled-task HEALTH derivation. Zod-free and pure so BOTH the
 // `chroxy schedule` CLI (#6868) and the dashboard panel import one mapping — a

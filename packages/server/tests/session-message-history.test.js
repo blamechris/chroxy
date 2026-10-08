@@ -319,6 +319,26 @@ describe('SessionMessageHistory', () => {
       assert.equal(entry.tool, 'read_file')
     })
 
+    it('persists isError and terminatedReason so a replay keeps the failed / terminated state (#7376)', () => {
+      history.recordHistory('s1', 'tool_start', { messageId: 'm', toolUseId: 'tu-t', tool: 'Bash', input: null })
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-t',
+        result: 'cut off',
+        truncated: false,
+        isError: true,
+        terminatedReason: 'permission_mode_switch',
+      })
+      const entry = history.getHistory('s1').find((e) => e.type === 'tool_result')
+      assert.equal(entry.isError, true)
+      assert.equal(entry.terminatedReason, 'permission_mode_switch')
+    })
+
+    it('POSITIVE CONTROL: an ordinary successful tool_result stores neither marker (#7376)', () => {
+      history.recordHistory('s1', 'tool_result', { toolUseId: 'tu-ok', result: 'fine', truncated: false, isError: false })
+      const entry = history.getHistory('s1').find((e) => e.type === 'tool_result')
+      assert.equal('isError' in entry, false)
+      assert.equal('terminatedReason' in entry, false)
+    })
     it('records tool_result events', () => {
       history.recordHistory('s1', 'tool_result', {
         toolUseId: 'tu-1',
@@ -377,6 +397,23 @@ describe('SessionMessageHistory', () => {
       // the backfill target (the wire event's own shape already carries
       // it separately for the live merge; history doesn't need it twice).
       assert.equal(toolResult.type, 'tool_result')
+    })
+
+    // #8251 — the client half. The replay frame for a backfilled claude-sdk
+    // tool_start carries the input, while the replayed tool_result never does;
+    // store-core must therefore take the INPUT from the tool_start frame.
+    it('re-sends the backfilled input on the replayed tool_start frame, not on the replayed tool_result (#8251)', () => {
+      history.recordHistory('s1', 'tool_start', { messageId: 'm1', toolUseId: 'tu-1', tool: 'Read', input: null })
+      history.recordHistory('s1', 'tool_result', { toolUseId: 'tu-1', result: 'ok', truncated: false, input: { file_path: 'README.md' } })
+
+      const sent = []
+      for (const entry of history.getHistory('s1')) {
+        sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry)
+      }
+      const start = sent.find((f) => f.type === 'tool_start')
+      const result = sent.find((f) => f.type === 'tool_result')
+      assert.deepEqual(start.input, { file_path: 'README.md' })
+      assert.equal(result.input, undefined)
     })
 
     it('is a no-op when tool_result carries no input field (BYOK today: unchanged behavior)', () => {
@@ -657,6 +694,8 @@ describe('SessionMessageHistory', () => {
       assert.equal(synthetic.interrupted, true)
       assert.equal(synthetic.isError, true)
       assert.equal(synthetic.reason, 'session_restored')
+      // #7376: the restore-time sweep is a distinct, outcome-unknown termination.
+      assert.equal(synthetic.terminatedReason, 'daemon_restart')
       assert.equal(typeof synthetic.result, 'string')
       assert.ok(synthetic.result.length > 0)
     })

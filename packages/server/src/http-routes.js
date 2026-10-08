@@ -18,6 +18,7 @@ import { isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 import { isValidSlug, mimeForPath } from './pages-store.js'
 import { sendOversizeResponse } from './http-oversize.js'
+import { resolveDashboardDist, dashboardBuildIdOf } from './dashboard-build.js'
 import { resolveOAuthCallback, MCP_OAUTH_CALLBACK_PATH } from './byok-mcp-oauth.js'
 
 /**
@@ -258,7 +259,7 @@ function matchAllowedOrigin(origin) {
  * @param {object} server - WsServer instance (accessed at request time for current state)
  * @returns {(req: import('http').IncomingMessage, res: import('http').ServerResponse) => void}
  */
-export function createHttpHandler(server) {
+export function createHttpHandler(server, { dashboardDist } = {}) {
   // #5312 (WP-1.2) — the actual routing logic, wrapped below in a top-level
   // try/catch so an unguarded throw from any route (e.g. buildDiagnosticsSnapshot,
   // readConnectionInfo, or readFileSync(index)) returns 500 instead of rejecting
@@ -1268,9 +1269,8 @@ export function createHttpHandler(server) {
 
       // Workspace layout: packages/dashboard/dist (dev)
       // Tauri bundle layout: server/src/dashboard-next/dist (bundled)
-      const workspaceDist = join(__dirname, '..', '..', 'dashboard', 'dist')
-      const bundleDist = join(__dirname, 'dashboard-next', 'dist')
-      const distDir = existsSync(workspaceDist) ? workspaceDist : bundleDist
+      // `dashboardDist` is a test seam; production never passes it.
+      const distDir = dashboardDist ?? resolveDashboardDist()
       if (!existsSync(distDir) && !createHttpHandler._distMissWarned) {
         createHttpHandler._distMissWarned = true
         log.warn(`Dashboard dist directory not found: ${distDir} — run "npm run build -w @chroxy/dashboard"`)
@@ -1319,7 +1319,12 @@ export function createHttpHandler(server) {
         let html = readFileSync(indexPath, 'utf-8')
         const escaped = JSON.stringify({port: server.port, noEncrypt: !server._encryptionEnabled}).replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
         const configMeta = `<meta name="chroxy-config" content='${escaped}'>`
-        html = html.replace('</head>', `${configMeta}\n</head>`)
+        // #8268 — the id of the bundle THIS page loaded, hashed from the pristine
+        // file (before the per-request config above is spliced in). The client
+        // compares it with `auth_ok.dashboardBuildId`, which is the id of the file
+        // on disk at connect time, so a page that outlives a daemon update can tell.
+        const buildMeta = `<meta name="chroxy-build" content="${dashboardBuildIdOf(html)}">`
+        html = html.replace('</head>', `${configMeta}\n${buildMeta}\n</head>`)
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store',

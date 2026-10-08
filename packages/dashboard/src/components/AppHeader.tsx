@@ -25,6 +25,15 @@ declare const __APP_VERSION__: string
  */
 export interface AppHeaderProps {
   serverVersion: string | null
+  /**
+   * #8268 — the version baked into THIS bundle. The badge shows the server's version
+   * (what the daemon runs); when this page's bundle is a different build, that hides
+   * the staleness, so the client's version is shown beside it. Defaults to the
+   * build-time constant.
+   */
+  clientVersion?: string | null
+  /** #8268 — the page is a bundle from before the daemon's current build (same version or not). */
+  bundleStale?: boolean
   connectionPhase: string
   /**
    * Chat redesign #6392: the canonical chat-activity state. When the dot is
@@ -143,15 +152,40 @@ export function AppHeader(props: AppHeaderProps) {
             page-level debounced ConnectionAnnouncer (mounted above)
             announces only the settled phase. */}
         {(() => {
-          const versionLabel = `Chroxy server v${props.serverVersion ?? __APP_VERSION__}`
+          const clientVersion = props.clientVersion !== undefined
+            ? props.clientVersion
+            : (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : null)
+          const shownVersion = props.serverVersion ?? clientVersion ?? ''
+          const versionLabel = `Chroxy server v${shownVersion}`
+          // #8268 — only meaningful once connected: a null serverVersion falls back
+          // to the client's, which would compare it with itself.
+          const differs = props.serverVersion != null && clientVersion != null && props.serverVersion !== clientVersion
+          const clientLabel = differs
+            ? `app v${clientVersion}`
+            : props.bundleStale ? 'app outdated' : null
+          const clientTitle = differs
+            ? `This window is running the v${clientVersion} dashboard; the server is v${props.serverVersion}`
+            : 'This window is running a dashboard build from before the server was last updated'
           return (
-            <span
-              className="version-badge"
-              title={versionLabel}
-              aria-label={versionLabel}
-            >
-              v{props.serverVersion ?? __APP_VERSION__}
-            </span>
+            <>
+              <span
+                className="version-badge"
+                title={versionLabel}
+                aria-label={versionLabel}
+              >
+                v{shownVersion}
+              </span>
+              {clientLabel && (
+                <span
+                  className="version-badge version-badge--client"
+                  data-testid="client-version-badge"
+                  title={clientTitle}
+                  aria-label={clientTitle}
+                >
+                  {clientLabel}
+                </span>
+              )}
+            </>
           )
         })()}
         {(() => {

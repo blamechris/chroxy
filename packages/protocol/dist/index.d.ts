@@ -68,6 +68,19 @@ export declare const CLAUDE_TUI_PTY_SIZE: Readonly<{
     cols: 120;
     rows: 30;
 }>;
+/**
+ * #8254: the smallest grid a viewer may drive the claude-tui PTY to. Below this
+ * claude wraps its output a few characters per line, which hides the recovery
+ * banners (unknown-resume #7847, logged-out #8223) from every classifier that
+ * reads the screen. The server clamps any resize request up to this floor, so a
+ * viewer that measured a collapsed or hidden pane (10x6 in the field) cannot
+ * blind the daemon. 80 columns is also the narrowest grid that keeps claude's
+ * "No conversation found with session ID: <uuid>" line unwrapped.
+ */
+export declare const CLAUDE_TUI_PTY_MIN_SIZE: Readonly<{
+    cols: 80;
+    rows: 24;
+}>;
 export * from './codex.ts';
 export * from './thinking-levels.ts';
 export { buildInputMessage } from './input.ts';
@@ -87,4 +100,5 @@ export type { IntegrationActionMessage } from './schemas/client.ts';
 export type { SkillsInventoryRequestMessage } from './schemas/client.ts';
 export type { Attachment, BinaryAttachment, FileRefAttachment } from './schemas/client.ts';
 export * from './error-categories.ts';
+export * from './turn-termination.ts';
 export * from './scheduled-task-health.ts';

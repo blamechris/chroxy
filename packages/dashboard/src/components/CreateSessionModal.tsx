@@ -10,7 +10,7 @@ import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
-import { buildProviderLimitationNote, selectOwnModelsForProvider } from '@chroxy/store-core'
+import { buildProviderLimitationNote, selectOwnModelsForProvider, selectPermissionModesForProvider } from '@chroxy/store-core'
 import type { ModelsByProvider, PermissionMode } from '@chroxy/store-core'
 import {
   CODEX_PROVIDER,
@@ -294,12 +294,18 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // `description` field) so the picker + hint stay in lockstep with the
   // server's source of truth. Pre-#4019 the modal hardcoded its own copy
   // of the description strings as a ternary chain, which drifted.
-  const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
-  // `availablePermissionModes` describes the active session's provider. The
-  // creation form can select a different provider, so remember which provider
-  // owns that roster before deciding whether its descriptions are reusable.
+  const permissionModesByProvider = useConnectionStore(s => s.permissionModesByProvider)
+  // The roster in use describes the active session's provider. The creation
+  // form can select a different provider, so remember which provider owns that
+  // roster before deciding whether its descriptions are reusable.
   const permissionModesProvider = useConnectionStore(s =>
     (s.sessions || []).find(session => session.sessionId === s.activeSessionId)?.provider ?? null,
+  )
+  // #8224: derived from the provider-keyed map at read time, not read from a
+  // flat slot the server had to remember to refresh.
+  const availablePermissionModes = useMemo(
+    () => selectPermissionModesForProvider(permissionModesByProvider, permissionModesProvider),
+    [permissionModesByProvider, permissionModesProvider],
   )
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)

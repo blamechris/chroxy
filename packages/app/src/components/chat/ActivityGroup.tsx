@@ -18,6 +18,7 @@ import {
   summarizeToolCounts,
   formatToolBreakdown,
   formatToolName,
+  describeTurnTermination,
 } from '@chroxy/store-core';
 
 function ActivityEntry({
@@ -81,6 +82,15 @@ function ActivityEntry({
     message.toolResult !== undefined ||
     (message.toolResultImages?.length ?? 0) > 0;
   const imageCount = message.toolResultImages?.length || 0;
+  // #7376: a tool cut off because its TURN was terminated underneath it
+  // (permission-mode switch, Stop, crash, watchdog) never reported a result. It
+  // is not "the command failed", so it gets its own amber state instead of the
+  // red alert icon, and its (server-synthesized) result text is replaced by a
+  // "check whether it took effect before retrying" sentence. Wins over `toolResultIsError`, which the
+  // server also sets on these synthetic results.
+  const termination = hasResult && message.toolResultTerminatedReason
+    ? describeTurnTermination(message.toolResultTerminatedReason)
+    : null;
 
   // Use the shared formatter so per-row labels match the header breakdown
   // produced by `summarizeToolCounts` (e.g. "GitHub: List Repos" appears
@@ -123,7 +133,9 @@ function ActivityEntry({
         {/* #6712: a failed tool_result (codex mcpToolCall / orphan sweep) shows a
             red alert icon instead of the green check. */}
         {hasResult ? (
-          message.toolResultIsError ? (
+          termination ? (
+            <Icon name="stop" size={12} color={COLORS.accentOrange} testID={`activity-entry-terminated-${message.id}`} accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
+          ) : message.toolResultIsError ? (
             <Icon name="alertCircle" size={12} color={COLORS.accentRed} testID={`activity-entry-error-${message.id}`} accessibilityLabel="tool failed" />
           ) : (
             <Icon name="check" size={12} color={COLORS.accentGreen} />
@@ -136,7 +148,7 @@ function ActivityEntry({
           <Text style={styles.activityImageBadge}>{imageCount === 1 ? '1 image' : `${imageCount} images`}</Text>
         )}
         <Text style={styles.activityEntryPreview} numberOfLines={1}>
-          {hasResult ? (message.toolResult || '').slice(0, 60) : (message.content || '').slice(0, 40)}
+          {termination ? termination.summary : hasResult ? (message.toolResult || '').slice(0, 60) : (message.content || '').slice(0, 40)}
         </Text>
       </View>
       {expanded && (
@@ -152,7 +164,7 @@ function ActivityEntry({
             // badge said 'N images'. Render an explicit placeholder so the
             // user sees what's there. Inline image rendering can land later
             // — the placeholder is the minimum signal.
-            const resultText = hasResult ? (message.toolResult || '') : (message.content || '')
+            const resultText = termination ? termination.summary : hasResult ? (message.toolResult || '') : (message.content || '')
             if (resultText.length > 0) {
               return (
                 <Text selectable style={styles.activityEntryExpanded}>

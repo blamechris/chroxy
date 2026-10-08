@@ -16,7 +16,9 @@ import {
   formatToolName,
   tryParseCompleteJson,
   getInputSummary,
+  getPartialSummary,
   shouldSuppressRawToolInput,
+  describeTurnTermination,
 } from '@chroxy/store-core'
 import { ChildAgentEventList } from './ChildAgentEventList'
 import { ImageLightbox } from './ImageLightbox'
@@ -100,7 +102,14 @@ function ToolGroupEntry({
   // Shared suppress set lives in @chroxy/store-core so the two paths can't
   // drift.
   const suppressRawInput = shouldSuppressRawToolInput(message.tool)
-  const summary = suppressRawInput ? '' : getInputSummary(message.toolInput)
+  // #8251: a running SDK tool has no structured `toolInput` until its result
+  // lands, but the streamed input is already in `toolInputPartial` (the same
+  // fallback the expanded panel and ToolBubble's collapsed summary use, #4081)
+  // — without it the collapsed row showed only the tool name for the whole run.
+  const summary = suppressRawInput
+    ? ''
+    : getInputSummary(message.toolInput)
+      || (message.toolInputPartial ? getPartialSummary(message.toolInputPartial) ?? '' : '')
   // `toolResult` is set to the server's result string by handleToolResult,
   // including the empty string when the tool produced no output. A bare
   // truthiness check (`!!toolResult`) wrongly classifies an empty result
@@ -110,8 +119,15 @@ function ToolGroupEntry({
     (message.toolResultImages?.length ?? 0) > 0
   // #6712: a failed tool_result (codex mcpToolCall / orphan sweep) gets an error
   // marker + entry class so the renderer can tint it distinctly from a success.
-  const resultIsError = hasResult && message.toolResultIsError === true
-  const markerState = resultIsError ? 'error' : hasResult ? 'complete' : 'pending'
+  // #7376: a tool cut off because its TURN was terminated (permission-mode
+  // switch, Stop, crash, watchdog) never ran to a verdict. It is NOT the same as
+  // "the command ran and failed", so it gets its own state, and it wins over the
+  // failure styling: the server marks these synthetic results `isError` too, so
+  // without the precedence they would be indistinguishable from a real failure.
+  const terminated = hasResult && !!message.toolResultTerminatedReason
+  const resultIsError = hasResult && !terminated && message.toolResultIsError === true
+  const termination = terminated ? describeTurnTermination(message.toolResultTerminatedReason) : null
+  const markerState = terminated ? 'terminated' : resultIsError ? 'error' : hasResult ? 'complete' : 'pending'
   const markerClass = `tool-group-entry-marker tool-group-entry-marker--${markerState}`
 
   // #4279 / #4282: the parent group's toggle now lives on a dedicated
@@ -173,7 +189,9 @@ function ToolGroupEntry({
   // and text-bearing results still show the Result section as before).
   const hasImages = (message.toolResultImages?.length ?? 0) > 0
   const hasTextResult = message.toolResult !== undefined && message.toolResult !== ''
-  const showResultText = !hasResult || hasTextResult || !hasImages
+  // #7376: a terminated tool's `toolResult` is the server's synthesized
+  // placeholder; the status line below says it better, so don't repeat it.
+  const showResultText = !terminated && (!hasResult || hasTextResult || !hasImages)
   // #6755 — full-resolution click-to-zoom, same pattern as ToolBubble:
   // store the INDEX (not the data URI) so the lightbox label can read
   // "Image N of M".
@@ -187,9 +205,10 @@ function ToolGroupEntry({
 
   return (
     <div
-      className={`tool-group-entry${expanded ? ' tool-group-entry--expanded' : ''}${resultIsError ? ' tool-group-entry--error' : ''}`}
+      className={`tool-group-entry${expanded ? ' tool-group-entry--expanded' : ''}${resultIsError ? ' tool-group-entry--error' : ''}${terminated ? ' tool-group-entry--terminated' : ''}`}
       data-testid={`tool-group-entry-${message.id}`}
       data-error={resultIsError ? 'true' : undefined}
+      data-terminated={terminated ? 'true' : undefined}
     >
       {/*
         #4281: the click target is the ROW, not the outer entry container.
@@ -210,12 +229,24 @@ function ToolGroupEntry({
         onKeyDown={handleKeyDown}
       >
         <span className={markerClass} aria-hidden="true">
-          {resultIsError ? '✕' : hasResult ? '✓' : '›'}
+          {terminated ? '⊘' : resultIsError ? '✕' : hasResult ? '✓' : '›'}
         </span>
         {/* #6712: the marker is aria-hidden, so surface the failure to AT. */}
         {resultIsError && <span className="sr-only">tool failed</span>}
+        {termination && <span className="sr-only">{termination.summary}</span>}
         <span className="tool-group-entry-name">{toolName}</span>
         {summary && <span className="tool-group-entry-input">{summary}</span>}
+        {/* #7376: visible without expanding, so a glance tells "cut off" from
+            "failed" (the red ✕). The full sentence is in the title + detail. */}
+        {termination && (
+          <span
+            className="tool-group-entry-terminated"
+            data-testid={`tool-group-entry-terminated-${message.id}`}
+            title={termination.summary}
+          >
+            {termination.label}
+          </span>
+        )}
         <span className="tool-group-entry-toggle" aria-hidden="true">
           {expanded ? '▾' : '▸'}
         </span>
@@ -242,6 +273,17 @@ function ToolGroupEntry({
               {inputDetail || inputPlaceholder}
             </pre>
           </div>
+          {termination && (
+            <div className="tool-group-entry-detail-section">
+              <div className="tool-group-entry-detail-label">Status</div>
+              <div
+                className="tool-group-entry-terminated-note"
+                data-testid={`tool-group-entry-terminated-note-${message.id}`}
+              >
+                {termination.summary}
+              </div>
+            </div>
+          )}
           {showResultText && (
             <div className="tool-group-entry-detail-section">
               <div className="tool-group-entry-detail-label">Result</div>

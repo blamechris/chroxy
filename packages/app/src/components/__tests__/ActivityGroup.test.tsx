@@ -105,6 +105,46 @@ describe('ActivityGroup / ActivityEntry — structured-renderer wiring (#4201)',
     expect(findByTestId(pending, 'activity-entry-error-m3')).toHaveLength(0);
   });
 
+  it('shows the terminated icon, not the error icon, for a tool cut off by a terminated turn (#7376)', () => {
+    const cut = renderGroup([makeToolMessage({
+      id: 'm1',
+      tool: 'Bash',
+      toolResult: 'synthesized placeholder',
+      toolResultIsError: true,
+      toolResultTerminatedReason: 'permission_mode_switch',
+    })]);
+    expandGroup(cut);
+    expect(findByTestId(cut, 'activity-entry-terminated-m1')[0]).toBeTruthy();
+    // The server also flags these isError; terminated must win over the red icon.
+    expect(findByTestId(cut, 'activity-entry-error-m1')).toHaveLength(0);
+
+    // Positive control: a genuine failure in the same shape is still the red error icon.
+    const failed = renderGroup([makeToolMessage({ id: 'm2', tool: 'Bash', toolResult: 'boom', toolResultIsError: true })]);
+    expandGroup(failed);
+    expect(findByTestId(failed, 'activity-entry-error-m2')[0]).toBeTruthy();
+    expect(findByTestId(failed, 'activity-entry-terminated-m2')).toHaveLength(0);
+  });
+
+  it('labels a tool whose pending permission Stop cancelled as stopped, not terminated (#8363)', () => {
+    const stopped = renderGroup([makeToolMessage({
+      id: 'm1',
+      tool: 'Bash',
+      toolResult: "The user doesn't want to proceed with this tool use.",
+      toolResultIsError: true,
+      toolResultTerminatedReason: 'user_stop_before_run',
+    })]);
+    expandGroup(stopped);
+    const icon = findByTestId(stopped, 'activity-entry-terminated-m1')[0];
+    expect(icon).toBeTruthy();
+    expect(icon.props.accessibilityLabel).toBe('stopped');
+    // CONTROL: any other termination keeps the generic label.
+    const cut = renderGroup([makeToolMessage({
+      id: 'm2', tool: 'Bash', toolResult: 'x', toolResultIsError: true, toolResultTerminatedReason: 'permission_mode_switch',
+    })]);
+    expandGroup(cut);
+    expect(findByTestId(cut, 'activity-entry-terminated-m2')[0].props.accessibilityLabel).toBe('turn terminated');
+  });
+
   it('does not render the TodoList when only the group is expanded but the entry is not', () => {
     const root = renderGroup([makeToolMessage({ id: 'm1' })]);
     expandGroup(root);

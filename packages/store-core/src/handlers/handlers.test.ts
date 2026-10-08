@@ -1552,6 +1552,8 @@ describe('handleAuthOk', () => {
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto' },
       ],
+      // #8224 — the provider that roster describes.
+      availablePermissionModesProvider: 'claude-sdk',
     })
     expect(result).toEqual({
       serverMode: 'cli',
@@ -1576,6 +1578,7 @@ describe('handleAuthOk', () => {
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto' },
       ],
+      availablePermissionModesProvider: 'claude-sdk',
     })
   })
 
@@ -1830,6 +1833,7 @@ describe('handleAuthOk', () => {
       newIdentityKey: null,
       rotationCert: null,
       availablePermissionModes: null,
+      availablePermissionModesProvider: null,
     })
   })
 })
@@ -7861,6 +7865,88 @@ describe('handleToolStart', () => {
     expect(out.chatMessage!.content).toBe(JSON.stringify({ cmd: 'ls', flag: true }))
   })
 
+  // #8251 — frames below are the shapes the server actually puts on the wire.
+  describe('structured toolInput from tool_start (#8251)', () => {
+    const TUI_INPUT = { command: 'ls .', description: 'List files in current directory' }
+    const toolResult = (msg: Record<string, unknown>, messages: ChatMessage[]) => {
+      const r = handleToolResult(msg, 'sess-1')!
+      return r.applyTo(messages)
+    }
+
+    it('claude-tui live: tool_start carries input and tool_result does not -> toolInput is set and survives the result', () => {
+      // claude-tui-session.js emits { messageId, toolUseId, tool, input } and a
+      // tool_result of { toolUseId, result, truncated } with no `input`.
+      const start = handleToolStart(
+        { type: 'tool_start', messageId: 'toolu_t1', toolUseId: 'toolu_t1', tool: 'Bash', input: TUI_INPUT },
+        'sess-1',
+        false,
+        [],
+      )
+      expect(start.chatMessage!.toolInput).toEqual(TUI_INPUT)
+      const after = toolResult(
+        { type: 'tool_result', toolUseId: 'toolu_t1', result: 'README.md', truncated: false },
+        [start.chatMessage!],
+      )
+      expect(after[0].toolInput).toEqual(TUI_INPUT)
+      expect(after[0].toolResult).toBe('README.md')
+    })
+
+    it('claude-sdk live: tool_start has input:null, the result backfills toolInput (unchanged #7346 path)', () => {
+      const start = handleToolStart(
+        { type: 'tool_start', messageId: 'toolu_s1', toolUseId: 'toolu_s1', tool: 'Read', input: null },
+        'sess-1',
+        false,
+        [],
+      )
+      expect(start.chatMessage!.toolInput).toBeUndefined()
+      const after = toolResult(
+        { type: 'tool_result', toolUseId: 'toolu_s1', result: 'ok', truncated: false, input: { file_path: 'README.md' } },
+        [start.chatMessage!],
+      )
+      expect(after[0].toolInput).toEqual({ file_path: 'README.md' })
+    })
+
+    it('claude-sdk replay (session switch / reload): the replayed tool_start carries the backfilled input and the replayed tool_result does not -> toolInput survives a full rebuild', () => {
+      // History ring buffer: tool_start entry backfilled at tool_result time
+      // (session-message-history.js), tool_result entry without `input`.
+      const replayedStart = { type: 'tool_start', messageId: 'toolu_s1', toolUseId: 'toolu_s1', tool: 'Read', input: { file_path: 'README.md' }, timestamp: 1700000000000 }
+      const replayedResult = { type: 'tool_result', toolUseId: 'toolu_s1', result: 'ok', truncated: false, timestamp: 1700000000500 }
+      const start = handleToolStart(replayedStart, 'sess-1', true, [])
+      expect(start.shouldDispatch).toBe(true)
+      const after = toolResult(replayedResult, [start.chatMessage!])
+      expect(after[0].toolInput).toEqual({ file_path: 'README.md' })
+      expect(after[0].toolResult).toBe('ok')
+    })
+
+    it('a later tool_result.input still wins over the tool_start input', () => {
+      const start = handleToolStart(
+        { messageId: 'toolu_x', toolUseId: 'toolu_x', tool: 'Bash', input: { command: 'early' } },
+        'sess-1',
+        false,
+        [],
+      )
+      const after = toolResult(
+        { toolUseId: 'toolu_x', result: 'ok', input: { command: 'final' } },
+        [start.chatMessage!],
+      )
+      expect(after[0].toolInput).toEqual({ command: 'final' })
+    })
+
+    it('keeps the server-sanitized shape as-is (redacted values and the _truncated summary are plain objects and render)', () => {
+      const redacted = { command: 'export TOKEN=[REDACTED]', api_key: '[REDACTED]' }
+      const capped = { _truncated: true, summary: '{"content":"xxxx... [truncated]' }
+      expect(handleToolStart({ messageId: 'a', tool: 'Bash', input: redacted }, 's', false, []).chatMessage!.toolInput).toEqual(redacted)
+      expect(handleToolStart({ messageId: 'b', tool: 'Write', input: capped }, 's', false, []).chatMessage!.toolInput).toEqual(capped)
+    })
+
+    it('leaves toolInput unset for null, array and primitive inputs', () => {
+      for (const input of [null, undefined, ['a'], 'ls', 42]) {
+        const out = handleToolStart({ messageId: 'm', tool: 'Bash', input }, 's', false, [])
+        expect(out.chatMessage!.toolInput).toBeUndefined()
+      }
+    })
+  })
+
   it('falls back to tool name when input is absent', () => {
     const out = handleToolStart(
       { messageId: 'srv-tool-1', tool: 'Bash' },
@@ -8271,6 +8357,83 @@ describe('handleToolResult', () => {
     expect(handleToolResult({ toolUseId: 'tu-1', result: 'ok' }, 's')!.patch.toolResultIsError).toBe(false)
     // non-boolean coerces to the safe default (matches the truncated guard)
     expect(handleToolResult({ toolUseId: 'tu-1', result: 'ok', isError: 'true' as unknown as boolean }, 's')!.patch.toolResultIsError).toBe(false)
+  })
+
+  // #7376 — a tool cut off because its TURN was terminated carries the reason,
+  // so the renderers can show "re-send" instead of the failure styling.
+  it('patches toolResultTerminatedReason from a string msg.terminatedReason', () => {
+    const p = handleToolResult(
+      { toolUseId: 'tu-1', result: 'cut off', isError: true, terminatedReason: 'permission_mode_switch' },
+      's',
+    )!.patch
+    expect(p.toolResultTerminatedReason).toBe('permission_mode_switch')
+    // the failure flag is left as sent: the RENDERER decides precedence
+    expect(p.toolResultIsError).toBe(true)
+  })
+
+  // #8363 -- the reason for a Stop that cancelled a pending permission rides the
+  // same field, so a client that knows nothing new still renders it as terminated.
+  it('patches toolResultTerminatedReason for a Stop on a pending permission', () => {
+    const p = handleToolResult(
+      { toolUseId: 'tu-1', result: 'Stopped before this tool ran', isError: true, terminatedReason: 'user_stop_before_run' },
+      's',
+    )!.patch
+    expect(p.toolResultTerminatedReason).toBe('user_stop_before_run')
+  })
+
+  it('POSITIVE CONTROL: no toolResultTerminatedReason key for a genuine failure or a success', () => {
+    for (const msg of [
+      { toolUseId: 'tu-1', result: 'boom', isError: true },
+      { toolUseId: 'tu-1', result: 'ok' },
+      { toolUseId: 'tu-1', result: 'ok', terminatedReason: '' },
+      { toolUseId: 'tu-1', result: 'ok', terminatedReason: 7 as unknown as string },
+    ]) {
+      expect('toolResultTerminatedReason' in handleToolResult(msg, 's')!.patch).toBe(false)
+    }
+  })
+
+  // #7376 (review): a CLI hard-timeout / stream stall clears local state without
+  // killing the child, so a REAL result can follow the synthetic terminated one
+  // for the same tool id (live, or both replayed from history in order). The
+  // renderers give the marker precedence, so a stale one hides the real text.
+  describe('an authoritative result replaces a synthetic terminated one', () => {
+    const toolUse = { id: 'tool-tu-1', type: 'tool_use', tool: 'Bash', toolUseId: 'tu-1', content: '' } as unknown as ChatMessage
+    const terminated = {
+      toolUseId: 'tu-1',
+      result: 'Turn ended (stream stall) before this tool returned a result.',
+      isError: true,
+      terminatedReason: 'stream_stall',
+    }
+    const apply = (msgs: ChatMessage[], m: Record<string, unknown>) => handleToolResult(m, 's')!.applyTo(msgs)
+
+    it('a genuine success clears the marker and shows the real text', () => {
+      const afterSynthetic = apply([toolUse], terminated)
+      expect(afterSynthetic[0]!.toolResultTerminatedReason).toBe('stream_stall')
+      const afterReal = apply(afterSynthetic, { toolUseId: 'tu-1', result: 'built ok' })
+      expect(afterReal[0]!.toolResult).toBe('built ok')
+      expect(afterReal[0]!.toolResultIsError).toBe(false)
+      expect('toolResultTerminatedReason' in afterReal[0]!).toBe(false)
+    })
+
+    it('a genuine is_error result clears the marker and keeps the real failure text', () => {
+      const afterReal = apply(apply([toolUse], terminated), { toolUseId: 'tu-1', result: 'exit 2: boom', isError: true })
+      expect(afterReal[0]!.toolResult).toBe('exit 2: boom')
+      expect(afterReal[0]!.toolResultIsError).toBe(true)
+      expect('toolResultTerminatedReason' in afterReal[0]!).toBe(false)
+    })
+
+    it('replaying both history entries in order ends on the real result', () => {
+      const replayed = [terminated, { toolUseId: 'tu-1', result: 'late real', isError: true }]
+        .reduce(apply, [toolUse])
+      expect(replayed[0]!.toolResult).toBe('late real')
+      expect('toolResultTerminatedReason' in replayed[0]!).toBe(false)
+    })
+
+    it('POSITIVE CONTROL: a terminated result still sets the marker, and a second terminated one keeps it', () => {
+      const once = apply([toolUse], terminated)
+      const twice = apply(once, { ...terminated, terminatedReason: 'hard_timeout' })
+      expect(twice[0]!.toolResultTerminatedReason).toBe('hard_timeout')
+    })
   })
 
   it('resolves sessionId from message when present', () => {

@@ -113,6 +113,8 @@ function normalize(messages: unknown[]): Array<Record<string, unknown>> {
     toolResult: m.toolResult,
     toolResultTruncated: m.toolResultTruncated,
     toolResultIsError: m.toolResultIsError,
+    // #7376: the terminated-turn marker, so a fixture can assert it reached the bubble.
+    toolResultTerminatedReason: m.toolResultTerminatedReason,
   }))
 }
 

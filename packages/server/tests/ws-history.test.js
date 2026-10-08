@@ -153,6 +153,19 @@ describe('sendPostAuthInfo — base auth_ok payload', () => {
     assert.equal(authOk.capabilities.agentConnections, true)
   })
 
+  // #8268 — a dashboard page that outlives a daemon update compares its own build id
+  // with this one. The id comes off the ctx per auth_ok, never frozen at startup.
+  it('carries the served dashboard build id in auth_ok when the daemon has one', () => {
+    ctx.dashboardBuildId = 'b1d2e3f4a5b6c7d8'
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(ctx._sends[0].dashboardBuildId, 'b1d2e3f4a5b6c7d8')
+  })
+
+  it('omits dashboardBuildId (not null) when no dashboard is built', () => {
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(Object.prototype.hasOwnProperty.call(ctx._sends[0], 'dashboardBuildId'), false)
+  })
+
   it('spreads extra fields into auth_ok', () => {
     sendPostAuthInfo(ctx, ws, { customField: 'hello' })
     const authOk = ctx._sends[0]
@@ -1433,6 +1446,21 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
     assert.deepEqual(permModes.modes, DEFAULT_PROVIDER_MODES)
   })
 
+  it('tags the auth_ok roster and the discrete frame with the provider they describe (#8224)', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-cx', name: 'Codex', cwd: '/repo', provider: 'codex' },
+    ])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-cx' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    const frame = ctx._sends.find(m => m.type === 'available_permission_modes')
+    assert.equal(authOk.availablePermissionModesProvider, 'codex')
+    assert.equal(frame.provider, 'codex')
+  })
+
   it('a codex active session at connect gets codex-tuned mode copy (#6638)', () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-cx', name: 'Codex', cwd: '/repo', provider: 'codex' },
@@ -1664,6 +1692,74 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
 })
 
 // ── sendSessionInfo ────────────────────────────────────────────────────────
+
+// #8224 — the permission-mode roster is a fact about the session's PROVIDER
+// (claude-tui cannot plan, claude-sdk can). `switch_session` used to be the only
+// path that sent it after connect, so creating a session — which auto-switches
+// the creator and calls `sendSessionInfo`, never the switch handler — left the
+// previous session's roster ("Plan (unavailable)") in the client. Every path
+// that surfaces a session goes through `sendSessionInfo`, so that is where the
+// provider-tagged roster is sent.
+describe('sendSessionInfo — provider-tagged permission-mode roster (#8224)', () => {
+  const planOf = (frame) => frame.modes.find(m => m.id === 'plan')
+
+  // `activeSessionId` defaults to the session being surfaced: every path that
+  // makes a session the client's own (create, switch, re-home, resume) sets it
+  // before calling sendSessionInfo.
+  function sendInfoFor(provider, ProviderClass, opts, { activeSessionId = 'sess-1', ctxOverrides = {} } = {}) {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha', provider },
+    ])
+    if (ProviderClass) manager.getSession('sess-1').session.constructor = ProviderClass
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, ...ctxOverrides })
+    registerClient(ctx, ws, { activeSessionId })
+    sendSessionInfo(ctx, ws, 'sess-1', opts)
+    return ctx._sends.filter(m => m.type === 'available_permission_modes')
+  }
+
+  it('sends the claude-sdk roster with Plan available, tagged claude-sdk', () => {
+    const frames = sendInfoFor('claude-sdk', getProvider('claude-sdk'))
+    assert.equal(frames.length, 1, 'exactly one roster frame')
+    assert.equal(frames[0].provider, 'claude-sdk')
+    assert.equal(planOf(frames[0]).supported, true)
+    assert.equal(planOf(frames[0]).label, 'Plan')
+  })
+
+  it('sends the claude-tui roster with Plan unavailable, tagged claude-tui', () => {
+    const frames = sendInfoFor('claude-tui', getProvider('claude-tui'))
+    assert.equal(frames.length, 1)
+    assert.equal(frames[0].provider, 'claude-tui')
+    assert.equal(planOf(frames[0]).supported, false)
+    assert.match(planOf(frames[0]).label, /unavailable/)
+  })
+
+  it('sends NO roster for a session that is not the client\'s active one (subscribe_sessions on a background session)', () => {
+    // A client older than #8224 keeps one flat roster slot; a background
+    // session's roster would displace the active session's on every connect.
+    assert.equal(sendInfoFor('claude-sdk', getProvider('claude-sdk'), undefined, { activeSessionId: 'other-session' }).length, 0)
+    assert.equal(sendInfoFor('claude-sdk', getProvider('claude-sdk'), undefined, { activeSessionId: null }).length, 0)
+  })
+
+  it('a codex session gets codex-tuned mode copy (#6638)', () => {
+    const frames = sendInfoFor('codex', getProvider('codex'))
+    assert.equal(frames.length, 1)
+    assert.match(frames[0].modes.find(m => m.id === 'acceptEdits').description, /apply_patch/)
+    assert.equal(frames[0].provider, 'codex')
+  })
+
+  it('an entry that reports no provider gets the DAEMON DEFAULT copy and tag (#7811)', () => {
+    const frames = sendInfoFor(undefined, undefined, undefined, { ctxOverrides: { billingCanary: { defaultProvider: 'codex' } } })
+    assert.equal(frames.length, 1)
+    assert.equal(frames[0].provider, 'codex')
+    assert.match(frames[0].modes.find(m => m.id === 'acceptEdits').description, /apply_patch/)
+    assert.doesNotMatch(frames[0].modes.find(m => m.id === 'auto').description, /dangerously-skip-permissions/)
+  })
+
+  it('skipModels (the connect burst, which sends its own tagged roster) does not send a second one', () => {
+    assert.equal(sendInfoFor('claude-sdk', getProvider('claude-sdk'), { skipModels: true }).length, 0)
+  })
+})
 
 describe('sendSessionInfo', () => {
   it('does nothing when sessionManager is absent', () => {

@@ -125,6 +125,88 @@ describe('ToolGroup', () => {
     expect(ok).not.toHaveAttribute('data-error')
   })
 
+  // #7376 — a tool cut off because its TURN was terminated is not "the command
+  // ran and failed". The server marks the synthetic result isError too, so the
+  // terminated state must WIN over the failure styling, and a genuine failure
+  // must still render as one.
+  it('renders a terminated tool as terminated, not as a failure (#7376)', () => {
+    const messages = [
+      tool('1', 'Bash', {
+        toolResult: 'Turn ended (permission-mode switch) before this tool returned a result. Check whether it took effect before retrying.',
+        toolResultIsError: true,
+        toolResultTerminatedReason: 'permission_mode_switch',
+      }),
+      tool('2', 'db/query', { toolResult: 'connection refused', toolResultIsError: true }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    const cut = screen.getByTestId('tool-group-entry-1')
+    expect(cut).toHaveAttribute('data-terminated', 'true')
+    expect(cut).toHaveClass('tool-group-entry--terminated')
+    expect(cut).not.toHaveClass('tool-group-entry--error')
+    expect(cut).not.toHaveAttribute('data-error')
+    expect(cut).toHaveTextContent('⊘')
+    expect(cut).not.toHaveTextContent('✕')
+    expect(screen.getByTestId('tool-group-entry-terminated-1')).toBeInTheDocument()
+    // Positive control: the genuine failure in the same group is still red.
+    const failed = screen.getByTestId('tool-group-entry-2')
+    expect(failed).toHaveAttribute('data-error', 'true')
+    expect(failed).toHaveClass('tool-group-entry--error')
+    expect(failed).not.toHaveAttribute('data-terminated')
+    expect(screen.queryByTestId('tool-group-entry-terminated-2')).toBeNull()
+  })
+
+  it('a terminated tool states the reason and the next step when expanded, instead of the raw result (#7376)', () => {
+    const messages = [
+      tool('1', 'Bash', {
+        toolResult: 'synthesized placeholder text',
+        toolResultIsError: true,
+        toolResultTerminatedReason: 'permission_mode_switch',
+      }),
+      tool('2', 'Read', { toolResult: 'ok' }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+    const note = screen.getByTestId('tool-group-entry-terminated-note-1')
+    expect(note).toHaveTextContent('Turn ended (permission-mode switch) before this tool returned a result')
+    expect(note).toHaveTextContent('Check whether it took effect before retrying')
+    expect(screen.getByTestId('tool-group-entry-detail-1')).not.toHaveTextContent('synthesized placeholder text')
+  })
+
+  // #8363 -- Stop pressed while a tool's permission prompt was pending. The
+  // provider writes a denial result saying the USER declined; the row says stopped.
+  it('a Stop on a pending permission is badged stopped and says it never ran (#8363)', () => {
+    const messages = [
+      tool('1', 'Bash', {
+        toolResult: "The user doesn't want to proceed with this tool use.",
+        toolResultIsError: true,
+        toolResultTerminatedReason: 'user_stop_before_run',
+      }),
+      // CONTROL: a real Deny -- no reason -- keeps the failure styling and its text
+      tool('2', 'Bash', { toolResult: "The user doesn't want to proceed with this tool use.", toolResultIsError: true }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    expect(screen.getByTestId('tool-group-entry-terminated-1')).toHaveTextContent('stopped')
+    fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+    const note = screen.getByTestId('tool-group-entry-terminated-note-1')
+    expect(note).toHaveTextContent('Stopped before this tool ran')
+    expect(screen.getByTestId('tool-group-entry-detail-1')).not.toHaveTextContent("doesn't want to proceed")
+    const denied = screen.getByTestId('tool-group-entry-2')
+    expect(denied).toHaveAttribute('data-error', 'true')
+    expect(denied).not.toHaveAttribute('data-terminated')
+    expect(screen.queryByTestId('tool-group-entry-terminated-2')).toBeNull()
+  })
+
+  it('an unrecognised reason from a newer server still renders as terminated, with generic wording (#7376)', () => {
+    const messages = [
+      tool('1', 'Bash', { toolResult: 'x', toolResultIsError: true, toolResultTerminatedReason: 'from_the_future' }),
+      tool('2', 'Read', { toolResult: 'ok' }),
+    ]
+    render(<ToolGroup messages={messages} isActive={true} />)
+    expect(screen.getByTestId('tool-group-entry-1')).toHaveAttribute('data-terminated', 'true')
+    fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+    expect(screen.getByTestId('tool-group-entry-terminated-note-1')).toHaveTextContent('Check whether it took effect before retrying')
+  })
+
   it('counts an empty toolResult as complete (server may emit "")', () => {
     const messages = [
       tool('1', 'Bash', { toolResult: '' }),
@@ -448,6 +530,26 @@ describe('ToolGroup', () => {
         // Marks the panel as streaming so styling can hint "still
         // arriving" — same affordance ToolBubble uses via data-parsed.
         expect(detail).toHaveAttribute('data-streaming', 'true')
+      })
+
+      // #8251 — a running claude-sdk tool has no structured toolInput until its
+      // result lands, but the single-shot sanitized tool_input_delta is already
+      // in toolInputPartial: the COLLAPSED row must show its preview, as
+      // ToolBubble's collapsed summary does (#4081).
+      it('collapsed row previews a complete toolInputPartial while toolInput is undefined', () => {
+        const messages = [
+          tool('1', 'Bash', { toolInputPartial: '{"command":"sleep 12 && ls ."}' }),
+        ]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('sleep 12 && ls .')
+      })
+
+      it('collapsed row does not leak a half-assembled partial buffer', () => {
+        const messages = [
+          tool('1', 'Bash', { toolInputPartial: '{"command":"sle' }),
+        ]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        expect(screen.getByTestId('tool-group-entry-1')).not.toHaveTextContent('sle')
       })
 
       it('pretty-prints toolInputPartial when the buffer is already complete JSON', () => {

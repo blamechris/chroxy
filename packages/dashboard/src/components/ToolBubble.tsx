@@ -35,6 +35,7 @@ import {
   isWebFetchToolName,
   parseWebSearchResults,
   parseWebFetchResult,
+  describeTurnTermination,
 } from '@chroxy/store-core'
 import type { ChildAgentEvent, ToolResultImage } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
@@ -85,6 +86,15 @@ export interface ToolBubbleProps {
    * Task tool_call. Only meaningful when `toolName === 'Task'`.
    */
   childAgentEvents?: ChildAgentEvent[]
+  /**
+   * #7376: the server's `terminatedReason` when this tool was cut off because
+   * its TURN was terminated underneath it (permission-mode switch, Stop, crash,
+   * watchdog, daemon restart) -- distinct from the command running and failing.
+   * Renders a "turn ended before a result, check before retrying" note in place of the (synthesized)
+   * result text. Any non-empty string counts; an unrecognised reason from a newer
+   * server gets the generic wording.
+   */
+  terminatedReason?: string
 }
 
 // #4243: `getInputSummary` and `getPartialSummary` now live in
@@ -124,7 +134,7 @@ export interface ToolBubbleProps {
 // detail-panel path can't drift — the group path previously had no
 // suppression check and leaked the raw AskUserQuestion JSON on claude-tui.
 
-export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName, isTail = false, resultImages, childAgentEvents }: ToolBubbleProps) {
+export function ToolBubble({ toolName, toolUseId, input, inputPartial, result: rawResult, serverName, isTail = false, resultImages, childAgentEvents, terminatedReason }: ToolBubbleProps) {
   // #4313 — tail bubbles mount expanded so the singleton trailing-tool
   // case matches the #4309 tail-group behavior. Initial-state only via
   // the lazy `useState` initializer.
@@ -146,7 +156,12 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   // hides — same shape as ToolGroup's `hasResult` and
   // ActivityIndicator's in-flight predicate. Without this the header
   // pulses forever for computer-use / screenshot tools.
-  const hasResult = result !== undefined || (resultImages?.length ?? 0) > 0
+  const hasResult = rawResult !== undefined || (resultImages?.length ?? 0) > 0
+  // #7376: a terminated tool's `result` is the server's synthesized placeholder
+  // text. The note below says it better, so withhold it from every renderer path
+  // (the structured parsers, the collapse pill, the `<pre>`) rather than show both.
+  const termination = hasResult && terminatedReason ? describeTurnTermination(terminatedReason) : null
+  const result = termination ? undefined : rawResult
   // #6755 — split `hasResult` into its two constituents so the expanded
   // body can render text and images independently (a tool can resolve
   // with either, both, or neither). `hasTextResult` excludes the empty
@@ -275,8 +290,9 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
 
   return (
     <div
-      className={`tool-bubble${expanded ? ' expanded' : ''}`}
+      className={`tool-bubble${expanded ? ' expanded' : ''}${termination ? ' tool-bubble--terminated' : ''}`}
       data-testid={`tool-bubble-${toolUseId}`}
+      data-terminated={termination ? 'true' : undefined}
       data-tool-id={toolUseId}
       role="button"
       tabIndex={0}
@@ -306,6 +322,19 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
         <span className="tool-input" data-testid="tool-input-summary" style={{ color: '#666' }}>
           {summary}
         </span>
+      )}
+      {/* #7376: always visible (not behind the expand toggle) -- the whole point
+          is that the user can tell "cut off, check before retrying" from "ran and failed"
+          without opening anything. */}
+      {termination && (
+        <div
+          className="tool-bubble-terminated-note"
+          data-testid={`tool-bubble-terminated-${toolUseId}`}
+          role="note"
+        >
+          <span aria-hidden="true">⊘ </span>
+          {termination.summary}
+        </div>
       )}
       {expanded && (hasTextResult || hasImages) && (
         // #4139: click inside the result area must not bubble up to the

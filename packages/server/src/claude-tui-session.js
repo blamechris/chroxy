@@ -23,7 +23,7 @@ import { performance } from 'node:perf_hooks'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission, spawnRefusalAdmission } from './base-session.js'
-import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
+import { CLAUDE_TUI_PTY_SIZE, CLAUDE_TUI_PTY_MIN_SIZE } from '@chroxy/protocol'
 // #5417 — the TUI shares CliSession's pinned "unknown resume id" patterns
 // (RESUME_UNKNOWN_STDERR_PATTERNS, #4929/#4950) via this matcher: the PTY
 // merges stdout+stderr, so claude's resume rejection lands in _outputTail.
@@ -619,6 +619,9 @@ export class ClaudeTuiSession extends BaseSession {
     // default and tracks every applied resize so a respawn re-spawns at the
     // operator's chosen size (not back to the default), and so a newly-
     // subscribing viewer can be told the authoritative size to letterbox to.
+    // #8254: a viewer's size does not outlive the viewer — setTerminalMirrorActive
+    // (false) puts it back to the default, and a request below
+    // CLAUDE_TUI_PTY_MIN_SIZE is clamped up (resizeTerminal).
     this._ptyCols = CLAUDE_TUI_PTY_SIZE.cols
     this._ptyRows = CLAUDE_TUI_PTY_SIZE.rows
     // #4278: when claude TUI calls AskUserQuestion, chroxy's PreToolUse
@@ -3108,6 +3111,12 @@ export class ClaudeTuiSession extends BaseSession {
 
     // Captured so the spawn-time backstop (#6708) verifies the EXACT binary this
     // attempt used, not a fresh re-resolve that could land on a different path.
+    // #8254: a respawn re-uses the tracked size, so refuse to carry a degenerate
+    // one into a new PTY. resizeTerminal already clamps, which makes this
+    // unreachable through the public API; it is the backstop for any other writer
+    // of _ptyCols/_ptyRows, because a 10x6 spawn blinds the recovery classifiers
+    // and every respawn then dies the same way.
+    this._applySpawnSizeFloor()
     try {
       // node-pty spawns CLAUDE directly — no cmd.exe routing needed even when
       // the Windows resolver lands on a `claude.cmd` shim. node-pty routes
@@ -3488,6 +3497,19 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #8254: put the tracked PTY size back at the default if it is below
+   * CLAUDE_TUI_PTY_MIN_SIZE. Called just before each spawn (first start and every
+   * respawn). resizeTerminal clamps, so this only fires for a size written some
+   * other way; the point is that no spawn ever starts at a grid that wraps
+   * claude's output into fragments the recovery classifiers cannot match.
+   */
+  _applySpawnSizeFloor() {
+    if (this._ptyCols >= CLAUDE_TUI_PTY_MIN_SIZE.cols && this._ptyRows >= CLAUDE_TUI_PTY_MIN_SIZE.rows) return
+    this._ptyCols = CLAUDE_TUI_PTY_SIZE.cols
+    this._ptyRows = CLAUDE_TUI_PTY_SIZE.rows
+  }
+
+  /**
    * #5837: turn the live mirror coalescer on/off based on whether any client is
    * subscribed to this session's terminal. WsServer calls this when the
    * terminal-subscriber count crosses 0↔1. When turning OFF, drop any pending
@@ -3498,7 +3520,14 @@ export class ClaudeTuiSession extends BaseSession {
     const next = !!active
     if (next === this._terminalMirrorActive) return
     this._terminalMirrorActive = next
-    if (!next) this._clearTerminalMirror()
+    if (!next) {
+      this._clearTerminalMirror()
+      // #8254: the last viewer has left, so the size it chose has no owner. Put
+      // the PTY back at the default — the grid the recovery classifiers were
+      // written against — instead of leaving it wherever that viewer last sized
+      // it. A returning viewer measures its pane again and asks for what it needs.
+      this.resizeTerminal(CLAUDE_TUI_PTY_SIZE.cols, CLAUDE_TUI_PTY_SIZE.rows)
+    }
   }
 
   /**
@@ -3530,12 +3559,19 @@ export class ClaudeTuiSession extends BaseSession {
    * running PTY when one exists (a resize requested before/after the PTY is alive
    * still updates the tracked size, taking effect on the next spawn). The real
    * TUI redraws at the new size; those bytes flow out through the normal mirror.
+   *
+   * #8254: the floor is CLAUDE_TUI_PTY_MIN_SIZE (80x24), not 1x1. A viewer that
+   * measured a collapsed or hidden pane asked for 10x6 in the field; at that grid
+   * claude wraps a few characters per line and the screen-reading recovery
+   * classifiers (#7847 unknown-resume, #8223 logged-out) never see their banner.
+   * A too-small request is clamped UP rather than refused, so a legitimately
+   * narrow viewer still gets the nearest sane grid and letterboxes to it.
    * @returns {{cols: number, rows: number}|null} the applied size, or null if the
    *   request was a no-op (unchanged) so the caller can skip a redundant broadcast.
    */
   resizeTerminal(cols, rows) {
-    const c = Math.max(1, Math.min(1000, Math.floor(Number(cols))))
-    const r = Math.max(1, Math.min(1000, Math.floor(Number(rows))))
+    const c = Math.max(CLAUDE_TUI_PTY_MIN_SIZE.cols, Math.min(1000, Math.floor(Number(cols))))
+    const r = Math.max(CLAUDE_TUI_PTY_MIN_SIZE.rows, Math.min(1000, Math.floor(Number(rows))))
     // Load-bearing guard: NaN (e.g. resizeTerminal('x', 'y')) survives
     // Math.floor/min/max unchanged, so the clamp above does NOT guarantee
     // finiteness — without this a NaN would reach _term.resize. Don't remove.
@@ -3572,10 +3608,11 @@ export class ClaudeTuiSession extends BaseSession {
   forceTerminalRepaint() {
     if (!this._term || this._ptyExited) return false
     const { cols, rows } = this.getTerminalSize()
-    // Toggle to a definitely-different width (cols-1, or 2 when at the 1-col
-    // floor) then restore — each resizeTerminal call changes the width so neither
-    // hits its unchanged-size no-op guard, and the original grid is restored.
-    const toggleCols = cols > 1 ? cols - 1 : 2
+    // Toggle to a definitely-different width (cols-1, or cols+1 when at the
+    // CLAUDE_TUI_PTY_MIN_SIZE floor, which resizeTerminal would clamp back to the
+    // same width) then restore — each resizeTerminal call changes the width so
+    // neither hits its unchanged-size no-op guard, and the original grid is restored.
+    const toggleCols = cols > CLAUDE_TUI_PTY_MIN_SIZE.cols ? cols - 1 : cols + 1
     this.resizeTerminal(toggleCols, rows)
     this.resizeTerminal(cols, rows)
     return true
@@ -4475,16 +4512,27 @@ export class ClaudeTuiSession extends BaseSession {
       if (bashOutputShellId) {
         this.clearBackgroundShell(bashOutputShellId)
       }
+      // #4628: track this tool_start so _emitResult can sweep it on
+      // turn-end if the matching PostToolUse hook is never written
+      // (the upstream failure mode observed in #4628). Tracked BEFORE the
+      // emit (#8251) so `_recordToolInput` below finds its entry.
+      this._trackToolStart(toolUseId, toolName)
+      // #8251: the hook payload carries the tool's whole `tool_input`, so it
+      // rides on `tool_start` itself (claude-tui never sends
+      // `tool_result.input`, and the persisted `tool_start` history entry is
+      // what a session-switch/reload replay rebuilds the INPUT panel from).
+      // It used to go out RAW — unredacted and uncapped on the live wire and
+      // in the history ring buffer. `_recordToolInput` is the one choke point
+      // the SDK/CLI/BYOK paths already use (#8135/#8136): it applies
+      // `sanitizeToolInput` (secret-shaped keys/values redacted, serialized
+      // size capped at MAX_INPUT_CHARS) and returns the safe value.
+      const sanitizedToolInput = this._recordToolInput(toolUseId, payload.tool_input ?? null)
       this.emit('tool_start', {
         messageId: toolUseId,
         toolUseId,
         tool: toolName,
-        input: payload.tool_input ?? null,
+        input: sanitizedToolInput ?? null,
       })
-      // #4628: track this tool_start so _emitResult can sweep it on
-      // turn-end if the matching PostToolUse hook is never written
-      // (the upstream failure mode observed in #4628).
-      this._trackToolStart(toolUseId, toolName)
       // #4278: AskUserQuestion in TUI sessions previously had no special
       // path — the tool_use bubble appeared in the chat with no
       // interactive way to answer, and claude sat on its own TTY-style
@@ -4796,9 +4844,19 @@ export class ClaudeTuiSession extends BaseSession {
     // accumulation. See companion sites above.
     // #4628: sweep orphan tool_starts before result so the dashboard's
     // activeTools clears as part of the same error burst.
+    //
+    // #7376: a turn that ended because the user pressed Stop, or because the
+    // PTY died under it, left its in-flight tools CUT OFF, not failed. Name the
+    // cause (read before `_clearTurnEndState` nulls the turn) so the synthetic
+    // tool_result says so; any other error keeps the generic sweep reason.
+    const sweepReason = this._activeTurn?.aborted
+      ? 'user_stop'
+      : this._ptyExited
+        ? 'process_exit'
+        : 'turn_finished_with_error'
     this._emitResult(
       { cost: null, duration, usage: null, sessionId: this._sessionId },
-      'turn_finished_with_error',
+      sweepReason,
     )
     // Shared per-turn teardown: timers, pre-first-output watchdog, attachment
     // dir (#4022), the busy-state triple, the AskUserQuestion sibling lock

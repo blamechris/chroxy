@@ -438,6 +438,11 @@ Object.assign(EVENT_MAP, {
     // codex mcpToolCall / orphan-sweep result would render plain live but
     // error-styled after a history replay (which sends the entry raw).
     if (typeof data.isError === 'boolean') msg.isError = data.isError
+    // #7376: the tool was cut off because its TURN was terminated (permission-
+    // mode switch, Stop, crash, watchdog), not because it failed. Forwarded on
+    // the live wire for the same reason as `isError` above -- the persisted
+    // history entry carries it (session-message-history.js) so a replay agrees.
+    if (typeof data.terminatedReason === 'string') msg.terminatedReason = data.terminatedReason
     // #7346/#8135 (review): forward the finalized tool input — cli-session.js
     // / sdk-session.js attach it via tool-result.js's emitToolResults (already
     // sanitized + size-capped at capture, base-session.js's _recordToolInput).

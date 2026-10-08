@@ -154,6 +154,13 @@ export interface AuthOkPayload {
    * (older server) — consumers then fall back to the discrete frame.
    */
   availablePermissionModes: PermissionMode[] | null
+  /**
+   * #8224 — the provider whose roster {@link availablePermissionModes} is
+   * (the active session's, or the daemon's resolved default when there is no
+   * session). Null when absent (older server): the roster then files under the
+   * untagged bucket, exactly as the discrete frame's absent tag does.
+   */
+  availablePermissionModesProvider: string | null
 }
 
 const DEFAULT_WEB_FEATURES: AuthOkWebFeatures = {
@@ -242,6 +249,10 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     availablePermissionModes: Array.isArray(msg.availablePermissionModes)
       ? handleAvailablePermissionModes({ modes: msg.availablePermissionModes })
       : null,
+    availablePermissionModesProvider:
+      typeof msg.availablePermissionModesProvider === 'string' && msg.availablePermissionModesProvider
+        ? msg.availablePermissionModesProvider
+        : null,
   }
 }
 
