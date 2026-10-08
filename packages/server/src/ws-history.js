@@ -302,6 +302,17 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
 const CAPABILITY_PERMISSION_OUTCOME_STOPPED = 'permission_outcome_stopped_v1'
 
 /**
+ * #6630: the client capability that says "a replayed `error` entry is safe to
+ * send me". Errors became part of the transcript (they used to be live-only), and
+ * a client build from before that raises its usage-limit alert for a rate-limit
+ * error even when it arrives in a replay, so an old app would pop the modal on
+ * every session switch for a quota that recovered long ago. Only a client that
+ * advertises this (the replay-aware builds) is sent the recorded errors; the rest
+ * get the transcript as it was, errors absent.
+ */
+export const CAPABILITY_HISTORY_ERROR_REPLAY = 'history_error_replay_v1'
+
+/**
  * Write ONE history entry to a client, the way BOTH replay paths must.
  *
  * Two things happen per entry, and both were forgotten by the second copy of
@@ -343,6 +354,16 @@ const CAPABILITY_PERMISSION_OUTCOME_STOPPED = 'permission_outcome_stopped_v1'
  *   it advertised. NOT `ws`: that is the raw socket and carries none (#8374).
  */
 export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
+  // #6630: a recorded error goes only to a client that said it can take one in a
+  // replay (see CAPABILITY_HISTORY_ERROR_REPLAY). Skipped, not downgraded: there is
+  // no older shape of an error bubble that is safe. Nothing else about the entry
+  // changes, and the stored entry is untouched for the clients that do advertise it.
+  if (
+    entry && entry.type === 'message' && entry.messageType === 'error'
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_ERROR_REPLAY) ?? false)
+  ) {
+    return
+  }
   // `sourceToolUseId` (#8336) is server-internal: it lets the restore-time sweep
   // pair a recorded question with its tool_start, and no client reads it. Live
   // broadcasts never carry it (the event normalizer picks fields), so the replay

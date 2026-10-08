@@ -654,6 +654,7 @@ export type {
   UserQuestionPayload,
   UserInputPayload,
   MessagePayload,
+  MessageReconcile,
   ToolStartPayload,
   ToolResultPayload,
   ToolInputDeltaPayload,
@@ -832,6 +833,8 @@ export {
   sharedStreamDelta,
   // #4297/#6630 — the empty-response-slot reorder, shared so the app moves it too.
   moveEmptyResponseSlotToEnd,
+  // #6630 — fill a held message in from a fuller replayed copy.
+  applyMessageReconcile,
   handleStreamEnd,
   // #6756 — extended-thinking (reasoning) stream handlers.
   handleThinkingStreamStart,

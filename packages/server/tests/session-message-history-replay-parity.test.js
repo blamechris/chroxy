@@ -15,7 +15,7 @@ import { SdkSession } from '../src/sdk-session.js'
 import { SessionMessageHistory, streamKindOf } from '../src/session-message-history.js'
 import { buildMessageWire, buildErrorWire } from '../src/message-wire.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
-import { sendHistoryEntry } from '../src/ws-history.js'
+import { sendHistoryEntry, CAPABILITY_HISTORY_ERROR_REPLAY } from '../src/ws-history.js'
 
 const S = 's1'
 
@@ -203,6 +203,10 @@ describe('SessionMessageHistory: replay parity (#6630)', () => {
       assert.equal(streamKindOf({ type: 'message', messageType: 'response', messageId: 'turn-1-thinking-0' }), 'thinking')
       assert.equal(streamKindOf({ type: 'message', messageType: 'response', messageId: 'turn-1' }), undefined)
       assert.equal(streamKindOf({ type: 'message', messageType: 'response', messageId: 'turn-1-thinking-x' }), undefined)
+      // ACP's reasoning id has no counter (acp-session.js)
+      assert.equal(streamKindOf({ type: 'message', messageType: 'response', messageId: 'turn-1-thinking' }), 'thinking')
+      assert.equal(streamKindOf({ type: 'message', messageType: 'response', messageId: 'turn-1-thinking-12' }), 'thinking')
+      assert.equal(streamKindOf({ type: 'message', messageType: 'response', messageId: 'thinking' }), undefined)
       assert.equal(streamKindOf({ type: 'message', messageType: 'error', messageId: 'a-thinking-0' }), undefined)
       assert.equal(streamKindOf({ type: 'tool_start', messageId: 'a-thinking-0' }), undefined)
       assert.equal(streamKindOf(null), undefined)
@@ -254,9 +258,9 @@ describe('message-wire builders (#6630)', () => {
   })
 
   it('buildErrorWire carries stdout/stderr only for the post-create failure code, capped', () => {
-    const big = 'x'.repeat(9000)
+    const big = 'line of setup output '.repeat(500)
     const failed = buildErrorWire({ message: 'm', code: 'post_create_command_failed', stdout: big, stderr: '' })
-    assert.equal(failed.stdout.length, 8192)
+    assert.ok(failed.stdout.length > 0 && failed.stdout.length <= 8192)
     assert.ok(!('stderr' in failed), 'an empty stream is absent, not present-but-empty')
     const other = buildErrorWire({ message: 'm', code: 'stream_stall', stdout: 'leak' })
     assert.ok(!('stdout' in other))
@@ -323,5 +327,120 @@ describe('SessionManager: an error is stamped once (#6630)', () => {
     session.emit('error', { message: 'again', timestamp: 1234 })
     const [, second] = mgr.getHistory(S).filter((e) => e.messageType === 'error')
     assert.equal(second.timestamp, 1234)
+  })
+})
+
+describe('error text is redacted and bounded before it is recorded (#6630 review)', () => {
+  // A synthetic provider key (the shape redaction.js masks), never a real one.
+  const KEY = `sk-ant-api03-${'A1b2C3d4E5'.repeat(5)}`
+  let mgr
+  afterEach(() => {
+    mock.restoreAll()
+    mgr?.destroyAll?.()
+  })
+
+  it('masks a key in the message live, in the history entry, and in the serialized state file', () => {
+    mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set(S, { session, name: S, cwd: '/tmp' })
+    mgr._wireSessionEvents(S, session)
+    const seen = []
+    mgr.on('session_event', (e) => { if (e.event === 'error') seen.push(e) })
+
+    session.emit('error', { message: `401 from the API for key ${KEY}: invalid x-api-key` })
+
+    const live = new EventNormalizer().normalize('error', seen[0].data, { sessionId: S }).messages[0].msg
+    const entry = mgr.getHistory(S).find((e) => e.messageType === 'error')
+    assert.ok(!live.content.includes(KEY), 'masked on the live frame')
+    assert.ok(live.content.includes('[REDACTED]'))
+    assert.equal(entry.content, live.content, 'the recorded entry is the live text')
+    assert.ok(!JSON.stringify(mgr.serializeState()).includes(KEY), 'masked in the serialized state')
+  })
+
+  it('masks a token in post-create stdout and stderr on the live frame, the entry and the saved copy', () => {
+    const history = new SessionMessageHistory()
+    const data = {
+      message: 'postCreateCommand failed',
+      code: 'post_create_command_failed',
+      stdout: `exporting\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789\nauthorization: Bearer abcdefgh12345678\n`,
+      stderr: `curl: key ${KEY} rejected`,
+    }
+    const live = new EventNormalizer().normalize('error', data, { sessionId: S }).messages[0].msg
+    history.recordHistory(S, 'error', data)
+    const saved = history.truncateEntry(history.getHistory(S)[0])
+    for (const frame of [live, history.getHistory(S)[0], saved]) {
+      assert.ok(!frame.stdout.includes('ghp_abcdefghij'), 'the token value is masked')
+      assert.ok(frame.stdout.includes('GITHUB_TOKEN= [REDACTED]'), 'the key name is kept, the value is not')
+      assert.ok(!frame.stdout.includes('abcdefgh12345678'), 'the bearer value is masked')
+      assert.ok(!frame.stderr.includes(KEY))
+    }
+  })
+
+  it('bounds one error at admission: the in-memory entry is clipped, not only the saved copy', () => {
+    const history = new SessionMessageHistory()
+    history.recordHistory(S, 'error', { message: 'boom '.repeat(100_000) })
+    const [entry] = history.getHistory(S)
+    assert.ok(entry.content.length < 51 * 1024 + 20, `held ${entry.content.length} characters`)
+    assert.ok(entry.content.endsWith('[truncated]'), 'says it was cut')
+  })
+
+  it('masks a key in the part of an oversized error that is kept', () => {
+    const history = new SessionMessageHistory()
+    history.recordHistory(S, 'error', { message: `request failed for ${KEY} ${'filler '.repeat(20_000)}` })
+    const [entry] = history.getHistory(S)
+    assert.ok(entry.content.endsWith('[truncated]'))
+    assert.ok(!entry.content.includes(KEY))
+    assert.ok(entry.content.includes('[REDACTED]'))
+  })
+
+  it('a short error is stored verbatim', () => {
+    const history = new SessionMessageHistory()
+    history.recordHistory(S, 'error', { message: 'Something went wrong' })
+    assert.equal(history.getHistory(S)[0].content, 'Something went wrong')
+  })
+})
+
+describe('recorded errors are replayed only to a client that advertises history_error_replay_v1 (#6630 review)', () => {
+  const entry = { type: 'message', messageType: 'error', content: 'Usage limit reached', timestamp: 1, _seq: 3 }
+  const frames = (client, e = entry) => {
+    const out = []
+    sendHistoryEntry((_ws, p) => out.push(p), {}, S, e, client)
+    return out
+  }
+
+  it('a client advertising it is sent the error, with its cursor stamp', () => {
+    const [frame] = frames({ clientCapabilities: new Set([CAPABILITY_HISTORY_ERROR_REPLAY]) })
+    assert.equal(frame.content, 'Usage limit reached')
+    assert.equal(frame.historySeq, 3)
+  })
+
+  it('a client that does not (an older build), or has no record, is sent nothing for it', () => {
+    for (const client of [{ clientCapabilities: new Set(['voice_input']) }, { clientCapabilities: new Set() }, {}, null, undefined]) {
+      assert.deepEqual(frames(client), [])
+    }
+  })
+
+  it('the capability on the raw socket is not consulted', () => {
+    const out = []
+    sendHistoryEntry((_ws, p) => out.push(p), { clientCapabilities: new Set([CAPABILITY_HISTORY_ERROR_REPLAY]) }, S, entry, null)
+    assert.deepEqual(out, [])
+  })
+
+  it('CONTROL: every other entry type is sent to a client with no capabilities at all', () => {
+    for (const e of [
+      { type: 'message', messageType: 'response', content: 'hi', messageId: 'm', timestamp: 1, _seq: 1 },
+      { type: 'message', messageType: 'system', content: 'note', timestamp: 1, _seq: 2 },
+      { type: 'tool_start', toolUseId: 't', tool: 'Bash', timestamp: 1, _seq: 4 },
+    ]) {
+      assert.equal(frames({ clientCapabilities: new Set() }, e).length, 1, e.type + '/' + e.messageType)
+    }
+  })
+
+  it('both stock clients advertise it', async () => {
+    const { CLIENT_CAPABILITIES } = await import('@chroxy/protocol')
+    assert.ok(CLIENT_CAPABILITIES.desktop.includes(CAPABILITY_HISTORY_ERROR_REPLAY))
+    assert.ok(CLIENT_CAPABILITIES.mobile.includes(CAPABILITY_HISTORY_ERROR_REPLAY))
   })
 })

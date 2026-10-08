@@ -35,6 +35,7 @@ import {
   handleStreamStart as sharedStreamStart,
   sharedStreamDelta,
   moveEmptyResponseSlotToEnd,
+  applyMessageReconcile,
   handleStreamEnd as sharedStreamEnd,
   // #6756 — extended-thinking (reasoning) content stream.
   handleThinkingStreamStart as sharedThinkingStart,
@@ -5933,7 +5934,18 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // #5555.3 — advance this session's cursor as we apply a replayed entry.
       if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
-      if (!result.shouldDispatch) break;
+      if (!result.shouldDispatch) {
+        // #6630: a replayed reasoning entry that is the fuller copy of a bubble the
+        // client holds (its stream was cut off by a disconnect) fills it in.
+        const reconcile = result.reconcile;
+        if (reconcile && targetId && get().sessionStates[targetId]) {
+          updateSession(targetId, (ss) => {
+            const next = applyMessageReconcile(ss.messages, reconcile);
+            return next === ss.messages ? {} : { messages: next };
+          });
+        }
+        break;
+      }
       const newMsg = result.chatMessage;
       if (targetId && get().sessionStates[targetId]) {
         // #7577 — placeholder removal and message append are two different

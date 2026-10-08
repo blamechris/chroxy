@@ -31,7 +31,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
-import { sendHistoryEntry } from '../src/ws-history.js'
+import { sendHistoryEntry, CAPABILITY_HISTORY_ERROR_REPLAY } from '../src/ws-history.js'
 
 const FIXTURE_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -50,6 +50,8 @@ function readFixture() {
   return { source, start, end, data: JSON.parse(source.slice(start + JSON_START.length, end)) }
 }
 const SESSION_ID = 's1'
+/** The client the committed replay frames are for: one that takes recorded errors. */
+const REPLAY_AWARE_CLIENT = { clientCapabilities: new Set([CAPABILITY_HISTORY_ERROR_REPLAY]) }
 /** Pinned so the ring buffer's `Date.now()` stamps are reproducible. */
 const FIXED_NOW = 1_700_000_000_000
 
@@ -79,7 +81,7 @@ function generate(events) {
   const replay = []
   const send = (_ws, payload) => replay.push(payload)
   for (const entry of history.getHistory(SESSION_ID)) {
-    sendHistoryEntry(send, null, SESSION_ID, entry, null)
+    sendHistoryEntry(send, null, SESSION_ID, entry, REPLAY_AWARE_CLIENT)
   }
   // JSON round trip: what is committed is what travels (drops `undefined` keys).
   return JSON.parse(JSON.stringify({ live, replay }))

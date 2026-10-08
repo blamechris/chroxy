@@ -22,6 +22,9 @@ export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'
 export const PERMISSION_OUTCOME_TOOL_MAX = 100
 export const PERMISSION_OUTCOME_DESCRIPTION_MAX = 500
 
+// `<turnId>-thinking-<n>` (sdk, byok) and `<turnId>-thinking` (acp).
+const LEGACY_THINKING_ID = /-thinking(?:-\d+)?$/
+
 /**
  * #6630 / #8282: which kind of stream a recorded `response` entry was. Today
  * only `'thinking'` (extended-thinking reasoning) is distinguished; anything
@@ -29,9 +32,9 @@ export const PERMISSION_OUTCOME_DESCRIPTION_MAX = 500
  *
  * The recorder stamps `kind: 'thinking'` on new entries. An entry written
  * before that field existed (a state file from an older run) is classified by
- * the message id every provider gives a reasoning stream, `<turnId>-thinking-<n>`
- * (sdk-session, byok-session), so those still replay as reasoning instead of as
- * an answer. ONE classifier, used by the replay emitter -- a client reads the
+ * the message id the providers give a reasoning stream: `<turnId>-thinking-<n>`
+ * (sdk-session, byok-session) and ACP's `<turnId>-thinking` (acp-session), so
+ * those still replay as reasoning instead of as an answer. ONE classifier, used by the replay emitter -- a client reads the
  * `kind` on the frame and never re-derives it from an id.
  *
  * @param {object} entry - a ring-buffer entry
@@ -40,7 +43,7 @@ export const PERMISSION_OUTCOME_DESCRIPTION_MAX = 500
 export function streamKindOf(entry) {
   if (!entry || entry.type !== 'message' || entry.messageType !== 'response') return undefined
   if (entry.kind === 'thinking') return 'thinking'
-  if (typeof entry.messageId === 'string' && /-thinking-\d+$/.test(entry.messageId)) return 'thinking'
+  if (typeof entry.messageId === 'string' && LEGACY_THINKING_ID.test(entry.messageId)) return 'thinking'
   return undefined
 }
 

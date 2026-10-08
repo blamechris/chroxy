@@ -17,6 +17,7 @@
  * (`contract-fixtures/replay-parity-data.ts`) prove it.
  */
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { redactValue } from './redaction.js'
 
 /**
  * #6941 review (Copilot) — coerce+bound a footer-stat numeric field
@@ -179,6 +180,46 @@ export function buildMessageWire(data) {
 }
 
 /**
+ * Ceiling on the text of one error, in characters. The same 50 KiB the persisted
+ * copy is clipped to (`SessionMessageHistory.truncateEntry`), applied here at
+ * ADMISSION so the live frame, the ring buffer and every replay hold the same
+ * bounded text -- the persistence clip alone left the in-memory entry (and each
+ * retransmission of it) unbounded.
+ */
+export const ERROR_TEXT_MAX = 50 * 1024
+
+/**
+ * Bound error text to `max` characters, then redact secret-shaped substrings.
+ * An error is whatever the provider or a setup command said, and it can carry an
+ * API key or a token (a BYOK request failure, a post-create script's output). It
+ * is now part of the durable transcript, written to `session-state.json`, so it
+ * passes through the same redactor the logger and the permission descriptions use
+ * (`redactValue`), here in the shared builder so the live frame and the recorded
+ * entry are identical.
+ *
+ * Clip FIRST, redact the clipped text: the clip prefers the last whitespace inside
+ * the bound so it rarely lands inside a token, and whatever it keeps is then
+ * redacted. Text with no whitespace to cut at is sliced (the post-create caps have
+ * always sliced, and a test pins it) rather than dropped.
+ *
+ * @param {string} text
+ * @param {number} max
+ * @returns {{ text: string, clipped: boolean }}
+ */
+function clipAndRedact(text, max) {
+  if (text.length <= max) return { text: redactValue(text), clipped: false }
+  const head = text.slice(0, max)
+  const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'))
+  return { text: redactValue(cut > 0 ? head.slice(0, cut) : head), clipped: true }
+}
+
+/** The error message: clipped, redacted, and says so when it was cut. */
+function errorMessageText(message) {
+  const { text, clipped } = clipAndRedact(String(message), ERROR_TEXT_MAX)
+  return clipped ? `${text}\n[truncated]` : text
+}
+
+/**
  * Build the wire envelope for a session `error` event -- a `message` frame with
  * `messageType: 'error'`, so the clients render it as an error bubble (or one of
  * the code-specific chips).
@@ -191,7 +232,7 @@ export function buildErrorWire(data) {
   const msg = {
     type: 'message',
     messageType: 'error',
-    content: data.message,
+    content: errorMessageText(data.message),
     // The session manager stamps one time on the event so the live frame and the
     // recorded entry agree (#6630); a direct caller without one gets "now".
     timestamp: Number.isFinite(data.timestamp) ? data.timestamp : Date.now(),
@@ -259,11 +300,11 @@ export function buildErrorWire(data) {
   // non-string both treated as "absent" so receivers see a consistent
   // "present or absent, never present-but-empty" shape.
   if (data.code === 'post_create_command_failed') {
-    if (typeof data.stdout === 'string' && data.stdout.length > 0) {
-      msg.stdout = data.stdout.length > 8192 ? data.stdout.slice(0, 8192) : data.stdout
-    }
-    if (typeof data.stderr === 'string' && data.stderr.length > 0) {
-      msg.stderr = data.stderr.length > 8192 ? data.stderr.slice(0, 8192) : data.stderr
+    for (const stream of ['stdout', 'stderr']) {
+      if (typeof data[stream] !== 'string' || data[stream].length === 0) continue
+      // Redacted like the message: setup output is where a token most often turns up.
+      const { text } = clipAndRedact(data[stream], 8192)
+      if (text.length > 0) msg[stream] = text
     }
   }
   return msg

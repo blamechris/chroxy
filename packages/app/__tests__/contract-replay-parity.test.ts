@@ -281,4 +281,28 @@ describe('live vs replayed transcript -- app (#6630)', () => {
       expect(after).toEqual(liveOnly);
     });
   }
+  // A connection that drops MID-reasoning: the client holds a partial thinking
+  // bubble, the server finishes the thought, and the cursor replay carries the full
+  // text and duration. The held copy must be filled in (the cursor moves past the
+  // entry, so nothing would ever retry), not discarded as a duplicate.
+  const interruptible = REPLAY_PARITY_FIXTURES.filter((fx) =>
+    fx.live.some((f) => f.type === 'stream_end' && f.thinking === true),
+  );
+
+  it('has scenarios to interrupt', () => {
+    expect(interruptible.map((f) => f.name)).toEqual(expect.arrayContaining(['thinking-then-reply', 'thinking-without-text']));
+  });
+
+  for (const fx of interruptible) {
+    const endIdx = fx.live.findIndex((f) => f.type === 'stream_end' && f.thinking === true);
+    for (let cut = 1; cut <= endIdx; cut++) {
+      it(`${fx.name}: delivery cut after live frame ${cut} of ${endIdx} is completed by the cursor replay`, () => {
+        const full = runLive(fx.live);
+        clearDeltaBuffers();
+        resetReplayFlags();
+        const after = runLiveThenCursorReplay(fx.live.slice(0, cut), fx.replay);
+        expect(after).toEqual(full);
+      });
+    }
+  }
 });

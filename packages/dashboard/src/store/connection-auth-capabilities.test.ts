@@ -74,6 +74,8 @@ describe('the dashboard auth frame advertises the stopped-outcome capability (#8
     expect(auth, 'the real onopen must send an auth frame').toBeDefined()
     expect(auth!.capabilities).toEqual([...CLIENT_CAPABILITIES.desktop])
     expect(auth!.capabilities as string[]).toContain('permission_outcome_stopped_v1')
+    // #6630: without it the server sends this client no recorded errors in a replay.
+    expect(auth!.capabilities as string[]).toContain('history_error_replay_v1')
   })
 
   // The pair branch is a SECOND handshake frame, and the server records an EMPTY

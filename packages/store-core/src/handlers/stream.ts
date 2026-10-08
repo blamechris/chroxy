@@ -42,6 +42,13 @@ export type MessagePayload =
   | {
       /** Caller should NOT dispatch a chat message. */
       shouldDispatch: false
+      /**
+       * #6630: set when the message was a replayed entry for a message the client
+       * already holds, but the replay is the FULLER copy (a reasoning bubble whose
+       * stream was cut off by a disconnect). The caller applies it in place with
+       * {@link applyMessageReconcile}; a plain duplicate has none.
+       */
+      reconcile?: MessageReconcile
     }
   | {
       /** Caller should dispatch the chat message. */
@@ -68,6 +75,26 @@ export type MessagePayload =
        */
       containerLostPatch: SessionPatch | null
     }
+
+/** A patch for a message the client already holds, found by id (see {@link applyMessageReconcile}). */
+export interface MessageReconcile {
+  id: string
+  type: ChatMessage['type']
+  patch: Partial<ChatMessage>
+}
+
+/**
+ * Apply a {@link MessageReconcile} to a messages array: merge the patch onto the
+ * message with that id and type. Returns the SAME array when nothing matches, so a
+ * caller can skip the state write.
+ */
+export function applyMessageReconcile(messages: ChatMessage[], reconcile: MessageReconcile): ChatMessage[] {
+  const idx = messages.findIndex((m) => m.id === reconcile.id && m.type === reconcile.type)
+  if (idx === -1) return messages
+  const next = [...messages]
+  next[idx] = { ...next[idx]!, ...reconcile.patch }
+  return next
+}
 
 /**
  * Validate, gate, and normalize a generic forwarded `message` event.
@@ -227,6 +254,30 @@ export function handleMessage(
   if (msgType === 'user_input' && !receivingHistoryReplay) return empty
 
   const stableMessageId = typeof msg.messageId === 'string' ? msg.messageId : undefined
+
+  // #6630: a replayed reasoning entry for a bubble the client already holds is
+  // normally a duplicate -- but not when the held copy is the PARTIAL one. A
+  // thought that was streaming when the connection dropped finished on the
+  // server meanwhile; the replay carries its full text and duration, and the
+  // cursor has advanced past the entry, so nothing would ever retry. The replay
+  // is authoritative: fill the held bubble in.
+  if (isReplayedThinking && stableMessageId) {
+    const held = cachedMessages.find((m) => m.id === stableMessageId && m.type === 'thinking')
+    if (held) {
+      const content = msg.content.slice(0, MAX_THINKING_CONTENT_LEN)
+      const durationMs = parseFiniteNonNegIntField(msg, 'thinkingDurationMs', MAX_SANE_DURATION_MS)
+      const patch: Partial<ChatMessage> = {}
+      if (content.length > held.content.length) {
+        patch.content = content
+        if (msg.content.length > MAX_THINKING_CONTENT_LEN) patch.thinkingTruncated = true
+      }
+      if (held.thinkingStreaming !== false) patch.thinkingStreaming = false
+      if (durationMs !== undefined && held.thinkingDurationMs !== durationMs) patch.thinkingDurationMs = durationMs
+      return Object.keys(patch).length > 0
+        ? { shouldDispatch: false, reconcile: { id: stableMessageId, type: 'thinking', patch } }
+        : empty
+    }
+  }
 
   // Replay dedup: skip if an equivalent entry already exists in cache.
   if (receivingHistoryReplay) {

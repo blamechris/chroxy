@@ -8,6 +8,7 @@ import {
   handleMessage,
   handleToolResult,
   handleToolStart,
+  applyMessageReconcile,
   moveEmptyResponseSlotToEnd,
   MAX_THINKING_CONTENT_LEN,
 } from './stream'
@@ -65,10 +66,57 @@ describe('handleMessage: a replayed reasoning stream (#6630)', () => {
     expect(built({ ...replayedThinking(), messageType: 'system' }, true).chatMessage.type).toBe('system')
   })
 
-  it('does not rebuild a thinking bubble the client already holds (cursor replay after a live stream)', () => {
-    const held: ChatMessage = { id: 't1-thinking-0', type: 'thinking', content: 'weighing', thinkingStreaming: false, timestamp: 5 }
+  it('does not rebuild a thinking bubble the client already holds complete (cursor replay after a live stream)', () => {
+    const held: ChatMessage = {
+      id: 't1-thinking-0', type: 'thinking', content: 'weighing the options', thinkingStreaming: false, thinkingDurationMs: 1200, timestamp: 5,
+    }
     const out = handleMessage(replayedThinking(), 's1', true, [held])
     expect(out.shouldDispatch).toBe(false)
+    expect('reconcile' in out && out.reconcile).toBeFalsy()
+  })
+
+  describe('a held bubble that is the PARTIAL copy (the connection dropped mid-thought)', () => {
+    const partial = (over: Partial<ChatMessage> = {}): ChatMessage => ({
+      id: 't1-thinking-0', type: 'thinking', content: 'weighing', thinkingStreaming: true, timestamp: 5, ...over,
+    })
+    const reconcileOf = (held: ChatMessage, msg = replayedThinking()) => {
+      const out = handleMessage(msg, 's1', true, [held])
+      expect(out.shouldDispatch).toBe(false)
+      return 'reconcile' in out ? out.reconcile : undefined
+    }
+
+    it('fills in the full text, the duration and the finished label', () => {
+      expect(reconcileOf(partial())).toEqual({
+        id: 't1-thinking-0',
+        type: 'thinking',
+        patch: { content: 'weighing the options', thinkingStreaming: false, thinkingDurationMs: 1200 },
+      })
+    })
+
+    it('an empty held bubble (the stream opened, nothing arrived) is filled the same way', () => {
+      expect(reconcileOf(partial({ content: '' }))?.patch).toMatchObject({ content: 'weighing the options', thinkingStreaming: false })
+    })
+
+    it('only what is missing is patched: a held bubble that has the text but never saw the end gets the label and duration', () => {
+      const held = partial({ content: 'weighing the options' })
+      expect(reconcileOf(held)?.patch).toEqual({ thinkingStreaming: false, thinkingDurationMs: 1200 })
+    })
+
+    it('never shortens a bubble that holds more than the replay', () => {
+      const held = partial({ content: 'weighing the options and then some' })
+      expect(reconcileOf(held)?.patch.content).toBeUndefined()
+    })
+
+    it('applyMessageReconcile merges it onto the held bubble by id and type, and is a no-op otherwise', () => {
+      const held = partial()
+      const other: ChatMessage = { id: 'x', type: 'response', content: 'r', timestamp: 1 }
+      const reconcile = reconcileOf(held)!
+      const next = applyMessageReconcile([other, held], reconcile)
+      expect(next[0]).toBe(other)
+      expect(next[1]).toMatchObject({ content: 'weighing the options', thinkingStreaming: false, thinkingDurationMs: 1200 })
+      const unmatched: ChatMessage[] = [{ ...held, type: 'response' }]
+      expect(applyMessageReconcile(unmatched, reconcile)).toBe(unmatched)
+    })
   })
 
   it('a response at that id is not a thinking bubble, so it does not stand in for one', () => {
