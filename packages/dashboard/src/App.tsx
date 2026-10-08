@@ -1257,6 +1257,15 @@ export function App() {
     setSidebarContextMenu(null)
   }, [])
 
+  // #7329: sidebar row → Rename. The inline editor lives in the SessionBar tab,
+  // so the sidebar only raises a request (new object per request so renaming
+  // the same session twice re-fires); SessionBar consumes it and clears it.
+  const [renameRequest, setRenameRequest] = useState<{ sessionId: string; nonce: number } | null>(null)
+  const requestRenameSession = useCallback((sessionId: string) => {
+    setRenameRequest(prev => ({ sessionId, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
+  const clearRenameRequest = useCallback(() => setRenameRequest(null), [])
+
   // #4045/#4249: build the menu item list for the currently-targeted sidebar
   // row. Branching by target.type and capability-gating ("Open in Finder"
   // only under Tauri; resumable "Open in Finder" only when the conversation
@@ -1304,6 +1313,7 @@ export function App() {
       copySessionTranscript: handleCopySessionTranscript,
       summarizeAndCreateSession: handleSummarizeAndCreateSession,
       confirmCloseSession: handleCloseSession,
+      requestRenameSession,
     })
   }, [
     sidebarContextMenu,
@@ -1316,6 +1326,7 @@ export function App() {
     openCreateSession,
     handleCopySessionTranscript,
     handleSummarizeAndCreateSession,
+    requestRenameSession,
   ])
 
   /**
@@ -2812,6 +2823,8 @@ export function App() {
             }}
             pendingPermissionTotal={pendingPermissionTotal}
             onJumpToPending={handleJumpToPending}
+            renameRequest={renameRequest}
+            onRenameRequestHandled={clearRenameRequest}
           />
         )}
 

@@ -1524,3 +1524,150 @@ describe('SessionBar', () => {
     })
   })
 })
+
+// #7329 — rename used to be reachable only by double-clicking the tab name.
+// Right-click (and the ContextMenu / Shift+F10 keys) now open the shared
+// SessionContextMenu with a Rename item that starts the SAME inline rename.
+describe('#7329 session tab rename entry points', () => {
+  function renderBar(overrides: Partial<React.ComponentProps<typeof SessionBar>> = {}) {
+    const props = {
+      sessions: makeSessions(),
+      onSwitch: vi.fn(),
+      onClose: vi.fn(),
+      onRename: vi.fn(),
+      onNewSession: vi.fn(),
+      ...overrides,
+    }
+    render(<SessionBar {...props} />)
+    return props
+  }
+
+  it('right-clicking a tab opens the context menu with Rename and Close', () => {
+    renderBar()
+    expect(screen.queryByTestId('session-context-menu')).toBeNull()
+    fireEvent.contextMenu(screen.getByTestId('session-tab-s2'), { clientX: 40, clientY: 20 })
+    expect(screen.getByTestId('session-context-menu')).toBeInTheDocument()
+    expect(screen.getByTestId('session-context-menu-item-rename')).toHaveTextContent('Rename')
+    expect(screen.getByTestId('session-context-menu-item-close')).toHaveTextContent('Close')
+  })
+
+  it('right-click → Rename focuses the inline input; Enter commits the new name', () => {
+    const { onRename } = renderBar()
+    fireEvent.contextMenu(screen.getByTestId('session-tab-s2'), { clientX: 40, clientY: 20 })
+    fireEvent.click(screen.getByTestId('session-context-menu-item-rename'))
+    // The menu dismisses and hands focus to the rename input — the menu's
+    // focus-return-to-trigger must NOT steal it back to the tab.
+    expect(screen.queryByTestId('session-context-menu')).toBeNull()
+    const input = screen.getByDisplayValue('Backend')
+    expect(document.activeElement).toBe(input)
+    fireEvent.change(input, { target: { value: 'Renamed' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onRename).toHaveBeenCalledTimes(1)
+    expect(onRename).toHaveBeenCalledWith('s2', 'Renamed')
+    expect(screen.queryByDisplayValue('Renamed')).toBeNull()
+  })
+
+  it('right-click → Rename → Escape cancels without renaming', () => {
+    const { onRename } = renderBar()
+    fireEvent.contextMenu(screen.getByTestId('session-tab-s1'), { clientX: 10, clientY: 10 })
+    fireEvent.click(screen.getByTestId('session-context-menu-item-rename'))
+    const input = screen.getByDisplayValue('Default')
+    fireEvent.change(input, { target: { value: 'Nope' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(onRename).not.toHaveBeenCalled()
+    expect(screen.getByText('Default')).toBeInTheDocument()
+  })
+
+  it('Escape closes the menu itself without starting a rename', () => {
+    renderBar()
+    fireEvent.contextMenu(screen.getByTestId('session-tab-s1'), { clientX: 10, clientY: 10 })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByTestId('session-context-menu')).toBeNull()
+    expect(document.querySelector('.tab-rename-input')).toBeNull()
+  })
+
+  it('the Close item closes that tab, not the active one', () => {
+    const { onClose } = renderBar()
+    fireEvent.contextMenu(screen.getByTestId('session-tab-s2'), { clientX: 10, clientY: 10 })
+    fireEvent.click(screen.getByTestId('session-context-menu-item-close'))
+    expect(onClose).toHaveBeenCalledWith('s2')
+  })
+
+  it('omits Close when the strip has a single session (no close button either)', () => {
+    renderBar({ sessions: makeSessions().slice(0, 1) })
+    fireEvent.contextMenu(screen.getByTestId('session-tab-s1'), { clientX: 10, clientY: 10 })
+    expect(screen.getByTestId('session-context-menu-item-rename')).toBeInTheDocument()
+    expect(screen.queryByTestId('session-context-menu-item-close')).toBeNull()
+  })
+
+  it('ContextMenu key on a focused tab opens the menu; Enter on Rename starts the rename', () => {
+    const { onRename } = renderBar()
+    const tab = screen.getByTestId('session-tab-s2')
+    tab.focus()
+    fireEvent.keyDown(tab, { key: 'ContextMenu' })
+    expect(screen.getByTestId('session-context-menu')).toBeInTheDocument()
+    // The menu focuses its first item on mount, so Enter activates Rename.
+    const rename = screen.getByTestId('session-context-menu-item-rename')
+    expect(document.activeElement).toBe(rename)
+    fireEvent.keyDown(rename, { key: 'Enter' })
+    const input = screen.getByDisplayValue('Backend')
+    expect(document.activeElement).toBe(input)
+    fireEvent.change(input, { target: { value: 'Kbd' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onRename).toHaveBeenCalledWith('s2', 'Kbd')
+  })
+
+  it('Shift+F10 on a focused tab opens the menu; plain F10 does not', () => {
+    renderBar()
+    const tab = screen.getByTestId('session-tab-s1')
+    fireEvent.keyDown(tab, { key: 'F10' })
+    expect(screen.queryByTestId('session-context-menu')).toBeNull()
+    fireEvent.keyDown(tab, { key: 'F10', shiftKey: true })
+    expect(screen.getByTestId('session-context-menu')).toBeInTheDocument()
+  })
+
+  it('does not open the menu on the tab being renamed (native text menu stays)', () => {
+    renderBar()
+    fireEvent.doubleClick(screen.getByText('Default'))
+    const input = screen.getByDisplayValue('Default')
+    fireEvent.contextMenu(input)
+    expect(screen.queryByTestId('session-context-menu')).toBeNull()
+  })
+
+  it('double-click still starts the rename', () => {
+    const { onRename } = renderBar()
+    fireEvent.doubleClick(screen.getByText('Backend'))
+    const input = screen.getByDisplayValue('Backend')
+    fireEvent.change(input, { target: { value: 'Dbl' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onRename).toHaveBeenCalledWith('s2', 'Dbl')
+  })
+
+  it('the tab name carries a tooltip that tells the user rename exists', () => {
+    renderBar()
+    const title = screen.getByText('Backend').getAttribute('title') ?? ''
+    expect(/double-click/i.test(title), 'mentions double-click').toBe(true)
+    expect(/right-click/i.test(title), 'mentions right-click').toBe(true)
+  })
+
+  it('a renameRequest from outside (the sidebar) starts the inline rename once', () => {
+    const onRenameRequestHandled = vi.fn()
+    const { onRename } = renderBar({
+      renameRequest: { sessionId: 's2', nonce: 1 },
+      onRenameRequestHandled,
+    })
+    const input = screen.getByDisplayValue('Backend')
+    expect(document.activeElement).toBe(input)
+    expect(onRenameRequestHandled).toHaveBeenCalledTimes(1)
+    fireEvent.change(input, { target: { value: 'FromSidebar' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onRename).toHaveBeenCalledWith('s2', 'FromSidebar')
+  })
+
+  it('a renameRequest for an unknown session is consumed without effect', () => {
+    const onRenameRequestHandled = vi.fn()
+    renderBar({ renameRequest: { sessionId: 'ghost', nonce: 1 }, onRenameRequestHandled })
+    expect(document.querySelector('.tab-rename-input')).toBeNull()
+    expect(onRenameRequestHandled).toHaveBeenCalledTimes(1)
+  })
+})
