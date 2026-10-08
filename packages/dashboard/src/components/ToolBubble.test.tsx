@@ -1007,8 +1007,9 @@ describe('ToolBubble — WebSearch/WebFetch structured render (#6757)', () => {
       render(<ToolBubble toolName="screenshot" toolUseId="tu-d1" resultImages={images} />)
       fireEvent.click(screen.getByRole('button'))
       const thumb = screen.getByTestId('tool-result-image-tu-d1-1').querySelector('img')!
-      await waitFor(() => expect(thumb).toHaveAttribute('src', 'blob:thumb-2'))
-      expect(thumb.getAttribute('src')).not.toContain('base64')
+      await waitFor(() => expect(thumb).toHaveAttribute('src', 'data:image/webp;base64,THUMB2'))
+      expect(thumb.getAttribute('src')).not.toBe(`data:${images[1]!.mediaType};base64,${images[1]!.data}`)
+      expect(thumb.getAttribute('src')!.startsWith('blob:')).toBe(false)
       fireEvent.click(screen.getByTestId('tool-result-image-tu-d1-1'))
       expect(screen.getByTestId('image-lightbox-img')).toHaveAttribute(
         'src',
@@ -1040,24 +1041,17 @@ describe('ToolBubble — WebSearch/WebFetch structured render (#6757)', () => {
       expect(root).toHaveAttribute('aria-expanded', 'true')
     })
 
-    it('revokes every object URL when the bubble unmounts', async () => {
+    it('collapsing drops the thumbnails; re-expanding renders them again', async () => {
       stubs = installThumbnailStubs()
-      const { unmount } = render(<ToolBubble toolName="screenshot" toolUseId="tu-d4" resultImages={mk(3)} />)
-      fireEvent.click(screen.getByRole('button'))
-      await waitFor(() => expect(stubs.created).toHaveLength(3))
-      unmount()
-      expect([...stubs.revoked].sort()).toEqual([...stubs.created].sort())
-    })
-
-    it('revokes the thumbnail URLs when the bubble is collapsed', async () => {
-      stubs = installThumbnailStubs()
-      render(<ToolBubble toolName="screenshot" toolUseId="tu-d5" resultImages={mk(2)} />)
-      const root = screen.getByTestId('tool-bubble-tu-d5')
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-d4" resultImages={mk(2)} />)
+      const root = screen.getByTestId('tool-bubble-tu-d4')
       fireEvent.click(root)
       await waitFor(() => expect(stubs.created).toHaveLength(2))
       fireEvent.click(root)
-      expect([...stubs.revoked].sort()).toEqual([...stubs.created].sort())
+      expect(screen.queryByTestId('tool-result-images-tu-d4')).not.toBeInTheDocument()
+      fireEvent.click(root)
+      const thumb = screen.getByTestId('tool-result-image-tu-d4-0').querySelector('img')!
+      await waitFor(() => expect(thumb).toHaveAttribute('data-thumb-state', 'downscaled'))
     })
   })
-
 })

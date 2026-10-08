@@ -53,10 +53,13 @@ describe('ToolResultImageGrid (#6810)', () => {
       const el = screen.getByTestId('grid-item-0').querySelector('img')!
       expect(el.getAttribute('src')).toBeNull()
       expect(el).toHaveAttribute('data-thumb-state', 'pending')
-      await waitFor(() => expect(el).toHaveAttribute('src', 'blob:thumb-1'))
+      await waitFor(() => expect(el).toHaveAttribute('src', 'data:image/webp;base64,THUMB1'))
       expect(el).toHaveAttribute('data-thumb-state', 'downscaled')
       expect(el).toHaveAttribute('loading', 'lazy')
       expect(el).toHaveAttribute('decoding', 'async')
+      // The downscaled src is a data: URI (CSP img-src allows data:, not blob:).
+      expect(el.getAttribute('src')!.startsWith('blob:')).toBe(false)
+      expect(el.getAttribute('src')).not.toBe(dataUri(images[0]!))
     })
 
     it('falls back to the data: URI when the decode fails', async () => {
@@ -69,46 +72,53 @@ describe('ToolResultImageGrid (#6810)', () => {
       expect(el).toHaveAttribute('src', dataUri(images[0]!))
     })
 
-    it('revokes every object URL on unmount', async () => {
+    it('falls back to the full data: URI, once, if the downscaled <img> errors', async () => {
       stubs = installThumbnailStubs()
-      const { unmount } = renderGrid(makeImages(3))
-      await waitFor(() => expect(stubs!.created).toHaveLength(3))
-      expect(stubs.revoked).toHaveLength(0)
-      unmount()
-      expect([...stubs.revoked].sort()).toEqual([...stubs.created].sort())
+      const images = makeImages(1)
+      renderGrid(images)
+      const el = screen.getByTestId('grid-item-0').querySelector('img')!
+      await waitFor(() => expect(el).toHaveAttribute('data-thumb-state', 'downscaled'))
+      fireEvent.error(el)
+      await waitFor(() => expect(el).toHaveAttribute('data-thumb-state', 'fallback'))
+      expect(el).toHaveAttribute('src', dataUri(images[0]!))
+      // A second error (the full image is also unloadable) must not loop or change anything.
+      fireEvent.error(el)
+      expect(el).toHaveAttribute('data-thumb-state', 'fallback')
+      expect(el).toHaveAttribute('src', dataUri(images[0]!))
+      expect(stubs.createImageBitmap).toHaveBeenCalledTimes(1)
     })
 
-    it('revokes a URL that finishes after unmount (no leak from an in-flight decode)', async () => {
+    it('an error on the already-fallback <img> is a no-op', () => {
+      const images = makeImages(1)
+      renderGrid(images)
+      const el = screen.getByTestId('grid-item-0').querySelector('img')!
+      fireEvent.error(el)
+      expect(el).toHaveAttribute('data-thumb-state', 'fallback')
+      expect(el).toHaveAttribute('src', dataUri(images[0]!))
+    })
+
+    it('ignores a stale decode that finishes after the image changed', async () => {
       stubs = installThumbnailStubs()
-      let release!: () => void
-      const gate = new Promise<void>((r) => { release = r })
-      const original = stubs.createImageBitmap.getMockImplementation()!
+      const original = stubs.createImageBitmap.getMockImplementation()! as (...a: unknown[]) => Promise<unknown>
+      let releaseFirst!: () => void
+      const firstGate = new Promise<void>((r) => { releaseFirst = r })
+      let call = 0
       stubs.createImageBitmap.mockImplementation(async (...args: unknown[]) => {
-        await gate
-        return (original as (...a: unknown[]) => Promise<unknown>)(...args) as never
+        if (++call === 1) await firstGate
+        return original(...args) as never
       })
-      const { unmount } = renderGrid(makeImages(1))
-      unmount()
-      release()
-      await waitFor(() => expect(stubs!.bitmaps).toHaveLength(1))
-      // Give the rest of the pipeline (canvas -> blob -> URL) time to settle.
-      await new Promise((r) => setTimeout(r, 20))
-      expect([...stubs.revoked].sort()).toEqual([...stubs.created].sort())
-    })
-
-    it('re-derives the thumbnail and revokes the old URL when the image changes', async () => {
-      stubs = installThumbnailStubs()
-      const first = makeImages(1)
-      const { rerender } = renderGrid(first)
-      await waitFor(() => expect(stubs!.created).toHaveLength(1))
+      const { rerender } = renderGrid(makeImages(1))
       const second: ToolResultImage[] = [{ mediaType: 'image/png', data: btoa('changed') }]
       rerender(
         <ToolResultImageGrid images={second} containerTestId="grid" itemTestIdPrefix="grid-item" onOpen={() => {}} />,
       )
-      await waitFor(() => expect(stubs!.created).toHaveLength(2))
-      expect(stubs.revoked).toContain('blob:thumb-1')
       const el = screen.getByTestId('grid-item-0').querySelector('img')!
-      await waitFor(() => expect(el).toHaveAttribute('src', 'blob:thumb-2'))
+      // The second image settles first; the first (stale) one lands last.
+      await waitFor(() => expect(el).toHaveAttribute('data-thumb-state', 'downscaled'))
+      const settledSrc = el.getAttribute('src')
+      releaseFirst()
+      await new Promise((r) => setTimeout(r, 20))
+      expect(el.getAttribute('src')).toBe(settledSrc)
     })
 
     it('opens the lightbox callback with the image INDEX (full-res stays with the caller)', async () => {

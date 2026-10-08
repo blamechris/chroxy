@@ -879,7 +879,7 @@ describe('ToolGroup', () => {
       render(<ToolGroup messages={[tool('1', 'screenshot', { toolResultImages: images })]} isActive={true} />)
       fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
       const thumb = screen.getByTestId('tool-group-entry-image-1-1').querySelector('img')!
-      await waitFor(() => expect(thumb).toHaveAttribute('src', 'blob:thumb-2'))
+      await waitFor(() => expect(thumb).toHaveAttribute('src', 'data:image/webp;base64,THUMB2'))
       fireEvent.click(screen.getByTestId('tool-group-entry-image-1-1'))
       expect(screen.getByTestId('image-lightbox-img')).toHaveAttribute(
         'src',
@@ -900,17 +900,5 @@ describe('ToolGroup', () => {
       expect(screen.getByTestId(`tool-group-entry-image-1-${total - 1}`)).toBeInTheDocument()
       await waitFor(() => expect(stubs.created).toHaveLength(total))
     })
-
-    it('revokes every object URL when the group unmounts', async () => {
-      stubs = installThumbnailStubs()
-      const { unmount } = render(
-        <ToolGroup messages={[tool('1', 'screenshot', { toolResultImages: mk(3) })]} isActive={true} />,
-      )
-      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
-      await waitFor(() => expect(stubs.created).toHaveLength(3))
-      unmount()
-      expect([...stubs.revoked].sort()).toEqual([...stubs.created].sort())
-    })
   })
-
 })

@@ -4,8 +4,9 @@
  *
  * Two things keep a long computer-use session from decoding every screenshot
  * at full resolution the moment an entry is expanded:
- *  1. each thumbnail is a small downscaled object URL (`useToolImageThumbnail`),
- *     falling back to the `data:` URI only where that is impossible;
+ *  1. each thumbnail is a small downscaled `data:` URI (`useToolImageThumbnail`;
+ *     not a `blob:` URL -- the CSP is `img-src 'self' data:`), falling back to
+ *     the full `data:` URI only where that is impossible;
  *  2. only the first `INITIAL_THUMBNAIL_LIMIT` thumbnails mount (and so decode);
  *     a "Show N more" button reveals the rest on request.
  *
@@ -42,7 +43,7 @@ function ToolResultImageThumb({
   testId: string
   onOpen: (index: number) => void
 }) {
-  const { src, state } = useToolImageThumbnail(image)
+  const { src, state, onError } = useToolImageThumbnail(image)
   return (
     <button
       type="button"
@@ -59,6 +60,7 @@ function ToolResultImageThumb({
         loading="lazy"
         decoding="async"
         data-thumb-state={state}
+        onError={onError}
       />
     </button>
   )
