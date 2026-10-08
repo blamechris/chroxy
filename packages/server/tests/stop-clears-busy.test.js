@@ -27,11 +27,13 @@ const SID = 'sess-8497'
  * a test can replay the log the way a client does and count busy -> idle
  * transitions instead of grepping for frame types.
  */
-function harness() {
+function harness({ listSessions = () => [] } = {}) {
   const frames = []
+  // What a client that is NOT viewing the session receives: only global broadcasts.
+  const globalFrames = []
   const sm = new EventEmitter()
   sm.getSession = () => null
-  sm.listSessions = () => []
+  sm.listSessions = listSessions
   sm.getSessionContext = () => Promise.resolve(null)
   const normalizer = new EventNormalizer()
   const devPreview = new EventEmitter()
@@ -46,11 +48,11 @@ function harness() {
     pushManager: null,
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),
-    broadcast: (msg) => frames.push(msg),
+    broadcast: (msg) => { frames.push(msg); globalFrames.push(msg) },
     broadcastToSession: (_sid, msg) => frames.push(msg),
   })
   const emit = (event, data = {}) => sm.emit('session_event', { sessionId: SID, event, data })
-  return { frames, emit, sm, normalizer }
+  return { frames, globalFrames, emit, sm, normalizer }
 }
 
 /** Replay frames as a client does: only these four frames move busy/idle. */
@@ -66,6 +68,23 @@ function replay(frames) {
     idle = next
   }
   return { idle, busyToIdle }
+}
+
+/**
+ * The last frame a client that only sees GLOBAL broadcasts got that says whether
+ * `SID` is busy: a `session_activity` ping, or the session's row in a
+ * `session_list` (which the client re-derives `isIdle` from). null = none.
+ */
+function lastBusyClaim(globalFrames) {
+  let last = null
+  for (const f of globalFrames) {
+    if (f.type === 'session_activity' && f.sessionId === SID) last = f.isBusy
+    else if (f.type === 'session_list') {
+      const row = (f.sessions || []).find((x) => x.sessionId === SID)
+      if (row) last = row.isBusy
+    }
+  }
+  return last
 }
 
 const count = (frames, type) => frames.filter((f) => f.type === type).length
@@ -179,5 +198,88 @@ describe('#8497 a requested Stop leaves busy on the client', () => {
     normalizer.destroy()
     assert.deepEqual(replay(frames), { idle: true, busyToIdle: 0 })
     assert.equal(count(frames, 'session_stopped'), 1)
+  })
+
+  it('a client that is not viewing the session ends the Stop idle: the session_list reads the live session AFTER the provider tore the turn down', async () => {
+    // ACP / Codex / SDK emit `stopped` BEFORE _clearMessageState() clears busy, so a
+    // session_list built inside the emit publishes isBusy:true. agent_idle only
+    // reaches viewers of the session; a client that sees only global frames must
+    // find idle in the LAST busy-bearing frame it gets.
+    let live = null
+    const h = harness({
+      listSessions: () => [{ sessionId: SID, isBusy: live ? live.isRunning : false }],
+    })
+    const sk = mkdtempSync(join(tmpdir(), 'chroxy-8497-'))
+    const Klass = createAcpSessionClass({
+      id: `fake-acp-8497b-${Date.now()}`,
+      label: 'Fake ACP Agent',
+      command: process.execPath,
+      args: [FIXTURE],
+      env: {},
+    })
+    const s = new Klass({ cwd: tmpdir(), skillsDir: sk, repoSkillsDir: null, resultTimeoutMs: 5000 })
+    live = s
+    try {
+      for (const ev of ['stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'stopped', 'error']) {
+        s.on(ev, (data) => h.emit(ev, data))
+      }
+      await s.start()
+      const waiting = new Promise((resolve) => {
+        s.on('stream_delta', (d) => { if (d.delta === 'WAITING') resolve() })
+      })
+      const stoppedP = new Promise((resolve) => s.once('stopped', resolve))
+      const sendP = s.sendMessage('HANG_UNTIL_CANCEL', [])
+      await waiting
+      await s.interrupt()
+      await stoppedP
+      await sendP
+      await nextTick()
+    } finally {
+      await s.destroy()
+      h.normalizer.destroy()
+      rmSync(sk, { recursive: true, force: true })
+    }
+
+    assert.equal(s.isRunning, false, 'precondition: the session is idle once the Stop settled')
+    assert.ok(h.globalFrames.some((f) => f.type === 'session_list'), 'a session list was still published')
+    assert.equal(lastBusyClaim(h.globalFrames), false, 'the last busy-bearing global frame says idle')
+  })
+
+  it('the session_list a Stop triggers is built after the provider\'s synchronous teardown, not inside the emit', async () => {
+    let busy = true
+    const h = harness({ listSessions: () => [{ sessionId: SID, isBusy: busy }] })
+    h.emit('stream_start', { messageId: 'm1' })
+    // The provider shape: emit('stopped') first, THEN clear busy, in one call stack.
+    h.emit('stopped', {})
+    busy = false
+    await nextTick()
+    h.normalizer.destroy()
+    assert.equal(lastBusyClaim(h.globalFrames), false)
+  })
+
+  it('the dedupe covers one synchronous turn end only: a result a microtask earlier does not swallow a later Stop', async () => {
+    // Pins the tick scope. A wider window (a macrotask) would still hold the
+    // flag here and drop this turn's idle.
+    const { frames, emit, normalizer } = harness()
+    emit('stream_start', { messageId: 'm1' })
+    emit('result', { cost: null, duration: 0, usage: null, sessionId: 'c1' })
+    await Promise.resolve()
+    const before = count(frames, 'agent_idle')
+    frames.push({ type: 'agent_busy' })
+    emit('stopped', {})
+    normalizer.destroy()
+    assert.equal(count(frames, 'agent_idle'), before + 1, 'the Stop announced its own idle')
+    assert.equal(replay(frames).idle, true)
+  })
+
+  it('`stopped` then `result` repeats the idle on purpose: the result is the frame that carries the cost', () => {
+    const { frames, emit, normalizer } = harness()
+    emit('stream_start', { messageId: 'm1' })
+    emit('stopped', {})
+    emit('result', { cost: 0.02, duration: 1, usage: null, sessionId: 'c1' })
+    normalizer.destroy()
+    assert.equal(idleActivity(frames).length, 2)
+    assert.equal(idleActivity(frames)[1].lastCost, 0.02, 'the cost still reaches the sidebar')
+    assert.equal(replay(frames).busyToIdle, 1, 'but the client sees one transition')
   })
 })

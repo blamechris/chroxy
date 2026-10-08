@@ -816,7 +816,7 @@ describe('setupForwarding', () => {
   // session-manager.js's `_wireSessionEvents` (transient list) and the
   // `stopped` handler in event-normalizer.js.
   describe('stopped event (#4756)', () => {
-    it('broadcasts session_stopped via broadcastToSession (not global)', () => {
+    it('broadcasts session_stopped via broadcastToSession (not global)', async () => {
       const ctx = makeCtx()
       setupForwarding(ctx)
 
@@ -836,6 +836,8 @@ describe('setupForwarding', () => {
       assert.equal(msg.type, 'session_stopped')
       assert.equal(msg.sessionId, 'sess-stop')
       assert.equal(msg.code, 0)
+      // The session list is deferred until the provider's teardown ran (#8497).
+      await Promise.resolve()
       // The confirmation itself is never a global broadcast; the only global
       // frames are the idle ping and the session list refresh (#8497).
       assert.equal(ctx.broadcast.mock.calls.some(c => c.arguments[0]?.type === 'session_stopped'), false)

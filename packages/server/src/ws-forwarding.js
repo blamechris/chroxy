@@ -284,6 +284,21 @@ function setupSessionForwarding(normalizer, ctx) {
     if (event === 'stopped' && !idledByResultThisTick.has(sessionId)) {
       announceIdle = true
       broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: null })
+      // The list a `result` refreshes, too, so clients that only see global
+      // frames (not viewing this session) re-derive its busy state. It must be
+      // BUILT after the provider's synchronous teardown: ACP, Codex app-server
+      // and the SDK emit `stopped` and only then clear `_isBusy`
+      // (_clearMessageState), so a list built inside this handler publishes the
+      // stopped session as busy and a non-viewing client, which gets no
+      // agent_idle, ends the Stop busy. A microtask runs once that call stack
+      // unwinds and before any later await.
+      queueMicrotask(() => {
+        try {
+          executeSideEffects([{ type: 'session_list' }], sessionId, ctx)
+        } catch (err) {
+          log.error(`deferred session_list after stop threw for session ${sessionId}: ${err?.message || err}`)
+        }
+      })
     }
 
     // Dev server preview: scan tool_result events for localhost server patterns
