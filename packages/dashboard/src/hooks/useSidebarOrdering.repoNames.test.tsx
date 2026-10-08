@@ -1,7 +1,7 @@
 /**
  * useSidebarOrdering — repo-group names (#7330). Drives the REAL hook.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 
 let activeServerId: string | null = null
@@ -58,5 +58,24 @@ describe('useSidebarOrdering repo names (#7330)', () => {
     activeServerId = 'srv_A'
     rerender()
     expect(result.current.sidebarRepoNames).toEqual({ '/p/a': 'A-name' })
+  })
+
+  describe('when storage throws', () => {
+    afterEach(() => { vi.restoreAllMocks() })
+
+    it('a rename still applies in memory and nothing escapes (setItem throws)', () => {
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+      const { result } = renderHook(() => useSidebarOrdering())
+      expect(() => act(() => result.current.handleRenameRepo('/p/a', 'Alpha'))).not.toThrow()
+      expect(result.current.sidebarRepoNames).toEqual({ '/p/a': 'Alpha' })
+    })
+
+    it('clearing a name still applies in memory when removeItem throws', () => {
+      const { result } = renderHook(() => useSidebarOrdering())
+      act(() => result.current.handleRenameRepo('/p/a', 'Alpha'))
+      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('blocked') })
+      expect(() => act(() => result.current.handleRenameRepo('/p/a', ''))).not.toThrow()
+      expect(result.current.sidebarRepoNames).toEqual({})
+    })
   })
 })

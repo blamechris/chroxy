@@ -2806,19 +2806,33 @@ describe('App', () => {
       const chroxy = '/Users/me/Projects/chroxy'
       stateOverrides = {
         connectionPhase: 'connected' as const,
+        // Worktree-ONLY group: the group key (repoCwd) differs from the
+        // session's cwd (opaque hex), so a name looked up by cwd would miss.
         sessions: [
-          { sessionId: 's1', name: 'Plain', cwd: chroxy, type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null, provider: 'claude-sdk', worktree: false },
           { sessionId: 's2', name: 'WT', cwd: '/Users/me/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e', repoCwd: chroxy, type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: 2, conversationId: null, provider: 'claude-sdk', worktree: true },
         ],
-        activeSessionId: 's1',
+        activeSessionId: 's2',
       }
-      render(<App />)
+      const first = render(<App />)
       fireEvent.contextMenu(screen.getByTestId(`repo-header-${chroxy}`))
       fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename' }))
       const input = screen.getByTestId(`repo-rename-input-${chroxy}`)
       fireEvent.change(input, { target: { value: 'Chroxy main' } })
       fireEvent.keyDown(input, { key: 'Enter' })
       expect(screen.getByTestId(`repo-header-${chroxy}`).querySelector('.sidebar-repo-name')?.textContent).toBe('Chroxy main')
+      // The stored name must also be found again on a fresh mount.
+      first.unmount()
+      render(<App />)
+      expect(screen.getByTestId(`repo-header-${chroxy}`).querySelector('.sidebar-repo-name')?.textContent).toBe('Chroxy main')
+    })
+
+    it('right-clicking inside the rename input leaves the native text menu alone', () => {
+      stateOverrides = repoState()
+      render(<App />)
+      const input = startRename()
+      fireEvent.contextMenu(input)
+      expect(screen.queryByRole('menu')).toBeNull()
+      expect(screen.getByTestId(`repo-rename-input-${REPO}`)).toBe(input)
     })
   })
 

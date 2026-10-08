@@ -998,6 +998,8 @@ export function Sidebar({
                         }}
                         onBlur={() => finishRepoRename(repo, 'commit', false)}
                         onClick={e => e.stopPropagation()}
+                        // Keep the native text menu (cut/copy/paste) here, not the repo menu.
+                        onContextMenu={e => e.stopPropagation()}
                       />
                     ) : (
                       <span className="sidebar-repo-name">{repo.name}</span>

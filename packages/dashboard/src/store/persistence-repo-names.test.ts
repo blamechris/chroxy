@@ -8,7 +8,7 @@
  *   - Reject malformed payloads without throwing
  *   - Drop the entry when the record is empty
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   persistSidebarRepoNames,
   loadPersistedSidebarRepoNames,
@@ -63,5 +63,24 @@ describe('sidebar repo-name persistence (#7330)', () => {
     const key = Object.keys(localStorage).find(k => k.includes('sidebar_repo_names'))!
     localStorage.setItem(key, JSON.stringify({ '/p/a': 'Alpha', '/p/b': 7, '/p/c': '', '/p/d': '   ', '/p/e': null }))
     expect(loadPersistedSidebarRepoNames()).toEqual({ '/p/a': 'Alpha' })
+  })
+
+  describe('when storage throws', () => {
+    afterEach(() => { vi.restoreAllMocks() })
+
+    it('persist swallows a throwing setItem', () => {
+      vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota') })
+      expect(() => persistSidebarRepoNames({ '/p/a': 'Alpha' })).not.toThrow()
+    })
+
+    it('persist swallows a throwing removeItem', () => {
+      vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => { throw new Error('blocked') })
+      expect(() => persistSidebarRepoNames({})).not.toThrow()
+    })
+
+    it('load returns {} when getItem throws', () => {
+      vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked') })
+      expect(loadPersistedSidebarRepoNames()).toEqual({})
+    })
   })
 })
