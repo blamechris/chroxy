@@ -323,7 +323,11 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
  * @param {object} entry - A ring-buffer entry, possibly carrying `_seq`.
  */
 export function sendHistoryEntry(send, ws, sessionId, entry) {
-  const { _seq, ...wireEntry } = entry
+  // `sourceToolUseId` (#8336) is server-internal: it lets the restore-time sweep
+  // pair a recorded question with its tool_start, and no client reads it. Live
+  // broadcasts never carry it (the event normalizer picks fields), so the replay
+  // frame must not either.
+  const { _seq, sourceToolUseId: _sourceToolUseId, ...wireEntry } = entry
   send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
   if (entry && entry.type === 'result') {
     send(ws, { type: 'agent_idle', sessionId })

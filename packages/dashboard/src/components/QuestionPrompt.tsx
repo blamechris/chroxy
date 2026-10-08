@@ -35,6 +35,8 @@ import { useId, useState, useRef, useEffect } from 'react'
 // call sites that import it from this file.
 import {
   OTHER_OPTION_VALUE,
+  // #8336 — the `answered` value of a question the daemon cut off.
+  QUESTION_INTERRUPTED_PLACEHOLDER,
   // #5800 — the multi-question form state machine now lives in store-core.
   buildAnswersMap,
   computeCanSubmit,
@@ -437,6 +439,25 @@ function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQ
   const showOptions =
     options.length > 0 && !isFreeTextAnswered &&
     (answered != null || !otherActive)
+
+  // #8336: a question the daemon was cut off before anyone answered (its tool
+  // was in flight at shutdown). It is NOT answered, so it gets no "✓" and none
+  // of the answered-summary chrome — just the question and an honest notice,
+  // matching the tool row above it ("in flight when chroxy was last shut
+  // down"). Placed after every hook above, so the hook order is unchanged.
+  if (answered === QUESTION_INTERRUPTED_PLACEHOLDER) {
+    return (
+      <div className="question-prompt question-prompt--interrupted" data-testid="question-prompt">
+        <div className="question-text">{question}</div>
+        <div className="question-interrupted" data-testid="question-interrupted" role="status">
+          <span className="question-interrupted-marker" aria-hidden="true">⚠</span>
+          <span className="question-interrupted-label">
+            Interrupted — chroxy restarted before this was answered
+          </span>
+        </div>
+      </div>
+    )
+  }
 
   // #4312: once answered, default to a collapsed one-line summary. The
   // disabled-button list still renders behind a chevron toggle for users

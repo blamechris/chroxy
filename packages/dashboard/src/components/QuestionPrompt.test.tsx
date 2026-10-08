@@ -217,6 +217,32 @@ describe('QuestionPrompt', () => {
     expect(screen.queryByPlaceholderText('Type your response…')).not.toBeInTheDocument()
   })
 
+  // #8336 — a question the daemon was cut off before anyone answered.
+  it('reads as interrupted, not answered, for the interrupted token (#8336)', () => {
+    render(
+      <QuestionPrompt
+        question="Which shape?"
+        options={options}
+        answered="(interrupted)"
+        onSelect={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Which shape?')).toBeInTheDocument()
+    expect(screen.getByTestId('question-interrupted')).toHaveTextContent(/Interrupted/)
+    // No answered chrome: no check mark row, no echo of the token, no live controls.
+    expect(screen.queryByTestId('question-answered-summary')).not.toBeInTheDocument()
+    expect(screen.queryByText('(interrupted)')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('an ordinary answer is not shown as interrupted (#8336)', () => {
+    render(
+      <QuestionPrompt question="Which shape?" options={options} answered="a" onSelect={vi.fn()} />
+    )
+    expect(screen.queryByTestId('question-interrupted')).not.toBeInTheDocument()
+    expect(screen.getByTestId('question-answered-summary')).toBeInTheDocument()
+  })
+
   it('disables Send button when text is empty (#1336)', () => {
     render(
       <QuestionPrompt

@@ -1114,3 +1114,20 @@ describe('dead code removal', () => {
     }
   })
 })
+
+// #8336 — the restore-time sweep stamps `interrupted` on a cut-off question; the
+// schema must carry it (a strip-on-parse schema would silently drop the marker).
+describe('ServerUserQuestionSchema interrupted flag (#8336)', () => {
+  const base = { type: 'user_question', toolUseId: 'tu1', questions: [{ question: 'Which?' }] }
+
+  it('keeps interrupted: true on parse', () => {
+    const parsed = ServerUserQuestionSchema.safeParse({ ...base, interrupted: true, historySeq: 4 })
+    assert.equal(parsed.success, true)
+    assert.equal(parsed.data.interrupted, true)
+  })
+
+  it('is optional, and rejects a non-boolean', () => {
+    assert.equal(ServerUserQuestionSchema.safeParse(base).success, true)
+    assert.equal(ServerUserQuestionSchema.safeParse({ ...base, interrupted: 'yes' }).success, false)
+  })
+})

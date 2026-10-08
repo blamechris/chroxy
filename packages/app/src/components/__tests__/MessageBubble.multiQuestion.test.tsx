@@ -258,6 +258,34 @@ describe('MessageBubble multi-question form (#4973)', () => {
   });
 });
 
+// #8336 — a question the daemon was cut off before anyone answered.
+describe('MessageBubble question cut off by a restart (#8336)', () => {
+  it('says so, instead of echoing the token or showing the multi-form answer chip', () => {
+    const tree = render(multiQuestionPrompt({ answered: '(interrupted)' }), { allowMultiQuestion: true });
+    const note = first(tree, 'question-interrupted');
+    expect(String(note.props.children)).toContain('Interrupted');
+    expect(JSON.stringify(tree.toJSON())).not.toContain('(interrupted)');
+    expect(present(tree, 'question-multi-summary-flat')).toBe(false);
+    expect(present(tree, 'question-prompt-multi')).toBe(false);
+  });
+
+  it('says so for a single question with options too', () => {
+    const tree = render(
+      multiQuestionPrompt({
+        answered: '(interrupted)',
+        questions: undefined,
+      }),
+    );
+    expect(present(tree, 'question-interrupted')).toBe(true);
+    expect(JSON.stringify(tree.toJSON())).not.toContain('(interrupted)');
+  });
+
+  it('a question answered in the ordinary way does not read as interrupted', () => {
+    const tree = render(multiQuestionPrompt({ answered: 'approve', questions: undefined }));
+    expect(present(tree, 'question-interrupted')).toBe(false);
+  });
+});
+
 describe('MessageBubble single-question multiSelect (#5776)', () => {
   it('renders the checkbox form when allowSingleMultiSelect is true', () => {
     const tree = render(singleMultiSelectPrompt(), { allowSingleMultiSelect: true });

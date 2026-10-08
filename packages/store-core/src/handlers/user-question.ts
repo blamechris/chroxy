@@ -14,6 +14,7 @@
 import type { ChatMessage } from '../types'
 import { nextMessageId } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
+import { QUESTION_INTERRUPTED_PLACEHOLDER } from '../replay-reconcile'
 
 // ---------------------------------------------------------------------------
 // user_question
@@ -182,6 +183,14 @@ export function handleUserQuestion(
   }
   if (typeof msg.toolUseId === 'string') {
     chatMessage.toolUseId = msg.toolUseId
+  }
+  // #8336: a question the daemon cut off (its tool was in flight at shutdown)
+  // arrives replayed with `interrupted: true`. Build it already marked, so
+  // `history_replay_end`'s sweep (which only stamps an UNanswered prompt) never
+  // calls it "(resolved)". Strict `=== true`: anything else is an ordinary
+  // question, and a pending or answered one never carries the field.
+  if (msg.interrupted === true) {
+    chatMessage.answered = QUESTION_INTERRUPTED_PLACEHOLDER
   }
   const msgSessionId =
     typeof msg.sessionId === 'string' && msg.sessionId.length > 0
