@@ -71,6 +71,7 @@ function makeArgs(
     summarizeAndCreateSession: vi.fn(),
     confirmCloseSession: vi.fn(),
     requestRenameSession: vi.fn(),
+    requestRenameRepo: vi.fn(),
     ...overrides,
   }
 }
@@ -389,6 +390,20 @@ describe('buildSidebarContextMenuItems', () => {
       )
       items.find(i => i.id === 'new-session')?.onClick?.()
       expect(openCreateSessionAt).toHaveBeenCalledWith('/home/user/projects/api')
+    })
+
+    it('#7330 — Rename requests the inline editor for the group path', () => {
+      const requestRenameRepo = vi.fn()
+      const items = buildSidebarContextMenuItems(
+        makeArgs({
+          target: { type: 'repo', path: '/home/user/projects/api' },
+          requestRenameRepo,
+        }),
+      )
+      const rename = items.find(i => i.id === 'rename')
+      expect(rename?.label).toBe('Rename')
+      rename?.onClick?.()
+      expect(requestRenameRepo).toHaveBeenCalledWith('/home/user/projects/api')
     })
 
     it('Open in Finder is gated off when not running under Tauri', () => {

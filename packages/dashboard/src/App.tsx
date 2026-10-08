@@ -1266,6 +1266,13 @@ export function App() {
     setRenameRequest(prev => ({ sessionId, nonce: (prev?.nonce ?? 0) + 1 }))
   }, [])
   const clearRenameRequest = useCallback(() => setRenameRequest(null), [])
+  // #7330: sidebar repo-group header → Rename. Same shape as the session
+  // request above, except the inline editor lives in the Sidebar header itself.
+  const [repoRenameRequest, setRepoRenameRequest] = useState<{ path: string; nonce: number } | null>(null)
+  const requestRenameRepo = useCallback((path: string) => {
+    setRepoRenameRequest(prev => ({ path, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
+  const clearRepoRenameRequest = useCallback(() => setRepoRenameRequest(null), [])
 
   // #4045/#4249: build the menu item list for the currently-targeted sidebar
   // row. Branching by target.type and capability-gating ("Open in Finder"
@@ -1315,6 +1322,7 @@ export function App() {
       summarizeAndCreateSession: handleSummarizeAndCreateSession,
       confirmCloseSession: handleCloseSession,
       requestRenameSession,
+      requestRenameRepo,
     })
   }, [
     sidebarContextMenu,
@@ -1328,6 +1336,7 @@ export function App() {
     handleCopySessionTranscript,
     handleSummarizeAndCreateSession,
     requestRenameSession,
+    requestRenameRepo,
   ])
 
   /**
@@ -1599,9 +1608,11 @@ export function App() {
     tabOrder,
     sidebarRepoOrder,
     sidebarSessionOrder,
+    sidebarRepoNames,
     handleReorderTabs,
     handleReorderRepos,
     handleReorderSidebarSessions,
+    handleRenameRepo,
   } = useSidebarOrdering()
 
   // Map sessions to SessionTabData[] with unified status indicators.
@@ -1747,8 +1758,11 @@ export function App() {
       const groupKey = sessionGroupKey(s)
       let repo = repoMap.get(groupKey)
       if (!repo) {
-        const name = repoDisplayName(s.cwd, s.repoCwd)
-        repo = { path: groupKey, name, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
+        // #7330: the derived label stays the default; a user-chosen label
+        // (keyed by the same group path as the orderings) overrides it.
+        const defaultName = repoDisplayName(s.cwd, s.repoCwd)
+        const name = sidebarRepoNames[groupKey] || defaultName
+        repo = { path: groupKey, name, defaultName, source: 'auto', exists: true, activeSessions: [], resumableSessions: [] }
         repoMap.set(groupKey, repo)
       }
       repo.activeSessions.push({
@@ -1802,7 +1816,7 @@ export function App() {
         activeSessions: applyOrderById(repo.activeSessions, savedSessionOrder, s => s.sessionId),
       }
     })
-  }, [sessions, getSessionVisualStatus, sidebarCumulativeUsage, sidebarRepoOrder, sidebarSessionOrder])
+  }, [sessions, getSessionVisualStatus, sidebarCumulativeUsage, sidebarRepoOrder, sidebarSessionOrder, sidebarRepoNames])
 
   // Known CWDs for CreateSessionModal suggestions
   const knownCwds = useMemo(
@@ -2800,6 +2814,9 @@ export function App() {
           initialPanelCollapsed={loadPersistedSidebarPanelCollapsed()}
           onReorderRepos={handleReorderRepos}
           onReorderSessions={handleReorderSidebarSessions}
+          onRenameRepo={handleRenameRepo}
+          repoRenameRequest={repoRenameRequest}
+          onRepoRenameRequestHandled={clearRepoRenameRequest}
         />
       )}
 

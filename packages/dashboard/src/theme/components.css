@@ -14437,3 +14437,20 @@ a.session-ci-chip__pr:focus-visible {
   min-height: 44px;
   min-width: 44px;
 }
+
+/* #7330 — inline rename input in a sidebar repo-group header. min-height keeps
+ * the control at the 44px tap-target floor. */
+.sidebar-repo-rename-input {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  box-sizing: border-box;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--accent-blue);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: inherit;
+  font-weight: 600;
+  outline: none;
+}

@@ -52,6 +52,10 @@ const KEY_SIDEBAR_PANEL_COLLAPSED = `${KEY_PREFIX}sidebar_panel_collapsed`;
 // orders without clobbering each other.
 const KEY_SIDEBAR_REPO_ORDER = `${KEY_PREFIX}sidebar_repo_order`;
 const KEY_SIDEBAR_SESSION_ORDER = `${KEY_PREFIX}sidebar_session_order`;
+// #7330 — user-chosen sidebar repo-group labels, keyed by group path (the same
+// key the two orderings above use). The default label stays derived from the
+// session cwd; an entry here only overrides it. Server-scoped like the orders.
+const KEY_SIDEBAR_REPO_NAMES = `${KEY_PREFIX}sidebar_repo_names`;
 // #4831 — user-defined SessionBar tab order (overlay on server-supplied sessions)
 const KEY_SESSION_TAB_ORDER = `${KEY_PREFIX}session_tab_order`;
 
@@ -404,6 +408,41 @@ export function loadPersistedSidebarSessionOrder(): Record<string, string[]> {
       if (typeof k === 'string' && Array.isArray(v)) {
         out[k] = v.filter((x): x is string => typeof x === 'string');
       }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * #7330 — persist user-chosen sidebar repo-group labels, keyed by group path
+ * (server-scoped). Pass `{}` to clear them all (every group then shows its
+ * derived label again).
+ */
+export function persistSidebarRepoNames(names: Record<string, string>): void {
+  try {
+    const key = scopedKey(KEY_SIDEBAR_REPO_NAMES);
+    if (Object.keys(names).length === 0) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, JSON.stringify(names));
+    }
+  } catch {
+    // Storage not available
+  }
+}
+
+/** Load persisted sidebar repo-group labels. Blank / non-string values are dropped. */
+export function loadPersistedSidebarRepoNames(): Record<string, string> {
+  try {
+    const raw = scopedRead(KEY_SIDEBAR_REPO_NAMES);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === 'string' && v.trim() !== '') out[k] = v;
     }
     return out;
   } catch {
