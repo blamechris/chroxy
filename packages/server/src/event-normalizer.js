@@ -818,6 +818,16 @@ Object.assign(EVENT_MAP, {
       msg.sessionId = ctx.sessionId
     }
     if (Number.isInteger(data?.code)) msg.code = data.code
+    // #8497: a Stop that ended the turn without a `result` must still take the
+    // session out of busy. The forwarder sets `announceIdle` only when no
+    // `result` already did, so this never repeats one. Opt-in on purpose: the
+    // legacy single-CLI path does not set it and keeps its prior output.
+    // The session_list refresh a `result` pairs with this is NOT returned here:
+    // `stopped` is emitted before most providers clear their busy flag, so a
+    // list built synchronously would still say busy. The forwarder defers it.
+    if (ctx.announceIdle === true) {
+      return { messages: [{ msg }, { msg: { type: 'agent_idle' } }] }
+    }
     return { messages: [{ msg }] }
   },
 

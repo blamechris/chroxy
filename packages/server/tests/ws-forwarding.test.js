@@ -816,7 +816,7 @@ describe('setupForwarding', () => {
   // session-manager.js's `_wireSessionEvents` (transient list) and the
   // `stopped` handler in event-normalizer.js.
   describe('stopped event (#4756)', () => {
-    it('broadcasts session_stopped via broadcastToSession (not global)', () => {
+    it('broadcasts session_stopped via broadcastToSession (not global)', async () => {
       const ctx = makeCtx()
       setupForwarding(ctx)
 
@@ -828,20 +828,30 @@ describe('setupForwarding', () => {
 
       // Must route per-session — only subscribers of sess-stop should see
       // the confirmation, not every connected client.
-      assert.equal(ctx.broadcastToSession.mock.calls.length, 1)
-      const [sid, msg] = ctx.broadcastToSession.mock.calls[0].arguments
+      // #8497: exactly one confirmation, followed by the per-session idle frame.
+      const stoppedCalls = ctx.broadcastToSession.mock.calls.filter(c => c.arguments[1].type === 'session_stopped')
+      assert.equal(stoppedCalls.length, 1)
+      const [sid, msg] = stoppedCalls[0].arguments
       assert.equal(sid, 'sess-stop')
       assert.equal(msg.type, 'session_stopped')
       assert.equal(msg.sessionId, 'sess-stop')
       assert.equal(msg.code, 0)
-      // Must NOT also fire global broadcast for this event.
-      assert.equal(ctx.broadcast.mock.calls.length, 0)
+      // The session list is deferred until the provider's teardown ran (#8497).
+      await Promise.resolve()
+      // The confirmation itself is never a global broadcast; the only global
+      // frames are the idle ping and the session list refresh (#8497).
+      assert.equal(ctx.broadcast.mock.calls.some(c => c.arguments[0]?.type === 'session_stopped'), false)
+      assert.deepEqual(
+        ctx.broadcast.mock.calls.map(c => c.arguments[0].type),
+        ['session_activity', 'session_list'],
+      )
     })
 
-    it('does not emit session_activity (informational, not busy/idle)', () => {
-      // session_activity is fired on stream_start/result only — `stopped`
-      // is a lifecycle signal, not a busy-state flip, so the sidebar
-      // activity feed should not light up for it.
+    it('announces the session idle when the turn ended without a result (#8497)', () => {
+      // `stopped` is the ONLY turn-ending signal ACP / Codex app-server / the
+      // jsonl-subprocess providers give a requested Stop. Without an idle ping and
+      // an agent_idle the client stays busy forever. It is still a quiet
+      // confirmation: no `result`, so no chip.
       const ctx = makeCtx()
       setupForwarding(ctx)
 
@@ -854,7 +864,9 @@ describe('setupForwarding', () => {
       const activityCall = ctx.broadcast.mock.calls.find(
         c => c.arguments[0]?.type === 'session_activity',
       )
-      assert.equal(activityCall, undefined, 'stopped must not trigger session_activity')
+      assert.deepEqual(activityCall.arguments[0], { type: 'session_activity', sessionId: 'sess-stop', isBusy: false, lastCost: null })
+      const types = ctx.broadcastToSession.mock.calls.map(c => c.arguments[1].type)
+      assert.deepEqual(types, ['session_stopped', 'agent_idle'])
     })
   })
 
