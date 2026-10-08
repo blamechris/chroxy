@@ -44,6 +44,7 @@ import { getLanIp } from './lan-ip.js'
 import { deriveWebhookPayloadUrl } from './github-webhook.js'
 import { isLocalOrLanPeer } from './connection-locality.js'
 import { configPath } from './config-dir.js'
+import { QuestionRouteMap } from './question-route-map.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -768,7 +769,7 @@ export class WsServer {
     this._permissionSubs = new Map() // clientId -> Map<sessionId, refcount>
     this._hookSecrets = new Set() // per-session hook secrets registered by active CliSessions
     this._sessionHookSecrets = new Map() // sessionId -> hookSecret (for cleanup on session_destroyed)
-    this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
+    this._questionSessionMap = new QuestionRouteMap() // toolUseId -> sessionId (for routing question responses; remembers just-removed routes, #8470)
     // #5563: primary-ownership now lives on the WsClientManager (sessionId →
     // primary clientId) with explicit claim/observe/hand-off semantics, not a
     // last-writer-wins map. `primaryClients` is no longer a server-owned Map;

@@ -709,8 +709,20 @@ export const ServerPermissionResolvedSchema = z.object({
     decision: z.string(),
     reason: z.string().optional(),
     sessionId: z.string().optional(),
-}).refine((m) => m.requestId !== undefined || m.toolUseId !== undefined, {
-    message: 'permission_resolved needs a requestId (permission prompt) or a toolUseId (question)',
+}).superRefine((m, ctx) => {
+    // Exactly one non-empty id: a permission prompt names a `requestId`, a
+    // superseded question a `toolUseId`, and a frame naming both (or an empty one)
+    // is neither.
+    const ids = [m.requestId, m.toolUseId].filter((id) => id !== undefined);
+    if (ids.length !== 1 || ids[0] === '') {
+        ctx.addIssue({ code: 'custom', message: 'permission_resolved needs exactly one non-empty id: a requestId (permission prompt) or a toolUseId (question)' });
+        return;
+    }
+    // The question variant exists for ONE case (#8470); any other shape keyed by a
+    // toolUseId is not something the server sends.
+    if (m.toolUseId !== undefined && !(m.decision === 'deny' && m.reason === 'superseded')) {
+        ctx.addIssue({ code: 'custom', message: "the toolUseId variant of permission_resolved is only the superseded question: decision 'deny', reason 'superseded'" });
+    }
 });
 /**
  * #8348: how a permission prompt ENDED, as a durable history entry.
@@ -923,6 +935,11 @@ export const ServerUserQuestionSchema = z.object({
     // on live frames and on every question that was answered or is still
     // pending. Clients render it as interrupted rather than "(resolved)".
     interrupted: z.boolean().optional(),
+    // #8470: a newer question REPLACED this one while it was open, so it was never
+    // answered. Set only on a REPLAYED entry (the server flags the question in its
+    // history when it supersedes it); absent on live frames. Clients render it as
+    // "replaced by a newer question" rather than "(resolved)".
+    superseded: z.boolean().optional(),
 });
 export const ServerAgentBusySchema = z.object({
     type: z.literal('agent_busy'),

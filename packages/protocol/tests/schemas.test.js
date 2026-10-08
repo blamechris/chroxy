@@ -3676,6 +3676,29 @@ describe('@chroxy/protocol schemas', () => {
       assert.equal(ServerPermissionResolvedSchema.safeParse({ type: 'permission_resolved', decision: 'deny' }).success, false, 'a frame naming neither a prompt nor a question is malformed')
     })
 
+    it('#8470: ServerPermissionResolvedSchema needs EXACTLY ONE NON-EMPTY id, and the toolUseId variant is the superseded shape', async () => {
+      const { ServerPermissionResolvedSchema } = await import('../src/schemas/server/stream.ts')
+      const ok = (m) => ServerPermissionResolvedSchema.safeParse({ type: 'permission_resolved', ...m }).success
+      assert.equal(ok({ requestId: 'r', toolUseId: 'ask-1', decision: 'deny', reason: 'superseded' }), false, 'both ids')
+      assert.equal(ok({ requestId: '', decision: 'allow' }), false, 'an empty requestId')
+      assert.equal(ok({ toolUseId: '', decision: 'deny', reason: 'superseded' }), false, 'an empty toolUseId')
+      assert.equal(ok({ requestId: '', toolUseId: 'ask-1', decision: 'deny', reason: 'superseded' }), false, 'an empty requestId beside a real toolUseId is still two ids')
+      assert.equal(ok({ toolUseId: 'ask-1', decision: 'allow' }), false, 'a question variant that allows')
+      assert.equal(ok({ toolUseId: 'ask-1', decision: 'allow', reason: 'superseded' }), false, 'a superseded question that allows')
+      assert.equal(ok({ toolUseId: 'ask-1', decision: 'deny' }), false, 'a question variant with no reason')
+      assert.equal(ok({ toolUseId: 'ask-1', decision: 'deny', reason: 'timeout' }), false, 'a question variant for any other reason')
+      assert.equal(ok({ toolUseId: 'ask-1', decision: 'deny', reason: 'superseded' }), true)
+      assert.equal(ok({ requestId: 'r', decision: 'deny', reason: 'timeout' }), true, 'the permission-prompt variant keeps every reason')
+    })
+
+    it('#8470: ServerUserQuestionSchema carries superseded through parsing', async () => {
+      const { ServerUserQuestionSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerUserQuestionSchema.safeParse({ type: 'user_question', toolUseId: 'ask-1', questions: [], superseded: true })
+      assert.ok(r.success)
+      assert.equal(r.data.superseded, true, 'not stripped')
+      assert.ok(ServerUserQuestionSchema.safeParse({ type: 'user_question', toolUseId: 'ask-1', questions: [] }).success)
+    })
+
     it('ServerPermissionOutcomeSchema rejects an unknown outcome and a missing requestId', async () => {
       const { ServerPermissionOutcomeSchema } = await import('../src/schemas/server/stream.ts')
       const base = { type: 'permission_outcome', requestId: 'perm-1', tool: 'Bash', description: 'ls', outcome: 'expired' }

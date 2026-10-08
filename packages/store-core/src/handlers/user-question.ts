@@ -195,6 +195,11 @@ export function handleUserQuestion(
   // question, and a pending or answered one never carries the field.
   if (msg.interrupted === true) {
     chatMessage.answered = QUESTION_INTERRUPTED_PLACEHOLDER
+  } else if (msg.superseded === true) {
+    // #8470: a newer question replaced this one, and the server recorded it. Built
+    // already marked for the same reason: the replay-end sweep would otherwise
+    // stamp it "(resolved)", which reads as answered.
+    chatMessage.answered = QUESTION_SUPERSEDED_PLACEHOLDER
   }
   const msgSessionId =
     typeof msg.sessionId === 'string' && msg.sessionId.length > 0

@@ -11,6 +11,7 @@ import { validateAttachments, resolveFileRefAttachments, resolveSession, sendErr
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { createLogger, sessionLogger } from '../logger.js'
+import { answerDigest } from '../question-route-map.js'
 import { INPUT_CONTEXT_CAPABILITIES, InputContextError, prepareInputContext } from '../input-context.js'
 
 const log = createLogger('ws')
@@ -1315,17 +1316,27 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   // (legacy single-session mode / clients that don't send one), where there is
   // a single question in flight and no cross-question mis-route risk.
   let questionSessionId
+  // #8470: false when the route is gone and the owner comes from the map's memory
+  // of recently removed routes. Such an answer reaches nothing, but the sender is
+  // still told, and only after the SAME entitlement checks as a live route.
+  let routeLive = true
+  let recentAnswerDigest
   if (typeof msg.toolUseId === 'string') {
-    if (!ctx.permissions.questionSessionMap.has(msg.toolUseId)) {
+    const routes = ctx.permissions.questionSessionMap
+    if (routes.has(msg.toolUseId)) {
+      questionSessionId = routes.get(msg.toolUseId)
+    } else {
       sessionLogger(client.activeSessionId || undefined).info(
         `user_question_response dropped: stale/unknown toolUseId=${msg.toolUseId} (question already resolved or its session is gone)`,
       )
-      // #8470: the sender marked its card answered when it sent; say it was not.
-      // Nothing about the question is revealed: the id is the sender's own.
-      sendQuestionNotDelivered(ws, msg, client.activeSessionId || undefined, ctx)
-      return
+      // An id nobody routed (never existed, or older than the memory) is silent:
+      // answering it would tell a client which ids exist.
+      const recent = routes.recentOwner?.(msg.toolUseId)
+      if (!recent) return
+      questionSessionId = recent.sessionId
+      recentAnswerDigest = recent.answerDigest
+      routeLive = false
     }
-    questionSessionId = ctx.permissions.questionSessionMap.get(msg.toolUseId)
   } else {
     questionSessionId = client.activeSessionId
   }
@@ -1347,6 +1358,16 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   // mapping intact so the legitimate subscribed client can still respond.
   if (!client.boundSessionId) {
     if (!isSessionViewer(client, questionSessionId)) return
+  }
+
+  if (!routeLive) {
+    // #8470: the sender marked its card answered when it sent; say it was not,
+    // unless the answer that landed IS this one (a duplicate or a second tab that
+    // chose the same thing): then the card is right and retracting it would be
+    // the lie.
+    if (recentAnswerDigest !== undefined && recentAnswerDigest === answerDigest(msg)) return
+    sendQuestionNotDelivered(ws, msg, questionSessionId || undefined, ctx)
+    return
   }
 
   if (msg.toolUseId) ctx.permissions.questionSessionMap.delete(msg.toolUseId)
@@ -1414,6 +1435,8 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
       sendQuestionNotDelivered(ws, msg, questionSessionId || undefined, ctx)
     } else if (msg.answer.length > 0 || hasAnswers) {
       ctx.sessions.sessionManager.recordQuestionAnswered?.(questionSessionId, msg.toolUseId)
+      // #8470: remember WHAT landed, so a duplicate of it is not called lost.
+      if (typeof msg.toolUseId === 'string') ctx.permissions.questionSessionMap.noteAnswered?.(msg.toolUseId, answerDigest(msg))
     }
   }
 }

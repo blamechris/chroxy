@@ -886,6 +886,61 @@ describe('shared dispatch table', () => {
         expect(sweepUnansweredPromptsAtReplayEnd('s1', env.sessions.s1.messages as ChatMessage[])).toBeNull()
       })
 
+      // #8470 -- the other verdict the server records on a question.
+      it('marks a replayed question the server flagged superseded, and the sweep leaves it (#8470)', () => {
+        const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        dispatch(env, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }], historySeq: 12, superseded: true,
+        } as never)
+        expect(env.sessions.s1.messages[0].answered).toBe('(superseded)')
+        expect(sweepUnansweredPromptsAtReplayEnd('s1', env.sessions.s1.messages as ChatMessage[])).toBeNull()
+      })
+
+      it('a replayed superseded copy marks the card the client already holds as waiting (cursor past the question) (#8470)', () => {
+        for (const answered of [undefined, '(resolved)']) {
+          const env = makeAdapter({
+            activeSessionId: 's1',
+            sessions: { s1: { sessionId: 's1', messages: [held(answered === undefined ? {} : { answered })] } },
+          })
+          dispatch(env, {
+            type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }], historySeq: 12, superseded: true,
+          } as never)
+          expect(env.sessions.s1.messages).toHaveLength(1)
+          expect(env.sessions.s1.messages[0].answered).toBe('(superseded)')
+        }
+      })
+
+      it('a replayed superseded copy never overwrites a real answer, and raises no "question" notification (#8470)', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held({ answered: 'Round' })] } },
+        })
+        dispatch(env, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }], historySeq: 12, superseded: true,
+        } as never)
+        expect(env.sessions.s1.messages[0].answered).toBe('Round')
+        const fresh = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        dispatch(fresh, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-9',
+          questions: [{ question: 'Which approach?' }], historySeq: 13, superseded: true,
+        } as never)
+        expect(fresh.notifications).toEqual([])
+      })
+
+      it('only `superseded: true` marks it (#8470)', () => {
+        for (const superseded of [false, 'true', 1, null]) {
+          const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+          dispatch(env, {
+            type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }], historySeq: 12, superseded,
+          } as never)
+          expect(env.sessions.s1.messages[0].answered).toBeUndefined()
+        }
+      })
+
       it('only `interrupted: true` marks it — anything else is an ordinary question (#8336)', () => {
         for (const interrupted of [false, 'true', 1, null]) {
           const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })

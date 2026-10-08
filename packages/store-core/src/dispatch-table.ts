@@ -179,6 +179,7 @@ import {
   replayDedupCache,
   REPLAY_RESOLVED_PLACEHOLDER,
   QUESTION_INTERRUPTED_PLACEHOLDER,
+  QUESTION_SUPERSEDED_PLACEHOLDER,
   isQuestionNoAnswerToken,
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
@@ -2299,13 +2300,17 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         // pending, and a replayed "interrupted" is older than that. The
         // post-replay `resendPendingQuestions` frame would repair it, but the
         // answer controls would be gone until it landed.
+        //
+        // #8470: the same goes for the other verdict the server records on a
+        // question -- a newer question replaced it ("superseded").
+        const verdict = chatMessage.answered
         if (
-          chatMessage.answered === QUESTION_INTERRUPTED_PLACEHOLDER &&
+          (verdict === QUESTION_INTERRUPTED_PLACEHOLDER || verdict === QUESTION_SUPERSEDED_PLACEHOLDER) &&
           (heldAnswered === undefined || heldAnswered === REPLAY_RESOLVED_PLACEHOLDER) &&
           !wasPromptLiveDuringReplay(sessionId, held.id)
         ) {
           const next = ss.messages.slice()
-          next[idx] = { ...held, answered: QUESTION_INTERRUPTED_PLACEHOLDER }
+          next[idx] = { ...held, answered: verdict }
           return { messages: next } as Partial<S>
         }
         return {} as Partial<S>
@@ -2352,12 +2357,12 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // for a session the store holds nothing for — `noteLivePromptDuringReplay`
   // reads no store state, so only the statement order moved.
   if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, survivingId)
-  // #8336 — an interrupted question is a correction, not a new question: it
+  // #8336 (and #8470, a superseded one) — an ended question is a correction, not a new question: it
   // arrives replayed (in place, or as the tail copy that carries the verdict past
   // a delta cursor) for a question the person was already told about, and nothing
   // is waiting on them. Notifying "has a question" for it, on a session they are
   // not looking at, is a false alarm that fires again on every such replay.
-  if (sessionId && chatMessage.answered !== QUESTION_INTERRUPTED_PLACEHOLDER) {
+  if (sessionId && !isQuestionNoAnswerToken(chatMessage.answered)) {
     adapter.pushSessionNotification(sessionId, 'question', questionText)
   }
 }
