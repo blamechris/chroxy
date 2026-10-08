@@ -1,7 +1,7 @@
 /**
  * ChatView + ThinkingDots tests (#1156)
  */
-import { describe, it, expect, afterEach, vi } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react'
 import { ChatView, type ChatViewMessage } from './ChatView'
 import { ThinkingDots } from './ThinkingDots'
@@ -566,7 +566,10 @@ describe('ChatView', () => {
 
     // Content grows (a stream_delta) — the RAF re-pins to the NEW bottom.
     Object.defineProperty(container, 'scrollHeight', { value: 1500, configurable: true })
-    await act(() => { vi.advanceTimersByTime(50) })
+    // #7405 — the pin follows a content change, so the growth arrives the way a
+    // stream_delta does: a DOM mutation inside the list.
+    container.appendChild(document.createTextNode('x'))
+    await act(async () => { await vi.advanceTimersByTimeAsync(50) })
     expect(container.scrollTop).toBe(1500)
 
     // The self-induced scroll event (flag still held) must NOT surface the
@@ -599,22 +602,40 @@ describe('ChatView', () => {
     // way a real element does. The older tests here write an unclamped
     // scrollTop, which makes `scrollHeight - scrollTop - clientHeight` land far
     // below zero and hides the threshold arithmetic this bug lives in.
+    //
+    // #7405 — the pin is now driven by content change, not by a per-frame loop,
+    // so a shim that grows `scrollHeight` with NO accompanying DOM change would
+    // model something a real browser never does (content cannot get taller
+    // without the DOM changing or a box resizing). `grow` therefore does what a
+    // stream_delta does — appends to the last row — and `growSilently` models a
+    // height change with no mutation (an image decoding, a font swap), which a
+    // test then delivers through the signal under test (a ResizeObserver
+    // callback, a `load` event).
     function installScroller(el: HTMLElement, contentHeight: number, viewport: number) {
       let height = contentHeight
       let top = 0
+      let writes = 0
       const clamp = (v: number) => Math.max(0, Math.min(v, height - viewport))
       Object.defineProperty(el, 'scrollHeight', { get: () => height, configurable: true })
       Object.defineProperty(el, 'clientHeight', { get: () => viewport, configurable: true })
       Object.defineProperty(el, 'scrollTop', {
         get: () => top,
-        set: (v: number) => { top = clamp(v) },
+        set: (v: number) => { writes++; top = clamp(v) },
         configurable: true,
       })
       return {
         get bottom() { return height - viewport },
         get top() { return top },
-        /** A stream_delta lands: the content gets taller. */
-        grow(by: number) { height += by },
+        /** How many times the component assigned `scrollTop` (the user's `drag` does not count). */
+        get writes() { return writes },
+        /** A stream_delta lands: the content gets taller AND the DOM changes. */
+        grow(by: number) {
+          height += by
+          const rows = el.querySelectorAll('.msg')
+          ;(rows[rows.length - 1] ?? el).appendChild(document.createTextNode('x'))
+        },
+        /** The content gets taller with no DOM mutation at all. */
+        growSilently(by: number) { height += by },
         /** The user's input device moves the viewport, then the frame ticks. */
         drag(by: number) { top = clamp(top + by) },
       }
@@ -659,8 +680,8 @@ describe('ChatView', () => {
 
       // The turn keeps streaming for another few seconds — the reader stays put
       // (the issue's "not just for one frame" control).
-      await act(() => { scroller.grow(1200); vi.advanceTimersByTime(1000) })
-      await act(() => { scroller.grow(1200); vi.advanceTimersByTime(1000) })
+      await act(async () => { scroller.grow(1200); await vi.advanceTimersByTimeAsync(1000) })
+      await act(async () => { scroller.grow(1200); await vi.advanceTimersByTimeAsync(1000) })
       expect(container.scrollTop).toBe(start - 400)
       expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
       vi.useRealTimers()
@@ -684,7 +705,7 @@ describe('ChatView', () => {
       }
       expect(container.scrollTop).toBe(start - 200)
 
-      await act(() => { scroller.grow(1200); vi.advanceTimersByTime(1000) })
+      await act(async () => { scroller.grow(1200); await vi.advanceTimersByTimeAsync(1000) })
       expect(container.scrollTop).toBe(start - 200)
       vi.useRealTimers()
     })
@@ -730,7 +751,7 @@ describe('ChatView', () => {
         })
         expect(container.scrollTop).toBe(start - 360)
 
-        await act(() => { scroller.grow(1200); vi.advanceTimersByTime(1000) })
+        await act(async () => { scroller.grow(1200); await vi.advanceTimersByTimeAsync(1000) })
         expect(container.scrollTop).toBe(start - 360)
         vi.useRealTimers()
       })
@@ -760,7 +781,7 @@ describe('ChatView', () => {
         })
         expect(container.scrollTop).toBe(start - 360)
 
-        await act(() => { scroller.grow(1200); vi.advanceTimersByTime(1000) })
+        await act(async () => { scroller.grow(1200); await vi.advanceTimersByTimeAsync(1000) })
         expect(container.scrollTop).toBe(start - 360)
         vi.useRealTimers()
       })
@@ -789,7 +810,7 @@ describe('ChatView', () => {
       await act(() => { fireEvent.scroll(container); vi.advanceTimersByTime(50) })
       expect(container.scrollTop).toBe(start - 40)
 
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(200) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(200) })
       expect(container.scrollTop).toBe(start - 40)
       expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
       vi.useRealTimers()
@@ -812,7 +833,7 @@ describe('ChatView', () => {
         vi.advanceTimersByTime(50)
       })
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(200) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(200) })
       expect(container.scrollTop).toBe(scroller.bottom)
       vi.useRealTimers()
     })
@@ -842,7 +863,7 @@ describe('ChatView', () => {
 
       // Releasing the thumb must not snap the reader back down.
       await act(() => { fireEvent.pointerUp(window) })
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(500) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(500) })
       expect(container.scrollTop).toBe(start - 160)
       vi.useRealTimers()
     })
@@ -875,7 +896,7 @@ describe('ChatView', () => {
       expect(container.scrollTop).toBe(start - 180)
       expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
 
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(500) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(500) })
       expect(container.scrollTop).toBe(start - 180)
       vi.useRealTimers()
     })
@@ -936,7 +957,7 @@ describe('ChatView', () => {
       for (let i = 0; i < 5; i++) {
         await act(() => { fireEvent.wheel(nested, { deltaY: -40 }); vi.advanceTimersByTime(20) })
       }
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
       vi.useRealTimers()
@@ -958,7 +979,7 @@ describe('ChatView', () => {
         vi.advanceTimersByTime(20)
       })
       expect(container.scrollTop).toBe(start - 40)
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(start - 40)
       vi.useRealTimers()
     })
@@ -980,7 +1001,7 @@ describe('ChatView', () => {
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
 
       // The assistant now streams a long answer — the tail must still be followed.
-      await act(() => { scroller.grow(4000); vi.advanceTimersByTime(200) })
+      await act(async () => { scroller.grow(4000); await vi.advanceTimersByTimeAsync(200) })
       expect(container.scrollTop).toBe(scroller.bottom)
       vi.useRealTimers()
     })
@@ -997,13 +1018,13 @@ describe('ChatView', () => {
       await act(() => { vi.advanceTimersByTime(50) })
 
       await act(() => { fireEvent.pointerDown(container) })
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(500) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(500) })
       // Paused, as designed, while the pointer is (as far as we know) held.
       expect(container.scrollTop).not.toBe(scroller.bottom)
 
       // No pointerup ever arrives. The pause still has to end.
       await act(() => { vi.advanceTimersByTime(11_000) })
-      await act(() => { scroller.grow(200); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(200); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       vi.useRealTimers()
     })
@@ -1035,7 +1056,7 @@ describe('ChatView', () => {
         expect(container.scrollTop).toBe(scroller.bottom - 40)
 
         await act(() => { fire() })
-        await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+        await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
         expect(container.scrollTop).toBe(scroller.bottom)
         vi.useRealTimers()
       })
@@ -1063,7 +1084,7 @@ describe('ChatView', () => {
         vi.advanceTimersByTime(50)
       })
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(200) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(200) })
       expect(container.scrollTop).toBe(scroller.bottom)
       vi.useRealTimers()
     })
@@ -1085,7 +1106,7 @@ describe('ChatView', () => {
         vi.advanceTimersByTime(50)
       })
       expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(200) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(200) })
       expect(container.scrollTop).toBe(parked + 100)
       vi.useRealTimers()
     })
@@ -1106,7 +1127,7 @@ describe('ChatView', () => {
       await act(() => { vi.advanceTimersByTime(50) })
 
       await act(() => { fireEvent.keyDown(screen.getByTestId('row-input'), { key: 'ArrowUp' }) })
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
       vi.useRealTimers()
@@ -1121,12 +1142,12 @@ describe('ChatView', () => {
       await act(() => { vi.advanceTimersByTime(50) })
       expect(container.scrollTop).toBe(scroller.bottom)
 
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       // The pin's own write is what fires a scroll event (growing content does
       // not move scrollTop, so it fires none) — and that event must still be
       // recognised as self-induced rather than surfacing the button.
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(20) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(20) })
       await act(() => { fireEvent.scroll(container); vi.advanceTimersByTime(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
@@ -1152,7 +1173,7 @@ describe('ChatView', () => {
           vi.advanceTimersByTime(20)
         })
       }
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
       vi.useRealTimers()
@@ -1173,7 +1194,7 @@ describe('ChatView', () => {
           vi.advanceTimersByTime(20)
         })
       }
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
       vi.useRealTimers()
@@ -1198,7 +1219,7 @@ describe('ChatView', () => {
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
 
       // ...and the follow is live again for the remainder of the turn.
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       vi.useRealTimers()
     })
@@ -1213,10 +1234,349 @@ describe('ChatView', () => {
 
       for (let i = 0; i < 5; i++) await wheelUpOneFrame(container, scroller, 40)
       await act(() => { fireEvent.click(screen.getByTestId('scroll-to-bottom')) })
-      await act(() => { scroller.grow(2000); vi.advanceTimersByTime(100) })
+      await act(async () => { scroller.grow(2000); await vi.advanceTimersByTimeAsync(100) })
       expect(container.scrollTop).toBe(scroller.bottom)
       expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
       vi.useRealTimers()
+    })
+
+    // ---- #7405 — the pin is driven by content change, not by every frame ----
+    //
+    // The old driver re-armed `requestAnimationFrame` for the whole stream:
+    // ~3600 `scrollTop = scrollHeight` writes a minute, nearly all of them
+    // writing the value already there. These cases count the writes the
+    // component makes, so they fail for the cost, not just for the behaviour —
+    // which the positive controls above already pin down.
+    describe('the pin follows content change, not the frame clock (#7405)', () => {
+      type ROEntry = { el: Element; cb: ResizeObserverCallback; ro: MockRO }
+      let observed: ROEntry[]
+      let unobserved: { el: Element; ro: MockRO }[]
+      let disconnected: number
+      class MockRO {
+        cb: ResizeObserverCallback
+        live = true
+        constructor(cb: ResizeObserverCallback) { this.cb = cb }
+        observe(el: Element) { observed.push({ el, cb: this.cb, ro: this }) }
+        unobserve(el: Element) { unobserved.push({ el, ro: this }) }
+        disconnect() { disconnected++; this.live = false }
+      }
+      const g = globalThis as unknown as { ResizeObserver: typeof ResizeObserver }
+      let origRO: typeof ResizeObserver
+      beforeEach(() => {
+        observed = []
+        unobserved = []
+        disconnected = 0
+        origRO = g.ResizeObserver
+        g.ResizeObserver = MockRO as unknown as typeof ResizeObserver
+      })
+      afterEach(() => { g.ResizeObserver = origRO })
+
+      /**
+       * The pin's row-height observer: ONE ResizeObserver watching the list's
+       * children. (`MeasuredRow` keeps a one-target observer per row for the
+       * height cache; the pin's is the instance with many targets.)
+       */
+      const pinObserver = (container: HTMLElement) => {
+        const byRo = new Map<MockRO, ROEntry[]>()
+        for (const o of observed) byRo.set(o.ro, [...(byRo.get(o.ro) ?? []), o])
+        const many = [...byRo.values()].filter(g => g.length > 1 && g.every(o => o.el.parentElement === container))
+        return many[0]?.[0]
+      }
+      const fireRO = async (entry: ROEntry) => {
+        // A real observer that was disconnected never calls back.
+        if (!entry.ro.live) return
+        await act(async () => { entry.cb([], entry.ro as unknown as ResizeObserver) })
+      }
+
+      it('makes no scrollTop write while the content is not changing', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        expect(container.scrollTop).toBe(scroller.bottom)
+        const settled = scroller.writes
+        // A thinking pause: five seconds of stream with nothing arriving. The
+        // per-frame loop wrote ~300 times here.
+        await act(() => { vi.advanceTimersByTime(5000) })
+        expect(scroller.writes).toBe(settled)
+        vi.useRealTimers()
+      })
+
+      it('writes at most once per content change, and none when already at the bottom', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const settled = scroller.writes
+
+        // Ten deltas, each followed by a second of quiet: one write apiece.
+        for (let i = 0; i < 10; i++) {
+          await act(async () => { scroller.grow(120); await vi.advanceTimersByTimeAsync(1000) })
+          expect(container.scrollTop).toBe(scroller.bottom)
+        }
+        expect(scroller.writes - settled).toBe(10)
+
+        // A mutation that does not make the list taller has nowhere to scroll to.
+        const before = scroller.writes
+        await act(async () => {
+          container.appendChild(document.createTextNode('same height'))
+          await vi.advanceTimersByTimeAsync(1000)
+        })
+        expect(scroller.writes).toBe(before)
+        vi.useRealTimers()
+      })
+
+      it('coalesces a burst of mutations inside one frame into one write and one queued frame', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const settled = scroller.writes
+        const raf = vi.spyOn(window, 'requestAnimationFrame')
+        // Twenty-five mutation batches inside one frame (a microtask checkpoint
+        // between each, so the observer really is called twenty-five times).
+        await act(async () => {
+          for (let i = 0; i < 25; i++) {
+            scroller.grow(40)
+            await Promise.resolve()
+          }
+        })
+        const queued = raf.mock.calls.length
+        await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+        expect(container.scrollTop).toBe(scroller.bottom)
+        expect(scroller.writes - settled).toBe(1)
+        // One frame queued for the whole burst. (The write itself queues one more
+        // to clear the programmatic-scroll flag.)
+        expect(queued).toBe(1)
+        raf.mockRestore()
+        vi.useRealTimers()
+      })
+
+      it('follows a row that grows with no DOM mutation, via the row ResizeObserver', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const ro = pinObserver(container)
+        // Every rendered row is watched, and the container itself is not what
+        // the pin hangs off: its box does not change when its content grows.
+        expect(ro).toBeTruthy()
+        const rows = Array.from(container.children).filter(c => c.classList.contains('msg') || c.querySelector('.msg'))
+        expect(rows.length).toBeGreaterThan(0)
+        for (const row of rows) expect(observed.some(o => o.el === row)).toBe(true)
+
+        scroller.growSilently(600)
+        await fireRO(ro!)
+        // Synchronously, inside the observer callback: this runs before paint,
+        // so the tail is never a frame late.
+        expect(container.scrollTop).toBe(scroller.bottom)
+        vi.useRealTimers()
+      })
+
+      it('observes a row that arrives mid-stream and releases one that leaves', async () => {
+        vi.useFakeTimers()
+        const { rerender } = render(<ChatView messages={makeMessages(3)} isStreaming />)
+        const container = screen.getByTestId('chat-messages')
+        installScroller(container, 4000, 400)
+        await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+        const pinRo = pinObserver(container)!.ro
+        const first = observed.length
+
+        rerender(<ChatView messages={makeMessages(4)} isStreaming />)
+        await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+        const added = observed.slice(first).filter(o => o.ro === pinRo).map(o => o.el)
+        expect(added.some(el => el.parentElement === container && el.textContent?.includes('Message 3'))).toBe(true)
+
+        const gone = container.querySelector('[data-testid="msg-msg-0"]')
+        expect(gone).toBeTruthy()
+        rerender(<ChatView messages={makeMessages(4).slice(1)} isStreaming />)
+        await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+        expect(unobserved.some(u => u.ro === pinRo && u.el === gone)).toBe(true)
+        vi.useRealTimers()
+      })
+
+      it('follows an image that finishes loading', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const settled = scroller.writes
+        scroller.growSilently(500)
+        const row = container.querySelector('.msg') as HTMLElement
+        // `load` does not bubble; the listener has to be a capture one.
+        await act(() => { fireEvent.load(row); vi.advanceTimersByTime(50) })
+        expect(container.scrollTop).toBe(scroller.bottom)
+        expect(scroller.writes - settled).toBe(1)
+        vi.useRealTimers()
+      })
+
+      it('does not write for a reader who scrolled up, however the content changes', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const pinRo = pinObserver(container)!.ro
+        expect(pinRo.live).toBe(true)
+        for (let i = 0; i < 5; i++) await wheelUpOneFrame(container, scroller, 40)
+        expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+        const held = scroller.top
+        const writes = scroller.writes
+
+        await act(async () => { scroller.grow(800); await vi.advanceTimersByTimeAsync(500) })
+        scroller.growSilently(800)
+        await act(() => { fireEvent.load(container.querySelector('.msg') as HTMLElement); vi.advanceTimersByTime(500) })
+        for (const o of observed.filter(o => o.el !== container)) await fireRO(o)
+        expect(scroller.top).toBe(held)
+        expect(scroller.writes).toBe(writes)
+        // And the observer is gone, not merely ignored — and nothing replaced it.
+        expect(pinRo.live).toBe(false)
+        const targets = new Map<MockRO, number>()
+        for (const o of observed) targets.set(o.ro, (targets.get(o.ro) ?? 0) + 1)
+        expect([...targets].filter(([ro, n]) => ro.live && n > 1)).toHaveLength(0)
+        vi.useRealTimers()
+      })
+
+      it('a gesture landing between a content change and its pin wins', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const writes = scroller.writes
+        const before = scroller.top
+        await act(() => {
+          scroller.grow(800) // content changed; the pin is queued...
+          scroller.drag(-40)
+          fireEvent.wheel(container, { deltaY: -40 }) // ...and the reader gestures before it runs
+          vi.advanceTimersByTime(100)
+        })
+        expect(scroller.top).toBe(before - 40)
+        expect(scroller.writes).toBe(writes)
+        vi.useRealTimers()
+      })
+
+      // The observer callback pins synchronously, so a gesture handled in the same
+      // task is only visible through the REF — React has not re-rendered yet, and
+      // the effect that would tear the observer down is still queued.
+      it('a gesture handled in the same task as a row resize wins over the observer', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const ro = pinObserver(container)!
+        const writes = scroller.writes
+        const before = scroller.top
+        await act(async () => {
+          scroller.drag(-40)
+          fireEvent.wheel(container, { deltaY: -40 })
+          scroller.growSilently(800)
+          ro.cb([], ro.ro as unknown as ResizeObserver)
+        })
+        expect(scroller.top).toBe(before - 40)
+        expect(scroller.writes).toBe(writes)
+        vi.useRealTimers()
+      })
+
+      it('a pin queued before the stream ended does not fire after it', async () => {
+        vi.useFakeTimers()
+        const { rerender } = render(<ChatView messages={makeMessages(3)} isStreaming />)
+        const container = screen.getByTestId('chat-messages')
+        const scroller = installScroller(container, 4000, 400)
+        await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+        const writes = scroller.writes
+        // A delta lands and its pin is queued (observer ran, frame not yet)...
+        await act(async () => { scroller.grow(800); await Promise.resolve() })
+        // ...then the stream ends before that frame.
+        rerender(<ChatView messages={makeMessages(3)} isStreaming={false} />)
+        await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+        expect(scroller.writes).toBe(writes)
+        vi.useRealTimers()
+      })
+
+      it('a pointer released after the stream ended does not pin', async () => {
+        vi.useFakeTimers()
+        const { rerender } = render(<ChatView messages={makeMessages(3)} isStreaming />)
+        const container = screen.getByTestId('chat-messages')
+        const scroller = installScroller(container, 4000, 400)
+        await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+        await act(() => { fireEvent.pointerDown(container) })
+        scroller.growSilently(800)
+        rerender(<ChatView messages={makeMessages(3)} isStreaming={false} />)
+        await act(async () => { await vi.advanceTimersByTimeAsync(50) })
+        const writes = scroller.writes
+        await act(() => { fireEvent.pointerUp(window) })
+        await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+        expect(scroller.writes).toBe(writes)
+        vi.useRealTimers()
+      })
+
+      it('stops pinning, and releases its observers, when the stream ends', async () => {
+        vi.useFakeTimers()
+        const { rerender } = render(<ChatView messages={makeMessages(3)} isStreaming />)
+        const container = screen.getByTestId('chat-messages')
+        const scroller = installScroller(container, 4000, 400)
+        await act(() => { vi.advanceTimersByTime(50) })
+        const pinRo = pinObserver(container)!.ro
+        expect(pinRo.live).toBe(true)
+
+        rerender(<ChatView messages={makeMessages(3)} isStreaming={false} />)
+        await act(() => { vi.advanceTimersByTime(50) })
+        expect(pinRo.live).toBe(false)
+        const writes = scroller.writes
+        await act(async () => { scroller.grow(800); await vi.advanceTimersByTimeAsync(500) })
+        scroller.growSilently(800)
+        await act(() => { fireEvent.load(container.querySelector('.msg') as HTMLElement); vi.advanceTimersByTime(500) })
+        for (const o of observed.filter(o => o.el !== container)) await fireRO(o)
+        expect(scroller.writes).toBe(writes)
+        vi.useRealTimers()
+      })
+
+      it('re-subscribes and catches up when the reader scrolls back to the bottom', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        for (let i = 0; i < 10; i++) await wheelUpOneFrame(container, scroller, 40)
+        expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+        // Back to within the resume band (but not exactly at the bottom), by the
+        // tail-ward gesture that asks to follow again.
+        await act(() => {
+          scroller.drag(scroller.bottom - scroller.top - 5)
+          fireEvent.wheel(container, { deltaY: 400 })
+          fireEvent.scroll(container)
+          vi.advanceTimersByTime(50)
+        })
+        expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+        // Following again: the very next delta is pinned...
+        await act(async () => { scroller.grow(300); await vi.advanceTimersByTimeAsync(100) })
+        expect(container.scrollTop).toBe(scroller.bottom)
+        // ...and the loop's old "pin on resume" catch-up still closes the 5px.
+        vi.useRealTimers()
+      })
+
+      it('holds the pin while a pointer is down, then catches up on release without further content', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        await act(() => { fireEvent.pointerDown(container) })
+        const writes = scroller.writes
+
+        await act(async () => { scroller.grow(900); await vi.advanceTimersByTimeAsync(500) })
+        expect(scroller.writes).toBe(writes)
+        expect(container.scrollTop).not.toBe(scroller.bottom)
+
+        // Nothing else arrives. The old per-frame loop caught up by itself; an
+        // event-driven pin must be told to, or the tail is stranded until the
+        // next delta.
+        await act(() => { fireEvent.pointerUp(window); vi.advanceTimersByTime(50) })
+        expect(container.scrollTop).toBe(scroller.bottom)
+        vi.useRealTimers()
+      })
+
+      it('tears everything down on unmount', async () => {
+        vi.useFakeTimers()
+        const { container, scroller } = renderStreaming()
+        await act(() => { vi.advanceTimersByTime(50) })
+        const live = disconnected
+        cleanup()
+        expect(disconnected).toBeGreaterThan(live)
+        // A mutation after unmount must not reach a dead component.
+        scroller.growSilently(100)
+        expect(() => container.appendChild(document.createTextNode('late'))).not.toThrow()
+        await act(() => { vi.advanceTimersByTime(100) })
+        vi.useRealTimers()
+      })
     })
   })
 
