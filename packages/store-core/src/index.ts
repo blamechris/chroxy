@@ -793,6 +793,7 @@ export {
   handleWebFeatureStatus,
   handleSearchResults,
   handleUserQuestion,
+  normalizeUserQuestion,
   handleUserInput,
   handleMessage,
   handleToolStart,

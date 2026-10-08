@@ -2569,7 +2569,7 @@ describe('App', () => {
       },
     ]
 
-    it('renders the placeholder (and hides question content) when the AskUserQuestion permission_request is unresolved', () => {
+    it('renders the permission card alone (no pending stub, question card hidden) when the AskUserQuestion permission_request is unresolved', () => {
       stateOverrides = {
         ...connectedState,
         getActiveSessionState: () => ({
@@ -2588,8 +2588,11 @@ describe('App', () => {
       }
       render(<App />)
       const chatPane = screen.getByTestId('chat-pane')
-      // Placeholder renders…
-      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // The permission card is the one pending-state surface (#8264: no
+      // second "Pending permission…" stub beside it; PermissionPrompt is
+      // mocked in this file)…
+      expect(within(chatPane).getByTestId('permission-prompt-mock-req-aq-1')).toBeInTheDocument()
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
       // …and the model-supplied question + option labels are NOT in the
       // chat pane (gate works end-to-end through App's derivation).
       expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
@@ -2675,8 +2678,8 @@ describe('App', () => {
       }
       render(<App />)
       const chatPane = screen.getByTestId('chat-pane')
-      // Placeholder STILL renders — deny does not un-gate.
-      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      // Still gated — deny does not un-gate (and, #8264, still no stub).
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
       // Question content stays hidden.
       expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
       expect(within(chatPane).queryByText('Ryu')).not.toBeInTheDocument()
@@ -2710,7 +2713,7 @@ describe('App', () => {
       }
       render(<App />)
       const chatPane = screen.getByTestId('chat-pane')
-      expect(within(chatPane).getByTestId('question-prompt-pending-permission')).toBeInTheDocument()
+      expect(within(chatPane).queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
       expect(within(chatPane).queryByText('Pick your fighter')).not.toBeInTheDocument()
     })
 
