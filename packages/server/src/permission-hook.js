@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
+import { shellQuotePath } from './utils/verify-binary.js'
 
 const log = createLogger('permission-hook')
 
@@ -11,6 +12,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 const DEFAULT_SETTINGS_PATH = resolve(homedir(), '.claude', 'settings.json')
+const DEFAULT_HOOK_SCRIPT = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
 
 // Module-level, in-process lock for settings.json read-modify-write operations.
 // Shared across all importers of this module in a single Node.js process so CLI
@@ -65,7 +67,9 @@ function _isChroxyHookEntry(entry) {
   // the regex on Windows paths — see #3715 review.)
   return inner.some(h =>
     typeof h?.command === 'string' &&
-    /(?:Chroxy\.app|chroxy[/\\]packages[/\\]server|@chroxy[/\\]server).*hooks[/\\]permission-hook\.sh$/.test(h.command)
+    // `'?$`: a command written with the script path shell-quoted ends in the
+    // closing quote; entries written before quoting existed end in `.sh`.
+    /(?:Chroxy\.app|chroxy[/\\]packages[/\\]server|@chroxy[/\\]server).*hooks[/\\]permission-hook\.sh'?$/.test(h.command)
   )
 }
 
@@ -73,9 +77,10 @@ function _isChroxyHookEntry(entry) {
  * Register the Chroxy permission hook in settings.json.
  * Idempotent — removes any existing Chroxy hook entry before adding.
  * @param {string} [settingsPath] - Path to settings.json (defaults to ~/.claude/settings.json)
+ * @param {string} [hookScript] - Hook script path (defaults to the packaged script; a test seam
+ *   so the written command can be checked against an install path that needs shell quoting)
  */
-function registerPermissionHookSync(settingsPath) {
-  const hookScript = resolve(__dirname, '..', 'hooks', 'permission-hook.sh')
+function registerPermissionHookSync(settingsPath, hookScript = DEFAULT_HOOK_SCRIPT) {
   settingsPath = settingsPath || DEFAULT_SETTINGS_PATH
 
   let settings = {}
@@ -114,7 +119,11 @@ function registerPermissionHookSync(settingsPath) {
     hooks: [
       {
         type: 'command',
-        command: hookScript,
+        // Claude runs this string through a shell: an install path with a space
+        // would split into words and exit 127, which Claude treats as a
+        // non-blocking error (the permission check silently skipped). Quoted only
+        // when it needs it, so a plain path is byte-for-byte what it always was.
+        command: shellQuotePath(hookScript),
         timeout: 300,
       },
     ],
@@ -158,13 +167,34 @@ function unregisterPermissionHookSync(settingsPath) {
 }
 
 /**
+ * Report whether the user-level settings file holds a chroxy permission-hook
+ * entry (#8263). Read-only; used by `chroxy doctor`. Never throws.
+ *
+ * @param {{settingsPath?: string}} [options]
+ * @returns {{found: number, settingsPath: string, error?: string}}
+ */
+export function countUserLevelChroxyHooks({ settingsPath } = {}) {
+  const target = settingsPath || DEFAULT_SETTINGS_PATH
+  try {
+    const settings = JSON.parse(readFileSync(target, 'utf-8'))
+    const entries = settings?.hooks?.PreToolUse
+    const found = Array.isArray(entries) ? entries.filter(_isChroxyHookEntry).length : 0
+    return { found, settingsPath: target }
+  } catch (err) {
+    if (err.code === 'ENOENT') return { found: 0, settingsPath: target }
+    return { found: 0, settingsPath: target, error: err.message }
+  }
+}
+
+/**
  * Create a permission hook manager that handles registration, retry, and cleanup.
  *
  * @param {EventEmitter} emitter - Used to emit 'error' events on failure
- * @param {{ settingsPath?: string }} [options] - Optional settings path for test isolation
+ * @param {{ settingsPath?: string, hookScript?: string }} [options] - Optional settings path for test
+ *   isolation, and a hook script path override (test seam, see registerPermissionHookSync)
  * @returns {{ register(): Promise, unregister(): Promise, destroy(): Promise }}
  */
-export function createPermissionHookManager(emitter, { settingsPath } = {}) {
+export function createPermissionHookManager(emitter, { settingsPath, hookScript } = {}) {
   let retryCount = 0
   let retryTimer = null
   let registered = false
@@ -207,7 +237,7 @@ export function createPermissionHookManager(emitter, { settingsPath } = {}) {
         return
       }
       try {
-        registerPermissionHookSync(settingsPath)
+        registerPermissionHookSync(settingsPath, hookScript)
         if (retryTimer) {
           clearTimeout(retryTimer)
           retryTimer = null

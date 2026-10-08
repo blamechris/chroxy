@@ -760,14 +760,15 @@ describe('shared dispatch table', () => {
         expect(env.sessions.s1.messages).toHaveLength(2)
       })
 
-      // The GATE, and the reason it is `!deliveredByReplay` rather than an
-      // unconditional dedup. During a FULL rebuild the pre-replay prefix is
-      // sliced off at `history_replay_end` (`messages.slice(base)`), so merging
-      // the replayed copy into the held one would put the question in the part
-      // of the array that is about to be DISCARDED — the prompt would vanish
-      // from the transcript entirely, which is the worse half of #7457's own
-      // symptom. A replayed frame therefore always appends.
-      it('a REPLAY-delivered frame appends rather than merging into the held copy', () => {
+      // #8336 — this used to pin the opposite ("a REPLAY-delivered frame appends
+      // rather than merging into the held copy"). The reason it gave — a full
+      // rebuild slices the pre-replay prefix off, so a merge there would lose the
+      // prompt — is real, and is now enforced where it belongs: the search is
+      // bounded to the view a rebuild KEEPS (`replayDedupCache`), see the
+      // prefix test below. Outside a rebuild (a delta replay, the ordinary
+      // reconnect) nothing is discarded, and appending a replayed copy of a
+      // question the client already holds is the duplicate card #8336 is about.
+      it('a REPLAY-delivered frame collapses onto the held copy instead of stacking a second card (#8336)', () => {
         const env = makeAdapter({
           activeSessionId: 's1',
           sessions: { s1: { sessionId: 's1', messages: [held()] } },
@@ -779,7 +780,168 @@ describe('shared dispatch table', () => {
           questions: [{ question: 'Which approach?' }],
           historySeq: 12,
         } as never)
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0]).toMatchObject({ id: 'question-old', timestamp: 1_700_000_000_000 })
+      })
+
+      it('a replayed copy never clears what the held bubble already carries (#8336)', () => {
+        for (const answered of ['Round', '(resolved)']) {
+          const env = makeAdapter({
+            activeSessionId: 's1',
+            sessions: { s1: { sessionId: 's1', messages: [held({ answered })] } },
+          })
+          dispatch(env, {
+            type: 'user_question',
+            sessionId: 's1',
+            toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }],
+            historySeq: 12,
+          } as never)
+          // A replay is history, not a statement that the question is pending
+          // again: only the LIVE re-send may revive a '(resolved)' bubble.
+          expect(env.sessions.s1.messages[0].answered).toBe(answered)
+        }
+      })
+
+      // Counterpart of the F2 test below, for the REPLAYED direction: the held
+      // copy sits in the pre-baseline prefix of a full rebuild, so the replayed
+      // copy must append into the kept tail or the prompt is lost at the swap.
+      it('a REPLAY-delivered frame still appends when the held copy is in the discarded prefix (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: { s1: { sessionId: 's1', messages: [held()] } },
+        })
+        reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+          historySeq: 12,
+        } as never)
         expect(env.sessions.s1.messages).toHaveLength(2)
+        const { swappedMessages } = reconcileReplayEnd('s1', env.sessions.s1.messages)
+        expect(swappedMessages).toHaveLength(1)
+        expect(swappedMessages?.[0]).toMatchObject({ type: 'prompt', toolUseId: 'ask-1' })
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      it('marks a replayed question the server flagged interrupted, and the sweep leaves it (#8336)', () => {
+        const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+          historySeq: 12,
+          interrupted: true,
+        } as never)
+        expect(env.sessions.s1.messages[0].answered).toBe('(interrupted)')
+        expect(sweepUnansweredPromptsAtReplayEnd('s1', env.sessions.s1.messages as ChatMessage[])).toBeNull()
+      })
+
+      it('only `interrupted: true` marks it — anything else is an ordinary question (#8336)', () => {
+        for (const interrupted of [false, 'true', 1, null]) {
+          const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+          dispatch(env, {
+            type: 'user_question',
+            sessionId: 's1',
+            toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }],
+            historySeq: 12,
+            interrupted,
+          } as never)
+          expect(env.sessions.s1.messages[0].answered).toBeUndefined()
+        }
+      })
+
+      // Round 3 on #8360: an interrupted question is a correction, not a new
+      // question. It must not raise the "has a question" notification for a
+      // session the person is not looking at -- neither as the replayed in-place
+      // copy nor as the tail copy that collapses onto a card already held.
+      it('does not notify "question" for a replayed interrupted question (#8336)', () => {
+        const env = makeAdapter({ activeSessionId: 's2', sessions: { s1: { sessionId: 's1', messages: [] }, s2: { sessionId: 's2', messages: [] } } })
+        dispatch(env, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }], historySeq: 12, interrupted: true,
+        } as never)
+        expect(env.sessions.s1.messages[0].answered).toBe('(interrupted)')
+        expect(env.notifications).toEqual([])
+      })
+
+      it('does not notify "question" for an interrupted tail copy that collapses onto a held card (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({ activeSessionId: 's2', sessions: { s1: { sessionId: 's1', messages: [] }, s2: { sessionId: 's2', messages: [] } } })
+        // The card arrives LIVE (the person is told once), then the replay's tail
+        // copy delivers the verdict.
+        dispatch(env, { type: 'user_question', sessionId: 's1', toolUseId: 'ask-1', questions: [{ question: 'Which approach?' }] } as never)
+        expect(env.notifications).toHaveLength(1)
+        dispatch(env, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }], historySeq: 14, interrupted: true,
+        } as never)
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0].answered).toBe('(interrupted)')
+        expect(env.notifications).toHaveLength(1)
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      it('still notifies "question" for an ordinary question, interrupted: false included (#8336)', () => {
+        for (const interrupted of [undefined, false]) {
+          const env = makeAdapter({ activeSessionId: 's2', sessions: { s1: { sessionId: 's1', messages: [] }, s2: { sessionId: 's2', messages: [] } } })
+          dispatch(env, {
+            type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }], interrupted,
+          } as never)
+          expect(env.notifications).toEqual([{ sessionId: 's1', eventType: 'question', message: 'Which approach?' }])
+        }
+      })
+
+      // Codex round 1 on #8360: identity is the id AND the questions. A full
+      // replay is a rebuild of the whole history, so two DIFFERENT questions that
+      // share an id must both survive it (before #8336 both appended).
+      it('a full replay holding two different questions under one id keeps both (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+        dispatch(env, { type: 'user_question', sessionId: 's1', toolUseId: 'ask-1', questions: [{ question: 'First turn?' }], historySeq: 1 } as never)
+        dispatch(env, { type: 'user_question', sessionId: 's1', toolUseId: 'ask-1', questions: [{ question: 'Second turn?' }], historySeq: 4 } as never)
+        expect(env.sessions.s1.messages.map((m) => m.content)).toEqual(['First turn?', 'Second turn?'])
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      it('the same question delivered twice in one full replay still collapses (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+        for (const historySeq of [3, 9]) {
+          dispatch(env, {
+            type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+            questions: [{ question: 'Which approach?' }], historySeq, interrupted: true,
+          } as never)
+        }
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0].answered).toBe('(interrupted)')
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      // Codex round 1 on #8360 (nonblocking): `start -> live Q -> stale replay Q
+      // -> end`. The ledger (#7420) says the question arrived live inside this
+      // window; a replayed "interrupted" is older evidence and must not take its
+      // answer controls away.
+      it('a replayed interrupted copy does not mark a question the ledger saw arrive live (#8336)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+        reconcileReplayStart('s1', false, env.sessions.s1!.messages)
+        dispatch(env, { type: 'user_question', sessionId: 's1', toolUseId: 'ask-1', questions: [{ question: 'Which approach?' }] } as never)
+        dispatch(env, {
+          type: 'user_question', sessionId: 's1', toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }], historySeq: 7, interrupted: true,
+        } as never)
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0].answered).toBeUndefined()
+        resetReplayReconcile({ clearCursors: true })
       })
 
       // #7508 F2 — the supersede must never reach into the PRE-BASELINE PREFIX.

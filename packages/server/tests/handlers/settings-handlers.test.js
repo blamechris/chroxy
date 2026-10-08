@@ -738,6 +738,95 @@ describe('settings-handlers', () => {
       assert.equal(call[1]({ id: 'guest', boundSessionId: 's1' }), false)
     })
 
+    // #7976: a hook-routed prompt (claude-tui / claude-cli / claude-channel) is
+    // MAPPED to its session but has no PermissionManager, so the resolver
+    // dispatches it through the legacy store. The WS answer used to broadcast
+    // nothing for it (the `!result.sessionId` branch only covers unmapped
+    // prompts), leaving a stale card on every other client.
+    describe('#7976 mapped hook-routed prompt', () => {
+      function hookFixture() {
+        const hookSession = createMockSession()
+        // No respondToPermission: the session has no in-process PermissionManager.
+        delete hookSession.respondToPermission
+        const sessions = new Map([['s1', { session: hookSession, name: 'S', cwd: '/tmp' }]])
+        const ctx = makeCtx(sessions)
+        ctx.permissions.permissionSessionMap.set('req-hook', 's1')
+        ctx.permissions.pendingPermissions = new Map([['req-hook', { data: { tool: 'Bash' } }]])
+        ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+        return ctx
+      }
+      const resolvedFrames = (ctx) => ctx.transport.broadcast.calls
+        .filter((args) => args[0]?.type === 'permission_resolved')
+
+      it('broadcasts exactly one permission_resolved carrying the owning sessionId', () => {
+        const ctx = hookFixture()
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-hook', decision: 'allow' }, ctx)
+
+        assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1, 'dispatched through the legacy store')
+        const frames = resolvedFrames(ctx)
+        assert.equal(frames.length, 1, 'exactly one permission_resolved')
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', sessionId: 's1' })
+        // No client filter: the resolver (#6590) and every other client that was
+        // sent the request receive it. Session-bound clients are still scoped by
+        // the broadcaster's delivery check on the frame's sessionId (#8342).
+        assert.equal(frames[0][1], undefined)
+      })
+
+      it('carries the decision for a deny too', () => {
+        const ctx = hookFixture()
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-hook', decision: 'deny' }, ctx)
+
+        const frames = resolvedFrames(ctx)
+        assert.equal(frames.length, 1)
+        assert.equal(frames[0][0].decision, 'deny')
+        assert.equal(frames[0][0].sessionId, 's1')
+      })
+
+      it('does not broadcast when the request is not pending (expired path)', () => {
+        const ctx = hookFixture()
+        ctx.permissions.pendingPermissions.clear()
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-hook', decision: 'allow' }, ctx)
+
+        assert.equal(resolvedFrames(ctx).length, 0)
+      })
+
+      it('an in-process (SDK) answer adds NO inline broadcast — the unified pipeline owns it (#3048)', () => {
+        const sdkSession = createMockSession()
+        sdkSession._pendingPermissions = new Map([['req-hook', true]])
+        // Must report the request as resolved, or the resolver returns `expired`
+        // and this test would pass without ever reaching the broadcast decision.
+        sdkSession.respondToPermission = createSpy(() => true)
+        const ctx = makeCtx(new Map([['s1', { session: sdkSession, name: 'S', cwd: '/tmp' }]]))
+        ctx.permissions.permissionSessionMap.set('req-hook', 's1')
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-hook', decision: 'allow' }, ctx)
+
+        assert.equal(sdkSession.respondToPermission.callCount, 1)
+        assert.equal(resolvedFrames(ctx).length, 0, 'would be a duplicate of the pipeline broadcast')
+      })
+
+      it('an UNMAPPED legacy prompt answered by a client with an active session is not stamped with that session', () => {
+        // The resolver falls back to client.activeSessionId for dispatch only; the
+        // prompt never belonged to that session, so the frame must not claim it.
+        const ctx = makeCtx(new Map())
+        ctx.permissions.pendingPermissions = new Map([['req-unmapped', { data: {} }]])
+        ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's9' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-unmapped', decision: 'allow' }, ctx)
+
+        assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1)
+        assert.equal(resolvedFrames(ctx).length, 0)
+      })
+    })
+
     // Issue #2912: permission_response rejection for a bound-client must use
     // the same unified SESSION_TOKEN_MISMATCH payload (code + message +
     // boundSessionId + boundSessionName) as every other emit site. The only

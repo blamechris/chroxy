@@ -346,3 +346,60 @@ describe('useMessageRenderer — terminated singleton tool bubble (#7376)', () =
     expect(screen.getByTestId('tool-bubble-tu-1')).toBeInTheDocument()
   })
 })
+
+// #8264 — the production wire shape of an Approve-mode AskUserQuestion on
+// claude-tui: a permission_request message (description = tool input as JSON cut
+// mid-string, `toolInput` = the structured input) plus the user_question prompt,
+// with the #4685 gate on. The pending state must be ONE readable card.
+describe('useMessageRenderer — pending AskUserQuestion permission (#8264)', () => {
+  const INPUT = { questions: [{ question: 'Red or blue?', options: [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: 'cool' }] }] }
+  const perm = {
+    ...promptMsg('p1', 'AskUserQuestion: {"questions":[{"question":"Red or blue?","options":[{"label":"Red","descr', 'AskUserQuestion', 'req-aq'),
+    toolInput: INPUT,
+  } as ChatMessage
+  const question = {
+    id: 'q1',
+    type: 'prompt',
+    content: 'Red or blue?',
+    options: [{ label: 'Red', value: 'Red' }, { label: 'Blue', value: 'Blue' }],
+    questions: [{ question: 'Red or blue?', options: [{ label: 'Red', value: 'Red' }, { label: 'Blue', value: 'Blue' }] }],
+    timestamp: 0,
+  } as ChatMessage
+
+  function renderBoth() {
+    const args = makeArgs({
+      storeMsgMap: new Map([['p1', perm], ['q1', question]]),
+      storeMessages: [perm, question],
+      hasPendingAskUserQuestionPermission: true,
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    const permNode = result.current({ id: 'p1', type: 'prompt', content: perm.content, timestamp: 0 } as unknown as ChatViewMessage)
+    const questionNode = result.current({ id: 'q1', type: 'prompt', content: question.content, timestamp: 0 } as unknown as ChatViewMessage)
+    return render(<div data-testid="chat">{permNode}{questionNode}</div>)
+  }
+
+  it('shows one permission card that reads as a question, with no JSON and no pending stub', () => {
+    renderBoth()
+    const chat = screen.getByTestId('chat')
+    expect(screen.getByTestId('perm-ask-headline')).toHaveTextContent('Claude wants to ask you a question')
+    // The question is on screen exactly once (the card); the gated question card adds nothing.
+    expect(screen.getAllByText('Red or blue?')).toHaveLength(1)
+    expect(screen.getAllByText('Red')).toHaveLength(1)
+    expect(chat.textContent?.includes('{"questions"')).toBe(false)
+    expect(screen.queryByTestId('question-prompt-pending-permission')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Pending permission to view question/i)).not.toBeInTheDocument()
+    expect(screen.getAllByTestId('permission-prompt')).toHaveLength(1)
+  })
+
+  it('reveals the interactive question card once the permission is no longer pending', () => {
+    const args = makeArgs({
+      storeMsgMap: new Map([['q1', question]]),
+      storeMessages: [question],
+      hasPendingAskUserQuestionPermission: false,
+    })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    render(<>{result.current({ id: 'q1', type: 'prompt', content: question.content, timestamp: 0 } as unknown as ChatViewMessage)}</>)
+    expect(screen.getByText('Red or blue?')).toBeInTheDocument()
+    expect(screen.getByText('Red')).toBeInTheDocument()
+  })
+})

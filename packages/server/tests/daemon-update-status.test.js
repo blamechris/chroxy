@@ -27,7 +27,17 @@ const iso = (ms) => new Date(ms).toISOString()
 
 const dirs = []
 const mkDir = () => { const d = mkdtempSync(join(tmpdir(), 'chroxy-update-status-')); dirs.push(d); return d }
-afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }) })
+
+// Every instance a test starts is closed in teardown, including when an assertion
+// throws before the test reaches its own close(). An open watcher or poll interval
+// is what keeps `node --test` alive after the summary (#8366).
+const live = []
+const track = (u) => { live.push(u); return u }
+const watcher = (o) => track(new DaemonUpdateStatus(o))
+afterEach(() => {
+  for (const u of live.splice(0)) u.close()
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
+})
 
 const put = (dir, file, value) => writeFileSync(join(dir, file), typeof value === 'string' ? value : JSON.stringify(value))
 const get = (dir, file) => (existsSync(join(dir, file)) ? JSON.parse(readFileSync(join(dir, file), 'utf8')) : null)
@@ -41,7 +51,7 @@ const BUSY = () => ({
 })
 
 function mk(dir, o = {}) {
-  return new DaemonUpdateStatus({ dir, running: A, now: () => NOW, getIdleState: IDLE, ...o })
+  return track(new DaemonUpdateStatus({ dir, running: A, now: () => NOW, getIdleState: IDLE, ...o }))
 }
 
 describe('file names and TTL match the deploy script (drift guard)', () => {
@@ -231,7 +241,7 @@ describe('the watcher', () => {
 
   it('emits ONE change when a file appears, none when nothing changed, and stops after close()', async () => {
     const dir = mkDir()
-    const u = new DaemonUpdateStatus({ dir, running: A, debounceMs: 10, pollMs: 20, getIdleState: IDLE })
+    const u = watcher({ dir, running: A, debounceMs: 10, pollMs: 20, getIdleState: IDLE })
     const seen = []
     u.on('change', (s) => seen.push(s))
     u.start()
@@ -251,7 +261,7 @@ describe('the watcher', () => {
 
   it('the poll delivers a change even when fs.watch never fires', async () => {
     const dir = mkDir()
-    const u = new DaemonUpdateStatus({ dir, running: A, debounceMs: 10, pollMs: 25, watch: () => ({ close() {}, on() {} }), getIdleState: IDLE })
+    const u = watcher({ dir, running: A, debounceMs: 10, pollMs: 25, watch: () => ({ close() {}, on() {} }), getIdleState: IDLE })
     const seen = []
     u.on('change', (s) => seen.push(s))
     u.start()
@@ -263,7 +273,7 @@ describe('the watcher', () => {
 
   it('a watch that cannot be created falls back to the poll without throwing', async () => {
     const dir = mkDir()
-    const u = new DaemonUpdateStatus({ dir, running: A, pollMs: 25, watch: () => { throw new Error('ENOENT') }, getIdleState: IDLE })
+    const u = watcher({ dir, running: A, pollMs: 25, watch: () => { throw new Error('ENOENT') }, getIdleState: IDLE })
     const seen = []
     u.on('change', (s) => seen.push(s))
     u.start()
@@ -276,7 +286,7 @@ describe('the watcher', () => {
   it('events for unrelated files do not trigger a read; the four names do', async () => {
     const dir = mkDir()
     let cb
-    const u = new DaemonUpdateStatus({ dir, running: A, debounceMs: 5, pollMs: 60_000, watch: (_d, _o, fn) => { cb = fn; return { close() {}, on() {} } }, getIdleState: IDLE })
+    const u = watcher({ dir, running: A, debounceMs: 5, pollMs: 60_000, watch: (_d, _o, fn) => { cb = fn; return { close() {}, on() {} } }, getIdleState: IDLE })
     const seen = []
     u.on('change', (s) => seen.push(s))
     u.start()
@@ -293,13 +303,31 @@ describe('the watcher', () => {
   it('close() is idempotent and leaves no timers or watchers behind', () => {
     const dir = mkDir()
     let closed = 0
-    const u = new DaemonUpdateStatus({ dir, running: A, watch: () => ({ close() { closed++ }, on() {} }), getIdleState: IDLE })
+    const u = watcher({ dir, running: A, watch: () => ({ close() { closed++ }, on() {} }), getIdleState: IDLE })
     u.start()
     u.close()
     u.close()
     assert.equal(closed, 1)
     u.start()
     assert.equal(u._pollTimer, null, 'a closed instance does not restart')
+  })
+
+  it('close() stops the poll, the pending debounce and the watcher: no tick fires after it (#8366)', async () => {
+    const dir = mkDir()
+    let fire
+    let closed = 0
+    const u = watcher({ dir, running: A, debounceMs: 5, pollMs: 5, watch: (_d, _o, fn) => { fire = fn; return { close() { closed++ }, on() {} } }, getIdleState: IDLE })
+    u.start()
+    // Every poll tick and every debounced read goes through _check() by name, so counting its calls
+    // observes the timers themselves. A leaked interval or timer keeps calling it after close().
+    let ticks = 0
+    u._check = () => { ticks++ }
+    fire('rename', PENDING_FILE) // arms the debounce
+    u.close()
+    ticks = 0
+    await settle(60)
+    assert.equal(ticks, 0, 'no poll or debounce tick after close()')
+    assert.equal(closed, 1, 'the watcher is closed exactly once')
   })
 
   it('an action emits the new status immediately (no wait for the debounce)', () => {

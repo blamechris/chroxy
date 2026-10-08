@@ -4261,6 +4261,43 @@ button.sidebar-token-view-session-row:hover {
   margin-bottom: 8px;
 }
 
+/* #8264: AskUserQuestion permission card body — the question and its options
+ * as text, in place of the tool input printed as JSON. Text wraps (never clips);
+ * the list is bounded and scrolls so a large payload cannot push Allow/Deny
+ * below the fold. */
+.perm-ask-headline {
+  font-weight: 600;
+  color: var(--accent-purple);
+}
+
+.perm-ask-questions {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.perm-ask-question + .perm-ask-question {
+  margin-top: 10px;
+}
+
+.perm-ask-question-text {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.perm-ask-options {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  list-style: disc;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.perm-ask-option {
+  overflow-wrap: anywhere;
+}
+
 /* #7939: MCP spawn-trust "Configured from" line. */
 .perm-mcp-source {
   font-size: var(--text-sm);
@@ -4623,24 +4660,6 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-muted);
 }
 
-/* #4685: pending-permission placeholder shown when an AskUserQuestion
-   permission_request is still unresolved on this session. The full
-   question payload (text, options, multi-question form, deferred notice,
-   free-text input) is suppressed until the user clicks Allow on the
-   matching permission prompt — pre-fix the content rendered the moment
-   the wire `user_question` event arrived, leaking model-supplied text
-   before consent. Mirrors the deferred-notice variant's muted tone so
-   the gap reads as "waiting" rather than "broken". */
-.question-prompt--pending-permission {
-  color: var(--text-muted);
-  font-style: italic;
-}
-
-.question-prompt--pending-permission .question-text {
-  margin-bottom: 0;
-  color: var(--text-muted);
-}
-
 /* #4634: multi-question AskUserQuestion form (#4604 Chunk B / #4620).
    The component renders these class names but they previously had no
    CSS rules — Submit fell back to the native browser button (gray-on-
@@ -4845,6 +4864,24 @@ button.sidebar-token-view-session-row:hover {
 .question-answered-chevron {
   color: var(--text-muted);
   font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* #8336 — a question cut off by a daemon restart: not answered, so no green
+   check; the same muted-italic row as .question-answered with a warning mark. */
+.question-interrupted {
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.question-interrupted-marker {
+  color: var(--accent-orange);
+  font-weight: 600;
   flex-shrink: 0;
 }
 
@@ -5331,6 +5368,13 @@ button.sidebar-token-view-session-row:hover {
 }
 
 /* Notification banners — cross-session alerts */
+/* #7466 — wraps the stack so it can keep the stack's height for a moment after
+   a banner retires (see NotificationBanners). Same flex behaviour as the stack
+   it wraps: never shrinks, so the reserved floor is honoured. */
+.notification-banners-slot {
+  flex-shrink: 0;
+}
+
 .notification-banners {
   display: flex;
   flex-direction: column;

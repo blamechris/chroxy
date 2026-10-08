@@ -31,6 +31,39 @@ if [ -z "$CHROXY_PORT" ]; then
   exit 0
 fi
 
+# #8263: inside a chroxy-managed claude-tui child, only the copy THIS session's
+# own --settings file registers may decide. That copy is invoked with
+# `--session-settings` (SESSION_SETTINGS_HOOK_MARKER in claude-tui/pty-driver.js,
+# written by writeHookSettings). The child also loads the user-level
+# ~/.claude/settings.json, and a chroxy hook entry orphaned there by a claude-cli
+# session that exited uncleanly (#3714) would run this same script a second time
+# per tool call: two permission prompts, and the duplicate wins the
+# AskUserQuestion sibling lock so the user's answer is refused. An UNMARKED
+# invocation in a TUI child therefore exits here, silently: exit 0 with no
+# output is "no decision" to Claude Code, which leaves the marked copy's
+# allow/deny in force. No request is made to /permission or /permission-floor.
+#
+# This cannot weaken the floor: the marked copy runs the whole script below
+# unchanged (floor probe included). Everything OUTSIDE a TUI child — claude-cli,
+# whose legitimate registration IS the user-level file and whose env never sets
+# CHROXY_TUI_CHILD, and plain Claude Code — is untouched. The failure direction
+# is the old behavior: if CHROXY_TUI_CHILD is missing (a child spawned by an
+# older daemon) the guard does not fire and both copies run as before.
+#
+# The only thing compared here is a fixed token against the script's own
+# arguments; tool parameters still arrive only via stdin (see SECURITY below).
+if [ "$CHROXY_TUI_CHILD" = "1" ]; then
+  SESSION_SETTINGS_COPY=0
+  for hook_arg in "$@"; do
+    if [ "$hook_arg" = "--session-settings" ]; then
+      SESSION_SETTINGS_COPY=1
+    fi
+  done
+  if [ "$SESSION_SETTINGS_COPY" != "1" ]; then
+    exit 0
+  fi
+fi
+
 PORT="$CHROXY_PORT"
 TOKEN="$CHROXY_HOOK_SECRET"
 # Where the daemon's HTTP endpoints live, from this process's point of view.

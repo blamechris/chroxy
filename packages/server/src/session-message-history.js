@@ -160,23 +160,61 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
+   * #8336 — the highest seq this session has handed out (0 when none). It is
+   * what a state file records so the NEXT run can keep numbering past it; the
+   * newest retained entry carries it, but the counter is the authority because
+   * it survives a front-trim of the whole buffer.
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  getLastIssuedSeq(sessionId) {
+    return (this._seqCounters.get(sessionId) || 1) - 1
+  }
+
+  /**
    * Set pre-existing history for a session (used during state restore).
+   *
+   * #8336 -- SEQUENCE CONTINUITY. Entries are stamped `firstSeq, firstSeq + 1, ...`
+   * and the counter is left just past the last one. The caller passes the first
+   * seq so that the entries the previous run persisted keep (roughly) the
+   * numbers that run served them under: a reconnecting client's cursor
+   * (`lastSeq`) then still means what it meant, and every entry added after the
+   * restore (a tail correction, the next turn) is numbered PAST every cursor the
+   * previous run issued. Restarting from 1 broke that: with the ring buffer
+   * already full, the restore's own additions plus the post-restart traffic could
+   * climb through the old cursor's value, and `resolveReplayPlan` then honoured a
+   * cursor that no longer pointed at what the client had seen.
+   *
+   * Without `firstSeq` (a state file from before this field, or a malformed one)
+   * numbering starts at 1: the pre-#8336 behaviour, where a cursor from the prior
+   * run is honoured only by accident and falls back to a full replay otherwise.
+   *
+   * The history is also trimmed to the ring-buffer cap, oldest first. A restore
+   * can add entries (synthetic tool results, a marked question copy) to a buffer
+   * that was already full, and `_pushHistory` only ever evicts one entry per push,
+   * so without this the buffer grew by the restore's additions on EVERY restart.
+   * The trimmed front is what falls off, so a cursor older than the new oldest
+   * entry takes the "trimmed past" full-replay fallback, as designed.
+   *
    * @param {string} sessionId
    * @param {Array} history
+   * @param {object} [opts]
+   * @param {number} [opts.firstSeq] - seq to give the first entry (integer >= 1)
    */
-  setHistory(sessionId, history) {
-    // #5555.3 — restored entries predate the seq scheme (it is server-internal
-    // and not persisted), so stamp them with a fresh 1..N sequence and advance
-    // the counter past the end. A reconnecting client's cursor from a PRIOR
-    // server process can't be honoured across a restart (seqs reset to 1), so
-    // it will simply fall through to a full replay — the safe default.
+  setHistory(sessionId, history, { firstSeq } = {}) {
     if (Array.isArray(history)) {
-      let seq = 1
+      const start = Number.isSafeInteger(firstSeq) && firstSeq >= 1 ? firstSeq : 1
+      let seq = start
       for (const entry of history) {
         if (entry && typeof entry === 'object') entry._seq = seq
         seq++
       }
       this._seqCounters.set(sessionId, seq)
+      const excess = history.length - this._maxHistory
+      if (excess > 0) {
+        history = history.slice(excess)
+        this._historyTruncated.set(sessionId, true)
+      }
     }
     this._messageHistory.set(sessionId, history)
   }
@@ -196,6 +234,14 @@ export class SessionMessageHistory extends EventEmitter {
    * downstream consumers that sort by timestamp stay monotonic without
    * pretending the tool completed "now".
    *
+   * #8336: a `user_question` entry for one of the swept `tool_start`s (matched
+   * on its `sourceToolUseId` when it has one, else its `toolUseId`) is returned
+   * as a COPY carrying `interrupted: true` (the question was cut off, not
+   * answered), so a replaying client can say so instead of stamping it
+   * "(resolved)". A second marked copy is appended at the END of the history so
+   * that a delta replay for a client whose cursor is already past the question
+   * still delivers the mark. Other entries are passed through.
+   *
    * Safe to call on:
    *   - empty / non-array input (returns the input unchanged)
    *   - history with no tool_start entries (returns a shallow copy)
@@ -213,7 +259,38 @@ export class SessionMessageHistory extends EventEmitter {
       }
     }
     const out = []
+    // #8336: the toolUseIds this sweep cuts off. A `user_question` entry for
+    // one of them was never answered (an answer would have produced the
+    // tool_result), so it is marked `interrupted` below rather than left
+    // looking like every other replayed question, which the client's
+    // history_replay_end sweep stamps "(resolved)".
+    const interruptedIds = new Set()
     for (const entry of history) {
+      if (
+        entry
+        && entry.type === 'tool_start'
+        && typeof entry.toolUseId === 'string'
+        && !resolved.has(entry.toolUseId)
+      ) {
+        interruptedIds.add(entry.toolUseId)
+      }
+    }
+    // #8336: the marked copies to re-append at the tail, see below.
+    const redelivered = []
+    for (const rawEntry of history) {
+      // `user_question` is copied, never mutated: the input array is the
+      // caller's, and the contract above says it is not modified. The set was
+      // collected up front, so the question is marked whichever side of its
+      // tool_start it was recorded on. A question names its tool by
+      // `sourceToolUseId` when it has one (SDK, BYOK: `toolUseId` is chroxy's
+      // own `ask-...` id there), else by `toolUseId` itself (CLI, TUI).
+      const questionToolId = rawEntry && rawEntry.type === 'user_question'
+        ? (typeof rawEntry.sourceToolUseId === 'string' ? rawEntry.sourceToolUseId : rawEntry.toolUseId)
+        : undefined
+      const entry = (typeof questionToolId === 'string' && interruptedIds.has(questionToolId))
+        ? { ...rawEntry, interrupted: true }
+        : rawEntry
+      if (entry !== rawEntry) redelivered.push({ ...entry })
       out.push(entry)
       if (
         entry
@@ -252,6 +329,23 @@ export class SessionMessageHistory extends EventEmitter {
         resolved.add(entry.toolUseId)
       }
     }
+    // #8336: the marked question is ALSO appended as a fresh entry at the tail.
+    // Marking it in place changes an entry a client may already be past: a
+    // reconnecting client's cursor is honoured when it falls inside the restored
+    // range, and the delta replay then sends only what lies past it. A client
+    // whose cursor sits beyond the question's position would never hear that it
+    // was cut off, and its replay-end sweep would stamp the card "(resolved)".
+    // A tail entry is numbered past every cursor the previous run could have
+    // issued -- `setHistory` continues the previous run's numbering rather than
+    // restarting at 1, and the tail is beyond its last entry by construction --
+    // so it always arrives. The client collapses it onto the card it holds (same
+    // `toolUseId`, same questions), so nobody sees two; a client rebuilding from
+    // scratch gets the question in place from the marked entry above and the copy
+    // merges onto it. If the ring-buffer cap later evicts the in-place original
+    // first (oldest-first), the copy is what remains: a full replay then shows the
+    // question after newer messages rather than where it was asked, which is the
+    // price of never losing the verdict.
+    for (const copy of redelivered) out.push(copy)
     return out
   }
 
@@ -442,6 +536,13 @@ export class SessionMessageHistory extends EventEmitter {
           type: 'user_question',
           toolUseId: data.toolUseId,
           questions: data.questions,
+          // #8336: the provider's id for the AskUserQuestion tool call, when it
+          // differs from `toolUseId` (the SDK and BYOK route the answer on a
+          // chroxy-minted `ask-...` id). It is how the restore-time sweep finds
+          // the `tool_start` this question belongs to.
+          ...(typeof data.sourceToolUseId === 'string' && data.sourceToolUseId.length > 0
+            ? { sourceToolUseId: data.sourceToolUseId }
+            : {}),
           timestamp: Date.now(),
         }, sessionId)
         break

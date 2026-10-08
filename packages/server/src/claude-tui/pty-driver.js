@@ -17,6 +17,7 @@ import { fileURLToPath } from 'url'
 // others still import CLAUDE_BINARY_CANDIDATES/resolveClaudeBinary from here.
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from '../utils/claude-binary.js'
 import { createLogger } from '../logger.js'
+import { shellQuotePath } from '../utils/verify-binary.js'
 import { CLAUDE_LOGIN_COMMAND } from '../utils/claude-login-command.js'
 // #7002/#7046 — the ONE writer for `~/.claude.json`. Deliberately shared with the
 // BYOK MCP add/remove path rather than re-implemented here: a second hand-rolled
@@ -39,6 +40,33 @@ const log = createLogger('claude-tui-session')
 // packages/server/hooks/permission-hook.sh.
 const PERMISSION_HOOK_SCRIPT = resolve(__dirname, '..', '..', 'hooks', 'permission-hook.sh')
 const NATIVE_ROUTE_CHECK_SCRIPT = resolve(__dirname, '..', '..', 'hooks', 'claude-native-route-check.mjs')
+
+// #8263: the argument that marks a permission-hook.sh invocation as the one THIS
+// session's own `--settings` file registered. A claude-tui child loads the
+// user-level ~/.claude/settings.json AND the per-session --settings file, so a
+// chroxy hook entry left in the user-level file (an orphan from a claude-cli
+// session that exited uncleanly, #3714) fires the same script a second time per
+// tool call: two permission prompts, and the duplicate loses the
+// AskUserQuestion sibling lock so the user's answer never reaches claude. The
+// script, running inside a TUI child (CHROXY_TUI_CHILD=1, set by
+// ClaudeTuiSession._buildPtyEnv) WITHOUT this argument, exits without a
+// decision. The marker string is duplicated in hooks/permission-hook.sh; the
+// test in tests/permission-hook-tui-user-level.test.js executes the command
+// written below against the real script so the two cannot drift apart.
+export const SESSION_SETTINGS_HOOK_MARKER = '--session-settings'
+
+// Claude Code runs a hook's `command` string through a shell. An install path
+// holding a space (or any shell metacharacter) therefore split into several words
+// and the hook died with exit 127 — which Claude treats as a NON-blocking error,
+// so the per-session permission copy (the only one left running inside a TUI
+// child once the user-level copy is inert) silently skipped the floor probe and
+// the /permission request. Quote the script path as one POSIX word. The marker
+// stays a separate, unquoted word: the script compares "$@" entries by exact
+// equality. shellQuotePath leaves a plain path unquoted, so the common case
+// (and every existing entry) is byte-for-byte what it was.
+export function sessionPermissionHookCommand(scriptPath = PERMISSION_HOOK_SCRIPT) {
+  return `${shellQuotePath(scriptPath)} ${SESSION_SETTINGS_HOOK_MARKER}`
+}
 
 export function buildNativeRouteCheckHook({ nodePath, scriptPath, markerPath, nonce }) {
   // Claude Code's command-hook exec form passes each `args` entry verbatim,
@@ -304,7 +332,7 @@ export function ensureCwdTrusted(cwd) {
 // Legacy sessions write this once at start. Explicit native connections rewrite
 // it before every spawn/respawn so the SessionStart route marker carries a fresh
 // nonce. The file remains stable across turns within one PTY process.
-export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonce = null }) {
+export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonce = null, permissionHookScript = PERMISSION_HOOK_SCRIPT }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
   // Portable unique-id source for hook filenames — see the UUID note above.
@@ -320,7 +348,9 @@ export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonc
   if (permissionsEnabled) {
     preToolUseHooks.push({
       type: 'command',
-      command: PERMISSION_HOOK_SCRIPT,
+      // #8263: the marker makes this copy — and only this copy — live inside a
+      // chroxy-managed TUI child (see SESSION_SETTINGS_HOOK_MARKER).
+      command: sessionPermissionHookCommand(permissionHookScript),
       timeout: 300,
     })
   }

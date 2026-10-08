@@ -36,6 +36,7 @@ import type { PermissionDecision } from '../store/types'
 import { isMacPlatform } from '../utils/platform'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
 import { PermissionCommandEdit, isEditableCommandTool } from './PermissionCommandEdit'
+import { ASK_USER_QUESTION_TOOL, AskUserQuestionPermissionBody, askUserQuestionSummary } from './AskUserQuestionPermissionBody'
 
 // #7939: which of the three MCP config scopes a spawn-trust server came from
 // (mirrors MCP_SERVER_SOURCE in packages/server/src/byok-mcp-config.js and
@@ -296,7 +297,11 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // It keeps the `perm-desc-<id>` anchor so the end-of-turn expired summary's
   // "Jump to prompt" link still lands on it.
   if (showsDroppedRecord) {
-    const droppedDescription = stripExpiredNote(description) || 'Permission requested'
+    // #8264: an AskUserQuestion's `description` is its tool input as truncated
+    // JSON; the dropped record names the question instead.
+    const droppedDescription = tool === ASK_USER_QUESTION_TOOL
+      ? askUserQuestionSummary(toolInput)
+      : stripExpiredNote(description) || 'Permission requested'
     return (
       <div
         className="permission-prompt permission-prompt-dropped"
@@ -338,7 +343,12 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
           would land, never the focus. `-1` keeps it out of normal Tab
           order (it's not a control), reachable only via `.focus()`. */}
       <div className="perm-desc" id={`perm-desc-${requestId}`} tabIndex={-1}>
-        <span className="perm-tool">{tool}</span>: {description || 'Permission requested'}
+        {tool === ASK_USER_QUESTION_TOOL ? (
+          // #8264: the question itself, readable — never the tool input as JSON.
+          <AskUserQuestionPermissionBody toolInput={toolInput} />
+        ) : (
+          <><span className="perm-tool">{tool}</span>: {description || 'Permission requested'}</>
+        )}
       </div>
 
       {/* #7939: MCP spawn-trust prompts name which config scope the server

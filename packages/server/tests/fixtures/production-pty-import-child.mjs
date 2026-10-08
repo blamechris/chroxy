@@ -34,7 +34,13 @@ if (target !== 'claude-tui' && target !== 'user-shell') {
 async function main() {
   if (target === 'claude-tui') {
     const { ClaudeTuiSession } = await import('../../src/claude-tui-session.js')
+    const { pinTmpDaemonBase } = await import('../helpers/pin-tmp-daemon-base.js')
     const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-skills-prodimport-'))
+    // #8352: the real start() mkdirs a session dir under SINK_BASE. Un-pinned
+    // that is the LIVE daemon's `<tmpdir>/chroxy-claude-tui` (and this child's
+    // own sandbox, which loads `_setup.mjs` first, refuses it with
+    // CHROXY_TEST_SANDBOX). Pin it to a throwaway base for this process.
+    const unpinSinkBase = pinTmpDaemonBase(ClaudeTuiSession, 'SINK_BASE')
     try {
       // #8223: this child is a REAL process outside the parent's real-binary
       // tripwire, and `_spawnPty` now runs the pre-spawn `claude auth status`
@@ -59,6 +65,7 @@ async function main() {
         console.log(JSON.stringify({ code: err.code, message: err.message }))
       }
     } finally {
+      unpinSinkBase()
       rmSync(skillsDir, { recursive: true, force: true })
     }
     return

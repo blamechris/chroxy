@@ -2638,6 +2638,14 @@ export class ClaudeTuiSession extends BaseSession {
     if (permissionsEnabled) {
       env.CHROXY_PORT = String(this._port)
       env.CHROXY_HOOK_SECRET = this._hookSecret
+      // #8263: tells permission-hook.sh it is running inside a chroxy-managed
+      // claude-tui child, where only the copy this session's own --settings
+      // file registers (it carries SESSION_SETTINGS_HOOK_MARKER) may decide.
+      // A user-level orphan copy sees this and stays inert instead of
+      // doubling every prompt. Set ONLY here: claude-cli children (whose
+      // legitimate registration IS the user-level file) never get it, and
+      // CHROXY_INHERITED_SESSION_ENV strips an ambient one from every builder.
+      env.CHROXY_TUI_CHILD = '1'
       env.CHROXY_PERMISSION_MODE = this.permissionMode || 'approve'
       // #4013: hook reads sidecar first (per-tool-call, picks up
       // mid-session changes from setPermissionMode), falls back to the

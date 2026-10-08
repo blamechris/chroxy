@@ -35,6 +35,8 @@ import { useId, useState, useRef, useEffect } from 'react'
 // call sites that import it from this file.
 import {
   OTHER_OPTION_VALUE,
+  // #8336 — the `answered` value of a question the daemon cut off.
+  QUESTION_INTERRUPTED_PLACEHOLDER,
   // #5800 — the multi-question form state machine now lives in store-core.
   buildAnswersMap,
   computeCanSubmit,
@@ -85,9 +87,9 @@ export interface QuestionPromptProps {
    * #4685 — when true, an `AskUserQuestion` permission_request for the
    * owning session is still unresolved (the user has NOT clicked Allow
    * yet). Gate ALL question content (text, options, multi-question form,
-   * deferred notice, free-text input) behind this flag and render only a
-   * neutral "Pending permission to view question…" placeholder until
-   * permission is granted. Without this gate the dashboard surfaces the
+   * deferred notice, free-text input) behind this flag and render nothing
+   * until permission is granted (#8264: the permission card itself is the
+   * pending-state surface). Without this gate the dashboard surfaces the
    * full question payload before the user has consented to see it —
    * defeating the purpose of the permission prompt. The flag flips back
    * to false once `resolvedPermissions[requestId]` is set OR the matching
@@ -143,25 +145,23 @@ export interface QuestionPromptProps {
 }
 
 export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, allowSingleMultiSelect, pendingPermission, onSelect }: QuestionPromptProps) {
-  // #4685 — gate ALL question content (text, options, multi-question
-  // form, deferred notice, free-text input) behind the
-  // `pendingPermission` flag. Render only a neutral placeholder until
-  // the user has clicked Allow on the AskUserQuestion permission prompt.
-  // Without this gate the dashboard surfaces the full question payload
-  // (and the model-supplied options, which can be social-engineering
-  // text) before the user has consented to see it — defeating the
-  // purpose of the permission prompt.
-  if (pendingPermission) {
-    return (
-      <div
-        className="question-prompt question-prompt--pending-permission"
-        data-testid="question-prompt-pending-permission"
-        role="status"
-      >
-        <div className="question-text">Pending permission to view question…</div>
-      </div>
-    )
-  }
+  // #4685 — gate ALL interactive question content (text, options, multi-question
+  // form, deferred notice, free-text input) behind the `pendingPermission`
+  // flag: nothing of the question can be answered until the user has clicked
+  // Allow on the AskUserQuestion permission prompt. The permission card itself
+  // shows the question and its options as read-only text so the user knows what
+  // they are consenting to (#8264); this component adds no question content of
+  // its own while pending.
+  //
+  // #8264 — the gate renders NOTHING (it used to render a grey "Pending
+  // permission to view question…" stub). The permission card is the single
+  // surface for the pending state: it now says "Claude wants to ask you a
+  // question" and shows the question as readable text, so a second element
+  // beside it only repeated that the card exists (and, beside the old raw-JSON
+  // card, read as a second unreadable thing). Returning null keeps the #4685
+  // guarantee — this component still emits no question content — without
+  // doubling up the pending state.
+  if (pendingPermission) return null
 
   const isMultiQuestion = Array.isArray(questions) && questions.length > 1
 
@@ -437,6 +437,25 @@ function SingleQuestionPrompt({ question, options, answered, onSelect }: SingleQ
   const showOptions =
     options.length > 0 && !isFreeTextAnswered &&
     (answered != null || !otherActive)
+
+  // #8336: a question the daemon was cut off before anyone answered (its tool
+  // was in flight at shutdown). It is NOT answered, so it gets no "✓" and none
+  // of the answered-summary chrome — just the question and an honest notice,
+  // matching the tool row above it ("in flight when chroxy was last shut
+  // down"). Placed after every hook above, so the hook order is unchanged.
+  if (answered === QUESTION_INTERRUPTED_PLACEHOLDER) {
+    return (
+      <div className="question-prompt question-prompt--interrupted" data-testid="question-prompt">
+        <div className="question-text">{question}</div>
+        <div className="question-interrupted" data-testid="question-interrupted" role="status">
+          <span className="question-interrupted-marker" aria-hidden="true">⚠</span>
+          <span className="question-interrupted-label">
+            Interrupted — chroxy restarted before this was answered
+          </span>
+        </div>
+      </div>
+    )
+  }
 
   // #4312: once answered, default to a collapsed one-line summary. The
   // disabled-button list still renders behind a chevron toggle for users

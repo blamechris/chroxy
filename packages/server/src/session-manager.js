@@ -2916,6 +2916,12 @@ export class SessionManager extends EventEmitter {
         agentCommId: entry.agentCommId || null,
         lastActivityAt: this._sessionLastActivityAt.get(id) || entry.createdAt,
         history,
+        // #8336: the highest history seq this run handed out. The ring buffer's
+        // `_seq` stamps are server-internal and stripped from `history` above,
+        // but a reconnecting client keeps its cursor across a restart; restore
+        // keeps numbering past this value so that cursor still means what it did
+        // (see SessionMessageHistory#setHistory). Absent on older state files.
+        historyLastSeq: this._history.getLastIssuedSeq(id),
         // #4664: persist per-session toggle/string settings via the
         // shared registry — each entry's coerce produces the same
         // strict-boolean/string-default shape the pre-refactor per-knob
@@ -3297,7 +3303,15 @@ export class SessionManager extends EventEmitter {
       // cleared — the footer shows "Running X · Nh Mm" forever.
       if (seedHistory && Array.isArray(saved.history) && saved.history.length > 0) {
         const swept = SessionMessageHistory.sweepUnresolvedToolStarts(saved.history)
-        this._history.setHistory(sessionId, swept)
+        // #8336: carry the previous run's numbering across the restart. The
+        // persisted entries were contiguous and ended at `historyLastSeq`, so the
+        // first one had `historyLastSeq - length + 1`; a state file without the
+        // field (or one that contradicts itself) restarts at 1, as before.
+        const lastSeq = saved.historyLastSeq
+        const firstSeq = Number.isSafeInteger(lastSeq) && lastSeq >= saved.history.length
+          ? lastSeq - saved.history.length + 1
+          : undefined
+        this._history.setHistory(sessionId, swept, { firstSeq })
       }
       if (typeof saved.lastActivityAt === 'number' && Number.isFinite(saved.lastActivityAt) && saved.lastActivityAt > 0) {
         this._sessionLastActivityAt.set(sessionId, saved.lastActivityAt)
