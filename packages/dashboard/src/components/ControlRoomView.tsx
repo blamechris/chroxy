@@ -392,8 +392,16 @@ function isStale(generatedAt: string | undefined): boolean {
  * (recomputing the aggregate) whenever activity or the session list changes, so
  * the rollups stay live. The pure `CrossSessionMissionControl` holds all the
  * rendering/grouping logic and is tested in isolation.
+ *
+ * #7538 — jump-to-intervene goes through `onSwitchSession` (App's
+ * `handleSwitchSession`), not the raw store action: this tab renders INSIDE the
+ * Control Room, which owns the whole main area, so a bare `switchSession` changes
+ * the active session underneath and leaves the operator looking at the tab they
+ * just clicked in. The App handler is the one that also leaves the Control Room
+ * and latches the switching skeleton. The store action is only the fallback for a
+ * caller that mounts the view without App (tests, storybook-style hosts).
  */
-function MissionControlTab() {
+function MissionControlTab({ onSwitchSession }: { onSwitchSession?: (sessionId: string) => void } = {}) {
   const activity = useConnectionStore((s) => s.activity)
   const sessions = useConnectionStore((s) => s.sessions)
   // #5969 — external (/api/events) sessions are a pull survey, not live store
@@ -424,7 +432,7 @@ function MissionControlTab() {
       external={external}
       onCancelActivity={(activityId, sessionId) => sendCancelActivity(activityId, sessionId)}
       cancellingActivityIds={cancellingActivityIds}
-      onJumpToSession={(sessionId) => switchSession(sessionId)}
+      onJumpToSession={(sessionId) => { (onSwitchSession ?? switchSession)(sessionId) }}
     />
   )
 }
@@ -436,6 +444,14 @@ export interface ControlRoomViewProps {
   onOpenSession?: (req: RepoOpenSessionRequest) => void
   /** Forwarded to the repo table's per-row gear action — opens the preset drawer (#5553). */
   onConfigureRepo?: (req: { path: string; name: string }) => void
+  /**
+   * #7538 — App's `handleSwitchSession`, for every Control Room control that jumps
+   * to a session (an orchestration node's "Open session", mission-control's
+   * jump-to-intervene). The Control Room is local App state the store cannot see,
+   * so only this handler can close it on a successful jump; the raw store action
+   * is the fallback for hosts that mount the view without App.
+   */
+  onSwitchSession?: (sessionId: string) => void
   /** Optional initial tab override (defaults to the persisted tab). For tests. */
   initialTab?: ControlRoomTab
   /**
@@ -466,6 +482,7 @@ export function ControlRoomView({
   onInvestigate,
   onOpenSession,
   onConfigureRepo,
+  onSwitchSession,
   initialTab,
   forceTab,
   forceTabNonce,
@@ -806,11 +823,11 @@ export function ControlRoomView({
       ) : tab === 'repo-events' ? (
         <RepoEventsSection />
       ) : tab === 'runs' ? (
-        <OrchestrationRunsSection />
+        <OrchestrationRunsSection onSwitchSession={onSwitchSession} />
       ) : tab === 'scheduled-tasks' ? (
         <ScheduledTasksSection />
       ) : tab === 'mission-control' ? (
-        <MissionControlTab />
+        <MissionControlTab onSwitchSession={onSwitchSession} />
       ) : (
         // #5544: scrollable wrapper so the (often long) settings body scrolls
         // inside the tab panel rather than the whole Control Room view. The

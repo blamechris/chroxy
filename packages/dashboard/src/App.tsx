@@ -2887,6 +2887,11 @@ export function App() {
               onInvestigate={handleInvestigate}
               onOpenSession={handleOpenSession}
               onConfigureRepo={handleConfigureRepo}
+              // #7538 — every Control Room jump to a session (an orchestration
+              // node's "Open session", mission-control's jump-to-intervene) goes
+              // through the SAME handler the tabs and notifications use, so a
+              // successful jump leaves the Control Room.
+              onSwitchSession={handleSwitchSession}
               // #5544 — the Settings tab embeds the converged preference body.
               // Closed→open via a Settings entry point mounts straight onto the
               // Settings tab (`initialTab`); an entry-point click while the CR
