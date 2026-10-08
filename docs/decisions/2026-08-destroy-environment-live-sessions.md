@@ -278,3 +278,22 @@ Both surfaces now drive Force from the refusal the daemon answered:
 
 `force: true` is still sent only from the explicit force confirm on each
 surface.
+
+### Follow-ups (#8407)
+
+- A recorded refusal is also dropped when a later `environment_list` shows the
+  environment with an empty `sessions` roster (the sessions it named have
+  exited, so "N live sessions running" would be false). A listing that still
+  shows sessions, or carries no roster, leaves the refusal alone.
+- A destroy (plain or Force) on the wire marks the environment in
+  `environmentDestroyingIds`, an in-flight marker, and the card shows
+  "Destroying…" instead of reverting to a clickable Destroy. An
+  `environment_error` naming the id, an `environment_list` without it, the
+  disconnect, or a 30 s timeout ends it; an error naming no environment frees
+  every card, because it cannot be attributed.
+- The Containers "refused, but no longer in the survey" notice has a Dismiss,
+  and says the survey could not be checked when the survey itself failed (a
+  failed survey also returns no containers). It has no timeout: it stands until
+  the operator acts, since the refusal stands.
+- Records keyed by server-supplied ids are read with `getOwn` (own keys only),
+  so an id such as `constructor` cannot read as a refusal.

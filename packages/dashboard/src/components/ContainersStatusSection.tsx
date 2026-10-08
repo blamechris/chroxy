@@ -22,6 +22,7 @@
  */
 import { useMemo, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { getOwn } from '../store/utils'
 import type { ServerContainersStatusSnapshotMessage } from '@chroxy/protocol'
 import type { ContainerActionResult } from '../store/types'
 import { formatGeneratedAgo } from './ControlRoomSection'
@@ -329,7 +330,7 @@ function CwdGroupRows({
           key={c.id}
           container={c}
           pending={actioningIds.has(c.id)}
-          result={actionResults[c.id]}
+          result={getOwn(actionResults, c.id)}
           connected={connected}
           onAction={onAction}
           onForceDestroy={onForceDestroy}
@@ -360,6 +361,12 @@ export interface ContainersStatusSectionProps {
    * confirm, never the plain destroy.
    */
   onAction?: (environmentId: string, action: ContainerAction, force?: boolean) => void
+  /**
+   * #8407: drop one environment's recorded action outcome — the dismiss on the
+   * "refused, but no longer in the survey" notice. Defaults to the store's
+   * dismissContainerActionResult.
+   */
+  onDismissActionResult?: (environmentId: string) => void
   /** Injectable clock (epoch ms) for the "generated Nm ago" string. */
   now?: () => number
 }
@@ -372,6 +379,7 @@ export function ContainersStatusSection({
   actioningIds: actioningIdsProp,
   actionResults: actionResultsProp,
   onAction: onActionProp,
+  onDismissActionResult: onDismissActionResultProp,
   now = Date.now,
 }: ContainersStatusSectionProps = {}) {
   const storeSnapshot = useConnectionStore((s) => s.containersStatus)
@@ -381,6 +389,7 @@ export function ContainersStatusSection({
   const storeActioningIds = useConnectionStore((s) => s.containerActioningIds)
   const storeActionResults = useConnectionStore((s) => s.containerActionResults)
   const sendContainersAction = useConnectionStore((s) => s.sendContainersAction)
+  const storeDismissActionResult = useConnectionStore((s) => s.dismissContainerActionResult)
 
   const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
   const loading = loadingProp !== undefined ? loadingProp : storeLoading
@@ -389,6 +398,7 @@ export function ContainersStatusSection({
   const actioningIds = actioningIdsProp ?? storeActioningIds
   const actionResults = actionResultsProp ?? storeActionResults
   const onAction = onActionProp ?? sendContainersAction
+  const onDismissActionResult = onDismissActionResultProp ?? storeDismissActionResult
 
   // #6134: destroy is destructive — route it through a confirmation dialog,
   // never straight to onAction. Holds the container awaiting confirmation
@@ -429,6 +439,12 @@ export function ContainersStatusSection({
   // refresh dropped the row after the refusal landed). The row — and so its
   // Force button — is gone, but the refusal still stands, so surface it here
   // with its own Force instead of leaving the operator with nothing.
+  //
+  // #8407: a FAILED survey also comes back with no containers, so "absent from
+  // the survey" says nothing about the container then. `surveyFailed` makes the
+  // notice (and the force dialog) say the survey could not be checked instead of
+  // claiming the container is gone. The notice is dismissible either way.
+  const surveyFailed = Boolean(snapshot?.error)
   const goneRefusals = snapshot
     ? Object.entries(actionResults).filter(
         ([id, r]) => r.liveSessions && r.error && !snapshot.containers.some((c) => c.id === id),
@@ -560,8 +576,17 @@ export function ContainersStatusSection({
 
           {goneRefusals.map(([id, result]) => (
             <p className="cr-callout cr-callout-bad" key={id} data-testid={`container-gone-${id}`} role="alert">
-              <b className="cr-mono">{id}</b> is no longer in the latest survey, but the daemon refused to
-              destroy it: {result.error}{' '}
+              {surveyFailed ? (
+                <>
+                  The latest survey failed, so <b className="cr-mono">{id}</b> could not be checked, but the
+                  daemon refused to destroy it: {result.error}
+                </>
+              ) : (
+                <>
+                  <b className="cr-mono">{id}</b> is no longer in the latest survey, but the daemon refused to
+                  destroy it: {result.error}
+                </>
+              )}{' '}
               <button
                 type="button"
                 className="cr-action cr-action-danger cr-action-force"
@@ -571,6 +596,16 @@ export function ContainersStatusSection({
                 title="Destroy the live sessions too, then the environment if it still exists"
               >
                 Force destroy
+              </button>
+              <button
+                type="button"
+                className="cr-action cr-action-dismiss"
+                data-testid={`container-gone-dismiss-${id}`}
+                aria-label={`Dismiss notice for ${id}`}
+                onClick={() => onDismissActionResult(id)}
+                title="Dismiss this notice"
+              >
+                Dismiss
               </button>
             </p>
           ))}
@@ -638,9 +673,10 @@ export function ContainersStatusSection({
             // #7594: the survey no longer lists it. The refusal still stands, so
             // the escalation stays available — and says why the details are thin.
             <>
-              <b>{confirmForceDestroyId}</b> is no longer in the latest survey, but the daemon refused to
-              destroy it because sessions are live. Force destroy ends them first, then removes the environment if
-              it still exists. Any unsaved work in those sessions is lost.
+              <b>{confirmForceDestroyId}</b>{' '}
+              {surveyFailed ? 'could not be checked (the latest survey failed)' : 'is no longer in the latest survey'},
+              but the daemon refused to destroy it because sessions are live. Force destroy ends them first, then
+              removes the environment if it still exists. Any unsaved work in those sessions is lost.
             </>
           )
         }

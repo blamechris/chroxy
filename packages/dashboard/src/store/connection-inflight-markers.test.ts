@@ -92,7 +92,7 @@ const MARKER_ROSTER: readonly string[] = Object.keys(createEmptyInFlightMarkers(
  * from the `it.each` below.
  */
 const ROSTER_EXPECTED = [
-  'containerActioningIds', 'byokPoolActioningIds', 'hostPruneActioningIds',
+  'containerActioningIds', 'environmentDestroyingIds', 'byokPoolActioningIds', 'hostPruneActioningIds',
   'simulatorActioningIds', 'emulatorActioningIds', 'wslActioningIds',
   'reindexingRepoPaths', 'relayRerunningRepoPaths',
   'hostStatusLoading', 'runnerStatusLoading', 'containersStatusLoading',

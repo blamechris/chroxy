@@ -1230,6 +1230,7 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     orchestrationRunDetailStale: 'runIds whose held detail hit a seq gap',
     orchestrationRunDetailLoading: 'runIds with an in-flight detail request',
     containerActioningIds: 'keyed by environmentId',
+    environmentDestroyingIds: 'Set of environment ids with an unanswered destroy_environment — keyed by environmentId (#8407)',
     containerActionResults: 'per environment id',
     byokPoolActioningIds: 'keyed by the action target',
     byokPoolActionResults: 'per target id',

@@ -747,6 +747,34 @@ let _serverWillBootstrap = false;
  * `packages/server/src/ws-client-sender.js`: catch → log → return false).
  * Most callers ignore the result (a closed socket was already a silent no-op).
  */
+// #8407: one safety timer per environment id for the Environments panel's
+// destroy-in-flight marker. Held here (next to the handler that clears the
+// marker on the daemon's answer) so that a re-armed attempt CANCELS the previous
+// attempt's timer instead of inheriting its deadline: plain Destroy at t=0,
+// refusal, Force at t=20 must stay pending until t=50, not be cleared by the
+// t=0 timer at t=30.
+const environmentDestroyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+export function cancelEnvironmentDestroyTimer(environmentId: string): void {
+  const handle = environmentDestroyTimers.get(environmentId);
+  if (handle === undefined) return;
+  clearTimeout(handle);
+  environmentDestroyTimers.delete(environmentId);
+}
+
+export function cancelAllEnvironmentDestroyTimers(): void {
+  for (const handle of environmentDestroyTimers.values()) clearTimeout(handle);
+  environmentDestroyTimers.clear();
+}
+
+export function armEnvironmentDestroyTimer(environmentId: string, ms: number, onExpire: () => void): void {
+  cancelEnvironmentDestroyTimer(environmentId);
+  environmentDestroyTimers.set(environmentId, setTimeout(() => {
+    environmentDestroyTimers.delete(environmentId);
+    onExpire();
+  }, ms));
+}
+
 export function wsSend(socket: WebSocket, payload: Record<string, unknown>): boolean {
   // Serialize/encrypt OUTSIDE the try so a JSON/crypto bug still throws loudly
   // (it's a real defect, not a transient send failure) rather than being
@@ -6971,11 +6999,31 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // by someone else, or by the Force that followed) has nothing left to
       // escalate. Refusals for environments still listed are kept: this
       // broadcast says nothing about whether their sessions have gone.
+      //
+      // #8407: a listed environment whose roster is now EMPTY is the other way a
+      // refusal goes stale — the sessions it named have exited, so "N live
+      // sessions running" would be false. This list is a later reading than the
+      // refusal, so dropping on it does not bring back the #7594 staleness (a
+      // non-empty list still says nothing, and the refusal stays).
       const refusals = get().environmentDestroyRefusals;
-      const listed = new Set((environments as EnvironmentInfo[]).map((e) => e?.id));
-      const kept = Object.keys(refusals).filter((id) => listed.has(id));
+      const listed = new Map((environments as EnvironmentInfo[]).map((e) => [e?.id, e] as const));
+      const kept = Object.keys(refusals).filter((id) => {
+        const env = listed.get(id);
+        return env !== undefined && !(Array.isArray(env.sessions) && env.sessions.length === 0);
+      });
       if (kept.length !== Object.keys(refusals).length) {
         set({ environmentDestroyRefusals: Object.fromEntries(kept.map((id) => [id, refusals[id]!])) });
+      }
+      // #8407: a destroy in flight ends when its environment leaves the roster.
+      // One that is still listed stays pending: a Force ends the sessions first
+      // and the server re-broadcasts as they go.
+      const destroying = get().environmentDestroyingIds;
+      if (destroying.size > 0) {
+        const stillPending = new Set([...destroying].filter((id) => listed.has(id)));
+        if (stillPending.size !== destroying.size) {
+          for (const id of destroying) if (!stillPending.has(id)) cancelEnvironmentDestroyTimer(id);
+          set({ environmentDestroyingIds: stillPending });
+        }
       }
       break;
     }
@@ -7046,6 +7094,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // not escalate.
       const { error, code, sessions, environmentId } = sharedEnvironmentError(msg);
       const isLiveSessions = code === 'ENVIRONMENT_HAS_LIVE_SESSIONS';
+      // #8407: any answer ends the pending state. One that names an environment
+      // frees that card; one that names none (the bound-client / not-enabled
+      // gates) cannot be attributed, so it frees every card rather than strand
+      // one disabled behind a reply that will never name it.
+      if (get().environmentDestroyingIds.size > 0) {
+        const next = new Set(get().environmentDestroyingIds);
+        if (environmentId) { next.delete(environmentId); cancelEnvironmentDestroyTimer(environmentId); }
+        else { next.clear(); cancelAllEnvironmentDestroyTimers(); }
+        set({ environmentDestroyingIds: next });
+      }
       // #7568 review: the live-sessions destroy refusal is a WARNING — the guard
       // did its job and nothing broke — so log it at warn level to match the UI
       // severity and keep error-level telemetry for real failures.
