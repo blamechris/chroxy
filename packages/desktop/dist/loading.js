@@ -321,4 +321,14 @@
       invoke('start_server');
     });
   });
+
+  // -- Settings --
+  // The app opens the settings panel itself, after the daemon proves it is the
+  // one this app talks to; the page never builds a URL with the access token.
+  var settingsBtn = document.getElementById('settings-btn');
+  if (settingsBtn && invoke) {
+    settingsBtn.addEventListener('click', function() {
+      invoke('open_settings');
+    });
+  }
 })();

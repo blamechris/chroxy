@@ -14,6 +14,9 @@ import { useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { getTauriInvoke, getTauriListen } from '../utils/tauri-bridge'
 
+/** The address the desktop app verifies a daemon at before it emits `server_ready`. */
+export const VERIFIED_HOST = '127.0.0.1'
+
 interface ServerReadyPayload {
   port: number
   token: string
@@ -47,8 +50,11 @@ export function useTauriEvents() {
         useConnectionStore.setState({ serverStartupLogs: null })
         // If we're already on the dashboard, reconnect via the store
         if (window.location.href.includes('/dashboard')) {
-          // Derive WS URL from the event payload so reconnect works even if the port changed
-          const wsUrl = `ws://localhost:${port}/ws`
+          // Derive WS URL from the event payload so reconnect works even if the port
+          // changed. The desktop app verified the daemon at 127.0.0.1:<port>, so the
+          // reconnect goes to that same address: `localhost` can resolve to ::1, a
+          // different socket than the one that was verified.
+          const wsUrl = `ws://${VERIFIED_HOST}:${port}/ws`
           useConnectionStore.getState().connect(wsUrl, token)
         } else {
           // Still on loading page — navigate to dashboard

@@ -5,7 +5,10 @@
 // carries no API stability cost.
 pub mod config;
 pub mod discovery;
+pub mod handoff;
+pub mod health_proof;
 pub mod node;
+pub mod owned_server;
 pub mod platform;
 pub mod qrcode;
 pub mod server;
@@ -16,9 +19,9 @@ pub mod tray_state;
 pub mod speech;
 pub mod window;
 
-use server::{ServerManager, ServerStatus, StartOrigin};
+use server::{ServerManager, ServerStatus, StartOrigin, StartOutcome};
 use settings::DesktopSettings;
-use tray_state::{is_chroxy_health, MenuState, PortState, TrayPlan, UserAction};
+use tray_state::{MenuState, PortState, TrayPlan, UserAction};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -97,18 +100,115 @@ struct AppMenuItems {
 
 // ── Tauri IPC commands ──────────────────────────────────────────────
 
+/// Which page is calling an IPC command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallerPage {
+    /// A page this app serves itself (the loading page and the setup wizard).
+    App,
+    /// Any other page: where it was loaded from (`None` when the URL had no host or port).
+    Remote { host: Option<String>, port: Option<u16> },
+}
+
+/// True for the app's own origin: `tauri://...`, or `http(s)://tauri.localhost`
+/// with the default port and no credentials in the URL. A different port or
+/// userinfo, or any other spelling of the host (another suffix, a trailing dot,
+/// another case), is a page like any other.
+fn is_app_origin(scheme: &str, host: Option<&str>, port: Option<u16>, has_userinfo: bool) -> bool {
+    scheme == "tauri"
+        || (matches!(scheme, "http" | "https")
+            && host == Some("tauri.localhost")
+            && port.is_none()
+            && !has_userinfo)
+}
+
+fn caller_page(url: &tauri::Url) -> CallerPage {
+    if is_app_origin(
+        url.scheme(),
+        url.host_str(),
+        url.port(),
+        !url.username().is_empty() || url.password().is_some(),
+    ) {
+        CallerPage::App
+    } else {
+        CallerPage::Remote {
+            host: url.host_str().map(str::to_string),
+            port: url.port_or_known_default(),
+        }
+    }
+}
+
+/// The token `get_server_info` may return.
+/// - The app's own page reads it from the config.
+/// - A page served from `127.0.0.1:<port>`, the endpoint the daemon is proved at,
+///   gets the token only if the daemon on `port` proves itself right now, and it is
+///   the token that proved.
+/// - Any other page (another host, another port, no URL) gets none.
+fn server_info_token(
+    page: &CallerPage,
+    port: u16,
+    prove: &dyn Fn(u16) -> Option<String>,
+    own_token: &dyn Fn() -> Option<String>,
+) -> Option<String> {
+    match page {
+        CallerPage::App => own_token(),
+        CallerPage::Remote { host, port: page_port }
+            if host.as_deref() == Some("127.0.0.1") && *page_port == Some(port) =>
+        {
+            prove(port)
+        }
+        CallerPage::Remote { .. } => None,
+    }
+}
+
 #[tauri::command]
-fn get_server_info(
-    state: tauri::State<'_, Mutex<ServerManager>>,
+async fn get_server_info(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
 ) -> Result<serde_json::Value, String> {
-    let mgr = lock_or_recover(&state);
-    Ok(serde_json::json!({
-        "port": mgr.port(),
-        "token": mgr.token(),
-        "status": mgr.status().label(),
-        "tunnelMode": mgr.tunnel_mode(),
-        "isRunning": mgr.is_running(),
-    }))
+    // An unreadable URL is a page with no host: it gets no token.
+    let page = webview
+        .url()
+        .map(|u| caller_page(&u))
+        .unwrap_or(CallerPage::Remote { host: None, port: None });
+    // Blocking (challenge over the network, config and credential store).
+    tauri::async_runtime::spawn_blocking(move || {
+        let (port, status, tunnel_mode, running) = {
+            let state = app.state::<Mutex<ServerManager>>();
+            let mgr = lock_or_recover(&state);
+            (mgr.port(), mgr.status().label().to_string(), mgr.tunnel_mode().to_string(), mgr.is_running())
+        };
+        let token = server_info_token(
+            &page,
+            port,
+            &|p| tray_state::prove_daemon(p, std::time::Duration::from_secs(2)),
+            &|| config::load_config().api_token,
+        );
+        serde_json::json!({
+            "port": port,
+            "token": token,
+            "status": status,
+            "tunnelMode": tunnel_mode,
+            "isRunning": running,
+        })
+    })
+    .await
+    .map_err(|e| format!("server info task failed: {e}"))
+}
+
+/// Open the dashboard's settings panel in the main window, after the daemon on the
+/// app's port proves itself.
+#[tauri::command]
+async fn open_settings(app: tauri::AppHandle) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let port = {
+            let state = app.state::<Mutex<ServerManager>>();
+            let port = lock_or_recover(&state).port();
+            port
+        };
+        window::open_settings(&app, port)
+    })
+    .await
+    .map_err(|e| format!("open settings task failed: {e}"))
 }
 
 #[tauri::command]
@@ -905,6 +1005,7 @@ pub fn run() {
         )
         .invoke_handler(tauri::generate_handler![
             get_server_info,
+            open_settings,
             get_server_logs,
             get_startup_logs,
             start_server,
@@ -1432,24 +1533,14 @@ pub fn run() {
                     StartupAction::AdoptExternal => {
                         let app_handle = app.handle().clone();
                         let port = config.port;
-                        let token = config.api_token.clone();
                         std::thread::spawn(move || {
                             if probe_external_health(port) {
-                                match token {
-                                    Some(t) => window::emit_server_ready(&app_handle, port, Some(&t)),
-                                    None => window::emit_server_error(
-                                        &app_handle,
-                                        &format!(
-                                            "A server is running on port {} but no access token was found. Pair the app or paste a token in Settings.",
-                                            port
-                                        ),
-                                    ),
-                                }
+                                show_adopted_daemon(&app_handle, port);
                             } else {
                                 window::emit_server_error(
                                     &app_handle,
                                     &format!(
-                                        "No server found on port {}. Start a server, or enable Auto-start Server in Settings.",
+                                        "No Chroxy daemon that proves its identity was found on port {}. Start a server, or enable Auto-start Server in Settings.",
                                         port
                                     ),
                                 );
@@ -1708,11 +1799,14 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 struct TrayRuntime {
     menu: MenuState,
     port: PortState,
+    /// A verified daemon missed one observation; the next one confirms it
+    /// ([`tray_state::next_external`]).
+    pending_downgrade: bool,
 }
 
 impl Default for TrayRuntime {
     fn default() -> Self {
-        Self { menu: MenuState::Stopped, port: PortState::Free }
+        Self { menu: MenuState::Stopped, port: PortState::Free, pending_downgrade: false }
     }
 }
 
@@ -1744,12 +1838,34 @@ fn update_port_state(app: &tauri::AppHandle, port: PortState) {
     };
     {
         let mut rt = lock_or_recover(&runtime);
+        rt.pending_downgrade = false;
         if rt.port == port {
             return;
         }
         rt.port = port;
     }
     render_tray(app);
+}
+
+/// Fold one observation of the configured port into the tray's state through
+/// [`tray_state::next_external`]: leaving `Chroxy` takes two observations, so one
+/// missed challenge does not flip a daemon the tray was showing. The watcher and a
+/// refused handoff both report through here and share the count.
+pub(crate) fn observe_port(app: &tauri::AppHandle, observed: PortState) {
+    let Some(runtime) = app.try_state::<Mutex<TrayRuntime>>() else {
+        return;
+    };
+    let changed = {
+        let mut rt = lock_or_recover(&runtime);
+        let (next, pending) = tray_state::next_external(rt.port, observed, rt.pending_downgrade);
+        rt.pending_downgrade = pending;
+        let changed = rt.port != next;
+        rt.port = next;
+        changed
+    };
+    if changed {
+        render_tray(app);
+    }
 }
 
 /// Re-render the menu from the CURRENT [`TrayRuntime`], on the main thread.
@@ -1826,31 +1942,29 @@ const PORT_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 /// the tray in step with it, so it follows a daemon that goes away or comes back.
 /// While the app's own server is active the port is ours and nothing is probed.
 fn spawn_port_watcher(app: tauri::AppHandle) {
-    std::thread::spawn(move || {
-        let mut pending_downgrade = false;
-        loop {
-            let owned = {
-                let state = app.state::<Mutex<ServerManager>>();
-                let status = lock_or_recover(&state).status();
-                matches!(
-                    status,
-                    ServerStatus::Running | ServerStatus::Starting | ServerStatus::Restarting
-                )
-            };
-            let current = tray_runtime(&app).port;
-            let (next, pending) = if owned {
-                (PortState::Free, false)
-            } else {
-                let observed =
-                    tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500));
-                tray_state::next_external(current, observed, pending_downgrade)
-            };
-            pending_downgrade = pending;
-            update_port_state(&app, next);
-            std::thread::sleep(PORT_WATCH_INTERVAL);
+    std::thread::spawn(move || loop {
+        let owned = {
+            let state = app.state::<Mutex<ServerManager>>();
+            let status = lock_or_recover(&state).status();
+            matches!(
+                status,
+                ServerStatus::Running | ServerStatus::Starting | ServerStatus::Restarting
+            )
+        };
+        if owned {
+            update_port_state(&app, PortState::Free);
+        } else {
+            let observed =
+                tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500));
+            observe_port(&app, observed);
         }
+        std::thread::sleep(PORT_WATCH_INTERVAL);
     });
 }
+
+/// How many times `monitor_startup` asks for the handoff before it shows a refusal.
+const HANDOFF_ATTEMPTS: u32 = 3;
+const HANDOFF_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether `monitor_startup` is watching an initial start or a restart.
 enum StartupContext {
@@ -1895,9 +2009,18 @@ fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
                 let state = app.state::<Mutex<ServerManager>>();
                 let mgr = lock_or_recover(&state);
                 let p = mgr.port();
-                let t = mgr.token();
                 drop(mgr);
-                window::emit_server_ready(app, p, t.as_deref());
+                // The handoff proves the responder is this app's server first. A
+                // refusal is retried a few times and then shown, but the server did
+                // reach Running, so it stays under crash supervision either way.
+                if handoff::with_retries(
+                    HANDOFF_ATTEMPTS,
+                    || window::try_server_ready(app, p),
+                    || std::thread::sleep(HANDOFF_RETRY_PAUSE),
+                ) {
+                    return true;
+                }
+                window::show_handoff_refusal(app, p);
                 return true;
             }
             ServerStatus::Error(ref msg) => {
@@ -1944,36 +2067,27 @@ fn startup_action(auto_start: bool, has_token: bool) -> StartupAction {
     }
 }
 
-/// #6015 — probe an already-running external server's `/health` on loopback.
-/// A few short attempts (so a just-launched daemon is still adopted); returns
-/// true on the first 200. Mirrors the embedded-server health check (ureq, 2s).
+/// #6015 — probe an already-running external server on loopback. A few short
+/// attempts (so a just-launched daemon is still adopted); returns true on the
+/// first verified chroxy daemon. The classification is [`tray_state::probe_port`],
+/// the same one every other adopt route uses, so a holder is adopted here only
+/// when a fresh health challenge returns a proof bound to the API token and port.
 fn probe_external_health(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{}/health", port);
     for attempt in 0..10 {
         // Log each attempt (mirrors the embedded-server health check in
         // server.rs) so a stuck client-mode launch is debuggable from the app's
         // stderr/console rather than a silent spinner.
-        match ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
-            Ok(resp) => {
-                let code = resp.status();
-                if code == 200 {
-                    // Token-leak guard: only adopt a verified chroxy server.
-                    let body = resp.into_string().unwrap_or_default();
-                    if is_chroxy_health(&body) {
-                        eprintln!("[client-adopt] attempt #{} GET {} -> 200 (chroxy)", attempt + 1, url);
-                        return true;
-                    }
-                    eprintln!(
-                        "[client-adopt] attempt #{} GET {} -> 200 but not a chroxy /health body; not adopting",
-                        attempt + 1, url
-                    );
-                } else {
-                    eprintln!("[client-adopt] attempt #{} GET {} -> {}", attempt + 1, url, code);
-                }
+        let held = tray_state::probe_port(port, std::time::Duration::from_secs(2));
+        match held {
+            PortState::Chroxy(_) => {
+                eprintln!("[client-adopt] attempt #{} port {} -> chroxy daemon", attempt + 1, port);
+                return true;
             }
-            Err(err) => {
-                eprintln!("[client-adopt] attempt #{} GET {} -> Err({})", attempt + 1, url, err);
-            }
+            PortState::Foreign(_) => eprintln!(
+                "[client-adopt] attempt #{} port {} -> not an adoptable chroxy daemon (not chroxy, or no valid proof); not adopting",
+                attempt + 1, port
+            ),
+            PortState::Free => eprintln!("[client-adopt] attempt #{} port {} -> nothing listening", attempt + 1, port),
         }
         // No sleep after the final attempt.
         if attempt < 9 {
@@ -1996,27 +2110,50 @@ fn app_server_active(app: &tauri::AppHandle) -> bool {
 
 /// User-initiated Start (tray, app menu, dashboard command). Refuses to start a
 /// second server on a port something else already holds (#8267), and the start it
-/// does run is [`StartOrigin::User`], which never kills a port holder, so a
-/// daemon that appears between the probe and the spawn is not killed either (it
-/// fails with EADDRINUSE instead). The launch-time auto-start calls
-/// [`handle_start`] with [`StartOrigin::Launch`] and still reclaims a stale orphan.
+/// does run is [`StartOrigin::User`], which never stops a port holder, so a
+/// daemon that appears between the probe and the spawn is not stopped either (it
+/// fails with EADDRINUSE instead). Runs under [`START_RESTART_GATE`]: a second
+/// Start or Restart while one is in flight is refused with a notification.
+///
+/// The launch-time auto-start calls [`handle_start`] with [`StartOrigin::Launch`]:
+/// it stops only an orphan of the app's own server, adopts a chroxy daemon it did
+/// not start, and fails on a foreign holder (#8388).
 ///
 /// Probes live rather than trusting the watcher's last sample, which can be up to
 /// one interval old; runs off the caller's thread because the probe can block.
 fn handle_start_checked(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        tray_state::run_guarded_user_start(
-            UserAction::Start,
-            app_server_active(&app),
-            || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
-            |held, msg| {
-                update_port_state(&app, held);
-                send_notification(&app, "Cannot Start Server", &msg);
+        tray_state::run_exclusive(
+            &START_RESTART_GATE,
+            || notify_operation_in_progress(&app),
+            || {
+                tray_state::run_guarded_user_start(
+                    UserAction::Start,
+                    app_server_active(&app),
+                    || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
+                    |held, msg| {
+                        update_port_state(&app, held);
+                        send_notification(&app, "Cannot Start Server", &msg);
+                    },
+                    || handle_start(&app, StartOrigin::User),
+                );
             },
-            || handle_start(&app, StartOrigin::User),
         );
     });
+}
+
+/// One user Start or Restart (and one crash auto-restart) at a time. They hold
+/// the server-manager lock for different stretches, so the lock alone would let
+/// a second one tear down the server the first had just spawned (#8393).
+static START_RESTART_GATE: tray_state::OpGate = tray_state::OpGate::new();
+
+fn notify_operation_in_progress(app: &tauri::AppHandle) {
+    send_notification(
+        app,
+        "Server Busy",
+        "A start or restart is already in progress. Try again in a moment.",
+    );
 }
 
 fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
@@ -2058,26 +2195,17 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
         mgr.set_tunnel_mode(effective_mode);
         mgr.set_node_path(node_path.as_deref());
         mgr.set_expose_on_lan(expose_on_lan);
-        mgr.set_origin(origin);
-        mgr.start()
+        mgr.start(origin)
     };
 
     match result {
-        Ok(()) => {
+        // An automatic start found a healthy daemon it did not start (#8388).
+        Ok(StartOutcome::Adopted(port)) => adopt_external_daemon(app, port),
+        Ok(StartOutcome::Spawned) => {
             update_menu_state(app, MenuState::Running);
 
             // Show window immediately (loading page shows spinner)
             window::show_window(app);
-
-            // Inject settings button handler on the loading page
-            {
-                let state = app.state::<Mutex<ServerManager>>();
-                let mgr = lock_or_recover(&state);
-                let p = mgr.port();
-                let t = mgr.token();
-                drop(mgr);
-                window::inject_settings_button_handler(app, p, t.as_deref());
-            }
 
             let app_handle = app.clone();
             std::thread::spawn(move || {
@@ -2128,11 +2256,36 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
                             std::thread::sleep(backoff);
 
                             // Attempt restart
-                            let state = app_handle.state::<Mutex<ServerManager>>();
-                            let mut mgr = lock_or_recover(&state);
-                            match mgr.try_auto_restart() {
-                                Ok(()) => {
-                                    drop(mgr);
+                            // A user Start/Restart in flight is already doing this
+                            // work, and a second restart would tear down the server
+                            // it just spawned: leave the crash for the next pass.
+                            let Some(permit) = START_RESTART_GATE.try_acquire() else {
+                                continue;
+                            };
+                            let outcome = {
+                                let state = app_handle.state::<Mutex<ServerManager>>();
+                                let mut mgr = lock_or_recover(&state);
+                                // The user's action may have recovered the server
+                                // while this thread slept through the backoff.
+                                if !(mgr.is_auto_restart_pending()
+                                    && matches!(mgr.status(), ServerStatus::Error(_)))
+                                {
+                                    continue;
+                                }
+                                // Explicitly `Launch`: nobody is watching, so it may
+                                // clear an orphan of the app's own server, and
+                                // nothing else. A daemon that took the port after
+                                // the crash is adopted or refused, never replaced
+                                // (#8388).
+                                mgr.try_auto_restart(StartOrigin::Launch)
+                            };
+                            drop(permit);
+                            match outcome {
+                                Ok(StartOutcome::Adopted(port)) => {
+                                    adopt_external_daemon(&app_handle, port);
+                                    return;
+                                }
+                                Ok(StartOutcome::Spawned) => {
                                     // Wait for server to reach Running again
                                     let recovered =
                                         monitor_startup(&app_handle, StartupContext::Restart);
@@ -2157,18 +2310,14 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
                                     }
                                     // Continue loop — will check for more crashes
                                 }
-                                Err(_) => {
-                                    drop(mgr);
+                                Err(e) => {
                                     update_menu_state(&app_handle, MenuState::Stopped);
-                                    window::emit_server_error(
-                                        &app_handle,
-                                        "Auto-restart failed. Use tray menu to restart manually.",
+                                    let msg = format!(
+                                        "Auto-restart failed: {} Use tray menu to restart manually.",
+                                        e
                                     );
-                                    send_notification(
-                                        &app_handle,
-                                        "Server Unrecoverable",
-                                        "Auto-restart failed. Use tray menu to restart manually.",
-                                    );
+                                    window::emit_server_error(&app_handle, &msg);
+                                    send_notification(&app_handle, "Server Unrecoverable", &msg);
                                     return;
                                 }
                             }
@@ -2189,6 +2338,32 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
             send_notification(app, "Server Error", &e);
         }
     }
+}
+
+/// An automatic start found a healthy chroxy daemon on the port that this app did
+/// not start (#8388). Nothing was spawned and nothing was stopped: show the tray's
+/// external-daemon state (#8267) and open the daemon's dashboard in the window.
+fn adopt_external_daemon(app: &tauri::AppHandle, port: u16) {
+    update_menu_state(app, MenuState::Stopped);
+    // The tray shows the daemon, and the user is told, only once it has proved
+    // itself again at the handoff; a refused handoff has already shown why.
+    if show_adopted_daemon(app, port) {
+        update_port_state(app, PortState::Chroxy(port));
+        send_notification(
+            app,
+            "Using Existing Daemon",
+            &format!(
+                "A chroxy daemon already serves port {}, so the app connected to it instead of starting its own.",
+                port
+            ),
+        );
+    }
+}
+
+/// Point the window at a daemon the app is adopting, or say why it cannot.
+/// Returns `true` when the window was pointed at it.
+fn show_adopted_daemon(app: &tauri::AppHandle, port: u16) -> bool {
+    window::emit_server_ready(app, port)
 }
 
 fn handle_stop(app: &tauri::AppHandle) {
@@ -2215,15 +2390,21 @@ fn handle_stop(app: &tauri::AppHandle) {
 fn handle_restart(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        tray_state::run_guarded_user_start(
-            UserAction::Restart,
-            app_server_active(&app),
-            || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
-            |held, msg| {
-                update_port_state(&app, held);
-                send_notification(&app, "Cannot Restart Server", &msg);
+        tray_state::run_exclusive(
+            &START_RESTART_GATE,
+            || notify_operation_in_progress(&app),
+            || {
+                tray_state::run_guarded_user_start(
+                    UserAction::Restart,
+                    app_server_active(&app),
+                    || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
+                    |held, msg| {
+                        update_port_state(&app, held);
+                        send_notification(&app, "Cannot Restart Server", &msg);
+                    },
+                    || restart_own_server(&app),
+                );
             },
-            || restart_own_server(&app),
         );
     });
 }
@@ -2232,12 +2413,14 @@ fn restart_own_server(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let result = {
         let mut mgr = lock_or_recover(&state);
-        mgr.set_origin(StartOrigin::User);
-        mgr.restart()
+        mgr.restart(StartOrigin::User)
     };
 
     match result {
-        Ok(()) => {
+        // A user restart never adopts (it never probes for a holder to replace),
+        // but the type allows it and showing the daemon is the right reading.
+        Ok(StartOutcome::Adopted(port)) => adopt_external_daemon(app, port),
+        Ok(StartOutcome::Spawned) => {
             update_menu_state(app, MenuState::Restarting);
 
             // Spawn monitoring thread to verify server reaches Running
@@ -2271,41 +2454,20 @@ fn reachable_target(app: &tauri::AppHandle) -> Option<(u16, bool)> {
     external_daemon_port(app).map(|port| (port, true))
 }
 
-/// The access token for a target from [`reachable_target`]. For an external
-/// daemon this may shell out to the OS keychain, so call it off the main thread.
-fn target_token(app: &tauri::AppHandle, external: bool) -> Option<String> {
-    if external {
-        config::load_config().api_token
-    } else {
-        let state = app.state::<Mutex<ServerManager>>();
-        let token = lock_or_recover(&state).token();
-        token
-    }
-}
-
 fn handle_dashboard(app: &tauri::AppHandle) {
-    let Some((port, external)) = reachable_target(app) else {
+    let Some((port, _external)) = reachable_target(app) else {
         // Emit server_stopped so the loading page shows "Server stopped"
         // instead of the default "Starting server..." text
         window::emit_server_stopped(app);
         return;
     };
     let app = app.clone();
-    // Off the tray-event (main) thread: an external daemon's token can come from
-    // the OS keychain via `security`, which may block on a prompt.
+    // Off the tray-event (main) thread: the token comes from the config file or
+    // the OS credential store (which may block on a prompt), and the daemon is
+    // challenged over the network first. A daemon that does not prove itself is
+    // refused and shown, whatever the tray had cached about it.
     std::thread::spawn(move || {
-        let token = target_token(&app, external);
-        if external && token.is_none() {
-            window::emit_server_error(
-                &app,
-                &format!(
-                    "A daemon is running on port {} but no access token was found. Pair the app or paste a token in Settings.",
-                    port
-                ),
-            );
-            return;
-        }
-        window::emit_server_ready(&app, port, token.as_deref());
+        window::emit_server_ready(&app, port);
     });
 }
 
@@ -2327,12 +2489,17 @@ fn qr_for_reachable_daemon(app: &tauri::AppHandle) -> Result<(String, String), S
     // Verify a server is reachable (menu state can become stale on crash/restart)
     let (port, external) =
         reachable_target(app).ok_or_else(|| "Server is not running".to_string())?;
-    let (hostname, token) = if external {
-        let token = target_token(app, true);
-        qrcode::get_external_connection_info(port, token.as_deref())?
-    } else {
-        qrcode::get_connection_info()?
-    };
+    let (hostname, token) = qrcode::connection_info_for(
+        external,
+        port,
+        &|p| tray_state::prove_daemon(p, std::time::Duration::from_secs(2)),
+        &qrcode::get_external_connection_info,
+        &qrcode::get_connection_info,
+        // A missed proof goes to the tray as one observation, so a second one
+        // stops it offering the menu items for a port that no longer answers
+        // as this app's daemon.
+        &|p| observe_port(app, PortState::Foreign(p)),
+    )?;
     let url = qrcode::build_connection_url(&hostname, &token);
     let svg = qrcode::generate_qr_svg(&url)?;
     Ok((svg, url))
@@ -2557,6 +2724,18 @@ fn handle_bring_all_to_front(app: &tauri::AppHandle) {
     window::show_window(app);
 }
 
+/// Enable or disable the "Check for Updates" item. The handle is copied out and
+/// the `TrayMenuItems` lock released BEFORE the setter runs: from an
+/// async-runtime thread the setter waits on the main thread, and the main-thread
+/// render takes that same lock (#8393).
+fn set_check_updates_enabled(app: &tauri::AppHandle, enabled: bool) {
+    if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
+        tray_state::pick_then_act(&items, |i| i.check_updates.clone(), |item| {
+            let _ = item.set_enabled(enabled);
+        });
+    }
+}
+
 fn handle_check_updates(app: &tauri::AppHandle) {
     /// Guard to prevent concurrent update checks.
     static UPDATE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -2570,10 +2749,7 @@ fn handle_check_updates(app: &tauri::AppHandle) {
     }
 
     // Disable the menu item while the check runs.
-    if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
-        let items = lock_or_recover(&items);
-        let _ = items.check_updates.set_enabled(false);
-    }
+    set_check_updates_enabled(app, false);
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -2582,10 +2758,7 @@ fn handle_check_updates(app: &tauri::AppHandle) {
         impl Drop for ResetGuard<'_> {
             fn drop(&mut self) {
                 self.0.store(false, Ordering::SeqCst);
-                if let Some(items) = self.1.try_state::<Mutex<TrayMenuItems>>() {
-                    let items = lock_or_recover(&items);
-                    let _ = items.check_updates.set_enabled(true);
-                }
+                set_check_updates_enabled(&self.1, true);
             }
         }
         let _guard = ResetGuard(&UPDATE_IN_FLIGHT, app_handle.clone());
@@ -2689,16 +2862,121 @@ mod tests {
     // #6015 (security) — only a real chroxy /health body is adoptable; a 200
     // from an unrelated local service squatting on the port must NOT be adopted
     // (we'd otherwise navigate the token to it).
+    // --- token-returning IPC ------------------------------------------------
+
+    #[test]
+    fn only_the_apps_own_origin_is_an_app_page() {
+        assert!(is_app_origin("tauri", Some("localhost"), None, false));
+        assert!(is_app_origin("http", Some("tauri.localhost"), None, false));
+        assert!(is_app_origin("https", Some("tauri.localhost"), None, false));
+        for (what, scheme, host, port, userinfo) in [
+            ("a port", "http", Some("tauri.localhost"), Some(8765), false),
+            ("a port on https", "https", Some("tauri.localhost"), Some(443), false),
+            ("userinfo", "http", Some("tauri.localhost"), None, true),
+            ("a longer host", "http", Some("tauri.localhost.evil"), None, false),
+            ("a subdomain", "http", Some("evil.tauri.localhost"), None, false),
+            ("upper case", "http", Some("TAURI.LOCALHOST"), None, false),
+            ("a trailing dot", "http", Some("tauri.localhost."), None, false),
+            ("loopback", "http", Some("127.0.0.1"), Some(8765), false),
+            ("localhost", "http", Some("localhost"), Some(8765), false),
+            ("another scheme", "ws", Some("tauri.localhost"), None, false),
+            ("no host", "http", None, None, false),
+            ("a file", "file", None, None, false),
+        ] {
+            assert!(!is_app_origin(scheme, host, port, userinfo), "{}", what);
+        }
+    }
+
+    #[test]
+    fn the_caller_is_classified_from_the_whole_url() {
+        let page = |u: &str| caller_page(&u.parse::<tauri::Url>().unwrap());
+        assert_eq!(page("tauri://localhost/index.html"), CallerPage::App);
+        assert_eq!(page("http://tauri.localhost/"), CallerPage::App);
+        for url in [
+            "http://tauri.localhost:8765/",
+            "http://user@tauri.localhost/",
+            "http://user:pw@tauri.localhost/",
+            "http://tauri.localhost.evil/",
+            "http://tauri.localhost./",
+        ] {
+            assert!(matches!(page(url), CallerPage::Remote { .. }), "{}", url);
+        }
+        assert_eq!(
+            page("http://127.0.0.1:8765/dashboard?token=x"),
+            CallerPage::Remote { host: Some("127.0.0.1".into()), port: Some(8765) }
+        );
+        assert_eq!(page("http://127.0.0.1/"), CallerPage::Remote { host: Some("127.0.0.1".into()), port: Some(80) });
+        assert_eq!(page("http://localhost:8765/"), CallerPage::Remote { host: Some("localhost".into()), port: Some(8765) });
+        assert_eq!(page("http://[::1]:8765/"), CallerPage::Remote { host: Some("[::1]".into()), port: Some(8765) });
+        assert_eq!(page("http://tauri.localhost:8765/"), CallerPage::Remote { host: Some("tauri.localhost".into()), port: Some(8765) });
+    }
+
+    fn daemon_page(host: &str, port: u16) -> CallerPage {
+        CallerPage::Remote { host: Some(host.to_string()), port: Some(port) }
+    }
+
+    #[test]
+    fn a_page_the_daemon_serves_gets_the_token_only_from_a_proving_daemon() {
+        let proves = |_: u16| Some("proven".to_string());
+        let silent = |_: u16| None;
+        let own = || Some("from-config".to_string());
+        let page = daemon_page("127.0.0.1", 8765);
+        assert_eq!(server_info_token(&page, 8765, &proves, &own).as_deref(), Some("proven"));
+        assert_eq!(server_info_token(&page, 8765, &silent, &own), None, "no proof, no token");
+        // The prover is asked for the port the app uses.
+        let asked = std::cell::Cell::new(0u16);
+        let spy = |p: u16| {
+            asked.set(p);
+            None
+        };
+        server_info_token(&daemon_page("127.0.0.1", 9123), 9123, &spy, &own);
+        assert_eq!(asked.get(), 9123);
+    }
+
+    #[test]
+    fn a_page_from_a_different_endpoint_than_the_proved_one_gets_no_token() {
+        let proves = |_: u16| Some("proven".to_string());
+        let own = || Some("from-config".to_string());
+        let must_not_ask = |_: u16| -> Option<String> { panic!("no challenge for a page at another endpoint") };
+        for page in [
+            daemon_page("127.0.0.1", 9999),                       // another port
+            daemon_page("localhost", 8765),                       // another host
+            daemon_page("[::1]", 8765),
+            daemon_page("127.0.0.2", 8765),
+            CallerPage::Remote { host: Some("127.0.0.1".into()), port: None },
+            CallerPage::Remote { host: None, port: Some(8765) },
+            CallerPage::Remote { host: None, port: None },        // an unreadable URL
+        ] {
+            assert_eq!(server_info_token(&page, 8765, &must_not_ask, &own), None, "{:?}", page);
+        }
+        // The same page at the proved endpoint does get it.
+        assert_eq!(server_info_token(&daemon_page("127.0.0.1", 8765), 8765, &proves, &own).as_deref(), Some("proven"));
+    }
+
+    #[test]
+    fn the_apps_own_page_reads_the_token_from_the_config_without_a_challenge() {
+        let own = || Some("from-config".to_string());
+        let must_not_ask = |_: u16| -> Option<String> { panic!("an app page needs no challenge") };
+        assert_eq!(server_info_token(&CallerPage::App, 8765, &must_not_ask, &own).as_deref(), Some("from-config"));
+        // A page served by the daemon never reads the config token.
+        let proves = |_: u16| Some("proven".to_string());
+        let must_not_read = || -> Option<String> { panic!("a daemon page gets only a proven token") };
+        assert_eq!(
+            server_info_token(&daemon_page("127.0.0.1", 8765), 8765, &proves, &must_not_read).as_deref(),
+            Some("proven")
+        );
+    }
+
     #[test]
     fn is_chroxy_health_fingerprint() {
-        assert!(is_chroxy_health(r#"{"status":"ok","mode":"cli","version":"0.9.46"}"#));
+        assert!(tray_state::is_chroxy_health(r#"{"status":"ok","mode":"cli","version":"0.9.46"}"#));
         // Wrong/foreign shapes — reject.
-        assert!(!is_chroxy_health(r#"{"status":"ok"}"#)); // no version
-        assert!(!is_chroxy_health(r#"{"status":"healthy","version":"1.0"}"#)); // not chroxy's "ok"
-        assert!(!is_chroxy_health(r#"{"version":"1.0"}"#)); // no status
-        assert!(!is_chroxy_health("OK")); // not JSON (e.g. another service)
-        assert!(!is_chroxy_health("")); // empty
-        assert!(!is_chroxy_health(r#"{"status":"ok","version":200}"#)); // version not a string
+        assert!(!tray_state::is_chroxy_health(r#"{"status":"ok"}"#)); // no version
+        assert!(!tray_state::is_chroxy_health(r#"{"status":"healthy","version":"1.0"}"#)); // not chroxy's "ok"
+        assert!(!tray_state::is_chroxy_health(r#"{"version":"1.0"}"#)); // no status
+        assert!(!tray_state::is_chroxy_health("OK")); // not JSON (e.g. another service)
+        assert!(!tray_state::is_chroxy_health("")); // empty
+        assert!(!tray_state::is_chroxy_health(r#"{"status":"ok","version":200}"#)); // version not a string
     }
 
     #[test]

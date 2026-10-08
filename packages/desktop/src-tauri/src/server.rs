@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use crate::config::{self, ChroxyConfig};
 use crate::lock_or_recover;
 use crate::node;
+use crate::owned_server;
+use crate::tray_state::{self, LaunchDecision, PortState};
 
 /// Pure filter: given an iterator of (pid, full_command_line) pairs, return
 /// the pids whose command line matches a `cloudflared tunnel --url
@@ -317,52 +319,124 @@ impl ServerStatus {
     }
 }
 
-/// Who asked for a start, which decides whether `start()` may kill whatever is
-/// already on the port (#8267).
+/// Who asked for a start. It is an ARGUMENT of [`ServerManager::start`],
+/// [`ServerManager::restart`] and [`ServerManager::try_auto_restart`], never
+/// remembered state: a missing origin is a compile error, and one click cannot
+/// change what a later automatic start does (#8393).
+///
+/// Neither origin ever stops a process the app cannot prove it started (#8388).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartOrigin {
-    /// App launch (auto-start) or its crash auto-restart: reclaims a stale
-    /// orphan on the port from a previous run, as it always has.
+    /// Nobody is watching: launch-time auto-start and the crash auto-restart.
+    /// It may stop an orphan of the app's OWN earlier server (proved by
+    /// [`owned_server`]); a healthy chroxy daemon already on the port is adopted
+    /// instead of replaced, and any other holder fails the start with a message.
     Launch,
     /// A user click (tray, app menu, dashboard Start/Restart): the port holder
-    /// may be an externally managed daemon the app does not own, so it is never
-    /// killed. A held port fails the start instead.
+    /// may be a daemon the app does not own, so it is never stopped. A held port
+    /// fails the start instead.
     User,
 }
 
-/// Whether a start from `origin` may kill the current port holder.
-pub fn may_reclaim_port(origin: StartOrigin) -> bool {
-    matches!(origin, StartOrigin::Launch)
+/// What `start()` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartOutcome {
+    /// A server process was spawned and is being health-polled.
+    Spawned,
+    /// A healthy chroxy daemon the app did not start already serves this port.
+    /// Nothing was spawned and nothing was stopped.
+    Adopted(u16),
 }
 
-/// Clear stale processes off `port` before a start, according to who is asking.
+/// The effects `prepare_port_with` needs, behind a trait so the sequencing is
+/// testable with a recorder instead of real processes.
+trait PortOps {
+    /// Classify what answers on `port`.
+    fn probe(&self, port: u16) -> PortState;
+    /// True if anything accepts a connection on `port`.
+    fn is_held(&self, port: u16) -> bool;
+    /// The listeners on `port` that are provably the app's own earlier server.
+    fn own_holder_pids(&self, port: u16) -> Vec<u32>;
+    fn terminate(&self, pids: &[u32]);
+    fn kill_tunnels(&self, port: u16);
+}
+
+/// What `prepare_port_with` decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortPrep {
+    /// The port is ready (or is somebody else's and the spawn will report it).
+    Ready,
+    /// Use the chroxy daemon already on this port.
+    Adopt(u16),
+}
+
+/// Clear the way for a spawn on `port`, according to who is asking.
 ///
-/// - The port-holder kill runs only for a launch-time start ([`may_reclaim_port`]).
-/// - Orphaned `cloudflared` tunnels are reaped for a launch-time start, and for a
-///   user start only when nothing holds the port: a held port means an external
-///   daemon whose own tunnel this would otherwise kill. A user *restart* of the
-///   app's own server still reaps its orphaned tunnel, because `kill_child` has
-///   just ended the only process that held the port.
-///
-/// The effects are closures so the decision is testable with recorders.
-fn reclaim_stale_with(
-    origin: StartOrigin,
-    port: u16,
-    port_held: impl FnOnce(u16) -> bool,
-    kill_holder: impl FnOnce(u16),
-    kill_tunnels: impl FnOnce(u16),
-) {
-    if may_reclaim_port(origin) {
-        kill_holder(port);
-        kill_tunnels(port);
-    } else if !port_held(port) {
-        kill_tunnels(port);
+/// - **User:** never stops a holder. Orphaned `cloudflared` tunnels are reaped
+///   only when nothing holds the port: a held port is an external daemon whose
+///   tunnel this would otherwise kill. A user *restart* of the app's own server
+///   still reaps its orphaned tunnel, because `kill_child` has just ended the
+///   only process that held the port.
+/// - **Launch:** probes first and follows [`tray_state::launch_start_decision`].
+///   The only thing it can stop is a listener [`PortOps::own_holder_pids`] proved
+///   to be the app's own; an adopted daemon's tunnel is left alone too.
+fn prepare_port_with(origin: StartOrigin, port: u16, ops: &dyn PortOps) -> Result<PortPrep, String> {
+    match origin {
+        StartOrigin::User => {
+            if !ops.is_held(port) {
+                ops.kill_tunnels(port);
+            }
+            Ok(PortPrep::Ready)
+        }
+        StartOrigin::Launch => {
+            let held = ops.probe(port);
+            let own = if held.is_occupied() { ops.own_holder_pids(port) } else { Vec::new() };
+            match tray_state::launch_start_decision(held, !own.is_empty()) {
+                LaunchDecision::Spawn => {
+                    ops.kill_tunnels(port);
+                    Ok(PortPrep::Ready)
+                }
+                LaunchDecision::ReclaimOwnOrphan => {
+                    ops.terminate(&own);
+                    ops.kill_tunnels(port);
+                    Ok(PortPrep::Ready)
+                }
+                LaunchDecision::Adopt(p) => Ok(PortPrep::Adopt(p)),
+                LaunchDecision::Refuse(h) => Err(tray_state::launch_refusal_message(h)),
+            }
+        }
+    }
+}
+
+/// The real effects: the live process table, the pid record, `cloudflared`.
+struct RealPortOps<'a> {
+    cli_js: &'a Path,
+    pid_file: Option<&'a Path>,
+    log_buffer: &'a Arc<Mutex<VecDeque<String>>>,
+}
+
+impl PortOps for RealPortOps<'_> {
+    fn probe(&self, port: u16) -> PortState {
+        tray_state::probe_port(port, Duration::from_millis(1500))
+    }
+    fn is_held(&self, port: u16) -> bool {
+        tray_state::port_accepts_connections(port)
+    }
+    fn own_holder_pids(&self, port: u16) -> Vec<u32> {
+        owned_server::find_own_holder_pids(port, self.pid_file, self.cli_js)
+    }
+    fn terminate(&self, pids: &[u32]) {
+        owned_server::terminate(pids)
+    }
+    fn kill_tunnels(&self, port: u16) {
+        ServerManager::kill_orphan_cloudflared(port, self.log_buffer)
     }
 }
 
 /// Manages the Chroxy server child process.
 pub struct ServerManager {
-    origin: StartOrigin,
+    /// Where the pid of the server this app spawned is recorded (#8388).
+    pid_file: Option<PathBuf>,
     status: Arc<Mutex<ServerStatus>>,
     child: Option<Child>,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
@@ -395,7 +469,7 @@ impl ServerManager {
 
     pub fn new() -> Self {
         Self {
-            origin: StartOrigin::Launch,
+            pid_file: owned_server::pid_file_path(),
             status: Arc::new(Mutex::new(ServerStatus::Stopped)),
             child: None,
             log_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(Self::MAX_LOG_LINES))),
@@ -408,11 +482,6 @@ impl ServerManager {
             auto_restart_pending: Arc::new(AtomicBool::new(false)),
             restart_count: Arc::new(AtomicU32::new(0)),
         }
-    }
-
-    /// Set who is asking for the next start/restart (see [`StartOrigin`]).
-    pub fn set_origin(&mut self, origin: StartOrigin) {
-        self.origin = origin;
     }
 
     pub fn status(&self) -> ServerStatus {
@@ -591,6 +660,9 @@ impl ServerManager {
         // Stop the health poll: the child is dead, so any 200 from this
         // port now belongs to a different server.
         self.health_generation.fetch_add(1, Ordering::SeqCst);
+        if let (Some(path), Some(child)) = (self.pid_file.as_deref(), self.child.as_ref()) {
+            owned_server::clear_pid_if(path, child.id());
+        }
         self.child = None;
 
         Self::push_log_line(
@@ -604,66 +676,6 @@ impl ServerManager {
         let msg = classify_startup_exit(&logs, self.config.port, exit_status.code());
         *lock_or_recover(&self.status) = ServerStatus::Error(msg.clone());
         Some(msg)
-    }
-
-    /// Kill any process listening on the given port (cleanup from previous crash).
-    #[cfg(unix)]
-    fn kill_port_holder(port: u16) {
-        if let Ok(output) = Command::new("lsof")
-            .args(["-ti", &format!("tcp:{}", port)])
-            .output()
-        {
-            let pids = String::from_utf8_lossy(&output.stdout);
-            for pid_str in pids.split_whitespace() {
-                if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    // Verify the process belongs to Chroxy/node before killing
-                    if let Ok(ps_output) = Command::new("ps")
-                        .args(["-p", pid_str.trim(), "-o", "comm="])
-                        .output()
-                    {
-                        let comm = String::from_utf8_lossy(&ps_output.stdout)
-                            .trim()
-                            .to_lowercase()
-                            .to_string();
-                        if comm.contains("node") || comm.contains("chroxy") {
-                            unsafe {
-                                libc::kill(pid, libc::SIGTERM);
-                            }
-                        }
-                    }
-                }
-            }
-            if !pids.trim().is_empty() {
-                // Give processes a moment to exit
-                thread::sleep(Duration::from_millis(500));
-            }
-        }
-    }
-
-    /// Kill any process listening on the given port (cleanup from previous crash).
-    #[cfg(windows)]
-    fn kill_port_holder(port: u16) {
-        // On Windows, use netstat + taskkill to find and kill port holders
-        if let Ok(output) = Command::new("cmd")
-            .args(["/C", &format!("netstat -ano | findstr :{}", port)])
-            .output()
-        {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                if let Some(pid_str) = line.split_whitespace().last() {
-                    if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                        if pid > 0 {
-                            let _ = Command::new("taskkill")
-                                .args(["/PID", &pid.to_string(), "/F"])
-                                .output();
-                        }
-                    }
-                }
-            }
-            if !text.trim().is_empty() {
-                thread::sleep(Duration::from_millis(500));
-            }
-        }
     }
 
     /// Kill orphan `cloudflared` processes still tunneling the given port
@@ -693,7 +705,7 @@ impl ServerManager {
         for pid in &pids {
             // SAFETY: pid was just parsed from `ps` output and is about
             // to receive SIGTERM; there's an inherent PID-reuse race
-            // (shared with kill_port_holder) but the verification step
+            // (shared with owned_server::terminate) but the verification step
             // in cloudflared_pids_to_kill bounds the damage to
             // processes whose cmdline still matches the cloudflared
             // pattern at enumeration time.
@@ -928,7 +940,17 @@ impl ServerManager {
     }
 
     /// Start the Chroxy server as a child process.
-    pub fn start(&mut self) -> Result<(), String> {
+    ///
+    /// `origin` says who is asking (see [`StartOrigin`]); it is required so that
+    /// no caller can inherit another caller's answer.
+    pub fn start(&mut self, origin: StartOrigin) -> Result<StartOutcome, String> {
+        self.prepare_for_start()?;
+        self.start_server_process(origin)
+    }
+
+    /// Refuse a server that is already up, and reset the auto-restart state that
+    /// a user-initiated start begins from.
+    fn prepare_for_start(&mut self) -> Result<(), String> {
         if matches!(
             self.status(),
             ServerStatus::Running | ServerStatus::Starting
@@ -940,32 +962,36 @@ impl ServerManager {
         self.user_stopped.store(false, Ordering::Relaxed);
         self.auto_restart_pending.store(false, Ordering::Relaxed);
         self.restart_count.store(0, Ordering::Relaxed);
+        Ok(())
+    }
 
-        self.start_server_process()
+    /// Decide what to do about whatever holds the port before a spawn. `None`
+    /// means go ahead and spawn; `Some` is a finished start with nothing to spawn.
+    fn settle_port(
+        &mut self,
+        origin: StartOrigin,
+        ops: &dyn PortOps,
+    ) -> Result<Option<StartOutcome>, String> {
+        match prepare_port_with(origin, self.config.port, ops)? {
+            PortPrep::Ready => Ok(None),
+            PortPrep::Adopt(port) => {
+                // The port is served by a daemon this app did not start: there is
+                // no child, so the manager is idle, and the caller shows the
+                // daemon instead.
+                *lock_or_recover(&self.status) = ServerStatus::Stopped;
+                Ok(Some(StartOutcome::Adopted(port)))
+            }
+        }
     }
 
     /// Internal: spawn the server process and start health polling.
-    fn start_server_process(&mut self) -> Result<(), String> {
+    fn start_server_process(&mut self, origin: StartOrigin) -> Result<StartOutcome, String> {
         // Clear stale logs from any previous run so the buffer only
         // contains output from the current server process.
         lock_or_recover(&self.log_buffer).clear();
 
         // Reload config each start
         self.config = config::load_config();
-
-        // Kill any orphaned server on the port (e.g. from a previous crash)
-        // Only for a launch-time start: a user-initiated one must never kill a
-        // holder the app does not own (#8267).
-        // Also kill any orphaned cloudflared process still tunneling that port,
-        // otherwise starting a new tunnel will race / fail to bind (#2835).
-        let log_buffer = Arc::clone(&self.log_buffer);
-        reclaim_stale_with(
-            self.origin,
-            self.config.port,
-            crate::tray_state::port_accepts_connections,
-            Self::kill_port_holder,
-            |port| Self::kill_orphan_cloudflared(port, &log_buffer),
-        );
 
         // Resolve Node 22 path.
         // If a custom path was set but no longer exists on disk, clear it
@@ -989,11 +1015,34 @@ impl ServerManager {
         // Resolve cli.js path
         let cli_js = Self::resolve_cli_js()?;
 
+        // Clear the way for the spawn (#8267, #8388). Done after node and cli.js
+        // resolve, so a start that cannot happen anyway stops nothing. A launch
+        // may stop an orphan of the app's OWN earlier server, never anything
+        // else; a user start stops nothing. Also reaps an orphaned cloudflared
+        // still tunneling this port, otherwise the new tunnel races / fails to
+        // bind (#2835).
+        let pid_file = self.pid_file.clone();
+        let log_buffer = Arc::clone(&self.log_buffer);
+        let ops = RealPortOps {
+            cli_js: &cli_js,
+            pid_file: pid_file.as_deref(),
+            log_buffer: &log_buffer,
+        };
+        if let Some(outcome) = self.settle_port(origin, &ops)? {
+            return Ok(outcome);
+        }
+
+        self.spawn_server(&node_path, &cli_js)
+    }
+
+    /// Spawn `<node_path> <cli_js> start --no-supervisor`, record its pid and start
+    /// health polling. The port has already been settled.
+    fn spawn_server(&mut self, node_path: &Path, cli_js: &Path) -> Result<StartOutcome, String> {
         *lock_or_recover(&self.status) = ServerStatus::Starting;
 
         // Build command
-        let mut cmd = Command::new(&node_path);
-        cmd.arg(&cli_js).arg("start");
+        let mut cmd = Command::new(node_path);
+        cmd.arg(cli_js).arg("start");
 
         // Build a comprehensive PATH. macOS GUI apps launched via launchd
         // (including this Tauri tray binary) inherit a minimal PATH
@@ -1093,12 +1142,20 @@ impl ServerManager {
             });
         }
 
+        // Record who we spawned, so a later launch can tell this server from a
+        // daemon somebody else started (#8388). Best effort: without the record
+        // a surviving orphan is adopted rather than replaced, which is safe.
+        if let Some(path) = self.pid_file.as_deref() {
+            if let Err(e) = owned_server::record_pid(path, child.id()) {
+                eprintln!("[tray] could not record the server pid at {}: {}", path.display(), e);
+            }
+        }
         self.child = Some(child);
 
         // Start health polling in background
         self.start_health_poll();
 
-        Ok(())
+        Ok(StartOutcome::Spawned)
     }
 
     /// Internal: kill the child process and clear the handle.
@@ -1106,6 +1163,11 @@ impl ServerManager {
     fn kill_child(&mut self) {
         // Stop health polling by advancing generation (old threads will see mismatch and exit)
         self.health_generation.fetch_add(1, Ordering::SeqCst);
+
+        if let (Some(path), Some(child)) = (self.pid_file.as_deref(), self.child.as_ref()) {
+            // This server is about to be gone; its record must not outlive it.
+            owned_server::clear_pid_if(path, child.id());
+        }
 
         if let Some(ref mut child) = self.child {
             // Only send SIGTERM if the child is still running
@@ -1184,14 +1246,45 @@ impl ServerManager {
     }
 
     /// Restart: stop then start (resets auto-restart state via start()).
-    pub fn restart(&mut self) -> Result<(), String> {
-        self.kill_child();
-        self.start()
+    ///
+    /// The status is reset to Stopped between the two: `start()` refuses a
+    /// Running or Starting server, so without it a restart of a running server
+    /// always failed with "Server is already running".
+    pub fn restart(&mut self, origin: StartOrigin) -> Result<StartOutcome, String> {
+        self.restart_with(origin, Self::start_server_process)
+    }
+
+    /// `restart` with the spawn injected, so the stop-then-start sequencing is
+    /// testable without spawning a server.
+    fn restart_with(
+        &mut self,
+        origin: StartOrigin,
+        spawn: impl FnOnce(&mut Self, StartOrigin) -> Result<StartOutcome, String>,
+    ) -> Result<StartOutcome, String> {
+        self.stop_process();
+        self.prepare_for_start()?;
+        spawn(self, origin)
     }
 
     /// Attempt auto-restart after crash detection.
     /// Increments restart count. Returns Err if max attempts exceeded or start fails.
-    pub fn try_auto_restart(&mut self) -> Result<(), String> {
+    ///
+    /// `origin` is passed by the caller like any other start. The supervisor loop
+    /// passes [`StartOrigin::Launch`]: it must be able to clear an orphan of the
+    /// app's own server, and, because that origin never stops anything it cannot
+    /// prove it started, a daemon that took the port after the crash is adopted
+    /// or refused, never replaced (#8388).
+    pub fn try_auto_restart(&mut self, origin: StartOrigin) -> Result<StartOutcome, String> {
+        self.auto_restart_with(origin, Self::start_server_process)
+    }
+
+    /// `try_auto_restart` with the spawn injected, so what a crash restart does
+    /// with each outcome is testable without spawning a server.
+    fn auto_restart_with(
+        &mut self,
+        origin: StartOrigin,
+        spawn: impl FnOnce(&mut Self, StartOrigin) -> Result<StartOutcome, String>,
+    ) -> Result<StartOutcome, String> {
         let count = self.restart_count.load(Ordering::Relaxed);
         if count >= Self::MAX_RESTART_ATTEMPTS {
             *lock_or_recover(&self.status) = ServerStatus::Error(format!(
@@ -1205,8 +1298,16 @@ impl ServerManager {
         self.auto_restart_pending.store(false, Ordering::Relaxed);
         *lock_or_recover(&self.status) = ServerStatus::Restarting;
         self.kill_child();
-        match self.start_server_process() {
-            Ok(()) => Ok(()),
+        match spawn(self, origin) {
+            Ok(outcome) => {
+                if let StartOutcome::Adopted(_) = outcome {
+                    // Another daemon took the port after the crash and the app
+                    // is using it: nothing of ours is left to restart.
+                    *lock_or_recover(&self.status) = ServerStatus::Stopped;
+                    self.auto_restart_pending.store(false, Ordering::Relaxed);
+                }
+                Ok(outcome)
+            }
             Err(e) => {
                 *lock_or_recover(&self.status) = ServerStatus::Error(e.clone());
                 self.auto_restart_pending.store(true, Ordering::Relaxed);
@@ -1235,6 +1336,15 @@ impl ServerManager {
     /// then monitor continuously. Signals auto-restart on crash detection.
     /// Uses a generation counter to ensure old threads exit when a new poll starts.
     fn start_health_poll(&self) {
+        self.start_health_poll_with(Arc::new(|port| {
+            tray_state::probe_port(port, Duration::from_secs(2))
+        }));
+    }
+
+    /// [`Self::start_health_poll`] with the probe passed in: what a challenge to
+    /// `port` found. The real one ([`tray_state::probe_port`]) reads the token fresh
+    /// on every call and retries once with a freshly loaded token.
+    fn start_health_poll_with(&self, probe: Arc<dyn Fn(u16) -> PortState + Send + Sync>) {
         let status = self.status.clone();
         let port = self.config.port;
         let generation = self.health_generation.clone();
@@ -1250,9 +1360,14 @@ impl ServerManager {
 
         thread::spawn(move || {
             let start = Instant::now();
-            // Use 127.0.0.1 (not localhost) to avoid IPv6 resolution issues
-            // in macOS GUI app context where DNS may resolve differently.
-            let url = format!("http://127.0.0.1:{}/", port);
+            // The responder is `Running` only when it answers a fresh health
+            // challenge with a proof bound to the token and to this port (loopback
+            // 127.0.0.1, not localhost, to avoid IPv6 resolution issues in a macOS
+            // GUI app context). A foreign process that answers 200 is not a start.
+            // `probe` reads the token fresh on every call (the config file, then the
+            // credential store) and retries once with a freshly loaded token when a
+            // proof does not verify: a token rotated while the server runs is the
+            // server's own, not a foreign answer.
 
             // Counters used for the timeout summary (issue #2835 sub-fix B).
             let mut attempts: u32 = 0;
@@ -1283,44 +1398,32 @@ impl ServerManager {
 
                 attempts += 1;
                 let attempt_start = Instant::now();
-                match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
-                    Ok(resp) => {
-                        let code = resp.status();
-                        let elapsed_ms = attempt_start.elapsed().as_millis();
-                        let msg = format!(
-                            "[health] attempt #{} GET {} -> {} ({}ms)",
-                            attempts, url, code, elapsed_ms
-                        );
-                        eprintln!("{}", msg);
-                        Self::push_log_line(&log_buf, msg);
-                        if code == 200 {
-                            // Re-check the generation under the status lock
-                            // (#5495): this request may have been in flight
-                            // when the child-exit path (or kill_child) bumped
-                            // the generation and resolved status — a late 200
-                            // must not overwrite Error/Stopped post-mortem.
-                            let mut s = lock_or_recover(&status);
-                            if generation.load(Ordering::SeqCst) != my_gen {
-                                return;
-                            }
-                            *s = ServerStatus::Running;
-                            break;
-                        } else {
-                            non200 += 1;
+                let observed = probe(port);
+                let msg = format!(
+                    "[health] attempt #{} port {} -> {} ({}ms)",
+                    attempts,
+                    port,
+                    describe_probe(observed),
+                    attempt_start.elapsed().as_millis()
+                );
+                eprintln!("{}", msg);
+                Self::push_log_line(&log_buf, msg);
+                match observed {
+                    PortState::Chroxy(_) => {
+                        // Re-check the generation under the status lock
+                        // (#5495): this request may have been in flight
+                        // when the child-exit path (or kill_child) bumped
+                        // the generation and resolved status — a late answer
+                        // must not overwrite Error/Stopped post-mortem.
+                        let mut s = lock_or_recover(&status);
+                        if generation.load(Ordering::SeqCst) != my_gen {
+                            return;
                         }
+                        *s = ServerStatus::Running;
+                        break;
                     }
-                    Err(err) => {
-                        network_errors += 1;
-                        let elapsed_ms = attempt_start.elapsed().as_millis();
-                        // ureq::Error prints like "Transport(...)" / "Status(...)"
-                        // which is short enough to include verbatim.
-                        let msg = format!(
-                            "[health] attempt #{} GET {} -> Err({}) ({}ms)",
-                            attempts, url, err, elapsed_ms
-                        );
-                        eprintln!("{}", msg);
-                        Self::push_log_line(&log_buf, msg);
-                    }
+                    PortState::Foreign(_) => non200 += 1,
+                    PortState::Free => network_errors += 1,
                 }
 
                 if !Self::sleep_interruptible(Duration::from_secs(2), &generation, my_gen) {
@@ -1338,25 +1441,26 @@ impl ServerManager {
                     return;
                 }
 
-                match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
-                    Ok(resp) => {
-                        if resp.status() == 200 {
-                            // Same in-flight guard as the startup loop: a
-                            // 200 that raced a generation bump must not
-                            // resurrect a resolved status (#5495).
-                            let mut s = lock_or_recover(&status);
-                            if generation.load(Ordering::SeqCst) != my_gen {
-                                return;
-                            }
-                            *s = ServerStatus::Running;
+                match probe(port) {
+                    PortState::Chroxy(_) => {
+                        // Same in-flight guard as the startup loop: an answer
+                        // that raced a generation bump must not resurrect a
+                        // resolved status (#5495).
+                        let mut s = lock_or_recover(&status);
+                        if generation.load(Ordering::SeqCst) != my_gen {
+                            return;
                         }
+                        *s = ServerStatus::Running;
                     }
-                    Err(err) => {
+                    other => {
+                        // No answer, or an answer without a valid proof (the
+                        // server died and something else took the port).
                         let mut s = lock_or_recover(&status);
                         if *s == ServerStatus::Running {
                             let msg = format!(
-                                "[health] monitor GET {} -> Err({}): server stopped responding",
-                                url, err
+                                "[health] monitor port {} -> {}: server stopped responding",
+                                port,
+                                describe_probe(other)
                             );
                             eprintln!("{}", msg);
                             Self::push_log_line(&log_buf, msg);
@@ -1480,6 +1584,15 @@ fn bundled_cli_js_candidates(exe: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+/// One line for the health log: what a challenge to the server's port found.
+fn describe_probe(observed: PortState) -> &'static str {
+    match observed {
+        PortState::Chroxy(_) => "answered the challenge with a valid proof",
+        PortState::Foreign(_) => "answered without a valid proof",
+        PortState::Free => "no answer",
+    }
+}
+
 impl Drop for ServerManager {
     fn drop(&mut self) {
         self.stop();
@@ -1488,47 +1601,447 @@ impl Drop for ServerManager {
 
 #[cfg(test)]
 mod tests {
-    // --- user-initiated starts never kill a holder they do not own (#8267) ---
+    // --- an automatic start stops only what it can prove it started (#8267, #8388) ---
 
-    fn reclaim_log(origin: StartOrigin, held: bool) -> Vec<&'static str> {
-        let log = std::cell::RefCell::new(Vec::new());
-        reclaim_stale_with(
-            origin,
-            8765,
-            |_| held,
-            |_| log.borrow_mut().push("kill_holder"),
-            |_| log.borrow_mut().push("kill_tunnels"),
-        );
-        log.into_inner()
+    use std::cell::RefCell;
+
+    /// Records every effect `prepare_port_with` asks for.
+    struct Rec {
+        held: PortState,
+        own: Vec<u32>,
+        log: RefCell<Vec<String>>,
     }
 
-    #[test]
-    fn user_start_never_reaches_the_port_holder_kill() {
-        for held in [true, false] {
-            assert!(!reclaim_log(StartOrigin::User, held).contains(&"kill_holder"));
+    impl Rec {
+        fn new(held: PortState, own: &[u32]) -> Self {
+            Self { held, own: own.to_vec(), log: RefCell::new(Vec::new()) }
+        }
+        fn log(&self) -> Vec<String> {
+            self.log.borrow().clone()
         }
     }
 
+    impl PortOps for Rec {
+        fn probe(&self, _: u16) -> PortState {
+            self.log.borrow_mut().push("probe".into());
+            self.held
+        }
+        fn is_held(&self, _: u16) -> bool {
+            self.log.borrow_mut().push("is_held".into());
+            self.held.is_occupied()
+        }
+        fn own_holder_pids(&self, _: u16) -> Vec<u32> {
+            self.log.borrow_mut().push("own_holder_pids".into());
+            self.own.clone()
+        }
+        fn terminate(&self, pids: &[u32]) {
+            self.log.borrow_mut().push(format!("terminate{:?}", pids));
+        }
+        fn kill_tunnels(&self, _: u16) {
+            self.log.borrow_mut().push("kill_tunnels".into());
+        }
+    }
+
+    fn killed(log: &[String]) -> bool {
+        log.iter().any(|l| l.starts_with("terminate"))
+    }
+
     #[test]
-    fn launch_start_still_reclaims_holder_then_tunnels() {
-        for held in [true, false] {
-            assert_eq!(reclaim_log(StartOrigin::Launch, held), vec!["kill_holder", "kill_tunnels"]);
+    fn user_start_never_stops_a_holder_whoever_it_is() {
+        for held in [PortState::Free, PortState::Chroxy(8765), PortState::Foreign(8765)] {
+            // Even a holder that would pass for the app's own.
+            let rec = Rec::new(held, &[42]);
+            let prep = prepare_port_with(StartOrigin::User, 8765, &rec);
+            assert_eq!(prep, Ok(PortPrep::Ready), "{:?}", held);
+            assert!(!killed(&rec.log()), "{:?}: {:?}", held, rec.log());
+            assert!(!rec.log().contains(&"own_holder_pids".to_string()), "a user start has no use for ownership");
         }
     }
 
     #[test]
     fn user_start_leaves_an_external_daemons_tunnel_alone_but_reaps_an_orphan() {
-        assert!(reclaim_log(StartOrigin::User, true).is_empty(), "held port: hands off");
-        assert_eq!(reclaim_log(StartOrigin::User, false), vec!["kill_tunnels"]);
+        let held = Rec::new(PortState::Chroxy(8765), &[]);
+        prepare_port_with(StartOrigin::User, 8765, &held).unwrap();
+        assert!(!held.log().contains(&"kill_tunnels".to_string()), "held port: hands off");
+
+        let free = Rec::new(PortState::Free, &[]);
+        prepare_port_with(StartOrigin::User, 8765, &free).unwrap();
+        assert!(free.log().contains(&"kill_tunnels".to_string()));
     }
 
     #[test]
-    fn manager_defaults_to_launch_origin_and_can_be_set_to_user() {
+    fn launch_on_a_free_port_spawns_and_reaps_a_stale_tunnel_without_asking_about_ownership() {
+        let rec = Rec::new(PortState::Free, &[]);
+        assert_eq!(prepare_port_with(StartOrigin::Launch, 8765, &rec), Ok(PortPrep::Ready));
+        assert_eq!(rec.log(), vec!["probe", "kill_tunnels"]);
+    }
+
+    #[test]
+    fn launch_adopts_a_chroxy_daemon_it_did_not_start_and_touches_nothing() {
+        let rec = Rec::new(PortState::Chroxy(8765), &[]);
+        assert_eq!(prepare_port_with(StartOrigin::Launch, 8765, &rec), Ok(PortPrep::Adopt(8765)));
+        assert!(!killed(&rec.log()), "{:?}", rec.log());
+        assert!(!rec.log().contains(&"kill_tunnels".to_string()), "the daemon's tunnel is not ours either");
+    }
+
+    #[test]
+    fn launch_refuses_a_foreign_holder_with_a_clear_message_and_kills_nothing() {
+        let rec = Rec::new(PortState::Foreign(8765), &[]);
+        let err = prepare_port_with(StartOrigin::Launch, 8765, &rec).unwrap_err();
+        assert!(err.contains("8765") && err.contains("another program"), "{}", err);
+        assert!(!killed(&rec.log()), "{:?}", rec.log());
+        assert!(!rec.log().contains(&"kill_tunnels".to_string()));
+    }
+
+    #[test]
+    fn launch_reclaims_the_apps_own_orphan_then_reaps_its_tunnel() {
+        // Healthy or wedged, an orphan proved to be ours is replaced.
+        for held in [PortState::Chroxy(8765), PortState::Foreign(8765)] {
+            let rec = Rec::new(held, &[42]);
+            assert_eq!(prepare_port_with(StartOrigin::Launch, 8765, &rec), Ok(PortPrep::Ready), "{:?}", held);
+            assert_eq!(rec.log(), vec!["probe", "own_holder_pids", "terminate[42]", "kill_tunnels"], "{:?}", held);
+        }
+    }
+
+    // --- the origin is an argument; a crash restart goes through the same decision ---
+
+    fn manager_on(port: u16) -> ServerManager {
         let mut mgr = ServerManager::new();
-        assert_eq!(mgr.origin, StartOrigin::Launch);
-        mgr.set_origin(StartOrigin::User);
-        assert_eq!(mgr.origin, StartOrigin::User);
-        assert!(may_reclaim_port(StartOrigin::Launch) && !may_reclaim_port(StartOrigin::User));
+        mgr.config.port = port;
+        mgr.pid_file = None; // never touch the real record
+        mgr
+    }
+
+    #[test]
+    fn settle_port_adopting_leaves_the_manager_idle() {
+        let mut mgr = manager_on(8765);
+        *lock_or_recover(&mgr.status) = ServerStatus::Error("crashed".into());
+        let rec = Rec::new(PortState::Chroxy(8765), &[]);
+        assert_eq!(mgr.settle_port(StartOrigin::Launch, &rec), Ok(Some(StartOutcome::Adopted(8765))));
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+        assert!(mgr.child.is_none());
+    }
+
+    #[test]
+    fn settle_port_refusing_spawns_nothing_and_does_not_disturb_the_status() {
+        let mut mgr = manager_on(8765);
+        let rec = Rec::new(PortState::Foreign(8765), &[]);
+        assert!(mgr.settle_port(StartOrigin::Launch, &rec).unwrap_err().contains("another program"));
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+    }
+
+    #[test]
+    fn settle_port_on_a_free_port_says_go_ahead() {
+        let mut mgr = manager_on(8765);
+        assert_eq!(mgr.settle_port(StartOrigin::Launch, &Rec::new(PortState::Free, &[])), Ok(None));
+    }
+
+    #[test]
+    fn a_crash_restart_that_finds_the_port_taken_by_a_chroxy_daemon_adopts_it() {
+        let mut mgr = manager_on(8765);
+        *lock_or_recover(&mgr.status) = ServerStatus::Error("Server stopped responding".into());
+        mgr.auto_restart_pending.store(true, Ordering::Relaxed);
+        let rec = Rec::new(PortState::Chroxy(8765), &[]);
+        let r = mgr.auto_restart_with(StartOrigin::Launch, |m, o| {
+            Ok(m.settle_port(o, &rec)?.expect("adopted"))
+        });
+        assert_eq!(r, Ok(StartOutcome::Adopted(8765)));
+        assert_eq!(mgr.status(), ServerStatus::Stopped, "not Restarting, not Error");
+        assert!(!mgr.is_auto_restart_pending(), "nothing left to restart");
+        assert!(!killed(&rec.log()), "{:?}", rec.log());
+    }
+
+    #[test]
+    fn a_crash_restart_that_adopts_leaves_the_manager_idle_whatever_the_spawn_did_to_the_status() {
+        // The restart marks itself Restarting before it spawns; an adopted
+        // outcome must not leave that (or an Error) behind.
+        let mut mgr = manager_on(8765);
+        *lock_or_recover(&mgr.status) = ServerStatus::Error("crashed".into());
+        let r = mgr.auto_restart_with(StartOrigin::Launch, |_, _| Ok(StartOutcome::Adopted(9)));
+        assert_eq!(r, Ok(StartOutcome::Adopted(9)));
+        assert_eq!(mgr.status(), ServerStatus::Stopped);
+    }
+
+    #[test]
+    fn a_crash_restart_that_finds_a_foreign_holder_fails_with_its_message_and_kills_nothing() {
+        let mut mgr = manager_on(8765);
+        let rec = Rec::new(PortState::Foreign(8765), &[]);
+        let r = mgr.auto_restart_with(StartOrigin::Launch, |m, o| {
+            m.settle_port(o, &rec)?;
+            panic!("must not reach the spawn")
+        });
+        let msg = r.unwrap_err();
+        assert!(msg.contains("another program"), "{}", msg);
+        assert_eq!(mgr.status(), ServerStatus::Error(msg));
+        assert!(!killed(&rec.log()), "{:?}", rec.log());
+    }
+
+    #[test]
+    fn a_crash_restart_passes_the_callers_origin_to_the_spawn() {
+        for origin in [StartOrigin::Launch, StartOrigin::User] {
+            let mut mgr = manager_on(8765);
+            let mut seen = None;
+            let _ = mgr.auto_restart_with(origin, |_, o| {
+                seen = Some(o);
+                Ok(StartOutcome::Spawned)
+            });
+            assert_eq!(seen, Some(origin));
+        }
+    }
+
+    #[test]
+    fn restart_of_a_running_server_reaches_the_spawn() {
+        // Before: start() saw the still-Running status and refused, so every
+        // Restart of a running server failed with "Server is already running".
+        let mut mgr = manager_on(8765);
+        *lock_or_recover(&mgr.status) = ServerStatus::Running;
+        let mut spawned_from = None;
+        let r = mgr.restart_with(StartOrigin::User, |m, o| {
+            spawned_from = Some((o, m.status()));
+            Ok(StartOutcome::Spawned)
+        });
+        assert_eq!(r, Ok(StartOutcome::Spawned));
+        assert_eq!(spawned_from, Some((StartOrigin::User, ServerStatus::Stopped)));
+    }
+
+    #[test]
+    fn start_still_refuses_a_server_that_is_already_up() {
+        let mut mgr = manager_on(8765);
+        for status in [ServerStatus::Running, ServerStatus::Starting] {
+            *lock_or_recover(&mgr.status) = status;
+            assert_eq!(mgr.start(StartOrigin::User), Err("Server is already running".to_string()));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_childs_pid_record_is_cleared_but_a_newer_ones_is_not() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("desktop-server.pid");
+        let mut mgr = manager_on(8765);
+        mgr.pid_file = Some(path.clone());
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+
+        owned_server::record_pid(&path, pid + 1).unwrap(); // a newer server's record
+        mgr.child = Some(child);
+        mgr.kill_child();
+        assert_eq!(owned_server::read_pid(&path), Some(pid + 1));
+
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        owned_server::record_pid(&path, pid).unwrap();
+        mgr.child = Some(child);
+        mgr.kill_child();
+        assert_eq!(owned_server::read_pid(&path), None);
+    }
+
+    /// A manager on a free port, with its pid record in `dir`.
+    #[cfg(unix)]
+    fn manager_recording_in(dir: &std::path::Path) -> (ServerManager, PathBuf) {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let path = dir.join("desktop-server.pid");
+        let mut mgr = manager_on(port);
+        mgr.pid_file = Some(path.clone());
+        (mgr, path)
+    }
+
+    // --- readiness needs a proof, not just an answer -----------------------
+
+    type SharedToken = std::sync::Arc<Mutex<String>>;
+
+    fn shared(t: &str) -> SharedToken {
+        std::sync::Arc::new(Mutex::new(t.to_string()))
+    }
+
+    /// A server on a free port that answers `/health` as chroxy and, while `proving`
+    /// is set, proves a challenge with whatever `token` holds at that moment.
+    fn serve_switchable(token: SharedToken, proving: std::sync::Arc<std::sync::atomic::AtomicBool>) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let nonce = request
+                    .split("challenge=")
+                    .nth(1)
+                    .and_then(|r| r.split_whitespace().next())
+                    .map(str::to_string);
+                let body = match nonce {
+                    Some(n) if proving.load(Ordering::SeqCst) => format!(
+                        r#"{{"status":"ok","mode":"cli","version":"1","proof":"{}"}}"#,
+                        crate::health_proof::compute_proof_hex(&token.lock().unwrap(), port, &n)
+                    ),
+                    _ => r#"{"status":"ok","mode":"cli","version":"1"}"#.to_string(),
+                };
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(reply.as_bytes());
+            }
+        });
+        port
+    }
+
+    /// What the app has on file: the token its cache holds and the one a fresh
+    /// load returns. A rotation changes the second and leaves the first stale.
+    type AppView = std::sync::Arc<Mutex<(String, String)>>;
+
+    fn app_view(cached: &str, fresh: &str) -> AppView {
+        std::sync::Arc::new(Mutex::new((cached.to_string(), fresh.to_string())))
+    }
+
+    /// The probe the real poll uses, with the token sources taken from `view`.
+    fn probe_from(view: AppView) -> Arc<dyn Fn(u16) -> PortState + Send + Sync> {
+        Arc::new(move |port| {
+            let (cached, fresh) = view.lock().unwrap().clone();
+            tray_state::probe_with_retry(
+                port,
+                Duration::from_secs(2),
+                Some(cached),
+                move || Some(fresh),
+                tray_state::probe_port_outcome,
+            )
+            .0
+        })
+    }
+
+    fn wait_for(mgr: &ServerManager, want: impl Fn(&ServerStatus) -> bool, secs: u64) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(secs) {
+            if want(&mgr.status()) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    fn polling_manager(port: u16) -> ServerManager {
+        let mgr = manager_on(port);
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+        mgr
+    }
+
+    fn flag(on: bool) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(on))
+    }
+
+    #[test]
+    fn a_responder_that_proves_itself_makes_the_server_running() {
+        let mgr = polling_manager(serve_switchable(shared("tok"), flag(true)));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10), "status {:?}", mgr.status());
+        let mut mgr = mgr;
+        mgr.kill_child(); // stops the poll
+    }
+
+    #[test]
+    fn a_responder_that_answers_200_without_a_proof_does_not_make_the_server_running() {
+        let mut mgr = polling_manager(serve_switchable(shared("tok"), flag(false)));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
+        assert!(
+            !wait_for(&mgr, |s| *s == ServerStatus::Running, 3),
+            "a bare 200 must not start the server"
+        );
+        assert_eq!(mgr.status(), ServerStatus::Starting);
+        mgr.kill_child();
+    }
+
+    #[test]
+    fn a_proof_made_with_another_token_does_not_make_the_server_running() {
+        let mut mgr = polling_manager(serve_switchable(shared("someone-elses-token"), flag(true)));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
+        assert!(!wait_for(&mgr, |s| *s == ServerStatus::Running, 3));
+        mgr.kill_child();
+    }
+
+    #[test]
+    fn a_running_server_whose_port_is_taken_by_a_responder_without_a_proof_is_an_error() {
+        let proving = flag(true);
+        let mut mgr = polling_manager(serve_switchable(shared("tok"), proving.clone()));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
+        // The proving server is replaced: the same port now answers without a proof.
+        proving.store(false, Ordering::SeqCst);
+        assert!(
+            wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 12),
+            "status {:?}",
+            mgr.status()
+        );
+        mgr.kill_child();
+    }
+
+    #[test]
+    fn a_token_rotated_while_the_server_runs_keeps_it_running_and_is_not_restarted() {
+        let daemon_token = shared("before");
+        let view = app_view("before", "before");
+        let mut mgr = polling_manager(serve_switchable(daemon_token.clone(), flag(true)));
+        mgr.start_health_poll_with(probe_from(view.clone()));
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
+        // Scheduled rotation: the daemon proves with the new token, the app's cache
+        // still holds the old one, and a fresh load returns the new one.
+        *daemon_token.lock().unwrap() = "after".to_string();
+        *view.lock().unwrap() = ("before".to_string(), "after".to_string());
+        // Longer than one monitor interval (5 s): at least one probe runs.
+        assert!(
+            !wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 7),
+            "a rotated token must not read as a crash; status {:?}",
+            mgr.status()
+        );
+        assert_eq!(mgr.status(), ServerStatus::Running);
+        assert!(!mgr.is_auto_restart_pending(), "no restart is queued for a healthy server");
+        mgr.kill_child();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_spawned_server_is_recorded_under_its_pid_and_the_record_goes_with_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, path) = manager_recording_in(dir.path());
+        let script = dir.path().join("cli.js");
+        std::fs::write(&script, "exec sleep 30\n").unwrap();
+
+        assert_eq!(mgr.spawn_server(Path::new("/bin/sh"), &script), Ok(StartOutcome::Spawned));
+        let pid = mgr.child.as_ref().expect("the spawned child").id();
+        assert_eq!(owned_server::read_pid(&path), Some(pid), "the record names the spawned server");
+
+        mgr.kill_child();
+        assert_eq!(owned_server::read_pid(&path), None, "a stopped server leaves no record");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_dies_during_startup_leaves_no_pid_record() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, path) = manager_recording_in(dir.path());
+        let child = Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        owned_server::record_pid(&path, child.id()).unwrap();
+        mgr.child = Some(child);
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+
+        let start = Instant::now();
+        let msg = loop {
+            if let Some(msg) = mgr.check_startup_child_exit() {
+                break msg;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "the child never exited");
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!msg.is_empty());
+        assert!(mgr.child.is_none());
+        assert_eq!(owned_server::read_pid(&path), None);
     }
 
     use super::*;
@@ -1871,7 +2384,7 @@ mod tests {
         mgr.restart_count
             .store(ServerManager::MAX_RESTART_ATTEMPTS, Ordering::Relaxed);
 
-        let result = mgr.try_auto_restart();
+        let result = mgr.try_auto_restart(StartOrigin::Launch);
         assert!(result.is_err());
         assert_eq!(
             mgr.status(),
