@@ -220,6 +220,48 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
+   * #8362 -- record that the server ACCEPTED an answer to a `user_question`.
+   *
+   * The restore-time sweep (`sweepUnresolvedToolStarts`) calls a question
+   * interrupted when its AskUserQuestion tool has no `tool_result`. For
+   * claude-cli and claude-tui the answer is delivered to the provider BEFORE the
+   * tool's result event arrives, so a restart in that window cut off a question
+   * that had in fact been answered, and a client rebuilding from scratch showed
+   * "Interrupted -- chroxy restarted before this was answered". This is the
+   * record the sweep consults.
+   *
+   * A flag only: the answer text is not stored (it is not already in the entry,
+   * and the history would otherwise start persisting user answers). Idempotent.
+   * Mutates the entry in place, like `tool_result`'s input backfill: nothing a
+   * client could hold is changed on the live wire, and `sendHistoryEntry` keeps
+   * the field off replay frames.
+   *
+   * @param {string} sessionId
+   * @param {string} [toolUseId] - The question's id (the one its route and wire
+   *   frame carry). Without one, the newest question not yet marked answered:
+   *   only clients that send no id reach that, and they have one question in
+   *   flight.
+   * @returns {boolean} true when an entry was newly marked (the caller persists)
+   */
+  markQuestionAnswered(sessionId, toolUseId) {
+    const history = this._messageHistory.get(sessionId)
+    if (!Array.isArray(history)) return false
+    for (let i = history.length - 1; i >= 0; i--) {
+      const entry = history[i]
+      if (!entry || entry.type !== 'user_question') continue
+      if (typeof toolUseId === 'string') {
+        if (entry.toolUseId !== toolUseId) continue
+      } else if (entry.answered === true) {
+        continue
+      }
+      if (entry.answered === true) return false
+      entry.answered = true
+      return true
+    }
+    return false
+  }
+
+  /**
    * Sweep an in-memory history array for `tool_start` entries that lack a
    * matching `tool_result` and splice in a synthetic `tool_result` right
    * after each one. Used during session restore (#4617) so that a session
@@ -240,7 +282,9 @@ export class SessionMessageHistory extends EventEmitter {
    * answered), so a replaying client can say so instead of stamping it
    * "(resolved)". A second marked copy is appended at the END of the history so
    * that a delta replay for a client whose cursor is already past the question
-   * still delivers the mark. Other entries are passed through.
+   * still delivers the mark. Other entries are passed through. A question carrying
+   * `answered: true` (#8362: the server accepted an answer before the restart) is
+   * passed through unmarked.
    *
    * Safe to call on:
    *   - empty / non-array input (returns the input unchanged)
@@ -287,7 +331,10 @@ export class SessionMessageHistory extends EventEmitter {
       const questionToolId = rawEntry && rawEntry.type === 'user_question'
         ? (typeof rawEntry.sourceToolUseId === 'string' ? rawEntry.sourceToolUseId : rawEntry.toolUseId)
         : undefined
-      const entry = (typeof questionToolId === 'string' && interruptedIds.has(questionToolId))
+      // #8362: a question the server accepted an answer for is not cut off even
+      // though its tool_result has not arrived yet (cli/tui deliver the answer
+      // first). The tool_start is still swept below -- the TOOL was in flight.
+      const entry = (typeof questionToolId === 'string' && interruptedIds.has(questionToolId) && rawEntry.answered !== true)
         ? { ...rawEntry, interrupted: true }
         : rawEntry
       if (entry !== rawEntry) redelivered.push({ ...entry })

@@ -327,7 +327,10 @@ export function sendHistoryEntry(send, ws, sessionId, entry) {
   // pair a recorded question with its tool_start, and no client reads it. Live
   // broadcasts never carry it (the event normalizer picks fields), so the replay
   // frame must not either.
-  const { _seq, sourceToolUseId: _sourceToolUseId, ...wireEntry } = entry
+  // `answered` (#8362) is likewise server-only: the restore-time sweep reads it to
+  // leave an answered question unmarked, and a replayed question reads as resolved
+  // on the client already.
+  const { _seq, sourceToolUseId: _sourceToolUseId, answered: _answered, ...wireEntry } = entry
   send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
   if (entry && entry.type === 'result') {
     send(ws, { type: 'agent_idle', sessionId })
