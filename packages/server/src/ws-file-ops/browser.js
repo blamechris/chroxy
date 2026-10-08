@@ -5,7 +5,7 @@ import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
-import { realpathOfDeepestAncestor, unresolvablePathError, withPosixNotADirectory } from './common.js'
+import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
 
 const log = createLogger('ws')
 
@@ -93,9 +93,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         return
       }
 
-      // #7284 — Windows answers ENOENT for a path through a file; say ENOTDIR.
       const dirents = await readdir(realAbsPath, { withFileTypes: true })
-        .catch(async (err) => { throw await withPosixNotADirectory(err, realAbsPath, homeReal) })
       const entries = dirents
         .filter(d => d.isDirectory() && !d.name.startsWith('.'))
         .sort((a, b) => a.name.localeCompare(b.name))
@@ -180,9 +178,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         return
       }
 
-      // #7284 — Windows answers ENOENT for a path through a file; say ENOTDIR.
       const dirents = await readdir(realAbsPath, { withFileTypes: true })
-        .catch(async (err) => { throw await withPosixNotADirectory(err, realAbsPath, cwdReal) })
       const entries = []
       for (const d of dirents) {
         if (d.name.startsWith('.')) continue
