@@ -1082,6 +1082,10 @@ describe('ClaudeTuiSession', () => {
               })
               session._sessionId = SESSION_ID
               session._resumedFromPersisted = resumed
+              // #8239: `--resume` is only used for an id claude persisted. This
+              // matrix is about argv shape, so pin the probe to "persisted"
+              // rather than reading the developer's real ~/.claude.
+              session._conversationPersisted = () => true
               session._settingsPath = join(fakeHome, 'settings.json')
               // Deterministic regardless of the real skills-loader's own
               // empty/non-empty behaviour — this suite is about argv
