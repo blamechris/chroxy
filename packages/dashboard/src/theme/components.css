@@ -1057,7 +1057,15 @@ a.dev-preview-chip__link:focus-visible {
   color: var(--text-primary);
 }
 
+/* #8467 — every row clears the 44px tap-target floor (CLAUDE.md "Tap targets")
+ * on EVERY pointer, not only a coarse one: the menu is reachable by touch/pen
+ * (the session tab's Rename lives here) and by mouse, and a dense desktop
+ * exception was not recorded. box-sizing keeps the padding inside the 44px. */
 .session-context-menu-item {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  min-height: 44px;
   padding: 6px 12px;
   cursor: pointer;
   user-select: none;
@@ -1075,19 +1083,14 @@ a.dev-preview-chip__link:focus-visible {
 .session-context-menu-item.separator-above {
   border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
   margin-top: 4px;
-  padding-top: 8px;
 }
 
-/* #7329 — touch hit area: on a coarse pointer the menu rows (now the only way
- * to reach Rename from a touch/pen device) meet the 44px minimum. */
-@media (pointer: coarse) {
-  .session-context-menu-item {
-    min-height: 44px;
-    box-sizing: border-box;
-    display: flex;
-    align-items: center;
-  }
-}
+/* #7329 / #8467 — the menu opens from the `contextmenu` event (secondary
+ * click, or a long-press where the browser maps one to it: Chromium/Android).
+ * iOS Safari does NOT fire `contextmenu` on a long-press, so there the menu
+ * is not reachable by touch until a dedicated long-press handler exists. The
+ * 44px row floor above therefore applies to every pointer with no media query
+ * to keep in sync. */
 
 .sidebar-session-dot {
   width: 6px;

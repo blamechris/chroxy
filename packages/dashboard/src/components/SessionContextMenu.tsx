@@ -71,7 +71,7 @@ export function SessionContextMenu({
   // real menu size until after layout, but a conservative estimate keeps the
   // first paint inside bounds — the effect below corrects it once mounted.
   const estimatedWidth = 200
-  const estimatedHeight = Math.max(32, visibleItems.length * 32 + 8)
+  const estimatedHeight = Math.max(32, visibleItems.length * 44 + 8)
   const initialLeft = Math.min(x, Math.max(0, window.innerWidth - estimatedWidth))
   const initialTop = Math.min(y, Math.max(0, window.innerHeight - estimatedHeight))
 
