@@ -177,8 +177,24 @@ fn parse_connection_info(json: &serde_json::Value) -> Result<(String, String), S
 /// desktop already holds (config.json, or the OS keychain). The token goes in the
 /// `Authorization` header only: never in the URL and never logged.
 pub fn fetch_daemon_connection_info(port: u16, token: &str) -> Result<(String, String), String> {
+    // The token is sent only to a daemon that has just answered a fresh challenge
+    // with a proof bound to this token and this port.
+    if !crate::tray_state::daemon_proves_itself(port, Some(token), std::time::Duration::from_secs(2)) {
+        return Err(DAEMON_NOT_PROVEN.to_string());
+    }
+    request_connection_info(port, token)
+}
+
+/// What a refused handoff reports: the daemon on the port did not answer the
+/// health challenge with a valid proof.
+pub const DAEMON_NOT_PROVEN: &str = "the daemon on this port did not prove its identity";
+
+fn request_connection_info(port: u16, token: &str) -> Result<(String, String), String> {
     let url = format!("http://127.0.0.1:{}/connect", port);
-    let resp = ureq::get(&url)
+    let resp = ureq::AgentBuilder::new()
+        .redirects(0)
+        .build()
+        .get(&url)
         .set("Authorization", &format!("Bearer {}", token))
         .timeout(std::time::Duration::from_secs(3))
         .call()
@@ -201,18 +217,22 @@ pub fn fetch_daemon_connection_info(port: u16, token: &str) -> Result<(String, S
     Ok((host, tok))
 }
 
-/// Connection info for a daemon the app did not start: ask it directly, and fall
-/// back to the on-disk files the same way [`get_connection_info`] does.
+/// Connection info for a daemon the app did not start: ask it directly. A daemon
+/// that does not prove its identity is refused outright, and so is a missing token;
+/// only a failure of `/connect` on a proven daemon falls back to the on-disk files
+/// the same way [`get_connection_info`] does.
 pub fn get_external_connection_info(
     port: u16,
     token: Option<&str>,
 ) -> Result<(String, String), String> {
-    if let Some(t) = token {
-        if let Ok(info) = fetch_daemon_connection_info(port, t) {
-            return Ok(info);
-        }
+    let Some(t) = token else {
+        return Err("no access token to prove the daemon with".to_string());
+    };
+    match fetch_daemon_connection_info(port, t) {
+        Ok(info) => Ok(info),
+        Err(e) if e == DAEMON_NOT_PROVEN => Err(e),
+        Err(_) => get_connection_info(),
     }
-    get_connection_info()
 }
 
 /// Try to get connection info from connection.json, falling back to config.json.
@@ -320,7 +340,7 @@ mod tests {
     fn fetch_daemon_connection_info_sends_bearer_header_and_parses_connect_body() {
         let body = r#"{"connectionUrl":"chroxy://abc.example.com?token=tok123","apiToken":"tok123"}"#;
         let (port, req) = serve_once(json_reply(body));
-        let info = fetch_daemon_connection_info(port, "tok123").unwrap();
+        let info = request_connection_info(port, "tok123").unwrap();
         assert_eq!(info, ("abc.example.com".to_string(), "tok123".to_string()));
         let req = req.join().unwrap();
         assert!(req.starts_with("GET /connect HTTP/1.1"), "{}", req.lines().next().unwrap_or(""));
@@ -336,7 +356,7 @@ mod tests {
         // An auth-less daemon answers with a placeholder; a QR built from it pairs nothing.
         let body = r#"{"wsUrl":"ws://localhost:8765","apiToken":"[REDACTED]"}"#;
         let (port, _req) = serve_once(json_reply(body));
-        assert!(fetch_daemon_connection_info(port, "x").is_err());
+        assert!(request_connection_info(port, "x").is_err());
     }
 
     #[test]
@@ -344,9 +364,78 @@ mod tests {
         let (port, _req) = serve_once(
             "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
         );
-        let err = fetch_daemon_connection_info(port, "s3cret-token").unwrap_err();
+        let err = request_connection_info(port, "s3cret-token").unwrap_err();
         assert!(err.contains("403"));
         assert!(!err.contains("s3cret-token"));
+    }
+
+    /// A daemon that answers any number of connections. `proves` decides whether
+    /// it answers a health challenge with a valid proof for `token`; every request
+    /// it receives is recorded (request line plus headers).
+    fn serve_daemon(token: &'static str, proves: bool) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let line = req.lines().next().unwrap_or("").to_string();
+                sink.lock().unwrap().push(req.clone());
+                let body = if line.starts_with("GET /connect") {
+                    r#"{"connectionUrl":"chroxy://abc.example.com?token=tok123","apiToken":"tok123"}"#.to_string()
+                } else {
+                    let proof = line
+                        .split("challenge=")
+                        .nth(1)
+                        .and_then(|r| r.split_whitespace().next())
+                        .filter(|_| proves)
+                        .map(|n| crate::health_proof::compute_proof_hex(token, port, n));
+                    match proof {
+                        Some(p) => format!(r#"{{"status":"ok","mode":"cli","version":"1","proof":"{}"}}"#, p),
+                        None => r#"{"status":"ok","mode":"cli","version":"1"}"#.to_string(),
+                    }
+                };
+                let _ = s.write_all(json_reply(&body).as_bytes());
+            }
+        });
+        (port, seen)
+    }
+
+    #[test]
+    fn the_connect_request_goes_only_to_a_daemon_that_proves_itself() {
+        let (port, seen) = serve_daemon("tok123", true);
+        let info = fetch_daemon_connection_info(port, "tok123").unwrap();
+        assert_eq!(info.0, "abc.example.com");
+        let seen = seen.lock().unwrap();
+        assert!(seen.iter().any(|r| r.starts_with("GET /health?challenge=")), "challenged first");
+        assert!(seen.iter().any(|r| r.starts_with("GET /connect")), "then asked for /connect");
+    }
+
+    #[test]
+    fn a_daemon_without_a_valid_proof_never_receives_the_connect_request() {
+        for (token, proves) in [("tok123", false), ("another-token", true)] {
+            let (port, seen) = serve_daemon(token, proves);
+            let err = fetch_daemon_connection_info(port, "tok123").unwrap_err();
+            assert_eq!(err, DAEMON_NOT_PROVEN);
+            let seen = seen.lock().unwrap();
+            assert!(
+                seen.iter().all(|r| !r.starts_with("GET /connect") && !r.to_lowercase().contains("authorization")),
+                "no /connect request and no credential sent"
+            );
+        }
+    }
+
+    #[test]
+    fn an_external_qr_refuses_an_unproven_daemon_and_a_missing_token_without_falling_back() {
+        let (port, seen) = serve_daemon("tok123", false);
+        assert_eq!(get_external_connection_info(port, Some("tok123")), Err(DAEMON_NOT_PROVEN.to_string()));
+        assert!(get_external_connection_info(port, None).is_err());
+        assert!(seen.lock().unwrap().iter().all(|r| !r.starts_with("GET /connect")));
     }
 
     #[test]

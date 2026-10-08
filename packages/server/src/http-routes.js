@@ -20,6 +20,7 @@ import { isValidSlug, mimeForPath } from './pages-store.js'
 import { sendOversizeResponse } from './http-oversize.js'
 import { resolveDashboardDist, dashboardBuildIdOf } from './dashboard-build.js'
 import { resolveOAuthCallback, MCP_OAUTH_CALLBACK_PATH } from './byok-mcp-oauth.js'
+import { challengeFromUrl, computeHealthProof } from './health-proof.js'
 
 /**
  * #5683 — read + JSON-parse a request body with a byte cap. Resolves to the
@@ -287,7 +288,7 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
     }
 
     // Health check — Cloudflare and app verify connectivity via GET / and GET /health
-    if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+    if (req.method === 'GET' && (req.url === '/' || (req.url ?? '').split('?')[0] === '/health')) {
       const accept = req.headers['accept'] || ''
       if (req.url === '/' && accept.includes('text/html') && server.apiToken) {
         res.writeHead(302, {
@@ -303,7 +304,15 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
         'Vary': 'Accept',
         'Access-Control-Allow-Origin': '*',
       })
-      res.end(JSON.stringify({ status: 'ok', mode: server.serverMode, version: SERVER_VERSION }))
+      const body = { status: 'ok', mode: server.serverMode, version: SERVER_VERSION }
+      // A valid challenge adds a proof keyed by the primary API token and bound
+      // to the port this server listens on. Any other value is ignored.
+      const challenge = challengeFromUrl(req.url)
+      if (challenge && typeof server.apiToken === 'string' && server.apiToken) {
+        const port = server.httpServer?.address?.()?.port ?? server.port
+        body.proof = computeHealthProof(server.apiToken, port, challenge)
+      }
+      res.end(JSON.stringify(body))
       return
     }
 

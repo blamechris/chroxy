@@ -130,79 +130,6 @@ pub fn parse_netstat_listeners(out: &str, port: u16) -> Vec<u32> {
     pids
 }
 
-/// The uid in `ps -o uid= -p <pid>` output, or `None` when the output is not
-/// exactly one unsigned number.
-#[cfg(any(unix, test))]
-pub fn parse_uid(out: &str) -> Option<u32> {
-    out.trim().parse().ok()
-}
-
-/// Split one CSV line into fields. Quotes group a field (a field such as
-/// `"50,000 K"` holds a comma) and a doubled quote inside one is a literal quote.
-#[cfg(any(windows, test))]
-fn split_csv_line(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' if quoted && chars.peek() == Some(&'"') => {
-                cur.push('"');
-                chars.next();
-            }
-            '"' => quoted = !quoted,
-            ',' if !quoted => fields.push(std::mem::take(&mut cur)),
-            _ => cur.push(c),
-        }
-    }
-    fields.push(cur);
-    fields
-}
-
-/// The user name column of `tasklist /v /fo csv /nh /fi "PID eq <pid>"` for
-/// `pid`, or `None` if the row is missing, is another pid's, is short, or the
-/// column reads `N/A` (a process of another user, as seen from a normal account).
-#[cfg(any(windows, test))]
-pub fn parse_tasklist_user(out: &str, pid: u32) -> Option<String> {
-    let pid = pid.to_string();
-    out.lines().find_map(|line| {
-        let f = split_csv_line(line.trim());
-        // Image Name, PID, Session Name, Session#, Mem Usage, Status, User Name, ...
-        if f.len() < 7 || f[1] != pid {
-            return None;
-        }
-        let user = f[6].trim();
-        (!user.is_empty() && !user.eq_ignore_ascii_case("n/a")).then(|| user.to_string())
-    })
-}
-
-/// True if a `DOMAIN\user` process owner is exactly the current `domain` and
-/// `user`. Case-insensitive, as Windows account names are.
-#[cfg(any(windows, test))]
-pub fn windows_owner_is(owner: &str, domain: &str, user: &str) -> bool {
-    !domain.is_empty()
-        && !user.is_empty()
-        && owner.eq_ignore_ascii_case(&format!("{}\\{}", domain, user))
-}
-
-/// True only when there is at least one listener and every one of them is
-/// known to run as the current user. `runs_as_current_user` answers `None` when
-/// the owner could not be determined, and that is the same as "not the current
-/// user": an owner that cannot be proven is a foreign holder.
-pub fn all_run_as_current_user(
-    listeners: &[u32],
-    runs_as_current_user: impl Fn(u32) -> Option<bool>,
-) -> bool {
-    !listeners.is_empty() && listeners.iter().all(|&p| runs_as_current_user(p) == Some(true))
-}
-
-/// True when every listener on `port` runs as the current user. A port with no
-/// findable listener, or with one whose owner cannot be read, is not.
-pub fn holders_run_as_current_user(port: u16) -> bool {
-    all_run_as_current_user(&listener_pids(port), process_runs_as_current_user)
-}
-
 /// The provably-own listeners on `port`, per the on-disk record and the live
 /// process table. Empty means "not ours" (or "cannot tell"), never "free".
 pub fn find_own_holder_pids(port: u16, pid_file: Option<&Path>, cli_js: &Path) -> Vec<u32> {
@@ -271,31 +198,6 @@ pub fn process_command(pid: u32) -> Option<String> {
         .output()
         .ok()?;
     parse_command_output(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// Whether `pid` runs as the current user: `Some(true)` or `Some(false)` when it
-/// is known, `None` when it could not be determined.
-#[cfg(unix)]
-pub fn process_runs_as_current_user(pid: u32) -> Option<bool> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "uid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    let uid = parse_uid(&String::from_utf8_lossy(&out.stdout))?;
-    // SAFETY: `getuid` takes no arguments, has no preconditions and cannot fail.
-    Some(uid == unsafe { libc::getuid() })
-}
-
-#[cfg(windows)]
-pub fn process_runs_as_current_user(pid: u32) -> Option<bool> {
-    let out = std::process::Command::new("tasklist")
-        .args(["/v", "/fo", "csv", "/nh", "/fi", &format!("PID eq {}", pid)])
-        .output()
-        .ok()?;
-    let owner = parse_tasklist_user(&String::from_utf8_lossy(&out.stdout), pid)?;
-    let domain = std::env::var("USERDOMAIN").ok()?;
-    let user = std::env::var("USERNAME").ok()?;
-    Some(windows_owner_is(&owner, &domain, &user))
 }
 
 /// Ask each pid to exit (SIGTERM, or `taskkill /F` where there is no signal),
@@ -481,74 +383,6 @@ Active Connections
         assert!(parse_netstat_listeners(out, 9999).is_empty());
     }
 
-    // --- who the holder runs as -------------------------------------------
-
-    #[test]
-    fn a_uid_is_one_unsigned_number() {
-        assert_eq!(parse_uid("  501\n"), Some(501));
-        assert_eq!(parse_uid("0"), Some(0));
-        assert_eq!(parse_uid(""), None, "empty: the pid was not found");
-        assert_eq!(parse_uid("\n"), None);
-        assert_eq!(parse_uid("abc"), None);
-        assert_eq!(parse_uid("-1"), None);
-        assert_eq!(parse_uid("501 502"), None, "two numbers are not one uid");
-    }
-
-    #[test]
-    fn listeners_all_owned_by_the_current_user_are_adoptable() {
-        assert!(all_run_as_current_user(&[42], |_| Some(true)));
-        assert!(all_run_as_current_user(&[42, 43], |_| Some(true)));
-    }
-
-    #[test]
-    fn a_listener_run_by_another_user_is_not_adoptable() {
-        assert!(!all_run_as_current_user(&[42], |_| Some(false)));
-        // One foreign co-listener is enough.
-        assert!(!all_run_as_current_user(&[42, 43], |p| Some(p == 42)));
-    }
-
-    #[test]
-    fn an_owner_that_cannot_be_read_is_not_adoptable() {
-        assert!(!all_run_as_current_user(&[42], |_| None));
-        assert!(!all_run_as_current_user(&[42, 43], |p| (p == 42).then_some(true)));
-    }
-
-    #[test]
-    fn a_port_with_no_listener_found_is_not_adoptable() {
-        assert!(!all_run_as_current_user(&[], |_| Some(true)));
-    }
-
-    #[test]
-    fn a_tasklist_row_yields_the_owner_of_that_pid() {
-        let row = r#""node.exe","1234","Console","1","50,000 K","Running","DESKTOP-AB1\chris","0:00:03","N/A""#;
-        assert_eq!(parse_tasklist_user(row, 1234).as_deref(), Some("DESKTOP-AB1\\chris"));
-        assert_eq!(parse_tasklist_user(&format!("{}\r\n", row), 1234).as_deref(), Some("DESKTOP-AB1\\chris"));
-        assert_eq!(parse_tasklist_user(row, 123), None, "a different pid");
-    }
-
-    #[test]
-    fn a_tasklist_owner_that_is_unavailable_or_unparseable_is_none() {
-        let na = r#""node.exe","1234","Services","0","50,000 K","Unknown","N/A","0:00:03","N/A""#;
-        assert_eq!(parse_tasklist_user(na, 1234), None, "another user's process");
-        let na_lower = na.replace("N/A\",\"0:00", "n/a\",\"0:00");
-        assert_eq!(parse_tasklist_user(&na_lower, 1234), None);
-        assert_eq!(parse_tasklist_user("INFO: No tasks are running which match the specified criteria.", 1234), None);
-        assert_eq!(parse_tasklist_user("", 1234), None);
-        assert_eq!(parse_tasklist_user(r#""node.exe","1234""#, 1234), None, "short row");
-        assert_eq!(parse_tasklist_user(r#""node.exe","1234","Console","1","1 K","Running","","0:00:03","N/A""#, 1234), None, "empty owner");
-    }
-
-    #[test]
-    fn a_windows_owner_must_be_the_current_domain_and_user() {
-        assert!(windows_owner_is("DESKTOP-AB1\\chris", "DESKTOP-AB1", "chris"));
-        assert!(windows_owner_is("desktop-ab1\\CHRIS", "DESKTOP-AB1", "chris"), "case-insensitive");
-        assert!(!windows_owner_is("DESKTOP-AB1\\other", "DESKTOP-AB1", "chris"));
-        assert!(!windows_owner_is("OTHERBOX\\chris", "DESKTOP-AB1", "chris"));
-        assert!(!windows_owner_is("NT AUTHORITY\\SYSTEM", "DESKTOP-AB1", "chris"));
-        assert!(!windows_owner_is("DESKTOP-AB1\\chris", "", "chris"), "unknown domain");
-        assert!(!windows_owner_is("\\", "", ""), "unknown account");
-    }
-
     // --- command output and the injected process table ---------------------
 
     #[test]
@@ -578,14 +412,6 @@ Active Connections
         assert!(find_own_holder_pids_with(8765, Some(&path), cli(), listeners, commands).is_empty());
     }
 
-    #[test]
-    fn a_tasklist_quoted_field_with_a_comma_stays_one_field() {
-        assert_eq!(
-            split_csv_line(r#""a","50,000 K","say ""hi""",z"#),
-            vec!["a", "50,000 K", "say \"hi\"", "z"]
-        );
-    }
-
     // --- the live process table (unix: lsof and ps) -------------------------
 
     #[cfg(unix)]
@@ -611,30 +437,6 @@ Active Connections
             let cmd = process_command(me()).expect("own command line");
             assert!(!cmd.is_empty());
             assert_eq!(process_command(2_000_000_000), None);
-        }
-
-        #[test]
-        fn this_process_runs_as_the_current_user_and_a_missing_pid_is_unknown() {
-            assert_eq!(process_runs_as_current_user(me()), Some(true));
-            assert_eq!(process_runs_as_current_user(2_000_000_000), None);
-        }
-
-        #[test]
-        fn pid_1_is_not_run_by_an_ordinary_user() {
-            // SAFETY: `getuid` takes no arguments and cannot fail.
-            if unsafe { libc::getuid() } == 0 {
-                return; // root runs as pid 1's owner; nothing to tell apart
-            }
-            assert_eq!(process_runs_as_current_user(1), Some(false));
-        }
-
-        #[test]
-        fn a_port_this_process_listens_on_is_run_by_the_current_user() {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = l.local_addr().unwrap().port();
-            assert!(holders_run_as_current_user(port));
-            drop(l);
-            assert!(!holders_run_as_current_user(port), "no listener found");
         }
     }
 }

@@ -12,6 +12,7 @@
 //! I/O: the periodic probe thread and applying a [`TrayPlan`] to the real menu
 //! items.
 
+use crate::health_proof;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -74,11 +75,16 @@ pub enum HealthOutcome {
     NoHttp { tcp_open: bool },
 }
 
-/// Classify one probe. An occupied port that does not answer as chroxy is
-/// `Foreign`, never `Chroxy`.
-pub fn classify_probe(port: u16, outcome: &HealthOutcome) -> PortState {
+/// Classify one probe. An occupied port is `Chroxy` only when it answers 200 with
+/// a chroxy-shaped body AND `proves_daemon(body)` accepts that body's proof;
+/// every other occupied port is `Foreign`.
+pub fn classify_probe(
+    port: u16,
+    outcome: &HealthOutcome,
+    proves_daemon: impl FnOnce(&str) -> bool,
+) -> PortState {
     match outcome {
-        HealthOutcome::Ok(body) if is_chroxy_health(body) => PortState::Chroxy(port),
+        HealthOutcome::Ok(body) if is_chroxy_health(body) && proves_daemon(body) => PortState::Chroxy(port),
         HealthOutcome::Ok(_) | HealthOutcome::BadStatus(_) => PortState::Foreign(port),
         HealthOutcome::NoHttp { tcp_open: true } => PortState::Foreign(port),
         HealthOutcome::NoHttp { tcp_open: false } => PortState::Free,
@@ -353,34 +359,48 @@ pub fn pick_then_act<T, U>(mutex: &std::sync::Mutex<T>, pick: impl FnOnce(&T) ->
     act(picked)
 }
 
-/// Probe `/health` on loopback once and classify what holds `port`.
+/// Probe `/health` on loopback once and classify what holds `port`, challenging
+/// it with the access token the app holds for it ([`crate::config::proof_token`]).
 ///
 /// This is the one place a holder is classified as an adoptable chroxy daemon:
 /// every route that adopts a daemon (the launch-time start, the crash restart, the
 /// client-mode adopt, the tray's external-daemon state) goes through it. A holder
-/// that answers like chroxy is adoptable only when every listener on the port runs
-/// as the current user; one whose owner cannot be proven is a foreign holder.
+/// that answers like chroxy is adoptable only when a fresh challenge returns a
+/// proof bound to the API token and to this port; any other answer is foreign.
 pub fn probe_port(port: u16, timeout: Duration) -> PortState {
-    probe_port_with_owner(port, timeout, crate::owned_server::holders_run_as_current_user)
+    probe_port_with_token(port, timeout, crate::config::proof_token().as_deref())
 }
 
-/// [`probe_port`] with the ownership check passed in. It is asked only when the
-/// holder answered like chroxy.
-pub fn probe_port_with_owner(
-    port: u16,
-    timeout: Duration,
-    holders_run_as_current_user: impl FnOnce(u16) -> bool,
-) -> PortState {
-    match probe_health(port, timeout) {
-        PortState::Chroxy(p) if !holders_run_as_current_user(p) => PortState::Foreign(p),
-        state => state,
-    }
+/// [`probe_port`] with the token passed in. With no token, or if the OS RNG fails,
+/// no proof can be checked and a chroxy-shaped holder is foreign.
+pub fn probe_port_with_token(port: u16, timeout: Duration, token: Option<&str>) -> PortState {
+    let nonce = health_proof::fresh_nonce();
+    let path = match &nonce {
+        Some(n) => health_proof::challenge_path(n),
+        None => "/health".to_string(),
+    };
+    let outcome = request_health(port, &path, timeout);
+    classify_probe(port, &outcome, |body| match (token, nonce.as_deref()) {
+        (Some(t), Some(n)) => health_proof::body_proves_daemon(body, t, port, n),
+        _ => false,
+    })
 }
 
-/// What answers `/health` on `port`, with no regard to who runs it.
-fn probe_health(port: u16, timeout: Duration) -> PortState {
-    let url = format!("http://127.0.0.1:{}/health", port);
-    let outcome = match ureq::get(&url).timeout(timeout).call() {
+/// True only if a fresh challenge to `port` returns a valid proof for `token`.
+///
+/// Call this immediately before every handoff of the access token to a daemon
+/// (navigating the window to it, opening the dashboard, asking it for the QR
+/// connection info). The state the tray cached from an earlier probe never
+/// authorises a handoff.
+pub fn daemon_proves_itself(port: u16, token: Option<&str>, timeout: Duration) -> bool {
+    probe_port_with_token(port, timeout, token) == PortState::Chroxy(port)
+}
+
+fn request_health(port: u16, path: &str, timeout: Duration) -> HealthOutcome {
+    let url = format!("http://127.0.0.1:{}{}", port, path);
+    // No redirects: the answer has to come from the port that was asked.
+    let agent = ureq::AgentBuilder::new().redirects(0).build();
+    match agent.get(&url).timeout(timeout).call() {
         Ok(resp) if resp.status() == 200 => {
             // Bounded read: the port may belong to something that streams forever.
             let mut body = String::new();
@@ -392,8 +412,7 @@ fn probe_health(port: u16, timeout: Duration) -> PortState {
         Err(ureq::Error::Transport(_)) => HealthOutcome::NoHttp {
             tcp_open: tcp_connects(port, timeout),
         },
-    };
-    classify_probe(port, &outcome)
+    }
 }
 
 /// True if something accepts a TCP connection on loopback `port`.
@@ -475,7 +494,7 @@ mod tests {
     #[test]
     fn chroxy_health_body_reads_as_external_daemon() {
         assert_eq!(
-            classify_probe(9000, &HealthOutcome::Ok(GOOD.to_string())),
+            classify_probe(9000, &HealthOutcome::Ok(GOOD.to_string()), |_| true),
             PortState::Chroxy(9000)
         );
     }
@@ -490,14 +509,14 @@ mod tests {
             HealthOutcome::BadStatus(503),
             HealthOutcome::NoHttp { tcp_open: true },
         ] {
-            assert_eq!(classify_probe(9000, &outcome), PortState::Foreign(9000), "{:?}", outcome);
+            assert_eq!(classify_probe(9000, &outcome, |_| true), PortState::Foreign(9000), "{:?}", outcome);
         }
     }
 
     #[test]
     fn closed_port_is_free() {
         assert_eq!(
-            classify_probe(9000, &HealthOutcome::NoHttp { tcp_open: false }),
+            classify_probe(9000, &HealthOutcome::NoHttp { tcp_open: false }, |_| true),
             PortState::Free
         );
     }
@@ -772,84 +791,177 @@ mod tests {
         assert_eq!(got, 1);
     }
 
-    // --- probe_port against real sockets -----------------------------------
+    // --- classify_probe with a proof -----------------------------------------
 
-    /// Serve `reply` (a full HTTP response) to every connection until dropped.
-    fn serve(reply: &'static str) -> u16 {
+    #[test]
+    fn a_chroxy_shaped_body_without_an_accepted_proof_is_foreign() {
+        assert_eq!(
+            classify_probe(9000, &HealthOutcome::Ok(GOOD.to_string()), |_| false),
+            PortState::Foreign(9000)
+        );
+    }
+
+    #[test]
+    fn the_proof_is_checked_only_for_a_chroxy_shaped_body() {
+        for outcome in [
+            HealthOutcome::Ok("OK".to_string()),
+            HealthOutcome::Ok(r#"{"status":"ok"}"#.to_string()),
+            HealthOutcome::BadStatus(404),
+            HealthOutcome::NoHttp { tcp_open: true },
+            HealthOutcome::NoHttp { tcp_open: false },
+        ] {
+            classify_probe(9000, &outcome, |_| panic!("no proof to check for {:?}", outcome));
+        }
+    }
+
+    // --- probes against real sockets -----------------------------------------
+
+    const TOKEN: &str = "test-token";
+
+    /// Answer each connection with `reply(request_line, listening_port)`.
+    fn serve_with(reply: impl Fn(&str, u16) -> String + Send + 'static) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut s) = stream else { break };
-                let mut buf = [0u8; 1024];
-                let _ = s.read(&mut buf);
-                let _ = s.write_all(reply.as_bytes());
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let line = request.lines().next().unwrap_or("").to_string();
+                let _ = s.write_all(reply(&line, port).as_bytes());
             }
         });
         port
     }
 
-    fn http_200(body: &str) -> &'static str {
-        Box::leak(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .into_boxed_str(),
+    fn http_200(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
         )
+    }
+
+    /// The nonce in `GET /health?challenge=<nonce> HTTP/1.1`.
+    fn nonce_of(line: &str) -> Option<String> {
+        let rest = line.split("challenge=").nth(1)?;
+        Some(rest.split_whitespace().next()?.to_string())
+    }
+
+    /// A chroxy daemon holding `token` that proves with `claimed_port_of(port)`.
+    fn serve_daemon(token: &'static str, claimed_port_of: fn(u16) -> u16) -> u16 {
+        serve_with(move |line, port| {
+            let proof = nonce_of(line)
+                .map(|n| health_proof::compute_proof_hex(token, claimed_port_of(port), &n));
+            let body = match proof {
+                Some(p) => format!(r#"{{"status":"ok","mode":"cli","version":"0.11.4","proof":"{}"}}"#, p),
+                None => GOOD.to_string(),
+            };
+            http_200(&body)
+        })
+    }
+
+    fn same_port(p: u16) -> u16 {
+        p
+    }
+
+    fn probe(port: u16, token: Option<&str>) -> PortState {
+        probe_port_with_token(port, T, token)
     }
 
     const T: Duration = Duration::from_millis(400);
 
     #[test]
-    fn probe_recognises_a_chroxy_daemon() {
-        let port = serve(http_200(GOOD));
-        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Chroxy(port));
+    fn a_daemon_that_answers_the_challenge_with_a_valid_proof_is_chroxy() {
+        let port = serve_daemon(TOKEN, same_port);
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Chroxy(port));
+        assert!(daemon_proves_itself(port, Some(TOKEN), T));
     }
 
     #[test]
-    fn a_chroxy_shaped_holder_that_does_not_run_as_the_current_user_is_foreign() {
-        let port = serve(http_200(GOOD));
-        assert_eq!(probe_port_with_owner(port, T, |_| false), PortState::Foreign(port));
+    fn a_chroxy_shaped_holder_without_a_proof_is_foreign() {
+        let port = serve_with(|_, _| http_200(GOOD));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+        assert!(!daemon_proves_itself(port, Some(TOKEN), T));
     }
 
     #[test]
-    fn the_owner_is_asked_about_the_probed_port_and_only_for_a_chroxy_shaped_holder() {
-        let asked = std::cell::RefCell::new(Vec::new());
-        let chroxy = serve(http_200(GOOD));
-        probe_port_with_owner(chroxy, T, |p| {
-            asked.borrow_mut().push(p);
-            true
+    fn a_proof_made_with_another_token_is_foreign() {
+        let port = serve_daemon("someone-elses-token", same_port);
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn a_proof_bound_to_another_port_is_foreign() {
+        let port = serve_daemon(TOKEN, |p| p.wrapping_add(1));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn a_replayed_or_malformed_proof_is_foreign() {
+        // A fixed proof does not answer a fresh nonce.
+        let stale = health_proof::compute_proof_hex(TOKEN, 0, &"ab".repeat(32));
+        let body = format!(r#"{{"status":"ok","mode":"cli","version":"0.11.4","proof":"{}"}}"#, stale);
+        let port = serve_with(move |_, _| http_200(&body));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+        let port = serve_with(|_, _| http_200(r#"{"status":"ok","mode":"cli","version":"0.11.4","proof":"zz"}"#));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+        let port = serve_with(|_, _| http_200(r#"{"status":"ok","mode":"cli","version":"0.11.4","proof":7}"#));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn without_a_token_a_daemon_cannot_be_proven() {
+        let port = serve_daemon(TOKEN, same_port);
+        assert_eq!(probe(port, None), PortState::Foreign(port));
+        assert_eq!(probe(port, Some("")), PortState::Foreign(port));
+        assert!(!daemon_proves_itself(port, None, T));
+    }
+
+    #[test]
+    fn every_probe_sends_a_fresh_challenge() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let port = serve_with(move |line, _| {
+            sink.lock().unwrap().push(nonce_of(line));
+            http_200(GOOD)
         });
-        assert_eq!(*asked.borrow(), vec![chroxy]);
-
-        let other = serve(http_200("hello"));
-        assert_eq!(probe_port_with_owner(other, T, |_| panic!("not chroxy-shaped")), PortState::Foreign(other));
-        let closed = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-        assert_eq!(probe_port_with_owner(closed, T, |_| panic!("nothing listens")), PortState::Free);
+        probe(port, Some(TOKEN));
+        probe(port, Some(TOKEN));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let (a, b) = (seen[0].clone().expect("challenge sent"), seen[1].clone().expect("challenge sent"));
+        assert!(health_proof::is_valid_nonce(&a) && health_proof::is_valid_nonce(&b));
+        assert_ne!(a, b, "a nonce is never reused");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_chroxy_daemon_run_by_this_user_is_recognised_by_the_real_owner_check() {
-        let port = serve(http_200(GOOD));
-        assert_eq!(probe_port(port, T), PortState::Chroxy(port));
+    fn a_redirect_is_not_followed() {
+        let hits = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let counter = hits.clone();
+        let target = serve_with(move |_, _| {
+            *counter.lock().unwrap() += 1;
+            http_200(GOOD)
+        });
+        let location = format!("http://127.0.0.1:{}/health", target);
+        let port = serve_with(move |_, _| {
+            format!("HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", location)
+        });
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
+        assert_eq!(*hits.lock().unwrap(), 0, "the redirect target was never asked");
     }
 
     #[test]
     fn probe_treats_a_200_that_is_not_chroxy_as_foreign() {
-        let port = serve(http_200("hello"));
-        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Foreign(port));
+        let port = serve_with(|_, _| http_200("hello"));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
     }
 
     #[test]
     fn probe_treats_a_404_as_foreign() {
-        let port = serve("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Foreign(port));
+        let port = serve_with(|_, _| "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string());
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
     }
 
     #[test]
@@ -857,7 +969,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         // Accept into the backlog and say nothing: HTTP times out, TCP connects.
-        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Foreign(port));
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
         drop(listener);
     }
 
@@ -867,6 +979,6 @@ mod tests {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Free);
+        assert_eq!(probe(port, Some(TOKEN)), PortState::Free);
     }
 }

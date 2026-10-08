@@ -1345,15 +1345,23 @@ impl ServerManager {
         // its own events (attempt counts, timeouts, connect errors) to
         // the dashboard via get_startup_logs (issue #2846).
         let log_buf = self.log_buffer.clone();
+        // The token the daemon must prove it holds. A server that generated its
+        // own token on first run is not in this copy of the config: read it back.
+        let config_token = self.config.api_token.clone();
 
         // Advance generation so any existing poll thread sees a mismatch and exits
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
 
         thread::spawn(move || {
             let start = Instant::now();
-            // Use 127.0.0.1 (not localhost) to avoid IPv6 resolution issues
-            // in macOS GUI app context where DNS may resolve differently.
-            let url = format!("http://127.0.0.1:{}/", port);
+            // The responder is `Running` only when it answers a fresh health
+            // challenge with a proof bound to the token and to this port (loopback
+            // 127.0.0.1, not localhost, to avoid IPv6 resolution issues in a macOS
+            // GUI app context). A foreign process that answers 200 is not a start.
+            let probe = || {
+                let token = config_token.clone().or_else(|| config::load_config().api_token);
+                tray_state::probe_port_with_token(port, Duration::from_secs(2), token.as_deref())
+            };
 
             // Counters used for the timeout summary (issue #2835 sub-fix B).
             let mut attempts: u32 = 0;
@@ -1384,44 +1392,32 @@ impl ServerManager {
 
                 attempts += 1;
                 let attempt_start = Instant::now();
-                match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
-                    Ok(resp) => {
-                        let code = resp.status();
-                        let elapsed_ms = attempt_start.elapsed().as_millis();
-                        let msg = format!(
-                            "[health] attempt #{} GET {} -> {} ({}ms)",
-                            attempts, url, code, elapsed_ms
-                        );
-                        eprintln!("{}", msg);
-                        Self::push_log_line(&log_buf, msg);
-                        if code == 200 {
-                            // Re-check the generation under the status lock
-                            // (#5495): this request may have been in flight
-                            // when the child-exit path (or kill_child) bumped
-                            // the generation and resolved status — a late 200
-                            // must not overwrite Error/Stopped post-mortem.
-                            let mut s = lock_or_recover(&status);
-                            if generation.load(Ordering::SeqCst) != my_gen {
-                                return;
-                            }
-                            *s = ServerStatus::Running;
-                            break;
-                        } else {
-                            non200 += 1;
+                let observed = probe();
+                let msg = format!(
+                    "[health] attempt #{} port {} -> {} ({}ms)",
+                    attempts,
+                    port,
+                    describe_probe(observed),
+                    attempt_start.elapsed().as_millis()
+                );
+                eprintln!("{}", msg);
+                Self::push_log_line(&log_buf, msg);
+                match observed {
+                    PortState::Chroxy(_) => {
+                        // Re-check the generation under the status lock
+                        // (#5495): this request may have been in flight
+                        // when the child-exit path (or kill_child) bumped
+                        // the generation and resolved status — a late answer
+                        // must not overwrite Error/Stopped post-mortem.
+                        let mut s = lock_or_recover(&status);
+                        if generation.load(Ordering::SeqCst) != my_gen {
+                            return;
                         }
+                        *s = ServerStatus::Running;
+                        break;
                     }
-                    Err(err) => {
-                        network_errors += 1;
-                        let elapsed_ms = attempt_start.elapsed().as_millis();
-                        // ureq::Error prints like "Transport(...)" / "Status(...)"
-                        // which is short enough to include verbatim.
-                        let msg = format!(
-                            "[health] attempt #{} GET {} -> Err({}) ({}ms)",
-                            attempts, url, err, elapsed_ms
-                        );
-                        eprintln!("{}", msg);
-                        Self::push_log_line(&log_buf, msg);
-                    }
+                    PortState::Foreign(_) => non200 += 1,
+                    PortState::Free => network_errors += 1,
                 }
 
                 if !Self::sleep_interruptible(Duration::from_secs(2), &generation, my_gen) {
@@ -1439,25 +1435,26 @@ impl ServerManager {
                     return;
                 }
 
-                match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
-                    Ok(resp) => {
-                        if resp.status() == 200 {
-                            // Same in-flight guard as the startup loop: a
-                            // 200 that raced a generation bump must not
-                            // resurrect a resolved status (#5495).
-                            let mut s = lock_or_recover(&status);
-                            if generation.load(Ordering::SeqCst) != my_gen {
-                                return;
-                            }
-                            *s = ServerStatus::Running;
+                match probe() {
+                    PortState::Chroxy(_) => {
+                        // Same in-flight guard as the startup loop: an answer
+                        // that raced a generation bump must not resurrect a
+                        // resolved status (#5495).
+                        let mut s = lock_or_recover(&status);
+                        if generation.load(Ordering::SeqCst) != my_gen {
+                            return;
                         }
+                        *s = ServerStatus::Running;
                     }
-                    Err(err) => {
+                    other => {
+                        // No answer, or an answer without a valid proof (the
+                        // server died and something else took the port).
                         let mut s = lock_or_recover(&status);
                         if *s == ServerStatus::Running {
                             let msg = format!(
-                                "[health] monitor GET {} -> Err({}): server stopped responding",
-                                url, err
+                                "[health] monitor port {} -> {}: server stopped responding",
+                                port,
+                                describe_probe(other)
                             );
                             eprintln!("{}", msg);
                             Self::push_log_line(&log_buf, msg);
@@ -1579,6 +1576,15 @@ fn bundled_cli_js_candidates(exe: &Path) -> Vec<PathBuf> {
         );
     }
     candidates
+}
+
+/// One line for the health log: what a challenge to the server's port found.
+fn describe_probe(observed: PortState) -> &'static str {
+    match observed {
+        PortState::Chroxy(_) => "answered the challenge with a valid proof",
+        PortState::Foreign(_) => "answered without a valid proof",
+        PortState::Free => "no answer",
+    }
 }
 
 impl Drop for ServerManager {
@@ -1837,6 +1843,108 @@ mod tests {
         let mut mgr = manager_on(port);
         mgr.pid_file = Some(path.clone());
         (mgr, path)
+    }
+
+    // --- readiness needs a proof, not just an answer -----------------------
+
+    /// A server on a free port that answers `/health` as chroxy and, while `proving`
+    /// is set, proves a challenge with `token`.
+    fn serve_switchable(token: &'static str, proving: std::sync::Arc<std::sync::atomic::AtomicBool>) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let nonce = request
+                    .split("challenge=")
+                    .nth(1)
+                    .and_then(|r| r.split_whitespace().next())
+                    .map(str::to_string);
+                let body = match nonce {
+                    Some(n) if proving.load(Ordering::SeqCst) => format!(
+                        r#"{{"status":"ok","mode":"cli","version":"1","proof":"{}"}}"#,
+                        crate::health_proof::compute_proof_hex(token, port, &n)
+                    ),
+                    _ => r#"{"status":"ok","mode":"cli","version":"1"}"#.to_string(),
+                };
+                let reply = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = s.write_all(reply.as_bytes());
+            }
+        });
+        port
+    }
+
+    fn wait_for(mgr: &ServerManager, want: impl Fn(&ServerStatus) -> bool, secs: u64) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(secs) {
+            if want(&mgr.status()) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    fn polling_manager(port: u16) -> ServerManager {
+        let mut mgr = manager_on(port);
+        mgr.config.api_token = Some("tok-for-readiness".to_string());
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+        mgr
+    }
+
+    #[test]
+    fn a_responder_that_proves_itself_makes_the_server_running() {
+        let proving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut mgr = polling_manager(serve_switchable("tok-for-readiness", proving));
+        mgr.start_health_poll();
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10), "status {:?}", mgr.status());
+        mgr.kill_child(); // stops the poll
+    }
+
+    #[test]
+    fn a_responder_that_answers_200_without_a_proof_does_not_make_the_server_running() {
+        let proving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut mgr = polling_manager(serve_switchable("tok-for-readiness", proving));
+        mgr.start_health_poll();
+        assert!(
+            !wait_for(&mgr, |s| *s == ServerStatus::Running, 3),
+            "a bare 200 must not start the server"
+        );
+        assert_eq!(mgr.status(), ServerStatus::Starting);
+        mgr.kill_child();
+    }
+
+    #[test]
+    fn a_proof_made_with_another_token_does_not_make_the_server_running() {
+        let proving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut mgr = polling_manager(serve_switchable("someone-elses-token", proving));
+        mgr.start_health_poll();
+        assert!(!wait_for(&mgr, |s| *s == ServerStatus::Running, 3));
+        mgr.kill_child();
+    }
+
+    #[test]
+    fn a_running_server_whose_port_is_taken_by_a_responder_without_a_proof_is_an_error() {
+        let proving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut mgr = polling_manager(serve_switchable("tok-for-readiness", proving.clone()));
+        mgr.start_health_poll();
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
+        // The proving server is replaced: the same port now answers without a proof.
+        proving.store(false, Ordering::SeqCst);
+        assert!(
+            wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 12),
+            "status {:?}",
+            mgr.status()
+        );
+        mgr.kill_child();
     }
 
     #[cfg(unix)]

@@ -5,6 +5,7 @@
 // carries no API stability cost.
 pub mod config;
 pub mod discovery;
+pub mod health_proof;
 pub mod node;
 pub mod owned_server;
 pub mod platform;
@@ -1435,13 +1436,22 @@ pub fn run() {
                         let port = config.port;
                         let token = config.api_token.clone();
                         std::thread::spawn(move || {
-                            if probe_external_health(port) {
+                            // Without a token there is nothing to prove a daemon with.
+                            if token.is_none() {
+                                window::emit_server_error(
+                                    &app_handle,
+                                    &format!(
+                                        "No access token was found to connect to port {} with. Pair the app or paste a token in Settings.",
+                                        port
+                                    ),
+                                );
+                            } else if probe_external_health(port, token.as_deref()) {
                                 show_adopted_daemon(&app_handle, port, token.as_deref());
                             } else {
                                 window::emit_server_error(
                                     &app_handle,
                                     &format!(
-                                        "No server found on port {}. Start a server, or enable Auto-start Server in Settings.",
+                                        "No Chroxy daemon that proves its identity was found on port {}. Start a server, or enable Auto-start Server in Settings.",
                                         port
                                     ),
                                 );
@@ -1887,10 +1897,12 @@ fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
                 let state = app.state::<Mutex<ServerManager>>();
                 let mgr = lock_or_recover(&state);
                 let p = mgr.port();
-                let t = mgr.token();
+                // A server that generated its own token on first run is not in the
+                // manager's copy of the config yet: read it back before the handoff.
+                let t = mgr.token().or_else(|| config::load_config().api_token);
                 drop(mgr);
-                window::emit_server_ready(app, p, t.as_deref());
-                return true;
+                // Refused (and shown) when the responder is not this app's server.
+                return window::emit_server_ready(app, p, t.as_deref());
             }
             ServerStatus::Error(ref msg) => {
                 update_menu_state(app, MenuState::Stopped);
@@ -1941,12 +1953,12 @@ fn startup_action(auto_start: bool, has_token: bool) -> StartupAction {
 /// first verified chroxy daemon. The classification is [`tray_state::probe_port`],
 /// the same one every other adopt route uses, so a holder is adopted here only
 /// when it answers as chroxy AND every listener runs as the current user.
-fn probe_external_health(port: u16) -> bool {
+fn probe_external_health(port: u16, token: Option<&str>) -> bool {
     for attempt in 0..10 {
         // Log each attempt (mirrors the embedded-server health check in
         // server.rs) so a stuck client-mode launch is debuggable from the app's
         // stderr/console rather than a silent spinner.
-        let held = tray_state::probe_port(port, std::time::Duration::from_secs(2));
+        let held = tray_state::probe_port_with_token(port, std::time::Duration::from_secs(2), token);
         match held {
             PortState::Chroxy(_) => {
                 eprintln!("[client-adopt] attempt #{} port {} -> chroxy daemon", attempt + 1, port);
@@ -2081,9 +2093,8 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
                 let state = app.state::<Mutex<ServerManager>>();
                 let mgr = lock_or_recover(&state);
                 let p = mgr.port();
-                let t = mgr.token();
                 drop(mgr);
-                window::inject_settings_button_handler(app, p, t.as_deref());
+                window::inject_settings_button_handler(app, p);
             }
 
             let app_handle = app.clone();
@@ -2224,34 +2235,41 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
 /// external-daemon state (#8267) and open the daemon's dashboard in the window.
 fn adopt_external_daemon(app: &tauri::AppHandle, port: u16) {
     update_menu_state(app, MenuState::Stopped);
-    update_port_state(app, PortState::Chroxy(port));
-    send_notification(
-        app,
-        "Using Existing Daemon",
-        &format!(
-            "A chroxy daemon already serves port {}, so the app connected to it instead of starting its own.",
-            port
-        ),
-    );
     let token = {
         let state = app.state::<Mutex<ServerManager>>();
         let token = lock_or_recover(&state).token();
         token
     };
-    show_adopted_daemon(app, port, token.as_deref());
+    // The tray shows the daemon, and the user is told, only once it has proved
+    // itself again at the handoff; a refused handoff has already shown why.
+    if show_adopted_daemon(app, port, token.as_deref()) {
+        update_port_state(app, PortState::Chroxy(port));
+        send_notification(
+            app,
+            "Using Existing Daemon",
+            &format!(
+                "A chroxy daemon already serves port {}, so the app connected to it instead of starting its own.",
+                port
+            ),
+        );
+    }
 }
 
 /// Point the window at a daemon the app is adopting, or say why it cannot.
-fn show_adopted_daemon(app: &tauri::AppHandle, port: u16, token: Option<&str>) {
+/// Returns `true` when the window was pointed at it.
+fn show_adopted_daemon(app: &tauri::AppHandle, port: u16, token: Option<&str>) -> bool {
     match token {
         Some(t) => window::emit_server_ready(app, port, Some(t)),
-        None => window::emit_server_error(
-            app,
-            &format!(
-                "A server is running on port {} but no access token was found. Pair the app or paste a token in Settings.",
-                port
-            ),
-        ),
+        None => {
+            window::emit_server_error(
+                app,
+                &format!(
+                    "A server is running on port {} but no access token was found. Pair the app or paste a token in Settings.",
+                    port
+                ),
+            );
+            false
+        }
     }
 }
 
@@ -2401,7 +2419,17 @@ fn qr_for_reachable_daemon(app: &tauri::AppHandle) -> Result<(String, String), S
         reachable_target(app).ok_or_else(|| "Server is not running".to_string())?;
     let (hostname, token) = if external {
         let token = target_token(app, true);
-        qrcode::get_external_connection_info(port, token.as_deref())?
+        match qrcode::get_external_connection_info(port, token.as_deref()) {
+            Ok(info) => info,
+            Err(e) => {
+                if e == qrcode::DAEMON_NOT_PROVEN {
+                    // Do not keep offering the menu items for a port that no
+                    // longer answers as this app's daemon.
+                    update_port_state(app, PortState::Foreign(port));
+                }
+                return Err(e);
+            }
+        }
     } else {
         qrcode::get_connection_info()?
     };

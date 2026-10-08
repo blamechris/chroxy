@@ -189,6 +189,35 @@ pub fn load_port() -> u16 {
     }
 }
 
+/// The access token to challenge a daemon with when the tray probes the port.
+///
+/// `config.json` is read every time. The OS credential store is consulted only
+/// when the file has no token, and its answer is kept for [`PROOF_TOKEN_TTL`]: the
+/// tray probes every few seconds, and spawning the credential tool each time
+/// would prompt over and over. Every credential handoff reads the token fresh with
+/// [`load_config`] instead.
+pub fn proof_token() -> Option<String> {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+
+    if let Some(t) = load_config_file().api_token.filter(|t| !t.is_empty()) {
+        return Some(t);
+    }
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, token)) = cache.as_ref() {
+        if at.elapsed() < PROOF_TOKEN_TTL {
+            return token.clone();
+        }
+    }
+    let token = get_keychain_token();
+    *cache = Some((Instant::now(), token.clone()));
+    token
+}
+
+/// How long [`proof_token`] reuses an answer from the OS credential store.
+const PROOF_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Parse `config.json` without the keychain fallback. Returns the default config
 /// if the file is missing or malformed.
 fn load_config_file() -> ChroxyConfig {

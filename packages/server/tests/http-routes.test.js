@@ -197,6 +197,88 @@ describe('http-routes', () => {
       assert.equal(body.status, 'ok')
     })
 
+    describe('health challenge', () => {
+      const NONCE_A = 'ab'.repeat(32)
+      const NONCE_B = 'cd'.repeat(32)
+      // Independently computed with Python's hmac: HMAC-SHA256(key='test-token',
+      // msg='chroxy-health-v1:<port>:<nonce>').
+      const PROOF_4242_A = 'e8c3801feb0b5d7b91ce06777985620c52141ff9f1b981dad2e40afe2880c9e6'
+      const PROOF_4243_A = 'fbbad36bc9a1ab934f55e1bc6e44be6287e28830c9e7eaf2206587cc8daad1ec'
+      const PROOF_4242_B = 'a1b8d144aeef60ab3e05b584db0aecc19a0282ddc1aada614e3552d3948f88aa'
+
+      // `startWith` binds an ephemeral port; the proof is bound to the port the
+      // daemon reports, so pin that to a known number after the listener is up.
+      async function healthBody(query, { port: reported = 4242, ...mockOverrides } = {}) {
+        const mock = createMockServer(mockOverrides)
+        await startWith(mock)
+        mock.port = reported
+        const res = await globalThis.fetch(`http://127.0.0.1:${port}/health${query}`)
+        assert.equal(res.status, 200)
+        const text = await res.text()
+        await closeServer()
+        return { text }
+      }
+
+      async function closeServer() {
+        const closing = once(httpServer, 'close')
+        httpServer.close()
+        httpServer.closeAllConnections?.()
+        await closing
+        httpServer = null
+      }
+
+      it('a valid challenge gets the proof for the daemon port and token', async () => {
+        const { text } = await healthBody(`?challenge=${NONCE_A}`)
+        const body = JSON.parse(text)
+        assert.equal(body.status, 'ok')
+        assert.equal(body.proof, PROOF_4242_A)
+      })
+
+      it('the proof differs per port and per nonce', async () => {
+        const { text } = await healthBody(`?challenge=${NONCE_A}`, { port: 4243 })
+        assert.equal(JSON.parse(text).proof, PROOF_4243_A)
+        assert.notEqual(PROOF_4243_A, PROOF_4242_A)
+        const second = await healthBody(`?challenge=${NONCE_B}`)
+        assert.equal(JSON.parse(second.text).proof, PROOF_4242_B)
+        assert.notEqual(PROOF_4242_B, PROOF_4242_A)
+      })
+
+      it('a malformed challenge gets no proof field', async () => {
+        const bad = [
+          'abc',
+          'AB'.repeat(32),
+          'ab'.repeat(31),
+          'ab'.repeat(33),
+          'zz'.repeat(32),
+          '',
+          `${NONCE_A}%0a`,
+        ]
+        for (const value of bad) {
+          const { text } = await healthBody(`?challenge=${value}`)
+          const body = JSON.parse(text)
+          assert.equal('proof' in body, false, `no proof for ${JSON.stringify(value)}`)
+          assert.equal(body.status, 'ok')
+          }
+      })
+
+      it('a repeated challenge parameter gets no proof field', async () => {
+        const { text } = await healthBody(`?challenge=${NONCE_A}&challenge=${NONCE_B}`)
+        assert.equal('proof' in JSON.parse(text), false)
+      })
+
+      it('a request without a challenge is answered exactly as before', async () => {
+        const { text } = await healthBody('')
+        const body = JSON.parse(text)
+        assert.deepEqual(Object.keys(body), ['status', 'mode', 'version'])
+        assert.equal(text, JSON.stringify(body))
+      })
+
+      it('no proof is given when the daemon has no API token', async () => {
+        const { text } = await healthBody(`?challenge=${NONCE_A}`, { apiToken: null })
+        assert.equal('proof' in JSON.parse(text), false)
+      })
+    })
+
     it('GET / with Accept: text/html redirects to /dashboard when apiToken set', async () => {
       const mock = createMockServer()
       await startWith(mock)

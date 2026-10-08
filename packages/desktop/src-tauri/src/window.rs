@@ -51,10 +51,39 @@ pub struct ServerRestartingPayload {
 
 // -- Event emission (replaces eval-based injection) --
 
+/// How long one handoff challenge may take.
+const HANDOFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The daemon on `port` did not answer a fresh health challenge with a valid
+/// proof for `token`: show that, and drop the cached claim that it is a chroxy
+/// daemon so no later menu item acts on it.
+fn refuse_handoff(app: &AppHandle, port: u16) {
+    crate::update_port_state(app, crate::tray_state::PortState::Foreign(port));
+    emit_server_error(
+        app,
+        &format!(
+            "The server on port {} did not prove it is the Chroxy daemon for this app, so the dashboard was not opened.",
+            port
+        ),
+    );
+}
+
 /// Update the loading page status text, then navigate to the dashboard after a brief delay.
 /// Tauri v2's CSP nonce blocks both inline and external scripts in the embedded frontend,
 /// so we inject status updates via eval() (which is nonce-aware) and navigate from Rust.
-pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) {
+///
+/// The access token goes to the daemon only after it answers a fresh health
+/// challenge with a proof bound to `token` and `port`: checked before the
+/// `server_ready` event (whose payload carries the token and URL) and again in the
+/// delayed task, immediately before the navigation. Returns `false`, having shown
+/// the refusal, when the daemon does not prove itself; the cached tray state is
+/// never consulted. Blocking (up to two network round trips): call it off the main
+/// thread.
+pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) -> bool {
+    if !crate::tray_state::daemon_proves_itself(port, token, HANDOFF_TIMEOUT) {
+        refuse_handoff(app, port);
+        return false;
+    }
     let url = dashboard_url(port, token);
     let payload = ServerReadyPayload {
         port,
@@ -78,8 +107,14 @@ pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) {
 
     // Navigate to dashboard after a brief pause so user sees "Connected!"
     let app_handle = app.clone();
+    let token = token.map(str::to_string);
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(800));
+        // The port may have changed hands during the pause: ask again, now.
+        if !crate::tray_state::daemon_proves_itself(port, token.as_deref(), HANDOFF_TIMEOUT) {
+            refuse_handoff(&app_handle, port);
+            return;
+        }
         if let Some(window) = app_handle.get_webview_window(MAIN_LABEL) {
             // Use eval to navigate — window.navigate() from tauri:// to http://
             // may be blocked by same-origin policy in the embedded webview.
@@ -87,6 +122,7 @@ pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) {
             let _ = window.eval(&format!("window.location.href = '{}'", escaped));
         }
     });
+    true
 }
 
 /// Emit `server_stopped` event and update loading page if visible.
@@ -145,15 +181,11 @@ pub fn emit_navigate_console(app: &AppHandle) {
 }
 
 /// Inject click handler for the settings button on the loading page.
-/// Navigates directly to the dashboard settings panel when clicked.
-pub fn inject_settings_button_handler(app: &AppHandle, port: u16, token: Option<&str>) {
-    let url = dashboard_url(port, token);
-    // Append settings query param so dashboard auto-opens settings panel
-    let settings_url = if url.contains('?') {
-        format!("{}&settings=1", url)
-    } else {
-        format!("{}?settings=1", url)
-    };
+/// Navigates directly to the dashboard settings panel when clicked. The URL
+/// carries no access token: the token is handed over only by
+/// [`emit_server_ready`], after the daemon has proved itself.
+pub fn inject_settings_button_handler(app: &AppHandle, port: u16) {
+    let settings_url = format!("{}?settings=1", dashboard_url(port, None));
     let escaped = settings_url.replace('\\', "\\\\").replace('\'', "\\'");
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         let _ = window.eval(&format!(

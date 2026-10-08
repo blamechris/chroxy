@@ -175,14 +175,20 @@ fn the_check_updates_item_is_never_set_with_the_menu_items_lock_held() {
     assert!(!check.contains("check_updates.set_enabled"), "a direct setter call in handle_check_updates could run under the lock");
 }
 
+/// Position of the first `needle` in `hay`, panicking if it is absent so a rename
+/// cannot turn an ordering pin into a no-op.
+fn pos(hay: &str, needle: &str) -> usize {
+    hay.find(needle).unwrap_or_else(|| panic!("`{}` not found", needle))
+}
+
 #[test]
-fn every_adopt_route_classifies_the_holder_through_probe_port() {
-    // `probe_port` is the one place a holder becomes an adoptable daemon: it checks
-    // that every listener runs as the current user. A route with its own `/health`
-    // request would adopt without that check.
+fn every_adopt_route_classifies_the_holder_through_a_challenge() {
+    // `probe_port_with_token` is the one place a holder becomes an adoptable
+    // daemon: it sends a fresh challenge and checks the proof. A route with its own
+    // `/health` request would adopt without that check.
     let lib = read("src/lib.rs");
     let client_mode = fn_body(&lib, "probe_external_health");
-    assert!(client_mode.contains("tray_state::probe_port("), "the client-mode adopt must use probe_port");
+    assert!(client_mode.contains("tray_state::probe_port_with_token("), "the client-mode adopt must challenge the daemon");
     assert!(!client_mode.contains("ureq"), "the client-mode adopt must not make its own request");
 
     let server = squash(&read("src/server.rs"));
@@ -190,10 +196,114 @@ fn every_adopt_route_classifies_the_holder_through_probe_port() {
         server.contains("fn probe(&self, port: u16) -> PortState { tray_state::probe_port("),
         "the automatic start must probe the holder with probe_port"
     );
+    assert!(
+        server.contains("tray_state::probe_port_with_token(port, Duration::from_secs(2), token.as_deref())"),
+        "the spawned server's readiness must challenge the responder"
+    );
 
     let tray = squash(&read("src/tray_state.rs"));
     assert!(
-        tray.contains("probe_port_with_owner(port, timeout, crate::owned_server::holders_run_as_current_user)"),
-        "probe_port must check the real owner"
+        tray.contains("pub fn probe_port(port: u16, timeout: Duration) -> PortState { probe_port_with_token(port, timeout, crate::config::proof_token().as_deref()) }"),
+        "probe_port must challenge with the configured token"
+    );
+    assert!(
+        tray.contains("(Some(t), Some(n)) => health_proof::body_proves_daemon(body, t, port, n)"),
+        "a chroxy-shaped body must be accepted only on a verified proof"
+    );
+}
+
+#[test]
+fn the_readiness_poll_never_treats_a_bare_200_as_running() {
+    let server = read("src/server.rs");
+    let start = pos(&server, "fn start_health_poll(");
+    let end = start + server[start..].find("fn resolve_cli_js").expect("end of the poll");
+    let poll = squash(&server[start..end]);
+    assert!(!poll.contains("ureq::get"), "the readiness poll must not make its own request");
+    assert!(!poll.contains("resp.status() == 200"), "a bare 200 must not set Running");
+    // Every `Running` assignment in the poll sits in a `PortState::Chroxy` arm.
+    let assignments = poll.matches("*s = ServerStatus::Running").count();
+    let proven_arms = poll.matches("PortState::Chroxy(_) => {").count();
+    assert!(assignments >= 1 && assignments == proven_arms, "each Running assignment must follow a proven probe");
+}
+
+#[test]
+fn the_dashboard_navigation_is_preceded_by_a_fresh_challenge_on_both_paths() {
+    let window = squash(&read("src/window.rs"));
+    let start = pos(&window, "pub fn emit_server_ready(");
+    let body = &window[start..pos(&window, "/// Emit `server_stopped`")];
+    let first = pos(body, "daemon_proves_itself(");
+    let event = pos(body, "app.emit(\"server_ready\"");
+    assert!(first < event, "the server_ready event (token and URL) must follow a challenge");
+    let second = first + 1 + body[first + 1..].find("daemon_proves_itself(").expect("a second challenge in the delayed task");
+    let navigate = pos(body, "window.location.href");
+    assert!(event < second && second < navigate, "the delayed navigation must be preceded by its own challenge");
+    assert!(body.contains("return false;"), "a refused handoff must not report success");
+    // A refusal drops the cached claim that the port holds a chroxy daemon.
+    let refuse = &window[pos(&window, "fn refuse_handoff(")..start];
+    assert!(
+        refuse.contains("update_port_state(app, crate::tray_state::PortState::Foreign(port))"),
+        "a refused handoff must update the tray state to foreign"
+    );
+}
+
+#[test]
+fn the_connect_request_is_preceded_by_a_challenge() {
+    let qr = squash(&read("src/qrcode.rs"));
+    let start = pos(&qr, "pub fn fetch_daemon_connection_info(");
+    let body = &qr[start..pos(&qr, "fn request_connection_info(")];
+    assert!(body.contains("daemon_proves_itself(port, Some(token)"), "fetch must challenge with the token it would send");
+    assert!(pos(body, "daemon_proves_itself(") < pos(body, "request_connection_info("), "challenge before the request");
+    // The only caller of the request is the verifying fetch: the definition and
+    // that one call are the only two mentions outside the tests.
+    let code = &qr[..pos(&qr, "#[cfg(test)]")];
+    assert_eq!(
+        code.matches("request_connection_info(").count(),
+        2,
+        "request_connection_info must be reached only through fetch_daemon_connection_info"
+    );
+}
+
+#[test]
+fn every_dashboard_and_qr_handoff_goes_through_the_verifying_functions() {
+    let lib = read("src/lib.rs");
+    // Open Dashboard hands over through emit_server_ready, which challenges.
+    let dash = fn_body(&lib, "handle_dashboard");
+    assert!(dash.contains("window::emit_server_ready("), "Open Dashboard must navigate through emit_server_ready");
+    assert!(!dash.contains("dashboard_url("), "Open Dashboard must not build its own URL");
+    // The external Show QR path asks through the verifying fetch.
+    let qr = fn_body(&lib, "qr_for_reachable_daemon");
+    assert!(qr.contains("qrcode::get_external_connection_info("), "Show QR must use the verifying request");
+    assert!(!qr.contains("fetch_daemon_connection_info") && !qr.contains("ureq"), "no direct /connect request");
+    assert!(
+        qr.contains("if e == qrcode::DAEMON_NOT_PROVEN { ") && qr.contains("update_port_state(app, PortState::Foreign(port));"),
+        "a refused QR request must update the tray state to foreign"
+    );
+    // Client-mode and launch adoption hand over through show_adopted_daemon.
+    let adopt = fn_body(&lib, "show_adopted_daemon");
+    assert!(adopt.contains("window::emit_server_ready("), "adoption must navigate through emit_server_ready");
+    // The spawned server's readiness hands over through emit_server_ready too.
+    let monitor = fn_body(&lib, "monitor_startup");
+    assert!(monitor.contains("return window::emit_server_ready("), "readiness must report the handoff's result");
+    // No other module builds a token-bearing dashboard URL for navigation.
+    for file in ["src/lib.rs", "src/server.rs", "src/qrcode.rs", "src/tray_state.rs"] {
+        let src = read(file);
+        let code = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        assert!(!code.contains("dashboard_url("), "{} must not build a dashboard URL", file);
+    }
+}
+
+#[test]
+fn adoption_shows_the_daemon_only_after_the_handoff_succeeds() {
+    let lib = read("src/lib.rs");
+    // Launch / crash-restart adoption.
+    let adopt = fn_body(&lib, "adopt_external_daemon");
+    let shown = pos(&adopt, "if show_adopted_daemon(app, port, token.as_deref()) {");
+    assert!(pos(&adopt, "update_port_state(app, PortState::Chroxy(port))") > shown, "the tray claims the daemon only after the handoff");
+    assert!(pos(&adopt, "send_notification(") > shown, "the user is told only after the handoff");
+    // Client-mode adoption.
+    let squashed = squash(&lib);
+    assert!(
+        squashed.contains("} else if probe_external_health(port, token.as_deref()) { show_adopted_daemon(&app_handle, port, token.as_deref());"),
+        "client-mode adoption must challenge the daemon, then hand over through show_adopted_daemon"
     );
 }
