@@ -20,12 +20,13 @@
  *     run it gated (and the model reasons in between), so requiring literal
  *     adjacency would never group a real turn; anything else between two prompts
  *     (text, a user message, another tool) ends the run.
- *   - "Identical" means the same session, tool, description, tool input AND
- *     outcome. Folding an allowed request and a denied one into one line, or two
+ *   - "Identical" means the same session, tool, description, tool input, outcome
+ *     AND decision, with the input actually recorded (see
+ *     {@link resolvedPermissionGroupKey}: a replayed record never groups). Folding an allowed request and a denied one into one line, or two
  *     different commands that share a rationale, would lose exactly what the
  *     audit line exists to keep.
  */
-import { permissionOutcomeFromDecision } from './pending-permissions'
+import { isPermissionDecision, permissionOutcomeFromDecision } from './pending-permissions'
 import type { ChatMessage, PermissionOutcomeKind } from './types'
 
 /**
@@ -55,19 +56,49 @@ function stableStringify(value: unknown): string {
 }
 
 /**
+ * Per-message memo of {@link resolvedPermissionGroupKey}. The grouping pass re-runs
+ * on every transcript change (every stream delta) and stringifies each resolved
+ * prompt's tool input (up to ~10K characters); store messages are replaced, never
+ * mutated, so a message object's key never changes.
+ */
+const keyCache = new WeakMap<ChatMessage, string | null>()
+
+/**
  * Identity of a resolved prompt for grouping, or `null` when the prompt is not
  * resolved (so it can never join a run). Two prompts with an equal non-null key
  * are the same request that ended the same way.
+ *
+ * The key carries the session, tool, description, tool input, outcome AND the
+ * decision token: `allowAlways` writes a persistent rule and must not be hidden
+ * inside an "allowed x N" of one-time allows.
+ *
+ * A prompt whose tool input was NOT recorded keys on its own `requestId`, so it
+ * never matches another. That is every record rebuilt from a replayed
+ * `permission_outcome`: the server journals the description, not the input (#8503),
+ * and the description is chosen by the agent (the server prefers
+ * `input.description` over `input.command`), so `rm a` and `rm -rf ~` under one
+ * rationale look identical there. Letting the description stand in for the input
+ * would fold them into one "allowed x 2" with no input line. Until #8503 journals
+ * the input, grouping therefore happens only where the input is known: live.
  */
 export function resolvedPermissionGroupKey(m: ChatMessage): string | null {
+  if (keyCache.has(m)) return keyCache.get(m)!
+  const key = computeGroupKey(m)
+  keyCache.set(m, key)
+  return key
+}
+
+function computeGroupKey(m: ChatMessage): string | null {
   const outcome = resolvedPermissionOutcome(m)
   if (!outcome) return null
+  if (m.toolInput == null) return stableStringify(['unrecorded', m.requestId])
   return stableStringify([
     m.originSessionId ?? null,
     m.tool ?? null,
     m.content,
     outcome,
-    m.toolInput ?? null,
+    isPermissionDecision(m.answered) ? m.answered : null,
+    m.toolInput,
   ])
 }
 

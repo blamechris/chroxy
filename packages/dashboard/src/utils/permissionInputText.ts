@@ -16,6 +16,38 @@ import { shouldSuppressRawToolInput } from '@chroxy/store-core'
 /** Cap on the characters shown. The broadcast input is itself capped near 10K; an audit line needs the head, not the lot. */
 export const PERMISSION_INPUT_MAX_CHARS = 1000
 
+/** Keys shown elsewhere (the command is the headline; the rationale is the record's own description). */
+const NOT_A_FLAG = new Set(['command', 'description'])
+
+/**
+ * The scalar fields that sit beside a command and change what it does
+ * (`dangerouslyDisableSandbox`, `run_in_background`, `timeout`, ...), one
+ * `key: value` line each. `false`, empty and non-scalar values are omitted so a
+ * plain command stays a plain command. The group key separates prompts that differ
+ * in these, so the text must show them or two "identical" lines would differ.
+ */
+function flagLines(toolInput: Record<string, unknown>): string[] {
+  const lines: string[] = []
+  for (const [key, value] of Object.entries(toolInput)) {
+    if (NOT_A_FLAG.has(key)) continue
+    if (value === true || (typeof value === 'number' && Number.isFinite(value))) {
+      lines.push(`${key}: ${value}`)
+    } else if (typeof value === 'string' && value.length > 0 && value.length <= 200) {
+      lines.push(`${key}: ${value}`)
+    }
+  }
+  return lines
+}
+
+/** Cut at the cap without leaving the first half of a surrogate pair (an emoji) before the marker. */
+function truncate(text: string): string {
+  if (text.length <= PERMISSION_INPUT_MAX_CHARS) return text
+  let end = PERMISSION_INPUT_MAX_CHARS
+  const last = text.charCodeAt(end - 1)
+  if (last >= 0xd800 && last <= 0xdbff) end--
+  return `${text.slice(0, end)}… (truncated)`
+}
+
 export function permissionInputText(
   tool: string | undefined | null,
   toolInput: Record<string, unknown> | null | undefined,
@@ -24,7 +56,7 @@ export function permissionInputText(
   const command = toolInput.command
   let text: string
   if (typeof command === 'string' && command.length > 0) {
-    text = command
+    text = [command, ...flagLines(toolInput)].join('\n')
   } else {
     try {
       text = JSON.stringify(toolInput, null, 2) ?? ''
@@ -33,7 +65,5 @@ export function permissionInputText(
     }
   }
   if (text === '' || text === '{}') return null
-  return text.length > PERMISSION_INPUT_MAX_CHARS
-    ? `${text.slice(0, PERMISSION_INPUT_MAX_CHARS)}… (truncated)`
-    : text
+  return truncate(text)
 }

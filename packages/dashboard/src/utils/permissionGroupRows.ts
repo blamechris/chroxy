@@ -35,44 +35,96 @@ export interface CollapseResolvedPermissionRunsResult {
   groups: Map<string, string[]>
 }
 
+/** What the run finder walks: a transcript row, or a hidden message that ends a turn. */
+type Entry = { kind: 'row'; rowIndex: number; row: ChatViewMessage } | { kind: 'boundary'; message: ChatMessage }
+
+/**
+ * The rows, with each HIDDEN turn boundary spliced in where it sits.
+ *
+ * `markTurnBoundary` stamps the last non-`user_input` message of a turn, and that
+ * can be a message the chat view filters out: a `system` row, or a `tool_use` /
+ * `thinking` row under the compact-chat filter. It has no row, so a finder that
+ * walks rows alone never sees the turn end and would fold the next turn's prompts
+ * into this one. `storeMsgMap` holds every store message in transcript order, so a
+ * stamped message that is on no row is placed between the rows around it.
+ */
+function entriesWithHiddenBoundaries(
+  rows: readonly ChatViewMessage[],
+  storeMsgMap: ReadonlyMap<string, ChatMessage>,
+  chatToolGroupPayloads: ReadonlyMap<string, { messages: ChatMessage[] }>,
+): Entry[] {
+  const onRow = new Set<string>()
+  for (const row of rows) {
+    const payload = chatToolGroupPayloads.get(row.id)
+    if (payload) for (const m of payload.messages) onRow.add(m.id)
+    else onRow.add(row.id)
+  }
+  // Transcript position of every message, and the stamped messages no row shows.
+  const position = new Map<string, number>()
+  const hidden: { message: ChatMessage; at: number }[] = []
+  let at = 0
+  for (const m of storeMsgMap.values()) {
+    position.set(m.id, at)
+    if (m.turnBoundary && !onRow.has(m.id)) hidden.push({ message: m, at })
+    at++
+  }
+  if (hidden.length === 0) return rows.map((row, rowIndex) => ({ kind: 'row', rowIndex, row }))
+
+  const entries: Entry[] = []
+  let next = 0 // next hidden boundary not yet placed
+  rows.forEach((row, rowIndex) => {
+    const first = chatToolGroupPayloads.get(row.id)?.messages[0]?.id ?? row.id
+    const rowAt = position.get(first)
+    // Rows with no store message (a turn summary) have no position; they end a run anyway.
+    if (rowAt !== undefined) {
+      while (next < hidden.length && hidden[next]!.at < rowAt) entries.push({ kind: 'boundary', message: hidden[next++]!.message })
+    }
+    entries.push({ kind: 'row', rowIndex, row })
+  })
+  return entries
+}
+
 export function collapseResolvedPermissionRuns(
   rows: ChatViewMessage[],
   storeMsgMap: ReadonlyMap<string, ChatMessage>,
   chatToolGroupPayloads: ReadonlyMap<string, { messages: ChatMessage[] }> = new Map(),
 ): CollapseResolvedPermissionRunsResult {
   const groups = new Map<string, string[]>()
-  const runs = findResolvedPermissionRuns(rows, (row): readonly ChatMessage[] => {
+  const entries = entriesWithHiddenBoundaries(rows, storeMsgMap, chatToolGroupPayloads)
+  const runs = findResolvedPermissionRuns(entries, (entry): readonly ChatMessage[] => {
+    // A hidden boundary is its own (never-transparent) message: it ends the run.
+    if (entry.kind === 'boundary') return [entry.message]
     // A collapsed tool group stands for its messages; a plain row for its own.
-    const payload = chatToolGroupPayloads.get(row.id)
+    const payload = chatToolGroupPayloads.get(entry.row.id)
     if (payload) return payload.messages
-    const m = storeMsgMap.get(row.id)
+    const m = storeMsgMap.get(entry.row.id)
     return m ? [m] : []
   })
   if (runs.length === 0) return { rows, groups }
 
-  // First member index -> its run; every later member index is dropped.
-  const runAt = new Map<number, (typeof runs)[number]>()
+  // First member row index -> its run; every later member row is dropped.
+  const runAt = new Map<number, { rowIds: string[]; first: ChatViewMessage }>()
   const dropped = new Set<number>()
   for (const run of runs) {
-    runAt.set(run.indices[0]!, run)
-    for (const idx of run.indices.slice(1)) dropped.add(idx)
+    const members = run.items.filter((e): e is Extract<Entry, { kind: 'row' }> => e.kind === 'row')
+    runAt.set(members[0]!.rowIndex, { rowIds: members.map((e) => e.row.id), first: members[0]!.row })
+    for (const e of members.slice(1)) dropped.add(e.rowIndex)
   }
 
   const out: ChatViewMessage[] = []
   for (let i = 0; i < rows.length; i++) {
     const run = runAt.get(i)
     if (run) {
-      const first = run.items[0]!
-      const id = permissionGroupRowId(first.id)
-      groups.set(id, run.items.map((r) => r.id))
+      const id = permissionGroupRowId(run.first.id)
+      groups.set(id, run.rowIds)
       out.push({
         id,
         type: 'permission-group',
         // The members share one description; carrying it keeps in-session find
         // (which reads a row's `content`) matching a grouped prompt.
-        content: first.content,
+        content: run.first.content,
         // The group sits at the first member's position, so it carries that time.
-        timestamp: first.timestamp,
+        timestamp: run.first.timestamp,
       })
     } else if (!dropped.has(i)) {
       out.push(rows[i]!)

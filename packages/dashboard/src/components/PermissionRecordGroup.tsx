@@ -72,7 +72,8 @@ export function PermissionRecordGroup({
         // once expanded the first member carries it.
         id={expanded ? undefined : `perm-desc-${requestIds[0]}`}
         aria-expanded={expanded}
-        aria-controls={membersId}
+        // Only while the list it controls exists.
+        aria-controls={expanded ? membersId : undefined}
         aria-label={`${expanded ? 'Hide' : 'Show'} all ${count} ${tool} permissions`}
         title={`${tool}: ${description}`}
         onClick={() => {

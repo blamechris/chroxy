@@ -64,6 +64,14 @@ describe('PermissionOutcomeRecord -- expandable (#6894)', () => {
     expect(screen.getAllByRole('button')).toHaveLength(1)
   })
 
+  it('aria-controls only points at an id that exists: absent while collapsed, the detail once expanded', () => {
+    renderRecord({ detail: { decision: 'allow' } })
+    const toggle = screen.getByTestId('perm-record-toggle')
+    expect(toggle.hasAttribute('aria-controls')).toBe(false)
+    fireEvent.click(toggle)
+    expect(document.getElementById(toggle.getAttribute('aria-controls')!)).toBe(screen.getByTestId('perm-record-detail'))
+  })
+
   it('keeps the perm-desc anchor the expired-summary jump link lands on', () => {
     renderRecord({ detail: { decision: 'allow' } })
     expect(document.getElementById('perm-desc-req-1')).not.toBeNull()

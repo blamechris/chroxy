@@ -106,6 +106,15 @@ describe('PermissionRecordGroup (#6894)', () => {
     expect(screen.queryByTestId('perm-group-input')).not.toBeInTheDocument()
   })
 
+  it('aria-controls only points at an id that exists: absent while collapsed, the members list once expanded', () => {
+    renderGroup()
+    const toggle = screen.getByTestId('perm-group-toggle')
+    expect(toggle.hasAttribute('aria-controls')).toBe(false)
+    fireEvent.click(toggle)
+    const target = toggle.getAttribute('aria-controls')!
+    expect(document.getElementById(target)).toBe(screen.getByTestId('perm-group-members'))
+  })
+
   it('has no Allow / Deny: a group is never actionable', () => {
     renderGroup()
     fireEvent.click(screen.getByTestId('perm-group-toggle'))

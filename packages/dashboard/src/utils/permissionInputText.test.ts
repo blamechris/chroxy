@@ -41,4 +41,34 @@ describe('permissionInputText', () => {
   it('returns markup verbatim as text (escaping is the renderer\'s job, and React does it)', () => {
     expect(permissionInputText('Bash', { command: '<img src=x onerror=alert(1)>' })).toBe('<img src=x onerror=alert(1)>')
   })
+
+  it('does not cut a surrogate pair in half at the cap', () => {
+    // an emoji is two UTF-16 units; put one astride the cut
+    const cmd = 'a'.repeat(PERMISSION_INPUT_MAX_CHARS - 1) + '\u{1F600}' + 'tail'
+    const text = permissionInputText('Bash', { command: cmd })!
+    const head = text.slice(0, text.indexOf('… (truncated)'))
+    expect(head.length).toBeGreaterThan(0)
+    const last = head.charCodeAt(head.length - 1)
+    expect(last >= 0xd800 && last <= 0xdbff, 'ends on a lone high surrogate').toBe(false)
+  })
+
+  it('shows the flags of a Bash input that change what the command does, beside the command', () => {
+    const text = permissionInputText('Bash', {
+      command: 'rm -rf build',
+      description: 'Clean up',
+      dangerouslyDisableSandbox: true,
+      run_in_background: true,
+      timeout: 5000,
+    })!
+    expect(text.split('\n')[0]).toBe('rm -rf build')
+    expect(text).toContain('dangerouslyDisableSandbox: true')
+    expect(text).toContain('run_in_background: true')
+    expect(text).toContain('timeout: 5000')
+    // the rationale is shown elsewhere; it is not repeated as a flag
+    expect(text).not.toContain('Clean up')
+  })
+
+  it('omits default-valued flags (false, empty) so a plain command stays a plain command', () => {
+    expect(permissionInputText('Bash', { command: 'ls', dangerouslyDisableSandbox: false, run_in_background: false })).toBe('ls')
+  })
 })

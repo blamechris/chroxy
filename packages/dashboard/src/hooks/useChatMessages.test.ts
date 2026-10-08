@@ -446,6 +446,8 @@ describe('useChatMessages -- resolved permission prompt groups (#6894)', () => {
       content: 'shell: Do you want to allow npm registry lookup?',
       tool: 'shell',
       requestId: `req-${id}`,
+      // a live prompt carries the broadcast tool input; a replayed record does not
+      toolInput: { command: 'npm view @chroxy/server version' },
       answered: 'allow',
       answeredAt: 1,
       ...over,
@@ -481,13 +483,17 @@ describe('useChatMessages -- resolved permission prompt groups (#6894)', () => {
     expect(result.current.chatMessages.map((r) => r.id)).toEqual(['p1'])
   })
 
-  it('groups replayed permission_outcome records the same way (survives a replay)', () => {
-    const rec = (id: string) =>
-      resolvedPrompt(id, { answered: undefined, answeredAt: undefined, permissionOutcome: 'expired' })
+  it('does NOT group records rebuilt from replayed history: their tool input is unknown, so identical descriptions may be different commands', () => {
+    const rec = (id: string): ChatMessage => {
+      const { toolInput: _t, ...rest } = resolvedPrompt(id, { answered: undefined, answeredAt: undefined, permissionOutcome: 'expired' })
+      void _t
+      return rest as ChatMessage
+    }
     const { result } = renderHook(() =>
       useChatMessages({ storeMessages: [rec('p1'), rec('p2')], streamingMessageId: null }),
     )
-    expect(result.current.chatMessages.map((r) => r.type)).toEqual(['permission-group'])
+    expect(result.current.chatMessages.map((r) => r.id)).toEqual(['p1', 'p2'])
+    expect(result.current.permissionPromptGroups.size).toBe(0)
   })
 
   it('can be switched off (the closed-transcript viewer cannot render a group row)', () => {

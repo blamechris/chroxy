@@ -233,7 +233,7 @@ describe('resolved permission groups -- a real interleaved turn through the mess
     expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
   })
 
-  it('rebuilt from replayed history (permission_outcome entries) it groups the same way', () => {
+  it('rebuilt from replayed history (permission_outcome entries) the approvals stay individual records: the server journals the description, not the command', () => {
     vi.useFakeTimers()
     reset()
     send({ type: 'history_replay_start', fullHistory: true, truncated: false, latestSeq: 9 })
@@ -245,6 +245,7 @@ describe('resolved permission groups -- a real interleaved turn through the mess
     vi.runAllTimers()
     vi.useRealTimers()
     mount(storeMessages())
-    expect(screen.getByTestId('perm-group-count')).toHaveTextContent('×3')
+    expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
+    expect(screen.getAllByTestId('perm-outcome-record')).toHaveLength(3)
   })
 })

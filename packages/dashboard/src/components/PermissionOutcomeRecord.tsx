@@ -114,7 +114,7 @@ export function PermissionOutcomeRecord({ requestId, tool, description, outcome,
           className="perm-record-toggle"
           data-testid="perm-record-toggle"
           aria-expanded={expanded}
-          aria-controls={detailId}
+          aria-controls={expanded ? detailId : undefined}
           aria-label={`${expanded ? 'Hide' : 'Show'} details of the ${tool} permission`}
           onClick={() => {
             const next = !expanded

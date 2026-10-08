@@ -16,6 +16,8 @@ function resolved(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
     content: 'shell: Do you want to allow npm registry lookup?',
     tool: 'shell',
     requestId: `req-${id}`,
+    // a live prompt carries the broadcast tool input; a replayed record does not
+    toolInput: { command: 'npm view @chroxy/server version' },
     answered: 'allow',
     answeredAt: 1,
     timestamp: Number(id.replace(/\D/g, '')) || 0,
@@ -159,5 +161,43 @@ describe('collapseResolvedPermissionRuns -- interleaved with tool bubbles (#6894
       expect(groups.size, msgs.map((m) => m.id).join(',')).toBe(0)
       expect(rows).toBe(input)
     }
+  })
+})
+
+// #6894 review: `markTurnBoundary` stamps the last non-user_input message of a turn,
+// which can be a message the chat view FILTERS OUT (a `system` row, or a tool/thinking
+// row under the compact-chat filter). It has no row, but it still ends the turn.
+describe('collapseResolvedPermissionRuns -- a turn boundary on a hidden message (#6894)', () => {
+  const tool = (id: string): ChatMessage => ({ id, type: 'tool_use', content: 'touch f', tool: 'shell', toolUseId: `tu-${id}`, timestamp: 0 } as ChatMessage)
+  const toolRow = (m: ChatMessage): ChatViewMessage => ({ id: m.id, type: 'tool_use', content: m.content, timestamp: 0 })
+  const sys = (over: Partial<ChatMessage> = {}): ChatMessage => ({ id: 'sys1', type: 'system', content: 'turn over', timestamp: 0, ...over } as ChatMessage)
+
+  // storeMsgMap holds EVERY store message in transcript order; rows hold only the visible ones.
+  function run(msgs: ChatMessage[]) {
+    const rows = msgs.filter((m) => m.type !== 'system').map((m) => (m.type === 'tool_use' ? toolRow(m) : rowOf(m)))
+    return collapseResolvedPermissionRuns(rows, mapOf(msgs))
+  }
+
+  it('P, T, [hidden system + boundary], P, T does NOT fold across the turn', () => {
+    const { groups } = run([resolved('p1'), tool('t2'), sys({ turnBoundary: true }), resolved('p3'), tool('t4')])
+    expect(groups.size).toBe(0)
+  })
+
+  it('POSITIVE CONTROL: the same transcript with an ordinary hidden system row (no boundary) still folds', () => {
+    const { groups } = run([resolved('p1'), tool('t2'), sys(), resolved('p3'), tool('t4')])
+    expect(groups.size).toBe(1)
+  })
+
+  it('a boundary on a hidden message at the end of a run does not stop that run from forming', () => {
+    const { groups } = run([resolved('p1'), tool('t2'), resolved('p3'), sys({ turnBoundary: true })])
+    expect(groups.size).toBe(1)
+  })
+
+  it('a hidden tool row under the compact filter carrying the boundary splits the turns too', () => {
+    const hiddenTool = { ...tool('t2'), turnBoundary: true } as ChatMessage
+    const msgs = [resolved('p1'), hiddenTool, resolved('p3')]
+    // compact filter: the tool_use never reaches the rows
+    const rows = [rowOf(msgs[0]!), rowOf(msgs[2]!)]
+    expect(collapseResolvedPermissionRuns(rows, mapOf(msgs)).groups.size).toBe(0)
   })
 })

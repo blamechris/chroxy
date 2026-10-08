@@ -21,11 +21,21 @@ function resolved(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
     content: 'shell: Do you want to allow npm registry lookup?',
     tool: 'shell',
     requestId: `req-${id}`,
+    // A LIVE prompt carries the tool input the server broadcast; a record rebuilt
+    // from history does not (see `replayedRecord`).
+    toolInput: { command: 'npm view @chroxy/server version' },
     answered: 'allow',
     answeredAt: NOW,
     timestamp: NOW,
     ...over,
   } as ChatMessage
+}
+
+/** A record as `buildPermissionOutcomeMessage` rebuilds it from a replayed `permission_outcome`: no tool input. */
+function replayedRecord(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
+  const { toolInput: _toolInput, ...rest } = resolved(id, over)
+  void _toolInput
+  return rest as ChatMessage
 }
 
 function pending(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
@@ -106,9 +116,29 @@ describe('resolvedPermissionGroupKey', () => {
     expect(resolvedPermissionGroupKey(pending('a'))).toBeNull()
   })
 
-  it('groups allow / allowSession decisions of one outcome together', () => {
-    expect(resolvedPermissionGroupKey(resolved('a', { answered: 'allow' })))
-      .toBe(resolvedPermissionGroupKey(resolved('b', { answered: 'allowSession' })))
+  it('keeps allow, allowSession and allowAlways apart: a persistent rule is not a one-time allow', () => {
+    const key = (answered: string) => resolvedPermissionGroupKey(resolved('x', { answered }))
+    expect(new Set([key('allow'), key('allowSession'), key('allowAlways')]).size).toBe(3)
+    expect(key('allow')).toBe(resolvedPermissionGroupKey(resolved('y', { answered: 'allow' })))
+  })
+
+  it('a record whose tool input was NOT recorded keys on its own requestId: it never matches another', () => {
+    const a = replayedRecord('a')
+    const b = replayedRecord('b') // same session, tool, description, outcome
+    expect(resolvedPermissionGroupKey(a)).not.toBeNull()
+    expect(resolvedPermissionGroupKey(a)).not.toBe(resolvedPermissionGroupKey(b))
+    // ... and the same record keys the same every time (a stable group id)
+    expect(resolvedPermissionGroupKey(a)).toBe(resolvedPermissionGroupKey(replayedRecord('a')))
+  })
+
+  it('an empty recorded input still counts as recorded (a tool with no arguments)', () => {
+    const a = resolved('a', { toolInput: {} })
+    const b = resolved('b', { toolInput: {} })
+    expect(resolvedPermissionGroupKey(a)).toBe(resolvedPermissionGroupKey(b))
+  })
+
+  it('a live record and an unrecorded one never share a key', () => {
+    expect(resolvedPermissionGroupKey(resolved('a'))).not.toBe(resolvedPermissionGroupKey(replayedRecord('a')))
   })
 })
 
@@ -179,14 +209,59 @@ describe('findResolvedPermissionRuns', () => {
     expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs), 3)).toEqual([])
   })
 
-  it('groups replayed outcome records the same as live-answered prompts', () => {
-    const msgs = [
-      resolved('a', { answered: undefined, permissionOutcome: 'expired' }),
-      resolved('b', { answered: undefined, permissionOutcome: 'expired' }),
-    ]
+  it('a live group of three still forms', () => {
+    const msgs = [resolved('a'), resolved('b'), resolved('c')]
     const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
     expect(runs).toHaveLength(1)
-    expect(runs[0]!.items).toHaveLength(2)
+    expect(runs[0]!.items).toHaveLength(3)
+  })
+
+  // The server journals a prompt's DESCRIPTION, not its input (#8503), and the
+  // description is chosen by the agent (redaction.js prefers `input.description`
+  // over `input.command`). Two commands under one rationale are indistinguishable
+  // in a replayed record, so those never fold. Until #8503 journals the input,
+  // grouping happens only where the input is known: live.
+  it('replayed records of the same description (different, unknown commands) do NOT group', () => {
+    const msgs = [
+      replayedRecord('a', { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed' }),
+      replayedRecord('b', { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed' }),
+    ]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('replayed expired / stopped records do not group either', () => {
+    for (const permissionOutcome of ['expired', 'stopped'] as const) {
+      const msgs = [
+        replayedRecord('a', { answered: undefined, permissionOutcome }),
+        replayedRecord('b', { answered: undefined, permissionOutcome }),
+      ]
+      expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+    }
+  })
+
+  it('a live prompt that was aborted or stopped (it still holds its input) groups', () => {
+    const msgs = [
+      resolved('a', { answered: undefined, permissionOutcome: 'stopped' }),
+      resolved('b', { answered: undefined, permissionOutcome: 'stopped' }),
+    ]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toHaveLength(1)
+  })
+
+  it('allow, allowAlways and allowSession prompts stay in separate runs', () => {
+    const msgs = [
+      resolved('a', { answered: 'allow' }),
+      resolved('b', { answered: 'allowAlways' }),
+      resolved('c', { answered: 'allowAlways' }),
+      resolved('d', { answered: 'allowSession' }),
+    ]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs.map((r) => r.items.map((i) => i.id))).toEqual([['b', 'c']])
+  })
+
+  it('a hidden message carrying a turn boundary (a filtered system row) ends the run', () => {
+    const hidden = { id: 'sys', type: 'system', content: 'turn ended', turnBoundary: true, timestamp: NOW } as ChatMessage
+    const msgs = [resolved('p1'), toolUse('t1'), hidden, resolved('p2'), toolUse('t2')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
   })
 })
 
@@ -314,12 +389,14 @@ describe('findResolvedPermissionRuns -- the real interleaving of a turn (#6894)'
     expect(runs.map(ids)).toEqual([['p1', 'p2']])
   })
 
-  it('a prompt that names no tool only groups with ADJACENT prompts', () => {
+  it('a prompt that names no tool groups with adjacent prompts or across thinking, never across a tool bubble', () => {
     const noTool = { tool: undefined, content: 'Permission required' }
     const apart = [resolved('p1', noTool), toolUse('t1', { tool: undefined }), resolved('p2', noTool)]
     expect(findResolvedPermissionRuns(rowsOf(apart), lookup(apart))).toEqual([])
     const adjacent = [resolved('p1', noTool), resolved('p2', noTool)]
     expect(findResolvedPermissionRuns(rowsOf(adjacent), lookup(adjacent))).toHaveLength(1)
+    const thought = [resolved('p1', noTool), thinking('k1'), resolved('p2', noTool)]
+    expect(findResolvedPermissionRuns(rowsOf(thought), lookup(thought))).toHaveLength(1)
   })
 
   it('tool bubbles before the first and after the last prompt are not part of the run', () => {

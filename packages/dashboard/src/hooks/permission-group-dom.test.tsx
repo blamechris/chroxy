@@ -9,7 +9,7 @@
  * approval in the middle must stay a full actionable card.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, renderHook, cleanup, screen, fireEvent, within } from '@testing-library/react'
+import { render, renderHook, cleanup, screen } from '@testing-library/react'
 import { buildPermissionOutcomeMessage, type ChatMessage } from '@chroxy/store-core'
 import { useChatMessages } from './useChatMessages'
 import { useMessageRenderer, type UseMessageRendererArgs } from './useMessageRenderer'
@@ -47,6 +47,7 @@ function liveAnswered(i: number): ChatMessage {
     content: `${TOOL}: ${DESC}`,
     tool: TOOL,
     requestId: `req-${i}`,
+    toolInput: { command: 'npm view @chroxy/server version' },
     answered: 'allow',
     answeredAt: 1,
     timestamp: i,
@@ -103,15 +104,6 @@ function mount(storeMessages: ChatMessage[]) {
   )
 }
 
-function normalised(html: string): string {
-  return html
-    .replace(/(data-testid="msg-|data-row-key=")[^"]*"/g, '$1#"')
-    .replace(/(perm-desc-|perm-group-members-|perm-group:)[^"]*"/g, '$1#"')
-    .replace(/aria-controls="[^"]*"/g, 'aria-controls="#"')
-    .replace(/<span class="msg-timestamp">[^<]*<\/span>/g, '')
-    .replace(/\s+/g, ' ')
-}
-
 describe('resolved permission groups -- rendered through the chat pipeline (#6894)', () => {
   it('three identical resolved prompts render as ONE counted line', () => {
     mount([liveAnswered(1), liveAnswered(2), liveAnswered(3)])
@@ -120,21 +112,11 @@ describe('resolved permission groups -- rendered through the chat pipeline (#689
     expect(screen.queryAllByTestId('perm-outcome-record')).toHaveLength(0)
   })
 
-  it('the group line is identical live and rebuilt from replayed permission_outcome history', () => {
-    const live = mount([liveAnswered(1), liveAnswered(2), liveAnswered(3)])
-    const liveHtml = normalised(live.container.innerHTML)
-    cleanup()
-    const replay = mount([replayedOutcome(1), replayedOutcome(2), replayedOutcome(3)])
-    const replayHtml = normalised(replay.container.innerHTML)
-    expect(liveHtml).toContain('perm-group')
-    expect(replayHtml).toBe(liveHtml)
-  })
-
-  it('a replayed group still states the outcome and expands to every record', () => {
-    mount([replayedOutcome(1), replayedOutcome(2)])
-    expect(screen.getByTestId('perm-group')).toHaveTextContent('Permission allowed')
-    fireEvent.click(screen.getByTestId('perm-group-toggle'))
-    expect(within(screen.getByTestId('perm-group-members')).getAllByTestId('perm-outcome-record')).toHaveLength(2)
+  it('rebuilt from replayed permission_outcome history the same prompts stay INDIVIDUAL compact records (their input is unknown)', () => {
+    mount([replayedOutcome(1), replayedOutcome(2), replayedOutcome(3)])
+    expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
+    expect(screen.getAllByTestId('perm-outcome-record')).toHaveLength(3)
+    for (const rec of screen.getAllByTestId('perm-outcome-record')) expect(rec).toHaveTextContent('Permission allowed')
   })
 
   it('a pending approval between resolved ones stays its own full card and splits the run', () => {
