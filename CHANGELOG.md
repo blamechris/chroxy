@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A claude-tui session now reports the subagents it is running (#7396).** The
+  default provider never tracked them, so the agent panel, the "N agents
+  running" badge, the working status on the tab and the Control Room agent nodes
+  were all dark, and a session read idle while a subagent ran. A subagent now
+  shows up when it is launched, a foreground one clears when it returns, and a
+  background one stays until Claude Code reports it finished. It also clears if
+  the turn ends in an error, is stopped, or the session ends, and it is given up
+  on if the session's transcript stops being readable for about a minute or the
+  agent has run for 12 hours without a completion notice.
+
 - **A resolved permission record still shows what was approved after a session
   switch or a reload (#8503).** The dashboard's compact permission record and its
   counted group (`Permission allowed ×3`) showed the command or file that was

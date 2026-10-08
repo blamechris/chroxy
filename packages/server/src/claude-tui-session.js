@@ -51,6 +51,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
+import { extractToolInputSemantics } from './claude-stream-parser.js'
 import { hasPersistedTranscript } from './jsonl-reader.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
@@ -796,6 +797,13 @@ export class ClaudeTuiSession extends BaseSession {
     // resolves to a transcript path; replaced if the transcript path
     // changes (new conversation id after /clear or resume).
     this._transcriptTaskScanner = null
+    // #7396 (review): what the poll needs to give up on a confirmed background
+    // subagent whose transcript stopped delivering. `_agentWatch` maps a
+    // confirmed agent's tool-use id to when it was confirmed and the scanner's
+    // discard count then; `_agentBlindTicks` counts consecutive ticks on which
+    // the transcript could not be looked at.
+    this._agentWatch = new Map()
+    this._agentBlindTicks = 0
     // #5431: change-detection poll armed while the last snapshot reported
     // outstanding work. Re-scans the transcript so a task-notification that
     // lands while the session is IDLE still clears the dashboard indicator
@@ -1677,6 +1685,24 @@ export class ClaudeTuiSession extends BaseSession {
   // transcript bytes appended since the last scan).
   static get BACKGROUND_TASK_POLL_MS() { return 15_000 }
 
+  // #7396 (review): a CONFIRMED background subagent is exempt from the turn-end
+  // sweep on the strength of a promise -- the transcript will eventually name it
+  // in a task-notification. These two bound that promise so a transcript that
+  // goes bad cannot pin the session as working (and a daemon restart as blocked)
+  // forever, which is #7340's worse failure.
+  //
+  // Consecutive poll ticks (15s each, so about a minute) on which the transcript
+  // could not be looked at -- removed, unreadable, or no longer the file the
+  // session file resolves to -- before the confirmed agents are drained. Short
+  // enough to be useful, long enough to ride out a file being replaced.
+  static get AGENT_BLIND_TICKS_MAX() { return 4 }
+  // Absolute lifetime of a confirmed agent, the backstop for every failure the
+  // blind-tick check cannot see (a notification that is simply never written).
+  // Hours, not minutes: a legitimate background agent can run a long time, and an
+  // early clear is recoverable (the notification still arrives; completing is
+  // idempotent) where a stuck badge is not.
+  static get AGENT_MAX_LIFETIME_MS() { return 12 * 60 * 60 * 1000 }
+
   /**
    * #5431 — outstanding background work derived from the session transcript:
    * `{ backgroundTasks: [{ toolUseId, kind, description, startedAt }],
@@ -1783,14 +1809,27 @@ export class ClaudeTuiSession extends BaseSession {
    * `getBackgroundTaskSnapshot()`.
    */
   _scanTranscript() {
-    const pid = this._term && this._term.pid
-    if (!Number.isInteger(pid) || pid <= 0) return null
-    const transcriptPath = transcriptPathForSessionFile(ClaudeTuiSession.sessionFilePath(pid))
+    const transcriptPath = this._resolveTranscriptPath()
     if (!transcriptPath) return null
     if (!this._transcriptTaskScanner || this._transcriptTaskScanner.path !== transcriptPath) {
       this._transcriptTaskScanner = new TranscriptTaskScanner(transcriptPath, this._log || log)
+      // #7396 (review): the subagents still being waited on must never be
+      // evicted from the scanner's bounded notified-id set.
+      this._transcriptTaskScanner.pinnedToolUseIds = this._activeAgents
     }
     return this._transcriptTaskScanner.scan()
+  }
+
+  /**
+   * #7396 (review) -- where the session file says the transcript is right now, or
+   * null when it cannot be resolved (no live PTY pid, no per-PID file, a bad
+   * file). Factored out of `_scanTranscript` so the poll can ask the same
+   * question of a scanner it already holds.
+   */
+  _resolveTranscriptPath() {
+    const pid = this._term && this._term.pid
+    if (!Number.isInteger(pid) || pid <= 0) return null
+    return transcriptPathForSessionFile(ClaudeTuiSession.sessionFilePath(pid))
   }
 
   /**
@@ -1887,35 +1926,141 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _refreshBackgroundTaskPoll(snapshot) {
     const outstanding = snapshot && (snapshot.backgroundTasks.length > 0 || snapshot.scheduledWakeup)
-    if (!outstanding) {
+    // #7396: a backgrounded subagent is outstanding work too, and the only
+    // thing that ever ends it is a task-notification in this same transcript.
+    if (!outstanding && !this._hasConfirmedBackgroundAgents()) {
       this._stopBackgroundTaskPoll()
       return
     }
+    this._armBackgroundTaskPoll()
+  }
+
+  /**
+   * #5431 / #7396 -- start the idle re-scan if it is not already running. Never
+   * stops it: `_refreshBackgroundTaskPoll` owns that decision for the callers
+   * that hold a snapshot, and the tick owns it for itself. A caller that only
+   * knows about ONE kind of outstanding work (a subagent just confirmed) must
+   * not be able to stop a poll the other kind still needs, which is why arming
+   * is a separate method.
+   *
+   * Each tick re-scans the transcript, ends the tracked subagents a
+   * task-notification has reported finished, and -- while the session is idle --
+   * broadcasts a changed task list. It stops itself once nothing of either kind
+   * is outstanding.
+   */
+  _armBackgroundTaskPoll() {
     if (this._backgroundTaskPollTimer || this._destroying) return
-    this._backgroundTaskPollTimer = setInterval(() => {
-      try {
-        if (this._destroying || this._ptyExited) {
-          this._stopBackgroundTaskPoll()
-          return
-        }
-        if (this._isBusy || !this._transcriptTaskScanner) return
-        const next = this._transcriptTaskScanner.scan()
-        const key = this._backgroundTaskKey(next)
-        if (key === this._lastBackgroundTaskKey) return
-        this._lastBackgroundTaskKey = key
-        this.emit('background_tasks_changed', next)
-        if (next.backgroundTasks.length === 0 && !next.scheduledWakeup) {
-          this._stopBackgroundTaskPoll()
-        }
-      } catch (err) {
-        // Never let the poll throw out of a timer tick — stop watching and
-        // degrade to "no live updates until the next readiness edge".
-        ;(this._log || log).debug?.(`background-task poll failed: ${err.message} — stopping poll`)
-        this._stopBackgroundTaskPoll()
-      }
-    }, ClaudeTuiSession.BACKGROUND_TASK_POLL_MS)
+    this._backgroundTaskPollTimer = setInterval(() => this._backgroundTaskPollTick(), ClaudeTuiSession.BACKGROUND_TASK_POLL_MS)
     // Don't keep the event loop alive solely for the background-task watch.
     if (typeof this._backgroundTaskPollTimer.unref === 'function') this._backgroundTaskPollTimer.unref()
+  }
+
+  /** #5431 / #7396 -- one tick of the idle re-scan. See `_armBackgroundTaskPoll`. */
+  _backgroundTaskPollTick() {
+    try {
+      if (this._destroying || this._ptyExited) {
+        this._stopBackgroundTaskPoll()
+        return
+      }
+      const scanner = this._transcriptTaskScanner
+      if (!scanner) {
+        // A confirmed agent implies a scanner existed; its absence is a tick the
+        // transcript could not be looked at.
+        this._watchConfirmedAgents(null)
+        return
+      }
+      const next = scanner.scan()
+      // #7396: runs busy or idle. A subagent that finished in the middle of a
+      // long turn should leave the badge then, not when the turn ends.
+      this._completeNotifiedAgents(scanner.notifiedToolUseIds)
+      this._watchConfirmedAgents(scanner)
+      // The broadcast (and the decision to stop) stays idle-only, as before:
+      // the turn-end `result` path recomputes the snapshot anyway, and stopping
+      // on a busy tick would swallow a drain nobody has been told about yet.
+      if (this._isBusy) return
+      const key = this._backgroundTaskKey(next)
+      if (key !== this._lastBackgroundTaskKey) {
+        this._lastBackgroundTaskKey = key
+        this.emit('background_tasks_changed', next)
+      }
+      if (next.backgroundTasks.length === 0 && !next.scheduledWakeup && !this._hasConfirmedBackgroundAgents()) {
+        this._stopBackgroundTaskPoll()
+      }
+    } catch (err) {
+      // Never let the poll throw out of a timer tick — stop watching and
+      // degrade to "no live updates until the next readiness edge".
+      ;(this._log || log).debug?.(`background-task poll failed: ${err.message} — stopping poll`)
+      this._stopBackgroundTaskPoll()
+    }
+  }
+
+  /**
+   * #7396 (review) -- the way out for a CONFIRMED background subagent whose
+   * transcript stops delivering its notification. Runs on every poll tick.
+   *
+   * Three independent reasons to stop waiting, each ending the agent with
+   * `agent_completed { reason }` (the wire message carries only the id; the
+   * reason is for in-process listeners and the log):
+   *
+   *  - `transcript_unreadable`: the transcript has been impossible to look at
+   *    for `AGENT_BLIND_TICKS_MAX` consecutive ticks -- the last scan failed, or
+   *    the session file now resolves to a different path than the scanner holds
+   *    (or to none), or there is no scanner. `scan()` degrades a read error to
+   *    an empty snapshot, which reads as "nothing new" for ever, so health is
+   *    asked of the scanner (`readable`) rather than inferred.
+   *  - `transcript_gap`: the scanner skipped an over-cap unread tail after the
+   *    agent was confirmed. A notification in that prefix is gone for good.
+   *  - `max_lifetime`: `AGENT_MAX_LIFETIME_MS` since confirmation, the backstop
+   *    for a notification that is simply never written.
+   *
+   * All three fail toward clearing the badge early, which is recoverable (the
+   * notification may still arrive; completing is idempotent), where a stuck
+   * badge pins the session working and blocks daemon restarts.
+   *
+   * @param {TranscriptTaskScanner|null} scanner
+   */
+  _watchConfirmedAgents(scanner) {
+    const confirmed = []
+    for (const [toolUseId, agent] of this._activeAgents) {
+      if (agent?.backgroundConfirmed === true) confirmed.push(toolUseId)
+    }
+    if (confirmed.length === 0) {
+      this._agentBlindTicks = 0
+      this._agentWatch.clear()
+      return
+    }
+    for (const id of this._agentWatch.keys()) {
+      if (!confirmed.includes(id)) this._agentWatch.delete(id)
+    }
+    const now = this._nowMonotonic()
+    const blind = !scanner || scanner.readable !== true || this._resolveTranscriptPath() !== scanner.path
+    if (blind) {
+      this._agentBlindTicks++
+      if (this._agentBlindTicks >= ClaudeTuiSession.AGENT_BLIND_TICKS_MAX) {
+        this._agentBlindTicks = 0
+        this._drainWatchedAgents(confirmed, 'transcript_unreadable')
+        return
+      }
+    } else {
+      this._agentBlindTicks = 0
+    }
+    for (const id of confirmed) {
+      let watch = this._agentWatch.get(id)
+      if (!watch) {
+        watch = { at: now, discards: scanner ? scanner.discardCount : 0 }
+        this._agentWatch.set(id, watch)
+      }
+      if (scanner && scanner.discardCount > watch.discards) this._drainWatchedAgents([id], 'transcript_gap')
+      else if (now - watch.at > ClaudeTuiSession.AGENT_MAX_LIFETIME_MS) this._drainWatchedAgents([id], 'max_lifetime')
+    }
+  }
+
+  _drainWatchedAgents(toolUseIds, reason) {
+    ;(this._log || log).warn(`giving up on ${toolUseIds.length} background subagent(s) (${reason}): ${toolUseIds.join(', ')}`)
+    for (const id of toolUseIds) {
+      this._agentWatch.delete(id)
+      this._completeAgent(id, { reason })
+    }
   }
 
   /** #5431 — idempotent stop for the background-task re-scan poll. */
@@ -1924,6 +2069,150 @@ export class ClaudeTuiSession extends BaseSession {
       clearInterval(this._backgroundTaskPollTimer)
       this._backgroundTaskPollTimer = null
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // #7396 -- subagent tracking. claude-tui drives a PTY, so it has none of the
+  // stream-JSON `task_started` / `task_notification` events CliSession and
+  // SdkSession track subagents with (#7340/#7395). The same lifecycle is
+  // rebuilt from two things the session already reads:
+  //
+  //   spawn      PreToolUse hook of the Agent/Task tool  (what the SDK path
+  //              reads off the tool_use block)
+  //   foreground PostToolUse hook with an `AgentOutput` of status "completed"
+  //   background PostToolUse hook with status "async_launched", then the
+  //              session transcript's `<task-notification>` for that
+  //              tool-use-id -- the PTY-side counterpart of `task_notification`
+  //
+  // Everything goes through BaseSession's `_trackAgent` / `_completeAgent(s)`,
+  // so the record shape, the idempotency and the activity-registry wiring are
+  // the ones the other providers have; this block only decides WHEN to call
+  // them.
+  // ---------------------------------------------------------------------
+
+  /** #7396 -- a tracked subagent that the turn end must not sweep. */
+  _hasConfirmedBackgroundAgents() {
+    for (const agent of this._activeAgents.values()) {
+      if (agent?.backgroundConfirmed === true) return true
+    }
+    return false
+  }
+
+  /**
+   * #7396 -- PreToolUse of a subagent tool. `extractToolInputSemantics` is the
+   * parser the CLI/SDK/BYOK paths use (it knows both tool names, `Agent` and the
+   * older `Task`, and applies the strict `run_in_background === true` reading),
+   * so the description and the model's background REQUEST mean the same thing
+   * here. The request is recorded but does not exempt the agent from the
+   * turn-end sweep: only a confirmed launch does (see below).
+   */
+  _trackAgentFromPreToolUse(toolName, toolUseId, payload) {
+    const semantics = extractToolInputSemantics(toolName, payload.tool_input)
+    if (semantics?.kind !== 'task') return
+    this._trackAgent({
+      toolUseId,
+      description: semantics.payload.description,
+      background: semantics.payload.background,
+    })
+  }
+
+  /**
+   * #7396 -- PostToolUse of a subagent tool: the call returned.
+   *
+   * `tool_response` is the tool's `AgentOutput`, a union on `status`:
+   * "completed" means the subagent ran to the end inside the call (so this IS
+   * its completion, exactly as BYOK's tool_result is), "async_launched" means it
+   * was handed to the background and keeps running. The response is the
+   * authority, not the input's `run_in_background`: Claude Code also backgrounds
+   * a call that never asked, and a call that asked can still run in the
+   * foreground. `isAsync` is the same fact on the transcript's `toolUseResult`.
+   *
+   * A background launch is CONFIRMED -- exempted from the turn-end sweep -- only
+   * when a terminal signal can actually arrive: the hook named a real
+   * `tool_use_id` (a synthesized one can never match a notification) AND the
+   * transcript is readable. Without either it stays tracked but unconfirmed, so
+   * the turn-end sweep clears it. That is #7340's rule carried over: stuck-busy
+   * is the worse failure, and an agent with no way out must not be exempted.
+   */
+  _settleAgentFromPostToolUse(toolName, toolUseId, payload) {
+    if (extractToolInputSemantics(toolName, null)?.kind !== 'task') return
+    const response = payload.tool_response
+    const launchedInBackground = !!response && typeof response === 'object'
+      && (response.status === 'async_launched' || response.isAsync === true)
+    if (!launchedInBackground) {
+      this._completeAgent(toolUseId)
+      return
+    }
+    const hasRealId = typeof payload.tool_use_id === 'string' && payload.tool_use_id.length > 0
+    const confirmable = hasRealId && this._canObserveAgentNotifications()
+    const semantics = extractToolInputSemantics(toolName, payload.tool_input)
+    this._trackAgent({
+      toolUseId,
+      description: typeof response.description === 'string' && response.description
+        ? response.description
+        : semantics?.payload?.description,
+      background: true,
+      authoritative: confirmable,
+    })
+    if (!confirmable) return
+    if (!this._agentWatch.has(toolUseId)) {
+      this._agentWatch.set(toolUseId, { at: this._nowMonotonic(), discards: this._transcriptTaskScanner?.discardCount ?? 0 })
+    }
+    // A notification can already be in the transcript (a very short-lived
+    // subagent); read it now rather than after the next poll interval.
+    this._reconcileAgentsFromTranscript()
+    if (this._hasConfirmedBackgroundAgents()) this._armBackgroundTaskPoll()
+  }
+
+  /** #7396 -- can this session read the transcript a task-notification lands in? */
+  _canObserveAgentNotifications() {
+    try {
+      return this._scanTranscript() !== null
+    } catch {
+      return false
+    }
+  }
+
+  /** #7396 -- scan the transcript and end the tracked subagents it reports finished. */
+  _reconcileAgentsFromTranscript() {
+    if (this._activeAgents.size === 0) return
+    try {
+      if (this._scanTranscript() === null) return
+    } catch {
+      return
+    }
+    this._completeNotifiedAgents(this._transcriptTaskScanner?.notifiedToolUseIds)
+  }
+
+  /**
+   * #7396 -- complete every tracked subagent whose tool-use id a
+   * task-notification has named. `_completeAgent` is idempotent, which is what
+   * makes the notification's several appearances in the transcript (enqueue,
+   * the re-delivered attachment, the dequeue) and its re-notifications harmless.
+   * Never spawns: a notification for an id nobody tracks is ignored.
+   * @param {ReadonlySet<string>|undefined} notified
+   */
+  _completeNotifiedAgents(notified) {
+    if (!notified || notified.size === 0) return
+    for (const toolUseId of [...this._activeAgents.keys()]) {
+      if (notified.has(toolUseId)) this._completeAgent(toolUseId)
+    }
+  }
+
+  /**
+   * #7396 -- turn-end settlement of the tracked subagents; the TUI counterpart of
+   * `_clearMessageState`'s agent sweep (the Stop-hook path does not run through
+   * it). Only the Stop hook is the provider reporting its own turn end, so only
+   * that path (`turnEndedCleanly`) lets a confirmed background subagent survive;
+   * every other end -- an error, a hard cap, a Ctrl-C -- drains them all, because
+   * a recoverable failure (a badge cleared early) beats an unrecoverable one (a
+   * badge nothing can clear). Whatever a notification already reported finished
+   * is completed first, so a subagent that ended during the turn is never kept.
+   */
+  _settleAgentsAtTurnEnd(turnEndedCleanly) {
+    if (this._activeAgents.size === 0) return
+    if (turnEndedCleanly === true) this._reconcileAgentsFromTranscript()
+    this._completeAgents({ exempt: this._survivingAgentIds(turnEndedCleanly) })
   }
 
   /**
@@ -2392,6 +2681,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._expirePendingPermissions('Permission request expired (the session process exited before it could be answered)')
     this._isBusy = false
     this._currentMessageId = null
+    // #7396: subagents are tasks inside the claude process, so they died with it
+    // and the task-notification that would clear them can never be written.
+    // (Contrast the background SHELLS below, which run in their own process
+    // groups and can outlive it.) Like `_expirePendingPermissions` above, this
+    // path never reaches `_clearTurnEndState` or `_clearMessageState`.
+    this._completeAgents()
     // #4307: the PTY is gone, so the ephemeral intra-turn run_in_background
     // tool_use→command map can never be resolved by a result on this PTY — drop
     // it (matches _clearTurnEndState / base _clearMessageState). On respawn the
@@ -4736,7 +5031,9 @@ export class ClaudeTuiSession extends BaseSession {
     // model's context window), the busy-state triple, and — previously MISSING on
     // this path — the AskUserQuestion sibling lock + stall watchdogs (#4604/#5319).
     // Shared with _finishTurnError so the two can't re-diverge. See helper doc.
-    this._clearTurnEndState()
+    // #7396: the Stop hook is claude reporting its own turn end, so a subagent
+    // confirmed as running in the background survives it.
+    this._clearTurnEndState({ turnEndedCleanly: true })
   }
 
   /**
@@ -4866,6 +5163,8 @@ export class ClaudeTuiSession extends BaseSession {
         tool: toolName,
         input: sanitizedToolInput ?? null,
       })
+      // #7396: a subagent launch. After `tool_start`, as on the SDK/CLI paths.
+      this._trackAgentFromPreToolUse(toolName, toolUseId, payload)
       // #4278: AskUserQuestion in TUI sessions previously had no special
       // path — the tool_use bubble appeared in the chat with no
       // interactive way to answer, and claude sat on its own TTY-style
@@ -5028,6 +5327,9 @@ export class ClaudeTuiSession extends BaseSession {
     // #4628: matching tool_start resolved — drop from the in-flight map
     // so _emitResult's sweep doesn't double-emit a synthetic for it.
     this._trackToolResult(toolUseId)
+    // #7396: the subagent call returned -- either it ran to the end inside the
+    // call, or it was handed to the background.
+    this._settleAgentFromPostToolUse(toolName, toolUseId, payload)
 
     // #4307: scan PostToolUse output for the canonical "Command running
     // in background with ID: <id>" pattern. The PostToolUse hook
@@ -5128,7 +5430,9 @@ export class ClaudeTuiSession extends BaseSession {
    * the leak audit P1-1 flagged: ClaudeTuiSession is the only subclass that
    * didn't run the base per-turn reset.
    */
-  _clearTurnEndState() {
+  _clearTurnEndState({ turnEndedCleanly = false } = {}) {
+    // #7396: settle the subagents this turn end owns. See `_settleAgentsAtTurnEnd`.
+    this._settleAgentsAtTurnEnd(turnEndedCleanly)
     // #7382: the turn is ending, so any prompt it was blocked on can never be
     // answered — the hook died with the turn. Expire them BEFORE the state below
     // is torn down, so the clients retire the card and #7381's release
@@ -5966,6 +6270,10 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+    // #7396: the Ctrl-C above ended the turn from the outside, so no subagent
+    // is exempt -- see `_settleAgentsAtTurnEnd`. Before the result, as the SDK's
+    // hard-timeout and stall paths sweep before theirs.
+    this._settleAgentsAtTurnEnd(false)
     // 4. AskUserQuestion-related slot/lock/watchdog symmetry. #4802:
     //    explicit `_pendingUserAnswers_clearAll()` (was an implicit
     //    `_pendingUserAnswer = null` via the back-compat setter). Safe
