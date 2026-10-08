@@ -3953,6 +3953,28 @@ describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)',
   }
 })
 
+// #8502 — `busy_cleared`: a jsonl-subprocess session says so when its busy flag
+// clears after the turn's `result` already went out. It must reach the forwarder
+// (which refreshes the session list) and must not be recorded into history.
+describe('_wireSessionEvents — busy_cleared event proxy (#8502)', () => {
+  it('proxies session.emit("busy_cleared") to mgr session_event, once, and keeps it out of history', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'gemini' })
+    mgr._wireSessionEvents('s1', session)
+    const events = []
+    mgr.on('session_event', (evt) => { if (evt.event === 'busy_cleared') events.push(evt) })
+
+    session.emit('busy_cleared', {})
+
+    assert.equal(events.length, 1, 'expected exactly one busy_cleared session_event')
+    assert.equal(events[0].sessionId, 's1')
+    assert.equal(mgr.getHistory('s1').some((e) => e.type === 'busy_cleared'), false)
+  })
+})
+
 // #4756 — `stopped` event proxying.
 //
 // CliSession emits `stopped` after `_handleChildClose` confirms a clean

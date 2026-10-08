@@ -495,6 +495,13 @@ export class JsonlSubprocessSession extends BaseSession {
       }
       if (!ctx.didEmitResult) {
         this._emitFallbackResult(ctx)
+      } else {
+        // #8502: this turn's `result` went out when its JSONL line was parsed,
+        // while the child was still exiting and `_isBusy` was still true, so the
+        // session_list that result triggered said busy. Nothing else announces
+        // that busy has now cleared, so a client that is not viewing the session
+        // would keep showing it working. The forwarder refreshes the list on this.
+        this.emit('busy_cleared', {})
       }
     })
 
