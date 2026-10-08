@@ -411,6 +411,27 @@ describe('ContainersStatusSection — lifecycle actions (#6134)', () => {
         expect(screen.queryByTestId('confirm-dialog')).toBeNull()
       })
 
+      it('each Dismiss names its environment for assistive tech', () => {
+        renderWith({
+          actionResults: {
+            ...goneRefusal,
+            'env-gone-2': { ...goneRefusal['env-gone'], error: 'Environment "gone2" has 1 live session(s).' },
+          },
+        })
+        expect(screen.getByTestId('container-gone-dismiss-env-gone').getAttribute('aria-label')).toBe('Dismiss notice for env-gone')
+        expect(screen.getByTestId('container-gone-dismiss-env-gone-2').getAttribute('aria-label')).toBe('Dismiss notice for env-gone-2')
+      })
+
+      it('a row whose id is an inherited member name shows no action outcome (own-key read)', () => {
+        renderWith({
+          snapshot: snapshot({ containers: [container({ id: 'constructor', name: 'ctor' })] }),
+          actionResults: {},
+        })
+        expect(screen.getByTestId('container-row-constructor')).toBeTruthy()
+        expect(screen.queryByTestId('container-action-ok-constructor')).toBeNull()
+        expect(screen.queryByTestId('container-action-error-constructor')).toBeNull()
+      })
+
       it('the Dismiss control meets the 44pt floor', () => {
         renderWith({ actionResults: goneRefusal })
         expect(screen.getByTestId('container-gone-dismiss-env-gone').className).toContain('cr-action-dismiss')

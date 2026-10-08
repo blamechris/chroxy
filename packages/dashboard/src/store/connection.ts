@@ -142,6 +142,8 @@ import {
   endTranscriptFetch,
   clearTranscriptWatchdog,
   resetTranscriptFetchTracking,
+  armEnvironmentDestroyTimer,
+  cancelAllEnvironmentDestroyTimers,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
 // #6871: the scheduled-task create/update payload shape (wire contract).
@@ -547,6 +549,9 @@ function clearConnectionScopedTrackers(): void {
   resetTranscriptFetchTracking();
   clearDeltaBuffers();
   clearTerminalWriteBatching();
+  // #8407: the destroy-in-flight markers go with the connection (the roster
+  // spread); their safety timers go with them.
+  cancelAllEnvironmentDestroyTimers();
 }
 
 export const selectShowSession = (s: ConnectionState): boolean =>
@@ -3239,6 +3244,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (Object.keys(staleMarkers).length > 0) {
         set(staleMarkers);
       }
+      // #8407: a transport drop clears the destroy-in-flight markers above, so
+      // their safety timers have nothing left to guard.
+      cancelAllEnvironmentDestroyTimers();
       // #8331: the daily-daemon update banner is per connection; a reply to a
       // Restart now / Postpone can never arrive on the dead socket either.
       clearDaemonUpdateWatchdog();
@@ -3536,6 +3544,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   forgetSession: () => {
     setLastConnectedUrl(null);
     clearPersistedState();
+    // #8407: the roster spread below clears the destroy-in-flight markers.
+    cancelAllEnvironmentDestroyTimers();
     set({
       // #7586 — every in-flight request marker, from the ONE roster
       // `socket.onclose` and `disconnect()` also take. FIRST in the payload on
@@ -5752,19 +5762,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (force) msg.force = true;
       // #7594: a fresh attempt supersedes the last refusal — the daemon's next
       // answer (a refusal again, or the destroy) is the one to act on.
+      //
+      // #8407: nothing below changes unless the frame actually went out — a
+      // failed send must not show "Destroying…" for a request the daemon never
+      // saw, nor drop the refusal that still offers the operator a retry.
+      if (!wsSend(socket, msg)) return;
       get().dismissEnvironmentDestroyRefusal(environmentId);
       // #8407: mark the attempt in flight so the card shows a pending state
       // rather than reverting to a clickable Destroy. The answer clears it
       // (message-handler); the timeout is the fallback for a reply that never
-      // names this id, so a lost frame cannot strand the card disabled.
+      // names this id, so a lost frame cannot strand the card disabled. One
+      // timer per id: a re-armed attempt cancels the previous deadline.
       set({ environmentDestroyingIds: new Set(get().environmentDestroyingIds).add(environmentId) });
-      setTimeout(() => {
+      armEnvironmentDestroyTimer(environmentId, ENVIRONMENT_DESTROY_PENDING_TIMEOUT_MS, () => {
         if (!get().environmentDestroyingIds.has(environmentId)) return;
         const next = new Set(get().environmentDestroyingIds);
         next.delete(environmentId);
         set({ environmentDestroyingIds: next });
-      }, ENVIRONMENT_DESTROY_PENDING_TIMEOUT_MS);
-      wsSend(socket, msg);
+      });
     }
   },
 

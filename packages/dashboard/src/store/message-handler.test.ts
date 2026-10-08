@@ -57,6 +57,8 @@ import {
   MCP_SERVER_OP_TIMEOUT_MESSAGE,
   MCP_SERVER_OP_EVICTED_MESSAGE,
   MCP_SERVER_OP_PENDING_CAP,
+  armEnvironmentDestroyTimer,
+  cancelAllEnvironmentDestroyTimers,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
 import {
@@ -823,6 +825,38 @@ describe('dashboard message-handler dispatch', () => {
         arm('env-1', 'env-2')
         handleMessage({ type: 'environment_error', error: 'environments are not enabled' }, ctx() as any)
         expect(pending()).toEqual([])
+      })
+
+      it('an answer also CANCELS that environment\'s safety timer, and only that one', () => {
+        vi.useFakeTimers()
+        try {
+          arm('env-1', 'env-2')
+          armEnvironmentDestroyTimer('env-1', 30_000, () => {})
+          armEnvironmentDestroyTimer('env-2', 30_000, () => {})
+          const before = vi.getTimerCount()
+          handleMessage({ type: 'environment_error', environmentId: 'env-1', error: 'docker exploded' }, ctx() as any)
+          expect(vi.getTimerCount()).toBe(before - 1)
+          handleMessage({ type: 'environment_error', error: 'environments are not enabled' }, ctx() as any)
+          expect(vi.getTimerCount()).toBe(before - 2)
+        } finally {
+          cancelAllEnvironmentDestroyTimers()
+          vi.useRealTimers()
+        }
+      })
+
+      it('environment_list cancels the timer of an environment that left the roster, keeps one still listed', () => {
+        vi.useFakeTimers()
+        try {
+          arm('env-1', 'env-2')
+          armEnvironmentDestroyTimer('env-1', 30_000, () => {})
+          armEnvironmentDestroyTimer('env-2', 30_000, () => {})
+          const before = vi.getTimerCount()
+          handleMessage({ type: 'environment_list', environments: [{ id: 'env-2', sessions: [] }] }, ctx() as any)
+          expect(vi.getTimerCount()).toBe(before - 1)
+        } finally {
+          cancelAllEnvironmentDestroyTimers()
+          vi.useRealTimers()
+        }
       })
 
       it('environment_list frees an environment that left the roster and keeps one still listed', () => {

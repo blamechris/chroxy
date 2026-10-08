@@ -745,6 +745,34 @@ let _serverWillBootstrap = false;
  * `packages/server/src/ws-client-sender.js`: catch → log → return false).
  * Most callers ignore the result (a closed socket was already a silent no-op).
  */
+// #8407: one safety timer per environment id for the Environments panel's
+// destroy-in-flight marker. Held here (next to the handler that clears the
+// marker on the daemon's answer) so that a re-armed attempt CANCELS the previous
+// attempt's timer instead of inheriting its deadline: plain Destroy at t=0,
+// refusal, Force at t=20 must stay pending until t=50, not be cleared by the
+// t=0 timer at t=30.
+const environmentDestroyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+export function cancelEnvironmentDestroyTimer(environmentId: string): void {
+  const handle = environmentDestroyTimers.get(environmentId);
+  if (handle === undefined) return;
+  clearTimeout(handle);
+  environmentDestroyTimers.delete(environmentId);
+}
+
+export function cancelAllEnvironmentDestroyTimers(): void {
+  for (const handle of environmentDestroyTimers.values()) clearTimeout(handle);
+  environmentDestroyTimers.clear();
+}
+
+export function armEnvironmentDestroyTimer(environmentId: string, ms: number, onExpire: () => void): void {
+  cancelEnvironmentDestroyTimer(environmentId);
+  environmentDestroyTimers.set(environmentId, setTimeout(() => {
+    environmentDestroyTimers.delete(environmentId);
+    onExpire();
+  }, ms));
+}
+
 export function wsSend(socket: WebSocket, payload: Record<string, unknown>): boolean {
   // Serialize/encrypt OUTSIDE the try so a JSON/crypto bug still throws loudly
   // (it's a real defect, not a transient send failure) rather than being
@@ -7003,7 +7031,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       const destroying = get().environmentDestroyingIds;
       if (destroying.size > 0) {
         const stillPending = new Set([...destroying].filter((id) => listed.has(id)));
-        if (stillPending.size !== destroying.size) set({ environmentDestroyingIds: stillPending });
+        if (stillPending.size !== destroying.size) {
+          for (const id of destroying) if (!stillPending.has(id)) cancelEnvironmentDestroyTimer(id);
+          set({ environmentDestroyingIds: stillPending });
+        }
       }
       break;
     }
@@ -7080,8 +7111,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // one disabled behind a reply that will never name it.
       if (get().environmentDestroyingIds.size > 0) {
         const next = new Set(get().environmentDestroyingIds);
-        if (environmentId) next.delete(environmentId);
-        else next.clear();
+        if (environmentId) { next.delete(environmentId); cancelEnvironmentDestroyTimer(environmentId); }
+        else { next.clear(); cancelAllEnvironmentDestroyTimers(); }
         set({ environmentDestroyingIds: next });
       }
       // #7568 review: the live-sessions destroy refusal is a WARNING — the guard

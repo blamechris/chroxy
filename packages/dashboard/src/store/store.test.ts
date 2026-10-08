@@ -897,6 +897,75 @@ describe('useConnectionStore', () => {
     }
   });
 
+  it('#8407: a re-armed destroy is not cut short by the previous attempt\'s timer (plain t=0, refusal t=1, Force t=20)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { useConnectionStore } = await import('./connection');
+      const send = vi.fn();
+      useConnectionStore.setState({ socket: { readyState: WebSocket.OPEN, send } as unknown as WebSocket, environmentDestroyingIds: new Set() });
+      const pending = () => useConnectionStore.getState().environmentDestroyingIds.has('env-1');
+
+      useConnectionStore.getState().destroyEnvironment('env-1'); // t=0
+      vi.advanceTimersByTime(1_000);
+      // t=1: the daemon's refusal answers the plain attempt (what the handler does).
+      useConnectionStore.setState({ environmentDestroyingIds: new Set() });
+      vi.advanceTimersByTime(19_000);
+      useConnectionStore.getState().destroyEnvironment('env-1', true); // t=20
+      expect(pending()).toBe(true);
+
+      // t=30.5: the t=0 attempt's deadline has passed. It must NOT clear the Force.
+      vi.advanceTimersByTime(10_500);
+      expect(pending(), 'the t=0 timer cleared the Force in flight').toBe(true);
+      // The Force's own deadline (t=50) still ends it.
+      vi.advanceTimersByTime(19_600);
+      expect(pending()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('#8407: a destroy whose frame never went out marks nothing in flight and keeps the refusal', async () => {
+    vi.useFakeTimers();
+    try {
+      const { useConnectionStore } = await import('./connection');
+      const send = vi.fn(() => { throw new Error('socket closing') });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      useConnectionStore.setState({
+        socket: { readyState: WebSocket.OPEN, send } as unknown as WebSocket,
+        environmentDestroyingIds: new Set(),
+        environmentDestroyRefusals: { 'env-1': ['sess-a'] },
+      });
+      useConnectionStore.getState().destroyEnvironment('env-1', true);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(useConnectionStore.getState().environmentDestroyingIds.size).toBe(0);
+      // The operator can still retry from the Force row.
+      expect(useConnectionStore.getState().environmentDestroyRefusals).toEqual({ 'env-1': ['sess-a'] });
+      warn.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('#8407: disconnect cancels the pending safety timers', async () => {
+    vi.useFakeTimers();
+    try {
+      const { useConnectionStore } = await import('./connection');
+      const send = vi.fn();
+      const close = vi.fn();
+      useConnectionStore.setState({ socket: { readyState: WebSocket.OPEN, send, close } as unknown as WebSocket, environmentDestroyingIds: new Set() });
+      useConnectionStore.getState().destroyEnvironment('env-1');
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      useConnectionStore.getState().disconnect();
+      expect(useConnectionStore.getState().environmentDestroyingIds.size).toBe(0);
+      // Only the destroy timer is under test: it must be gone, not left to fire.
+      useConnectionStore.setState({ environmentDestroyingIds: new Set(['env-1']) });
+      vi.advanceTimersByTime(31_000);
+      expect(useConnectionStore.getState().environmentDestroyingIds.has('env-1'), 'a cancelled timer fired').toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('#8407: an offline destroyEnvironment marks nothing in flight', async () => {
     const { useConnectionStore } = await import('./connection');
     useConnectionStore.setState({ socket: null, environmentDestroyingIds: new Set() });

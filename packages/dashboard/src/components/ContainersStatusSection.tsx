@@ -22,6 +22,7 @@
  */
 import { useMemo, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { getOwn } from '../store/utils'
 import type { ServerContainersStatusSnapshotMessage } from '@chroxy/protocol'
 import type { ContainerActionResult } from '../store/types'
 import { formatGeneratedAgo } from './ControlRoomSection'
@@ -329,7 +330,7 @@ function CwdGroupRows({
           key={c.id}
           container={c}
           pending={actioningIds.has(c.id)}
-          result={actionResults[c.id]}
+          result={getOwn(actionResults, c.id)}
           connected={connected}
           onAction={onAction}
           onForceDestroy={onForceDestroy}
@@ -600,6 +601,7 @@ export function ContainersStatusSection({
                 type="button"
                 className="cr-action cr-action-dismiss"
                 data-testid={`container-gone-dismiss-${id}`}
+                aria-label={`Dismiss notice for ${id}`}
                 onClick={() => onDismissActionResult(id)}
                 title="Dismiss this notice"
               >
