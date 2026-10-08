@@ -1959,7 +1959,18 @@ export class BaseSession extends EventEmitter {
     const sanitized = sanitizeToolInput(input)
     if (typeof toolUseId !== 'string' || toolUseId.length === 0) return sanitized
     const entry = this._inFlightToolStarts.get(toolUseId)
-    if (entry) entry.input = sanitized
+    if (entry) {
+      entry.input = sanitized
+      // #8371: tell the owner of the history ring buffer right now, not at
+      // result time. The `tool_start` entry was recorded with `input: null`
+      // and a replay (session switch, dashboard reload) during a still-running
+      // tool would otherwise show no INPUT until the result lands. Only for a
+      // TRACKED id (BYOK never tracks, so its streamed partials never reach
+      // here) and only the sanitised value -- never the raw input.
+      if (sanitized !== null && sanitized !== undefined) {
+        this.emit('tool_input_recorded', { toolUseId, input: sanitized })
+      }
+    }
     return sanitized
   }
 

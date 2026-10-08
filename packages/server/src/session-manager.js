@@ -4633,6 +4633,14 @@ export class SessionManager extends EventEmitter {
       })
     }
 
+    // #8371: a tracked tool's sanitised input is known before the tool runs.
+    // Backfill the `tool_start` history entry now so a replay during the
+    // running tool carries the INPUT. History only: nothing is sent to clients
+    // (the live view already got it as `tool_input_delta`).
+    session.on('tool_input_recorded', (data) => {
+      this._history.backfillToolInput(sessionId, data?.toolUseId, data?.input)
+    })
+
     // models_updated is global (not per-session) — forward as transient event
     session.on('models_updated', (data) => {
       this.emit('session_event', { sessionId, event: 'models_updated', data })
