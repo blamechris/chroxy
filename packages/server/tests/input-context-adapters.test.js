@@ -1,4 +1,4 @@
-import { after, describe, it } from 'node:test'
+import { after, afterEach, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -13,6 +13,7 @@ import { InputSchema } from '@chroxy/protocol/schemas'
 import { buildInputMessage } from '@chroxy/protocol'
 import { inputHandlers } from '../src/handlers/input-handlers.js'
 import { createSpy, nsCtx, waitFor } from './test-helpers.js'
+import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 
 const root = mkdtempSync(join(tmpdir(), 'chroxy-context-adapters-'))
 after(() => rmSync(root, { recursive: true, force: true }))
@@ -55,6 +56,13 @@ async function dispatchTo(session, msg, { primaryClientId = null } = {}) {
 }
 
 describe('selected context reaches concrete Claude/Codex adapters (#7822)', () => {
+  // #8352 — delivering an image to the Codex adapter materialises it under
+  // `CodexAppServerSession.ATTACH_BASE`, a tmpdir base a live daemon uses. Pin
+  // it per test; `_setup.mjs` throws CHROXY_TEST_SANDBOX on the real one.
+  let unpinAttachBase
+  beforeEach(() => { unpinAttachBase = pinTmpDaemonBase(CodexAppServerSession, 'ATTACH_BASE') })
+  afterEach(() => { if (unpinAttachBase) unpinAttachBase(); unpinAttachBase = null })
+
   it('preserves identical text, provenance, media type, and image bytes', async () => {
     const bytes = Buffer.from('context-image-bytes')
     const context = {

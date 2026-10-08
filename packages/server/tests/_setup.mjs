@@ -85,7 +85,7 @@ import { createRequire } from 'node:module'
 import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
-import { installFsWriteSandbox } from '../../../scripts/lib/test-fs-sandbox.mjs'
+import { installFsWriteSandbox, tmpDaemonBaseRoots } from '../../../scripts/lib/test-fs-sandbox.mjs'
 import { installSpawnHomeSandbox } from '../../../scripts/lib/test-spawn-home-sandbox.mjs'
 import { installRealBinaryTripwire } from '../../../scripts/lib/test-real-binary-tripwire.mjs'
 import { assertNoTestForceExit } from '../../../scripts/lib/no-test-force-exit.mjs'
@@ -181,15 +181,25 @@ export const {
   skipped: SANDBOX_SKIPPED,
   isProtected: SANDBOX_IS_PROTECTED,
 } = installFsWriteSandbox({
-  protectedRoots: [resolve(REAL_HOME, '.chroxy'), resolve(REAL_HOME, '.claude')],
+  protectedRoots: [
+    resolve(REAL_HOME, '.chroxy'),
+    resolve(REAL_HOME, '.claude'),
+    // #8352: the live daemon's own tmpdir bases (hook sink, sidecar, attach,
+    // env-file). A test that mutates one of these deletes state a RUNNING
+    // daemon validates by dev/ino. Pin a per-test base instead — see
+    // `scripts/lib/test-fs-sandbox.mjs` for the list and why.
+    ...tmpDaemonBaseRoots(tmpdir()),
+  ],
   // Bare files that live NEXT TO the protected dirs (`~/.claude.json` from
   // byok-mcp-config) rather than inside them.
   protectedFiles: [resolve(REAL_HOME, '.claude.json')],
   allowEnv: 'CHROXY_TEST_ALLOW_REAL_HOME_WRITES',
   message: (method, target) =>
     `[chroxy-test-sandbox] BLOCKED ${method} to real user-state path: ${target}\n` +
-    `  This test attempted to write to (or move from/to) the developer's actual ~/.chroxy or ~/.claude tree.\n` +
-    `  Pass a temp path explicitly (e.g. stateFilePath: tmpStateFile()) or set\n` +
+    `  This test attempted to write to (or move from/to) the developer's actual ~/.chroxy or ~/.claude tree,\n` +
+    `  or a live daemon's tmpdir base (chroxy-claude-tui, chroxy-claude-cli, chroxy-codex-attach, chroxy-byok — #8352).\n` +
+    `  Pass a temp path explicitly (e.g. stateFilePath: tmpStateFile(), or pin the class's *_BASE getter\n` +
+    `  to a mkdtemp dir with Object.defineProperty) or set\n` +
     `  process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1' if the write is intentional.\n` +
     `  See packages/server/tests/_setup.mjs and issue #4633.`,
 })
@@ -344,5 +354,5 @@ process.env.CHROXY_DISCORD_WEBHOOK_URL = 'invalid://chroxy-test-scrub-not-a-webh
 // Quiet by default; set CHROXY_TEST_SANDBOX_DEBUG=1 to see the protected
 // paths once per process.
 if (process.env.CHROXY_TEST_SANDBOX_DEBUG === '1') {
-  console.error(`[chroxy-test-sandbox] guarded write paths under: ${REAL_HOME}/.chroxy, ${REAL_HOME}/.claude`)
+  console.error(`[chroxy-test-sandbox] guarded write paths under: ${REAL_HOME}/.chroxy, ${REAL_HOME}/.claude, ${tmpDaemonBaseRoots(tmpdir()).join(', ')}`)
 }
