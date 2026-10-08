@@ -376,4 +376,31 @@ export function describeComposedText(text) {
   return redactBounded(text).slice(0, SERIALIZED_DESCRIPTION_MAX)
 }
 
+/**
+ * Every placeholder the redaction passes in this file put INTO a string in place of
+ * what was there: `[REDACTED]` (a matched secret, or a value under a sensitive key),
+ * `[REDACTED:depth]` / `[REDACTED:cycle]` (a subtree that was not walked) and the
+ * `... [truncated]` tail of a clipped value. A string that carries one is a copy a
+ * client was shown, not the content the agent proposed; writing it to disk replaces
+ * the original characters with the placeholder.
+ *
+ * Kept next to the producers above on purpose: a placeholder added to one of them has
+ * to be added here, and the test that feeds each producer's output through
+ * {@link countRedactionMarkers} fails when one is missed.
+ */
+const REDACTION_MARKER_PATTERN = /\[REDACTED(?::[a-z]+)?\]|\.\.\. \[truncated\]/g
+
+/**
+ * How many redaction placeholders `text` carries (see REDACTION_MARKER_PATTERN).
+ * Not a boolean: a file that legitimately contains the text `[REDACTED]` is allowed
+ * to keep exactly the occurrences it started with, and no more.
+ *
+ * @param {unknown} text
+ * @returns {number}
+ */
+export function countRedactionMarkers(text) {
+  if (typeof text !== 'string') return 0
+  return (text.match(REDACTION_MARKER_PATTERN) || []).length
+}
+
 export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }

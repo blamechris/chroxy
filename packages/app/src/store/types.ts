@@ -57,6 +57,7 @@ export type {
   DiffHunkLine,
 } from '@chroxy/store-core';
 
+import type { PermissionEditedInput } from '@chroxy/store-core';
 // Import for local use in SessionState/ConnectionState definitions below
 import type {
   AgentInfo,
@@ -592,7 +593,7 @@ export interface MessageInputActions {
   // #6451 — locally drop an optimistic 'Queued' badge whose send failed outright
   // (no server confirm/dequeue will arrive), so it can't linger forever.
   clearOptimisticQueuedMessage: (clientMessageId: string, sessionId?: string) => void;
-  sendPermissionResponse: (requestId: string, decision: string, editedInput?: Record<string, string> | null) => 'sent' | 'queued' | false;
+  sendPermissionResponse: (requestId: string, decision: string, editedInput?: PermissionEditedInput | null) => 'sent' | 'queued' | false;
   /** #6543: pull the full redacted tool input for a pending permission (a `permission_input` reply lands in `permissionInputs`). */
   requestPermissionInput: (requestId: string) => boolean;
   /**

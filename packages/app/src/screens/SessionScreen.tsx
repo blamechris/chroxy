@@ -71,6 +71,7 @@ import { formatPasteMarker, expandPasteMarkers, parseMemoryAppend } from '@chrox
 import { PastedTextModal } from '../components/PastedTextModal';
 import { disconnectWithQueueGuard } from '../store/disconnectWithQueueGuard';
 import { selectChatMessages } from './selectChatMessages';
+import type { PermissionEditedInput } from '@chroxy/store-core';
 
 
 // Stable empty arrays to avoid new-reference-per-render in Zustand selectors
@@ -1020,7 +1021,7 @@ export function SessionScreen() {
     // #6543 (feature B): the operator's per-hunk narrowing from a Write/Edit
     // pre-write-diff review, forwarded to sendPermissionResponse (which drops it
     // for a deny). Null/omitted for every non-reviewable prompt.
-    editedInput?: Record<string, string> | null,
+    editedInput?: PermissionEditedInput | null,
   ) => {
     // #4875: shared `isFreeformAnswer` guard from @chroxy/store-core
     // narrows `value` to `OtherFreeformAnswer` in the true branch, so the

@@ -20,6 +20,7 @@ import {
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
 import { sanitizeToolInput, redactValue, describeByNamedField, describeToolInput, describeComposedText } from './redaction.js'
 import { redactMcpUrl, resolveTrustAddress, MCP_SERVER_SOURCE_VALUES } from './byok-mcp-config.js'
+import { DROPPED_HUNKS_KEY, isHunkReviewedTool, narrowByDroppedHunks, assertNoNewRedactionMarkers } from './edited-input.js'
 // #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
 // project key, not the raw session cwd, or a relative / `..`-laden cwd
 // produces entries that never correlate with the persisted rule they audit.
@@ -244,18 +245,39 @@ const MAX_DENY_REASON_LEN = 2000
  * the original by value). Never mutates the inputs. This is the load-bearing
  * "narrow-only, no path redirect" control for feature B — keep it dumb + auditable.
  *
+ * #8446 — what reaches the tool executor is built from `originalInput`, the RAW
+ * input held here, never from content the client saw. The client reviewed a
+ * REDACTED copy, so text it builds carries `[REDACTED]` where a secret was:
+ *  - a Write/Edit narrowed by dropped hunks is rebuilt here from the raw input and
+ *    the client's `droppedHunks` (see edited-input.js); any content the client also
+ *    sent for that field is ignored;
+ *  - any other whitelisted text (an older client's content, a Bash command) is
+ *    refused when it carries a redaction placeholder the raw input did not.
+ *
  * @param {object} originalInput  the agent's proposed tool input
  * @param {*} editedInput         the client-supplied override (untrusted)
  * @param {string} toolName       the tool the permission is for
  * @returns {object}
+ * @throws {EditedInputRefusedError} the edit cannot be applied without writing a
+ *   placeholder (or without guessing); nothing has been changed
  */
 export function mergeEditedInput(originalInput, editedInput, toolName) {
   if (!editedInput || typeof editedInput !== 'object' || Array.isArray(editedInput)) return originalInput
   const allowed = EDITABLE_INPUT_FIELDS[toolName]
   if (!allowed) return originalInput
   const merged = { ...originalInput }
+  let narrowedField = null
+  if (isHunkReviewedTool(toolName)
+    && Object.prototype.hasOwnProperty.call(editedInput, DROPPED_HUNKS_KEY)
+    && !(Array.isArray(editedInput[DROPPED_HUNKS_KEY]) && editedInput[DROPPED_HUNKS_KEY].length === 0)) {
+    narrowedField = allowed[0]
+    merged[narrowedField] = narrowByDroppedHunks(originalInput, toolName, editedInput[DROPPED_HUNKS_KEY])
+  }
   for (const field of allowed) {
+    if (field === narrowedField) continue
     if (Object.prototype.hasOwnProperty.call(editedInput, field) && typeof editedInput[field] === 'string') {
+      // Text may be made of the raw field, and for an Edit of the text it replaces.
+      assertNoNewRedactionMarkers(editedInput[field], [originalInput?.[field], isHunkReviewedTool(toolName) ? originalInput?.old_string : undefined])
       merged[field] = editedInput[field]
     }
   }
@@ -984,6 +1006,12 @@ export class PermissionManager extends EventEmitter {
     // #6543: capture the tool name BEFORE deleting the last-permission data, so
     // the editedInput whitelist knows which content field(s) are substitutable.
     const toolName = this._lastPermissionData.get(requestId)?.tool
+    // #8446: build the approved input BEFORE touching any state. A refused edit
+    // throws EditedInputRefusedError with the request still pending, so the caller
+    // (permission-resolver.js) can answer it; ignored on a deny.
+    const approvedInput = (decision === 'allow' || decision === 'allowAlways')
+      ? mergeEditedInput(pending.input, editedInput, toolName)
+      : pending.input
     this._pendingPermissions.delete(requestId)
     this._lastPermissionData.delete(requestId)
     this._clearPermissionTimer(requestId)
@@ -995,10 +1023,10 @@ export class PermissionManager extends EventEmitter {
     this.emit('permission_resolved', { requestId, decision, reason: 'user' })
 
     // #6543 (feature B): on an approve, an operator who reviewed the proposed
-    // Write/Edit per-hunk may substitute the CONTENT (never the path — see
-    // mergeEditedInput). Ignored on deny. The merged input flows to the agent's
-    // tool executor as `updatedInput`, which still path-confines the write.
-    const approvedInput = mergeEditedInput(pending.input, editedInput, toolName)
+    // Write/Edit per-hunk may narrow the CONTENT (never the path — see
+    // mergeEditedInput, built above from the RAW input, #8446). The merged input
+    // flows to the agent's tool executor as `updatedInput`, which still
+    // path-confines the write.
 
     if (decision === 'allow') {
       pending.resolve({ behavior: 'allow', updatedInput: approvedInput })

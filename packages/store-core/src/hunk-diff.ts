@@ -214,3 +214,41 @@ export function applyHunks(
   if (cursor < orig.length) out.push(...orig.slice(cursor))
   return out.join('\n')
 }
+
+/**
+ * A hunk the operator dropped, as the server needs to find it again: the numbers of
+ * its `@@ -oldStart,oldCount +newStart,newCount @@` header. The server rebuilds the
+ * approved Write/Edit from the RAW tool input and these ranges (#8446), because the
+ * client only ever sees the redacted copy and must not send content the server
+ * writes. Git's convention, as `computeHunks` emits it.
+ */
+export interface DroppedHunkRange {
+  oldStart: number
+  oldCount: number
+  newStart: number
+  newCount: number
+}
+
+/**
+ * The `editedInput` a permission response carries: text fields the server's content
+ * whitelist reads (a Bash `command`), and for a hunk-reviewed Write/Edit the
+ * `droppedHunks` decisions.
+ */
+export type PermissionEditedInput = { [field: string]: string | DroppedHunkRange[] }
+
+/**
+ * The header ranges of every hunk NOT in `selected` — the operator's drop decisions.
+ * `selected` is the set of KEPT hunk indices, as `applyHunks` takes it. A hunk whose
+ * header cannot be parsed is not reported; `computeHunks` never produces one.
+ */
+export function droppedHunkRanges(hunks: DiffHunk[], selected: Set<number> | number[]): DroppedHunkRange[] {
+  const kept = selected instanceof Set ? selected : new Set(selected)
+  const ranges: DroppedHunkRange[] = []
+  hunks.forEach((hunk, index) => {
+    if (kept.has(index)) return
+    const m = /^@@ -(\d+),(\d+) \+(\d+),(\d+) @@/.exec(hunk.header)
+    if (!m) return
+    ranges.push({ oldStart: Number(m[1]), oldCount: Number(m[2]), newStart: Number(m[3]), newCount: Number(m[4]) })
+  })
+  return ranges
+}

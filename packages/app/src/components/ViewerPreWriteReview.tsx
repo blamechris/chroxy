@@ -29,6 +29,7 @@ import type { ChatMessage } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview';
 import { COLORS } from '../constants/colors';
+import type { PermissionEditedInput } from '@chroxy/store-core';
 
 // Stable empty array so the messages selector never returns a fresh reference.
 const EMPTY_MESSAGES: ChatMessage[] = [];
@@ -59,7 +60,7 @@ export function ViewerPreWriteReview({ filePath }: ViewerPreWriteReviewProps) {
   const requestPermissionInput = useConnectionStore((s) => s.requestPermissionInput);
   const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
 
-  const [editedInput, setEditedInput] = useState<Record<string, string> | null>(null);
+  const [editedInput, setEditedInput] = useState<PermissionEditedInput | null>(null);
   // Double-submit guard: flips synchronously on the first press, before the
   // store's answered state catches up a render later.
   const submittingRef = useRef(false);

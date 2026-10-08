@@ -22,6 +22,7 @@
 //     `mapped` (#8359): true when `sessionId` came from the request's own mapping, false when it is
 //     only the WS dispatch fallback (or null). A caller deciding whether a frame may NAME the session
 //     reads this, never `sessionId`: the fallback fills `sessionId` for an unmapped prompt too.
+//   { kind: 'edit_refused', sessionId, message }            -> WS error (#8446); the request was DENIED, nothing ran
 //   { kind: 'expired', sessionId }                          -> HTTP 410 / WS permission_expired
 //   { kind: 'not_found' }                                   -> HTTP 404 / WS permission_expired
 
@@ -31,6 +32,7 @@
 // permission-rules.json even when the session was started with a relative or
 // `..`-laden cwd. Reused, not duplicated.
 import { normalizeProjectKey } from './permission-rule-store.js'
+import { EditedInputRefusedError } from './edited-input.js'
 
 /**
  * #6030: the single source of truth for the permission "dispatch origin"
@@ -159,7 +161,22 @@ export function createPermissionResolver({
         // path — the legacy HTTP path below ignores it (CLI tool executes as-is).
         // #6773: a deny `reason` rides the same in-process path and becomes the
         // agent-facing denial message (permission-manager.js buildDenyMessage).
-        const resolved = entry.session.respondToPermission(requestId, decision, editedInput, reason)
+        let resolved
+        try {
+          resolved = entry.session.respondToPermission(requestId, decision, editedInput, reason)
+        } catch (err) {
+          if (!(err instanceof EditedInputRefusedError)) throw err
+          // #8446 — the operator's edit cannot be applied without writing a
+          // redaction placeholder (or guessing), and the manager refused it with the
+          // request still pending. FAIL CLOSED: deny it, with the reason as the
+          // agent's tool result, so nothing is written and the prompt does not
+          // outlive an answer the client already shows as given (a client marks it
+          // answered when it sends). The caller tells the operator why.
+          entry.session.respondToPermission(requestId, 'deny', undefined, err.message)
+          consumeRoute(requestId)
+          audit(clientId, originSessionId, requestId, 'deny', { ...(toolName ? { tool: toolName } : {}), reason: 'edit_refused' })
+          return { kind: 'edit_refused', sessionId: originSessionId, message: err.message }
+        }
         consumeRoute(requestId)
         if (resolved) {
           const extra = {}

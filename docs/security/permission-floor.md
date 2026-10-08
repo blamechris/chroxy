@@ -361,6 +361,34 @@ those; `floored` only guarantees it never approves one the floor reserved for a 
 3. **Keep the parity matrix honest.** `tests/permission-hook-floor.test.js` runs a
    `(tool, target)` matrix through both pipelines and asserts they agree.
 
+## 4a. An approved edit never changes where a write lands, or what it is made of (#8446)
+
+The pre-write review (`features.ide`) lets the operator drop hunks of a `Write`/`Edit`
+before approving it. The floor decides *whether* the prompt appears; this decides what
+an approve with edits can do, and it lives in `edited-input.js` and
+`mergeEditedInput` (`permission-manager.js`).
+
+- **Only the content field changes.** `EDITABLE_INPUT_FIELDS` (`Write` content, `Edit`
+  `new_string`, `Bash` command) is the whole whitelist; `file_path` and `old_string`
+  always come from the original input, so an edit cannot move a write off a floored
+  path. A guard test fails if a path field is ever added.
+- **The client sends decisions, never content.** The review is drawn over the REDACTED
+  tool input (`get_permission_input`), so text built from it carries `[REDACTED]` where
+  a secret was. The client sends `editedInput.droppedHunks`, the `@@` ranges of the
+  hunks it dropped, and the server rebuilds the written text from the RAW input it
+  holds: the proposed text with each dropped hunk's lines replaced by the original's.
+  Content a client also sends for that field is ignored.
+- **Refusal is a deny.** Text a client sends (an older client, or an edited Bash
+  command) that carries a redaction placeholder the raw input did not is refused, as
+  are ranges that are malformed, out of range, overlapping, or that cannot be mapped
+  back because redaction changed the line count. The request is DENIED (nothing runs,
+  the agent's tool result says why) and the answering client gets a
+  `PERMISSION_EDIT_REFUSED` error. It is not left pending: a client marks a prompt
+  answered the moment it sends.
+- **Only the in-process pipeline applies edits.** Hook-routed prompts (claude-tui,
+  claude-cli) have no `PermissionManager`; their resolver path passes only the
+  decision, and they have no pending input to pull, so no review is offered.
+
 ## 5. Known limits
 
 - **TOCTOU (#6922).** Resolution happens at permission-check time and is not atomic

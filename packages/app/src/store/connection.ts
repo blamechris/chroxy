@@ -77,6 +77,7 @@ export { stripAnsi, filterThinking, nextMessageId, createEmptySessionState } fro
 // Re-export loadConnection for backward compatibility (used by notifications.ts)
 export { loadConnection, _testQueueInternals, _testMessageHandler } from './message-handler';
 
+import type { PermissionEditedInput } from '@chroxy/store-core';
 // Import what we need internally
 import type {
   ChatMessage,
@@ -2030,7 +2031,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  sendPermissionResponse: (requestId: string, decision: string, editedInput?: Record<string, string> | null) => {
+  sendPermissionResponse: (requestId: string, decision: string, editedInput?: PermissionEditedInput | null) => {
     const { socket } = get();
     // #5699 — refuse to answer a permission prompt while disconnected, rather
     // than queuing it. The server EXPIRES the pending request the moment the

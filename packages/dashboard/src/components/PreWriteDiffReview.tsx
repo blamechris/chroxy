@@ -2,30 +2,32 @@
  * PreWriteDiffReview (#6543 PR-3, IDE P3 feature B) — the per-hunk pre-write
  * review rendered inside a Write/Edit permission prompt. It turns the agent's
  * proposed edit into a diff, lets the operator drop individual hunks, and hands
- * the narrowed content back as an `editedInput` the prompt sends on Approve.
+ * the operator's drop decisions back as an `editedInput` the prompt sends on Approve.
  *
  * Wires the whole feature-B stack together:
  *   - the pulled tool input (#6550 `get_permission_input`),
- *   - the client differ (#6546 `computeHunks`/`applyHunks`),
+ *   - the client differ (#6546 `computeHunks`/`droppedHunkRanges`),
  *   - the selectable hunk component (#6548 `HunkView`),
- *   - the server merge whitelist (#6552) — which is why we only ever emit the
- *     ONE content field per tool (Write→`content`, Edit→`new_string`); the
- *     server ignores anything else, so the path can't be redirected here either.
+ *   - the server merge (#6552, #8446) — we send only WHICH hunks were dropped
+ *     (`droppedHunks`, their `@@` ranges), never content: the diff drawn here is
+ *     over the REDACTED tool input, so the server rebuilds the narrowed content
+ *     from the raw input it holds. The path can't be redirected from here either.
  *
  * The diff base: Edit is self-contained (`old_string → new_string`); Write is
  * `'' → content` (review the whole proposed body; a disk-diff base is a
  * follow-up). Emits `null` when every hunk is kept (no edit → a plain Allow).
  */
 import { useEffect, useMemo, useState } from 'react'
-import { computeHunks, applyHunks } from '@chroxy/store-core'
+import { computeHunks, droppedHunkRanges } from '@chroxy/store-core'
 import { HunkView } from './DiffViewerPanel'
+import type { PermissionEditedInput } from '@chroxy/store-core'
 
 type ToolInput = Record<string, unknown>
 
-/** Per-tool: the substitutable content field + how to derive the diff sides. */
-const TOOL_DIFF: Record<string, { field: string; base: (i: ToolInput) => string; proposed: (i: ToolInput) => string }> = {
-  Write: { field: 'content', base: () => '', proposed: (i) => String(i.content ?? '') },
-  Edit: { field: 'new_string', base: (i) => String(i.old_string ?? ''), proposed: (i) => String(i.new_string ?? '') },
+/** Per-tool: how to derive the two diff sides (must match the server's HUNK_REVIEW, edited-input.js). */
+const TOOL_DIFF: Record<string, { base: (i: ToolInput) => string; proposed: (i: ToolInput) => string }> = {
+  Write: { base: () => '', proposed: (i) => String(i.content ?? '') },
+  Edit: { base: (i) => String(i.old_string ?? ''), proposed: (i) => String(i.new_string ?? '') },
 }
 
 /** Whether a tool has a per-hunk pre-write review (drives the prompt's gate). */
@@ -37,15 +39,15 @@ export interface PreWriteDiffReviewProps {
   tool: string
   input: ToolInput
   /** Called with the narrowed `editedInput` (or `null` when all hunks are kept). */
-  onEditedInputChange: (editedInput: Record<string, string> | null) => void
+  onEditedInputChange: (editedInput: PermissionEditedInput | null) => void
 }
 
 export function PreWriteDiffReview({ tool, input, onEditedInputChange }: PreWriteDiffReviewProps) {
   const spec = TOOL_DIFF[tool]
-  const { base, hunks } = useMemo(() => {
-    if (!spec) return { base: '', hunks: [] }
+  const { hunks } = useMemo(() => {
+    if (!spec) return { hunks: [] }
     const b = spec.base(input)
-    return { base: b, hunks: computeHunks(b, spec.proposed(input)) }
+    return { hunks: computeHunks(b, spec.proposed(input)) }
   }, [spec, input])
 
   // All hunks kept by default. Reset when the diff changes (new prompt/input).
@@ -67,7 +69,7 @@ export function PreWriteDiffReview({ tool, input, onEditedInputChange }: PreWrit
       else next.add(i)
       const allKept = next.size === hunks.length
       // Idempotent (parent setState); StrictMode's dev double-invoke is harmless.
-      onEditedInputChange(allKept ? null : { [spec!.field]: applyHunks(base, hunks, next) })
+      onEditedInputChange(allKept ? null : { droppedHunks: droppedHunkRanges(hunks, next) })
       return next
     })
   }

@@ -27,6 +27,7 @@ import { useConnectionStore } from '../store/connection'
 import type { ChatMessage, PermissionDecision } from '../store/types'
 import { findPendingWriteForFile } from '@chroxy/store-core'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
+import type { PermissionEditedInput } from '@chroxy/store-core'
 
 // Stable empty array so the messages selector never returns a fresh reference
 // (a new `[]` each render would re-run the memo + churn the subscription).
@@ -66,7 +67,7 @@ export function ViewerPreWriteReview({ filePath }: ViewerPreWriteReviewProps) {
   // request on drop); disable the buttons so a tap isn't a silent no-op.
   const connected = useConnectionStore((s) => s.connectionPhase === 'connected')
 
-  const [editedInput, setEditedInput] = useState<Record<string, string> | null>(null)
+  const [editedInput, setEditedInput] = useState<PermissionEditedInput | null>(null)
   // #2852-style double-submit guard: the ref flips synchronously on the first
   // click, before the store's `answered` state catches up a render later.
   const submittingRef = useRef(false)

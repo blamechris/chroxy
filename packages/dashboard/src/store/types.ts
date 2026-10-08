@@ -24,6 +24,7 @@ import type { HeldRunDetail } from '@chroxy/store-core'
 // for its state slot, and avoids importing a `.tsx` component here.
 import type { CostBadgeMode } from '../lib/cost-badge-mode'
 import type { SessionDefaultSource, SessionDefaultsNotice } from './session-defaults'
+import type { PermissionEditedInput } from '@chroxy/store-core'
 
 // Re-export shared protocol types from store-core
 export type {
@@ -1918,7 +1919,7 @@ export interface ConnectionState {
    * payload, or rejects on disconnect / 60s timeout. Errors from the server
    * arrive as the `error` field on the resolved value, not as a Promise reject. */
   evaluateDraft: (draft: string) => Promise<EvaluatorResultPayload>;
-  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null, reason?: string) => 'sent' | 'queued' | false;
+  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: PermissionEditedInput | null, reason?: string) => 'sent' | 'queued' | false;
   /** Mark a permission request as resolved in the store (separate from the
    * wire-level response). Used by PermissionPrompt to render its answered
    * state across remounts (#2833). Safe to call for an already-resolved
