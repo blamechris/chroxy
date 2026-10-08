@@ -144,6 +144,14 @@ BYOK have always fed. The text is only as good as what claude is asked for:
   it leaves the daemon, and a block is shown whole rather than token by token so a
   secret that straddles two chunks is still caught.
 - Subagent (sidechain) reasoning is not shown; only the main conversation's.
+- **Known limit, `claude-tui`:** on a turn that thinks and then calls a tool, the
+  thinking bubble can appear below that tool's row. Claude Code writes a turn's
+  assistant lines to the transcript after it has run the PreToolUse hook, so the
+  reasoning is not on disk yet when the tool starts. Holding the tool back to wait
+  for it was tried and rejected (it cost up to 500 ms on every tool turn and still
+  timed out). A turn that only thinks and answers is unaffected, and so is a
+  thinking block that is already in the transcript when the tool starts. The
+  proper fix is a client-side hint, not a server wait.
 
 ### `CHROXY_TUI_MULTISELECT_REINJECT` env override (experimental, #5797)
 

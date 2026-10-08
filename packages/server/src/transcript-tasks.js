@@ -143,8 +143,6 @@ const PROMPT_DESCRIPTION_MAX = 80
 // MAX_THINKING_CONTENT_LEN), past which it drops text on arrival anyway.
 export const MAX_PENDING_THINKING_BLOCKS = 256
 export const MAX_THINKING_BLOCK_CHARS = 1024 * 1024
-// #7393: how many tool_use ids are remembered while capturing (see hasToolUse).
-export const MAX_TRACKED_TOOL_USE_IDS = 4096
 
 /**
  * Derive the transcript path for a per-PID session file
@@ -248,7 +246,6 @@ export class TranscriptTaskScanner {
     // consumer's uuid de-duplication keep the re-read from replaying old blocks).
     this._thinking ??= []
     this._thinkingSinceMs ??= null
-    this._toolUseIds ??= new Set()
   }
 
   /**
@@ -268,22 +265,6 @@ export class TranscriptTaskScanner {
   stopThinkingCapture() {
     this._thinkingSinceMs = null
     this._thinking = []
-    this._toolUseIds = new Set()
-  }
-
-  /**
-   * #7393 — has the scanner read the transcript entry carrying this tool_use id
-   * (while capturing)? claude writes a tool_use block, and the thinking block
-   * before it, to the transcript BEFORE the tool runs, but the PreToolUse hook
-   * file can be read a few ms before those lines reach the disk. A consumer that
-   * must show a thinking block ahead of the tool's own events therefore waits
-   * until this is true: the transcript is ordered, so once the tool_use has been
-   * read, every thinking block that precedes it has been read too. Sidechain
-   * (subagent) tool_uses are recorded as well, so their hooks find theirs.
-   * @param {string} id
-   */
-  hasToolUse(id) {
-    return typeof id === 'string' && id !== '' && this._toolUseIds.has(id)
   }
 
   /**
@@ -449,7 +430,6 @@ export class TranscriptTaskScanner {
           if (!block || block.type !== 'tool_use' || typeof block.id !== 'string') continue
           this._ingestToolUse(block, entryTs ?? Date.now())
         }
-        this._noteToolUses(blocks)
         this._ingestThinking(entry, blocks, entryTs)
       }
       return
@@ -468,18 +448,6 @@ export class TranscriptTaskScanner {
       // match is brittle against harness-side trimming/wrapping.
       const probe = this._wakeup.prompt.slice(0, 200)
       if (probe && text.includes(probe)) this._wakeup = null
-    }
-  }
-
-  /** #7393 — remember the tool_use ids on one assistant entry while capture is on (bounded, oldest out first). */
-  _noteToolUses(blocks) {
-    if (this._thinkingSinceMs === null) return
-    for (const block of blocks) {
-      if (!block || block.type !== 'tool_use' || typeof block.id !== 'string' || !block.id) continue
-      this._toolUseIds.add(block.id)
-      if (this._toolUseIds.size > MAX_TRACKED_TOOL_USE_IDS) {
-        this._toolUseIds.delete(this._toolUseIds.values().next().value)
-      }
     }
   }
 
