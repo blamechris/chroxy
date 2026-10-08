@@ -269,6 +269,91 @@ export function createEmptyConnectionScope() {
  */
 
 /**
+ * #7579 — the DAEMON-SNAPSHOT roster: object-shaped state that is a reading of
+ * ONE daemon, kept across a same-server Disconnect → Connect, and dropped the
+ * moment the tab points at a different daemon.
+ *
+ * ## Why it is its own roster
+ *
+ * `createEmptyConnectionScope()` is "this connection to this daemon": cleared by
+ * `disconnect()` AND by both full-reset sites. These fields are a different
+ * answer to the same question. They are still TRUE of the same daemon across a
+ * socket drop or a user Disconnect → Connect — the Control Room's "generated Nm
+ * ago" line is the staleness cue, and `socket.onclose` deliberately keeps them
+ * (#6153) — but they are NOT true of a different daemon, and #7557 / #7573 gave
+ * their SATELLITES (`orchestrationRunDetails`, `credentialTestResults`,
+ * `scheduledTaskActionResults`, …) that same lifetime while leaving the
+ * PRIMARIES they attach to with none. After a switch the Runs panel rendered
+ * server A's run list beside B's empty detail maps, and the credentials pane
+ * rendered A's `masked` key previews and A's `fileError` beside B's empty test
+ * verdicts, with action buttons that fire at B.
+ *
+ * So the consumers are the two sites that mean "a different daemon":
+ * `forgetSession` (which a direct `connect()` to another URL reaches, #8207) and
+ * `_resetSessionMemory` (every `retargetToServer` switch path). NOT `disconnect()`
+ * and NOT `auth_ok`'s non-reconnect branch — that branch is also the ordinary
+ * Disconnect → Connect to the SAME server, where every field here is still true.
+ * `session-destroy-prunes-pr-maps.test.ts` resolves this roster when it checks
+ * where a snapshot dies and asserts `disconnect()` does NOT clear a member (the
+ * decision is per field, written down there next to a reason, and enforced).
+ *
+ * ## Per-field decisions, in one place
+ *
+ * Every member below is preserved across a same-server reconnect, for one of
+ * three reasons:
+ *   - a SURVEY reading (`hostStatus` … `wslStatus`, `externalSessionsSnapshot`,
+ *     `repoEventsSnapshot`, `githubWebhookConfig`, `skillsInventory`,
+ *     `integrationStatus`): kept so "generated Nm ago" can signal staleness; a
+ *     reconnect re-fetches on tab activation.
+ *   - a PRIMARY whose satellites #7557 already keeps across a reconnect
+ *     (`orchestrationRuns` / `selectedRunId`, `scheduledTasks` /
+ *     `selectedScheduledTaskId` / `scheduledTasksError`,
+ *     `credentialsStatus` / `byokCredentialsStatus`): clearing the primary on
+ *     disconnect while the run-detail map beside it survives would invert the
+ *     defect this roster fixes.
+ *   - a server-side PREFERENCE or tally (`monthlyBudget`, `notificationPrefs`)
+ *     and the last IDE symbol table (`symbols`) / dead-session chip
+ *     (`sessionNotFoundError`): still true of the same daemon, re-pushed or
+ *     re-requested on connect.
+ *
+ * `pendingApprovalPairHost` is deliberately NOT here: it names a saved SERVER
+ * REGISTRY entry (the picker's own list), not a reading of the connected daemon.
+ *
+ * Initial values are asserted equal to the store's initial literal by a test,
+ * not by a second hand-kept list. A fresh object per call.
+ */
+export function createEmptyDaemonSnapshots() {
+  return {
+    credentialsStatus: null,
+    byokCredentialsStatus: null,
+    orchestrationRuns: null,
+    selectedRunId: null,
+    scheduledTasks: null,
+    scheduledTasksError: null,
+    selectedScheduledTaskId: null,
+    hostStatus: null,
+    mailboxStatus: null,
+    runnerStatus: null,
+    containersStatus: null,
+    repoRuntimeConfig: null,
+    byokPoolStatus: null,
+    hostPruneStatus: null,
+    integrationStatus: null,
+    skillsInventory: null,
+    simulatorStatus: null,
+    emulatorStatus: null,
+    wslStatus: null,
+    externalSessionsSnapshot: null,
+    repoEventsSnapshot: null,
+    githubWebhookConfig: null,
+    monthlyBudget: null,
+    notificationPrefs: null,
+    sessionNotFoundError: null,
+    symbols: null,
+  } satisfies Partial<ConnectionState>;
+}
+
+/**
  * #7586 — the IN-FLIGHT marker roster: every store field that records "a
  * request is outstanding on this socket" (a spinner, a disabled control, a
  * throttle stamp), so that the reply which would clear it can never arrive once
