@@ -7,9 +7,11 @@
  * thinking-message presentation.
  */
 import { describe, it, expect, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import type { ChatMessage, ToolResultImage } from '@chroxy/store-core'
 import { ToolGroup } from './ToolGroup'
+import { INITIAL_THUMBNAIL_LIMIT } from './ToolResultImageGrid'
+import { installThumbnailStubs, type ThumbnailStubs } from '../utils/tool-image-thumbnail-stubs'
 
 afterEach(cleanup)
 
@@ -862,4 +864,53 @@ describe('ToolGroup', () => {
       }
     })
   })
+
+  // #6810 -- same contract as ToolBubble: downscaled thumbnails, full-res
+  // lightbox, capped eager render.
+  describe('downscaled tool-result thumbnails in the grouped entry (#6810)', () => {
+    let stubs: ThumbnailStubs
+    afterEach(() => { stubs?.restore() })
+    const mk = (n: number): ToolResultImage[] =>
+      Array.from({ length: n }, (_, i) => ({ mediaType: 'image/png', data: btoa(`shot-${i}`) }))
+
+    it('thumbnail src is the downscaled URL once available; the lightbox gets the full data URI', async () => {
+      stubs = installThumbnailStubs()
+      const images = mk(2)
+      render(<ToolGroup messages={[tool('1', 'screenshot', { toolResultImages: images })]} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      const thumb = screen.getByTestId('tool-group-entry-image-1-1').querySelector('img')!
+      await waitFor(() => expect(thumb).toHaveAttribute('src', 'blob:thumb-2'))
+      fireEvent.click(screen.getByTestId('tool-group-entry-image-1-1'))
+      expect(screen.getByTestId('image-lightbox-img')).toHaveAttribute(
+        'src',
+        `data:${images[1]!.mediaType};base64,${images[1]!.data}`,
+      )
+    })
+
+    it('caps eagerly decoded thumbnails and reveals the rest on request', async () => {
+      stubs = installThumbnailStubs()
+      const total = INITIAL_THUMBNAIL_LIMIT + 3
+      render(<ToolGroup messages={[tool('1', 'screenshot', { toolResultImages: mk(total) })]} isActive={true} />)
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      await waitFor(() => expect(stubs.created).toHaveLength(INITIAL_THUMBNAIL_LIMIT))
+      expect(stubs.createImageBitmap).toHaveBeenCalledTimes(INITIAL_THUMBNAIL_LIMIT)
+      // The section label still counts every image, not just the visible ones.
+      expect(screen.getByText(`Images (${total})`)).toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('tool-group-entry-images-1-more'))
+      expect(screen.getByTestId(`tool-group-entry-image-1-${total - 1}`)).toBeInTheDocument()
+      await waitFor(() => expect(stubs.created).toHaveLength(total))
+    })
+
+    it('revokes every object URL when the group unmounts', async () => {
+      stubs = installThumbnailStubs()
+      const { unmount } = render(
+        <ToolGroup messages={[tool('1', 'screenshot', { toolResultImages: mk(3) })]} isActive={true} />,
+      )
+      fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
+      await waitFor(() => expect(stubs.created).toHaveLength(3))
+      unmount()
+      expect([...stubs.revoked].sort()).toEqual([...stubs.created].sort())
+    })
+  })
+
 })
