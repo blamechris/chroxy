@@ -554,6 +554,9 @@ export class SessionMessageHistory extends EventEmitter {
           const thinkingDurationMs = kind === 'thinking'
             ? boundedNonNegInt(data.thinkingDurationMs, { max: MAX_SANE_DURATION_MS })
             : undefined
+          // The live stream_end carries a token count when a provider separates one
+          // out (` · N tokens` in the footer); record it so a replay says the same.
+          const thinkingTokens = kind === 'thinking' ? boundedNonNegInt(data.thinkingTokens) : undefined
           this._pushHistory(history, {
             type: 'message',
             messageType: 'response',
@@ -561,6 +564,7 @@ export class SessionMessageHistory extends EventEmitter {
             messageId: data.messageId,
             ...(kind ? { kind } : {}),
             ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+            ...(thinkingTokens !== undefined ? { thinkingTokens } : {}),
             timestamp: Date.now(),
           }, sessionId)
         }

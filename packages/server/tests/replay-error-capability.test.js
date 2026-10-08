@@ -31,6 +31,9 @@ const HISTORY = [
   { type: 'message', messageType: 'error', content: 'Usage limit reached', code: undefined, timestamp: 2, _seq: 2 },
   { type: 'message', messageType: 'error', content: 'No response for 90 seconds', code: 'stream_stall', timeoutMs: 90000, timestamp: 3, _seq: 3 },
   { type: 'message', messageType: 'response', content: 'Done', messageId: 'm2', timestamp: 4, _seq: 4 },
+  // A signature-only reasoning block, and one with text (#6630 round 2).
+  { type: 'message', messageType: 'response', kind: 'thinking', content: '', messageId: 't1-thinking-0', thinkingDurationMs: 900, timestamp: 5, _seq: 5 },
+  { type: 'message', messageType: 'response', kind: 'thinking', content: 'weighing it', messageId: 't1-thinking-1', thinkingDurationMs: 400, timestamp: 6, _seq: 6 },
 ]
 
 function makeManager() {
@@ -41,7 +44,7 @@ function makeManager() {
   Object.defineProperty(mgr, 'firstSessionId', { get: () => 'sess-1' })
   mgr.getHistory = () => HISTORY
   mgr.isHistoryTruncated = () => false
-  mgr.getLatestHistorySeq = () => 4
+  mgr.getLatestHistorySeq = () => 6
   mgr.getOldestHistorySeq = () => 1
   mgr.recordUserInput = () => {}
   mgr.getFullHistoryAsync = async () => ({ entries: HISTORY, source: 'ring', truncated: false })
@@ -75,7 +78,8 @@ describe('replayed errors follow the client capability (#6630 review)', () => {
   }
 
   const errorsIn = (messages) => messages.filter((m) => m.type === 'message' && m.messageType === 'error')
-  const repliesIn = (messages) => messages.filter((m) => m.type === 'message' && m.messageType === 'response')
+  const repliesIn = (messages) => messages.filter((m) => m.type === 'message' && m.messageType === 'response' && !m.kind)
+  const thoughtsIn = (messages) => messages.filter((m) => m.type === 'message' && m.kind === 'thinking')
 
   it('the stock desktop client list is sent the recorded errors', async () => {
     const port = await start()
@@ -108,6 +112,30 @@ describe('replayed errors follow the client capability (#6630 review)', () => {
     const port = await start()
     const messages = await replayFor(server, port, undefined)
     const end = messages.find((m) => m.type === 'history_replay_end')
-    assert.equal(end.latestSeq, 4, 'latestSeq advances past the entries it was not sent')
+    assert.equal(end.latestSeq, 6, 'latestSeq advances past the entries it was not sent')
+  })
+
+  it('the stock client lists are sent the text-less reasoning entry as well as the one with text', async () => {
+    for (const list of [CLIENT_CAPABILITIES.desktop, CLIENT_CAPABILITIES.mobile]) {
+      const port = await start()
+      const messages = await replayFor(server, port, [...list])
+      assert.deepEqual(thoughtsIn(messages).map((m) => m.content), ['', 'weighing it'])
+      await server.close?.()
+      server = null
+    }
+  })
+
+  it('a client that has the error capability but not the thinking one is not sent the text-less entry, but is sent the one with text', async () => {
+    const port = await start()
+    const messages = await replayFor(server, port, ['history_error_replay_v1'])
+    assert.deepEqual(thoughtsIn(messages).map((m) => m.content), ['weighing it'])
+    assert.equal(errorsIn(messages).length, 2)
+  })
+
+  it('a client advertising nothing is sent only the reasoning that has text', async () => {
+    const port = await start()
+    const messages = await replayFor(server, port, undefined)
+    assert.deepEqual(thoughtsIn(messages).map((m) => m.content), ['weighing it'])
+    assert.equal(messages.find((m) => m.type === 'history_replay_end').latestSeq, 6)
   })
 })

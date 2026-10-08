@@ -313,6 +313,17 @@ const CAPABILITY_PERMISSION_OUTCOME_STOPPED = 'permission_outcome_stopped_v1'
 export const CAPABILITY_HISTORY_ERROR_REPLAY = 'history_error_replay_v1'
 
 /**
+ * #6630: the client capability that says "a replayed reasoning entry with NO text is
+ * safe to send me". Current Claude models send a thinking block with only its
+ * signature, and the server records that as a response entry with `kind: 'thinking'`
+ * and empty content. A client build from before `kind` was understood renders it as
+ * an empty assistant bubble, one per turn, so only a client that advertises this is
+ * sent one. A reasoning entry WITH text is unchanged for everyone (older builds
+ * showed reasoning as an answer already).
+ */
+export const CAPABILITY_HISTORY_THINKING_REPLAY = 'history_thinking_replay_v1'
+
+/**
  * Write ONE history entry to a client, the way BOTH replay paths must.
  *
  * Two things happen per entry, and both were forgotten by the second copy of
@@ -361,6 +372,16 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
   if (
     entry && entry.type === 'message' && entry.messageType === 'error'
     && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_ERROR_REPLAY) ?? false)
+  ) {
+    return
+  }
+  // #6630: a text-less reasoning entry goes only to a client that can render it (see
+  // CAPABILITY_HISTORY_THINKING_REPLAY). Skipped for the same reason as the error: an
+  // older build has no safe shape for it.
+  if (
+    entry && streamKindOf(entry) === 'thinking'
+    && (typeof entry.content !== 'string' || entry.content.length === 0)
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_THINKING_REPLAY) ?? false)
   ) {
     return
   }

@@ -13,9 +13,10 @@ import { join } from 'node:path'
 import { SessionManager } from '../src/session-manager.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { SessionMessageHistory, streamKindOf } from '../src/session-message-history.js'
-import { buildMessageWire, buildErrorWire } from '../src/message-wire.js'
+import { buildMessageWire, buildErrorWire, redactAndClip, ERROR_REDACT_SCAN_MAX } from '../src/message-wire.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
-import { sendHistoryEntry, CAPABILITY_HISTORY_ERROR_REPLAY } from '../src/ws-history.js'
+import { sendHistoryEntry, CAPABILITY_HISTORY_ERROR_REPLAY, CAPABILITY_HISTORY_THINKING_REPLAY } from '../src/ws-history.js'
+import { ClaudeByokSession } from '../src/byok-session.js'
 
 const S = 's1'
 
@@ -110,6 +111,17 @@ describe('SessionMessageHistory: replay parity (#6630)', () => {
       assert.equal(entry.thinkingDurationMs, 1500)
     })
 
+    it('records the token count the live stream_end carries, bounded like the live frame', () => {
+      reason('t1-thinking-0', { thinkingDurationMs: 800, thinkingTokens: 128 })
+      reason('t1-thinking-1', { thinkingTokens: -4 })
+      const [a, b] = history.getHistory(S)
+      assert.equal(a.thinkingTokens, 128)
+      assert.equal(b.thinkingTokens, undefined)
+      const frames = []
+      sendHistoryEntry((_ws, p) => frames.push(p), null, S, a, { clientCapabilities: new Set() })
+      assert.equal(frames[0].thinkingTokens, 128)
+    })
+
     it('does not tag a reply, and a reply never carries a duration', () => {
       history.recordHistory(S, 'stream_start', { messageId: 'm1' })
       history.recordHistory(S, 'stream_delta', { messageId: 'm1', delta: 'hi' })
@@ -171,7 +183,8 @@ describe('SessionMessageHistory: replay parity (#6630)', () => {
       const thinking = events.filter((e) => e.thinking === true)
       assert.deepEqual(thinking.map((e) => e.name), ['stream_start', 'stream_end'], 'no thinking delta was emitted')
       const frames = []
-      for (const entry of history.getHistory(S)) sendHistoryEntry((_ws, p) => frames.push(p), null, S, entry, null)
+      const client = { clientCapabilities: new Set([CAPABILITY_HISTORY_THINKING_REPLAY]) }
+      for (const entry of history.getHistory(S)) sendHistoryEntry((_ws, p) => frames.push(p), null, S, entry, client)
       const replayed = frames.find((f) => f.kind === 'thinking')
       assert.ok(replayed, 'the reasoning bubble is replayed')
       assert.equal(replayed.content, '')
@@ -382,7 +395,7 @@ describe('error text is redacted and bounded before it is recorded (#6630 review
     const history = new SessionMessageHistory()
     history.recordHistory(S, 'error', { message: 'boom '.repeat(100_000) })
     const [entry] = history.getHistory(S)
-    assert.ok(entry.content.length < 51 * 1024 + 20, `held ${entry.content.length} characters`)
+    assert.ok(entry.content.length <= 50 * 1024, `held ${entry.content.length} characters`)
     assert.ok(entry.content.endsWith('[truncated]'), 'says it was cut')
   })
 
@@ -442,5 +455,302 @@ describe('recorded errors are replayed only to a client that advertises history_
     const { CLIENT_CAPABILITIES } = await import('@chroxy/protocol')
     assert.ok(CLIENT_CAPABILITIES.desktop.includes(CAPABILITY_HISTORY_ERROR_REPLAY))
     assert.ok(CLIENT_CAPABILITIES.mobile.includes(CAPABILITY_HISTORY_ERROR_REPLAY))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Review round 2
+// ---------------------------------------------------------------------------
+
+// Synthetic keys (the shapes redaction.js masks), never real ones.
+const ANT_KEY = `sk-ant-api03-${'A1b2C3d4E5'.repeat(5)}`
+const GOOGLE_KEY = `AIza${'Zy9Xw8Vu7T'.repeat(3)}Abcde` // AIza + 35
+
+describe('error `code` is a bounded identifier or it is dropped (#6630 round 2)', () => {
+  it('keeps an identifier-shaped string', () => {
+    for (const code of ['stream_stall', 'HTTP_429', 'ECONNRESET', 'invalid_api_key', 'a.b:c-d']) {
+      assert.equal(buildErrorWire({ message: 'm', code }).code, code)
+    }
+  })
+
+  it('drops an object, a number, a long string and a string that is not an identifier', () => {
+    for (const code of [
+      { details: { api_key: ANT_KEY } },
+      429,
+      'x'.repeat(65),
+      `key ${ANT_KEY}`,
+      'has space',
+      '',
+      null,
+      ['a'],
+    ]) {
+      const wire = buildErrorWire({ message: 'm', code })
+      assert.ok(!('code' in wire), `kept ${JSON.stringify(code)?.slice(0, 40)}`)
+    }
+  })
+
+  it('the code-gated fields follow the validated code, not the raw one', () => {
+    const wire = buildErrorWire({ message: 'm', code: { toString: () => 'stream_stall' }, timeoutMs: 90000 })
+    assert.ok(!('timeoutMs' in wire))
+  })
+
+  describe('through the real BYOK error path', () => {
+    let tmpHome
+    let originalHome
+    let originalApiKey
+    const sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+    beforeEach(() => {
+      tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-byok-code-'))
+      originalHome = process.env.HOME
+      originalApiKey = process.env.ANTHROPIC_API_KEY
+      process.env.HOME = tmpHome
+      process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
+    })
+    afterEach(() => {
+      if (originalHome) process.env.HOME = originalHome
+      else delete process.env.HOME
+      process.env.CHROXY_CONFIG_DIR = sandboxConfigDir
+      if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
+      else delete process.env.ANTHROPIC_API_KEY
+      rmSync(tmpHome, { recursive: true, force: true })
+    })
+
+    it('an SDK error whose `code` is an object holding a key persists no code and no key', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      // What an OpenAI-compatible SSE error looks like once the SDK has parsed it:
+      // `code` is whatever the upstream put in the error body, with no HTTP status.
+      const upstream = Object.assign(new Error('upstream rejected the request'), {
+        code: { details: { api_key: ANT_KEY } },
+      })
+      session._client = { messages: { stream: () => { throw upstream } } }
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+      await session.start()
+      await session.sendMessage('hi')
+      assert.equal(errors.length, 1, 'the real error path emitted one error')
+      assert.equal(typeof errors[0].code, 'object', 'precondition: BYOK forwards the raw code')
+
+      const history = new SessionMessageHistory()
+      history.recordHistory(S, 'error', errors[0])
+      const [entry] = history.getHistory(S)
+      assert.ok(!('code' in entry))
+      assert.ok(!JSON.stringify(history.truncateEntry(entry)).includes(ANT_KEY))
+      const live = new EventNormalizer().normalize('error', errors[0], { sessionId: S }).messages[0].msg
+      assert.ok(!('code' in live), 'nor on the live frame')
+      await session.destroy()
+    })
+  })
+})
+
+describe('quoted JSON keys are redacted in recorded errors (#6630 round 2, #8416)', () => {
+  const secret = 'abcdefgh12345678'
+  const cases = [
+    ['a JSON token', `{"token":"${secret}"}`],
+    ['a JSON password with spaces', `{ "password" : "${secret}" }`],
+    ['a nested access token', `{"data":{"access_token":"${secret}"}}`],
+    ['an api_key', `{"api_key":"${secret}"}`],
+    ['single quotes', `{'secret': '${secret}'}`],
+    ['JSON inside a string (escaped quotes)', `request body: {\"token\":\"${secret}\"}`],
+    ['an unquoted assignment (unchanged)', `TOKEN=${secret}`],
+  ]
+  for (const [label, text] of cases) {
+    it(`masks ${label} in the message, stdout and stderr`, () => {
+      const wire = buildErrorWire({ message: text, code: 'post_create_command_failed', stdout: text, stderr: text })
+      for (const field of ['content', 'stdout', 'stderr']) {
+        assert.ok(!wire[field].includes(secret), `${field} kept the secret: ${wire[field]}`)
+        assert.ok(wire[field].includes('[REDACTED]'), `${field}: ${wire[field]}`)
+      }
+    })
+  }
+
+  it('leaves text that merely mentions the word alone', () => {
+    assert.equal(buildErrorWire({ message: 'the token is invalid' }).content, 'the token is invalid')
+    assert.equal(buildErrorWire({ message: '{"token":"short"}' }).content, '{"token":"short"}')
+  })
+})
+
+describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2)', () => {
+  // Place `key` so it STRADDLES `bound`: it starts before it and ends after it.
+  const straddle = (key, bound, filler) => filler.repeat(Math.ceil((bound - 12) / filler.length)).slice(0, bound - 12) + key + filler.repeat(50)
+  const KEYS = [['sk-ant', ANT_KEY], ['AIza', GOOGLE_KEY]]
+
+  for (const [name, key] of KEYS) {
+    it(`${name} key across the 50 KiB message bound, with no whitespace anywhere`, () => {
+      const wire = buildErrorWire({ message: straddle(key, 50 * 1024, 'x') })
+      assert.ok(!wire.content.includes(key.slice(0, 14)), 'no prefix of the key survives')
+      assert.ok(wire.content.length <= 50 * 1024)
+    })
+    it(`${name} key across the 50 KiB message bound, in whitespace-separated text`, () => {
+      const wire = buildErrorWire({ message: straddle(key, 50 * 1024, 'word ') })
+      assert.ok(!wire.content.includes(key.slice(0, 14)))
+    })
+    it(`${name} key across the 8 KiB bound of stdout and stderr`, () => {
+      const wire = buildErrorWire({
+        message: 'm', code: 'post_create_command_failed',
+        stdout: straddle(key, 8192, 'x'), stderr: straddle(key, 8192, 'x'),
+      })
+      for (const field of ['stdout', 'stderr']) {
+        assert.ok(!wire[field].includes(key.slice(0, 14)), field)
+        assert.ok(wire[field].length <= 8192, field)
+      }
+    })
+  }
+
+  it('input past the scan ceiling is cut at whitespace, and a key crossing THAT is dropped whole', () => {
+    const filler = 'y'.repeat(1024 * 1024 - 20)
+    const wire = buildErrorWire({ message: `${filler}${ANT_KEY}${'z'.repeat(100)}` })
+    assert.ok(!wire.content.includes('sk-ant'))
+    assert.ok(wire.content.length <= 50 * 1024)
+    assert.ok(wire.content.endsWith('[truncated]'))
+  })
+
+  it('past the scan ceiling the unsafe trailing run is discarded, not kept half-recognisable (a budget larger than the ceiling lets it show)', () => {
+    const text = `${'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)}${ANT_KEY}${'z'.repeat(100)}`
+    const out = redactAndClip(text, ERROR_REDACT_SCAN_MAX * 2, '[cut]')
+    assert.ok(!out.includes('sk-ant'), 'no prefix of the key survives the ceiling cut')
+    assert.ok(out.endsWith('[cut]'))
+  })
+
+  it('still slices (rather than drops) a long whitespace-free message that holds no secret', () => {
+    const wire = buildErrorWire({ message: 'a'.repeat(100_000), code: 'post_create_command_failed', stdout: 'b'.repeat(20_000) })
+    assert.equal(wire.stdout.length, 8192)
+    assert.ok(wire.content.length > 40_000 && wire.content.length <= 50 * 1024)
+  })
+})
+
+describe('a clipped error reads the same live and persisted (#6630 round 2)', () => {
+  it('the content fits the persisted bound with its marker inside it, so truncateEntry leaves it alone', () => {
+    const history = new SessionMessageHistory()
+    history.recordHistory(S, 'error', { message: 'boom '.repeat(100_000) })
+    const [entry] = history.getHistory(S)
+    assert.ok(entry.content.length <= 50 * 1024, `${entry.content.length}`)
+    assert.ok(entry.content.endsWith('\n[truncated]'))
+    const saved = history.truncateEntry(entry)
+    assert.equal(saved.content, entry.content)
+    assert.ok(!/\[t\[truncated\]/.test(saved.content), 'no doubled marker')
+    assert.equal((saved.content.match(/\[truncated\]/g) || []).length, 1)
+  })
+
+  it('a message just over the bound is clipped with the marker inside the budget', () => {
+    const wire = buildErrorWire({ message: 'q'.repeat(50 * 1024 + 5) })
+    assert.equal(wire.content.length, 50 * 1024)
+    assert.ok(wire.content.endsWith('\n[truncated]'))
+  })
+
+  it('a message that fits is untouched', () => {
+    const wire = buildErrorWire({ message: 'q'.repeat(50 * 1024) })
+    assert.equal(wire.content.length, 50 * 1024)
+    assert.ok(!wire.content.includes('[truncated]'))
+  })
+})
+
+describe('a text-less reasoning entry is replayed only to a client with history_thinking_replay_v1 (#6630 round 2)', () => {
+  const empty = { type: 'message', messageType: 'response', kind: 'thinking', content: '', messageId: 't-thinking-0', thinkingDurationMs: 900, timestamp: 1, _seq: 5 }
+  const withText = { ...empty, content: 'weighing it', messageId: 't-thinking-1', _seq: 6 }
+  const legacyEmpty = { type: 'message', messageType: 'response', content: '', messageId: 't-thinking', timestamp: 1, _seq: 7 }
+  const frames = (client, e) => {
+    const out = []
+    sendHistoryEntry((_ws, p) => out.push(p), {}, S, e, client)
+    return out
+  }
+
+  it('a client advertising it is sent the empty entry, with its cursor stamp', () => {
+    const [frame] = frames({ clientCapabilities: new Set([CAPABILITY_HISTORY_THINKING_REPLAY]) }, empty)
+    assert.equal(frame.kind, 'thinking')
+    assert.equal(frame.historySeq, 5)
+  })
+
+  it('a client that does not, or has no record, is sent nothing for it (also by legacy id)', () => {
+    for (const client of [{ clientCapabilities: new Set([CAPABILITY_HISTORY_ERROR_REPLAY]) }, { clientCapabilities: new Set() }, {}, null, undefined]) {
+      assert.deepEqual(frames(client, empty), [])
+      assert.deepEqual(frames(client, legacyEmpty), [])
+    }
+  })
+
+  it('CONTROL: a reasoning entry WITH text, and an empty reply, are sent to a client with no capabilities', () => {
+    assert.equal(frames({ clientCapabilities: new Set() }, withText).length, 1)
+    assert.equal(frames({ clientCapabilities: new Set() }, { ...empty, kind: undefined, messageId: 'm1' }).length, 1)
+  })
+
+  it('both stock clients advertise it', async () => {
+    const { CLIENT_CAPABILITIES } = await import('@chroxy/protocol')
+    assert.ok(CLIENT_CAPABILITIES.desktop.includes(CAPABILITY_HISTORY_THINKING_REPLAY))
+    assert.ok(CLIENT_CAPABILITIES.mobile.includes(CAPABILITY_HISTORY_THINKING_REPLAY))
+  })
+})
+
+describe('BYOK gives every thinking stream of a turn its own id (#6630 round 2)', () => {
+  let tmpHome
+  let originalHome
+  let originalApiKey
+  const sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-byok-rounds-'))
+    originalHome = process.env.HOME
+    originalApiKey = process.env.ANTHROPIC_API_KEY
+    process.env.HOME = tmpHome
+    process.env.CHROXY_CONFIG_DIR = join(tmpHome, '.chroxy')
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
+  })
+  afterEach(() => {
+    if (originalHome) process.env.HOME = originalHome
+    else delete process.env.HOME
+    process.env.CHROXY_CONFIG_DIR = sandboxConfigDir
+    if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
+    else delete process.env.ANTHROPIC_API_KEY
+    rmSync(tmpHome, { recursive: true, force: true })
+  })
+
+  const fakeStream = (events, final) => ({
+    async *[Symbol.asyncIterator]() { for (const e of events) yield e },
+    async finalMessage() { return final },
+  })
+  const thinkingRound = (text, final) => fakeStream([
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: text } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: final.stop_reason } },
+  ], final)
+
+  it('two tool rounds, each with a thought at block index 0: two ids, two recorded entries', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    session.setPermissionMode('auto')
+    session._executeToolBlock = async ({ block }) => ({ type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false })
+    let round = 0
+    session._client = {
+      messages: {
+        stream: () => {
+          round += 1
+          if (round === 1) {
+            return thinkingRound('First thought.', {
+              stop_reason: 'tool_use',
+              content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/tmp/x' } }],
+              usage: { input_tokens: 1, output_tokens: 1 },
+            })
+          }
+          return thinkingRound('A completely different second-round thought.', {
+            stop_reason: 'end_turn', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 1, output_tokens: 1 },
+          })
+        },
+      },
+    }
+    const history = new SessionMessageHistory()
+    const starts = []
+    for (const name of ['stream_start', 'stream_delta', 'stream_end']) {
+      session.on(name, (d) => {
+        if (name === 'stream_start' && d.thinking) starts.push(d.messageId)
+        history.recordHistory(S, name, d)
+      })
+    }
+    await session.start()
+    await session.sendMessage('go')
+
+    assert.equal(starts.length, 2)
+    assert.notEqual(starts[0], starts[1], 'the two thoughts do not share an id')
+    assert.ok(starts.every((id) => /-thinking-\d+$/.test(id)), 'still the legacy-classifiable shape')
+    const entries = history.getHistory(S).filter((e) => e.kind === 'thinking')
+    assert.deepEqual(entries.map((e) => e.content), ['First thought.', 'A completely different second-round thought.'])
+    await session.destroy()
   })
 })

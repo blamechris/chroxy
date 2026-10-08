@@ -3,7 +3,7 @@
  * live one. The end-to-end proof is the REPLAY_PARITY_FIXTURES suites in the
  * dashboard and the app; these pin each shared rule on its own.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import {
   handleMessage,
   handleToolResult,
@@ -14,6 +14,7 @@ import {
 } from './stream'
 import { permissionOutcomeFromDecision } from '../pending-permissions'
 import { isReplayDuplicate } from '../replay-dedup'
+import { reconcileReplayStart, reconcileReplayEnd, replayDedupCache, resetReplayReconcile } from '../replay-reconcile'
 import type { ChatMessage } from '../types'
 
 const replayedThinking = (over: Record<string, unknown> = {}) => ({
@@ -43,6 +44,12 @@ describe('handleMessage: a replayed reasoning stream (#6630)', () => {
       thinkingStreaming: false,
       thinkingDurationMs: 1200,
     })
+  })
+
+  it('carries the token count the live stream_end carried, and drops a malformed one', () => {
+    expect(built(replayedThinking({ thinkingTokens: 128 }), true).chatMessage.thinkingTokens).toBe(128)
+    expect(built(replayedThinking({ thinkingTokens: -1 }), true).chatMessage.thinkingTokens).toBeUndefined()
+    expect(built(replayedThinking(), true).chatMessage.thinkingTokens).toBeUndefined()
   })
 
   it('leaves the duration off when the entry has none, or has an absurd one', () => {
@@ -86,9 +93,9 @@ describe('handleMessage: a replayed reasoning stream (#6630)', () => {
     }
 
     it('fills in the full text, the duration and the finished label', () => {
-      expect(reconcileOf(partial())).toEqual({
-        id: 't1-thinking-0',
-        type: 'thinking',
+      const held = partial()
+      expect(reconcileOf(held)).toEqual({
+        target: held,
         patch: { content: 'weighing the options', thinkingStreaming: false, thinkingDurationMs: 1200 },
       })
     })
@@ -107,15 +114,49 @@ describe('handleMessage: a replayed reasoning stream (#6630)', () => {
       expect(reconcileOf(held)?.patch.content).toBeUndefined()
     })
 
-    it('applyMessageReconcile merges it onto the held bubble by id and type, and is a no-op otherwise', () => {
+    it('fills in the token count the live stream_end would have carried', () => {
+      const held = partial({ content: 'weighing the options', thinkingStreaming: false, thinkingDurationMs: 1200 })
+      expect(reconcileOf(held, replayedThinking({ thinkingTokens: 128 }))?.patch).toEqual({ thinkingTokens: 128 })
+    })
+
+    it('applyMessageReconcile merges it onto the very object it was computed against, and is a no-op otherwise', () => {
       const held = partial()
       const other: ChatMessage = { id: 'x', type: 'response', content: 'r', timestamp: 1 }
       const reconcile = reconcileOf(held)!
       const next = applyMessageReconcile([other, held], reconcile)
       expect(next[0]).toBe(other)
       expect(next[1]).toMatchObject({ content: 'weighing the options', thinkingStreaming: false, thinkingDurationMs: 1200 })
-      const unmatched: ChatMessage[] = [{ ...held, type: 'response' }]
-      expect(applyMessageReconcile(unmatched, reconcile)).toBe(unmatched)
+      // A different object with the same id and type is NOT the target.
+      const lookalike: ChatMessage[] = [{ ...held }]
+      expect(applyMessageReconcile(lookalike, reconcile)).toBe(lookalike)
+    })
+  })
+
+  describe('a full-rebuild replay (the dedup cache is the replay tail, not the whole array)', () => {
+    afterEach(() => resetReplayReconcile({ clearCursors: true }))
+
+    it('patches the bubble the replay appended, never the old prefix copy that is about to be discarded', () => {
+      // The old prefix holds a LONGER bubble at the id; the replay delivers an earlier
+      // copy of the same id, then a fuller one (an id the server reused for two streams).
+      const prefix: ChatMessage = { id: 't1-thinking-0', type: 'thinking', content: 'a long thought from before the rebuild', thinkingStreaming: false, timestamp: 1 }
+      let messages: ChatMessage[] = [prefix]
+      reconcileReplayStart('s1', true, messages)
+
+      const apply = (entry: Record<string, unknown>) => {
+        const out = handleMessage(entry, 's1', true, replayDedupCache('s1', messages))
+        if (out.shouldDispatch) messages = [...messages, out.chatMessage]
+        else if (out.reconcile) messages = applyMessageReconcile(messages, out.reconcile)
+      }
+      apply(replayedThinking({ content: 'short', thinkingDurationMs: undefined, historySeq: 1 }))
+      expect(messages).toHaveLength(2)
+      apply(replayedThinking({ content: 'short, then fuller', historySeq: 2 }))
+
+      expect(messages[0]).toBe(prefix)
+      expect(messages[0]!.content).toBe('a long thought from before the rebuild')
+      expect(messages[1]!.content).toBe('short, then fuller')
+
+      const swapped = reconcileReplayEnd('s1', messages, 2).swappedMessages as ChatMessage[] | null
+      expect(swapped?.map((m) => m.content)).toEqual(['short, then fuller'])
     })
   })
 
@@ -147,10 +188,18 @@ describe('handleMessage: replayed error bubbles (#6630)', () => {
     const live = built(limit, false)
     expect(live.isRateLimitError).toBe(true)
     expect(live.errorContent).toBe('Usage limit reached')
-    const replay = built(limit, true)
+    const replay = built({ ...limit, historySeq: 7 }, true)
     expect(replay.isRateLimitError).toBe(false)
     expect(replay.errorContent).toBeNull()
     expect(replay.chatMessage.type).toBe('error') // the bubble is still rebuilt
+  })
+
+  it('a LIVE quota error that lands while a replay window is open still raises its alert', () => {
+    // Inside the window, but no `historySeq`: this frame is new, not a recorded entry.
+    const limit = error({ content: 'Usage limit reached', code: undefined, timeoutMs: undefined })
+    const interleaved = built(limit, true)
+    expect(interleaved.isRateLimitError).toBe(true)
+    expect(interleaved.errorContent).toBe('Usage limit reached')
   })
 })
 

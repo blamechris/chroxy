@@ -169,7 +169,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           {
             "messageId": "t1-thinking-0",
             "thinking": true,
-            "thinkingDurationMs": 1200
+            "thinkingDurationMs": 1200,
+            "thinkingTokens": 128
           }
         ],
         [
@@ -230,6 +231,7 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "messageId": "t1-thinking-0",
           "thinking": true,
           "thinkingDurationMs": 1200,
+          "thinkingTokens": 128,
           "sessionId": "s1"
         },
         {
@@ -275,6 +277,7 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "messageId": "t1-thinking-0",
           "kind": "thinking",
           "thinkingDurationMs": 1200,
+          "thinkingTokens": 128,
           "timestamp": 1700000000000,
           "sessionId": "s1",
           "historySeq": 1

@@ -219,6 +219,8 @@ export const ServerMessageSchema = z.object({
   // #6630: on a replayed reasoning frame, the elapsed time the live stream_end
   // carried (`thought for Xs`). Same bound as the stream_end field.
   thinkingDurationMs: ThinkingDurationMsSchema,
+  // #6630: and the token count the live stream_end carried (` · N tokens`).
+  thinkingTokens: ThinkingTokensSchema,
   // #7454/#7458: present on REPLAYED frames only (both replay paths map the
   // server-internal `_seq` onto the wire; absent on live broadcasts). The
   // #5555.3 delta-replay cursor — and for user_question the #7420

@@ -29,8 +29,13 @@ export const CLIENT_CAPABILITIES = {
     // entry (no usage-limit alert for it, the code-specific chips rebuilt). A client
     // without it is not sent recorded errors in a history replay, because an older
     // build raises its usage-limit alert for one on every replay.
-    desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1'],
-    mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1'],
+    //
+    // `history_thinking_replay_v1` (#6630): the client renders a replayed reasoning entry
+    // with no text (`kind: 'thinking'`, empty content) as a thinking bubble. A client
+    // without it is not sent one, because an older build renders it as an empty
+    // assistant bubble.
+    desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1'],
+    mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1'],
 };
 /**
  * Minimum protocol version the server will accept from clients.

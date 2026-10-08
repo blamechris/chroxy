@@ -8,6 +8,7 @@ import type { ProviderCapabilities } from '../store/types'
 import { ToolGroup } from '../components/ToolGroup'
 import { ToolBubble } from '../components/ToolBubble'
 import { PermissionPrompt } from '../components/PermissionPrompt'
+import { stripExpiredNote } from '../utils/stripExpiredNote'
 import { PermissionOutcomeRecord } from '../components/PermissionOutcomeRecord'
 import { PermissionExpiredSummary } from '../components/PermissionExpiredSummary'
 import { QuestionPrompt } from '../components/QuestionPrompt'
@@ -185,7 +186,10 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           <PermissionOutcomeRecord
             requestId={storeMsg.requestId!}
             tool={storeMsg.tool || 'Unknown'}
-            description={permissionPromptDescription(storeMsg.content, storeMsg.tool) || 'Permission requested'}
+            // A prompt answered AFTER it expired (the #2833 race) carries the
+            // "(Expired ...)" note `permission_expired` appended; the record states the
+            // outcome itself, so strip it as PermissionPrompt does for its own record.
+            description={stripExpiredNote(permissionPromptDescription(storeMsg.content, storeMsg.tool)) || 'Permission requested'}
             outcome={answeredOutcome}
           />
         )

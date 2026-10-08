@@ -150,4 +150,11 @@ describe('live vs replayed transcript -- rendered DOM (dashboard, #6630)', () =>
       expect(html).toContain('thought for 1.0s')
     }
   })
+
+  it('the token count in the thinking footer survives a rebuild', () => {
+    const fx = REPLAY_PARITY_FIXTURES.find((f) => f.name === 'thinking-then-reply')!
+    for (const html of [dom(live(fx.live)), dom(replayed(fx.replay))]) {
+      expect(html).toContain('thought for 1.2s · 128 tokens')
+    }
+  })
 })

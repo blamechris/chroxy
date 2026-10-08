@@ -108,6 +108,7 @@ export declare const ServerMessageSchema: z.ZodObject<{
     timeoutMs: z.ZodOptional<z.ZodNumber>;
     kind: z.ZodOptional<z.ZodString>;
     thinkingDurationMs: z.ZodOptional<z.ZodNumber>;
+    thinkingTokens: z.ZodOptional<z.ZodNumber>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolStartSchema: z.ZodObject<{

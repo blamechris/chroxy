@@ -90,6 +90,7 @@ const MODEL_FIELDS = [
   'mcpPromptExpansion',
   'thinkingStreaming',
   'thinkingDurationMs',
+  'thinkingTokens',
   'thinkingTruncated',
   'requestId',
   'permissionOutcome',

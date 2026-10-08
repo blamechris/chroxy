@@ -189,35 +189,69 @@ export function buildMessageWire(data) {
 export const ERROR_TEXT_MAX = 50 * 1024
 
 /**
- * Bound error text to `max` characters, then redact secret-shaped substrings.
- * An error is whatever the provider or a setup command said, and it can carry an
- * API key or a token (a BYOK request failure, a post-create script's output). It
- * is now part of the durable transcript, written to `session-state.json`, so it
- * passes through the same redactor the logger and the permission descriptions use
- * (`redactValue`), here in the shared builder so the live frame and the recorded
- * entry are identical.
+ * Hard ceiling on the text the redactor is ever handed (characters). An error body
+ * can in principle be megabytes (a proxy's HTML page); the patterns are linear, but
+ * there is no reason to scan more than this to keep a 50 KiB result.
+ */
+export const ERROR_REDACT_SCAN_MAX = 1024 * 1024
+
+/**
+ * Text appended to an error message that was cut. Counted INSIDE the 50 KiB budget:
+ * the saved copy (`SessionMessageHistory.truncateEntry`) clips anything over 50 KiB
+ * and appends its own marker, so a message that overshot by this much came out as
+ * `...\n[t[truncated]`. Within the budget the persisted copy is the live one.
+ */
+const ERROR_TRUNCATION_MARKER = '\n[truncated]'
+
+/**
+ * Redact secret-shaped substrings from error text, THEN bound it to `max`
+ * characters. An error is whatever the provider or a setup command said, and it can
+ * carry an API key or a token (a BYOK request failure, a post-create script's
+ * output). It is part of the durable transcript, written to `session-state.json`,
+ * so it passes through the same redactor the logger and the permission descriptions
+ * use (`redactValue`), here in the shared builder so the live frame and the
+ * recorded entry are identical.
  *
- * Clip FIRST, redact the clipped text: the clip prefers the last whitespace inside
- * the bound so it rarely lands inside a token, and whatever it keeps is then
- * redacted. Text with no whitespace to cut at is sliced (the post-create caps have
- * always sliced, and a test pins it) rather than dropped.
+ * ORDER matters: redact the COMPLETE text, then cut. Cutting first can leave the
+ * front of a key the patterns no longer recognise (a 40-character floor on `sk-ant-`
+ * keys; an `AIza` key cut 29 characters in) when the bound falls inside it. After
+ * redaction the keys are already gone, so the cut can be a plain slice (the
+ * post-create caps have always sliced rather than dropped, and a test pins it). The
+ * one exception is input past the redaction scan ceiling, which cannot be scanned
+ * whole: it is cut at the last whitespace inside the ceiling (`redactBounded`'s
+ * rule: a run with no whitespace to stop at is dropped, never half-kept) before it
+ * is redacted.
  *
  * @param {string} text
- * @param {number} max
- * @returns {{ text: string, clipped: boolean }}
+ * @param {number} max  character budget for the result, marker included
+ * @param {string} [marker]  appended when the text had to be cut
+ * @returns {string}
  */
-function clipAndRedact(text, max) {
-  if (text.length <= max) return { text: redactValue(text), clipped: false }
-  const head = text.slice(0, max)
-  const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'))
-  return { text: redactValue(cut > 0 ? head.slice(0, cut) : head), clipped: true }
+export function redactAndClip(text, max, marker = '') {
+  let clipped = false
+  if (text.length > ERROR_REDACT_SCAN_MAX) {
+    const head = text.slice(0, ERROR_REDACT_SCAN_MAX)
+    const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'), head.lastIndexOf('\r'))
+    text = cut > 0 ? head.slice(0, cut) : ''
+    clipped = true
+  }
+  const redacted = redactValue(text)
+  if (redacted.length <= max && !clipped) return redacted
+  if (redacted.length <= max - marker.length) return redacted + marker
+  return redacted.slice(0, Math.max(0, max - marker.length)) + marker
 }
 
-/** The error message: clipped, redacted, and says so when it was cut. */
+/** The error message: redacted, then bounded to 50 KiB with a marker that fits inside it. */
 function errorMessageText(message) {
-  const { text, clipped } = clipAndRedact(String(message), ERROR_TEXT_MAX)
-  return clipped ? `${text}\n[truncated]` : text
+  return redactAndClip(String(message), ERROR_TEXT_MAX, ERROR_TRUNCATION_MARKER)
 }
+
+/**
+ * Longest `code` a client will chip on. A code is an identifier (`stream_stall`,
+ * `HTTP_429`, `ECONNRESET`, `invalid_api_key`); anything else a provider put there
+ * (an object from an SSE error body, a message-length string) is not one.
+ */
+const ERROR_CODE_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/
 
 /**
  * Build the wire envelope for a session `error` event -- a `message` frame with
@@ -237,7 +271,11 @@ export function buildErrorWire(data) {
     // recorded entry agree (#6630); a direct caller without one gets "now".
     timestamp: Number.isFinite(data.timestamp) ? data.timestamp : Date.now(),
   }
-  if (data.code) msg.code = data.code
+  // Only a bounded identifier travels as the code. An OpenAI-compatible SSE error can
+  // put an object (holding a key) in `code` and BYOK forwards what the SDK saw; a
+  // value that is not an identifier is dropped, and the bubble renders as a plain error.
+  const code = typeof data.code === 'string' && ERROR_CODE_PATTERN.test(data.code) ? data.code : undefined
+  if (code) msg.code = code
   // #4947: forward `attemptedResumeId` when CliSession's resume-failure
   // path tagged the error envelope (see cli-session.js
   // `_handleChildClose` — emits `error{code:'resume_unknown',
@@ -268,7 +306,7 @@ export function buildErrorWire(data) {
   //      but trips Zod-validating consumers. Silently truncate rather
   //      than drop — the truncated id still helps operator triage.
   if (
-    (data.code === 'resume_unknown' || data.code === 'resume_unknown_exhausted') &&
+    (code === 'resume_unknown' || code === 'resume_unknown_exhausted') &&
     typeof data.attemptedResumeId === 'string'
   ) {
     const trimmed = data.attemptedResumeId.trim()
@@ -282,7 +320,7 @@ export function buildErrorWire(data) {
   // advertises. Gated on the code like the two blocks around it, and held to
   // the positive-finite-integer shape the wire schema declares; anything else
   // is dropped so the clients fall back to their `auth_ok` value.
-  if (data.code === 'stream_stall' && Number.isInteger(data.timeoutMs) && data.timeoutMs > 0) {
+  if (code === 'stream_stall' && Number.isInteger(data.timeoutMs) && data.timeoutMs > 0) {
     msg.timeoutMs = data.timeoutMs
   }
   // #5067: forward captured `stdout` / `stderr` on docker-byok
@@ -299,11 +337,11 @@ export function buildErrorWire(data) {
   // pattern as the resume_unknown gate above. Empty-string and
   // non-string both treated as "absent" so receivers see a consistent
   // "present or absent, never present-but-empty" shape.
-  if (data.code === 'post_create_command_failed') {
+  if (code === 'post_create_command_failed') {
     for (const stream of ['stdout', 'stderr']) {
       if (typeof data[stream] !== 'string' || data[stream].length === 0) continue
       // Redacted like the message: setup output is where a token most often turns up.
-      const { text } = clipAndRedact(data[stream], 8192)
+      const text = redactAndClip(data[stream], 8192)
       if (text.length > 0) msg[stream] = text
     }
   }

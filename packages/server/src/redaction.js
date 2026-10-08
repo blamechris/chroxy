@@ -20,7 +20,11 @@ const SENSITIVE_PATTERNS = [
   // Bearer tokens in headers
   /Bearer\s+[A-Za-z0-9_\-./+=]{8,}/gi,
   // API tokens (base64url, UUID, hex) after common key names
-  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{8,}["']?/gi,
+  // The key may be QUOTED (a JSON property: `{"token":"…"}`, or the same JSON inside
+  // a string, where each quote is escaped: `\"token\":\"…\"`), so a quote -- plain
+  // or backslash-escaped -- is allowed between the key and its separator, before the
+  // value and after it (#6630, #8416).
+  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?/gi,
 ]
 
 // Provider API key patterns (#2961). These run separately so we can emit a

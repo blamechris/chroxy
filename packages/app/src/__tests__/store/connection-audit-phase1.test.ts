@@ -393,6 +393,7 @@ describe('the mobile auth frame advertises the stopped-outcome capability (#8374
     expect(frame.capabilities).toContain('permission_outcome_stopped_v1');
     // #6630: without it the server sends this client no recorded errors in a replay.
     expect(frame.capabilities).toContain('history_error_replay_v1');
+    expect(frame.capabilities).toContain('history_thinking_replay_v1');
     // The server reads the capability off exactly this list.
     const { CLIENT_CAPABILITIES } = jest.requireActual('@chroxy/protocol');
     expect(frame.capabilities).toEqual([...CLIENT_CAPABILITIES.mobile]);

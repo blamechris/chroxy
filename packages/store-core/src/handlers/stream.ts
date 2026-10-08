@@ -78,18 +78,25 @@ export type MessagePayload =
 
 /** A patch for a message the client already holds, found by id (see {@link applyMessageReconcile}). */
 export interface MessageReconcile {
-  id: string
-  type: ChatMessage['type']
+  /**
+   * The held message object the patch was COMPUTED against. It is matched by
+   * identity, never by id: during a full-rebuild replay the dedup cache is only the
+   * appended replay tail, while the array the patch lands on still holds the old
+   * prefix (discarded at replay end), and an id match would land on the prefix
+   * copy -- shortening a bubble that is about to be thrown away and leaving the
+   * one that is kept untouched.
+   */
+  target: ChatMessage
   patch: Partial<ChatMessage>
 }
 
 /**
  * Apply a {@link MessageReconcile} to a messages array: merge the patch onto the
- * message with that id and type. Returns the SAME array when nothing matches, so a
- * caller can skip the state write.
+ * very message object it was computed against. Returns the SAME array when that
+ * object is not in it, so a caller can skip the state write.
  */
 export function applyMessageReconcile(messages: ChatMessage[], reconcile: MessageReconcile): ChatMessage[] {
-  const idx = messages.findIndex((m) => m.id === reconcile.id && m.type === reconcile.type)
+  const idx = messages.indexOf(reconcile.target)
   if (idx === -1) return messages
   const next = [...messages]
   next[idx] = { ...next[idx]!, ...reconcile.patch }
@@ -243,6 +250,10 @@ export function handleMessage(
   // answer. Only a response can be reasoning, and only under a replay: a live
   // frame never carries `kind`.
   const isReplayedThinking = receivingHistoryReplay && rawType === 'response' && msg.kind === 'thinking'
+  // A history entry on the wire always carries its sequence number (`sendHistoryEntry`
+  // stamps `historySeq`); a live frame never does. The replay WINDOW being open says
+  // only that something is replaying, not that THIS frame is part of it.
+  const isReplayedEntry = receivingHistoryReplay && typeof msg.historySeq === 'number'
   const msgType = isReplayedThinking ? 'thinking' : rawType
   if (typeof msg.content !== 'string') return empty
   if (typeof msg.timestamp !== 'number') return empty
@@ -273,8 +284,10 @@ export function handleMessage(
       }
       if (held.thinkingStreaming !== false) patch.thinkingStreaming = false
       if (durationMs !== undefined && held.thinkingDurationMs !== durationMs) patch.thinkingDurationMs = durationMs
+      const tokens = parseFiniteNonNegIntField(msg, 'thinkingTokens')
+      if (tokens !== undefined && held.thinkingTokens !== tokens) patch.thinkingTokens = tokens
       return Object.keys(patch).length > 0
-        ? { shouldDispatch: false, reconcile: { id: stableMessageId, type: 'thinking', patch } }
+        ? { shouldDispatch: false, reconcile: { target: held, patch } }
         : empty
     }
   }
@@ -306,6 +319,7 @@ export function handleMessage(
   const replayedThinkingDurationMs = isReplayedThinking
     ? parseFiniteNonNegIntField(msg, 'thinkingDurationMs', MAX_SANE_DURATION_MS)
     : undefined
+  const replayedThinkingTokens = isReplayedThinking ? parseFiniteNonNegIntField(msg, 'thinkingTokens') : undefined
 
   const chatMessage: ChatMessage = {
     id: resolvedMessageId,
@@ -321,6 +335,7 @@ export function handleMessage(
           thinkingStreaming: false,
           ...(msg.content.length > MAX_THINKING_CONTENT_LEN ? { thinkingTruncated: true } : null),
           ...(replayedThinkingDurationMs !== undefined ? { thinkingDurationMs: replayedThinkingDurationMs } : null),
+          ...(replayedThinkingTokens !== undefined ? { thinkingTokens: replayedThinkingTokens } : null),
         }
       : null),
     tool: typeof msg.tool === 'string' ? msg.tool : undefined,
@@ -419,7 +434,11 @@ export function handleMessage(
   // for the error that just happened. (The bubble itself is still rebuilt.)
   let isRateLimitError = false
   let errorContent: string | null = null
-  if (msgType === 'error' && !receivingHistoryReplay) {
+  //
+  // Only a REPLAYED ENTRY is suppressed -- a frame that carries `historySeq` -- not any
+  // frame that arrives while the session's replay window is open: a live quota error
+  // that lands between two replay chunks is new, and its alert is owed.
+  if (msgType === 'error' && !isReplayedEntry) {
     if (isRateLimitMessage(msg.content)) {
       isRateLimitError = true
       errorContent = msg.content
