@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { TURN_TERMINATION_REASONS } from '@chroxy/protocol'
-import { SdkSession } from '../src/sdk-session.js'
+import { SdkSession, isProcessExitError } from '../src/sdk-session.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 
 /**
@@ -70,17 +70,82 @@ describe('SdkSession — a Stop that completes normally, and a process exit, are
   }
   const okResult = { type: 'result', session_id: 'sess-x', total_cost_usd: 0, duration_ms: 5, usage: {} }
 
+  // An async generator object has no `interrupt()`; the real Query does. Without
+  // one, `SdkSession.interrupt()` swallows a TypeError and the "Stop" under test
+  // never reaches the SDK, so give the fake the method the real path calls.
+  function withInterrupt(gen, onInterrupt = async () => {}) {
+    const calls = { interrupts: 0 }
+    gen.interrupt = async () => {
+      calls.interrupts++
+      await onInterrupt()
+    }
+    return { gen, calls }
+  }
+
   it('Stop acknowledged by a NORMAL result tags the cut-off tool user_stop', async () => {
-    const { session, results } = run((s) => (async function* () {
-      yield bashStart
-      await s.interrupt() // the user pressed Stop; the SDK then ends the turn normally
-      yield okResult
-    })())
+    let interruptCalls
+    const { session, results } = run((s) => {
+      const { gen, calls } = withInterrupt((async function* () {
+        yield bashStart
+        await s.interrupt() // the user pressed Stop; the SDK then ends the turn normally
+        yield okResult
+      })())
+      interruptCalls = calls
+      return gen
+    })
     await session.sendMessage('go')
     session.destroy()
+    assert.equal(interruptCalls.interrupts, 1, 'the Stop reached the SDK query\'s interrupt()')
     assert.equal(results.length, 1)
     assert.equal(results[0].toolUseId, 'toolu_cut')
     assert.equal(results[0].terminatedReason, 'user_stop')
+  })
+
+  it('a Stop that lands while a FAILED turn awaits classification does NOT relabel it user_stop', async () => {
+    // The turn already failed (the query threw, outcome observed, and
+    // `wasIntentionalStop` was captured false). The catch then awaits container
+    // classification; a Stop arriving in that window -- even one whose interrupt
+    // rejects -- must not retag the failure's tools as the user's doing.
+    let release
+    const gate = new Promise((r) => { release = r })
+    let entered
+    const enteredClassify = new Promise((r) => { entered = r })
+    let interruptCalls
+    const { session, results } = run(() => {
+      const { gen, calls } = withInterrupt((async function* () {
+        yield bashStart
+        throw new Error('socket hang up')
+      })(), async () => { throw new Error('interrupt rejected') })
+      interruptCalls = calls
+      return gen
+    })
+    session._classifyContainerFailure = async () => {
+      entered()
+      await gate
+      return null
+    }
+    const turn = session.sendMessage('go')
+    await enteredClassify
+    await session.interrupt()
+    release()
+    await turn
+    session.destroy()
+    assert.equal(interruptCalls.interrupts, 1, 'the Stop was delivered during the await')
+    assert.equal(results.length, 1)
+    assert.equal(results[0].toolUseId, 'toolu_cut')
+    assert.equal('terminatedReason' in results[0], false, 'the failure keeps the outcome it already observed')
+  })
+
+  it('a turn starts with no Stop requested, whatever leaked from the last one', async () => {
+    let seenAtStart
+    const { session } = run((s) => (async function* () {
+      seenAtStart = s._stopRequestedThisTurn
+      yield okResult
+    })())
+    session._stopRequestedThisTurn = true // a leak from an exit path that forgot to reset it
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(seenAtStart, false)
   })
 
   it('POSITIVE CONTROL: the same normal result with no Stop stays an untagged failure', async () => {
@@ -105,6 +170,28 @@ describe('SdkSession — a Stop that completes normally, and a process exit, are
     assert.equal(results[0].terminatedReason, 'process_exit')
   })
 
+  it('a signal-terminated process tags the tool process_exit', async () => {
+    const { session, results } = run(() => (async function* () {
+      yield bashStart
+      throw new Error('Claude Code process terminated by signal SIGKILL')
+    })())
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(results.length, 1)
+    assert.equal(results[0].terminatedReason, 'process_exit')
+  })
+
+  it('NEGATIVE: an unrelated "subprocess exited with code" error is not read as the CLI dying', async () => {
+    const { session, results } = run(() => (async function* () {
+      yield bashStart
+      throw new Error('subprocess exited with code 1')
+    })())
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(results.length, 1)
+    assert.equal('terminatedReason' in results[0], false)
+  })
+
   it('POSITIVE CONTROL: any other thrown error keeps the generic sweep', async () => {
     const { session, results } = run(() => (async function* () {
       yield bashStart
@@ -114,6 +201,32 @@ describe('SdkSession — a Stop that completes normally, and a process exit, are
     session.destroy()
     assert.equal(results.length, 1)
     assert.equal('terminatedReason' in results[0], false)
+  })
+})
+
+describe('isProcessExitError — anchored to the SDK message forms (#7376)', () => {
+  for (const msg of [
+    'Claude Code process exited with code 1',
+    'Claude Code process exited with code 137',
+    'Claude Code process terminated by signal SIGKILL',
+    'Claude Code process terminated by signal SIGTERM',
+  ]) {
+    it(`matches: ${msg}`, () => assert.equal(isProcessExitError(new Error(msg)), true))
+  }
+  for (const msg of [
+    'subprocess exited with code 1',
+    'the Claude Code process exited with code 1 inside a hook', // mentions it, is not it
+    'Claude Code process exited', // no code
+    'Claude Code process exited with code abc', // not a number
+    'Claude Code process terminated by signal', // no signal
+    'Claude Code process aborted by user', // a different SDK message
+    'socket hang up',
+  ]) {
+    it(`does not match: ${msg}`, () => assert.equal(isProcessExitError(new Error(msg)), false))
+  }
+  it('does not match nothing', () => {
+    assert.equal(isProcessExitError(undefined), false)
+    assert.equal(isProcessExitError(null), false)
   })
 })
 

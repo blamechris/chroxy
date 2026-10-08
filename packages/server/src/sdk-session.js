@@ -142,12 +142,17 @@ export function isSdkToolCancellationText(text) {
  * @param {unknown} err
  * @returns {boolean}
  */
-function isProcessExitError(err) {
+export function isProcessExitError(err) {
   if (!err) return false
   const text = typeof err.message === 'string' ? err.message : String(err)
-  // The SDK transport's shapes for a CLI process that died under the query
-  // ("Claude Code process exited with code N", "... terminated by signal SIGx").
-  return /process exited with code\b|terminated by signal\b/i.test(text)
+  // The SDK transport's two shapes for a CLI process that died under the query
+  // (sdk.mjs: `Claude Code process exited with code ${code}` and
+  // `Claude Code process terminated by signal ${signal}`), ANCHORED to the start
+  // of the message so an unrelated error that merely mentions a subprocess
+  // exiting ("subprocess exited with code 1", "the Claude Code process exited
+  // with code 1 in the hook") is not read as the CLI dying. A CLI that exits 1
+  // on an API or auth failure is still a process exit, and is labelled one.
+  return /^Claude Code process (?:exited with code -?\d+|terminated by signal SIG[A-Z0-9]+)\b/.test(text)
 }
 
 /**
@@ -926,6 +931,8 @@ export class SdkSession extends BaseSession {
     }
 
     this._isBusy = true
+    // #7376: a turn starts with no Stop requested, whatever the last one did.
+    this._stopRequestedThisTurn = false
     // #8300: a per-session monotonic turn token. `supersededByNewerTurn`
     // compares against it: unlike a handle comparison it never reverts once
     // a follow-up turn has started and ended.
@@ -1551,7 +1558,7 @@ export class SdkSession extends BaseSession {
         // tool_results to the dashboard.
         // A superseded turn emits its result directly: `_emitResult` would
         // sweep the shared in-flight tool_starts, which are the successor's.
-        ;(superseded ? (payload) => this.emit('result', payload) : (payload, reason) => this._emitResult(payload, reason))({
+        ;(superseded ? (payload) => this.emit('result', payload) : (payload, reason, opts) => this._emitResult(payload, reason, opts))({
           sessionId: msg.session_id || this._sdkSessionId,
           cost: msg.total_cost_usd,
           duration: msg.duration_ms,
@@ -1566,7 +1573,7 @@ export class SdkSession extends BaseSession {
           // Wire field is contextOccupancy — NOT contextUsage — so it can
           // never be confused with the billing `usage` aggregate above.
           ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
-        }, 'turn_ended_with_orphan_tool_start')
+        }, 'turn_ended_with_orphan_tool_start', { completion: 'normal' }) // #7376
 
         // #7340: NOT `{ turnEndedCleanly: true }`, however much this looks
         // like CliSession's `result` branch -- and the difference is the
@@ -1591,7 +1598,7 @@ export class SdkSession extends BaseSession {
         // (the `background_task_ended_with_turn` error above) instead of
         // leaving the loss silent. Exempting on this path needs the query
         // kept alive past `result`, which is a much larger change.
-        if (!superseded) this._clearMessageState()
+        if (!superseded) this._clearMessageState({ completion: 'normal' }) // #7376
 
         // #8300: the prompt is answered — release the streaming input so the
         // SDK closes the CLI's stdin and the process exits once idle. With

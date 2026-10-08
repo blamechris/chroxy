@@ -960,6 +960,8 @@ export class CliSession extends BaseSession {
     }
 
     this._isBusy = true
+    // #7376: a turn starts with no Stop requested, whatever the last one did.
+    this._stopRequestedThisTurn = false
     this._messageCounter++
     // `msg-{bootPrefix}-{counter}` — see BaseSession constructor for why
     // the boot-unique prefix is needed (#3700). Format change does not
@@ -1628,7 +1630,14 @@ export class CliSession extends BaseSession {
         // survives the sweep and clears later on `task_notification`. This and
         // SdkSession's `result` are the ONLY two sites that may pass this flag;
         // see the contract on `BaseSession._clearMessageState`.
-        this._clearMessageState({ turnEndedCleanly: true })
+        // #7376: `completion: 'normal'` -- the child's own `result` ended the
+        // turn, so a Stop requested during it is what cut its tools off.
+        // Also disarm the user-stop flag: the child survived the SIGINT (this
+        // is its answer to it), and `_clearMessageState` cancels the 5s timer
+        // that would otherwise have disarmed it, so without this a crash in
+        // the NEXT turn read as the user's Stop.
+        this._clearIntentionalStop()
+        this._clearMessageState({ turnEndedCleanly: true, completion: 'normal' })
         break
       }
     }

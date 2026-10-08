@@ -412,10 +412,12 @@ export class SessionMessageHistory extends EventEmitter {
           result: data.result,
           truncated: data.truncated,
           // #7376: persist the failed / terminated markers, not just the text.
-          // This entry is what a reconnect or session switch replays raw
-          // (Sync Full History reads the native JSONL instead, whose parser
-          // keeps no tool results, so it carries neither marker) -- without them the live "turn terminated" (or "failed")
-          // state silently reverted to a plain green result on replay. Only the
+          // This entry is what a reconnect or session switch replays raw.
+          // (Sync Full History PREFERS the native JSONL, whose parser keeps no
+          // tool results, so that path carries neither marker; the ring-buffer
+          // fallback still replays this entry.) Without them the live "turn
+          // terminated" (or "failed") state silently reverted to a plain green
+          // result on replay. Only the
           // meaningful values are stored (`isError: true`, a string reason), so
           // entries for ordinary successful results are byte-for-byte unchanged.
           ...(data.isError === true ? { isError: true } : {}),

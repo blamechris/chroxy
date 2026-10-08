@@ -2019,7 +2019,7 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     // #7376 — a tool cut off by a terminated turn (permission-mode switch, Stop,
     // crash, watchdog) is NOT a failed command. The server tags the synthetic
     // result with `terminatedReason`; both clients must attach it onto the
-    // tool_use bubble so each renders "re-send" instead of the failure styling.
+    // tool_use bubble so each renders "cut off by the turn ending" instead of the failure styling.
     name: 'tool_result carries terminatedReason onto the tool_use bubble',
     type: 'tool_result',
     init: {

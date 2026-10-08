@@ -1983,7 +1983,7 @@ export class BaseSession extends EventEmitter {
    * tool did not fail, its turn was ended underneath it. The result then also
    * carries `terminatedReason` (the one diagnostic-adjacent field that IS on
    * the wire, `ServerToolResultSchema.terminatedReason`) and says so in its
-   * text, so a client can render "the turn was terminated, re-send" instead of
+   * text, so a client can render "cut off by the turn ending; check whether it took effect" instead of
    * the failure styling. Every other sweep reason (the natural turn end that
    * simply never saw a result) keeps the original wording and no
    * `terminatedReason`: those really are indistinguishable from a failure.
@@ -1991,14 +1991,23 @@ export class BaseSession extends EventEmitter {
    * @param {string} reason — short identifier for the sweep cause
    * @returns {number} count of sweeps emitted
    */
-  _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result', exempt = null) {
+  _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result', exempt = null, { completion } = {}) {
     if (this._inFlightToolStarts.size === 0) return 0
-    // #7376: a Stop the provider acknowledged with a NORMAL result (or a
-    // completion that raced it) reaches here with a generic reason, because the
-    // path that ended the turn did not know a Stop had been requested. The
-    // turn-scoped flag does, and the tools still unresolved were cut off by it.
-    // An explicit termination reason (a crash, a watchdog) is never overridden.
-    if (this._stopRequestedThisTurn && !isTurnTerminationReason(reason)) reason = 'user_stop'
+    // #7376: a Stop the provider acknowledged with a NORMAL result reaches here
+    // with a generic reason, because the path that ended the turn did not know a
+    // Stop had been requested. The turn-scoped flag does, and the tools still
+    // unresolved were cut off by it.
+    //
+    // ONLY on a normal completion -- the caller says so with
+    // `completion: 'normal'`, and nothing else is inferred. A failure cleanup
+    // (a query that threw, a child that died, a destroy) has already observed
+    // its own outcome, and a Stop that lands while it is still awaiting
+    // something (the SDK's container classification) must not relabel that
+    // outcome as the user's doing. An explicit termination reason is never
+    // overridden either.
+    if (completion === 'normal' && this._stopRequestedThisTurn && !isTurnTerminationReason(reason)) {
+      reason = 'user_stop'
+    }
     let count = 0
     for (const [toolUseId, entry] of [...this._inFlightToolStarts]) {
       // #7340: a confirmed-backgrounded subagent that has not reported back is
@@ -2037,9 +2046,12 @@ export class BaseSession extends EventEmitter {
    *
    * @param {object} payload — the result event payload ({cost, duration, usage, sessionId})
    * @param {string} [sweepReason] — optional override for the sweep reason
+   * @param {{ completion?: 'normal' }} [opts] — #7376: `completion: 'normal'`
+   *   says the turn ended with the provider's own `result`; see
+   *   `_sweepUnresolvedToolStarts` for what that permits.
    */
-  _emitResult(payload, sweepReason = 'stream_completed_without_result') {
-    this._sweepUnresolvedToolStarts(sweepReason)
+  _emitResult(payload, sweepReason = 'stream_completed_without_result', opts = {}) {
+    this._sweepUnresolvedToolStarts(sweepReason, null, opts)
     // queueLength is stamped centrally in the emit() override below (#6627/#6706).
     this.emit('result', payload)
   }
@@ -2359,7 +2371,12 @@ export class BaseSession extends EventEmitter {
    *   drops them fails safe (it sweeps), which is why the forwarding is a
    *   correctness nicety here rather than a hazard.
    *
-   * @param {{ turnEndedCleanly?: boolean, terminatedReason?: string }} [opts]
+   * @param {{ turnEndedCleanly?: boolean, terminatedReason?: string, completion?: 'normal' }} [opts]
+   *   `completion: 'normal'` (#7376) says the turn ended with the provider's own
+   *   `result`. Only then may a Stop requested during the turn tag the tools it
+   *   left unresolved as `user_stop`: every other caller is a failure or teardown
+   *   path that has already observed its own outcome, and keeps it.
+   *
    *   `terminatedReason` (#7376) is WHY the turn is being ended underneath
    *   whatever tool is still in flight -- a `TURN_TERMINATION_REASONS` value
    *   (`permission_mode_switch`, `user_stop`, `process_exit`, ...). It becomes
@@ -2370,7 +2387,7 @@ export class BaseSession extends EventEmitter {
    *   here would mislabel. Omitted on the paths that have no considered cause --
    *   those keep the generic `message_state_cleared` sweep.
    */
-  _clearMessageState({ turnEndedCleanly = false, terminatedReason } = {}) {
+  _clearMessageState({ turnEndedCleanly = false, terminatedReason, completion } = {}) {
     // #7382 (review): expire HERE, so inheriting the bookkeeping also inherits
     // the BEHAVIOUR. Hoisting the API alone bought a new provider the methods
     // and none of the wiring — and the roster guard, which only checked that
@@ -2421,6 +2438,7 @@ export class BaseSession extends EventEmitter {
     this._sweepUnresolvedToolStarts(
       isTurnTerminationReason(terminatedReason) ? terminatedReason : 'message_state_cleared',
       survivingAgents,
+      { completion },
     )
     // #7376: the turn is over; a Stop requested during it must not tag the next.
     this._stopRequestedThisTurn = false
