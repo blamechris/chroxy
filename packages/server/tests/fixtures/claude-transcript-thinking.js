@@ -83,11 +83,12 @@ export function textEntry(text, { ts, apiBlockIndex = 1 } = {}) {
   }))
 }
 
-export function toolUseEntry({ ts, apiBlockIndex = 2 } = {}) {
+export function toolUseEntry({ ts, apiBlockIndex = 2, id = 'toolu_01FIXTURE', sidechain = false } = {}) {
   return JSON.stringify(baseEntry({
     ...(ts ? { timestamp: ts } : {}),
+    isSidechain: sidechain,
     message: messageOf(
-      [{ type: 'tool_use', id: 'toolu_01FIXTURE', name: 'Read', input: { file_path: '/tmp/x' } }],
+      [{ type: 'tool_use', id, name: 'Read', input: { file_path: '/tmp/x' } }],
       { stop_reason: 'tool_use' },
     ),
     apiBlockIndex,

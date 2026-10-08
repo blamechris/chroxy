@@ -171,6 +171,47 @@ describe('TranscriptTaskScanner — thinking capture (#7393)', () => {
     assert.equal(blocks[blocks.length - 1].text, 't599', 'the newest survive')
   })
 
+  it('records the tool_use ids it has read while capturing, sidechain included (a subagent\'s tool hooks must not wait for them)', () => {
+    write()
+    const scanner = new TranscriptTaskScanner(path)
+    scanner.startThinkingCapture(T0)
+    append(
+      toolUseEntry({ id: 'toolu_main', ts: '2026-10-08T12:00:05.000Z' }),
+      toolUseEntry({ id: 'toolu_side', sidechain: true, ts: '2026-10-08T12:00:06.000Z' }),
+    )
+    assert.equal(scanner.hasToolUse('toolu_main'), false, 'not before a scan has read it')
+    scanner.scan()
+    assert.equal(scanner.hasToolUse('toolu_main'), true)
+    assert.equal(scanner.hasToolUse('toolu_side'), true)
+    assert.equal(scanner.hasToolUse('toolu_other'), false)
+    assert.equal(scanner.hasToolUse(''), false)
+  })
+
+  it('records no tool_use ids when capture is off, and forgets them when it stops', () => {
+    write(toolUseEntry({ id: 'toolu_old', ts: '2026-10-08T11:00:00.000Z' }))
+    const scanner = new TranscriptTaskScanner(path)
+    scanner.scan()
+    assert.equal(scanner.hasToolUse('toolu_old'), false)
+    scanner.startThinkingCapture(T0)
+    append(toolUseEntry({ id: 'toolu_new', ts: '2026-10-08T12:00:05.000Z' }))
+    scanner.scan()
+    assert.equal(scanner.hasToolUse('toolu_new'), true)
+    scanner.stopThinkingCapture()
+    assert.equal(scanner.hasToolUse('toolu_new'), false)
+  })
+
+  it('bounds the tool_use id set', () => {
+    write()
+    const scanner = new TranscriptTaskScanner(path)
+    scanner.startThinkingCapture(T0)
+    const lines = []
+    for (let i = 0; i < 5000; i++) lines.push(toolUseEntry({ id: `toolu_${i}`, ts: '2026-10-08T12:00:05.000Z' }))
+    append(...lines)
+    scanner.scan()
+    assert.equal(scanner.hasToolUse('toolu_4999'), true)
+    assert.equal(scanner.hasToolUse('toolu_0'), false, 'the oldest fell out')
+  })
+
   it('leaves the existing scan result untouched (capture is purely additive)', () => {
     write()
     const scanner = new TranscriptTaskScanner(path)

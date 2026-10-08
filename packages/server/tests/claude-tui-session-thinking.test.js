@@ -368,13 +368,137 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     // block. (#8513 review: the throttle let tool_start through first.)
     s._lastThinkingScanMs = s._nowMonotonic()
     appendJournal(transcript, [thinkingEntry({ text: 'I should list the directory.', ts: now() }), toolUseEntry({ ts: now(1) })])
+    // No tool_use_id (older claude builds omit it), so the catch-up wait does not
+    // apply and only the forced drain before the batch can keep the order.
     writeFileSync(join(sinkDir, 'pre-aaa.json'), JSON.stringify({
-      tool_use_id: 'toolu_a', tool_name: 'Bash', tool_input: { command: 'ls' },
+      tool_name: 'Bash', tool_input: { command: 'ls' },
     }))
     await waitFor(() => order.includes('tool_start') && order.includes('thinking_end'), 'both events')
     stop(sinkDir)
     await turn
     assert.deepEqual(order, ['thinking_end', 'tool_start'])
+  })
+
+  // --- the real race: the hook is read before the transcript line is on disk ----
+  // Live smoke on 663a28672: claude's transcript had thinking at .588, tool_use at
+  // .594, and the PreToolUse hook was read BEFORE the transcript lines reached the
+  // disk, so a drain at any moment before the tool_start saw nothing to show.
+
+  const preHook = (sinkDir, id = 'toolu_01FIXTURE', name = 'pre-race.json') =>
+    writeFileSync(join(sinkDir, name), JSON.stringify({ tool_use_id: id, tool_name: 'Read', tool_input: { file_path: '/tmp/x' } }))
+
+  it('holds a tool_start until the transcript has caught up to its tool_use, so the thinking before it is shown first', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    const order = []
+    s.on('stream_end', (d) => { if (d.thinking) order.push('thinking_end') })
+    s.on('tool_start', () => order.push('tool_start'))
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+
+    preHook(sinkDir) // the hook file is there FIRST ...
+    await new Promise((r) => setTimeout(r, 200)) // ... several poll passes go by with nothing in the transcript ...
+    assert.deepEqual(order, [], 'precondition: nothing has been emitted yet, tool_start is being held')
+    appendJournal(transcript, [ // ... and then claude's writer catches up
+      thinkingEntry({ text: 'I should read the file.', durationMs: 6, ts: now() }),
+      toolUseEntry({ id: 'toolu_01FIXTURE', ts: now(6) }),
+    ])
+    await waitFor(() => order.includes('tool_start'), 'the tool_start')
+    stop(sinkDir)
+    await turn
+    assert.deepEqual(order, ['thinking_end', 'tool_start'])
+    assert.equal(events.errors.length, 0)
+  })
+
+  it('adds no wait when the transcript is already ahead of the hook', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, sinkDir } = makeTurnSession()
+    const waits = []
+    const real = s._awaitTranscriptCatchUp.bind(s)
+    s._awaitTranscriptCatchUp = async (...a) => { const t0 = Date.now(); const r = await real(...a); waits.push(Date.now() - t0); return r }
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    appendJournal(transcript, [thinkingEntry({ text: 'x', ts: now() }), toolUseEntry({ id: 'toolu_01FIXTURE', ts: now(1) })])
+    preHook(sinkDir)
+    await waitFor(() => waits.length >= 1, 'the catch-up check')
+    stop(sinkDir)
+    await turn
+    assert.ok(waits.every((w) => w < 40), `catch-up cost ${waits.join(',')} ms with the transcript already flushed`)
+  })
+
+  it('a turn with many tools pays nothing per tool once the transcript is ahead', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, sinkDir } = makeTurnSession()
+    const waits = []
+    const real = s._awaitTranscriptCatchUp.bind(s)
+    s._awaitTranscriptCatchUp = async (...a) => { const t0 = Date.now(); const r = await real(...a); waits.push(Date.now() - t0); return r }
+    let toolStarts = 0
+    s.on('tool_start', () => { toolStarts++ })
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    const ids = Array.from({ length: 12 }, (_, i) => `toolu_many_${i}`)
+    appendJournal(transcript, ids.flatMap((id, i) => [
+      thinkingEntry({ text: `plan ${i}`, ts: now(i * 2) }),
+      toolUseEntry({ id, ts: now(i * 2 + 1) }),
+    ]))
+    ids.forEach((id, i) => preHook(sinkDir, id, `pre-${String(i).padStart(2, '0')}.json`))
+    await waitFor(() => toolStarts === 12, 'all 12 tool_starts')
+    stop(sinkDir)
+    await turn
+    assert.equal(waits.length, 12)
+    assert.ok(waits.reduce((a, b) => a + b, 0) < 100, `total catch-up cost ${waits.reduce((a, b) => a + b, 0)} ms for 12 tools`)
+  })
+
+  it('gives up after the bounded wait, still emits the tool_start, logs once, and does not wait again that turn', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    s._toolCatchUpMs = 800
+    const warns = []
+    s._log = { ...console, info() {}, debug() {}, error() {}, warn: (m) => warns.push(String(m)) }
+    const toolStarts = []
+    s.on('tool_start', (d) => toolStarts.push({ id: d.toolUseId, at: Date.now() }))
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+
+    const t0 = Date.now()
+    preHook(sinkDir, 'toolu_never_in_transcript', 'pre-1.json')
+    await waitFor(() => toolStarts.length === 1, 'the first tool_start after the bounded wait')
+    const firstDelay = toolStarts[0].at - t0
+    assert.ok(firstDelay >= 750, `held for the bounded wait (${firstDelay} ms)`)
+    assert.ok(firstDelay < 2500, `but not forever (${firstDelay} ms)`)
+
+    const t1 = Date.now()
+    preHook(sinkDir, 'toolu_second_never', 'pre-2.json')
+    await waitFor(() => toolStarts.length === 2, 'the second tool_start')
+    assert.ok(toolStarts[1].at - t1 < 450, `the second tool does not wait again (${toolStarts[1].at - t1} ms)`)
+
+    stop(sinkDir)
+    await turn
+    assert.equal(warns.filter((m) => /transcript/i.test(m) && /tool_start/i.test(m)).length, 1, 'logged once')
+    assert.equal(events.errors.length, 0)
+    assert.equal(events.results.length, 1, 'the turn still completes')
+  })
+
+  it('does not hold a tool_start when thinking is off', async () => {
+    process.env.CHROXY_TUI_THINKING = '0'
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s, sinkDir } = makeTurnSession()
+    s._toolCatchUpMs = 5000
+    const at = []
+    s.on('tool_start', () => at.push(Date.now()))
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    const t0 = Date.now()
+    preHook(sinkDir, 'toolu_whatever')
+    await waitFor(() => at.length === 1, 'tool_start')
+    assert.ok(at[0] - t0 < 600)
+    stop(sinkDir)
+    await turn
   })
 
   it('picks up reasoning that lands while a hook batch is being consumed, still ahead of the response', async () => {

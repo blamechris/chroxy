@@ -821,6 +821,7 @@ export class ClaudeTuiSession extends BaseSession {
     // field, like `_authTranscriptScanMs`, so a test can shrink the cadence.
     this._thinkingEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.CHROXY_TUI_THINKING ?? '').trim().toLowerCase())
     this._thinkingScanMs = ClaudeTuiSession.THINKING_SCAN_MS
+    this._toolCatchUpMs = ClaudeTuiSession.TOOL_CATCH_UP_MS
     this._lastThinkingScanMs = 0
     // #8400: usage-limit / rate-limit / overload, read from the same transcript.
     // `_usageLimitBaseline` is the cumulative count at turn start (null until a
@@ -2046,6 +2047,11 @@ export class ClaudeTuiSession extends BaseSession {
   // is what the user watches: a reasoning block shows up within about this long
   // of claude writing it. The read is incremental (only appended bytes).
   static get THINKING_SCAN_MS() { return 250 }
+  // #7393: the longest a PreToolUse hook's tool_start is held back for the
+  // transcript to catch up to the tool_use (and so to the thinking before it).
+  // One timeout per turn, then the turn stops waiting.
+  static get TOOL_CATCH_UP_MS() { return 500 }
+  static get TOOL_CATCH_UP_POLL_MS() { return 15 }
   // #8400: how long a reported usage limit shortens a repeat of itself to one line. The
   // longest window claude names is the 5-hour session, so a retry inside six
   // hours of the message is the same episode; past that, the message is a
@@ -4555,6 +4561,15 @@ export class ClaudeTuiSession extends BaseSession {
         pending.push({ name, full, parsed })
       }
       if (pending.length === 0) return
+      // #7393: a PreToolUse hook can be read a few ms BEFORE the transcript lines
+      // for the tool_use, and the thinking block ahead of it, reach the disk
+      // (live smoke on #8513). No drain timing fixes that, so order by the
+      // transcript itself: hold each tool_start until the entry carrying its
+      // tool_use id has been read. Before the sink re-validation below, so that
+      // check stays the last thing before the events go out.
+      for (const { name, parsed } of pending) {
+        if (name.startsWith('pre-')) await this._awaitTranscriptCatchUp(parsed?.tool_use_id)
+      }
       const postCheck = await this._validateSinkBaseAsync()
       if (postCheck.timedOut) {
         // Same availability-vs-security distinction as the top-of-pass check:
@@ -5756,6 +5771,39 @@ export class ClaudeTuiSession extends BaseSession {
       }
     } catch (err) {
       ;(this._log || log).debug?.(`thinking drain failed: ${err?.message} — no reasoning this pass`)
+    }
+  }
+
+  /**
+   * #7393 — wait (bounded) until the transcript holds the entry for `toolUseId`,
+   * emitting every thinking block read on the way. The transcript is ordered and
+   * claude writes thinking before the tool_use it leads to, so once the tool_use
+   * has been read the thinking before it is on the wire: tool_start can follow.
+   *
+   * Costs nothing when the transcript is already ahead (the first check passes).
+   * Never wedges the turn: after `_toolCatchUpMs` it logs once and lets the
+   * tool_start out, and the rest of that turn stops waiting (an unreadable or
+   * lagging transcript must not tax every tool call). Skipped when thinking is
+   * off, the turn is aborted, or the hook carries no tool_use id.
+   */
+  async _awaitTranscriptCatchUp(toolUseId) {
+    const turn = this._activeTurn
+    const thinking = turn?.thinking
+    if (!thinking || turn.aborted || thinking.catchUpGaveUp) return
+    if (typeof toolUseId !== 'string' || !toolUseId) return
+    const deadline = this._nowMonotonic() + this._toolCatchUpMs
+    for (;;) {
+      this._drainTurnThinking({ force: true })
+      const scanner = this._transcriptTaskScanner
+      if (!scanner) return // no transcript to wait on (no session file yet): nothing to order against
+      if (scanner.hasToolUse(toolUseId)) return
+      if (this._nowMonotonic() >= deadline || this._activeTurn !== turn || turn.aborted || this._ptyExited) break
+      await new Promise((r) => setTimeout(r, ClaudeTuiSession.TOOL_CATCH_UP_POLL_MS))
+      if (this._activeTurn !== turn) return
+    }
+    if (this._activeTurn === turn && !turn.aborted && !this._ptyExited) {
+      thinking.catchUpGaveUp = true
+      ;(this._log || log).warn(`transcript did not reach tool_use ${toolUseId} within ${this._toolCatchUpMs}ms — emitting its tool_start without waiting; reasoning before it may arrive after it (further tools this turn will not wait)`)
     }
   }
 
