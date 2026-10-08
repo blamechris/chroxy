@@ -371,14 +371,7 @@ pub fn pick_then_act<T, U>(mutex: &std::sync::Mutex<T>, pick: impl FnOnce(&T) ->
 /// that answers like chroxy is adoptable only when a fresh challenge returns a
 /// proof bound to the API token and to this port; any other answer is foreign.
 pub fn probe_port(port: u16, timeout: Duration) -> PortState {
-    probe_with_retry(
-        port,
-        timeout,
-        crate::config::proof_token(),
-        crate::config::fresh_token,
-        probe_port_with_token,
-    )
-    .0
+    probe_effective(port, timeout, &REAL_TOKEN_SOURCES, probe_port_outcome).0
 }
 
 /// The token that makes the daemon on `port` prove itself now, or `None`.
@@ -389,36 +382,62 @@ pub fn probe_port(port: u16, timeout: Duration) -> PortState {
 /// returns: the one that proved, not a copy read earlier. The state the tray
 /// cached from an earlier probe never authorises a handoff.
 pub fn prove_daemon(port: u16, timeout: Duration) -> Option<String> {
-    match probe_with_retry(
-        port,
-        timeout,
-        crate::config::proof_token(),
-        crate::config::fresh_token,
-        probe_port_with_token,
-    ) {
+    match probe_effective(port, timeout, &REAL_TOKEN_SOURCES, probe_port_outcome) {
         (PortState::Chroxy(_), token) => token,
         _ => None,
     }
 }
 
-/// Probe with `first`; if the holder answers but its proof does not verify, probe
-/// once more with the token `fresh` loads (when that is a different token).
-/// Returns the state and, for `Chroxy`, the token that proved it.
+/// Where the tokens come from: the one the app holds (read through its cache) and
+/// a fresh load for the retry.
+pub struct TokenSources {
+    pub first: fn() -> Option<String>,
+    pub fresh: fn() -> Option<String>,
+}
+
+/// The app's real token sources. [`probe_port`] and [`prove_daemon`] both read them.
+pub const REAL_TOKEN_SOURCES: TokenSources = TokenSources {
+    first: crate::config::proof_token,
+    fresh: crate::config::fresh_token,
+};
+
+/// [`probe_with_retry`] over `sources`: the first token is read once, and the
+/// fresh one only if the retry is needed.
+pub fn probe_effective(
+    port: u16,
+    timeout: Duration,
+    sources: &TokenSources,
+    probe: impl Fn(u16, Duration, Option<&str>) -> ProbeResult,
+) -> (PortState, Option<String>) {
+    probe_with_retry(port, timeout, (sources.first)(), sources.fresh, probe)
+}
+
+/// What one probe found, and whether the holder answered like chroxy with a proof
+/// that did not verify (the only case a different token could change).
+pub type ProbeResult = (PortState, bool);
+
+/// Probe with `first`; if the holder answered like chroxy with a proof that does
+/// not verify, probe once more with the token `fresh` loads (when that is a
+/// different one). A holder that is not chroxy, or gave no proof, never reads
+/// `fresh`: the credential store is not touched on its account. Returns the state
+/// and, for `Chroxy`, the token that proved it.
 pub fn probe_with_retry(
     port: u16,
     timeout: Duration,
     first: Option<String>,
     fresh: impl FnOnce() -> Option<String>,
-    probe: impl Fn(u16, Duration, Option<&str>) -> PortState,
+    probe: impl Fn(u16, Duration, Option<&str>) -> ProbeResult,
 ) -> (PortState, Option<String>) {
-    let state = probe(port, timeout, first.as_deref());
+    let (state, proof_failed) = probe(port, timeout, first.as_deref());
     if !matches!(state, PortState::Foreign(_)) {
         return (state, first);
     }
-    if let Some(retry) = fresh().filter(|t| !t.is_empty() && Some(t) != first.as_ref()) {
-        let second = probe(port, timeout, Some(&retry));
-        if second == PortState::Chroxy(port) {
-            return (second, Some(retry));
+    if proof_failed {
+        if let Some(retry) = fresh().filter(|t| !t.is_empty() && Some(t) != first.as_ref()) {
+            let (second, _) = probe(port, timeout, Some(&retry));
+            if second == PortState::Chroxy(port) {
+                return (second, Some(retry));
+            }
         }
     }
     (state, None)
@@ -427,16 +446,28 @@ pub fn probe_with_retry(
 /// [`probe_port`] with the token passed in and no retry. With no token, or if the
 /// OS RNG fails, no proof can be checked and a chroxy-shaped holder is foreign.
 pub fn probe_port_with_token(port: u16, timeout: Duration, token: Option<&str>) -> PortState {
+    probe_port_outcome(port, timeout, token).0
+}
+
+/// [`probe_port_with_token`], also saying whether the holder gave a chroxy-shaped
+/// body whose `proof` did not verify.
+pub fn probe_port_outcome(port: u16, timeout: Duration, token: Option<&str>) -> ProbeResult {
     let nonce = health_proof::fresh_nonce();
     let path = match &nonce {
         Some(n) => health_proof::challenge_path(n),
         None => "/health".to_string(),
     };
     let outcome = request_health(port, &path, timeout);
-    classify_probe(port, &outcome, |body| match (token, nonce.as_deref()) {
-        (Some(t), Some(n)) => health_proof::body_proves_daemon(body, t, port, n),
-        _ => false,
-    })
+    let mut proof_failed = false;
+    let state = classify_probe(port, &outcome, |body| {
+        let proved = match (token, nonce.as_deref()) {
+            (Some(t), Some(n)) => health_proof::body_proves_daemon(body, t, port, n),
+            _ => false,
+        };
+        proof_failed = !proved && health_proof::proof_field(body).is_some();
+        proved
+    });
+    (state, proof_failed)
 }
 
 fn request_health(port: u16, path: &str, timeout: Duration) -> HealthOutcome {
@@ -923,30 +954,73 @@ mod tests {
 
     // --- a rotated token: one retry with a freshly loaded token -----------
 
-    fn chroxy_only_for(good: &'static str) -> impl Fn(u16, Duration, Option<&str>) -> PortState {
-        move |port, _, token| if token == Some(good) { PortState::Chroxy(port) } else { PortState::Foreign(port) }
+    /// A fake probe: chroxy for `good`, otherwise foreign with `proof_failed`.
+    fn chroxy_only_for(good: &'static str, proof_failed: bool) -> impl Fn(u16, Duration, Option<&str>) -> ProbeResult {
+        move |port, _, token| {
+            if token == Some(good) {
+                (PortState::Chroxy(port), false)
+            } else {
+                (PortState::Foreign(port), proof_failed)
+            }
+        }
     }
 
     #[test]
     fn a_proof_that_fails_with_the_cached_token_is_retried_once_with_a_fresh_one() {
-        let (state, token) = probe_with_retry(9000, T, Some("old".into()), || Some("new".into()), chroxy_only_for("new"));
+        let (state, token) = probe_with_retry(9000, T, Some("old".into()), || Some("new".into()), chroxy_only_for("new", true));
         assert_eq!(state, PortState::Chroxy(9000));
         assert_eq!(token.as_deref(), Some("new"), "the token that proved is the one handed back");
     }
 
     #[test]
     fn a_proof_that_verifies_the_first_time_does_not_read_a_fresh_token() {
-        let (state, token) = probe_with_retry(9000, T, Some("cur".into()), || panic!("read again"), chroxy_only_for("cur"));
+        let (state, token) = probe_with_retry(9000, T, Some("cur".into()), || panic!("read again"), chroxy_only_for("cur", true));
         assert_eq!((state, token.as_deref()), (PortState::Chroxy(9000), Some("cur")));
     }
 
     #[test]
+    fn a_holder_that_is_not_chroxy_never_reads_the_credential_store() {
+        // Foreign without a failed proof: not chroxy-shaped, or no proof field.
+        let reads = std::cell::Cell::new(0);
+        for _ in 0..3 {
+            let (state, token) = probe_with_retry(
+                9000,
+                T,
+                Some("cached".into()),
+                || {
+                    reads.set(reads.get() + 1);
+                    Some("fresh".into())
+                },
+                chroxy_only_for("fresh", false),
+            );
+            assert_eq!((state, token), (PortState::Foreign(9000), None));
+        }
+        assert_eq!(reads.get(), 0, "a foreign holder triggers no fresh read");
+    }
+
+    #[test]
+    fn a_rotated_token_triggers_exactly_one_fresh_read() {
+        let reads = std::cell::Cell::new(0);
+        let (state, token) = probe_with_retry(
+            9000,
+            T,
+            Some("old".into()),
+            || {
+                reads.set(reads.get() + 1);
+                Some("new".into())
+            },
+            chroxy_only_for("new", true),
+        );
+        assert_eq!((state, token.as_deref()), (PortState::Chroxy(9000), Some("new")));
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
     fn no_retry_is_made_for_an_unchanged_missing_or_empty_fresh_token_or_a_free_port() {
-        let always_foreign = |p: u16, _: Duration, _: Option<&str>| PortState::Foreign(p);
         let calls = std::cell::Cell::new(0);
         let counting = |p: u16, _: Duration, _: Option<&str>| {
             calls.set(calls.get() + 1);
-            PortState::Foreign(p)
+            (PortState::Foreign(p), true)
         };
         for fresh in [Some("same".to_string()), None, Some(String::new())] {
             calls.set(0);
@@ -954,9 +1028,10 @@ mod tests {
             assert_eq!((state, token), (PortState::Foreign(9000), None));
             assert_eq!(calls.get(), 1, "{:?}", fresh);
         }
-        let free = |p: u16, _: Duration, _: Option<&str>| { let _ = p; PortState::Free };
+        let free = |_: u16, _: Duration, _: Option<&str>| (PortState::Free, false);
         assert_eq!(probe_with_retry(9000, T, None, || panic!("free port"), free).0, PortState::Free);
-        assert_eq!(probe_with_retry(9000, T, Some("a".into()), || Some("b".into()), always_foreign).0, PortState::Foreign(9000));
+        let still_wrong = |p: u16, _: Duration, _: Option<&str>| (PortState::Foreign(p), true);
+        assert_eq!(probe_with_retry(9000, T, Some("a".into()), || Some("b".into()), still_wrong).0, PortState::Foreign(9000));
     }
 
     #[test]
@@ -967,14 +1042,81 @@ mod tests {
             T,
             Some("token-before-the-rotation".into()),
             || Some("rotated-token".into()),
-            probe_port_with_token,
+            probe_port_outcome,
         );
         assert_eq!(state, PortState::Chroxy(port));
         assert_eq!(token.as_deref(), Some("rotated-token"));
         // A holder that cannot prove with either token stays foreign.
         let port = serve_daemon("a-third-token", same_port);
-        let (state, token) = probe_with_retry(port, T, Some("x".into()), || Some("y".into()), probe_port_with_token);
+        let (state, token) = probe_with_retry(port, T, Some("x".into()), || Some("y".into()), probe_port_outcome);
         assert_eq!((state, token), (PortState::Foreign(port), None));
+    }
+
+    #[test]
+    fn a_real_holder_that_is_not_chroxy_or_has_no_proof_reads_no_fresh_token() {
+        let reads = std::cell::Cell::new(0);
+        let fresh = || {
+            reads.set(reads.get() + 1);
+            Some("fresh".to_string())
+        };
+        // Not chroxy-shaped.
+        let port = serve_with(|_, _| http_200("hello"));
+        assert_eq!(probe_with_retry(port, T, Some("a".into()), fresh, probe_port_outcome).0, PortState::Foreign(port));
+        // Chroxy-shaped with no proof field.
+        let port = serve_with(|_, _| http_200(GOOD));
+        assert_eq!(probe_with_retry(port, T, Some("a".into()), fresh, probe_port_outcome).0, PortState::Foreign(port));
+        // A closed port and a refusal.
+        let port = serve_with(|_, _| "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string());
+        assert_eq!(probe_with_retry(port, T, Some("a".into()), fresh, probe_port_outcome).0, PortState::Foreign(port));
+        assert_eq!(reads.get(), 0);
+    }
+
+    #[test]
+    fn a_chroxy_shaped_body_with_a_proof_that_does_not_verify_is_reported_as_such() {
+        let port = serve_daemon("someone-elses-token", same_port);
+        assert_eq!(probe_port_outcome(port, T, Some(TOKEN)), (PortState::Foreign(port), true));
+        let port = serve_with(|_, _| http_200(GOOD));
+        assert_eq!(probe_port_outcome(port, T, Some(TOKEN)), (PortState::Foreign(port), false));
+        let port = serve_daemon(TOKEN, same_port);
+        assert_eq!(probe_port_outcome(port, T, Some(TOKEN)), (PortState::Chroxy(port), false));
+    }
+
+    // --- the real token sources -------------------------------------------
+
+    #[test]
+    fn probe_port_and_prove_daemon_read_the_real_token_sources() {
+        // Both go through REAL_TOKEN_SOURCES, which must be the app's own readers.
+        let first: fn() -> Option<String> = crate::config::proof_token;
+        let fresh: fn() -> Option<String> = crate::config::fresh_token;
+        assert_eq!(REAL_TOKEN_SOURCES.first as usize, first as usize);
+        assert_eq!(REAL_TOKEN_SOURCES.fresh as usize, fresh as usize);
+    }
+
+    #[test]
+    fn probe_effective_reads_the_first_token_once_and_the_fresh_one_only_on_a_failed_proof() {
+        thread_local! {
+            static FIRST: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+            static FRESH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        fn first() -> Option<String> {
+            FIRST.with(|c| c.set(c.get() + 1));
+            Some("old".into())
+        }
+        fn fresh() -> Option<String> {
+            FRESH.with(|c| c.set(c.get() + 1));
+            Some("new".into())
+        }
+        let sources = TokenSources { first, fresh };
+        let port = serve_daemon("new", same_port);
+        let (state, token) = probe_effective(port, T, &sources, probe_port_outcome);
+        assert_eq!((state, token.as_deref()), (PortState::Chroxy(port), Some("new")));
+        assert_eq!((FIRST.with(|c| c.get()), FRESH.with(|c| c.get())), (1, 1));
+        // A daemon that proves with the first token never reads the fresh one.
+        let port = serve_daemon("old", same_port);
+        FRESH.with(|c| c.set(0));
+        let (state, _) = probe_effective(port, T, &sources, probe_port_outcome);
+        assert_eq!(state, PortState::Chroxy(port));
+        assert_eq!(FRESH.with(|c| c.get()), 0);
     }
 
     #[test]

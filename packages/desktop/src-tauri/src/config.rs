@@ -248,13 +248,32 @@ fn effective_token(
     token
 }
 
-fn effective_token_now(max_age: std::time::Duration) -> Option<String> {
+/// How old an answer from the credential store may be when it is reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenRead {
+    /// The tray's periodic probe: reuse an answer up to [`PROOF_TOKEN_TTL`] old.
+    Cached,
+    /// A retry after a proof failed: read again unless the answer is under
+    /// [`FRESH_TOKEN_MIN_AGE`] old.
+    Fresh,
+}
+
+impl TokenRead {
+    fn max_age(self) -> std::time::Duration {
+        match self {
+            TokenRead::Cached => PROOF_TOKEN_TTL,
+            TokenRead::Fresh => FRESH_TOKEN_MIN_AGE,
+        }
+    }
+}
+
+fn read_token(kind: TokenRead) -> Option<String> {
     let mut cache = KEYCHAIN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
     effective_token(
         load_config_file().api_token,
         &mut cache,
         std::time::Instant::now(),
-        max_age,
+        kind.max_age(),
         get_keychain_token,
     )
 }
@@ -264,14 +283,14 @@ fn effective_token_now(max_age: std::time::Duration) -> Option<String> {
 /// [`PROOF_TOKEN_TTL`]. The tray probes every few seconds, and spawning the
 /// credential tool each time would prompt over and over.
 pub fn proof_token() -> Option<String> {
-    effective_token_now(PROOF_TOKEN_TTL)
+    read_token(TokenRead::Cached)
 }
 
 /// The same source as [`proof_token`], read again: it bypasses the cache (except
 /// for an answer read within the last [`FRESH_TOKEN_MIN_AGE`]). A daemon whose
 /// token was rotated since the cache was filled proves with the new one.
 pub fn fresh_token() -> Option<String> {
-    effective_token_now(FRESH_TOKEN_MIN_AGE)
+    read_token(TokenRead::Fresh)
 }
 
 /// Parse `config.json` without the keychain fallback. Returns the default config
@@ -443,22 +462,36 @@ fn get_dpapi_token() -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let mut stdin = child.stdin.take()?;
-    stdin.write_all(cipher.as_bytes()).ok()?;
+    // Every way out below the spawn ends the child first.
+    let reap = |child: &mut std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        reap(&mut child);
+        return None;
+    };
+    if stdin.write_all(cipher.as_bytes()).is_err() {
+        reap(&mut child);
+        return None;
+    }
     drop(stdin);
 
     // Bounded, like the server's own read (5 s).
     let start = std::time::Instant::now();
     loop {
-        match child.try_wait().ok()? {
-            Some(status) if status.success() => break,
-            Some(_) => return None,
-            None if start.elapsed() > std::time::Duration::from_secs(5) => {
-                let _ = child.kill();
-                let _ = child.wait();
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => return None,
+            Ok(None) if start.elapsed() > std::time::Duration::from_secs(5) => {
+                reap(&mut child);
                 return None;
             }
-            None => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(_) => {
+                reap(&mut child);
+                return None;
+            }
         }
     }
     let mut out = String::new();
@@ -518,6 +551,22 @@ mod tests {
         assert_eq!(effective_token(None, &mut cache, later, PROOF_TOKEN_TTL, read("new")).as_deref(), Some("old"), "cached");
         let stale = t0 + Duration::from_secs(61);
         assert_eq!(effective_token(None, &mut cache, stale, PROOF_TOKEN_TTL, read("new")).as_deref(), Some("new"), "expired");
+    }
+
+    #[test]
+    fn a_fresh_read_has_a_short_age_limit_and_the_tray_read_a_long_one() {
+        assert_eq!(TokenRead::Cached.max_age(), Duration::from_secs(60));
+        assert_eq!(TokenRead::Fresh.max_age(), Duration::from_secs(2));
+        // An answer 10 s old is reused by the tray's read and not by a fresh one.
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(10);
+        let mut cache = TokenCache::new();
+        cache.put(t0, Some("old".into()));
+        let read = |kind: TokenRead, cache: &mut TokenCache| {
+            effective_token(None, cache, later, kind.max_age(), || Some("new".into()))
+        };
+        assert_eq!(read(TokenRead::Cached, &mut cache.clone()).as_deref(), Some("old"));
+        assert_eq!(read(TokenRead::Fresh, &mut cache).as_deref(), Some("new"));
     }
 
     #[test]

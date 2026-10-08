@@ -100,27 +100,63 @@ struct AppMenuItems {
 
 // ── Tauri IPC commands ──────────────────────────────────────────────
 
-/// True for a page this app serves itself (the loading page and the setup
-/// wizard: `tauri://localhost`, or `http(s)://tauri.localhost` on Windows), as
-/// opposed to a page served by whatever listens on a loopback port.
-fn is_app_page(scheme: &str, host: Option<&str>) -> bool {
-    scheme == "tauri" || (matches!(scheme, "http" | "https") && host == Some("tauri.localhost"))
+/// Which page is calling an IPC command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallerPage {
+    /// A page this app serves itself (the loading page and the setup wizard).
+    App,
+    /// Any other page: where it was loaded from (`None` when the URL had no host or port).
+    Remote { host: Option<String>, port: Option<u16> },
 }
 
-/// The token `get_server_info` may return. A page served by the daemon (or by
-/// whatever holds its port) gets the token only if the daemon on `port` proves
-/// itself right now, and it is the token that proved; the app's own pages read it
-/// from the config.
+/// True for the app's own origin: `tauri://...`, or `http(s)://tauri.localhost`
+/// with the default port and no credentials in the URL. A different port or
+/// userinfo, or any other spelling of the host (another suffix, a trailing dot,
+/// another case), is a page like any other.
+fn is_app_origin(scheme: &str, host: Option<&str>, port: Option<u16>, has_userinfo: bool) -> bool {
+    scheme == "tauri"
+        || (matches!(scheme, "http" | "https")
+            && host == Some("tauri.localhost")
+            && port.is_none()
+            && !has_userinfo)
+}
+
+fn caller_page(url: &tauri::Url) -> CallerPage {
+    if is_app_origin(
+        url.scheme(),
+        url.host_str(),
+        url.port(),
+        !url.username().is_empty() || url.password().is_some(),
+    ) {
+        CallerPage::App
+    } else {
+        CallerPage::Remote {
+            host: url.host_str().map(str::to_string),
+            port: url.port_or_known_default(),
+        }
+    }
+}
+
+/// The token `get_server_info` may return.
+/// - The app's own page reads it from the config.
+/// - A page served from `127.0.0.1:<port>`, the endpoint the daemon is proved at,
+///   gets the token only if the daemon on `port` proves itself right now, and it is
+///   the token that proved.
+/// - Any other page (another host, another port, no URL) gets none.
 fn server_info_token(
-    app_page: bool,
+    page: &CallerPage,
     port: u16,
     prove: &dyn Fn(u16) -> Option<String>,
     own_token: &dyn Fn() -> Option<String>,
 ) -> Option<String> {
-    if app_page {
-        own_token()
-    } else {
-        prove(port)
+    match page {
+        CallerPage::App => own_token(),
+        CallerPage::Remote { host, port: page_port }
+            if host.as_deref() == Some("127.0.0.1") && *page_port == Some(port) =>
+        {
+            prove(port)
+        }
+        CallerPage::Remote { .. } => None,
     }
 }
 
@@ -129,11 +165,11 @@ async fn get_server_info(
     app: tauri::AppHandle,
     webview: tauri::Webview,
 ) -> Result<serde_json::Value, String> {
-    // An unreadable URL is treated as a remote page.
-    let app_page = webview
+    // An unreadable URL is a page with no host: it gets no token.
+    let page = webview
         .url()
-        .map(|u| is_app_page(u.scheme(), u.host_str()))
-        .unwrap_or(false);
+        .map(|u| caller_page(&u))
+        .unwrap_or(CallerPage::Remote { host: None, port: None });
     // Blocking (challenge over the network, config and credential store).
     tauri::async_runtime::spawn_blocking(move || {
         let (port, status, tunnel_mode, running) = {
@@ -142,7 +178,7 @@ async fn get_server_info(
             (mgr.port(), mgr.status().label().to_string(), mgr.tunnel_mode().to_string(), mgr.is_running())
         };
         let token = server_info_token(
-            app_page,
+            &page,
             port,
             &|p| tray_state::prove_daemon(p, std::time::Duration::from_secs(2)),
             &|| config::load_config().api_token,
@@ -2453,28 +2489,17 @@ fn qr_for_reachable_daemon(app: &tauri::AppHandle) -> Result<(String, String), S
     // Verify a server is reachable (menu state can become stale on crash/restart)
     let (port, external) =
         reachable_target(app).ok_or_else(|| "Server is not running".to_string())?;
-    let (hostname, token) = if external {
-        match qrcode::get_external_connection_info(port) {
-            Ok(info) => info,
-            Err(e) => {
-                if e == qrcode::DAEMON_NOT_PROVEN {
-                    // Report the miss to the tray: a second one stops it offering
-                    // the menu items for a port that no longer answers as this
-                    // app's daemon.
-                    observe_port(app, PortState::Foreign(port));
-                }
-                return Err(e);
-            }
-        }
-    } else {
-        // The app's own server: the connection info is read from local files, but
-        // the QR goes only to a port whose responder proves it is this app's server.
-        if tray_state::prove_daemon(port, std::time::Duration::from_secs(2)).is_none() {
-            observe_port(app, PortState::Foreign(port));
-            return Err(qrcode::DAEMON_NOT_PROVEN.to_string());
-        }
-        qrcode::get_connection_info()?
-    };
+    let (hostname, token) = qrcode::connection_info_for(
+        external,
+        port,
+        &|p| tray_state::prove_daemon(p, std::time::Duration::from_secs(2)),
+        &qrcode::get_external_connection_info,
+        &qrcode::get_connection_info,
+        // A missed proof goes to the tray as one observation, so a second one
+        // stops it offering the menu items for a port that no longer answers
+        // as this app's daemon.
+        &|p| observe_port(app, PortState::Foreign(p)),
+    )?;
     let url = qrcode::build_connection_url(&hostname, &token);
     let svg = qrcode::generate_qr_svg(&url)?;
     Ok((svg, url))
@@ -2840,21 +2865,54 @@ mod tests {
     // --- token-returning IPC ------------------------------------------------
 
     #[test]
-    fn only_the_apps_own_pages_are_app_pages() {
-        assert!(is_app_page("tauri", Some("localhost")));
-        assert!(is_app_page("http", Some("tauri.localhost")));
-        assert!(is_app_page("https", Some("tauri.localhost")));
-        for (scheme, host) in [
-            ("http", Some("127.0.0.1")),
-            ("http", Some("localhost")),
-            ("http", Some("evil.tauri.localhost")),
-            ("http", Some("tauri.localhost.example")),
-            ("ws", Some("tauri.localhost")),
-            ("http", None),
-            ("file", None),
+    fn only_the_apps_own_origin_is_an_app_page() {
+        assert!(is_app_origin("tauri", Some("localhost"), None, false));
+        assert!(is_app_origin("http", Some("tauri.localhost"), None, false));
+        assert!(is_app_origin("https", Some("tauri.localhost"), None, false));
+        for (what, scheme, host, port, userinfo) in [
+            ("a port", "http", Some("tauri.localhost"), Some(8765), false),
+            ("a port on https", "https", Some("tauri.localhost"), Some(443), false),
+            ("userinfo", "http", Some("tauri.localhost"), None, true),
+            ("a longer host", "http", Some("tauri.localhost.evil"), None, false),
+            ("a subdomain", "http", Some("evil.tauri.localhost"), None, false),
+            ("upper case", "http", Some("TAURI.LOCALHOST"), None, false),
+            ("a trailing dot", "http", Some("tauri.localhost."), None, false),
+            ("loopback", "http", Some("127.0.0.1"), Some(8765), false),
+            ("localhost", "http", Some("localhost"), Some(8765), false),
+            ("another scheme", "ws", Some("tauri.localhost"), None, false),
+            ("no host", "http", None, None, false),
+            ("a file", "file", None, None, false),
         ] {
-            assert!(!is_app_page(scheme, host), "{} {:?}", scheme, host);
+            assert!(!is_app_origin(scheme, host, port, userinfo), "{}", what);
         }
+    }
+
+    #[test]
+    fn the_caller_is_classified_from_the_whole_url() {
+        let page = |u: &str| caller_page(&u.parse::<tauri::Url>().unwrap());
+        assert_eq!(page("tauri://localhost/index.html"), CallerPage::App);
+        assert_eq!(page("http://tauri.localhost/"), CallerPage::App);
+        for url in [
+            "http://tauri.localhost:8765/",
+            "http://user@tauri.localhost/",
+            "http://user:pw@tauri.localhost/",
+            "http://tauri.localhost.evil/",
+            "http://tauri.localhost./",
+        ] {
+            assert!(matches!(page(url), CallerPage::Remote { .. }), "{}", url);
+        }
+        assert_eq!(
+            page("http://127.0.0.1:8765/dashboard?token=x"),
+            CallerPage::Remote { host: Some("127.0.0.1".into()), port: Some(8765) }
+        );
+        assert_eq!(page("http://127.0.0.1/"), CallerPage::Remote { host: Some("127.0.0.1".into()), port: Some(80) });
+        assert_eq!(page("http://localhost:8765/"), CallerPage::Remote { host: Some("localhost".into()), port: Some(8765) });
+        assert_eq!(page("http://[::1]:8765/"), CallerPage::Remote { host: Some("[::1]".into()), port: Some(8765) });
+        assert_eq!(page("http://tauri.localhost:8765/"), CallerPage::Remote { host: Some("tauri.localhost".into()), port: Some(8765) });
+    }
+
+    fn daemon_page(host: &str, port: u16) -> CallerPage {
+        CallerPage::Remote { host: Some(host.to_string()), port: Some(port) }
     }
 
     #[test]
@@ -2862,27 +2920,51 @@ mod tests {
         let proves = |_: u16| Some("proven".to_string());
         let silent = |_: u16| None;
         let own = || Some("from-config".to_string());
-        assert_eq!(server_info_token(false, 8765, &proves, &own).as_deref(), Some("proven"));
-        assert_eq!(server_info_token(false, 8765, &silent, &own), None, "no proof, no token");
+        let page = daemon_page("127.0.0.1", 8765);
+        assert_eq!(server_info_token(&page, 8765, &proves, &own).as_deref(), Some("proven"));
+        assert_eq!(server_info_token(&page, 8765, &silent, &own), None, "no proof, no token");
         // The prover is asked for the port the app uses.
         let asked = std::cell::Cell::new(0u16);
         let spy = |p: u16| {
             asked.set(p);
             None
         };
-        server_info_token(false, 9123, &spy, &own);
+        server_info_token(&daemon_page("127.0.0.1", 9123), 9123, &spy, &own);
         assert_eq!(asked.get(), 9123);
+    }
+
+    #[test]
+    fn a_page_from_a_different_endpoint_than_the_proved_one_gets_no_token() {
+        let proves = |_: u16| Some("proven".to_string());
+        let own = || Some("from-config".to_string());
+        let must_not_ask = |_: u16| -> Option<String> { panic!("no challenge for a page at another endpoint") };
+        for page in [
+            daemon_page("127.0.0.1", 9999),                       // another port
+            daemon_page("localhost", 8765),                       // another host
+            daemon_page("[::1]", 8765),
+            daemon_page("127.0.0.2", 8765),
+            CallerPage::Remote { host: Some("127.0.0.1".into()), port: None },
+            CallerPage::Remote { host: None, port: Some(8765) },
+            CallerPage::Remote { host: None, port: None },        // an unreadable URL
+        ] {
+            assert_eq!(server_info_token(&page, 8765, &must_not_ask, &own), None, "{:?}", page);
+        }
+        // The same page at the proved endpoint does get it.
+        assert_eq!(server_info_token(&daemon_page("127.0.0.1", 8765), 8765, &proves, &own).as_deref(), Some("proven"));
     }
 
     #[test]
     fn the_apps_own_page_reads_the_token_from_the_config_without_a_challenge() {
         let own = || Some("from-config".to_string());
         let must_not_ask = |_: u16| -> Option<String> { panic!("an app page needs no challenge") };
-        assert_eq!(server_info_token(true, 8765, &must_not_ask, &own).as_deref(), Some("from-config"));
-        // A remote page never reads the config token.
+        assert_eq!(server_info_token(&CallerPage::App, 8765, &must_not_ask, &own).as_deref(), Some("from-config"));
+        // A page served by the daemon never reads the config token.
         let proves = |_: u16| Some("proven".to_string());
-        let must_not_read = || -> Option<String> { panic!("a remote page gets only a proven token") };
-        assert_eq!(server_info_token(false, 8765, &proves, &must_not_read).as_deref(), Some("proven"));
+        let must_not_read = || -> Option<String> { panic!("a daemon page gets only a proven token") };
+        assert_eq!(
+            server_info_token(&daemon_page("127.0.0.1", 8765), 8765, &proves, &must_not_read).as_deref(),
+            Some("proven")
+        );
     }
 
     #[test]

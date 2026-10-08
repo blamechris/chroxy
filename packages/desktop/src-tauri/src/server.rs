@@ -1911,7 +1911,7 @@ mod tests {
                 Duration::from_secs(2),
                 Some(cached),
                 move || Some(fresh),
-                tray_state::probe_port_with_token,
+                tray_state::probe_port_outcome,
             )
             .0
         })

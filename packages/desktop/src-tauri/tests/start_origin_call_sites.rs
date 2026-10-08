@@ -203,8 +203,13 @@ fn every_adopt_route_classifies_the_holder_through_a_challenge() {
 
     let tray = squash(&read("src/tray_state.rs"));
     assert!(
-        tray.contains("pub fn probe_port(port: u16, timeout: Duration) -> PortState { probe_with_retry( port, timeout, crate::config::proof_token(), crate::config::fresh_token, probe_port_with_token, ) .0 }"),
-        "probe_port must challenge with the configured token and retry with a fresh one"
+        tray.contains("pub fn probe_port(port: u16, timeout: Duration) -> PortState { probe_effective(port, timeout, &REAL_TOKEN_SOURCES, probe_port_outcome).0 }")
+            && tray.contains("match probe_effective(port, timeout, &REAL_TOKEN_SOURCES, probe_port_outcome) {"),
+        "probe_port and prove_daemon must both challenge through the real token sources"
+    );
+    assert!(
+        tray.contains("let (state, proof_failed) = probe(port, timeout, first.as_deref());") && tray.contains("if proof_failed {"),
+        "the fresh token is read only after a chroxy-shaped body's proof failed"
     );
     assert!(
         tray.contains("(Some(t), Some(n)) => health_proof::body_proves_daemon(body, t, port, n)"),
@@ -285,10 +290,14 @@ fn every_dashboard_qr_and_ipc_handoff_goes_through_the_verifying_functions() {
     assert!(!dash.contains("dashboard_url(") && !dash.contains("api_token") && !dash.contains("load_config"), "Open Dashboard must not handle a token itself");
     // The QR path asks through the verifying request, or proves first.
     let qr = fn_body(&lib, "qr_for_reachable_daemon");
-    assert!(qr.contains("qrcode::get_external_connection_info(port)"), "Show QR must use the verifying request");
+    assert!(qr.contains("qrcode::connection_info_for( external, port,"), "Show QR must go through connection_info_for");
+    assert!(qr.contains("&qrcode::get_external_connection_info,"), "an external daemon is asked through the verifying request");
     assert!(!qr.contains("fetch_daemon_connection_info") && !qr.contains("ureq"), "no direct /connect request");
-    assert!(qr.contains("tray_state::prove_daemon(port,"), "the app's own server is challenged before its QR is returned");
-    assert!(qr.matches("observe_port(app, PortState::Foreign(port))").count() == 2, "a refused QR reports an observation");
+    assert!(
+        qr.contains("tray_state::prove_daemon(p, std::time::Duration::from_secs(2))")
+            && qr.contains("&|p| observe_port(app, PortState::Foreign(p))"),
+        "the own server is challenged and a refused QR reports an observation"
+    );
     // Adoption hands over through show_adopted_daemon -> emit_server_ready.
     let adopt = fn_body(&lib, "show_adopted_daemon");
     assert!(adopt.contains("window::emit_server_ready(app, port)"), "adoption must navigate through emit_server_ready");
@@ -301,11 +310,11 @@ fn every_dashboard_qr_and_ipc_handoff_goes_through_the_verifying_functions() {
     // Token-returning IPC proves first (or is an app page).
     let ipc = squash(&lib);
     assert!(
-        ipc.contains("let token = server_info_token( app_page, port, &|p| tray_state::prove_daemon(p, std::time::Duration::from_secs(2)),"),
+        ipc.contains("let token = server_info_token( &page, port, &|p| tray_state::prove_daemon(p, std::time::Duration::from_secs(2)),"),
         "get_server_info must challenge the daemon for a page it did not serve"
     );
     assert!(
-        ipc.contains(".map(|u| is_app_page(u.scheme(), u.host_str())) .unwrap_or(false);"),
+        ipc.contains(".map(|u| caller_page(&u)) .unwrap_or(CallerPage::Remote { host: None, port: None });"),
         "get_server_info must classify the page by its URL, treating an unreadable one as remote"
     );
     // No other module builds a token-bearing dashboard URL for navigation.
@@ -340,4 +349,14 @@ fn the_settings_button_opens_settings_through_the_command_not_a_url() {
     let build = read("build.rs");
     assert!(build.contains("\"open_settings\""), "open_settings must be a declared command");
     assert!(read("capabilities/default.json").contains("allow-open-settings"), "open_settings must be permitted");
+}
+
+#[test]
+fn the_two_token_reads_use_their_own_age_limits() {
+    let config = squash(&read("src/config.rs"));
+    assert!(config.contains("pub fn proof_token() -> Option<String> { read_token(TokenRead::Cached) }"));
+    assert!(
+        config.contains("pub fn fresh_token() -> Option<String> { read_token(TokenRead::Fresh) }"),
+        "the retry's token read must bypass the long cache"
+    );
 }

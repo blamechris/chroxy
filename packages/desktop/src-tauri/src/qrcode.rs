@@ -234,6 +234,35 @@ pub fn get_external_connection_info(port: u16) -> Result<(String, String), Strin
     }
 }
 
+/// `(hostname, token)` for the daemon the tray is acting on, or why not. The daemon
+/// on `port` must prove itself first, whichever kind it is:
+/// - an external daemon is asked directly (`fetch_external` does its own proof);
+/// - the app's own server is proved here, then `local` reads the on-disk files.
+///
+/// `on_unproven(port)` is told whenever the daemon did not prove itself.
+pub fn connection_info_for(
+    external: bool,
+    port: u16,
+    prove: &dyn Fn(u16) -> Option<String>,
+    fetch_external: &dyn Fn(u16) -> Result<(String, String), String>,
+    local: &dyn Fn() -> Result<(String, String), String>,
+    on_unproven: &dyn Fn(u16),
+) -> Result<(String, String), String> {
+    if external {
+        return fetch_external(port).map_err(|e| {
+            if e == DAEMON_NOT_PROVEN {
+                on_unproven(port);
+            }
+            e
+        });
+    }
+    if prove(port).is_none() {
+        on_unproven(port);
+        return Err(DAEMON_NOT_PROVEN.to_string());
+    }
+    local()
+}
+
 /// Try to get connection info from connection.json, falling back to config.json.
 pub fn get_connection_info() -> Result<(String, String), String> {
     // First try connection.json (written by running server with tunnel)
@@ -446,6 +475,70 @@ mod tests {
         let seen = seen.lock().unwrap();
         let connect = seen.iter().find(|r| r.starts_with("GET /connect")).expect("a /connect request");
         assert!(connect.to_lowercase().contains("authorization: bearer rotated"));
+    }
+
+    #[test]
+    fn the_own_servers_qr_is_read_only_after_it_proves_itself() {
+        let local_calls = std::cell::Cell::new(0);
+        let unproven = std::cell::RefCell::new(Vec::new());
+        let local = || {
+            local_calls.set(local_calls.get() + 1);
+            Ok(("localhost:8765".to_string(), "tok".to_string()))
+        };
+        let on_unproven = |p: u16| unproven.borrow_mut().push(p);
+        let no_external = |_: u16| -> Result<(String, String), String> { panic!("not external") };
+        let silent = |_: u16| None;
+        let proves = |_: u16| Some("tok".to_string());
+
+        let r = connection_info_for(false, 8765, &silent, &no_external, &local, &on_unproven);
+        assert_eq!(r, Err(DAEMON_NOT_PROVEN.to_string()));
+        assert_eq!(local_calls.get(), 0, "no local files read for an unproven server");
+        assert_eq!(*unproven.borrow(), vec![8765]);
+
+        let r = connection_info_for(false, 8765, &proves, &no_external, &local, &on_unproven);
+        assert_eq!(r, Ok(("localhost:8765".to_string(), "tok".to_string())));
+        assert_eq!(local_calls.get(), 1);
+        assert_eq!(*unproven.borrow(), vec![8765], "a proven server reports nothing");
+    }
+
+    #[test]
+    fn the_prover_is_asked_for_the_own_servers_port() {
+        let asked = std::cell::Cell::new(0u16);
+        let spy = |p: u16| {
+            asked.set(p);
+            Some("t".to_string())
+        };
+        let local = || Ok(("h".to_string(), "t".to_string()));
+        let ext = |_: u16| -> Result<(String, String), String> { panic!("not external") };
+        connection_info_for(false, 9321, &spy, &ext, &local, &|_| {}).unwrap();
+        assert_eq!(asked.get(), 9321);
+    }
+
+    #[test]
+    fn an_external_daemon_is_asked_directly_and_a_missed_proof_is_reported() {
+        let prove = |_: u16| -> Option<String> { panic!("the external fetch proves for itself") };
+        let local = || -> Result<(String, String), String> { panic!("no local files for an external daemon") };
+        let reported = std::cell::RefCell::new(Vec::new());
+        let on_unproven = |p: u16| reported.borrow_mut().push(p);
+
+        let ok = |_: u16| Ok(("h".to_string(), "t".to_string()));
+        assert_eq!(
+            connection_info_for(true, 8765, &prove, &ok, &local, &on_unproven),
+            Ok(("h".to_string(), "t".to_string()))
+        );
+        assert!(reported.borrow().is_empty());
+
+        let refused = |_: u16| Err(DAEMON_NOT_PROVEN.to_string());
+        assert_eq!(
+            connection_info_for(true, 8765, &prove, &refused, &local, &on_unproven),
+            Err(DAEMON_NOT_PROVEN.to_string())
+        );
+        assert_eq!(*reported.borrow(), vec![8765]);
+
+        // Any other failure is not a missed proof.
+        let other = |_: u16| Err("daemon refused /connect (HTTP 403)".to_string());
+        assert!(connection_info_for(true, 8765, &prove, &other, &local, &on_unproven).is_err());
+        assert_eq!(*reported.borrow(), vec![8765]);
     }
 
     #[test]
