@@ -597,19 +597,19 @@ describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2
     })
   }
 
-  it('a message past the scan bound is cut at whitespace, and a key crossing THAT is dropped whole', () => {
-    const filler = 'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)
-    const wire = buildErrorWire({ message: `${filler}${ANT_KEY}${'z'.repeat(100)}` })
+  it('a message is redacted whole before it is cut, so a key crossing the budget is gone', () => {
+    const filler = 'y'.repeat(ERROR_TEXT_MAX - 20)
+    const wire = buildErrorWire({ message: `${filler} ${ANT_KEY} ${'z'.repeat(100)}` })
     assert.ok(!wire.content.includes('sk-ant'))
     assert.ok(wire.content.length <= ERROR_TEXT_MAX)
     assert.ok(wire.content.endsWith('[truncated]'))
   })
 
-  it('past the scan ceiling the unsafe trailing run is discarded, not kept half-recognisable (a budget larger than the ceiling lets it show)', () => {
-    const text = `${'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)}${ANT_KEY}${'z'.repeat(100)}`
+  it('a key that would end up past the budget is redacted whole, whatever budget the caller asks for', () => {
+    const text = `${'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)} ${ANT_KEY} tail`
     const out = redactAndClip(text, ERROR_REDACT_SCAN_MAX * 2, '[cut]')
-    assert.ok(!out.includes('sk-ant'), 'no prefix of the key survives the ceiling cut')
-    assert.ok(out.endsWith('[cut]'))
+    assert.ok(!out.includes('sk-ant'))
+    assert.ok(out.endsWith('[REDACTED] tail'))
   })
 
   it('still slices (rather than drops) a whitespace-free output stream longer than its cap that holds no secret', () => {
@@ -619,9 +619,12 @@ describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2
     assert.equal(wire.stderr.length, 8192)
   })
 
-  it('keeps a whitespace-free message that fits, and drops the unsafe run of one that does not', () => {
+  it('keeps a whitespace-free message that fits, and the beginning of one that does not', () => {
     assert.equal(buildErrorWire({ message: 'a'.repeat(ERROR_TEXT_MAX) }).content.length, ERROR_TEXT_MAX)
-    assert.equal(buildErrorWire({ message: 'a'.repeat(ERROR_TEXT_MAX + 1) }).content, '\n[truncated]')
+    const long = buildErrorWire({ message: 'a'.repeat(ERROR_TEXT_MAX + 1) }).content
+    assert.equal(long.length, ERROR_TEXT_MAX)
+    assert.ok(long.startsWith('aaaa'))
+    assert.ok(long.endsWith('\n[truncated]'))
   })
 })
 

@@ -219,11 +219,9 @@ const MAX_SANITIZE_DEPTH = 8
  */
 function redactDeep(value, depth, seen, maxChars = MAX_INPUT_CHARS) {
   if (typeof value === 'string') {
-    // Redact before any cut, over a bounded scan: `scanWindow` keeps the text the
-    // patterns are handed to maxChars plus a margin, so a secret that straddles the
-    // bound lies past what is shown, and discards an unsafe trailing run otherwise.
-    const { text, clipped } = scanWindow(value, maxChars, maxChars + REDACT_SCAN_MARGIN)
-    const redacted = redactValue(text)
+    // Redact the whole string, then cut the redacted result: a slice of redacted
+    // text cannot expose a secret, a cut of the raw text can.
+    const { text: redacted, clipped } = redactWhole(value)
     return clipped || redacted.length > maxChars
       ? redacted.slice(0, maxChars) + '... [truncated]'
       : redacted
@@ -301,59 +299,62 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
 const PULL_MAX_INPUT_CHARS = 512 * 1024 // 512K chars
 
 /**
- * How much text is handed to the pattern redactor in one go. A bound on the scan,
- * far above any length a record keeps.
+ * The most text of one record's identifying field that is kept, in characters.
  */
-const MAX_REDACT_SCAN = 8192
+const NAMED_FIELD_MAX_CHARS = 8192
 
 /**
- * How far below a scan bound a kept result must stay for a plain cut at the bound to
- * be harmless: a secret straddling the bound starts at most this far before it, and
- * is therefore already redacted out of the part that is kept.
+ * The most text the pattern redactor is ever handed in one call, in characters. It
+ * is an admission ceiling for pathological sizes, far above any text a caller shows
+ * or keeps: matching is linear, so text up to the ceiling is redacted WHOLE and the
+ * caller cuts the redacted result afterwards, which cannot expose a secret.
  */
-export const REDACT_SCAN_MARGIN = 2048
+export const REDACT_ADMISSION_MAX = 4 * 1024 * 1024
 
 /**
  * The part of `text` the patterns are handed when no more than `scanMax` characters
- * may be scanned, given that the caller goes on to keep at most `keep` characters of
- * the redacted result (`Infinity` when it keeps all of it).
- *
- * Text within the bound is returned whole. Longer text is cut at the bound. When the
- * kept part stays a margin below the bound the cut is a plain slice; otherwise it
- * backs up to the last whitespace, and a run with no whitespace to stop at is
- * discarded, never half-kept, so the cut never leaves the front of a token that the
- * patterns can no longer recognise.
+ * may be scanned. Text within the bound is returned whole. Longer text is cut at the
+ * last whitespace inside the bound, and a run with no whitespace to stop at is
+ * discarded, never half-kept, so the cut does not leave the front of a token that the
+ * patterns can no longer recognise. This is the only lossy step in redaction, and it
+ * applies only past the admission ceiling.
  *
  * @param {string} text
- * @param {number} keep
  * @param {number} scanMax
  * @returns {{ text: string, clipped: boolean }}
  */
-export function scanWindow(text, keep, scanMax) {
+export function scanWindow(text, scanMax) {
   if (text.length <= scanMax) return { text, clipped: false }
   const head = text.slice(0, scanMax)
-  if (keep + REDACT_SCAN_MARGIN <= scanMax) return { text: head, clipped: true }
   const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'), head.lastIndexOf('\r'))
   return { text: cut > 0 ? head.slice(0, cut) : '', clipped: true }
 }
 
 /**
- * Redact `text` without ever persisting a piece of a secret that a length bound
- * cut in two.
- *
- * Text longer than the scan bound is cut at the last whitespace inside it (or
- * dropped entirely when it has none), so the cut never lands inside a token: a
- * secret that crosses the bound is left out whole instead of being redacted
- * from a prefix the patterns no longer recognise. Redaction runs on what
- * remains; callers clip AFTER this, never before.
+ * Redact the whole of `text`, up to the admission ceiling. `clipped` says the text
+ * was longer than the ceiling and its tail was discarded (see {@link scanWindow}).
+ * Callers that bound what they keep or show cut the REDACTED text afterwards, with a
+ * plain slice, never the raw text beforehand.
  *
  * @param {unknown} text
- * @param {number} [maxScan]
+ * @param {number} [ceiling]
+ * @returns {{ text: string, clipped: boolean }}
+ */
+export function redactWhole(text, ceiling = REDACT_ADMISSION_MAX) {
+  const s = typeof text === 'string' ? text : String(text ?? '')
+  const window = scanWindow(s, ceiling)
+  return { text: redactValue(window.text), clipped: window.clipped }
+}
+
+/**
+ * Redact `text` whole (up to the ceiling) and return it. Callers clip AFTER this.
+ *
+ * @param {unknown} text
+ * @param {number} [ceiling]
  * @returns {string}
  */
-export function redactBounded(text, maxScan = MAX_REDACT_SCAN) {
-  const s = typeof text === 'string' ? text : String(text ?? '')
-  return redactValue(scanWindow(s, Infinity, maxScan).text)
+export function redactBounded(text, ceiling = REDACT_ADMISSION_MAX) {
+  return redactWhole(text, ceiling).text
 }
 
 /**
@@ -369,7 +370,7 @@ export function redactBounded(text, maxScan = MAX_REDACT_SCAN) {
 export function describeByNamedField(rawInput) {
   if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) return undefined
   const named = rawInput.description || rawInput.command || rawInput.file_path || rawInput.pattern || rawInput.query
-  return named ? redactBounded(String(named)) : undefined
+  return named ? redactBounded(String(named)).slice(0, NAMED_FIELD_MAX_CHARS) : undefined
 }
 
 export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }

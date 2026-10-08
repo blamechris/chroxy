@@ -1,18 +1,23 @@
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { Worker } from 'node:worker_threads'
+import { spawn } from 'node:child_process'
+import { createInterface } from 'node:readline'
 import {
-  SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, redactValue, sanitizeToolInput, scanWindow, MAX_INPUT_CHARS,
+  SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, redactValue, redactBounded, redactWhole, sanitizeToolInput,
+  scanWindow, MAX_INPUT_CHARS, REDACT_ADMISSION_MAX,
 } from '../src/redaction.js'
-import { createLogger, addLogListener, removeLogListener } from '../src/logger.js'
+import { createLogger, addLogListener, removeLogListener, redactSensitivePreservingEscapes } from '../src/logger.js'
+import { redactAndClip, ERROR_TEXT_MAX } from '../src/message-wire.js'
 
 /**
- * Redaction runs in time linear in the length of its input, and the two callers that
- * take arbitrary text (tool-input redaction and the logger) bound what they scan.
+ * Redaction runs in time linear in the length of its input. The callers that take
+ * arbitrary text (tool-input redaction, the logger, error messages) redact the WHOLE
+ * text first and cut the redacted result afterwards; only text past an admission
+ * ceiling loses its tail before redaction.
  *
- * The timing cases run in a worker thread. A pattern that is not linear does not fail
+ * The timing cases run in a child process. A pattern that is not linear does not fail
  * a synchronous assertion, it holds the thread for as long as it runs, and a test
- * timeout cannot fire while the thread is held. The worker can be terminated, so a
+ * timeout cannot fire while the thread is held. The child can be killed, so a
  * regression is a red test that names the case, within a few seconds.
  */
 
@@ -46,55 +51,65 @@ const GRAMMAR = [
   ]],
 ]
 
-const WORKER_SOURCE = `
-  const { parentPort, workerData } = require('node:worker_threads')
-  import(workerData.moduleUrl).then(({ redactValue }) => {
-    for (const { label, fragment } of workerData.cases) {
-      for (const size of workerData.sizes) {
-        const text = fragment.repeat(Math.ceil(size / fragment.length)).slice(0, size)
-        parentPort.postMessage({ begin: label, size })
-        const started = process.hrtime.bigint()
-        redactValue(text)
-        parentPort.postMessage({ label, size, ms: Number(process.hrtime.bigint() - started) / 1e6 })
-      }
+// The child reads its input from stdin, times each case, and reports one JSON line per event.
+const CHILD_SOURCE = `
+  import { readFileSync } from 'node:fs'
+  const { moduleUrl, loggerUrl, cases, sizes } = JSON.parse(readFileSync(0, 'utf8'))
+  const { redactValue } = await import(moduleUrl)
+  const { redactSensitivePreservingEscapes } = await import(loggerUrl)
+  const say = (m) => process.stdout.write(JSON.stringify(m) + '\\n')
+  for (const { label, fragment, fn } of cases) {
+    const run = fn === 'escapes' ? redactSensitivePreservingEscapes : redactValue
+    for (const size of sizes) {
+      const text = fragment.repeat(Math.ceil(size / fragment.length)).slice(0, size)
+      say({ begin: label, size })
+      const started = process.hrtime.bigint()
+      run(text)
+      say({ label, size, ms: Number(process.hrtime.bigint() - started) / 1e6 })
     }
-    parentPort.postMessage({ done: true })
-  })
+  }
+  say({ done: true })
 `
 
-/** Run every case in a worker; a case that outlives its deadline ends the worker and is reported. */
+/**
+ * Run every case in a child process; a case that outlives its deadline gets the child
+ * killed and is reported. A process can be killed in the middle of a long match, which a
+ * worker thread cannot reliably be.
+ */
 function timeCases(cases, deadlineMs = CASE_DEADLINE_MS) {
   return new Promise((resolve) => {
     const results = []
-    const worker = new Worker(WORKER_SOURCE, {
-      eval: true,
-      workerData: { moduleUrl: new URL('../src/redaction.js', import.meta.url).href, cases, sizes: SIZES },
-    })
+    const child = spawn(process.execPath, ['--input-type=module', '-e', CHILD_SOURCE], { stdio: ['pipe', 'pipe', 'inherit'] })
     let timer
     let current = null
+    let settled = false
+    const finish = (stuck) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.kill('SIGKILL')
+      resolve({ results, stuck })
+    }
     const arm = () => {
       clearTimeout(timer)
-      timer = setTimeout(() => {
-        worker.terminate()
-        resolve({ results, stuck: current })
-      }, deadlineMs)
+      timer = setTimeout(() => finish(current), deadlineMs)
     }
     arm()
-    worker.on('message', (m) => {
-      if (m.done) {
-        clearTimeout(timer)
-        worker.terminate()
-        resolve({ results, stuck: null })
-        return
-      }
+    child.stdin.end(JSON.stringify({
+      moduleUrl: new URL('../src/redaction.js', import.meta.url).href,
+      loggerUrl: new URL('../src/logger.js', import.meta.url).href,
+      cases,
+      sizes: SIZES,
+    }))
+    createInterface({ input: child.stdout }).on('line', (line) => {
+      const m = JSON.parse(line)
+      if (m.done) return finish(null)
       if (m.begin) current = `${m.begin} @ ${m.size}`
       else results.push(m)
       arm()
     })
-    worker.on('error', (err) => {
-      clearTimeout(timer)
-      resolve({ results, stuck: `worker error: ${err.message}` })
-    })
+    child.on('error', (err) => finish(`child error: ${err.message}`))
+    child.on('exit', (code) => finish(settled ? null : `child exited with ${code} before finishing`))
   })
 }
 
@@ -124,6 +139,71 @@ describe('redaction time is linear in the length of the input', () => {
     const { results, stuck } = await timeCases([{ label: 'dash-joined', fragment: 'eyJ-' }], 3000)
     assert.equal(stuck, null, `did not finish: ${stuck}`)
     assert.ok(results.every((r) => r.ms < BUDGET_MS), 'bounded at every size')
+  })
+})
+
+describe('the escape-aware pass is linear too', () => {
+  const FRAGMENTS = [
+    'a', 'word ', 'a\x1b[1m', '\x1b[', '\x1b]', '\x1b]title\x07', '\x01', 'sk-ant-api03-' + 'A'.repeat(20) + '\x1b[1m',
+    'token=abc\x1b[0mdefghij ', 'eyJ-', '\x1b[0;1;' + '1;'.repeat(30),
+  ]
+
+  it('finishes every 8 KiB, 64 KiB and 256 KiB input in bounded time', { timeout: 120_000 }, async () => {
+    const cases = FRAGMENTS.map((fragment) => ({ label: JSON.stringify(fragment.slice(0, 30)), fragment, fn: 'escapes' }))
+    const { results, stuck } = await timeCases(cases)
+    assert.equal(stuck, null, `a case did not finish within ${CASE_DEADLINE_MS} ms: ${stuck}`)
+    const slow = results.filter((r) => r.ms > BUDGET_MS)
+    assert.ok(slow.length === 0, `over ${BUDGET_MS} ms: ${slow.map((r) => `${r.label} @ ${r.size} = ${r.ms.toFixed(0)} ms`).join('; ')}`)
+  })
+
+  // The pass as it was before the escape search became sticky: same output, searches the rest of the text each time.
+  const ESCAPE = new RegExp(
+    ['\\x1b\\[[0-9;?]*[\\x40-\\x7E]', '\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)', '\\x1bO.', '\\x1b[=>cN]', '[\\x00-\\x08\\x0b-\\x1f\\x7f]'].join('|'),
+    'g',
+  )
+  function legacyPreservingEscapes(s, fill = 'X') {
+    let stripped = ''
+    const map = []
+    let i = 0
+    while (i < s.length) {
+      ESCAPE.lastIndex = i
+      const m = ESCAPE.exec(s)
+      if (m && m.index === i) { i += m[0].length || 1; continue }
+      stripped += s[i]
+      map.push(i)
+      i++
+    }
+    const chars = s.split('')
+    let changed = false
+    for (const pattern of [...SENSITIVE_PATTERNS, ...API_KEY_PATTERNS]) {
+      pattern.lastIndex = 0
+      let match
+      while ((match = pattern.exec(stripped)) !== null) {
+        for (let k = match.index; k < match.index + match[0].length; k++) chars[map[k]] = fill
+        changed = true
+        if (match[0].length === 0) pattern.lastIndex++
+      }
+    }
+    return changed ? chars.join('') : s
+  }
+
+  it('returns exactly what it returned before, on random text with escapes inside tokens', () => {
+    const atoms = [
+      'sk-ant-api03-', 'A'.repeat(20), 'A'.repeat(30), '\x1b[1m', '\x1b[0;31m', '\x1b]0;t\x07', '\x1b]x\x1b\\', '\x1bOA', '\x1b=', '\x01', '\x7f',
+      ' ', '\n', '\t', 'token=', 'abcdefghij', 'eyJaaaaaaaa.bbbbbbbb.cccccccc', 'Bearer ', '\x1b', '\x1b[', '\x1b]', 'x', '"',
+    ]
+    let seed = 8451
+    const next = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32
+    let changedCount = 0
+    for (let i = 0; i < 6000; i++) {
+      let text = ''
+      for (let j = 1 + Math.floor(next() * 12); j > 0; j--) text += atoms[Math.floor(next() * atoms.length)]
+      const expected = legacyPreservingEscapes(text)
+      if (expected !== text) changedCount++
+      assert.ok(redactSensitivePreservingEscapes(text) === expected, `differs for ${JSON.stringify(text)}`)
+      assert.ok(redactSensitivePreservingEscapes(text, '\uE000') === legacyPreservingEscapes(text, '\uE000'), `differs (fill) for ${JSON.stringify(text)}`)
+    }
+    assert.ok(changedCount > 500, 'the generator produces redactable text often enough to compare')
   })
 })
 
@@ -179,12 +259,13 @@ describe('the JWT matcher reports the spans the regular expression did', () => {
   })
 })
 
-describe('tool-input redaction bounds what it scans', () => {
+describe('the cut follows redaction, never precedes it', () => {
   const ANT_KEY = 'sk-ant-api03-' + 'A'.repeat(60)
+  const shown = (out) => out.command ?? out.summary
 
   it('a long value is cut to the broadcast cap and marked, in bounded time', () => {
     const started = process.hrtime.bigint()
-    const out = sanitizeToolInput({ command: 'eyJ-'.repeat(2_000_000) })
+    const out = sanitizeToolInput({ command: 'word '.repeat(1_600_000) })
     const ms = Number(process.hrtime.bigint() - started) / 1e6
     // The cut value no longer fits the broadcast cap once serialized, so the whole input is summarized.
     assert.equal(out._truncated, true)
@@ -193,32 +274,95 @@ describe('tool-input redaction bounds what it scans', () => {
     assert.ok(ms < BUDGET_MS, `took ${ms.toFixed(0)} ms`)
   })
 
-  it('a value longer than the scan is marked as cut even when redaction shrinks it', () => {
-    const out = sanitizeToolInput({ command: 'sk-ant-api03-' + 'A'.repeat(100_000) })
-    assert.equal(out.command, '[REDACTED]... [truncated]')
+  it('keys that shrink the text do not let a token at the old scan edge through', () => {
+    const prefix = `${ANT_KEY} `.repeat(50)
+    const text = `${prefix}${'x'.repeat(12_272 - prefix.length)} eyJaaaaaaaa.bbbbbbbb.cccccccc tail`
+    const out = shown(sanitizeToolInput({ command: text }))
+    assert.ok(!out.includes('eyJ'), 'no part of the token is shown')
+    assert.ok(!out.includes('sk-ant'), 'no part of a key is shown')
+    assert.ok(out.includes('[REDACTED] tail'))
   })
 
-  it('a value just over the cap is redacted before it is cut', () => {
-    const filler = 'a'.repeat(MAX_INPUT_CHARS - 60)
-    const out = sanitizeToolInput({ command: `${filler} ${ANT_KEY} ${'z'.repeat(50_000)}` })
-    assert.ok(!out.summary.includes('sk-ant'), 'no part of the key survives the cut')
-    assert.ok(out.summary.includes('[REDACTED]'))
+  it('a token with a 3 KiB payload that straddles the cap is redacted whole', () => {
+    const token = `eyJ${'H'.repeat(33)}.eyJ${'P'.repeat(3000)}.${'S'.repeat(43)}`
+    const out = shown(sanitizeToolInput({ command: `${'k'.repeat(MAX_INPUT_CHARS - 31)} ${token} tail` }))
+    assert.ok(!out.includes('eyJ'), 'no part of the token is shown')
+    assert.ok(!out.includes('PPPP'))
   })
 
-  it('a value within the scan is returned exactly as before', () => {
+  it('a quoted secret that contains a space and straddles the cap is redacted whole', () => {
+    const out = shown(sanitizeToolInput({ command: `${'x'.repeat(MAX_INPUT_CHARS - 25)} password="secret phrase extends past limit" tail` }))
+    assert.ok(!out.includes('secret'), 'no part of the value is shown')
+  })
+
+  it('a value within the cap is returned exactly as before', () => {
     const value = `${'a'.repeat(100)} ${ANT_KEY} tail`
     assert.equal(sanitizeToolInput({ command: value }).command, `${'a'.repeat(100)} [REDACTED] tail`)
   })
 
-  it('keeps the cut clear of the end of the scan, or drops the unsafe run past it', () => {
-    assert.deepEqual(scanWindow('abc', 1, 10), { text: 'abc', clipped: false })
-    assert.deepEqual(scanWindow('x'.repeat(9000), 10, 5000), { text: 'x'.repeat(5000), clipped: true })
-    assert.deepEqual(scanWindow(`ab cd${'e'.repeat(5000)}`, 4000, 5000), { text: 'ab', clipped: true })
-    assert.deepEqual(scanWindow('e'.repeat(9000), 4000, 5000), { text: '', clipped: true })
+  it('text past the admission ceiling is the one case that loses its tail first, and says so', () => {
+    const out = sanitizeToolInput({ command: `sk-ant-api03-${'A'.repeat(REDACT_ADMISSION_MAX + 10)}` })
+    assert.equal(out.command, '... [truncated]')
   })
 })
 
-describe('the logger bounds what it scans', () => {
+describe('redactBounded and scanWindow', () => {
+  const ANT_KEY = 'sk-ant-api03-' + 'A'.repeat(60)
+
+  it('redacts all of a text that is within the ceiling, whatever its length', () => {
+    const text = `${'word '.repeat(5000)}${ANT_KEY} tail`
+    assert.equal(redactBounded(text), `${'word '.repeat(5000)}[REDACTED] tail`)
+  })
+
+  it('coerces a non-string, and returns nothing for nothing', () => {
+    assert.equal(redactBounded(undefined), '')
+    assert.equal(redactBounded(null), '')
+    assert.equal(redactBounded(12345), '12345')
+  })
+
+  it('past a ceiling, drops the tail at whitespace so no piece of a key is kept', () => {
+    // The key starts 20 characters before the ceiling: a plain cut would leave "sk-ant-api03-AAAAA".
+    const text = `${'w'.repeat(79)} ${ANT_KEY} tail`
+    const cut = redactBounded(text, 100)
+    assert.ok(!cut.includes('sk-ant'), cut)
+    assert.equal(cut, 'w'.repeat(79))
+  })
+
+  it('past a ceiling, drops a run that has no whitespace rather than half-keeping it', () => {
+    assert.equal(redactBounded(`sk-ant-api03-${'A'.repeat(500)}`, 100), '')
+  })
+
+  it('reports whether the tail was discarded', () => {
+    assert.deepEqual(redactWhole('short', 100), { text: 'short', clipped: false })
+    assert.deepEqual(redactWhole(`${'w'.repeat(90)} ${'z'.repeat(50)}`, 100), { text: 'w'.repeat(90), clipped: true })
+  })
+
+  it('scanWindow keeps text within the bound whole and backs up to whitespace past it', () => {
+    assert.deepEqual(scanWindow('abc', 10), { text: 'abc', clipped: false })
+    assert.deepEqual(scanWindow('ab cd\tef\ngh', 8), { text: 'ab cd', clipped: true })
+    assert.deepEqual(scanWindow(`ab cd${'e'.repeat(50)}`, 20), { text: 'ab', clipped: true })
+    assert.deepEqual(scanWindow('e'.repeat(50), 20), { text: '', clipped: true })
+    assert.deepEqual(scanWindow('ab\rcd' + 'e'.repeat(50), 20), { text: 'ab', clipped: true })
+  })
+})
+
+describe('error text keeps the redaction whole', () => {
+  it('a quoted secret with a space that straddles the message budget is redacted before the cut', () => {
+    const text = `${'x'.repeat(ERROR_TEXT_MAX - 25)} password="secret phrase extends past limit" trailing`
+    const out = redactAndClip(text, ERROR_TEXT_MAX, '\n[truncated]')
+    assert.ok(!out.includes('secret'), 'no part of the value is kept')
+    assert.ok(out.endsWith('\n[truncated]'), 'marked as cut')
+    assert.ok(out.length <= ERROR_TEXT_MAX)
+  })
+
+  it('a token that straddles the budget is redacted whole', () => {
+    const token = `eyJ${'H'.repeat(33)}.eyJ${'P'.repeat(3000)}.${'S'.repeat(43)}`
+    const out = redactAndClip(`${'k'.repeat(ERROR_TEXT_MAX - 31)} ${token} tail`, ERROR_TEXT_MAX, '\n[truncated]')
+    assert.ok(!out.includes('eyJ'), 'no part of the token is kept')
+  })
+})
+
+describe('the logger redacts the whole line, then cuts it', () => {
   function capture(message) {
     const entries = []
     const listener = (entry) => entries.push(entry)
@@ -232,25 +376,44 @@ describe('the logger bounds what it scans', () => {
     }
     return entries[0].message
   }
+  const LIMIT = 64 * 1024
 
-  it('a long line is cut at whitespace inside the bound and marked, in bounded time', () => {
+  it('a long line is cut to the line limit and marked, in bounded time', () => {
     const started = process.hrtime.bigint()
-    const out = capture(`before ${'eyJ-'.repeat(500_000)} after`)
+    const out = capture(`before ${'word '.repeat(400_000)} after`)
     const ms = Number(process.hrtime.bigint() - started) / 1e6
-    assert.ok(out.startsWith('before'), 'the start of the line is kept')
+    assert.ok(out.startsWith('before word word'), 'the start of the line is kept')
     assert.ok(out.endsWith('... [truncated]'), 'marked as cut')
-    assert.ok(out.length <= 64 * 1024 + 20, 'bounded')
+    assert.equal(out.length, LIMIT + '... [truncated]'.length)
     assert.ok(ms < BUDGET_MS * 2, `took ${ms.toFixed(0)} ms`)
   })
 
-  it('a long line still has the secrets in its kept part redacted', () => {
-    const out = capture(`key sk-ant-api03-${'B'.repeat(60)} ${'word '.repeat(40_000)}`)
+  it('a quoted secret with a space that straddles the limit does not show', () => {
+    const out = capture(`${'x'.repeat(LIMIT - 25)} password="secret phrase extends past limit" trailing`)
+    assert.ok(!out.includes('secret'), 'no part of the value is shown')
+    assert.ok(out.endsWith('... [truncated]'))
+  })
+
+  it('a long line with no whitespace keeps its beginning', () => {
+    const out = capture(`prefix:${'a'.repeat(LIMIT + 100)}`)
+    assert.ok(out.startsWith('prefix:aaaa'), out.slice(0, 20))
+    assert.equal(out.length, LIMIT + '... [truncated]'.length)
+  })
+
+  it('secrets in the kept part of a long line are redacted', () => {
+    const out = capture(`key ${'sk-ant-api03-' + 'B'.repeat(60)} ${'word '.repeat(40_000)}`)
     assert.ok(out.startsWith('key [REDACTED] word'), out.slice(0, 40))
     assert.ok(!out.includes('sk-ant'))
   })
 
-  it('a line within the bound is logged whole', () => {
+  it('a line within the limit is logged whole', () => {
     const line = `token=abcdefghijkl ${'word '.repeat(1000)}`
     assert.equal(capture(line), `token= [REDACTED] ${'word '.repeat(1000)}`)
+  })
+
+  it('a line past the admission ceiling loses its tail first, and says so', () => {
+    const out = capture(`head ${'word '.repeat(REDACT_ADMISSION_MAX / 5 + 10)}`)
+    assert.ok(out.startsWith('head word'))
+    assert.ok(out.endsWith('... [truncated]'))
   })
 })

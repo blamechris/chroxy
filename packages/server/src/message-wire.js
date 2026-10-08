@@ -17,7 +17,7 @@
  * (`contract-fixtures/replay-parity-data.ts`) prove it.
  */
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
-import { redactValue, scanWindow } from './redaction.js'
+import { redactWhole } from './redaction.js'
 
 /**
  * #6941 review (Copilot) — coerce+bound a footer-stat numeric field
@@ -180,14 +180,13 @@ export function buildMessageWire(data) {
 }
 
 /**
- * The most text the redactor is ever handed at once, in characters. This bounds the
- * redaction scan: the redactor runs synchronously on the event loop, so what it is
- * given must be small.
+ * The length of one error message, in characters: the budget the saved copy of an
+ * error is held to.
  */
 export const ERROR_REDACT_SCAN_MAX = 16 * 1024
 
 /**
- * Ceiling on the text of one error message, in characters: the scan bound above,
+ * Ceiling on the text of one error message, in characters: the budget above,
  * applied at ADMISSION so the live frame, the ring buffer and every replay hold the
  * same bounded text. It is below the 50 KiB `SessionMessageHistory.truncateEntry`
  * clips a saved entry to, so the saved copy is never cut again.
@@ -215,14 +214,10 @@ const ERROR_TRUNCATION_MARKER = '\n[truncated]'
  * After redaction the keys are already gone, so the cut can be a plain slice (the
  * post-create caps have always sliced rather than dropped, and a test pins it).
  *
- * Text longer than the scan bound cannot be scanned whole. It is cut at the bound
- * first, and what that cut can do to a key at the bound decides the rest:
- *   - when the result kept is at least a safety margin shorter than the bound (the
- *     8 KiB output streams), a key at the bound lies entirely beyond what is kept,
- *     so the slice is safe and nothing more is done;
- *   - otherwise (the message, whose budget IS the bound) the cut backs up to the last
- *     whitespace, and a run with no whitespace to stop at is discarded, never
- *     half-kept (`redactBounded`'s rule).
+ * The whole text is redacted (`redactWhole`), so a secret that straddles the budget
+ * is gone before the cut. Only text past the redactor's admission ceiling loses its
+ * tail first, at the last whitespace (a run with none is discarded, never
+ * half-kept); that is the one lossy case.
  *
  * @param {string} text
  * @param {number} max  character budget for the result, marker included
@@ -230,8 +225,7 @@ const ERROR_TRUNCATION_MARKER = '\n[truncated]'
  * @returns {string}
  */
 export function redactAndClip(text, max, marker = '') {
-  const { text: scanned, clipped } = scanWindow(text, max, ERROR_REDACT_SCAN_MAX)
-  const redacted = redactValue(scanned)
+  const { text: redacted, clipped } = redactWhole(text)
   if (redacted.length <= max && !clipped) return redacted
   if (redacted.length <= max - marker.length) return redacted + marker
   return redacted.slice(0, Math.max(0, max - marker.length)) + marker
