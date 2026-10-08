@@ -70,8 +70,12 @@ let capturedOnRestart: ((sessionId: string) => void) | null = null
 // shallow stub keeps the App tests focused on App behaviour while
 // MultiTerminalView's own tests cover its production wiring.
 vi.mock('./components/MultiTerminalView', () => ({
-  MultiTerminalView: (props: { className?: string }) => (
-    <div data-testid="multi-terminal-view-mock" className={props.className} />
+  MultiTerminalView: (props: { className?: string; visible?: boolean }) => (
+    <div
+      data-testid="multi-terminal-view-mock"
+      className={props.className}
+      data-visible={String(props.visible)}
+    />
   ),
 }))
 
@@ -1472,6 +1476,19 @@ describe('App', () => {
       rerender(<App />)
       expect(screen.getByTestId('chat-pane')).toBeInTheDocument()
       expect(screen.getByTestId('terminal-pane')).toBeInTheDocument()
+    })
+
+    // #8254: the terminal pane stays mounted under display:none on the Chat tab,
+    // and a hidden pane that measured itself resized the real claude PTY to 10x6.
+    it('tells the terminal view it is hidden on the Chat tab and shown on the Output tab', () => {
+      stateOverrides = { ...connectedState, viewMode: 'chat' }
+      const { rerender } = render(<App />)
+      const terminalPane = screen.getByTestId('terminal-pane')
+      expect(within(terminalPane).getByTestId('multi-terminal-view-mock').dataset.visible).toBe('false')
+
+      stateOverrides = { ...connectedState, viewMode: 'terminal' }
+      rerender(<App />)
+      expect(within(terminalPane).getByTestId('multi-terminal-view-mock').dataset.visible).toBe('true')
     })
 
     it('hides the inactive pane with display:none and shows the active one', () => {

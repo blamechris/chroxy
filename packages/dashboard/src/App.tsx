@@ -3048,6 +3048,9 @@ export function App() {
                         sessions={sessions}
                         activeSessionId={activeSessionId}
                         className="terminal-container"
+                        // #8254: this pane is display:none unless the Output tab is
+                        // showing; a hidden pane must not size the real PTY.
+                        visible={viewMode === 'terminal'}
                       />
                     </div>
                   </>
