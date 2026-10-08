@@ -18,7 +18,7 @@ import {
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
-import { sanitizeToolInput, redactValue, describeByNamedField, describeToolInput } from './redaction.js'
+import { sanitizeToolInput, redactValue, describeByNamedField, describeToolInput, describeComposedText } from './redaction.js'
 import { redactMcpUrl, resolveTrustAddress, MCP_SERVER_SOURCE_VALUES } from './byok-mcp-config.js'
 // #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
 // project key, not the raw session cwd, or a relative / `..`-laden cwd
@@ -1418,7 +1418,7 @@ export class PermissionManager extends EventEmitter {
       // `{ mcpServer: {...} }`, not a bare file_path/path/notebook_path), so
       // isFlooredTarget is always false here — computed rather than hardcoded
       // so this stays correct if that ever changes.
-      const shownDescription = redactValue(String(description)).slice(0, 200)
+      const shownDescription = describeComposedText(description)
       const permPayload = {
         requestId,
         tool: 'mcp_spawn',

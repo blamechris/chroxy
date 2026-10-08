@@ -12,6 +12,7 @@ import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import {
   describeToolInput,
   describeByNamedField,
+  describeComposedText,
   RECORD_DESCRIPTION_MAX,
 } from '../src/redaction.js'
 
@@ -38,6 +39,21 @@ const NESTED = { config: { token: SECRET, host: 'example.com' } }
 // A secret that a 200-char clip of the RAW serialization would cut in two,
 // leaving a prefix no pattern recognises.
 const STRADDLING = { filler: 'x'.repeat(160), password: SECRET }
+
+// A synthetic webhook credential (the shape the value redactor recognises),
+// placed in a property NAME: the sanitizer masks values and copies names as-is.
+const HOOK_TOKEN = 'SYNTHETICFIXTURE0000AAAA1111BBBB'
+const HOOK_URL = `https://discord.com/api/webhooks/123456789012345678/${HOOK_TOKEN}`
+const KEYED_SECRET = { requests: { [HOOK_URL]: { method: 'POST' } } }
+// The same, with the token starting near character 190 of the serialization, so
+// a 200-char clip would leave its first characters behind.
+const KEYED_STRADDLING = { requests: { [`${'a'.repeat(123)} ${HOOK_URL}`]: { method: 'POST' } } }
+const OWN_TRUNCATED_FIELD = { _truncated: true, id: 'resource-123' }
+
+function assertNoHookToken(text, label) {
+  assert.ok(!String(text).includes(HOOK_TOKEN), `${label} carries the credential`)
+  assert.ok(!String(text).includes(HOOK_TOKEN.slice(0, 8)), `${label} carries a prefix of the credential`)
+}
 
 let tmpDir
 function tmpStateFile() {
@@ -70,6 +86,34 @@ describe('describeToolInput (#8384)', () => {
 
   it('redacts before it clips', () => {
     assertNoSecret(describeToolInput(STRADDLING), 'description')
+  })
+
+  it('masks a credential in a property name', () => {
+    const text = describeToolInput(KEYED_SECRET)
+    assertNoHookToken(text, 'description')
+    assert.ok(text.includes('[REDACTED]'), text)
+  })
+
+  it('scans the whole serialization before clipping, so no prefix of a credential in a name survives', () => {
+    const text = describeToolInput(KEYED_STRADDLING)
+    assertNoHookToken(text, 'description')
+    assert.ok(text.length <= 200)
+  })
+
+  it('describes an input that carries its own _truncated field by its content', () => {
+    assert.ok(describeToolInput(OWN_TRUNCATED_FIELD, 'Tool').includes('resource-123'))
+  })
+
+  it('describes an oversized input by the start of its sanitized serialization', () => {
+    const text = describeToolInput({ a: 'x'.repeat(20000), password: SECRET })
+    assert.ok(text.startsWith('{"a":"xxx'), text.slice(0, 40))
+    assertNoSecret(text, 'description')
+  })
+
+  it('describeComposedText redacts the bounded scan, then clips to what a client shows', () => {
+    assert.equal(describeComposedText('Spawn x running /bin/y'), 'Spawn x running /bin/y')
+    assert.equal(describeComposedText(`Spawn x running ${'a'.repeat(9000)}`), 'Spawn x running')
+    assert.equal(describeComposedText('w '.repeat(300)).length, 200)
   })
 
   it('describes an input by its identifying field when it has one', () => {
@@ -106,6 +150,31 @@ describe('in-process producer: PermissionManager.handlePermission (claude-sdk, c
       assertNoSecret(JSON.stringify(pm._lastPermissionData.get(payload.requestId)), 'the held payload')
     })
   }
+
+  it('masks a credential in a property name, even where a clip would split it', () => {
+    for (const input of [KEYED_SECRET, KEYED_STRADDLING]) {
+      const { payload } = raiseOn(pm, 'CustomTool', input)
+      assertNoHookToken(payload.description, 'description')
+    }
+  })
+
+  it('describes an input with its own _truncated field by its content', () => {
+    const { payload } = raiseOn(pm, 'CustomTool', OWN_TRUNCATED_FIELD)
+    assert.ok(payload.description.includes('resource-123'), payload.description)
+  })
+
+  it('describes the mcp_spawn prompt as it always has, and bounds the scan of a huge command', async () => {
+    const shown = []
+    pm.on('permission_request', (d) => shown.push(d))
+    const first = pm.requestMcpTrust({ name: 'files', command: '/usr/local/bin/mcp-files', args: ['--root', '/tmp'], envKeys: [] })
+    const second = pm.requestMcpTrust({ name: 'files', command: 'a'.repeat(9000), args: [], envKeys: [] })
+    assert.equal(shown[0].description, 'Spawn MCP server "files" running /usr/local/bin/mcp-files --root')
+    assert.equal(shown[0].recordDescription, shown[0].description)
+    assert.equal(shown[1].description, 'Spawn MCP server "files" running')
+    assert.equal(shown[1].recordDescription, shown[1].description)
+    pm.clearAll()
+    await Promise.all([first, second])
+  })
 
   it('masks the field in the description exactly as it is masked in `input`', () => {
     const { payload } = raiseOn(pm, 'CustomTool', NO_NAMED_FIELD)
@@ -151,6 +220,13 @@ describe('BYOK producer: ClaudeByokSession (#8384, #8397)', () => {
     assert.ok(payload, 'the session re-emitted the permission_request')
     assertNoSecret(payload.description, 'description')
     assert.equal(payload.input.password, '[REDACTED]')
+  })
+
+  it('masks a credential in a property name', () => {
+    let payload
+    session.once('permission_request', (d) => { payload = d })
+    session._permissions.handlePermission('CustomTool', KEYED_STRADDLING, null, 'approve')
+    assertNoHookToken(payload.description, 'description')
   })
 
   it('drops recordDescription from a child prompt relayed upward', () => {
@@ -268,6 +344,20 @@ describe('hook-routed producer: ws-permissions.js (claude-cli, claude-tui) (#838
       })
     }
   }
+
+  for (const owner of ['cli', 'tui']) {
+    it(`${owner}: masks a credential in a property name, even where a clip would split it`, async () => {
+      for (const input of [KEYED_SECRET, KEYED_STRADDLING]) {
+        const { message } = await raise(owner, input)
+        assertNoHookToken(message.description, 'description')
+      }
+    })
+  }
+
+  it('describes an input with its own _truncated field by its content', async () => {
+    const { message } = await raise('cli', OWN_TRUNCATED_FIELD)
+    assert.ok(message.description.includes('resource-123'), message.description)
+  })
 
   it('masks the field in the description exactly as it is masked in `input`', async () => {
     const { message } = await raise('tui', NO_NAMED_FIELD)

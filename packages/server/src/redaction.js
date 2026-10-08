@@ -111,6 +111,11 @@ const MAX_INPUT_CHARS = 10_240 // ~10K chars max for broadcast (JS string length
 // stack. Real tool inputs are shallow; anything past this is summarized away.
 const MAX_SANITIZE_DEPTH = 8
 
+// The wrappers `sanitizeToolInput` itself returns for an oversized input. Held
+// by identity (not by a field on the object), so an input's own `_truncated`
+// key is never mistaken for one and the wrapper's wire shape is unchanged.
+const TRUNCATION_WRAPPERS = new WeakSet()
+
 /**
  * Recursively redact a single tool_input value of any shape (#6029). Applies the
  * KEY-NAME pass to object keys and the VALUE-SHAPE pass (`redactValue`) to every
@@ -189,7 +194,11 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
   // Final size check on the whole object
   const serialized = JSON.stringify(result)
   if (serialized.length > maxChars) {
-    return { _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' }
+    const wrapper = { _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' }
+    // Remember which object is the sanitizer's own wrapper: an input may carry a
+    // `_truncated` field of its own, and the wrapper's shape is persisted.
+    TRUNCATION_WRAPPERS.add(wrapper)
+    return wrapper
   }
   return result
 }
@@ -299,10 +308,26 @@ export function describeToolInput(rawInput, emptyFallback = '') {
   }
   if (rawInput && typeof rawInput === 'object' && Object.keys(rawInput).length > 0) {
     const sanitized = sanitizeToolInput(rawInput)
-    const text = sanitized._truncated === true ? String(sanitized.summary ?? '') : JSON.stringify(sanitized)
-    return text.slice(0, SERIALIZED_DESCRIPTION_MAX)
+    const text = TRUNCATION_WRAPPERS.has(sanitized) ? String(sanitized.summary ?? '') : JSON.stringify(sanitized)
+    // `sanitizeToolInput` masks values, but copies property NAMES verbatim, so
+    // the whole serialization is scanned again -- unclipped, it is already
+    // bounded by the sanitizer's own cap -- and only then clipped.
+    return redactValue(text).slice(0, SERIALIZED_DESCRIPTION_MAX)
   }
   return emptyFallback
+}
+
+/**
+ * A prompt description composed by a producer from its own fields (not derived
+ * from a tool input): redacted over the bounded scan, then clipped to the length
+ * a client shows. The MCP trust prompt uses it, so every description follows one
+ * policy.
+ *
+ * @param {unknown} text
+ * @returns {string}
+ */
+export function describeComposedText(text) {
+  return redactBounded(text).slice(0, SERIALIZED_DESCRIPTION_MAX)
 }
 
 export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }
