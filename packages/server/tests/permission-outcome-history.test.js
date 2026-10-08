@@ -95,6 +95,25 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     assert.ok(e.description.length <= PERMISSION_OUTCOME_DESCRIPTION_MAX)
   })
 
+  it('fails closed on oversized text: a JWT-shaped value crossing the scan bound leaves no prefix behind', () => {
+    const h = new SessionMessageHistory()
+    const jwt = `eyJ${'A'.repeat(20)}.${'B'.repeat(9000)}.${'C'.repeat(20)}`
+    h.recordHistory('s1', 'permission_outcome', {
+      requestId: 'p', tool: 'Bash', description: `curl -H ${jwt}`, outcome: 'allowed',
+    })
+    const [e] = h.getHistory('s1')
+    assert.equal(e.description.includes('eyJ'), false)
+    assert.equal(e.description.includes('BBBB'), false)
+  })
+
+  it('oversized text with no whitespace to cut at is dropped, not clipped raw', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'permission_outcome', {
+      requestId: 'p', tool: 'Bash', description: `eyJ${'A'.repeat(20)}.${'B'.repeat(20000)}`, outcome: 'allowed',
+    })
+    assert.equal(h.getHistory('s1')[0].description, '')
+  })
+
   it('keeps no tool input: only the fields the clients were shown', () => {
     const h = new SessionMessageHistory()
     h.recordHistory('s1', 'permission_outcome', {
@@ -294,6 +313,51 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     const serialized = JSON.stringify(mgr.serializeState())
     assert.equal(serialized.includes('ordinarySecret123'), false, 'not in the state file payload')
     assert.equal(serialized.includes('nestedSecret456'), false)
+  })
+
+  it('records the file path of a LARGE Write (input past the broadcast cap), not the truncation wrapper', async () => {
+    const { pm, requestId, decided } = raise('s1', 'Write', {
+      content: 'x'.repeat(20_000), file_path: '/Users/me/proj/src/big-file.ts',
+    })
+    pm.respondToPermission(requestId, 'allow')
+    await decided
+    const [e] = outcomes(mgr, 's1')
+    assert.equal(e.description, '/Users/me/proj/src/big-file.ts')
+    assert.equal(e.description.includes('_truncated'), false)
+  })
+
+  it('a large input with a credential under a sensitive key still records the path and not the credential', async () => {
+    const { pm, requestId, decided } = raise('s1', 'Write', {
+      content: 'x'.repeat(20_000), file_path: '/srv/app/config.ts', password: 'ordinarySecret123',
+    })
+    pm.respondToPermission(requestId, 'deny')
+    await decided
+    const [e] = outcomes(mgr, 's1')
+    assert.equal(e.description, '/srv/app/config.ts')
+    assert.equal(JSON.stringify(mgr.serializeState()).includes('ordinarySecret123'), false)
+  })
+
+  it('a large input with no identifying field records the tool only, never the truncation wrapper', async () => {
+    const { pm, requestId, decided } = raise('s1', 'mcp__svc__call', { blob: 'lorem ipsum '.repeat(2000), password: 'ordinarySecret123' })
+    pm.respondToPermission(requestId, 'deny')
+    await decided
+    const [e] = outcomes(mgr, 's1')
+    assert.equal(e.description, '')
+    assert.equal(JSON.stringify(mgr.serializeState()).includes('ordinarySecret123'), false)
+  })
+
+  it('does not journal a Task subagent prompt relayed as agent_event (the client cannot reconcile nested cards yet)', () => {
+    const { session } = makeInProcessSession(mgr, 's1')
+    session.emit('agent_event', {
+      parentToolUseId: 'tu_task', type: 'permission_request',
+      payload: { requestId: 'perm-child', tool: 'mcp__foo__bar', description: 'x', input: {} },
+    })
+    assert.equal(mgr._permissionRequests.has('perm-child'), false, 'not tracked')
+    session.emit('agent_event', {
+      parentToolUseId: 'tu_task', type: 'permission_resolved',
+      payload: { requestId: 'perm-child', decision: 'allow', reason: 'user' },
+    })
+    assert.equal(outcomes(mgr, 's1').length, 0)
   })
 
   it('redacts before it clips: a key straddling the length cap is not left as an unmatched partial', () => {
@@ -513,14 +577,24 @@ describe('SessionManager records permission outcomes: hook-routed providers (#83
 
   // The recording is best-effort: whatever the session manager does (no such
   // methods, or methods that throw), the hook is still answered and cleaned up.
-  for (const [label, sessionManager] of [
-    ['lacks the recording methods', () => ({})],
-    ['throws from the recording methods', () => ({
-      notePermissionRequest() { throw new Error('boom') },
-      recordPermissionOutcome() { throw new Error('boom') },
-    })],
+  // The answer goes through the REAL resolver, because that is where a user's
+  // answer is journaled.
+  for (const [label, makeManager] of [
+    ['lacks the recording methods', () => ({ calls: { note: 0, record: 0 }, sm: { getSession: () => null } })],
+    ['throws from the recording methods', () => {
+      const calls = { note: 0, record: 0 }
+      return {
+        calls,
+        sm: {
+          getSession: () => null,
+          notePermissionRequest() { calls.note++; throw new Error('boom') },
+          recordPermissionOutcome() { calls.record++; throw new Error('boom') },
+        },
+      }
+    }],
   ]) {
     it(`still answers the hook when the session manager ${label}`, async () => {
+      const { calls, sm } = makeManager()
       const pending = new Map()
       const routes = new Map()
       const stubbed = createPermissionHandler({
@@ -530,26 +604,75 @@ describe('SessionManager records permission outcomes: hook-routed providers (#83
         pushManager: null,
         pendingPermissions: pending,
         permissionSessionMap: routes,
-        getSessionManager: sessionManager,
+        getSessionManager: () => sm,
         findSessionByHookSecret: () => ({ session: {}, sessionId: 's1' }),
       })
-      const res = makeRes()
-      stubbed.handlePermissionRequest(makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }), { authorization: 'Bearer x' }), res)
-      await new Promise((r) => setImmediate(r))
-      assert.equal(pending.size, 1, 'the request became pending')
-      const [requestId] = [...pending.keys()]
-      assert.equal(routes.get(requestId), 's1', 'and is routed to its session')
-      assert.equal(res.statusCode, null, 'nothing is written until it is answered')
+      const realResolver = createPermissionResolver({
+        permissionSessionMap: routes,
+        pendingPermissions: pending,
+        getSessionManager: () => sm,
+        resolveLegacyPermission: stubbed.resolvePermission,
+        getPermissionAudit: () => null,
+      })
+      try {
+        const res = makeRes()
+        stubbed.handlePermissionRequest(makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }), { authorization: 'Bearer x' }), res)
+        await new Promise((r) => setImmediate(r))
+        assert.equal(pending.size, 1, 'the request became pending')
+        const [requestId] = [...pending.keys()]
+        assert.equal(routes.get(requestId), 's1', 'and is routed to its session')
+        assert.equal(res.statusCode, null, 'nothing is written until it is answered')
 
-      stubbed.resolvePermission(requestId, 'allow')
+        const result = realResolver.resolve(requestId, 'allow', null, { clientId: 'c1' })
 
-      assert.equal(res.statusCode, 200)
-      assert.deepEqual(JSON.parse(res.body), { decision: 'allow' })
-      assert.equal(pending.size, 0, 'the pending entry is cleaned up')
-      assert.equal(routes.size, 0, 'and so is its route')
-      stubbed.destroy()
+        assert.equal(result.kind, 'resolved')
+        assert.equal(res.statusCode, 200)
+        assert.deepEqual(JSON.parse(res.body), { decision: 'allow' })
+        assert.equal(pending.size, 0, 'the pending entry is cleaned up')
+        assert.equal(routes.size, 0, 'and so is its route')
+        if (label.startsWith('throws')) {
+          assert.equal(calls.note, 1, 'the request was reported to the (throwing) recorder')
+          assert.equal(calls.record, 1, 'and so was the answer: the containment really was exercised')
+        }
+      } finally {
+        stubbed.destroy()
+      }
     })
   }
+
+  it('records the file path of a LARGE Write (input past the broadcast cap), not the truncation wrapper', async () => {
+    const { res, requestId } = await raise({
+      tool_name: 'Write',
+      tool_input: { content: 'x'.repeat(20_000), file_path: '/Users/me/proj/src/big-file.ts' },
+    })
+    resolver.resolve(requestId, 'allow', null, { clientId: 'c1' })
+    res.emit('close')
+    const [e] = outcomes(mgr, 's1')
+    assert.equal(e.description, '/Users/me/proj/src/big-file.ts')
+    assert.equal(e.description.includes('_truncated'), false)
+  })
+
+  it('a large input with a credential under a sensitive key still records the path and not the credential', async () => {
+    const { requestId } = await raise({
+      tool_name: 'Write',
+      tool_input: { content: 'x'.repeat(20_000), file_path: '/srv/app/config.ts', password: 'ordinarySecret123' },
+    })
+    resolver.resolve(requestId, 'deny', null, { clientId: 'c1' })
+    const [e] = outcomes(mgr, 's1')
+    assert.equal(e.description, '/srv/app/config.ts')
+    assert.equal(JSON.stringify(mgr.serializeState()).includes('ordinarySecret123'), false)
+  })
+
+  it('a large input with no identifying field records the tool only, never the truncation wrapper', async () => {
+    const { requestId } = await raise({
+      tool_name: 'mcp__svc__call',
+      tool_input: { blob: 'lorem ipsum '.repeat(2000), password: 'ordinarySecret123' },
+    })
+    resolver.resolve(requestId, 'deny', null, { clientId: 'c1' })
+    const [e] = outcomes(mgr, 's1')
+    assert.equal(e.description, '')
+    assert.equal(e.tool, 'mcp__svc__call')
+  })
 
   // #8348 -- the description the transcript keeps is built from the SANITIZED
   // input, so a value under a sensitive key never reaches history or the state file.

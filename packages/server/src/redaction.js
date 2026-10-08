@@ -203,4 +203,50 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
  */
 const PULL_MAX_INPUT_CHARS = 512 * 1024 // 512K chars
 
+/**
+ * How much text is handed to the pattern redactor in one go. A bound on the scan,
+ * far above any length a record keeps.
+ */
+const MAX_REDACT_SCAN = 8192
+
+/**
+ * Redact `text` without ever persisting a piece of a secret that a length bound
+ * cut in two.
+ *
+ * Text longer than the scan bound is cut at the last whitespace inside it (or
+ * dropped entirely when it has none), so the cut never lands inside a token: a
+ * secret that crosses the bound is left out whole instead of being redacted
+ * from a prefix the patterns no longer recognise. Redaction runs on what
+ * remains; callers clip AFTER this, never before.
+ *
+ * @param {unknown} text
+ * @param {number} [maxScan]
+ * @returns {string}
+ */
+export function redactBounded(text, maxScan = MAX_REDACT_SCAN) {
+  let s = typeof text === 'string' ? text : String(text ?? '')
+  if (s.length > maxScan) {
+    const head = s.slice(0, maxScan)
+    const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'))
+    s = cut > 0 ? head.slice(0, cut) : ''
+  }
+  return redactValue(s)
+}
+
+/**
+ * The identifying field of a RAW tool input that a permission prompt is
+ * described by (the same precedence the producers use for the description the
+ * clients see), redacted; `undefined` when the input has none. Read from the raw
+ * input on purpose: the broadcast copy of a large input is replaced by a
+ * truncation wrapper that no longer has the field.
+ *
+ * @param {unknown} rawInput
+ * @returns {string|undefined}
+ */
+export function describeByNamedField(rawInput) {
+  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) return undefined
+  const named = rawInput.description || rawInput.command || rawInput.file_path || rawInput.pattern || rawInput.query
+  return named ? redactBounded(String(named)) : undefined
+}
+
 export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }

@@ -27,9 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     pending card.
   - "Sync Full History" keeps the records: they are merged into the rebuilt
     transcript by time.
-  - The recorded description is built from the sanitised tool input, so values
-    under sensitive keys are masked in it.
-  - Prompts raised by a BYOK Task subagent are recorded too.
+  - The recorded description is the prompt's identifying field (command, file
+    path, ...) even for a very large input, and is otherwise built from the
+    sanitised tool input, so values under sensitive keys are masked in it.
+  - Prompts raised by a BYOK Task subagent are not recorded yet (their cards
+    live inside the Task bubble, which the client cannot reconcile).
   - A card the client already holds is corrected to the recorded outcome (for
     example, a timed-out prompt shown as denied is relabelled expired).
   - A prompt that was open when the daemon crashed has no recorded outcome.

@@ -273,6 +273,12 @@ const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
  * and say so only in `reason`. Those are `expired` (the tool call was dropped),
  * not `denied` (nobody refused it) -- the distinction #8256 asks the clients for.
  *
+ * One system-made deny is recorded as `denied`, not `expired`: switching a session
+ * to auto mode while an MCP trust prompt is open resolves that prompt with
+ * `reason: 'auto_mode_mcp_trust_bypass'` and `decision: 'deny'`. The daemon
+ * refused the server spawn on purpose (trust is never granted by a bypass), so
+ * that is a refusal rather than a prompt that simply ran out.
+ *
  * @param {'permission_resolved'|'permission_expired'} event
  * @param {object} data
  * @returns {'allowed'|'denied'|'expired'|null}
@@ -287,30 +293,35 @@ function permissionOutcomeForEvent(event, data) {
 /**
  * #8348: the description the transcript keeps for a permission prompt.
  *
- * It is built from the SANITIZED tool input (the one the clients received, with
- * values under sensitive keys masked and strings pattern-redacted) whenever the
- * input is available, using the same field precedence the producers use for the
- * description the clients see. The description string a producer passes is only
- * used when there is no input to build from: when it was derived from the input
- * as a JSON fallback, it was serialized BEFORE sanitizing, so a value under a
- * sensitive key would still be in it, and redacting that string again does not
- * recover the key context.
- *
- * An AskUserQuestion prompt names the question that was asked instead.
+ * In order:
+ *   1. an AskUserQuestion prompt names the question that was asked;
+ *   2. `recordDescription`, the identifying field of the RAW input (command,
+ *      file_path, ...) that the producer read before the input was shortened for
+ *      broadcast and already redacted. A large input is broadcast as a truncation
+ *      wrapper that has lost those fields, so only the producer can supply it;
+ *   3. the SANITIZED input, serialized: values under sensitive keys are masked in
+ *      it. This is the case the producer's own description was built by
+ *      serializing the raw input, which still carries them, so that string is NOT
+ *      used and redacting it again does not recover the key context. The
+ *      truncation wrapper is never serialized: it carries nothing worth showing;
+ *   4. the producer's description, only when there is no input at all.
  *
  * @param {string|undefined} tool
  * @param {string|undefined} description
  * @param {object|undefined} input the sanitized tool input
+ * @param {string|undefined} recordDescription
  * @returns {string}
  */
-function describePermissionForOutcome(tool, description, input) {
+function describePermissionForOutcome(tool, description, input, recordDescription) {
   if (tool === 'AskUserQuestion') {
     const first = Array.isArray(input?.questions) ? input.questions[0] : null
     const question = first && typeof first.question === 'string' ? first.question.trim() : ''
     if (question) return question
   }
+  if (typeof recordDescription === 'string' && recordDescription.length > 0) return recordDescription
   const fallback = typeof description === 'string' ? description : ''
   if (!input || typeof input !== 'object' || Array.isArray(input)) return fallback
+  if (input._truncated === true) return ''
   const named = input.description || input.command || input.file_path || input.pattern || input.query
   const source = named
     || (Object.keys(input).length > 0 ? JSON.stringify(input) : fallback)
@@ -4271,7 +4282,7 @@ export class SessionManager extends EventEmitter {
     this._permissionRequests.set(requestId, {
       sessionId,
       tool: typeof request.tool === 'string' ? request.tool : '',
-      description: describePermissionForOutcome(request.tool, request.description, request.input),
+      description: describePermissionForOutcome(request.tool, request.description, request.input, request.recordDescription),
     })
     while (this._permissionRequests.size > MAX_TRACKED_PERMISSION_REQUESTS) {
       const oldest = this._permissionRequests.keys().next().value
@@ -4596,19 +4607,13 @@ export class SessionManager extends EventEmitter {
         } else if (event === 'permission_resolved' || event === 'permission_expired') {
           const outcome = permissionOutcomeForEvent(event, data)
           if (outcome) this.recordPermissionOutcome(data.requestId, outcome)
-        } else if (event === 'agent_event') {
-          // A BYOK Task subagent's permission prompts reach this session wrapped
-          // in `agent_event { type, payload }` (a grandchild's too: each level
-          // re-emits to its parent, so this session sees one event per prompt).
-          // They are shown to the user and answered through THIS session, so
-          // they are journaled under it.
-          if (data?.type === 'permission_request') {
-            this.notePermissionRequest(sessionId, data.payload)
-          } else if (data?.type === 'permission_resolved') {
-            const outcome = permissionOutcomeForEvent('permission_resolved', data.payload)
-            if (outcome) this.recordPermissionOutcome(data.payload.requestId, outcome)
-          }
         }
+        // Not journaled yet: a BYOK Task subagent's prompts, which reach this
+        // session wrapped in `agent_event { type, payload }`. The client holds such
+        // a prompt inside the Task bubble's `childAgentEvents`, not as a top-level
+        // prompt message, so it cannot yet reconcile a recorded outcome with it: it
+        // would show the nested prompt and a second standalone record. Until it can
+        // (a follow-up), child prompts keep their transient, live-only behaviour.
         this.emit('session_event', { sessionId, event, data })
       })
     }

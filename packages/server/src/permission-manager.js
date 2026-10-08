@@ -18,7 +18,7 @@ import {
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
-import { sanitizeToolInput, redactValue } from './redaction.js'
+import { sanitizeToolInput, redactValue, describeByNamedField } from './redaction.js'
 import { redactMcpUrl, resolveTrustAddress, MCP_SERVER_SOURCE_VALUES } from './byok-mcp-config.js'
 // #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
 // project key, not the raw session cwd, or a relative / `..`-laden cwd
@@ -815,6 +815,7 @@ export class PermissionManager extends EventEmitter {
       // floored prompt apart from an ordinary one. Stashed on _lastPermissionData
       // too, so both the resend path (resendPendingPermissions) and this
       // broadcast agree — one computation, replayed verbatim.
+      const recordDescription = describeByNamedField(toolInput)
       const permPayload = {
         requestId,
         tool: toolName,
@@ -823,6 +824,11 @@ export class PermissionManager extends EventEmitter {
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
         floored: protectedTarget,
+        // #8348: the identifying field of the RAW input, redacted, for the
+        // session's permission transcript. Not on the wire (the request builder
+        // picks its fields), and read from the raw input because the broadcast
+        // copy of a large input no longer has the field.
+        ...(recordDescription !== undefined ? { recordDescription } : {}),
       }
       this._lastPermissionData.set(requestId, permPayload)
       this.emit('permission_request', permPayload)
@@ -1412,6 +1418,8 @@ export class PermissionManager extends EventEmitter {
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
         floored: isFlooredTarget('mcp_spawn', input, this._cwd),
+        // #8348: for the permission transcript (see handlePermission).
+        recordDescription: redactValue(String(description)).slice(0, 200),
       }
       this._lastPermissionData.set(requestId, permPayload)
       this.emit('permission_request', permPayload)

@@ -5,7 +5,7 @@ import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 import { settlePush } from './push.js'
 import { createPermissionResolver } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
-import { redactValue, sanitizeToolInput } from './redaction.js'
+import { redactValue, sanitizeToolInput, describeByNamedField } from './redaction.js'
 // #7004: the protected-path / secret-read FLOOR. Imported from permission-floor.js
 // — the leaf module that is the SINGLE source of the floor — so the hook-routed
 // path applies the byte-identical predicate the in-process path
@@ -411,7 +411,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // so a session switch or reload can still show it. An unattributable
       // prompt (no owning session) has no transcript to be recorded in.
       if (ownerSessionId) {
-        recordPermissionRaised(ownerSessionId, { requestId, tool, description, input: sanitizedInput })
+        recordPermissionRaised(ownerSessionId, { requestId, tool, description, input: sanitizedInput, recordDescription: describeByNamedField(toolInput) })
       }
 
       if (pushManager) {

@@ -177,6 +177,28 @@ describe('permission_outcome through a FULL-REBUILD replay (session switch / rel
     expect(prompts(swapped)[0]).toMatchObject({ id: 'live-perm', answered: 'deny', answeredAt: NOW, permissionOutcome: 'denied' })
   })
 
+  it('reconciles the card in the REBUILT TAIL when the pre-replay prefix is non-empty (the index maps back past the prefix)', () => {
+    const old1 = user('old1', 'earlier')
+    const old2 = user('old2', 'earlier still')
+    const env = makeEnv([old1, old2])
+    reconcileReplayStart('s1', true, env.sessions.s1!.messages)
+    // The rebuilt tail: a replayed message, then a live card that raced in.
+    const raced = livePending({ options: undefined, answered: 'deny', answeredAt: NOW })
+    env.adapter.updateSession('s1', (sess) => ({ messages: [...sess.messages, user('h1', 'run it'), raced] }))
+    dispatch(env, outcome({ outcome: 'expired' }))
+    const during = env.sessions.s1!.messages
+    // The prefix is untouched: the reconcile must land on the tail card, not on
+    // whatever sits at the tail-relative index inside the prefix.
+    expect(during[0]).toBe(old1)
+    expect(during[1]).toBe(old2)
+    expect(during[3]).toMatchObject({ id: 'live-perm', permissionOutcome: 'expired' })
+    const swapped = reconcileReplayEnd('s1', during, 7).swappedMessages as ChatMessage[]
+    expect(swapped.map((m) => m.id)).toEqual(['h1', 'live-perm'])
+    expect(prompts(swapped)).toHaveLength(1)
+    expect(prompts(swapped)[0]!.permissionOutcome).toBe('expired')
+    expect(prompts(swapped)[0]!.answered).toBeUndefined()
+  })
+
   it('is idempotent: the same entry replayed twice leaves one record, untouched by the second', () => {
     const env = makeEnv([])
     reconcileReplayStart('s1', true, [])
