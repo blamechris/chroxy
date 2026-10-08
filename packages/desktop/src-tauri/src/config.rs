@@ -203,10 +203,41 @@ fn load_config_file() -> ChroxyConfig {
     };
 
     match serde_json::from_str(&contents) {
-        Ok(config) => config,
+        Ok(config) => {
+            note_parse_result(None);
+            config
+        }
         Err(e) => {
-            eprintln!("[config] Failed to parse {}: {}", path.display(), e);
+            let msg = format!("Failed to parse {}: {}", path.display(), e);
+            if note_parse_result(Some(&msg)) {
+                eprintln!("[config] {}", msg);
+            }
             ChroxyConfig::default()
+        }
+    }
+}
+
+/// The last parse failure that was logged, so a malformed `config.json` read on
+/// every tray poll (#8267) is reported once per change, not every few seconds.
+static LAST_PARSE_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Record a parse outcome (`None` = parsed fine). Returns true when `err` is a
+/// new failure that should be logged.
+fn note_parse_result(err: Option<&str>) -> bool {
+    let mut last = LAST_PARSE_ERROR.lock().unwrap_or_else(|e| e.into_inner());
+    should_log_parse_error(&mut last, err)
+}
+
+fn should_log_parse_error(last: &mut Option<String>, err: Option<&str>) -> bool {
+    match err {
+        None => {
+            *last = None;
+            false
+        }
+        Some(msg) if last.as_deref() == Some(msg) => false,
+        Some(msg) => {
+            *last = Some(msg.to_string());
+            true
         }
     }
 }
@@ -260,6 +291,17 @@ pub(crate) fn parse_config(json: &str) -> Result<ChroxyConfig, serde_json::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_parse_failure_is_logged_once_and_a_change_logs_again() {
+        let mut last = None;
+        assert!(should_log_parse_error(&mut last, Some("bad at 1")));
+        assert!(!should_log_parse_error(&mut last, Some("bad at 1")));
+        assert!(!should_log_parse_error(&mut last, Some("bad at 1")));
+        assert!(should_log_parse_error(&mut last, Some("bad at 2")), "a different failure logs");
+        assert!(!should_log_parse_error(&mut last, None), "a good read logs nothing");
+        assert!(should_log_parse_error(&mut last, Some("bad at 2")), "failing again after a fix logs again");
+    }
 
     #[test]
     fn default_config_has_zero_port() {

@@ -162,6 +162,94 @@ pub fn tray_plan(state: MenuState, port: PortState) -> TrayPlan {
     }
 }
 
+/// The port of a verified chroxy daemon the app did not start, if the menu is in
+/// that state. Only meaningful while the app-managed server is stopped.
+pub fn external_port(menu: MenuState, port: PortState) -> Option<u16> {
+    match (menu, port) {
+        (MenuState::Stopped, PortState::Chroxy(p)) => Some(p),
+        _ => None,
+    }
+}
+
+/// The user-initiated actions that would spawn a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAction {
+    Start,
+    Restart,
+}
+
+/// What a user-initiated Start/Restart should do about a held port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserStartDecision {
+    Proceed,
+    /// Do nothing; tell the user what holds the port.
+    Refuse(PortState),
+}
+
+/// While the app's own server is active the port is its own (a Restart of it is
+/// legitimate); otherwise anything holding the port is somebody else's and the
+/// action is refused.
+pub fn user_start_decision(app_server_active: bool, held: PortState) -> UserStartDecision {
+    if !app_server_active && held.is_occupied() {
+        UserStartDecision::Refuse(held)
+    } else {
+        UserStartDecision::Proceed
+    }
+}
+
+/// User-facing explanation of a refusal.
+pub fn refusal_message(action: UserAction, held: PortState) -> String {
+    match (action, held) {
+        (UserAction::Start, PortState::Chroxy(p)) => format!(
+            "A chroxy daemon already serves port {}. Use Open Dashboard to connect to it.",
+            p
+        ),
+        (UserAction::Restart, PortState::Chroxy(p)) => format!(
+            "The daemon on port {} was not started by this app, so it cannot be restarted. Manage it with its service manager.",
+            p
+        ),
+        (_, PortState::Foreign(p)) => format!(
+            "Port {} is in use by another program. Free it, or change the port in config.json.",
+            p
+        ),
+        (_, PortState::Free) => "The port is free.".to_string(),
+    }
+}
+
+/// Orchestrates a user-initiated Start/Restart: probe live (only when the app's
+/// own server is idle), refuse if the port is held, else proceed. The effects are
+/// closures so the sequencing is testable: a refusal must never reach `proceed`.
+pub fn run_guarded_user_start(
+    action: UserAction,
+    app_server_active: bool,
+    probe: impl FnOnce() -> PortState,
+    on_refuse: impl FnOnce(PortState, String),
+    proceed: impl FnOnce(),
+) {
+    let held = if app_server_active { PortState::Free } else { probe() };
+    match user_start_decision(app_server_active, held) {
+        UserStartDecision::Refuse(h) => on_refuse(h, refusal_message(action, h)),
+        UserStartDecision::Proceed => proceed(),
+    }
+}
+
+/// Stop acts on the server this app spawned. Against an external daemon it must
+/// do nothing, not even tell a connected window that the server stopped.
+pub fn run_guarded_stop(
+    menu: MenuState,
+    port: PortState,
+    on_refuse: impl FnOnce(String),
+    proceed: impl FnOnce(),
+) {
+    match external_port(menu, port) {
+        Some(p) => on_refuse(format!(
+            "The daemon on port {} was not started by this app, so it cannot be stopped. Manage it with its service manager.",
+            p
+        )),
+        None => proceed(),
+    }
+}
+
 /// Probe `/health` on loopback once and classify what holds `port`.
 pub fn probe_port(port: u16, timeout: Duration) -> PortState {
     let url = format!("http://127.0.0.1:{}/health", port);
@@ -179,6 +267,11 @@ pub fn probe_port(port: u16, timeout: Duration) -> PortState {
         },
     };
     classify_probe(port, &outcome)
+}
+
+/// True if something accepts a TCP connection on loopback `port`.
+pub fn port_accepts_connections(port: u16) -> bool {
+    tcp_connects(port, Duration::from_millis(300))
 }
 
 fn tcp_connects(port: u16, timeout: Duration) -> bool {
@@ -313,6 +406,103 @@ mod tests {
             next_external(PortState::Foreign(8765), PortState::Chroxy(8765), false),
             (PortState::Chroxy(8765), false)
         );
+    }
+
+    // --- guards for user-initiated actions (#8267 review S1, X1) -----------
+
+    #[test]
+    fn is_occupied_is_true_for_anything_but_free() {
+        assert!(!PortState::Free.is_occupied());
+        assert!(PortState::Chroxy(1).is_occupied());
+        assert!(PortState::Foreign(1).is_occupied());
+        assert!(PortState::Chroxy(1).is_external_chroxy());
+        assert!(!PortState::Foreign(1).is_external_chroxy());
+        assert!(!PortState::Free.is_external_chroxy());
+    }
+
+    #[test]
+    fn user_start_is_refused_for_every_held_port_when_the_app_is_idle() {
+        for held in [PortState::Chroxy(8765), PortState::Foreign(8765)] {
+            assert_eq!(user_start_decision(false, held), UserStartDecision::Refuse(held));
+        }
+        assert_eq!(user_start_decision(false, PortState::Free), UserStartDecision::Proceed);
+    }
+
+    #[test]
+    fn user_restart_of_the_apps_own_running_server_proceeds() {
+        for held in [PortState::Free, PortState::Chroxy(8765), PortState::Foreign(8765)] {
+            assert_eq!(user_start_decision(true, held), UserStartDecision::Proceed);
+        }
+    }
+
+    #[test]
+    fn guarded_start_never_proceeds_on_a_held_port() {
+        for action in [UserAction::Start, UserAction::Restart] {
+            for held in [PortState::Chroxy(8765), PortState::Foreign(8765)] {
+                let (mut proceeded, mut refused) = (false, None);
+                run_guarded_user_start(action, false, || held, |h, m| refused = Some((h, m)), || proceeded = true);
+                assert!(!proceeded, "{:?} on {:?} must not reach the start path", action, held);
+                let (h, msg) = refused.expect("must refuse");
+                assert_eq!(h, held);
+                assert!(msg.contains("8765"));
+            }
+        }
+    }
+
+    #[test]
+    fn guarded_start_proceeds_on_a_free_port_and_does_not_probe_an_active_server() {
+        let (mut proceeded, mut refused) = (false, false);
+        run_guarded_user_start(UserAction::Start, false, || PortState::Free, |_, _| refused = true, || proceeded = true);
+        assert!(proceeded && !refused);
+
+        // The app's own server is active: its own port must not be probed (it
+        // would read as an external daemon) and the action proceeds.
+        let (mut probed, mut proceeded) = (false, false);
+        run_guarded_user_start(
+            UserAction::Restart,
+            true,
+            || {
+                probed = true;
+                PortState::Chroxy(8765)
+            },
+            |_, _| panic!("must not refuse"),
+            || proceeded = true,
+        );
+        assert!(proceeded && !probed);
+    }
+
+    #[test]
+    fn guarded_stop_refuses_only_for_an_external_daemon() {
+        let (mut proceeded, mut msg) = (false, None);
+        run_guarded_stop(MenuState::Stopped, PortState::Chroxy(8765), |m| msg = Some(m), || proceeded = true);
+        assert!(!proceeded);
+        assert!(msg.unwrap().contains("8765"));
+
+        for (menu, port) in [
+            (MenuState::Stopped, PortState::Free),
+            (MenuState::Stopped, PortState::Foreign(8765)),
+            (MenuState::Running, PortState::Chroxy(8765)),
+            (MenuState::Restarting, PortState::Chroxy(8765)),
+        ] {
+            let mut proceeded = false;
+            run_guarded_stop(menu, port, |_| panic!("must not refuse {:?}/{:?}", menu, port), || proceeded = true);
+            assert!(proceeded);
+        }
+    }
+
+    #[test]
+    fn external_port_needs_a_stopped_menu_and_a_verified_daemon() {
+        assert_eq!(external_port(MenuState::Stopped, PortState::Chroxy(9)), Some(9));
+        assert_eq!(external_port(MenuState::Running, PortState::Chroxy(9)), None);
+        assert_eq!(external_port(MenuState::Stopped, PortState::Foreign(9)), None);
+        assert_eq!(external_port(MenuState::Stopped, PortState::Free), None);
+    }
+
+    #[test]
+    fn refusal_messages_name_the_port_and_the_way_out() {
+        assert!(refusal_message(UserAction::Start, PortState::Chroxy(7)).contains("Open Dashboard"));
+        assert!(refusal_message(UserAction::Restart, PortState::Chroxy(7)).contains("service manager"));
+        assert!(refusal_message(UserAction::Start, PortState::Foreign(7)).contains("another program"));
     }
 
     // --- probe_port against real sockets -----------------------------------

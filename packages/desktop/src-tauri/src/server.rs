@@ -317,8 +317,52 @@ impl ServerStatus {
     }
 }
 
+/// Who asked for a start, which decides whether `start()` may kill whatever is
+/// already on the port (#8267).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartOrigin {
+    /// App launch (auto-start) or its crash auto-restart: reclaims a stale
+    /// orphan on the port from a previous run, as it always has.
+    Launch,
+    /// A user click (tray, app menu, dashboard Start/Restart): the port holder
+    /// may be an externally managed daemon the app does not own, so it is never
+    /// killed. A held port fails the start instead.
+    User,
+}
+
+/// Whether a start from `origin` may kill the current port holder.
+pub fn may_reclaim_port(origin: StartOrigin) -> bool {
+    matches!(origin, StartOrigin::Launch)
+}
+
+/// Clear stale processes off `port` before a start, according to who is asking.
+///
+/// - The port-holder kill runs only for a launch-time start ([`may_reclaim_port`]).
+/// - Orphaned `cloudflared` tunnels are reaped for a launch-time start, and for a
+///   user start only when nothing holds the port: a held port means an external
+///   daemon whose own tunnel this would otherwise kill. A user *restart* of the
+///   app's own server still reaps its orphaned tunnel, because `kill_child` has
+///   just ended the only process that held the port.
+///
+/// The effects are closures so the decision is testable with recorders.
+fn reclaim_stale_with(
+    origin: StartOrigin,
+    port: u16,
+    port_held: impl FnOnce(u16) -> bool,
+    kill_holder: impl FnOnce(u16),
+    kill_tunnels: impl FnOnce(u16),
+) {
+    if may_reclaim_port(origin) {
+        kill_holder(port);
+        kill_tunnels(port);
+    } else if !port_held(port) {
+        kill_tunnels(port);
+    }
+}
+
 /// Manages the Chroxy server child process.
 pub struct ServerManager {
+    origin: StartOrigin,
     status: Arc<Mutex<ServerStatus>>,
     child: Option<Child>,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
@@ -351,6 +395,7 @@ impl ServerManager {
 
     pub fn new() -> Self {
         Self {
+            origin: StartOrigin::Launch,
             status: Arc::new(Mutex::new(ServerStatus::Stopped)),
             child: None,
             log_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(Self::MAX_LOG_LINES))),
@@ -363,6 +408,11 @@ impl ServerManager {
             auto_restart_pending: Arc::new(AtomicBool::new(false)),
             restart_count: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Set who is asking for the next start/restart (see [`StartOrigin`]).
+    pub fn set_origin(&mut self, origin: StartOrigin) {
+        self.origin = origin;
     }
 
     pub fn status(&self) -> ServerStatus {
@@ -904,10 +954,18 @@ impl ServerManager {
         self.config = config::load_config();
 
         // Kill any orphaned server on the port (e.g. from a previous crash)
-        Self::kill_port_holder(self.config.port);
-        // Kill any orphaned cloudflared process still tunneling that port,
+        // Only for a launch-time start: a user-initiated one must never kill a
+        // holder the app does not own (#8267).
+        // Also kill any orphaned cloudflared process still tunneling that port,
         // otherwise starting a new tunnel will race / fail to bind (#2835).
-        Self::kill_orphan_cloudflared(self.config.port, &self.log_buffer);
+        let log_buffer = Arc::clone(&self.log_buffer);
+        reclaim_stale_with(
+            self.origin,
+            self.config.port,
+            crate::tray_state::port_accepts_connections,
+            Self::kill_port_holder,
+            |port| Self::kill_orphan_cloudflared(port, &log_buffer),
+        );
 
         // Resolve Node 22 path.
         // If a custom path was set but no longer exists on disk, clear it
@@ -1430,6 +1488,49 @@ impl Drop for ServerManager {
 
 #[cfg(test)]
 mod tests {
+    // --- user-initiated starts never kill a holder they do not own (#8267) ---
+
+    fn reclaim_log(origin: StartOrigin, held: bool) -> Vec<&'static str> {
+        let log = std::cell::RefCell::new(Vec::new());
+        reclaim_stale_with(
+            origin,
+            8765,
+            |_| held,
+            |_| log.borrow_mut().push("kill_holder"),
+            |_| log.borrow_mut().push("kill_tunnels"),
+        );
+        log.into_inner()
+    }
+
+    #[test]
+    fn user_start_never_reaches_the_port_holder_kill() {
+        for held in [true, false] {
+            assert!(!reclaim_log(StartOrigin::User, held).contains(&"kill_holder"));
+        }
+    }
+
+    #[test]
+    fn launch_start_still_reclaims_holder_then_tunnels() {
+        for held in [true, false] {
+            assert_eq!(reclaim_log(StartOrigin::Launch, held), vec!["kill_holder", "kill_tunnels"]);
+        }
+    }
+
+    #[test]
+    fn user_start_leaves_an_external_daemons_tunnel_alone_but_reaps_an_orphan() {
+        assert!(reclaim_log(StartOrigin::User, true).is_empty(), "held port: hands off");
+        assert_eq!(reclaim_log(StartOrigin::User, false), vec!["kill_tunnels"]);
+    }
+
+    #[test]
+    fn manager_defaults_to_launch_origin_and_can_be_set_to_user() {
+        let mut mgr = ServerManager::new();
+        assert_eq!(mgr.origin, StartOrigin::Launch);
+        mgr.set_origin(StartOrigin::User);
+        assert_eq!(mgr.origin, StartOrigin::User);
+        assert!(may_reclaim_port(StartOrigin::Launch) && !may_reclaim_port(StartOrigin::User));
+    }
+
     use super::*;
 
     // -- resolve_cli_js candidate layout (#6640) --
