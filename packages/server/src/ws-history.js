@@ -294,6 +294,13 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
 }
 
 /**
+ * #8374: the client capability that says "I can label a `permission_outcome` whose
+ * outcome is `stopped`". Advertised in the auth handshake (CLIENT_CAPABILITIES in
+ * @chroxy/protocol).
+ */
+const CAPABILITY_PERMISSION_OUTCOME_STOPPED = 'permission_outcome_stopped_v1'
+
+/**
  * Write ONE history entry to a client, the way BOTH replay paths must.
  *
  * Two things happen per entry, and both were forgotten by the second copy of
@@ -340,6 +347,15 @@ export function sendHistoryEntry(send, ws, sessionId, entry) {
   // leave an answered question unmarked, and a replayed question reads as resolved
   // on the client already.
   const { _seq, sourceToolUseId: _sourceToolUseId, answered: _answered, ...wireEntry } = entry
+  // #8374: a client build from before `stopped` existed drops a `permission_outcome`
+  // whose outcome it cannot parse, and a full rebuild then loses the record
+  // altogether. Say `expired` to a client that did not advertise it can label the
+  // new value: the record survives, only its label degrades. The stored entry is
+  // untouched (`wireEntry` is a copy), so a capable client still gets `stopped`.
+  if (wireEntry.type === 'permission_outcome' && wireEntry.outcome === 'stopped'
+    && !(ws?.clientCapabilities?.has?.(CAPABILITY_PERMISSION_OUTCOME_STOPPED) ?? false)) {
+    wireEntry.outcome = 'expired'
+  }
   send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
   if (entry && entry.type === 'result') {
     send(ws, { type: 'agent_idle', sessionId })

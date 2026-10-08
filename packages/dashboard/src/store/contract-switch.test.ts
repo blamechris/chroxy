@@ -391,7 +391,7 @@ describe('permission_resolved flips answered + clears options (in-place)', () =>
   })
 
   // #8374: Stop resolves a pending claude-sdk prompt as a deny with reason
-  // 'aborted'. The decision alone cannot tell that from a user Deny, so the card
+  // 'stopped'. The decision alone cannot tell that from a user Deny, so the card
   // read "Denied" for a tool nobody refused.
   function resolveWith(extra: Record<string, unknown>) {
     const store = createMockStore({
@@ -432,13 +432,19 @@ describe('permission_resolved flips answered + clears options (in-place)', () =>
     return ss!.messages[0] as unknown as Record<string, unknown>
   }
 
-  it('#8374: a Stop-cancelled prompt (reason "aborted") becomes a stopped record, not an answered deny', () => {
-    const bubble = resolveWith({ reason: 'aborted' })
+  it('#8374: a Stop-cancelled prompt (reason "stopped") becomes a stopped record, not an answered deny', () => {
+    const bubble = resolveWith({ reason: 'stopped' })
     expect(bubble.id).toBe('prompt-req-1')
     expect(bubble.permissionOutcome).toBe('stopped')
     expect(bubble.answered).toBeUndefined()
     expect(bubble.options).toBeUndefined()
     expect(bubble.expiresAt as number).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('#8374: a non-user abort (reason "aborted") is not labelled a Stop', () => {
+    const bubble = resolveWith({ reason: 'aborted' })
+    expect(bubble.permissionOutcome).toBeUndefined()
+    expect(bubble.answered).toBe('deny')
   })
 
   it('#8374 CONTROL: a user Deny (reason "user", or none) still reads as an answered deny', () => {

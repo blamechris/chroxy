@@ -386,6 +386,7 @@ export class ActivityRegistry {
     const denied = data?.decision === 'deny'
       || data?.reason === 'timeout'
       || data?.reason === 'aborted'
+      || data?.reason === 'stopped'
     this._end(BLOCKED_ID_PREFIX + key, denied ? 'failed' : 'done')
   }
 

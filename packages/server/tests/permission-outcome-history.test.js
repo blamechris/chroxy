@@ -252,13 +252,27 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     assert.equal(outcomes(mgr, 's1')[0].requestId, requestId)
   })
 
-  it('records "stopped" when the prompt is aborted (Stop) -- not expired, not denied (#8374)', async () => {
+  it('records "expired" when the prompt is aborted with no user Stop behind it (a failed turn, a teardown) (#8374)', async () => {
     const { session, pm } = makeInProcessSession(mgr, 's1')
     pms.push(pm)
     const ac = new AbortController()
     let requestId
     session.once('permission_request', (d) => { requestId = d.requestId })
     const decided = pm.handlePermission('Bash', { command: 'ls' }, ac.signal, 'approve')
+    ac.abort()
+    await decided
+    assert.equal(outcomes(mgr, 's1')[0].requestId, requestId)
+    assert.equal(outcomes(mgr, 's1')[0].outcome, 'expired')
+  })
+
+  it('records "stopped" when the user pressed Stop on the open prompt (#8374)', async () => {
+    const { session, pm } = makeInProcessSession(mgr, 's1')
+    pms.push(pm)
+    const ac = new AbortController()
+    let requestId
+    session.once('permission_request', (d) => { requestId = d.requestId })
+    const decided = pm.handlePermission('Bash', { command: 'ls' }, ac.signal, 'approve')
+    pm.markPendingStopped()
     ac.abort()
     await decided
     assert.equal(outcomes(mgr, 's1')[0].requestId, requestId)

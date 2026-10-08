@@ -836,15 +836,21 @@ export class PermissionManager extends EventEmitter {
       this._lastPermissionData.set(requestId, permPayload)
       this.emit('permission_request', permPayload)
 
-      // Auto-deny on abort signal (user interrupted)
+      // Auto-deny on abort signal. WHY the signal aborted is not on the signal --
+      // a user Stop and a failed turn (a dead app-server, a stalled stream) abort
+      // the same controller -- so the user's Stop entry point marks the prompts
+      // pending at that moment (`markPendingStopped`, #8374) and this reads the
+      // mark: `stopped` for a Stop, `aborted` for everything else.
       if (signal) {
         signal.addEventListener('abort', () => {
-          if (this._pendingPermissions.has(requestId)) {
+          const pending = this._pendingPermissions.get(requestId)
+          if (pending) {
+            const reason = pending.stopRequested ? 'stopped' : 'aborted'
             this._pendingPermissions.delete(requestId)
             this._lastPermissionData.delete(requestId)
             this._clearPermissionTimer(requestId)
             resolve({ behavior: 'deny', message: 'Request cancelled' })
-            this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'aborted' })
+            this.emit('permission_resolved', { requestId, decision: 'deny', reason })
           }
         }, { once: true })
       }
@@ -862,6 +868,23 @@ export class PermissionManager extends EventEmitter {
       }, this._timeoutMs)
       this._permissionTimers.set(requestId, timer)
     })
+  }
+
+  /**
+   * #8374: the user pressed Stop. Mark every permission prompt waiting RIGHT NOW
+   * as cancelled by that Stop, so the abort that follows resolves it with
+   * `reason: 'stopped'` instead of `'aborted'`.
+   *
+   * Called only from the user's Stop entry point (the `interrupt` message
+   * handler), never from `interrupt()` itself: the scheduler and teardown call
+   * that too, and a turn failed by a stalled stream or a dead app-server aborts
+   * the same controller. Those are not Stops.
+   *
+   * The mark lives on the pending entry, so it dies with the prompt: a prompt
+   * raised after the Stop, or one answered before the abort lands, is unaffected.
+   */
+  markPendingStopped() {
+    for (const entry of this._pendingPermissions.values()) entry.stopRequested = true
   }
 
   /**

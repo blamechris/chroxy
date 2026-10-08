@@ -187,14 +187,22 @@ describe('a Stop-cancelled permission prompt (#8374)', () => {
     type: 'permission_resolved', sessionId: SID, requestId: REQ, decision: 'deny', ...over,
   });
 
-  it('live: permission_resolved with reason "aborted" makes the card a stopped record, not an answered deny', () => {
+  it('live: permission_resolved with reason "stopped" makes the card a stopped record, not an answered deny', () => {
     const { read, send, store } = boot([livePrompt()]);
-    send(resolvedFrame({ reason: 'aborted' }));
+    send(resolvedFrame({ reason: 'stopped' }));
     const [card] = read().filter((m) => m.type === 'prompt');
     expect(card).toMatchObject({ id: 'perm-live', permissionOutcome: 'stopped' });
     expect(card!.answered).toBeUndefined();
     expect(card!.options).toBeUndefined();
     expect(derivePendingPermissionCounts(store.getState().sessionStates as any, Date.now() + 1)).toEqual({});
+  });
+
+  it('a non-user abort (reason "aborted") is not labelled a Stop', () => {
+    const { read, send } = boot([livePrompt()]);
+    send(resolvedFrame({ reason: 'aborted' }));
+    const [card] = read().filter((m) => m.type === 'prompt');
+    expect(card!.permissionOutcome).toBeUndefined();
+    expect(card!.answered).toBe('deny');
   });
 
   it('CONTROL: a user Deny stays an answered deny with no outcome record', () => {
@@ -207,7 +215,7 @@ describe('a Stop-cancelled permission prompt (#8374)', () => {
 
   it('a switch/reload replays the same card: the stopped outcome collapses onto the stopped card', () => {
     const { read, send } = boot([livePrompt()]);
-    send(resolvedFrame({ reason: 'aborted' }));
+    send(resolvedFrame({ reason: 'stopped' }));
     const before = read().filter((m) => m.type === 'prompt')[0];
     send({ type: 'history_replay_start', sessionId: SID, fullHistory: false, truncated: false, latestSeq: 9 });
     send(outcomeFrame({ outcome: 'stopped' }));

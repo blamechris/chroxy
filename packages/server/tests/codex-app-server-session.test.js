@@ -1424,6 +1424,83 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     cleanup()
   })
 
+  // #8374: only a USER Stop is "stopped". `_failTurn()` (a dead app-server, the
+  // reconnect watchdog) aborts the same turn controller, and must stay "aborted"
+  // so the card and the durable outcome say the prompt expired, not that someone
+  // pressed Stop.
+  describe('what ended a pending approval (#8374)', () => {
+    const resolvedReasons = (s) => {
+      const out = []
+      s.on('permission_resolved', (d) => out.push(d.reason))
+      return out
+    }
+    const raise = (s) => {
+      capture(s, ['permission_request'])
+      s._onServerRequest({ id: 61, method: 'item/commandExecution/requestApproval', params: { command: 'x' } })
+    }
+
+    it('a user Stop (marked, then interrupt()) resolves it as "stopped"', async () => {
+      const { s, cleanup } = mkApprovalSession()
+      const reasons = resolvedReasons(s)
+      raise(s)
+      s.markPendingPermissionsStopped() // what the user-Stop entry point does
+      await s.interrupt()
+      await tick()
+      assert.deepEqual(reasons, ['stopped'])
+      cleanup()
+    })
+
+    it('interrupt() alone (scheduler, teardown) is not a user Stop: "aborted"', async () => {
+      const { s, cleanup } = mkApprovalSession()
+      const reasons = resolvedReasons(s)
+      raise(s)
+      await s.interrupt()
+      await tick()
+      assert.deepEqual(reasons, ['aborted'])
+      cleanup()
+    })
+
+    it('_failTurn() (a dead app-server) resolves it as "aborted", never "stopped"', async () => {
+      const { s, cleanup } = mkApprovalSession()
+      s.on('error', () => {})
+      const reasons = resolvedReasons(s)
+      raise(s)
+      s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+      s._failTurn('app-server exited')
+      await tick()
+      assert.deepEqual(reasons, ['aborted'])
+      cleanup()
+    })
+
+    it('the reconnect watchdog expiring resolves it as "aborted", never "stopped"', async () => {
+      mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+      const { s, cleanup } = mkApprovalSession()
+      try {
+        s.on('error', () => {})
+        const reasons = resolvedReasons(s)
+        raise(s)
+        s._isBusy = true
+        s._activeTurn = { messageId: 'm1', turnId: 't1', didStreamStart: false }
+        s._armReconnectWatchdog()
+        mock.timers.tick(2 * 60 * 1000) // the watchdog window (RECONNECT_WATCHDOG_MS)
+        assert.deepEqual(reasons, ['aborted'])
+      } finally {
+        s.destroy()
+        mock.timers.reset()
+        cleanup()
+      }
+    })
+
+    it('destroy() resolves it as "aborted", never "stopped"', async () => {
+      const { s, cleanup } = mkApprovalSession()
+      const reasons = resolvedReasons(s)
+      raise(s)
+      await s.destroy()
+      assert.ok(reasons.every((r) => r !== 'stopped'), 'a teardown is not a Stop')
+      cleanup()
+    })
+  })
+
   it('an aborted turn scope resolves a pending approval as deny (decline)', async () => {
     const { s, cleanup, responded } = mkApprovalSession()
     const reqs = capture(s, ['permission_request'])

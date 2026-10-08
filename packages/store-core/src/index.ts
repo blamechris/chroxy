@@ -1087,6 +1087,8 @@ export {
   // #7388 — the ONE "was this permission already answered by a user?" gate,
   // applied by both clients' permission_expired handlers (the #2833 race).
   isPermissionRequestAnswered,
+  // #8374 — the gate for a late permission_expired on a record that already ended.
+  hasPermissionOutcomeRecord,
   firstLivePermissionPrompt,
   livePermissionPrompts,
   countLivePermissionPrompts,

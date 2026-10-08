@@ -696,11 +696,12 @@ export const ServerPermissionExpiredSchema = z.object({
 //   - `sessionId` — the owning chroxy session (stamped from `ctx.sessionId`;
 //     absent in single-session mode → OPTIONAL).
 //   - `reason` (#8374) — WHY it was resolved, when the server knows: `'user'`
-//     (someone answered), `'timeout'`, `'aborted'` (the user pressed Stop),
+//     (someone answered), `'timeout'`, `'stopped'` (the user pressed Stop), `'aborted'` (the
+//     turn's controller was aborted for any other reason),
 //     `'cleared'`, `'auto_mode'`, ... A PLAIN string, like `decision`, so a new
 //     reason can't fail the parse; OPTIONAL because the hook-route and
 //     other-client broadcasts carry none. Clients read exactly one value:
-//     `'aborted'` marks the prompt Stopped rather than Denied, because Stop
+//     `'stopped'` marks the prompt Stopped rather than Denied, because Stop
 //     resolves the prompt as `decision: 'deny'` and nothing else tells the two
 //     apart.
 export const ServerPermissionResolvedSchema = z.object({

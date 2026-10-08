@@ -110,7 +110,7 @@ export interface PermissionResolvedPayload {
   requestId: string | null
   decision: string | null
   /**
-   * #8374: why the server resolved the prompt (`'user'`, `'timeout'`, `'aborted'`,
+   * #8374: why the server resolved the prompt (`'user'`, `'timeout'`, `'stopped'`, `'aborted'`,
    * ...), or null when the frame carried none (the hook route and other-client
    * broadcasts). Only {@link PERMISSION_STOPPED_REASON} is acted on.
    */
@@ -133,14 +133,14 @@ export function handlePermissionResolved(
  * canUseTool needs a verdict), so the decision alone cannot tell it from a user
  * Deny -- this is the only discriminator.
  */
-export const PERMISSION_STOPPED_REASON = 'aborted'
+export const PERMISSION_STOPPED_REASON = 'stopped'
 
 /**
  * Apply a `permission_resolved` frame to the prompt message it resolves. The one
  * place both clients' handlers do it, so the two cannot disagree about what a
  * Stop-cancelled prompt looks like.
  *
- *   - Stop (`reason: 'aborted'`): no decision was made, so `answered` is cleared
+ *   - Stop (`reason: 'stopped'`): no decision was made, so `answered` is cleared
  *     and the message becomes a `stopped` record -- the same shape a replayed
  *     `permission_outcome: stopped` produces (see `reconcileHeldPermissionCard`),
  *     so a session switch changes nothing about it. A countdown still running is

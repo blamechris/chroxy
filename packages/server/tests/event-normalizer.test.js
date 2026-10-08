@@ -1131,13 +1131,13 @@ describe('EventNormalizer', () => {
       assert.equal(result.messages[0].msg.decision, 'deny')
     })
 
-    // #8374: Stop resolves a pending prompt as a deny with reason 'aborted'. The
+    // #8374: Stop resolves a pending prompt as a deny with reason 'stopped'. The
     // reason is the ONLY thing that tells that apart from a user Deny, so it has
     // to reach the clients.
     it('#8374: forwards the reason, so a Stop-cancelled prompt differs from a user Deny', () => {
-      const stopped = normalizer.normalize('permission_resolved', { requestId: 'req-3', decision: 'deny', reason: 'aborted' }, makeCtx({ sessionId: 'sess-7' }))
+      const stopped = normalizer.normalize('permission_resolved', { requestId: 'req-3', decision: 'deny', reason: 'stopped' }, makeCtx({ sessionId: 'sess-7' }))
       const denied = normalizer.normalize('permission_resolved', { requestId: 'req-4', decision: 'deny', reason: 'user' }, makeCtx({ sessionId: 'sess-7' }))
-      assert.equal(stopped.messages[0].msg.reason, 'aborted')
+      assert.equal(stopped.messages[0].msg.reason, 'stopped')
       assert.equal(denied.messages[0].msg.reason, 'user')
     })
 

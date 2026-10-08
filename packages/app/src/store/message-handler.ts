@@ -100,6 +100,7 @@ import {
   // Keys on a REAL user decision, not merely `answered` being set:
   // history_replay_end stamps '(resolved)' on prompts nobody answered (#7380).
   isPermissionRequestAnswered,
+  hasPermissionOutcomeRecord,
   handlePermissionTimeout as sharedPermissionTimeout,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — remaining both-sides duplicates extracted into store-core
@@ -3446,7 +3447,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         // the whole universe here. The dashboard, which does have one and stamps
         // `answered` into it, passes it.
         const alreadyAnswered = isPermissionRequestAnswered(get().sessionStates, expiredRequestId);
-        if (!alreadyAnswered) {
+        // #8374: a record that already ENDED without a user decision (`stopped`,
+        // `expired`) is as immune to a late expiry as an answered one, but must not
+        // be told "your response was already recorded" -- none was. A Stop that
+        // beat a stale Allow from another device is exactly this race.
+        const alreadyEnded = !alreadyAnswered && hasPermissionOutcomeRecord(get().sessionStates, expiredRequestId);
+        if (alreadyEnded) {
+          // Nothing to decorate and nothing to say; the shared tail below still
+          // drains the banner and the pulled input.
+        } else if (!alreadyAnswered) {
           console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
           const expTargetId = (msg.sessionId as string) || get().activeSessionId;
           if (expTargetId && get().sessionStates[expTargetId]) {

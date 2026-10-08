@@ -1513,6 +1513,19 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #8374: the USER pressed Stop. Mark the permission prompts open at this moment
+   * as cancelled by that Stop, so the abort that follows resolves them as
+   * `stopped` rather than `aborted`. Called by the `interrupt` message handler
+   * only -- never from a provider's `interrupt()`, which the scheduler and
+   * teardown also call -- because a turn failed by a stalled stream or a dead
+   * provider process aborts the same controller and is not a Stop.
+   * A no-op for a session with no in-process permission manager.
+   */
+  markPendingPermissionsStopped() {
+    this._permissions?.markPendingStopped?.()
+  }
+
+  /**
    * #7376: record that a Stop was requested during the turn that is running
    * now. A no-op when idle, so a Stop pressed between turns cannot leak into the
    * next one. Called by the providers whose `interrupt()` can be acknowledged by

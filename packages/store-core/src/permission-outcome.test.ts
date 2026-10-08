@@ -375,7 +375,7 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
   })
 
   it('handlePermissionResolved hands the wire reason on', () => {
-    expect(resolved({ reason: 'aborted' })).toEqual({ requestId: 'perm-1', decision: 'deny', reason: 'aborted' })
+    expect(resolved({ reason: 'stopped' })).toEqual({ requestId: 'perm-1', decision: 'deny', reason: 'stopped' })
     expect(resolved({ reason: 'user' }).reason).toBe('user')
     expect(resolved().reason).toBeNull()
     expect(resolved({ reason: 7 }).reason).toBeNull()
@@ -383,7 +383,7 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
 
   it('a live deny that Stop caused becomes a stopped record: no decision, no options, closed countdown', () => {
     const live = livePending()
-    const next = applyPermissionResolved(live, resolved({ reason: 'aborted' }), NOW)
+    const next = applyPermissionResolved(live, resolved({ reason: 'stopped' }), NOW)
     expect(next.permissionOutcome).toBe('stopped')
     expect(next.answered).toBeUndefined()
     expect(next.options).toBeUndefined()
@@ -409,8 +409,14 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
     expect(allowed.permissionOutcome).toBeUndefined()
   })
 
+  it('a non-user abort (reason "aborted": a stalled stream, a dead provider) is NOT labelled a Stop', () => {
+    const next = applyPermissionResolved(livePending(), resolved({ reason: 'aborted' }), NOW)
+    expect(next.permissionOutcome).toBeUndefined()
+    expect(next.answered).toBe('deny')
+  })
+
   it('keeps an already-past expiry rather than moving it forward', () => {
-    const next = applyPermissionResolved(livePending({ expiresAt: NOW - 5000 }), resolved({ reason: 'aborted' }), NOW)
+    const next = applyPermissionResolved(livePending({ expiresAt: NOW - 5000 }), resolved({ reason: 'stopped' }), NOW)
     expect(next.expiresAt).toBe(NOW - 5000)
   })
 
@@ -426,7 +432,7 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
   })
 
   it('a replayed "stopped" outcome collapses onto the card the live frame already stopped', () => {
-    const stopped = applyPermissionResolved(livePending(), resolved({ reason: 'aborted' }), NOW)
+    const stopped = applyPermissionResolved(livePending(), resolved({ reason: 'stopped' }), NOW)
     const env = makeEnv([stopped])
     dispatch(env, outcome({ outcome: 'stopped' }))
     expect(env.sessions.s1!.messages).toHaveLength(1)
