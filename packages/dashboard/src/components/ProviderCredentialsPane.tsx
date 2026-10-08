@@ -206,13 +206,23 @@ export function ProviderCredentialsPane({ isOpen }: { isOpen: boolean }) {
   const credentialsStatus = useConnectionStore((s) => s.credentialsStatus)
   const refreshCredentialsStatus = useConnectionStore((s) => s.refreshCredentialsStatus)
 
+  // #8419: `connected` is part of the effect's identity. The Control Room
+  // Settings tab mounts this pane with a constant `isOpen`, so keying on `isOpen`
+  // alone never asked a NEW daemon after a Server Picker switch — and the switch
+  // clears `credentialsStatus` (#7579), leaving the list empty until a remount.
+  // Every connect() leaves 'connected' first (connecting / reconnecting), so this
+  // re-fires once per new handshake: a switch, and a reconnect to the same daemon
+  // (the same shape the Control Room survey tabs use).
+  const connected = useConnectionStore((s) => s.connectionPhase === 'connected')
+
   // Pull the latest status whenever the panel opens so it's accurate after an
   // out-of-band change (another dashboard, or an edit to credentials.json).
-  // Ignore the boolean return — a closed socket on open is the common case.
+  // Gated on `connected`, so nothing is sent into a closed socket and the first
+  // open is one request (open-while-connected, or the connect that follows).
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || !connected) return
     refreshCredentialsStatus()
-  }, [isOpen, refreshCredentialsStatus])
+  }, [isOpen, connected, refreshCredentialsStatus])
 
   const entries = credentialsStatus?.credentials ?? []
 

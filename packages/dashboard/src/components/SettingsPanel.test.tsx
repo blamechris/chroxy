@@ -53,6 +53,8 @@ let mockState: Record<string, unknown> = {}
 
 function setMockState(extra: Record<string, unknown> = {}): void {
   mockState = {
+    // #8419: the credentials refresh effects are gated on a completed handshake.
+    connectionPhase: 'connected',
     activeTheme: 'default',
     setTheme: mockSetTheme,
     defaultProvider: 'claude-sdk',
@@ -1189,6 +1191,30 @@ describe('SettingsPanel', () => {
       setMockState({ refreshByokCredentialsStatus })
       render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
       expect(refreshByokCredentialsStatus).toHaveBeenCalled()
+    })
+
+    // #8419: the Control Room Settings tab passes a constant isOpen, so the
+    // refetch has to follow the connection.
+    it('asks once on a first open, nothing while disconnected, and again after a switch', () => {
+      const refreshByokCredentialsStatus = vi.fn()
+      setMockState({ refreshByokCredentialsStatus })
+      const { rerender } = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshByokCredentialsStatus).toHaveBeenCalledTimes(1)
+
+      setMockState({ refreshByokCredentialsStatus, connectionPhase: 'connecting' })
+      rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshByokCredentialsStatus).toHaveBeenCalledTimes(1)
+
+      setMockState({ refreshByokCredentialsStatus, connectionPhase: 'connected' })
+      rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshByokCredentialsStatus).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not ask while the connection is down', () => {
+      const refreshByokCredentialsStatus = vi.fn()
+      setMockState({ refreshByokCredentialsStatus, connectionPhase: 'reconnecting' })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect(refreshByokCredentialsStatus).not.toHaveBeenCalled()
     })
 
     it('calls clearByokCredentials when Remove is clicked', () => {
