@@ -72,6 +72,8 @@ import {
   recordHistorySeq,
   reconcileReplayStart,
   reconcileReplayEnd,
+  applyPendingRestoreNotice,
+  settlePendingRestoreNotice,
   // #7456 — per-session teardown for the two paths that drop a session's store
   // state wholesale; without it this module's per-session entries outlive
   // everything they correspond to.
@@ -2536,6 +2538,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           sessionStates,
         };
       });
+      // #6808 — a checkpoint restore parks "what this restore did" for the session it
+      // opened. Show it now: that session's history is empty, so the server may send
+      // NO replay (nothing would ever append it). It stays parked for the replay-end
+      // re-append in case a full-history replay follows and wipes this.
+      updateSession(sessionId, (ss) => {
+        const withNotice = applyPendingRestoreNotice(sessionId, ss.messages);
+        return withNotice ? { messages: withNotice as SessionState['messages'] } : {};
+      });
       // Refresh slash commands (project commands may differ per session cwd)
       get().fetchSlashCommands();
       // Refresh agents (project agents may differ per session cwd)
@@ -2736,6 +2746,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           }
         } else {
           reconcileReplayEnd(endTargetId, [], endLatestSeq);
+        }
+        // #6808 — a checkpoint restore parks "what this restore did" for the NEW
+        // session. It was shown at session_switched; a full-history replay wipes
+        // that, so re-append it here, AFTER the swap, and clear it.
+        if (endTargetId) {
+          updateSession(endTargetId, (ss) => {
+            const withNotice = settlePendingRestoreNotice(endTargetId, ss.messages);
+            return withNotice ? { messages: withNotice as SessionState['messages'] } : {};
+          });
         }
         // Mark replayed prompts as answered — the premise being that any prompt
         // in history has already been resolved by the server.

@@ -16,7 +16,7 @@ jest.mock('../../store/connection', () => ({
 
 const mockUseConnectionStore = useConnectionStore as unknown as jest.Mock;
 
-function setupStore(checkpoints: any[] = [], opts: { canFork?: boolean } = {}) {
+function setupStore(checkpoints: any[] = [], opts: { canFork?: boolean; providersLoaded?: boolean } = {}) {
   mockUseConnectionStore.mockImplementation((selector: any) => {
     const state = {
       checkpoints,
@@ -28,7 +28,9 @@ function setupStore(checkpoints: any[] = [], opts: { canFork?: boolean } = {}) {
       // non-fork one (claude-tui) so 'Conversation' is disabled unless canFork.
       activeSessionId: 's1',
       sessions: [{ sessionId: 's1', provider: opts.canFork ? 'claude-sdk' : 'claude-tui' }],
-      availableProviders: [
+      // #6808: providersLoaded:false models the window before provider
+      // capabilities arrive (fork support UNKNOWN, not "no").
+      availableProviders: opts.providersLoaded === false ? [] : [
         { name: 'claude-sdk', capabilities: { conversationFork: true } },
         { name: 'claude-tui', capabilities: {} },
       ],
@@ -155,7 +157,7 @@ describe('CheckpointView', () => {
 
   it('shows restore confirmation alert on restore press', () => {
     const alertSpy = jest.spyOn(Alert, 'alert');
-    setupStore(sampleCheckpoints);
+    setupStore(sampleCheckpoints, { canFork: true });
     let root: renderer.ReactTestRenderer;
     act(() => {
       root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
@@ -175,6 +177,46 @@ describe('CheckpointView', () => {
         expect.objectContaining({ text: 'Restore' }),
       ]),
     );
+  });
+
+  // #6808 — a provider that cannot fork a transcript still opens a new session in
+  // 'both' mode, but it resumes the FULL conversation. The confirm must not promise
+  // a branch it cannot deliver.
+  it("'both' confirm does not promise a conversation branch when the provider cannot fork", () => {
+    const alertSpy = jest.spyOn(Alert, 'alert');
+    setupStore(sampleCheckpoints, { canFork: false });
+    let root: renderer.ReactTestRenderer;
+    act(() => {
+      root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+    });
+    act(() => {
+      findByLabel(root!.root, 'Restore checkpoint Initial setup').props.onPress();
+    });
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Restore Checkpoint',
+      'Revert your working files to "Initial setup" and open a new session? This provider can\'t branch the conversation, so the new session continues the full conversation.',
+      expect.anything(),
+    );
+  });
+
+  // #6808 — before provider capabilities load, fork support is UNKNOWN, not "no":
+  // the confirm must promise nothing either way (no branch, no "can't branch").
+  it("'both' confirm promises nothing while provider capabilities are not loaded", () => {
+    const alertSpy = jest.spyOn(Alert, 'alert');
+    setupStore(sampleCheckpoints, { canFork: true, providersLoaded: false });
+    let root: renderer.ReactTestRenderer;
+    act(() => {
+      root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+    });
+    act(() => {
+      findByLabel(root!.root, 'Restore checkpoint Initial setup').props.onPress();
+    });
+    const message = String(alertSpy.mock.calls[0][1]);
+    expect(message).toBe(
+      'Revert your working files to "Initial setup" and open a new session? Whether the conversation is branched depends on the provider; the new session will say what happened.',
+    );
+    expect(message).not.toMatch(/branch the conversation into/i);
+    expect(message).not.toMatch(/can't branch/i);
   });
 
   it('calls restoreCheckpoint and closes on restore confirm', () => {

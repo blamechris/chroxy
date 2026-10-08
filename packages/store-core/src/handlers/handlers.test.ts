@@ -34,6 +34,15 @@ import {
   handleCheckpointList,
   handleCheckpointRestored,
   handleCheckpointFilesRestored,
+  buildCheckpointRestoreNotice,
+  restoreCanBranchConversation,
+  conversationForkSupport,
+  dropPendingRestoreNotice,
+  findCheckpointName,
+  stashPendingRestoreNotice,
+  applyPendingRestoreNotice,
+  settlePendingRestoreNotice,
+  clearPendingRestoreNotices,
   handleError,
   handleSessionError,
   handleSessionStopped,
@@ -10334,5 +10343,229 @@ describe('handleMessage — container-health codes (#7603)', () => {
     )
     if (!result.shouldDispatch) throw new Error('unreachable')
     expect(result.containerLostPatch).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildCheckpointRestoreNotice (#6808)
+// ---------------------------------------------------------------------------
+describe('buildCheckpointRestoreNotice', () => {
+  const branched = (mode?: 'both' | 'conversation') => ({
+    newSessionId: 's2',
+    filesOnly: false,
+    ...(mode ? { mode } : {}),
+  })
+  const filesOnly = (mode?: 'both' | 'conversation') => ({
+    newSessionId: 's2',
+    filesOnly: true,
+    ...(mode ? { mode } : {}),
+  })
+
+  it("filesOnly:false + 'both' says files were restored AND the conversation was branched", () => {
+    const m = buildCheckpointRestoreNotice(branched('both'), 'Before refactor')
+    expect(m.type).toBe('system')
+    expect(m.content).toBe(
+      'Rewound to checkpoint "Before refactor": files restored and the conversation branched into this new session',
+    )
+    expect(typeof m.id).toBe('string')
+    expect(typeof m.timestamp).toBe('number')
+  })
+
+  it("filesOnly:true + 'both' says the conversation was NOT rewound, without guessing why", () => {
+    // The server also reports filesOnly:true on a FORK-CAPABLE provider (no recorded
+    // branch point, fork threw, fork returned no id), so the cause is never stated.
+    const m = buildCheckpointRestoreNotice(filesOnly('both'), 'Before refactor')
+    expect(m.content).toBe(
+      'Files restored to checkpoint "Before refactor". The conversation was not rewound: this new session continues the full conversation.',
+    )
+    expect(m.content).not.toMatch(/provider/i)
+    // The two branches must never read alike: only the branched one claims a rewind.
+    expect(m.content).not.toContain('Rewound')
+    expect(m.content).not.toContain('branched into')
+  })
+
+  it("'conversation' mode says files were NOT changed", () => {
+    expect(buildCheckpointRestoreNotice(branched('conversation'), 'Cp').content).toBe(
+      'Conversation branched from checkpoint "Cp" into this new session. Files were not changed.',
+    )
+  })
+
+  it("'conversation' + filesOnly:true never claims a rewind or a file revert", () => {
+    const c = buildCheckpointRestoreNotice(filesOnly('conversation'), 'Cp').content
+    expect(c).toBe(
+      'Opened a new session at checkpoint "Cp", but the conversation was not rewound and files were not changed.',
+    )
+  })
+
+  it('treats an absent mode (pre-#6767 server) as "both"', () => {
+    expect(buildCheckpointRestoreNotice(branched(), 'Cp').content).toBe(
+      buildCheckpointRestoreNotice(branched('both'), 'Cp').content,
+    )
+    // legacy payload with no filesOnly is parsed to filesOnly:true: never over-claim
+    expect(buildCheckpointRestoreNotice(filesOnly(), 'Cp').content).toBe(
+      buildCheckpointRestoreNotice(filesOnly('both'), 'Cp').content,
+    )
+  })
+
+  it('falls back to "the checkpoint" when the name is unknown, blank or non-string', () => {
+    expect(buildCheckpointRestoreNotice(branched('both'), null).content).toBe(
+      'Rewound to the checkpoint: files restored and the conversation branched into this new session',
+    )
+    expect(buildCheckpointRestoreNotice(branched('both'), undefined).content).toContain('the checkpoint')
+    expect(buildCheckpointRestoreNotice(branched('both'), '   ').content).toContain('the checkpoint')
+  })
+})
+
+describe('findCheckpointName', () => {
+  const cps = [
+    { id: 'cp-1', name: 'First' },
+    { id: 'cp-2', name: '  Second  ' },
+    { id: 'cp-3', name: '' },
+  ] as any[]
+  it('returns the trimmed name of the matching checkpoint', () => {
+    expect(findCheckpointName(cps, 'cp-1')).toBe('First')
+    expect(findCheckpointName(cps, 'cp-2')).toBe('Second')
+  })
+  it('returns null for an unknown id, a blank name or a non-string id', () => {
+    expect(findCheckpointName(cps, 'nope')).toBeNull()
+    expect(findCheckpointName(cps, 'cp-3')).toBeNull()
+    expect(findCheckpointName(cps, undefined)).toBeNull()
+    expect(findCheckpointName(cps, 42)).toBeNull()
+  })
+})
+
+describe('pending restore notice (#6808)', () => {
+  const msg = { id: 'm1', type: 'system', content: 'x', timestamp: 1 } as any
+  const other = { id: 'u1', type: 'user_input', content: 'hi', timestamp: 2 } as any
+  beforeEach(() => clearPendingRestoreNotices())
+
+  describe('applyPendingRestoreNotice (session became active; a replay may or may not follow)', () => {
+    it('appends the parked notice to the transcript, keeping the others in order', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(applyPendingRestoreNotice('s2', [other], 1001)).toEqual([other, msg])
+    })
+
+    it('does not mutate the input array', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      const input = [other]
+      applyPendingRestoreNotice('s2', input, 1001)
+      expect(input).toEqual([other])
+    })
+
+    it('is idempotent: a transcript that already holds the notice is left alone', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(applyPendingRestoreNotice('s2', [msg], 1001)).toBeNull()
+    })
+
+    it('stays parked, so a replay that wipes the transcript can re-append it', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      applyPendingRestoreNotice('s2', [], 1001)
+      expect(settlePendingRestoreNotice('s2', [], 1002)).toEqual([msg])
+    })
+
+    it('ignores other sessions and a null id', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(applyPendingRestoreNotice('other', [], 1001)).toBeNull()
+      expect(applyPendingRestoreNotice(null, [], 1001)).toBeNull()
+    })
+
+    it('does not re-show a notice that expired unshown', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(applyPendingRestoreNotice('s2', [], 1000 + 5 * 60_000)).toBeNull()
+    })
+  })
+
+  describe('settlePendingRestoreNotice (history_replay_end)', () => {
+    it('appends when the transcript lacks the notice, then clears it', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(settlePendingRestoreNotice('s2', [other], 1001)).toEqual([other, msg])
+      expect(settlePendingRestoreNotice('s2', [other], 1002)).toBeNull()
+      expect(applyPendingRestoreNotice('s2', [other], 1003)).toBeNull()
+    })
+
+    it('clears without duplicating when the notice is already in the transcript', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(settlePendingRestoreNotice('s2', [msg], 1001)).toBeNull()
+      expect(settlePendingRestoreNotice('s2', [], 1002)).toBeNull()
+    })
+
+    it('apply then settle over an intact transcript shows it exactly once', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      const shown = applyPendingRestoreNotice('s2', [], 1001)!
+      expect(settlePendingRestoreNotice('s2', shown, 1002)).toBeNull()
+    })
+
+    it('a notice shown but never settled expires, so a later reconnect replay cannot resurrect it', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      applyPendingRestoreNotice('s2', [], 1001)
+      expect(settlePendingRestoreNotice('s2', [], 1001 + 60_000)).toBeNull()
+    })
+
+    it('ignores other sessions and a null id', () => {
+      stashPendingRestoreNotice('s2', msg, 1000)
+      expect(settlePendingRestoreNotice('other', [], 1001)).toBeNull()
+      expect(settlePendingRestoreNotice(null, [], 1001)).toBeNull()
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// restoreCanBranchConversation (#6808) — what the picker may promise BEFORE a restore
+// ---------------------------------------------------------------------------
+describe('restoreCanBranchConversation', () => {
+  it("'files' never branches the conversation, whatever is known about the provider", () => {
+    expect(restoreCanBranchConversation('files', true)).toBe(false)
+    expect(restoreCanBranchConversation('files', false)).toBe(false)
+    expect(restoreCanBranchConversation('files', null)).toBe(false)
+  })
+  it("'both' and 'conversation' branch only when the provider is KNOWN to fork", () => {
+    expect(restoreCanBranchConversation('both', true)).toBe(true)
+    expect(restoreCanBranchConversation('both', false)).toBe(false)
+    expect(restoreCanBranchConversation('conversation', true)).toBe(true)
+    expect(restoreCanBranchConversation('conversation', false)).toBe(false)
+  })
+  it('answers null (unknown) when fork support has not loaded, so copy can promise nothing', () => {
+    expect(restoreCanBranchConversation('both', null)).toBeNull()
+    expect(restoreCanBranchConversation('conversation', null)).toBeNull()
+  })
+})
+
+describe('conversationForkSupport', () => {
+  const providers = [
+    { name: 'claude-sdk', capabilities: { conversationFork: true } },
+    { name: 'claude-tui', capabilities: {} },
+    { name: 'codex', capabilities: { conversationFork: false } },
+    { name: 'half-loaded' },
+  ]
+  it('is true only when the named provider advertises conversationFork', () => {
+    expect(conversationForkSupport('claude-sdk', providers)).toBe(true)
+  })
+  it('is false when the provider is listed with capabilities that do not fork', () => {
+    expect(conversationForkSupport('claude-tui', providers)).toBe(false)
+    expect(conversationForkSupport('codex', providers)).toBe(false)
+  })
+  it('is null (unknown) when the provider list has not loaded or lacks the provider', () => {
+    expect(conversationForkSupport('claude-sdk', [])).toBeNull()
+    expect(conversationForkSupport('missing', providers)).toBeNull()
+    expect(conversationForkSupport(null, providers)).toBeNull()
+    expect(conversationForkSupport(undefined, providers)).toBeNull()
+  })
+  it('is null when the provider is listed but its capabilities have not arrived', () => {
+    expect(conversationForkSupport('half-loaded', providers)).toBeNull()
+  })
+})
+
+describe('dropPendingRestoreNotice (#6808 teardown)', () => {
+  const msg = { id: 'm1', type: 'system', content: 'x', timestamp: 1 } as any
+  beforeEach(() => clearPendingRestoreNotices())
+  it('forgets one session\'s parked notice and leaves the others', () => {
+    stashPendingRestoreNotice('s1', msg, 1000)
+    stashPendingRestoreNotice('s2', { ...msg, id: 'm2' }, 1000)
+    dropPendingRestoreNotice('s1')
+    expect(settlePendingRestoreNotice('s1', [], 1001)).toBeNull()
+    expect(settlePendingRestoreNotice('s2', [], 1001)).toEqual([{ ...msg, id: 'm2' }])
+  })
+  it('tolerates a null id', () => {
+    expect(() => dropPendingRestoreNotice(null)).not.toThrow()
   })
 })

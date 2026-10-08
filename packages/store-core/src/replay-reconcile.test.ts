@@ -22,6 +22,7 @@ import {
   getReplayAppendProvenance,
   MAX_REPLAY_APPEND_PROVENANCE,
 } from './replay-reconcile'
+import { stashPendingRestoreNotice, settlePendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
 
 type Msg = { id: string }
 
@@ -1875,6 +1876,25 @@ describe('live-arrival ledger lifetime (#7456)', () => {
     expect(wasPromptLiveDuringReplay('s2', 'q2')).toBe(true)
     expect(isRebuildInProgress('s2')).toBe(true)
     expect(getHistoryCursor('s2')).toBe(22)
+  })
+
+  // #6808 — the parked checkpoint-restore notice is per-session state too; nothing
+  // else would ever clear one whose session is removed before its replay ends.
+  it('dropReplaySessionState also forgets a parked checkpoint-restore notice, for that session only', () => {
+    clearPendingRestoreNotices()
+    const n = (id: string) => ({ id, type: 'system', content: 'x', timestamp: 1 }) as any
+    stashPendingRestoreNotice('s1', n('n1'))
+    stashPendingRestoreNotice('s2', n('n2'))
+    dropReplaySessionState('s1')
+    expect(settlePendingRestoreNotice('s1', [])).toBeNull()
+    expect(settlePendingRestoreNotice('s2', [])).toEqual([n('n2')])
+  })
+
+  it('resetReplayReconcile (fresh auth / hard reset) forgets parked checkpoint-restore notices', () => {
+    clearPendingRestoreNotices()
+    stashPendingRestoreNotice('s1', { id: 'n1', type: 'system', content: 'x', timestamp: 1 } as any)
+    resetReplayReconcile()
+    expect(settlePendingRestoreNotice('s1', [])).toBeNull()
   })
 
   it('dropReplaySessionState also drops a ledger already released to the sweep', () => {
