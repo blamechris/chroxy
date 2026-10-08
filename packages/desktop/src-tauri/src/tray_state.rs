@@ -354,7 +354,31 @@ pub fn pick_then_act<T, U>(mutex: &std::sync::Mutex<T>, pick: impl FnOnce(&T) ->
 }
 
 /// Probe `/health` on loopback once and classify what holds `port`.
+///
+/// This is the one place a holder is classified as an adoptable chroxy daemon:
+/// every route that adopts a daemon (the launch-time start, the crash restart, the
+/// client-mode adopt, the tray's external-daemon state) goes through it. A holder
+/// that answers like chroxy is adoptable only when every listener on the port runs
+/// as the current user; one whose owner cannot be proven is a foreign holder.
 pub fn probe_port(port: u16, timeout: Duration) -> PortState {
+    probe_port_with_owner(port, timeout, crate::owned_server::holders_run_as_current_user)
+}
+
+/// [`probe_port`] with the ownership check passed in. It is asked only when the
+/// holder answered like chroxy.
+pub fn probe_port_with_owner(
+    port: u16,
+    timeout: Duration,
+    holders_run_as_current_user: impl FnOnce(u16) -> bool,
+) -> PortState {
+    match probe_health(port, timeout) {
+        PortState::Chroxy(p) if !holders_run_as_current_user(p) => PortState::Foreign(p),
+        state => state,
+    }
+}
+
+/// What answers `/health` on `port`, with no regard to who runs it.
+fn probe_health(port: u16, timeout: Duration) -> PortState {
     let url = format!("http://127.0.0.1:{}/health", port);
     let outcome = match ureq::get(&url).timeout(timeout).call() {
         Ok(resp) if resp.status() == 200 => {
@@ -781,19 +805,51 @@ mod tests {
     #[test]
     fn probe_recognises_a_chroxy_daemon() {
         let port = serve(http_200(GOOD));
+        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Chroxy(port));
+    }
+
+    #[test]
+    fn a_chroxy_shaped_holder_that_does_not_run_as_the_current_user_is_foreign() {
+        let port = serve(http_200(GOOD));
+        assert_eq!(probe_port_with_owner(port, T, |_| false), PortState::Foreign(port));
+    }
+
+    #[test]
+    fn the_owner_is_asked_about_the_probed_port_and_only_for_a_chroxy_shaped_holder() {
+        let asked = std::cell::RefCell::new(Vec::new());
+        let chroxy = serve(http_200(GOOD));
+        probe_port_with_owner(chroxy, T, |p| {
+            asked.borrow_mut().push(p);
+            true
+        });
+        assert_eq!(*asked.borrow(), vec![chroxy]);
+
+        let other = serve(http_200("hello"));
+        assert_eq!(probe_port_with_owner(other, T, |_| panic!("not chroxy-shaped")), PortState::Foreign(other));
+        let closed = {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        assert_eq!(probe_port_with_owner(closed, T, |_| panic!("nothing listens")), PortState::Free);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chroxy_daemon_run_by_this_user_is_recognised_by_the_real_owner_check() {
+        let port = serve(http_200(GOOD));
         assert_eq!(probe_port(port, T), PortState::Chroxy(port));
     }
 
     #[test]
     fn probe_treats_a_200_that_is_not_chroxy_as_foreign() {
         let port = serve(http_200("hello"));
-        assert_eq!(probe_port(port, T), PortState::Foreign(port));
+        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Foreign(port));
     }
 
     #[test]
     fn probe_treats_a_404_as_foreign() {
         let port = serve("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        assert_eq!(probe_port(port, T), PortState::Foreign(port));
+        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Foreign(port));
     }
 
     #[test]
@@ -801,7 +857,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         // Accept into the backlog and say nothing: HTTP times out, TCP connects.
-        assert_eq!(probe_port(port, T), PortState::Foreign(port));
+        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Foreign(port));
         drop(listener);
     }
 
@@ -811,6 +867,6 @@ mod tests {
             let l = TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        assert_eq!(probe_port(port, T), PortState::Free);
+        assert_eq!(probe_port_with_owner(port, T, |_| true), PortState::Free);
     }
 }

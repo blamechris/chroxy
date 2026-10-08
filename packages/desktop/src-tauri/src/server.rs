@@ -1032,11 +1032,17 @@ impl ServerManager {
             return Ok(outcome);
         }
 
+        self.spawn_server(&node_path, &cli_js)
+    }
+
+    /// Spawn `<node_path> <cli_js> start --no-supervisor`, record its pid and start
+    /// health polling. The port has already been settled.
+    fn spawn_server(&mut self, node_path: &Path, cli_js: &Path) -> Result<StartOutcome, String> {
         *lock_or_recover(&self.status) = ServerStatus::Starting;
 
         // Build command
-        let mut cmd = Command::new(&node_path);
-        cmd.arg(&cli_js).arg("start");
+        let mut cmd = Command::new(node_path);
+        cmd.arg(cli_js).arg("start");
 
         // Build a comprehensive PATH. macOS GUI apps launched via launchd
         // (including this Tauri tray binary) inherit a minimal PATH
@@ -1817,6 +1823,58 @@ mod tests {
         owned_server::record_pid(&path, pid).unwrap();
         mgr.child = Some(child);
         mgr.kill_child();
+        assert_eq!(owned_server::read_pid(&path), None);
+    }
+
+    /// A manager on a free port, with its pid record in `dir`.
+    #[cfg(unix)]
+    fn manager_recording_in(dir: &std::path::Path) -> (ServerManager, PathBuf) {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let path = dir.join("desktop-server.pid");
+        let mut mgr = manager_on(port);
+        mgr.pid_file = Some(path.clone());
+        (mgr, path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_spawned_server_is_recorded_under_its_pid_and_the_record_goes_with_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, path) = manager_recording_in(dir.path());
+        let script = dir.path().join("cli.js");
+        std::fs::write(&script, "exec sleep 30\n").unwrap();
+
+        assert_eq!(mgr.spawn_server(Path::new("/bin/sh"), &script), Ok(StartOutcome::Spawned));
+        let pid = mgr.child.as_ref().expect("the spawned child").id();
+        assert_eq!(owned_server::read_pid(&path), Some(pid), "the record names the spawned server");
+
+        mgr.kill_child();
+        assert_eq!(owned_server::read_pid(&path), None, "a stopped server leaves no record");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_that_dies_during_startup_leaves_no_pid_record() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut mgr, path) = manager_recording_in(dir.path());
+        let child = Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        owned_server::record_pid(&path, child.id()).unwrap();
+        mgr.child = Some(child);
+        *lock_or_recover(&mgr.status) = ServerStatus::Starting;
+
+        let start = Instant::now();
+        let msg = loop {
+            if let Some(msg) = mgr.check_startup_child_exit() {
+                break msg;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "the child never exited");
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!msg.is_empty());
+        assert!(mgr.child.is_none());
         assert_eq!(owned_server::read_pid(&path), None);
     }
 

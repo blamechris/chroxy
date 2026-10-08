@@ -174,3 +174,26 @@ fn the_check_updates_item_is_never_set_with_the_menu_items_lock_held() {
     );
     assert!(!check.contains("check_updates.set_enabled"), "a direct setter call in handle_check_updates could run under the lock");
 }
+
+#[test]
+fn every_adopt_route_classifies_the_holder_through_probe_port() {
+    // `probe_port` is the one place a holder becomes an adoptable daemon: it checks
+    // that every listener runs as the current user. A route with its own `/health`
+    // request would adopt without that check.
+    let lib = read("src/lib.rs");
+    let client_mode = fn_body(&lib, "probe_external_health");
+    assert!(client_mode.contains("tray_state::probe_port("), "the client-mode adopt must use probe_port");
+    assert!(!client_mode.contains("ureq"), "the client-mode adopt must not make its own request");
+
+    let server = squash(&read("src/server.rs"));
+    assert!(
+        server.contains("fn probe(&self, port: u16) -> PortState { tray_state::probe_port("),
+        "the automatic start must probe the holder with probe_port"
+    );
+
+    let tray = squash(&read("src/tray_state.rs"));
+    assert!(
+        tray.contains("probe_port_with_owner(port, timeout, crate::owned_server::holders_run_as_current_user)"),
+        "probe_port must check the real owner"
+    );
+}

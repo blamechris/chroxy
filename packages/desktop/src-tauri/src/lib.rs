@@ -19,7 +19,7 @@ pub mod window;
 
 use server::{ServerManager, ServerStatus, StartOrigin, StartOutcome};
 use settings::DesktopSettings;
-use tray_state::{is_chroxy_health, MenuState, PortState, TrayPlan, UserAction};
+use tray_state::{MenuState, PortState, TrayPlan, UserAction};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
@@ -1936,36 +1936,27 @@ fn startup_action(auto_start: bool, has_token: bool) -> StartupAction {
     }
 }
 
-/// #6015 — probe an already-running external server's `/health` on loopback.
-/// A few short attempts (so a just-launched daemon is still adopted); returns
-/// true on the first 200. Mirrors the embedded-server health check (ureq, 2s).
+/// #6015 — probe an already-running external server on loopback. A few short
+/// attempts (so a just-launched daemon is still adopted); returns true on the
+/// first verified chroxy daemon. The classification is [`tray_state::probe_port`],
+/// the same one every other adopt route uses, so a holder is adopted here only
+/// when it answers as chroxy AND every listener runs as the current user.
 fn probe_external_health(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{}/health", port);
     for attempt in 0..10 {
         // Log each attempt (mirrors the embedded-server health check in
         // server.rs) so a stuck client-mode launch is debuggable from the app's
         // stderr/console rather than a silent spinner.
-        match ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
-            Ok(resp) => {
-                let code = resp.status();
-                if code == 200 {
-                    // Token-leak guard: only adopt a verified chroxy server.
-                    let body = resp.into_string().unwrap_or_default();
-                    if is_chroxy_health(&body) {
-                        eprintln!("[client-adopt] attempt #{} GET {} -> 200 (chroxy)", attempt + 1, url);
-                        return true;
-                    }
-                    eprintln!(
-                        "[client-adopt] attempt #{} GET {} -> 200 but not a chroxy /health body; not adopting",
-                        attempt + 1, url
-                    );
-                } else {
-                    eprintln!("[client-adopt] attempt #{} GET {} -> {}", attempt + 1, url, code);
-                }
+        let held = tray_state::probe_port(port, std::time::Duration::from_secs(2));
+        match held {
+            PortState::Chroxy(_) => {
+                eprintln!("[client-adopt] attempt #{} port {} -> chroxy daemon", attempt + 1, port);
+                return true;
             }
-            Err(err) => {
-                eprintln!("[client-adopt] attempt #{} GET {} -> Err({})", attempt + 1, url, err);
-            }
+            PortState::Foreign(_) => eprintln!(
+                "[client-adopt] attempt #{} port {} -> not an adoptable chroxy daemon (not chroxy, or not run by the current user); not adopting",
+                attempt + 1, port
+            ),
+            PortState::Free => eprintln!("[client-adopt] attempt #{} port {} -> nothing listening", attempt + 1, port),
         }
         // No sleep after the final attempt.
         if attempt < 9 {
@@ -2778,14 +2769,14 @@ mod tests {
     // (we'd otherwise navigate the token to it).
     #[test]
     fn is_chroxy_health_fingerprint() {
-        assert!(is_chroxy_health(r#"{"status":"ok","mode":"cli","version":"0.9.46"}"#));
+        assert!(tray_state::is_chroxy_health(r#"{"status":"ok","mode":"cli","version":"0.9.46"}"#));
         // Wrong/foreign shapes — reject.
-        assert!(!is_chroxy_health(r#"{"status":"ok"}"#)); // no version
-        assert!(!is_chroxy_health(r#"{"status":"healthy","version":"1.0"}"#)); // not chroxy's "ok"
-        assert!(!is_chroxy_health(r#"{"version":"1.0"}"#)); // no status
-        assert!(!is_chroxy_health("OK")); // not JSON (e.g. another service)
-        assert!(!is_chroxy_health("")); // empty
-        assert!(!is_chroxy_health(r#"{"status":"ok","version":200}"#)); // version not a string
+        assert!(!tray_state::is_chroxy_health(r#"{"status":"ok"}"#)); // no version
+        assert!(!tray_state::is_chroxy_health(r#"{"status":"healthy","version":"1.0"}"#)); // not chroxy's "ok"
+        assert!(!tray_state::is_chroxy_health(r#"{"version":"1.0"}"#)); // no status
+        assert!(!tray_state::is_chroxy_health("OK")); // not JSON (e.g. another service)
+        assert!(!tray_state::is_chroxy_health("")); // empty
+        assert!(!tray_state::is_chroxy_health(r#"{"status":"ok","version":200}"#)); // version not a string
     }
 
     #[test]
