@@ -839,6 +839,31 @@ describe('settings-handlers', () => {
         assert.equal(filter({ id: 'guest', boundSessionId: 's9' }), false)
       })
 
+      it('an UNMAPPED HTTP-held prompt answered by a client whose active session is in-process still resolves and broadcasts (#8359)', () => {
+        // The live shape: POST /permission with the primary token (no session hook
+        // secret) is unmapped; the answering client sits on a claude-sdk session,
+        // whose respondToPermission returns false for an id it never issued. The
+        // dispatch used to try that session, return `expired`, and leave the HTTP
+        // request held forever with no frame to anyone.
+        const sdkSession = createMockSession()
+        sdkSession.respondToPermission = createSpy(() => false)
+        const ctx = makeCtx(new Map([['s9', { session: sdkSession, name: 'S', cwd: '/tmp' }]]))
+        ctx.permissions.pendingPermissions = new Map([['req-held', { data: { tool: 'Bash' } }]])
+        ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's9' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-held', decision: 'allow' }, ctx)
+
+        assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1, 'the held HTTP request is released')
+        assert.equal(sdkSession.respondToPermission.callCount, 0)
+        const frames = resolvedFrames(ctx)
+        assert.equal(frames.length, 1, 'exactly one permission_resolved')
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-held', decision: 'allow' })
+        assert.equal(frames[0][1]({ id: 'guest', boundSessionId: 's9' }), false)
+        assert.equal(frames[0][1]({ id: 'other', boundSessionId: null }), true)
+        assert.equal(ctx.transport.send.calls.filter((a) => a[1]?.type === 'permission_expired').length, 0)
+      })
+
       it('a MAPPED legacy prompt is still session-tagged and unfiltered, not tagless (#8359 control)', () => {
         const ctx = hookFixture()
         const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })

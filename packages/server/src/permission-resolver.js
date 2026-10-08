@@ -131,7 +131,21 @@ export function createPermissionResolver({
     // signal (the method's contract) — see the #5373 PR note on the WS
     // _pendingPermissions pre-check this reconciles.
     const sm = getSessionManager?.()
-    if (originSessionId && sm) {
+    // #8359: an UNMAPPED request that sits in the legacy store is an HTTP-held
+    // prompt (POST /permission whose bearer matched no session hook secret). The
+    // WS dispatch fallback names the answering client's active session, and if that
+    // is an in-process session its respondToPermission returns false for an id it
+    // never issued -- so the SDK attempt below ended in `expired` and the held
+    // request was never released. Go straight to the legacy store instead.
+    //
+    // Order when an id is in BOTH stores (not expected: legacy ids are minted by
+    // the HTTP handler, SDK ids by a PermissionManager): a MAPPED request always
+    // tries its session first (invariant F), so only an unmapped one is routed here;
+    // unmapped + legacy-pending resolves legacy because the mapping is the only
+    // evidence an in-process session owns it, and its absence plus a held HTTP
+    // request is evidence of the opposite. The binding check above is untouched.
+    const legacyHeldUnmapped = mappedSessionId == null && pendingPermissions.has(requestId)
+    if (originSessionId && sm && !legacyHeldUnmapped) {
       const entry = sm.getSession(originSessionId)
       if (entry && typeof entry.session.respondToPermission === 'function') {
         // #6830 — read the tool name BEFORE respondToPermission runs: it deletes

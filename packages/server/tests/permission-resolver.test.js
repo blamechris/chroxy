@@ -161,6 +161,31 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () =
     assert.equal(rm.mapped, true)
   })
 
+  it('an unmapped legacy-held request resolves via legacy even when the fallback session has respondToPermission (#8359)', () => {
+    // The WS dispatch fallback names the answering client's active session. That
+    // session is in-process and reports false for an id it never issued; the old
+    // order returned `expired` and never released the held HTTP request.
+    const fallback = makeSdkSession({ pending: [] })
+    const { resolver, legacyResolved, audited } = build({ map: [], legacy: ['perm-held'], ownerSession: fallback })
+    const r = resolver.resolve('perm-held', 'allow', null, { clientId: 'c1', dispatchFallbackSessionId: OWNER })
+    assert.equal(r.kind, 'resolved')
+    assert.equal(r.via, 'legacy')
+    assert.equal(r.mapped, false)
+    assert.equal(r.sessionId, OWNER, 'the fallback only names the dispatch session')
+    assert.deepEqual(legacyResolved, [{ requestId: 'perm-held', decision: 'allow' }])
+    assert.equal(fallback.respondToPermission.mock.callCount(), 0, 'the in-process session is never asked about an id it did not issue')
+    assert.equal(audited.length, 1)
+  })
+
+  it('a MAPPED SDK request that respondToPermission reports gone is still `expired`, never legacy (#8359 control)', () => {
+    const owner = makeSdkSession({ pending: [] })
+    const { resolver, legacyResolved } = build({ map: [['perm-gone', OWNER]], legacy: ['perm-gone'], ownerSession: owner })
+    const r = resolver.resolve('perm-gone', 'allow', null, { clientId: 'c1' })
+    assert.equal(r.kind, 'expired')
+    assert.equal(owner.respondToPermission.mock.callCount(), 1, 'invariant F: the mapped session is tried first')
+    assert.deepEqual(legacyResolved, [])
+  })
+
   it('a mapped SDK session whose request already expired → expired (map consumed)', () => {
     const owner = makeSdkSession({ pending: [] }) // respondToPermission returns false
     const { resolver, permissionSessionMap } = build({ map: [['perm-6', OWNER]], ownerSession: owner })
