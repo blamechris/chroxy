@@ -212,7 +212,7 @@ import {
   type EncryptionState,
   type KeyPair,
 } from './crypto';
-import { filterThinking, nextMessageId } from './utils';
+import { filterThinking, nextMessageId, createEmptySessionPanels } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
 import { unwrapToolResultText } from '../lib/tool-result-text';
@@ -5281,21 +5281,17 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             // owner (switchSession's else branch sets `primaryClientId: null`).
             patch.primaryClientId = null;
           }
-          // #7546 — the memory-stack + permission-audit panels are FLAT,
-          // per-active-session pulls (#6996 / #6772). `switchSession` resets both
-          // groups on every active-session change so the panel never renders the
-          // PREVIOUS session's data against the new one; the active session
-          // dying here is that same change, so mirror switchSession's reset
-          // values exactly. CONDITIONAL by construction — this branch only runs
-          // when the removed id WAS the active session, so a background-session
-          // prune leaves the panel the user is looking at untouched.
-          patch.permissionAudit = null;
-          patch.permissionAuditLoading = false;
-          patch.permissionAuditError = false;
-          patch.memoryStackEntries = null;
-          patch.memoryStackFile = null;
-          patch.memoryStackError = null;
-          patch.memoryStackLoading = false;
+          // #7546 / #7588 — the memory-stack + permission-audit panels are FLAT,
+          // per-active-session pulls (#6996 / #6772). `switchSession` resets them on
+          // every active-session change so the panel never renders the PREVIOUS
+          // session's data against the new one; the active session dying here is
+          // that same change, so take the SAME roster. Spread from
+          // `createEmptySessionPanels()` rather than re-spelled: a hand copy
+          // is exactly what #7546 found going missing. CONDITIONAL by
+          // construction — this branch only runs when the removed id WAS the
+          // active session, so a background-session prune leaves the panel the user
+          // is looking at untouched.
+          Object.assign(patch, createEmptySessionPanels());
         }
         set(patch);
       }
@@ -7009,20 +7005,14 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             // else branch sets `primaryClientId: null`).
             patch.primaryClientId = null;
           }
-          // #7546 — reset the FLAT memory-stack + permission-audit panels, the
-          // same groups `switchSession` clears on any active-session change
+          // #7546 / #7588 — reset the FLAT memory-stack + permission-audit panels
+          // from the same roster `switchSession` clears on any active-session change
           // (#6996 / #6772), so a timed-out session's memory stack / permission
           // history does not bleed onto the session that becomes active next.
           // CONDITIONAL by construction: only reached when the timed-out id WAS
           // the active session, so a background-session timeout leaves the
-          // active panel alone. Values mirror switchSession exactly.
-          patch.permissionAudit = null;
-          patch.permissionAuditLoading = false;
-          patch.permissionAuditError = false;
-          patch.memoryStackEntries = null;
-          patch.memoryStackFile = null;
-          patch.memoryStackError = null;
-          patch.memoryStackLoading = false;
+          // active panel alone.
+          Object.assign(patch, createEmptySessionPanels());
         }
         set(patch);
         // Garbage-collect persisted messages for the deleted session (#797)

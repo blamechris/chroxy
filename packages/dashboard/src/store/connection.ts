@@ -84,7 +84,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
-import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, getOwn, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptySessionPanels, createEmptyConnectionReadings, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, getOwn, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -3503,26 +3503,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       shutdownReason: null,
       restartEtaMs: null,
       restartingSince: null,
-      pendingPermissionConfirm: null,
-  fileBrowserPendingOpen: null,
-  workspaceSymbols: null,
-  symbolLocation: null,
-  codeSearchResults: null,
-  referencesResult: null,
-  referencesSymbol: '',
-  referencesOpen: false,
-  permissionAudit: null,
-  permissionAuditError: false,
-  // #6996 review — mirror permissionAudit: memory_read is a FLAT,
-  // per-session-cwd pull, so a reconnect must not leave a stale memory stack
-  // from before the drop presented as current. viewingCachedSession/
-  // activeSessionId are preserved on disconnect, but the underlying
-  // server-side data can differ after a reconnect (e.g. server restart) —
-  // clear and let the panel re-fetch.
-  memoryStackEntries: null,
-  memoryStackFile: null,
-  memoryStackError: null,
-  lastMemoryStackRequestId: null,
+      // #8411 / #7588 — the object-shaped transient readings (pending permission
+      // confirm, the IDE results, the references modal, the memory-read nonce) and the
+      // active-session panels (permission-audit history, memory stack), from the ONE
+      // pair of rosters `forgetSession` and `_resetSessionMemory` also spread. They
+      // were literals here and at neither full-reset site, so a switchServer from an
+      // already-disconnected tab carried them across. Per-field reasons live on the
+      // factories (utils.ts). The panels' former #6772 / #6996 reconnect rationale
+      // (the server-side data can differ after a reconnect, so clear and re-fetch)
+      // is unchanged.
+      ...createEmptyConnectionReadings(),
+      ...createEmptySessionPanels(),
       _directoryListingCallback: null,
       _terminalWriteCallback: null,
       contextUsage: null,
@@ -3557,6 +3548,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // key of the same name is a TS2783 error. The later literals win and are
       // identical, so the overlap is harmless.
       ...createEmptyInFlightMarkers(),
+      // #8411 / #7588 — the object-shaped transient readings and the active-session
+      // panels, the same pair `disconnect()` and `_resetSessionMemory` spread. A
+      // direct `connect()` to another URL reaches this action alone (#8207), and an
+      // open references modal or a pending file-open from the old daemon is as wrong
+      // there as after a switch.
+      ...createEmptyConnectionReadings(),
+      ...createEmptySessionPanels(),
       // #7555 — `messages` and `terminalRawBuffer` used to be spelled out here.
       // They are two of the twelve FLAT_SESSION_FIELDS, so they now come from
       // the `createEmptyFlatSessionMirror()` spread inside the marked block
@@ -3916,6 +3914,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // `disconnect()`'s teardown for everything the guard skips. Keeping those
       // two lists in lockstep by hand is what follow-on #7592 removes.
       ...createEmptyConnectionScope(),
+      // #8411 / #7588 — the object-shaped transient readings and the active-session
+      // panels, from the ONE pair of rosters `disconnect()` and `forgetSession` also
+      // spread. They were literals in `disconnect()` alone, so the same
+      // already-disconnected-tab switch reached this action without them.
+      ...createEmptyConnectionReadings(),
+      ...createEmptySessionPanels(),
       // #7625 — the failed-restore roster. A named snapshot object, so the
       // Record/Set/array roster in `createEmptyConnectionScope()` does not
       // reach it; same mechanism as `transcriptViewer` — an explicit literal at
@@ -5552,26 +5556,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // a stale banner doesn't outlive the resolution.
     if (get().sessionNotFoundError) set({ sessionNotFoundError: null });
 
-    // #6772 (PR #6836 review) — the permission audit history is a FLAT,
-    // per-session pull (queryPermissionAudit scopes to the active session).
-    // Clear it on every switch so the SettingsPanel "Permission history" view
-    // never shows the PREVIOUS session's entries against the new session; the
-    // user re-pulls on demand. The loading + error flags reset too so an
-    // in-flight pull for the old session can't wedge the button.
-    set({ permissionAudit: null, permissionAuditLoading: false, permissionAuditError: false });
-
-    // #6996 review — same FLAT, per-session-cwd shape as permissionAudit
-    // above. requestMemoryRead() now sends an explicit sessionId and a
-    // requestId nonce that handleMemoryStackResult uses to drop a superseded
-    // reply, but the reply itself still doesn't echo sessionId — so this
-    // reset stays as defence-in-depth. Without it, MemoryPanel's
-    // `entries === null` mount-guard never re-fires across a switch, so the
-    // panel keeps rendering the PREVIOUS session's memory stack as though it
-    // were the new session's — the exact provenance failure this panel
-    // exists to prevent. Clear it here so the panel re-fetches for the new
-    // session; the loading + error flags reset too so an in-flight pull for
-    // the old session can't wedge the button.
-    set({ memoryStackEntries: null, memoryStackFile: null, memoryStackError: null, memoryStackLoading: false });
+    // #7588 — the per-active-session panels (the #6772 permission-audit history and
+    // the #6996 memory stack, with their loading + error flags) reset in ONE place,
+    // `createEmptySessionPanels()`, which the two active-session death paths in
+    // message-handler.ts and both full-reset sites spread too. Both branches below
+    // run after this, so the switch is unconditional. Clearing on every switch is
+    // what stops the Settings "Permission history" view and the MemoryPanel (whose
+    // `entries === null` mount-guard would otherwise never re-fire) rendering the
+    // PREVIOUS session's data against the new one, and the loading/error flags
+    // reset so an in-flight pull for the old session cannot wedge the button.
+    // `lastMemoryStackRequestId` is deliberately left alone: nulling it would make
+    // the old session's in-flight reply apply (see the factory).
+    set(createEmptySessionPanels());
 
     // Optimistically switch to cached state + mark notifications for target
     // session as read. #4890 — pre-widget we filtered the target session's

@@ -75,7 +75,7 @@ vi.mock('./crypto', () => ({
 vi.mock('./persistence', () => ({ clearPersistedSession: vi.fn() }))
 
 import { handleMessage, setStore, clearDeltaBuffers, clearPermissionSplits, stopHeartbeat, resetReplayFlags } from './message-handler'
-import { createEmptyConnectionScope, createEmptyDaemonSnapshots, createEmptyFlatSessionMirror, createEmptyInFlightMarkers, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
+import { createEmptyConnectionReadings, createEmptyConnectionScope, createEmptyDaemonSnapshots, createEmptyFlatSessionMirror, createEmptyInFlightMarkers, createEmptySessionPanels, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
 
 /**
  * The #7559 roster's field names, derived from the ONE factory the fix spreads
@@ -101,6 +101,14 @@ const IN_FLIGHT_MARKER_FIELDS: readonly string[] = Object.keys(createEmptyInFlig
  */
 const DAEMON_SNAPSHOT_FIELDS: readonly string[] = Object.keys(createEmptyDaemonSnapshots())
 const FLAT_SESSION_MIRROR_FIELDS: readonly string[] = Object.keys(createEmptyFlatSessionMirror())
+
+/**
+ * #8411 / #7588 — the connection-lifetime readings roster and the per-active-session
+ * panel roster, derived from their factories for the same reason as the four above:
+ * `forgetSession`, `_resetSessionMemory` and `disconnect()` all take both by spread.
+ */
+const CONNECTION_READING_FIELDS: readonly string[] = Object.keys(createEmptyConnectionReadings())
+const SESSION_PANEL_FIELDS: readonly string[] = Object.keys(createEmptySessionPanels())
 import type { ConnectionState } from './types'
 import { createEmptyActivityState } from '@chroxy/store-core'
 import type { ActivityState } from '@chroxy/store-core'
@@ -2414,6 +2422,10 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     // flat session mirror (the roster wipes). Imported for the same reason.
     ['createEmptyDaemonSnapshots()', DAEMON_SNAPSHOT_FIELDS],
     ['createEmptyFlatSessionMirror()', FLAT_SESSION_MIRROR_FIELDS],
+    // #8411 / #7588 — the object-shaped transient readings and the active-session
+    // panels, spread by ALL THREE full-reset actions. Imported for the same reason.
+    ['createEmptyConnectionReadings()', CONNECTION_READING_FIELDS],
+    ['createEmptySessionPanels()', SESSION_PANEL_FIELDS],
   ]
 
   /**
@@ -3290,20 +3302,14 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
   /**
    * Tracked, not cleared at the full-reset sites. Each entry is cleared by
    * `disconnect()`, which a switch made from an already-disconnected tab skips
-   * (#7559) — the same exposure the collection axis closed with
-   * `createEmptyConnectionScope()`, left open here for these seven because their
-   * scalar and array siblings (`memoryStackEntries`, `referencesSymbol`,
-   * `permissionAudit*`, …) need the same decision in the same change.
+   * (#7559) — the exposure the collection axis closed with
+   * `createEmptyConnectionScope()`. Empty since #8411, which moved the seven it
+   * held (and their `memoryStack*` / `referencesSymbol` / `permissionAudit*`
+   * siblings) into `createEmptyConnectionReadings()` / `createEmptySessionPanels()`,
+   * spread by all three actions. Kept, with its enforcing cells, as the place a
+   * future deferral is written down WITH its tracking issue.
    */
-  const SNAPSHOT_LIFETIME_DEFERRED: Record<string, string> = {
-    memoryStackFile: 'cleared by disconnect() only; its memoryStack* siblings share the gap — #8411',
-    pendingPermissionConfirm: 'cleared by disconnect() only — #8411',
-    fileBrowserPendingOpen: 'cleared by disconnect() only — #8411',
-    workspaceSymbols: 'cleared by disconnect() only — #8411',
-    symbolLocation: 'cleared by disconnect() only — #8411',
-    codeSearchResults: 'cleared by disconnect() only — #8411',
-    referencesResult: 'cleared by disconnect() only — #8411',
-  }
+  const SNAPSHOT_LIFETIME_DEFERRED: Record<string, string> = {}
 
   /** `auth_ok`'s unconditional `connectedState` literal — set on BOTH branches. */
   const authokConnectedState = (() => {
