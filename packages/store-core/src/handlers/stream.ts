@@ -408,6 +408,15 @@ export interface ToolStartPayload {
 }
 
 /**
+ * A tool input as `ChatMessage.toolInput` types it: a non-null, non-array
+ * object. Every real tool input serializes as one; anything else (`null` on a
+ * live SDK/CLI/BYOK `tool_start`, a stray string or array) stays unset.
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== undefined && value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
  * Validate, dedup, and normalize a `tool_start` message.
  *
  * - Resolves `sessionId` from `msg.sessionId` (string-typed) falling back to
@@ -498,6 +507,19 @@ export function handleToolStart(
     toolUseId,
     serverName,
     timestamp: wireTimestamp,
+  }
+  // #8251 — the structured input, when the server already knows it at
+  // `tool_start` time. claude-tui sends it here (its PreToolUse hook payload
+  // carries the whole `tool_input`) and never sends `tool_result.input`, and a
+  // history replay forwards the persisted `tool_start` entry — whose `input`
+  // the server backfilled once the result landed (#7346) — but not a
+  // `tool_result` that repeats it. Without this the INPUT panel read
+  // "(no input)" for every claude-tui tool call and for every claude-sdk call
+  // after a session switch or reload. `tool_result.input` (below) still wins
+  // when it lands later. Same plain-object guard as that backfill: arrays,
+  // primitives and `null` (SDK/CLI/BYOK live starts) leave `toolInput` unset.
+  if (isPlainObject(msg.input)) {
+    chatMessage.toolInput = msg.input
   }
 
   // #4308 — build the ActiveTool entry. Skip when `toolUseId` is missing
@@ -624,13 +646,8 @@ export function handleToolResult(
   // and the only shape a real tool input is ever serialized as; BYOK
   // never sends this field, so `msg.input` stays `undefined` there and
   // this is a no-op (unchanged from before).
-  if (
-    msg.input !== undefined
-    && msg.input !== null
-    && typeof msg.input === 'object'
-    && !Array.isArray(msg.input)
-  ) {
-    patch.toolInput = msg.input as Record<string, unknown>
+  if (isPlainObject(msg.input)) {
+    patch.toolInput = msg.input
   }
 
   return {

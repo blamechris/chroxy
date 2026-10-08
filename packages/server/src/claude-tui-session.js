@@ -4475,16 +4475,27 @@ export class ClaudeTuiSession extends BaseSession {
       if (bashOutputShellId) {
         this.clearBackgroundShell(bashOutputShellId)
       }
+      // #4628: track this tool_start so _emitResult can sweep it on
+      // turn-end if the matching PostToolUse hook is never written
+      // (the upstream failure mode observed in #4628). Tracked BEFORE the
+      // emit (#8251) so `_recordToolInput` below finds its entry.
+      this._trackToolStart(toolUseId, toolName)
+      // #8251: the hook payload carries the tool's whole `tool_input`, so it
+      // rides on `tool_start` itself (claude-tui never sends
+      // `tool_result.input`, and the persisted `tool_start` history entry is
+      // what a session-switch/reload replay rebuilds the INPUT panel from).
+      // It used to go out RAW — unredacted and uncapped on the live wire and
+      // in the history ring buffer. `_recordToolInput` is the one choke point
+      // the SDK/CLI/BYOK paths already use (#8135/#8136): it applies
+      // `sanitizeToolInput` (secret-shaped keys/values redacted, serialized
+      // size capped at MAX_INPUT_CHARS) and returns the safe value.
+      const sanitizedToolInput = this._recordToolInput(toolUseId, payload.tool_input ?? null)
       this.emit('tool_start', {
         messageId: toolUseId,
         toolUseId,
         tool: toolName,
-        input: payload.tool_input ?? null,
+        input: sanitizedToolInput ?? null,
       })
-      // #4628: track this tool_start so _emitResult can sweep it on
-      // turn-end if the matching PostToolUse hook is never written
-      // (the upstream failure mode observed in #4628).
-      this._trackToolStart(toolUseId, toolName)
       // #4278: AskUserQuestion in TUI sessions previously had no special
       // path — the tool_use bubble appeared in the chat with no
       // interactive way to answer, and claude sat on its own TTY-style

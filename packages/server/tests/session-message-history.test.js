@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { SessionMessageHistory } from '../src/session-message-history.js'
+import { sendHistoryEntry } from '../src/ws-history.js'
 
 describe('SessionMessageHistory', () => {
   let history
@@ -376,6 +377,23 @@ describe('SessionMessageHistory', () => {
       // the backfill target (the wire event's own shape already carries
       // it separately for the live merge; history doesn't need it twice).
       assert.equal(toolResult.type, 'tool_result')
+    })
+
+    // #8251 — the client half. The replay frame for a backfilled claude-sdk
+    // tool_start carries the input, while the replayed tool_result never does;
+    // store-core must therefore take the INPUT from the tool_start frame.
+    it('re-sends the backfilled input on the replayed tool_start frame, not on the replayed tool_result (#8251)', () => {
+      history.recordHistory('s1', 'tool_start', { messageId: 'm1', toolUseId: 'tu-1', tool: 'Read', input: null })
+      history.recordHistory('s1', 'tool_result', { toolUseId: 'tu-1', result: 'ok', truncated: false, input: { file_path: 'README.md' } })
+
+      const sent = []
+      for (const entry of history.getHistory('s1')) {
+        sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry)
+      }
+      const start = sent.find((f) => f.type === 'tool_start')
+      const result = sent.find((f) => f.type === 'tool_result')
+      assert.deepEqual(start.input, { file_path: 'README.md' })
+      assert.equal(result.input, undefined)
     })
 
     it('is a no-op when tool_result carries no input field (BYOK today: unchanged behavior)', () => {

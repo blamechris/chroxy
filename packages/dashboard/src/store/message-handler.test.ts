@@ -3851,6 +3851,45 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #8251 — the structured tool input must reach the message the tool row
+  // renders from, on the frames each provider actually sends: claude-tui puts
+  // it on `tool_start` and never on `tool_result`; a replayed claude-sdk
+  // `tool_start` carries the input the server backfilled while its replayed
+  // `tool_result` does not.
+  describe('tool_start input reaches toolInput (#8251)', () => {
+    function seed() {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        }),
+      );
+      setStore(store);
+    }
+    const msgs = () => (store.getState() as any).sessionStates.s1.messages as Array<Record<string, unknown>>;
+
+    it('claude-tui live: tool_start input survives a tool_result that carries none', () => {
+      seed();
+      handleMessage({ type: 'tool_start', messageId: 'toolu_t', toolUseId: 'toolu_t', tool: 'Bash', input: { command: 'ls .', description: 'List files' }, sessionId: 's1' }, ctx() as any);
+      expect(msgs()[0]!.toolInput).toEqual({ command: 'ls .', description: 'List files' });
+      handleMessage({ type: 'tool_result', toolUseId: 'toolu_t', result: 'README.md', truncated: false, sessionId: 's1' }, ctx() as any);
+      expect(msgs()[0]!.toolInput).toEqual({ command: 'ls .', description: 'List files' });
+      expect(msgs()[0]!.toolResult).toBe('README.md');
+    });
+
+    it('claude-sdk replay (full rebuild): replayed tool_start input survives a replayed tool_result without input', () => {
+      seed();
+      handleMessage({ type: 'history_replay_start', sessionId: 's1', fullHistory: true }, ctx() as any);
+      handleMessage({ type: 'tool_start', messageId: 'toolu_r', toolUseId: 'toolu_r', tool: 'Read', input: { file_path: 'README.md' }, sessionId: 's1', historySeq: 1 }, ctx() as any);
+      handleMessage({ type: 'tool_result', toolUseId: 'toolu_r', result: 'ok', truncated: false, sessionId: 's1', historySeq: 2 }, ctx() as any);
+      handleMessage({ type: 'history_replay_end', sessionId: 's1', latestSeq: 2 }, ctx() as any);
+      const tool = msgs().find((m) => m.toolUseId === 'toolu_r')!;
+      expect(tool.toolInput).toEqual({ file_path: 'README.md' });
+      expect(tool.toolResult).toBe('ok');
+    });
+  });
+
   // #7340 — the `activeAgents` wipe on `history_replay_start` must target the
   // session the frame is REPLAYING, not whichever session happens to be active.
   //

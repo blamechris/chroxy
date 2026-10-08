@@ -11,6 +11,9 @@ import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import { EventNormalizer } from '../src/event-normalizer.js'
+import { SessionMessageHistory } from '../src/session-message-history.js'
+import { sendHistoryEntry } from '../src/ws-history.js'
 import {
   CLAUDE_NATIVE_FIRST_PARTY_BASE_URL,
   CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV,
@@ -6193,6 +6196,80 @@ describe('ClaudeTuiSession', () => {
       assert.equal(events[0].messageId, 'toolu_123')
       assert.equal(events[0].tool, 'Edit')
       assert.deepEqual(events[0].input, { file_path: '/foo.js', new_string: 'x' })
+    })
+
+    // #8251 — claude-tui never sends `tool_result.input`, so the PreToolUse
+    // `tool_input` riding on `tool_start` is the ONLY place a client (or a
+    // later history replay) can get the tool's INPUT from. It used to go out
+    // raw; it must go out through the same sanitizeToolInput floor the SDK/CLI/
+    // BYOK paths use (secret redaction + the 10KB broadcast cap).
+    describe('tool_start input is sanitized and capped (#8251)', () => {
+      it('redacts secret-shaped keys and values before emitting', () => {
+        const events = []
+        session.on('tool_start', (e) => events.push(e))
+        const secret = 'sk-ant-api03-' + 'A'.repeat(48)
+
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_secret',
+          tool_name: 'Bash',
+          tool_input: { command: `export TOKEN=${secret} && ls .`, api_key: 'hunter2hunter2', description: 'List files' },
+        }, 'msg-1')
+
+        assert.equal(events.length, 1)
+        const wire = JSON.stringify(events[0].input)
+        assert.ok(!wire.includes(secret), 'secret-shaped value in a benign key is redacted')
+        assert.ok(!wire.includes('hunter2hunter2'), 'value under a sensitive key is redacted')
+        assert.equal(events[0].input.api_key, '[REDACTED]')
+        assert.equal(events[0].input.description, 'List files', 'non-secret fields survive')
+      })
+
+      it('caps an oversized input at the broadcast limit instead of shipping it whole', () => {
+        const events = []
+        session.on('tool_start', (e) => events.push(e))
+
+        session._emitToolHookEvent('PreToolUse', {
+          tool_use_id: 'toolu_big',
+          tool_name: 'Write',
+          tool_input: { file_path: '/big.txt', content: 'x'.repeat(200 * 1024) },
+        }, 'msg-1')
+
+        assert.equal(events.length, 1)
+        assert.ok(JSON.stringify(events[0].input).length < 12 * 1024, 'serialized input stays near the 10KB cap')
+      })
+
+      it('keeps the sanitized input on tool_start across the wire frame and the history entry a replay re-sends', () => {
+        const normalizer = new EventNormalizer({ flushIntervalMs: 10 })
+        const history = new SessionMessageHistory({ maxHistory: 10 })
+        const events = []
+        session.on('tool_start', (e) => events.push(e))
+        try {
+          session._emitToolHookEvent('PreToolUse', {
+            tool_use_id: 'toolu_ls',
+            tool_name: 'Bash',
+            tool_input: { command: 'ls .', description: 'List files in current directory' },
+          }, 'msg-1')
+          session._emitToolHookEvent('PostToolUse', {
+            tool_use_id: 'toolu_ls',
+            tool_name: 'Bash',
+            tool_response: { stdout: 'README.md', stderr: '' },
+          }, 'msg-1')
+          assert.equal(events.length, 1)
+
+          const frame = normalizer.normalize('tool_start', events[0], { sessionId: 's1', mode: 'multi', getSessionEntry: () => ({ session: {}, name: 'n', cwd: '/tmp' }) })
+          assert.deepEqual(frame.messages[0].msg.input, { command: 'ls .', description: 'List files in current directory' })
+
+          history.recordHistory('s1', 'tool_start', events[0])
+          const [entry] = history.getHistory('s1')
+          assert.deepEqual(entry.input, { command: 'ls .', description: 'List files in current directory' })
+          // The frame a session switch / reload actually re-sends for that entry.
+          const sent = []
+          sendHistoryEntry((_ws, payload) => sent.push(payload), null, 's1', entry)
+          assert.equal(sent[0].type, 'tool_start')
+          assert.deepEqual(sent[0].input, { command: 'ls .', description: 'List files in current directory' })
+        } finally {
+          normalizer.destroy()
+        }
+      })
     })
 
     it('emits tool_result with toolUseId and result on PostToolUse', () => {

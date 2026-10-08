@@ -16,6 +16,7 @@ import {
   formatToolName,
   tryParseCompleteJson,
   getInputSummary,
+  getPartialSummary,
   shouldSuppressRawToolInput,
 } from '@chroxy/store-core'
 import { ChildAgentEventList } from './ChildAgentEventList'
@@ -100,7 +101,14 @@ function ToolGroupEntry({
   // Shared suppress set lives in @chroxy/store-core so the two paths can't
   // drift.
   const suppressRawInput = shouldSuppressRawToolInput(message.tool)
-  const summary = suppressRawInput ? '' : getInputSummary(message.toolInput)
+  // #8251: a running SDK tool has no structured `toolInput` until its result
+  // lands, but the streamed input is already in `toolInputPartial` (the same
+  // fallback the expanded panel and ToolBubble's collapsed summary use, #4081)
+  // — without it the collapsed row showed only the tool name for the whole run.
+  const summary = suppressRawInput
+    ? ''
+    : getInputSummary(message.toolInput)
+      || (message.toolInputPartial ? getPartialSummary(message.toolInputPartial) ?? '' : '')
   // `toolResult` is set to the server's result string by handleToolResult,
   // including the empty string when the tool produced no output. A bare
   // truthiness check (`!!toolResult`) wrongly classifies an empty result
