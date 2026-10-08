@@ -1,7 +1,11 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { DockerByokSession } from '../src/docker-byok-session.js'
+import {
+  DockerByokSession,
+  INSPECT_ALIVE_COOLDOWN_MS,
+  INSPECT_UNKNOWN_COOLDOWN_MS,
+} from '../src/docker-byok-session.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
 import { DockerContainerPool } from '../src/docker-byok-pool.js'
 import { ContainerLivenessMonitor } from '../src/container-liveness-monitor.js'
@@ -89,8 +93,10 @@ function realPool() {
   return pool
 }
 
-function buildSession({ backend = backendStub(), pool = realPool(), execFile = execFileStub() } = {}) {
-  const session = new DockerByokSession({ cwd: '/host/cwd', _execFile: execFile, _dockerBackend: backend, _pool: pool })
+function buildSession({ backend = backendStub(), pool = realPool(), execFile = execFileStub(), now } = {}) {
+  const session = new DockerByokSession({
+    cwd: '/host/cwd', _execFile: execFile, _dockerBackend: backend, _pool: pool, ...(now ? { _now: now } : {}),
+  })
   session._containerReady = true
   session._containerId = CTR
   session._acquiredFromPool = true
@@ -438,6 +444,258 @@ describe('#7600 DockerByokSession — a tool dispatch confirms the vanish via in
     assert.equal(errors.length, 0)
     assert.equal(session._containerReady, true)
     assert.equal(pool.isSoiled(CTR), false)
+  })
+})
+
+// ── #7609: the post-failure inspect is rate-bounded ──────────────────────────
+
+describe('#7609 DockerByokSession — a negative-result cooldown bounds the post-failure docker inspect', () => {
+  // A fake clock the session reads through its `_now` seam.
+  function fakeClock(start = 1_000_000) {
+    const clock = { t: start, now: () => clock.t, advance(ms) { clock.t += ms } }
+    return clock
+  }
+  const tick = () => new Promise((r) => setImmediate(r))
+
+  it('pins the windows: the long one is the liveness poll period, the unknown one is strictly shorter', () => {
+    assert.equal(INSPECT_ALIVE_COOLDOWN_MS, 30_000)
+    assert.ok(INSPECT_UNKNOWN_COOLDOWN_MS > 0 && INSPECT_UNKNOWN_COOLDOWN_MS < INSPECT_ALIVE_COOLDOWN_MS)
+  })
+
+  it('many failing tools inside the window cost ONE inspect; every one still returns its plain error', async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ execError: dockerErr('exit code 1'), running: true })
+    const { session, errors } = buildSession({ backend, now: clock.now })
+
+    for (let i = 0; i < 10; i++) {
+      const result = await session._dispatchBuiltinTool(BASH)
+      assert.equal(result.isError, true)
+      assert.ok(result.content.includes('exit code 1'), 'the model still sees the real failure')
+      clock.advance(1_000) // 10s total: well inside the 30s window
+    }
+    assert.equal(backend.execCalls.length, 10)
+    assert.deepEqual(backend.statusCalls, [CTR], 'ten failures, one inspect')
+    assert.equal(errors.length, 0)
+    assert.equal(session._containerReady, true)
+  })
+
+  it('the first failure after the window expires probes again, and re-arms the window', async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ execError: dockerErr('exit code 1'), running: true })
+    const { session } = buildSession({ backend, now: clock.now })
+
+    await session._dispatchBuiltinTool(BASH)
+    clock.advance(INSPECT_ALIVE_COOLDOWN_MS - 1)
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 1, 'one ms before expiry: still suppressed')
+
+    clock.advance(1)
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 2, 'at expiry: probes again')
+
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 2, 'and the new window suppresses again')
+  })
+
+  it('NEGATIVE CONTROL: a healthy dispatch never probes and never arms the window', async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ exec: { stdout: 'hi\n', stderr: '' } })
+    const { session } = buildSession({ backend, now: clock.now })
+
+    await session._dispatchBuiltinTool(BASH)
+    assert.deepEqual(backend.statusCalls, [])
+    assert.equal(session._inspectCooldown, null)
+
+    // The first FAILURE after healthy calls still probes (nothing was armed).
+    backend.execInEnvironment = async () => { throw dockerErr('exit code 1') }
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 1)
+  })
+
+  it('a vanish is detected immediately when the probe says gone — even with a recent running verdict expired just now', async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ execError: dockerErr(EXEC_NO_SUCH_CONTAINER), running: true })
+    const { session, pool, errors } = buildSession({ backend, now: clock.now })
+
+    await session._dispatchBuiltinTool(BASH) // running: arms the window
+    clock.advance(INSPECT_ALIVE_COOLDOWN_MS)
+    backend.getEnvironmentStatus = async (id) => { backend.statusCalls.push(id); return false }
+
+    const result = await session._dispatchBuiltinTool(BASH)
+    assert.ok(result.content.includes(CONTAINER_VANISHED_MESSAGE))
+    assert.equal(errors.length, 1)
+    assert.equal(session._containerReady, false)
+    assert.equal(pool.isSoiled(CTR), true)
+    assert.equal(session._inspectCooldown, null, 'a positive result is never cached')
+  })
+
+  it('a vanish INSIDE the window is not seen by the tool path but the #7601 poll still surfaces it (lossless in the vanish direction)', async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ execError: dockerErr(EXEC_NO_SUCH_CONTAINER), running: true })
+    const { session, pool, errors } = buildSession({ backend, now: clock.now })
+
+    await session._dispatchBuiltinTool(BASH) // running: arms the window
+    assert.equal(errors.length, 0)
+
+    // The container now vanishes; a failing tool inside the window does not probe.
+    backend.getEnvironmentStatus = async (id) => { backend.statusCalls.push(id); return false }
+    clock.advance(5_000)
+    const hidden = await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 1, 'suppressed: the vanish is not seen here')
+    assert.ok(!hidden.content.includes(CONTAINER_VANISHED_MESSAGE))
+    assert.equal(errors.length, 0)
+
+    // No further dispatch; the poll tick finds it.
+    const monitor = new ContainerLivenessMonitor({
+      enumerate: () => [{ sessionId: 's1', containerId: CTR, session }],
+      inspect: async () => 'gone',
+      logger: { info() {}, warn() {} },
+    })
+    await monitor._tick()
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0].code, CONTAINER_VANISHED)
+    assert.equal(session._containerReady, false)
+    assert.equal(pool.isSoiled(CTR), true)
+  })
+
+  it('the window resets when the container CHANGES: a new id is probed at once', async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ execError: dockerErr('exit code 1'), running: true })
+    const { session } = buildSession({ backend, now: clock.now })
+
+    await session._dispatchBuiltinTool(BASH)
+    assert.deepEqual(backend.statusCalls, [CTR])
+
+    session._containerId = 'ctr-respawned-fedcba9876543210' // re-acquired / respawned
+    await session._dispatchBuiltinTool(BASH)
+    assert.deepEqual(backend.statusCalls, [CTR, 'ctr-respawned-fedcba9876543210'], 'the predecessor verdict does not cover the new container')
+
+    // ...and the new id has its own window.
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 2)
+  })
+
+  it('the window resets across a vanish → running-again recovery on the SAME id', async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ execError: dockerErr('exit code 1'), running: true })
+    const { session } = buildSession({ backend, now: clock.now })
+
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 1)
+
+    session.notifyContainerVanished() // the poll saw it gone...
+    assert.equal(session._inspectCooldown, null)
+    session.clearContainerVanished() // ...then running again under the same id
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 2, 'judged afresh, not by the pre-vanish verdict')
+  })
+
+  it("an 'unknown' probe (daemon hung / timeout) arms only the SHORT window, so it cannot hide a real vanish for long", async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ execError: dockerErr('exit code 1'), statusError: new Error('ETIMEDOUT') })
+    const { session, errors } = buildSession({ backend, now: clock.now })
+
+    await session._dispatchBuiltinTool(BASH)
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 1, 'a hung daemon is not hammered on every failure')
+
+    // The daemon recovers and the container turns out to be gone: the very
+    // next probe after the SHORT window (not the 30s one) catches it.
+    backend.getEnvironmentStatus = async (id) => { backend.statusCalls.push(id); return false }
+    clock.advance(INSPECT_UNKNOWN_COOLDOWN_MS)
+    backend.execInEnvironment = async () => { throw dockerErr(EXEC_NO_SUCH_CONTAINER) }
+    const result = await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 2)
+    assert.ok(result.content.includes(CONTAINER_VANISHED_MESSAGE))
+    assert.equal(errors.length, 1)
+    assert.ok(INSPECT_UNKNOWN_COOLDOWN_MS < INSPECT_ALIVE_COOLDOWN_MS)
+  })
+
+  it('concurrent failing tools during a probe share the one in-flight inspect', async () => {
+    const clock = fakeClock()
+    let resolveStatus
+    const backend = backendStub({ execError: dockerErr('exit code 1') })
+    backend.getEnvironmentStatus = (id) => { backend.statusCalls.push(id); return new Promise((resolve) => { resolveStatus = resolve }) }
+    const { session, errors } = buildSession({ backend, now: clock.now })
+
+    const pending = [1, 2, 3, 4, 5].map(() => session._dispatchBuiltinTool(BASH))
+    await tick()
+    assert.equal(backend.statusCalls.length, 1, 'five concurrent failures, one inspect spawn')
+    resolveStatus(true)
+    const results = await Promise.all(pending)
+    assert.ok(results.every((r) => r.isError === true))
+    assert.equal(errors.length, 0)
+    assert.equal(session._inspectInFlight, null, 'the in-flight slot is released')
+    assert.equal(backend.statusCalls.length, 1)
+  })
+
+  it('concurrent failing tools all see a gone verdict from the shared probe, surfaced once', async () => {
+    const clock = fakeClock()
+    let resolveStatus
+    const backend = backendStub({ execError: dockerErr(EXEC_NO_SUCH_CONTAINER) })
+    backend.getEnvironmentStatus = (id) => { backend.statusCalls.push(id); return new Promise((resolve) => { resolveStatus = resolve }) }
+    const { session, errors } = buildSession({ backend, now: clock.now })
+
+    const pending = [1, 2, 3].map(() => session._dispatchBuiltinTool(BASH))
+    await tick()
+    resolveStatus(false)
+    const results = await Promise.all(pending)
+    assert.ok(results.every((r) => r.content.includes(CONTAINER_VANISHED_MESSAGE)))
+    assert.equal(backend.statusCalls.length, 1)
+    assert.equal(errors.length, 1, 'the vanish is surfaced once')
+  })
+
+  it('a stale running verdict that lands AFTER the poll latched a vanish does not outlive the recovery', async () => {
+    // Race: the inspect (running) is in flight when the poll surfaces the
+    // vanish; the verdict then lands and arms a window for a container the
+    // session has since written off. The recovery edge must drop it.
+    const clock = fakeClock()
+    let resolveStatus
+    const backend = backendStub({ execError: dockerErr('exit code 1') })
+    backend.getEnvironmentStatus = (id) => { backend.statusCalls.push(id); return new Promise((resolve) => { resolveStatus = resolve }) }
+    const { session } = buildSession({ backend, now: clock.now })
+
+    const pending = session._dispatchBuiltinTool(BASH)
+    await tick()
+    session.notifyContainerVanished()
+    resolveStatus(true)
+    await pending
+    assert.notEqual(session._inspectCooldown, null, 'the late verdict armed a window')
+
+    session.clearContainerVanished()
+    assert.equal(session._inspectCooldown, null, 'the recovery edge drops it')
+    backend.getEnvironmentStatus = async (id) => { backend.statusCalls.push(id); return true }
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(backend.statusCalls.length, 2, 'the first failure after recovery probes')
+  })
+
+  it("a 'gone' verdict is never cached, even when the vanish was already latched so the surface is a no-op", async () => {
+    const clock = fakeClock()
+    let resolveStatus
+    const backend = backendStub({ execError: dockerErr(EXEC_NO_SUCH_CONTAINER) })
+    backend.getEnvironmentStatus = (id) => { backend.statusCalls.push(id); return new Promise((resolve) => { resolveStatus = resolve }) }
+    const { session } = buildSession({ backend, now: clock.now })
+
+    const pending = session._dispatchBuiltinTool(BASH)
+    await tick()
+    session.notifyContainerVanished() // the poll got there first: the later surface is a no-op
+    resolveStatus(false)
+    await pending
+    assert.equal(session._inspectCooldown, null, 'the positive result is not remembered')
+  })
+
+  it('a rejected probe releases the in-flight slot so the next failure can probe', async () => {
+    const clock = fakeClock()
+    const backend = backendStub({ execError: dockerErr('exit code 1') })
+    let calls = 0
+    backend.getEnvironmentStatus = async (id) => { calls++; backend.statusCalls.push(id); throw new Error('boom') }
+    const { session } = buildSession({ backend, now: clock.now })
+
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(session._inspectInFlight, null)
+    clock.advance(INSPECT_UNKNOWN_COOLDOWN_MS)
+    await session._dispatchBuiltinTool(BASH)
+    assert.equal(calls, 2)
   })
 })
 
