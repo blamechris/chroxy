@@ -1193,6 +1193,40 @@ export const REPLAY_RESOLVED_PLACEHOLDER = '(resolved)'
  */
 export const QUESTION_INTERRUPTED_PLACEHOLDER = '(interrupted)'
 
+/**
+ * The `answered` value of a question a NEWER question replaced (#8470).
+ *
+ * The third non-decision `answered` may hold. Set from the wire
+ * (`permission_resolved { toolUseId, reason: 'superseded' }`): the agent asked a
+ * second question while the first was open, the server ended the first as a deny,
+ * and nobody answered it. Not a decision: renderers show it as "replaced".
+ */
+export const QUESTION_SUPERSEDED_PLACEHOLDER = '(superseded)'
+
+/**
+ * The `answered` value of a question whose answer from THIS client never reached
+ * it (#8470). The fourth non-decision `answered` may hold. Set from the wire
+ * (`error { code: 'QUESTION_NOT_DELIVERED', toolUseId }`): the client marked the
+ * card answered when it sent, and the server then said the question was no longer
+ * waiting (already answered, timed out, or replaced), so nothing reached the
+ * agent. Renderers show it as "not delivered", never as the answer.
+ */
+export const QUESTION_NOT_DELIVERED_PLACEHOLDER = '(not delivered)'
+
+/**
+ * Is `answered` one of the non-decision tokens a QUESTION can end in without
+ * anyone having answered it (as opposed to the replay sweep's '(resolved)', which
+ * means "answered or expired, unknown which")? A live `user_question` re-delivery
+ * clears these, because it proves the question is pending again.
+ */
+export function isQuestionNoAnswerToken(answered: unknown): boolean {
+  return (
+    answered === QUESTION_INTERRUPTED_PLACEHOLDER ||
+    answered === QUESTION_SUPERSEDED_PLACEHOLDER ||
+    answered === QUESTION_NOT_DELIVERED_PLACEHOLDER
+  )
+}
+
 /** The subset of `ChatMessage` the replay-end sweep reads. */
 interface SweepablePrompt {
   id: string

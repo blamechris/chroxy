@@ -99,6 +99,12 @@ import {
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   applyPermissionResolved,
+  // #8470 — a question that ended with no answer: replaced by a newer one
+  // (permission_resolved, question variant) or answered into nothing (error).
+  QUESTION_SUPERSEDED_REASON,
+  handleQuestionNotDelivered,
+  endQuestionInSessions,
+  markQuestionEnded,
   handlePermissionTimeout as sharedPermissionTimeout,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
@@ -3027,6 +3033,25 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
   }
 }
 
+/**
+ * #8470: end a question card without an answer, wherever it sits. Searches every
+ * session state, then the flat `messages` (sessions not in `sessionStates`), and
+ * reports whether any card changed so a caller can fall back to a toast.
+ */
+function endQuestionCard(toolUseId: string, kind: 'superseded' | 'notDelivered', get: MsgGet, set: MsgSet): boolean {
+  const hit = endQuestionInSessions(get().sessionStates, toolUseId, kind);
+  if (hit) {
+    updateSession(hit.sessionId, () => ({ messages: hit.messages }));
+    return true;
+  }
+  const flat = markQuestionEnded(get().messages, toolUseId, kind);
+  if (flat) {
+    set({ messages: flat });
+    return true;
+  }
+  return false;
+}
+
 function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   // Another client resolved this permission — dismiss the prompt on this client.
   // The permission_request may have been stored in ANY session state (whichever tab
@@ -3036,6 +3061,13 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   // dashboard-specific.
   const resolved = sharedPermissionResolved(msg);
   const { requestId: resolvedRequestId } = resolved;
+  // #8470: the question variant. Only a SUPERSEDED question is announced (nobody
+  // answered it, so no round-trip will dismiss its card); it carries a toolUseId
+  // and no requestId.
+  if (!resolvedRequestId && resolved.toolUseId && resolved.reason === QUESTION_SUPERSEDED_REASON) {
+    endQuestionCard(resolved.toolUseId, 'superseded', get, set);
+    return;
+  }
   if (resolvedRequestId) {
     // #8374: a prompt Stop cancelled becomes a `stopped` record, not an answered
     // deny. Shared with the app, so the two cannot disagree.
@@ -7174,6 +7206,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       const { code: errCode, message: errMsg, fatal: errFatal, partialCost } = sharedError(msg);
       const partialCostLine = partialCost ? formatPartialCostLine(partialCost) : undefined;
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
+      // #8470: the server dropped a question answer this client sent. The card was
+      // marked answered on send; retract that, in place, so it reads "not
+      // delivered" instead of answered. Quiet when the card is found (the card
+      // is the signal); a toast only when it is not, so the news is never lost.
+      const notDelivered = handleQuestionNotDelivered(msg);
+      if (notDelivered && endQuestionCard(notDelivered.toolUseId, 'notDelivered', get, set)) break;
       // #3588: clear any in-flight skill_trust_grant whose requestId
       // matches this error envelope so the SkillsPanel "Pending review"
       // row's disabled state lifts. Without this, an INVALID_AUTHOR /

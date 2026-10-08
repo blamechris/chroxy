@@ -34,8 +34,13 @@ export const CLIENT_CAPABILITIES = {
     // with no text (`kind: 'thinking'`, empty content) as a thinking bubble. A client
     // without it is not sent one, because an older build renders it as an empty
     // assistant bubble.
-    desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1'],
-    mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1'],
+    //
+    // `history_question_superseded_v1` (#8470): the client reads `superseded: true` on a
+    // replayed `user_question` (a newer question replaced it) and shows it as replaced.
+    // A client without it is not sent that question, because an older build would
+    // render it as a live, answerable card and then as "(resolved)".
+    desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1'],
+    mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1'],
 };
 /**
  * Minimum protocol version the server will accept from clients.

@@ -320,6 +320,40 @@ export class SessionMessageHistory extends EventEmitter {
   }
 
   /**
+   * #8470 -- record that a newer question REPLACED this one, so nobody answered it
+   * and nobody will. `permission_resolved` is transient, so without this a client
+   * that was not watching live (a fresh dashboard, a full rebuild, a reconnect)
+   * replays the question as unanswered and stamps it "(resolved)", which reads as
+   * answered.
+   *
+   * Two writes, for the same reason the restore-time sweep makes two (#8336): the
+   * entry is flagged IN PLACE (a full rebuild receives the question where it was
+   * asked, already marked), and a marked COPY is appended at the tail with a fresh
+   * seq (a client whose cursor is already past the question would otherwise never
+   * hear; the client collapses the copy onto the card it holds by `toolUseId`).
+   * The flag also stops the restore-time sweep calling the question interrupted
+   * when a restart lands before the denial's `tool_result`.
+   *
+   * @param {string} sessionId
+   * @param {string} toolUseId - the question's id (the `ask-...` id on its frame)
+   * @returns {boolean} true when an entry was newly marked (the caller persists)
+   */
+  markQuestionSuperseded(sessionId, toolUseId) {
+    const history = this._messageHistory.get(sessionId)
+    if (!Array.isArray(history) || typeof toolUseId !== 'string') return false
+    for (let i = history.length - 1; i >= 0; i--) {
+      const entry = history[i]
+      if (!entry || entry.type !== 'user_question' || entry.toolUseId !== toolUseId) continue
+      if (entry.superseded === true || entry.answered === true) return false
+      entry.superseded = true
+      const { _seq: _dropped, ...copy } = entry
+      this._pushHistory(history, copy, sessionId)
+      return true
+    }
+    return false
+  }
+
+  /**
    * Sweep an in-memory history array for `tool_start` entries that lack a
    * matching `tool_result` and splice in a synthetic `tool_result` right
    * after each one. Used during session restore (#4617) so that a session
@@ -342,7 +376,8 @@ export class SessionMessageHistory extends EventEmitter {
    * that a delta replay for a client whose cursor is already past the question
    * still delivers the mark. Other entries are passed through. A question carrying
    * `answered: true` (#8362: the server accepted an answer before the restart) is
-   * passed through unmarked.
+   * passed through unmarked, as is one carrying `superseded: true` (#8470: a newer
+   * question replaced it, which is its own verdict).
    *
    * Safe to call on:
    *   - empty / non-array input (returns the input unchanged)
@@ -392,7 +427,7 @@ export class SessionMessageHistory extends EventEmitter {
       // #8362: a question the server accepted an answer for is not cut off even
       // though its tool_result has not arrived yet (cli/tui deliver the answer
       // first). The tool_start is still swept below -- the TOOL was in flight.
-      const entry = (typeof questionToolId === 'string' && interruptedIds.has(questionToolId) && rawEntry.answered !== true)
+      const entry = (typeof questionToolId === 'string' && interruptedIds.has(questionToolId) && rawEntry.answered !== true && rawEntry.superseded !== true)
         ? { ...rawEntry, interrupted: true }
         : rawEntry
       if (entry !== rawEntry) redelivered.push({ ...entry })
