@@ -515,6 +515,37 @@ function staleInFlightMarkers(get: () => ConnectionState): Partial<ConnectionSta
   return patch as Partial<ConnectionState>;
 }
 
+/**
+ * #7592 — the module-level, connection-scoped trackers that live OUTSIDE the
+ * store (in `message-handler.ts` / store-core) and so are not reached by any
+ * `set({ … })` roster spread: the outgoing message queue, the replay baseline
+ * AND history cursors, the in-flight transcript fetch (and its watchdog), the
+ * un-flushed streaming delta buffers, and the batched terminal writes.
+ *
+ * Called by exactly the two entry points that END a connection to this server
+ * for good: `disconnect()` and `_resetSessionMemory()` (the server-switch
+ * path, which runs `disconnect()` only when the phase is not already
+ * 'disconnected'). They were two hand-copied call lists that had already
+ * drifted once (#7578's review caught `clearDeltaBuffers` /
+ * `clearTerminalWriteBatching` missing from the second), so the set is one
+ * function now. A tracker added here is torn down on both; nothing else may
+ * name one of these calls inside either entry point
+ * (`connection-scoped-trackers.test.ts` enforces that, and that a new
+ * clear-/reset- call in `disconnect()` is classified rather than forgotten).
+ *
+ * Deliberately NOT called by `socket.onclose` / `onerror`: a transport drop
+ * KEEPS the history cursors (that is what makes a tunnel-blip reconnect a delta
+ * replay, #5555.3) and the queue (it drains on reconnect); `onclose` clears the
+ * replay window alone via `resetReplayReconcile()` without `clearCursors`.
+ */
+function clearConnectionScopedTrackers(): void {
+  clearMessageQueue();
+  resetReplayReconcile({ clearCursors: true });
+  resetTranscriptFetchTracking();
+  clearDeltaBuffers();
+  clearTerminalWriteBatching();
+}
+
 export const selectShowSession = (s: ConnectionState): boolean =>
   s.connectionPhase !== 'disconnected' || s.viewingCachedSession;
 
@@ -3303,27 +3334,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
-    // #6863 — drop any in-flight transcript fetch tracking (and its watchdog)
-    // so a stale conversationId from before the disconnect can't intercept
-    // frames on a later, unrelated connection.
-    resetTranscriptFetchTracking();
-    // #5555.3/.4 — explicit disconnect is a hard reset: drop the replay
-    // baseline AND the history cursors so a later connect (possibly to a
-    // different server) starts from a full replay rather than presenting a
-    // stale cursor. (Tunnel-blip RECONNECTS keep cursors — they don't run
-    // disconnect(); auth_ok clears only the baseline.)
-    resetReplayReconcile({ clearCursors: true });
-    // Flush and clear any pending delta buffer
-    clearDeltaBuffers();
+    // #7592 — the module-level connection-scoped trackers, ONE helper shared
+    // with `_resetSessionMemory()`: the in-flight transcript fetch + watchdog
+    // (#6863: a stale conversationId must not intercept a later connection's
+    // frames), the replay baseline AND history cursors (#5555.3/.4: an explicit
+    // disconnect is a hard reset, so a later connect to a possibly different
+    // server starts from a full replay; tunnel-blip RECONNECTS keep cursors —
+    // they don't run disconnect(); auth_ok clears only the baseline), the
+    // pending delta buffers, the batched terminal writes, and the outgoing
+    // message queue.
+    clearConnectionScopedTrackers();
     // Clear permission boundary split tracking
     clearPermissionSplits();
-    // Clear terminal write batching
-    clearTerminalWriteBatching();
     // Clear encryption state (new connection = new keys = forward secrecy)
     setEncryptionState(null);
     setPendingKeyPair(null);
-    // Clear message queue on explicit disconnect
-    clearMessageQueue();
     // #8148: same sweep as socket.onclose (see `sweepTransientSessionState`'s
     // docstring). `disconnect()` nulls `socket.onclose` above to suppress
     // auto-reconnect, so onclose's sweep never runs on a user-initiated
@@ -3424,16 +3449,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       pendingPermissionConfirm: null,
   fileBrowserPendingOpen: null,
   workspaceSymbols: null,
-  workspaceSymbolsLoading: false,
   symbolLocation: null,
   codeSearchResults: null,
-  codeSearchLoading: false,
   referencesResult: null,
   referencesSymbol: '',
   referencesOpen: false,
-  referencesLoading: false,
   permissionAudit: null,
-  permissionAuditLoading: false,
   permissionAuditError: false,
   // #6996 review — mirror permissionAudit: memory_read is a FLAT,
   // per-session-cwd pull, so a reconnect must not leave a stale memory stack
@@ -3444,7 +3465,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   memoryStackEntries: null,
   memoryStackFile: null,
   memoryStackError: null,
-  memoryStackLoading: false,
   lastMemoryStackRequestId: null,
       _directoryListingCallback: null,
       _terminalWriteCallback: null,
@@ -3460,9 +3480,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       savedConnection: null,
       userDisconnected: true,
       viewingCachedSession: false,
-      conversationHistoryLoading: false,
       transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
-      searchLoading: false,
       searchQuery: '',
     });
   },
@@ -3635,7 +3653,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setLastConnectedUrl(null);
     // #7578 — the module-level connection-scoped trackers that live in
     // message-handler.ts / store-core, not in the store roster spread below.
-    // `disconnect()` clears ALL FIVE (~L3120-3141), but `switchServer` /
+    // `disconnect()` clears ALL FIVE (via `clearConnectionScopedTrackers()`), but `switchServer` /
     // `connectLocal` run `disconnect()` only `if (connectionPhase !==
     // 'disconnected')`, and a FAILED CONNECT rests at exactly that phase with the
     // previous server's values intact — so a switch made from there reached
@@ -3653,10 +3671,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //     and the batched TERMINAL WRITES: server A's partial bytes, held on a
     //     ~tens-of-ms coalescing timer, would otherwise flush into server B's
     //     session. Narrow, but `disconnect()` tears them down for this exact
-    //     reason and this action must mirror it (#7578 review; helper follow-on
-    //     #7592).
+    //     reason and this action must mirror it (#7578 review).
     // This is the streaming/queue class only. `disconnect()` clears MORE than
-    // these five — the pending-operation correlations (trust grants, model /
+    // the helper's five — the pending-operation correlations (trust grants, model /
     // permission-mode / thinking reverts, git one-shots, MCP ops, permission
     // splits) belong to the SOCKET teardown (`disconnect()` / onclose / onerror)
     // and are not mirrored here; the in-flight request marker STORE FIELDS (#7586)
@@ -3669,14 +3686,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // this action — so cursors stay retained and tunnel-blip delta replay is
     // unaffected; only the context-SWITCH paths reach here, all through
     // `retargetToServer`: `switchServer`, `connectLocal`, and (#7570) a
-    // `connectToServer` whose `wsUrl` differs from the store's. Keeping this set
-    // in lockstep with `disconnect()`'s teardown by hand is what #7592 (extract a
-    // shared helper) exists to remove.
-    clearMessageQueue();
-    resetReplayReconcile({ clearCursors: true });
-    resetTranscriptFetchTracking();
-    clearDeltaBuffers();
-    clearTerminalWriteBatching();
+    // `connectToServer` whose `wsUrl` differs from the store's. The set is ONE
+    // function shared with `disconnect()` (#7592), so it cannot drift from it.
+    clearConnectionScopedTrackers();
     set({
       // #7586 — every in-flight request marker, from the ONE roster
       // `socket.onclose` and `disconnect()` also take. FIRST in the payload on
