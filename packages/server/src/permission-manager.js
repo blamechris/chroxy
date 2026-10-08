@@ -18,7 +18,7 @@ import {
 // #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
 // the same redaction as the hook path. Shared sanitizer + value redactor live in
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
-import { sanitizeToolInput, redactValue, describeByNamedField } from './redaction.js'
+import { sanitizeToolInput, redactValue, describeByNamedField, describeToolInput, describeComposedText } from './redaction.js'
 import { redactMcpUrl, resolveTrustAddress, MCP_SERVER_SOURCE_VALUES } from './byok-mcp-config.js'
 // #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
 // project key, not the raw session cwd, or a relative / `..`-laden cwd
@@ -196,7 +196,6 @@ const DEFAULT_TIMEOUT_MS = 300_000
 // input, where the alternative is unbounded memory/CPU growth.
 const MAX_PENDING_PERMISSIONS = 1000  // concurrent pending requests (each holds map entries + a timer)
 const MAX_SESSION_RULES = 100         // session-scoped auto-allow rules
-const MAX_RAW_DESCRIPTION_LEN = 8192  // raw tool field length fed to redactValue (far above the 200-char shown window)
 
 /**
  * #6543 (IDE P3 feature B) / #6773 — per-tool whitelist of the field(s) a client
@@ -789,23 +788,12 @@ export class PermissionManager extends EventEmitter {
       })
 
       const toolInput = input || {}
-      const rawDescription = toolInput.description
-        || toolInput.command
-        || toolInput.file_path
-        || toolInput.pattern
-        || toolInput.query
-        || (Object.keys(toolInput).length > 0 ? JSON.stringify(toolInput) : toolName)
-      // #6038/#6048/#6049: build the broadcast description by REDACTING the full
-      // string first, THEN truncating — truncating first (the old order) could
-      // leave a secret straddling the cap as a sub-floor partial prefix that the
-      // pattern scan misses. String() coerces a non-string field so a malformed
-      // tool input can't crash the emit path (.replace on a non-string throws).
-      // #6448 — cap the raw string BEFORE redaction so a malicious multi-MB tool
-      // field can't make redactValue scan the whole thing (CPU DoS). The 8KB cap
-      // is far above the 200-char shown window below, so it can never split a
-      // SHOWN secret — the #6038 redact-then-truncate guarantee holds for
-      // everything the client sees (anything past 8KB is sliced away regardless).
-      const description = redactValue(String(rawDescription).slice(0, MAX_RAW_DESCRIPTION_LEN)).slice(0, 200)
+      // #6038/#6048/#6049/#8384: the broadcast description is built by
+      // `describeToolInput`, the one place a description is derived from a tool
+      // input: redaction (of the identifying field, or of the SANITIZED input
+      // when none exists) always runs before the 200-char clip. The raw input is
+      // never serialized into it.
+      const description = describeToolInput(toolInput, toolName).slice(0, 200)
 
       this._logInfo(`Permission request ${requestId}: ${toolName}`)
 
@@ -1453,16 +1441,18 @@ export class PermissionManager extends EventEmitter {
       // `{ mcpServer: {...} }`, not a bare file_path/path/notebook_path), so
       // isFlooredTarget is always false here — computed rather than hardcoded
       // so this stays correct if that ever changes.
+      const shownDescription = describeComposedText(description)
       const permPayload = {
         requestId,
         tool: 'mcp_spawn',
-        description: redactValue(String(description)).slice(0, 200),
+        description: shownDescription,
         input: sanitizeToolInput(input),
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
         floored: isFlooredTarget('mcp_spawn', input, this._cwd),
-        // #8348: for the permission transcript (see handlePermission).
-        recordDescription: redactValue(String(description)).slice(0, 200),
+        // #8348: for the permission transcript (see handlePermission). The
+        // shown description is already redacted and clipped.
+        recordDescription: shownDescription,
       }
       this._lastPermissionData.set(requestId, permPayload)
       this.emit('permission_request', permPayload)

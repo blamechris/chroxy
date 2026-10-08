@@ -5293,6 +5293,33 @@ describe('ClaudeByokSession', () => {
       assert.equal(permEvents[0].payload.input.x, 1)
     })
 
+    it('#8397: a relayed child permission_request carries no recordDescription (in-process only)', async () => {
+      const { captured } = await runTaskAndDriveChild((child) => {
+        child.emit('permission_request', {
+          requestId: 'perm-child-8397',
+          tool: 'Bash',
+          description: 'ls',
+          input: { command: 'ls' },
+          remainingMs: 60000,
+          createdAt: Date.now(),
+          recordDescription: 'ls',
+        })
+        // A grand-child prompt reaches the child as an agent_event and is
+        // re-tagged on the way up: it must not carry the field either.
+        child.emit('agent_event', {
+          parentToolUseId: 'tu_grandchild',
+          type: 'permission_request',
+          payload: { requestId: 'perm-gc-8397', tool: 'Bash', input: {}, recordDescription: 'ls' },
+        })
+      })
+      const relayed = captured.filter((e) => e.parentToolUseId && e.type === 'permission_request')
+      assert.equal(relayed.length, 2)
+      for (const e of relayed) {
+        assert.ok(!('recordDescription' in e.payload), `${e.payload.requestId} still carries recordDescription`)
+      }
+      assert.equal(relayed[0].payload.description, 'ls', 'the rest of the prompt is relayed')
+    })
+
     it('#5056: re-emits child permission_resolved so the dashboard can clear the nested prompt', async () => {
       const { captured } = await runTaskAndDriveChild((child) => {
         child.emit('permission_request', {

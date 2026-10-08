@@ -239,19 +239,141 @@ export function redactBounded(text, maxScan = MAX_REDACT_SCAN) {
 }
 
 /**
+ * How much of a permission prompt's identifying field the permission transcript
+ * keeps. Applied where the field is produced (so the copy held with a pending
+ * prompt is bounded too), and again by the history layer as it records.
+ */
+export const RECORD_DESCRIPTION_MAX = 500
+
+/** How much of a serialized input a description shows when no field names the call. */
+const SERIALIZED_DESCRIPTION_MAX = 200
+
+/**
+ * The identifying field of a tool input that a permission prompt is described
+ * by: the one precedence every producer shares.
+ *
+ * @param {unknown} rawInput
+ * @returns {unknown} the field's value, or undefined when the input has none
+ */
+function namedField(rawInput) {
+  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) return undefined
+  return rawInput.description || rawInput.command || rawInput.file_path || rawInput.pattern || rawInput.query || undefined
+}
+
+/**
  * The identifying field of a RAW tool input that a permission prompt is
- * described by (the same precedence the producers use for the description the
- * clients see), redacted; `undefined` when the input has none. Read from the raw
- * input on purpose: the broadcast copy of a large input is replaced by a
- * truncation wrapper that no longer has the field.
+ * described by, redacted and clipped to `RECORD_DESCRIPTION_MAX`; `undefined`
+ * when the input has none. Read from the raw input on purpose: the broadcast
+ * copy of a large input is replaced by a truncation wrapper that no longer has
+ * the field. Redacted before it is clipped, never after.
  *
  * @param {unknown} rawInput
  * @returns {string|undefined}
  */
 export function describeByNamedField(rawInput) {
-  if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) return undefined
-  const named = rawInput.description || rawInput.command || rawInput.file_path || rawInput.pattern || rawInput.query
-  return named ? redactBounded(String(named)) : undefined
+  const named = namedField(rawInput)
+  return named ? redactBounded(String(named)).slice(0, RECORD_DESCRIPTION_MAX) : undefined
+}
+
+// Bounds on the walk `describeToolInput` makes. Only 200 characters of its
+// result are ever shown, so it needs only the first few entries of an input.
+const DESCRIBE_MAX_ENTRIES = 64
+const OMITTED_TEXT = '[omitted]'
+
+/**
+ * A redacted, bounded copy of a tool input for DESCRIBING it (never for
+ * broadcast: `sanitizeToolInput` owns that). Every property name and every
+ * string value is redacted as the RAW string, before it is JSON-escaped (an
+ * escaped `\n` hides a credential from patterns that expect a word boundary) and
+ * before it is shortened (a clip can leave a prefix no pattern recognises). A
+ * string longer than the scan bound is read by `redactBounded`, which drops what
+ * it cannot scan rather than keeping an unscanned tail.
+ *
+ * @param {*} value
+ * @param {number} depth
+ * @param {WeakSet} seen
+ * @param {{ left: number }} budget entries still to be read, shared across the walk
+ * @returns {*}
+ */
+function redactedForDescription(value, depth, seen, budget) {
+  if (typeof value === 'string') {
+    const text = redactBounded(value)
+    return value && !text ? OMITTED_TEXT : text.slice(0, SERIALIZED_DESCRIPTION_MAX)
+  }
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value !== 'object') return String(value)
+  if (depth >= MAX_SANITIZE_DEPTH) return '[REDACTED:depth]'
+  if (seen.has(value)) return '[REDACTED:cycle]'
+  seen.add(value)
+  let out
+  if (Array.isArray(value)) {
+    out = []
+    for (const item of value) {
+      if (budget.left <= 0) break
+      budget.left -= 1
+      out.push(redactedForDescription(item, depth + 1, seen, budget))
+    }
+  } else {
+    out = Object.create(null)
+    for (const [key, child] of Object.entries(value)) {
+      if (budget.left <= 0) break
+      budget.left -= 1
+      const name = redactedForDescription(key, depth + 1, seen, budget)
+      out[name] = SENSITIVE_KEY_NAMES.has(key.toLowerCase())
+        ? '[REDACTED]'
+        : redactedForDescription(child, depth + 1, seen, budget)
+    }
+  }
+  seen.delete(value)
+  return out
+}
+
+/**
+ * The human-readable `description` of a permission prompt, derived from its
+ * tool input. The ONE place a producer (in-process sdk/byok/codex, hook-routed
+ * claude-tui/claude-cli) builds it, so what a description may carry is decided
+ * once.
+ *
+ * - An input with an identifying field (command, file_path, ...) is described by
+ *   that field, redacted over the bounded scan.
+ * - Anything else is described by a structurally redacted copy of the input
+ *   (`redactedForDescription`), serialized: a value under a sensitive key reads
+ *   `[REDACTED]` exactly as it does in the prompt's `input`, and secrets in
+ *   property names are redacted too. The raw input is never serialized, and the
+ *   sanitizer's size-clipped summary is never used: this walk reads the input
+ *   itself, redacting each string whole before it is shortened.
+ *
+ * The serialization is scanned once more (defence in depth), then clipped to the
+ * length a client shows.
+ *
+ * @param {unknown} rawInput
+ * @param {string} [emptyFallback] returned when the input has nothing to describe
+ * @returns {string}
+ */
+export function describeToolInput(rawInput, emptyFallback = '') {
+  const named = namedField(rawInput)
+  if (named) {
+    const text = redactBounded(String(named))
+    if (text) return text
+  }
+  if (rawInput && typeof rawInput === 'object' && Object.keys(rawInput).length > 0) {
+    const walked = redactedForDescription(rawInput, 0, new WeakSet(), { left: DESCRIBE_MAX_ENTRIES })
+    return redactValue(JSON.stringify(walked)).slice(0, SERIALIZED_DESCRIPTION_MAX)
+  }
+  return emptyFallback
+}
+
+/**
+ * A prompt description composed by a producer from its own fields (not derived
+ * from a tool input): redacted over the bounded scan, then clipped to the length
+ * a client shows. The MCP trust prompt uses it, so every description follows one
+ * policy.
+ *
+ * @param {unknown} text
+ * @returns {string}
+ */
+export function describeComposedText(text) {
+  return redactBounded(text).slice(0, SERIALIZED_DESCRIPTION_MAX)
 }
 
 export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }
