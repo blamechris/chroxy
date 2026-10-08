@@ -197,16 +197,17 @@ export function useChatMessages(props: UseChatMessagesProps): UseChatMessagesRes
     return { chatMessages: rows, permissionExpiredSummaries: payloads }
   }, [storeMessages, baseChatMessages, chatToolGroupPayloads, isSessionIdle, turnBoundarySource])
 
-  // #6894 — dashboard-only: fold each run of ADJACENT identical resolved
-  // permission prompts into one counted row. After the summary splice (which
+  // #6894 — dashboard-only: fold each run of identical resolved
+  // permission prompts of one turn (separated at most by tool runs of the same
+  // tool) into one counted row. After the summary splice (which
   // anchors on raw row ids a group would hide); a pending prompt never joins a
   // run. Like the summary rows, it leaves `chatTailMessageId` alone.
   const { rows: chatMessages, groups: permissionPromptGroups } = useMemo(
     () =>
       groupResolvedPermissions
-        ? collapseResolvedPermissionRuns(summarizedRows, storeMsgMap)
+        ? collapseResolvedPermissionRuns(summarizedRows, storeMsgMap, chatToolGroupPayloads)
         : { rows: summarizedRows, groups: new Map<string, string[]>() },
-    [summarizedRows, storeMsgMap, groupResolvedPermissions],
+    [summarizedRows, storeMsgMap, chatToolGroupPayloads, groupResolvedPermissions],
   )
 
   return {

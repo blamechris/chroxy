@@ -12,10 +12,11 @@
  * (`findResolvedPermissionRuns`); a pending prompt never reaches this component,
  * so a group has no countdown and no Allow / Deny.
  *
- * Anchor: while collapsed the line carries the FIRST member's `perm-desc-<id>`
- * anchor (the end-of-turn expired summary's "Jump to prompt" link lands there);
- * expanded, that anchor belongs to the first member again, so the id is never on
- * the page twice.
+ * Anchors: every member keeps its `perm-desc-<requestId>` jump target (the
+ * end-of-turn expired summary's "Jump to prompt" link names one of them). While
+ * collapsed, the first member's is the toggle and the others are empty focusable
+ * anchors beside it, so a jump lands on the group line whichever member it names;
+ * expanded, each member record carries its own, so no id is ever on the page twice.
  */
 import { useState, type ReactNode } from 'react'
 import type { PermissionOutcomeKind } from '@chroxy/store-core'
@@ -25,8 +26,8 @@ import { useInitialExpanded } from './chatExpandRegistry'
 export interface PermissionRecordGroupProps {
   /** The synthetic row id; keys the persisted expand state. */
   groupId: string
-  /** `requestId` of the first member -- the jump-link anchor while collapsed. */
-  firstRequestId: string
+  /** `requestId` of every member, in order -- the jump-link anchors while collapsed. */
+  requestIds: string[]
   tool: string
   description: string
   outcome: PermissionOutcomeKind
@@ -38,7 +39,7 @@ export interface PermissionRecordGroupProps {
 
 export function PermissionRecordGroup({
   groupId,
-  firstRequestId,
+  requestIds,
   tool,
   description,
   outcome,
@@ -61,7 +62,7 @@ export function PermissionRecordGroup({
         data-testid="perm-group-toggle"
         // The jump-link anchor while collapsed (a button takes focus() as is);
         // once expanded the first member carries it.
-        id={expanded ? undefined : `perm-desc-${firstRequestId}`}
+        id={expanded ? undefined : `perm-desc-${requestIds[0]}`}
         aria-expanded={expanded}
         aria-controls={membersId}
         aria-label={`${expanded ? 'Hide' : 'Show'} all ${count} ${tool} permissions`}
@@ -81,6 +82,9 @@ export function PermissionRecordGroup({
           {permissionOutcomeSuffix(outcome)}
         </span>
       </button>
+      {!expanded && requestIds.slice(1).map((requestId) => (
+        <span key={requestId} className="perm-group-anchor" id={`perm-desc-${requestId}`} tabIndex={-1} />
+      ))}
       {expanded && (
         <div className="perm-group-members" id={membersId} data-testid="perm-group-members">
           {renderMembers()}

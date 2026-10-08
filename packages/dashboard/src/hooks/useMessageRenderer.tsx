@@ -228,7 +228,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
       return (
         <PermissionRecordGroup
           groupId={msg.id}
-          firstRequestId={first.requestId!}
+          requestIds={members.map((m) => m.requestId!)}
           tool={first.tool || 'Unknown'}
           description={resolvedPermissionDescription(first)}
           outcome={resolvedPermissionOutcome(first)!}

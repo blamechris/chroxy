@@ -10,11 +10,15 @@
  * client draws it. The dashboard splices a synthetic group row per run; the
  * mobile app does not call this (its answered prompts already collapse to pills).
  *
- * Two rules carry the whole contract:
+ * Three rules carry the whole contract:
  *
  *   - A PENDING prompt never groups with anything. `resolvedPermissionOutcome`
  *     is `null` for it, a `null` key breaks any run, and so each pending approval
  *     stays its own actionable card.
+ *   - A run lives inside ONE turn and is separated only by tool runs of the same
+ *     tool. A turn records each approved prompt next to the tool run it gated, so
+ *     requiring literal adjacency would never group a real turn; anything else
+ *     between two prompts (text, a user message, another tool) ends the run.
  *   - "Identical" means the same session, tool, description, tool input AND
  *     outcome. Folding an allowed request and a denied one into one line, or two
  *     different commands that share a rationale, would lose exactly what the
@@ -67,46 +71,77 @@ export function resolvedPermissionGroupKey(m: ChatMessage): string | null {
 }
 
 export interface ResolvedPermissionRun<T> {
-  /** Shared {@link resolvedPermissionGroupKey} of every item. */
+  /** Shared {@link resolvedPermissionGroupKey} of every member. */
   key: string
-  /** The adjacent items, in input order. Always at least `minRunLength` long. */
+  /** The member prompts, in input order. Always at least `minRunLength` long. */
   items: T[]
-  /** Index of `items[0]` in the input list. */
+  /** Index in the input list of each member (strictly increasing; not necessarily contiguous). */
+  indices: number[]
+  /** Index of the first member (`indices[0]`). */
   startIndex: number
 }
 
 /**
- * The runs of ADJACENT items that are the same resolved permission prompt.
+ * Whether an item is a tool run of `tool` -- the only thing allowed to sit
+ * BETWEEN two members of a run. A turn records an approved prompt together with
+ * the tool run it gated (`prompt, tool bubble, prompt, tool bubble, ...`), so
+ * identical prompts of one turn are never adjacent. The tool bubble must be the
+ * SAME tool (a `Read` between two `Bash` approvals is a different story), every
+ * message of a collapsed tool group must be, and a turn boundary on it means the
+ * next prompt belongs to the next turn.
+ */
+function isToolRunOf(messages: readonly ChatMessage[], tool: string | undefined): boolean {
+  if (!tool || messages.length === 0) return false
+  return messages.every((m) => m.type === 'tool_use' && m.tool === tool && !m.turnBoundary)
+}
+
+/**
+ * The runs of identical resolved permission prompts, in one turn, separated by at
+ * most tool runs of the same tool.
  *
- * `getMessage` maps an item to its store message; an item with none (a synthetic
- * row, a tool group) has no key and breaks the run, as does a pending prompt or a
- * different request. Runs shorter than `minRunLength` (default 2) are not
+ * `getMessages` maps an item (a transcript row) to the store messages it stands
+ * for: `[m]` for a plain row, the members of a collapsed tool group, `[]` for a
+ * synthetic row. Anything that is not a resolved prompt or a same-tool tool run
+ * ends the run: a pending prompt, a different request, an assistant text block, a
+ * user message, a thinking block, an error, a tool run of another tool, a
+ * synthetic row. A `turnBoundary` on a member ends the run after it, so a run
+ * never spans two turns. Runs shorter than `minRunLength` (default 2) are not
  * reported: a lone resolved prompt stays its own line.
+ *
+ * The separating tool runs are NOT part of a run: the caller leaves them where
+ * they are and moves only the members.
  */
 export function findResolvedPermissionRuns<T>(
   items: readonly T[],
-  getMessage: (item: T) => ChatMessage | undefined,
+  getMessages: (item: T) => readonly ChatMessage[] | undefined,
   minRunLength = 2,
 ): ResolvedPermissionRun<T>[] {
   const runs: ResolvedPermissionRun<T>[] = []
-  let current: ResolvedPermissionRun<T> | null = null
+  let current: (ResolvedPermissionRun<T> & { tool: string | undefined }) | null = null
   const flush = () => {
-    if (current && current.items.length >= minRunLength) runs.push(current)
+    if (current && current.items.length >= minRunLength) {
+      runs.push({ key: current.key, items: current.items, indices: current.indices, startIndex: current.startIndex })
+    }
     current = null
   }
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!
-    const msg = getMessage(item)
-    const key = msg ? resolvedPermissionGroupKey(msg) : null
-    if (key === null) {
-      flush()
+    const msgs = getMessages(item) ?? []
+    const member = msgs.length === 1 ? msgs[0]! : null
+    const key = member ? resolvedPermissionGroupKey(member) : null
+    if (member && key !== null) {
+      if (current && current.key === key) {
+        current.items.push(item)
+        current.indices.push(i)
+      } else {
+        flush()
+        current = { key, items: [item], indices: [i], startIndex: i, tool: member.tool }
+      }
+      if (member.turnBoundary) flush()
+    } else if (current && isToolRunOf(msgs, current.tool)) {
       continue
-    }
-    if (current && current.key === key) {
-      current.items.push(item)
     } else {
       flush()
-      current = { key, items: [item], startIndex: i }
     }
   }
   flush()

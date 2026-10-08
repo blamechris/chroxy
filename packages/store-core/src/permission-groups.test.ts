@@ -32,9 +32,27 @@ function pending(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
   return resolved(id, { answered: undefined, answeredAt: undefined, expiresAt: NOW + 60_000, ...over })
 }
 
-const lookup = (msgs: ChatMessage[]) => {
+/** A tool bubble as `handleToolStart` records it (type tool_use, tool name, structured input). */
+function toolUse(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id,
+    type: 'tool_use',
+    content: 'touch smoke-perm.txt',
+    tool: 'shell',
+    toolUseId: `tu-${id}`,
+    toolInput: { command: 'touch smoke-perm.txt' },
+    timestamp: NOW,
+    ...over,
+  } as ChatMessage
+}
+
+const lookup = (msgs: ChatMessage[], groups: Record<string, ChatMessage[]> = {}) => {
   const map = new Map(msgs.map((m) => [m.id, m]))
-  return (row: { id: string }) => map.get(row.id)
+  return (row: { id: string }): ChatMessage[] => {
+    if (groups[row.id]) return groups[row.id]!
+    const m = map.get(row.id)
+    return m ? [m] : []
+  }
 }
 const rowsOf = (msgs: ChatMessage[]) => msgs.map((m) => ({ id: m.id }))
 
@@ -101,6 +119,7 @@ describe('findResolvedPermissionRuns', () => {
     expect(runs).toHaveLength(1)
     expect(runs[0]!.items.map((r) => r.id)).toEqual(['a', 'b', 'c'])
     expect(runs[0]!.startIndex).toBe(0)
+    expect(runs[0]!.indices).toEqual([0, 1, 2])
   })
 
   it('a single resolved prompt is not a run', () => {
@@ -168,5 +187,104 @@ describe('findResolvedPermissionRuns', () => {
     const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
     expect(runs).toHaveLength(1)
     expect(runs[0]!.items).toHaveLength(2)
+  })
+})
+
+/**
+ * The shape a real turn is recorded in (#6894 smoke): every approved prompt is
+ * accompanied by the tool run it gated, so identical prompts from one turn are
+ * SEPARATED by tool bubbles, never adjacent. Built from the message shapes the
+ * live handlers produce (`handleToolStart` -> `tool_use`, `handlePermissionRequest`
+ * + `permission_resolved` -> an answered `prompt`).
+ */
+describe('findResolvedPermissionRuns -- the real interleaving of a turn (#6894)', () => {
+  const ids = (run: { items: { id: string }[] }) => run.items.map((i) => i.id)
+
+  it('groups prompt / tool-bubble pairs: P T P T P', () => {
+    const msgs = [resolved('p1', { tool: 'shell' }), toolUse('t1'), resolved('p2', { tool: 'shell' }), toolUse('t2'), resolved('p3', { tool: 'shell' })]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs).toHaveLength(1)
+    expect(ids(runs[0]!)).toEqual(['p1', 'p2', 'p3'])
+    expect(runs[0]!.indices).toEqual([0, 2, 4])
+  })
+
+  it('groups tool-bubble / prompt pairs: T P T P T P (tool first, as the SDK emits it)', () => {
+    const msgs = [toolUse('t1'), resolved('p1'), toolUse('t2'), resolved('p2'), toolUse('t3'), resolved('p3')]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs).toHaveLength(1)
+    expect(ids(runs[0]!)).toEqual(['p1', 'p2', 'p3'])
+    expect(runs[0]!.indices).toEqual([1, 3, 5])
+  })
+
+  it('a collapsed tool_group of the same tool between two prompts does not break the run', () => {
+    const msgs = [resolved('p1'), toolUse('t1'), toolUse('t2'), resolved('p2')]
+    const rows = [{ id: 'p1' }, { id: 'activity-t1' }, { id: 'p2' }]
+    const runs = findResolvedPermissionRuns(rows, lookup(msgs, { 'activity-t1': [msgs[1]!, msgs[2]!] }))
+    expect(runs).toHaveLength(1)
+    expect(runs[0]!.indices).toEqual([0, 2])
+  })
+
+  it('a tool bubble of a DIFFERENT tool breaks the run', () => {
+    const msgs = [resolved('p1'), toolUse('t1', { tool: 'Read' }), resolved('p2')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('a tool_group that mixes in another tool breaks the run', () => {
+    const msgs = [resolved('p1'), toolUse('t1'), toolUse('t2', { tool: 'Read' }), resolved('p2')]
+    const rows = [{ id: 'p1' }, { id: 'activity-t1' }, { id: 'p2' }]
+    expect(findResolvedPermissionRuns(rows, lookup(msgs, { 'activity-t1': [msgs[1]!, msgs[2]!] }))).toEqual([])
+  })
+
+  it.each([
+    ['an assistant text block', { id: 'x', type: 'response', content: 'working on it' }],
+    ['a user message', { id: 'x', type: 'user_input', content: 'continue' }],
+    ['a thinking block', { id: 'x', type: 'thinking', content: 'hmm' }],
+    ['an error', { id: 'x', type: 'error', content: 'boom' }],
+  ] as const)('%s between two prompts breaks the run', (_label, over) => {
+    const msgs = [resolved('p1'), toolUse('t1'), { ...toolUse('x'), ...over } as ChatMessage, resolved('p2')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('a PENDING prompt between two resolved ones breaks the run, tool bubbles or not', () => {
+    const msgs = [resolved('p1'), toolUse('t1'), pending('p2'), toolUse('t2'), resolved('p3')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('a prompt with a different description breaks the run and starts its own', () => {
+    const other = { content: 'shell: something else' }
+    const msgs = [resolved('p1'), toolUse('t1'), resolved('p2'), toolUse('t2'), resolved('p3', other), toolUse('t3'), resolved('p4', other)]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs.map(ids)).toEqual([['p1', 'p2'], ['p3', 'p4']])
+  })
+
+  it('a turn boundary on a tool bubble between two prompts splits them into different turns', () => {
+    const msgs = [resolved('p1'), toolUse('t1', { turnBoundary: true } as Partial<ChatMessage>), resolved('p2')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('a turn boundary on a prompt ends the run after it', () => {
+    const msgs = [resolved('p1'), toolUse('t1'), resolved('p2', { turnBoundary: true } as Partial<ChatMessage>), toolUse('t2'), resolved('p3')]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs.map(ids)).toEqual([['p1', 'p2']])
+  })
+
+  it('a prompt that names no tool only groups with ADJACENT prompts', () => {
+    const noTool = { tool: undefined, content: 'Permission required' }
+    const apart = [resolved('p1', noTool), toolUse('t1', { tool: undefined }), resolved('p2', noTool)]
+    expect(findResolvedPermissionRuns(rowsOf(apart), lookup(apart))).toEqual([])
+    const adjacent = [resolved('p1', noTool), resolved('p2', noTool)]
+    expect(findResolvedPermissionRuns(rowsOf(adjacent), lookup(adjacent))).toHaveLength(1)
+  })
+
+  it('tool bubbles before the first and after the last prompt are not part of the run', () => {
+    const msgs = [toolUse('t0'), resolved('p1'), toolUse('t1'), resolved('p2'), toolUse('t2')]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs[0]!.indices).toEqual([1, 3])
+  })
+
+  it('an empty item (a synthetic row) between prompts breaks the run', () => {
+    const msgs = [resolved('p1'), resolved('p2')]
+    const rows = [{ id: 'p1' }, { id: 'summary' }, { id: 'p2' }]
+    expect(findResolvedPermissionRuns(rows, lookup(msgs))).toEqual([])
   })
 })

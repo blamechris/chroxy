@@ -4724,6 +4724,12 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-secondary);
 }
 
+.perm-group-anchor {
+  display: block;
+  height: 0;
+  overflow: hidden;
+}
+
 .perm-group-members {
   display: flex;
   flex-direction: column;

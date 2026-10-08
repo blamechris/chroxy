@@ -38,11 +38,11 @@ describe('collapseResolvedPermissionRuns (#6894)', () => {
     expect(groups.get(row.id)).toEqual(['p1', 'p2', 'p3'])
   })
 
-  it('gives the group row the description text (so in-session find matches it) and the last member timestamp', () => {
+  it('gives the group row the description text (so in-session find matches it) and the first member timestamp (its position)', () => {
     const msgs = [resolved('p1'), resolved('p9')]
     const { rows } = collapseResolvedPermissionRuns(msgs.map(rowOf), mapOf(msgs))
     expect(rows[0]!.content).toBe(msgs[0]!.content)
-    expect(rows[0]!.timestamp).toBe(msgs[1]!.timestamp)
+    expect(rows[0]!.timestamp).toBe(msgs[0]!.timestamp)
   })
 
   it('leaves a lone resolved prompt as its own row', () => {
@@ -78,11 +78,11 @@ describe('collapseResolvedPermissionRuns (#6894)', () => {
     expect(rows.map((r) => r.id)).toEqual(['u1', permissionGroupRowId('p1'), 'r1'])
   })
 
-  it('a synthetic row between two identical prompts (tool group, summary) separates them', () => {
+  it('a synthetic row between two identical prompts (a turn summary) separates them', () => {
     const msgs = [resolved('p1'), resolved('p2')]
-    const tg: ChatViewMessage = { id: 'activity-t1', type: 'tool_group', content: '', timestamp: 0 }
-    const { rows, groups } = collapseResolvedPermissionRuns([rowOf(msgs[0]!), tg, rowOf(msgs[1]!)], mapOf(msgs))
-    expect(rows.map((r) => r.id)).toEqual(['p1', 'activity-t1', 'p2'])
+    const summary: ChatViewMessage = { id: 'permission-expired-summary-r1', type: 'permission-expired-summary', content: '', timestamp: 0 }
+    const { rows, groups } = collapseResolvedPermissionRuns([rowOf(msgs[0]!), summary, rowOf(msgs[1]!)], mapOf(msgs))
+    expect(rows.map((r) => r.id)).toEqual(['p1', 'permission-expired-summary-r1', 'p2'])
     expect(groups.size).toBe(0)
   })
 
@@ -99,5 +99,65 @@ describe('collapseResolvedPermissionRuns (#6894)', () => {
     const a = collapseResolvedPermissionRuns(two.map(rowOf), mapOf(two)).rows[0]!.id
     const b = collapseResolvedPermissionRuns(three.map(rowOf), mapOf(three)).rows[0]!.id
     expect(a).toBe(b)
+  })
+})
+
+// #6894 smoke: a real turn is `tool bubble / permission record` pairs, so the
+// identical prompts are separated by the tool runs they approved.
+describe('collapseResolvedPermissionRuns -- interleaved with tool bubbles (#6894)', () => {
+  const tool = (id: string, over: Partial<ChatMessage> = {}): ChatMessage => ({
+    id,
+    type: 'tool_use',
+    content: 'touch smoke-perm.txt',
+    tool: 'shell',
+    toolUseId: `tu-${id}`,
+    timestamp: Number(id.replace(/\D/g, '')) || 0,
+    ...over,
+  } as ChatMessage)
+  const toolRow = (m: ChatMessage): ChatViewMessage => ({ id: m.id, type: 'tool_use', content: m.content, timestamp: m.timestamp })
+
+  it('puts the group at the FIRST prompt, drops the later prompts and leaves every tool bubble in place', () => {
+    const msgs = [tool('t1'), resolved('p2'), tool('t3'), resolved('p4'), tool('t5'), resolved('p6')]
+    const input = msgs.map((m) => (m.type === 'tool_use' ? toolRow(m) : rowOf(m)))
+    const { rows, groups } = collapseResolvedPermissionRuns(input, mapOf(msgs))
+    expect(rows.map((r) => r.id)).toEqual(['t1', permissionGroupRowId('p2'), 't3', 't5'])
+    expect(groups.get(permissionGroupRowId('p2'))).toEqual(['p2', 'p4', 'p6'])
+  })
+
+  it('works prompt-first too (P T P T P) and keeps the trailing tool bubble', () => {
+    const msgs = [resolved('p1'), tool('t2'), resolved('p3'), tool('t4'), resolved('p5'), tool('t6')]
+    const input = msgs.map((m) => (m.type === 'tool_use' ? toolRow(m) : rowOf(m)))
+    const { rows } = collapseResolvedPermissionRuns(input, mapOf(msgs))
+    expect(rows.map((r) => r.id)).toEqual([permissionGroupRowId('p1'), 't2', 't4', 't6'])
+  })
+
+  it('sees through a collapsed tool_group row of the same tool via its payload', () => {
+    const t2 = tool('t2')
+    const t3 = tool('t3')
+    const msgs = [resolved('p1'), t2, t3, resolved('p4')]
+    const input: ChatViewMessage[] = [
+      rowOf(msgs[0]!),
+      { id: 'activity-t2', type: 'tool_group', content: '', timestamp: 3 },
+      rowOf(msgs[3]!),
+    ]
+    const payloads = new Map([['activity-t2', { messages: [t2, t3], isActive: false }]])
+    const { rows } = collapseResolvedPermissionRuns(input, mapOf(msgs), payloads)
+    expect(rows.map((r) => r.id)).toEqual([permissionGroupRowId('p1'), 'activity-t2'])
+  })
+
+  it('an assistant text block, a pending prompt, a different tool or a different command keeps the prompts apart', () => {
+    const text = { id: 'r1', type: 'response', content: 'ok', timestamp: 0 } as ChatMessage
+    const cases: ChatMessage[][] = [
+      [resolved('p1'), tool('t2'), text, tool('t3'), resolved('p4')],
+      [resolved('p1'), tool('t2'), pending('p3'), tool('t4'), resolved('p5')],
+      [resolved('p1'), tool('t2', { tool: 'Read' }), resolved('p3')],
+      [resolved('p1'), tool('t2'), resolved('p3', { content: 'shell: another request' })],
+    ]
+    for (const msgs of cases) {
+      const input = msgs.map((m) => (m.type === 'tool_use' ? toolRow(m) : rowOf(m)))
+      const { rows, groups } = collapseResolvedPermissionRuns(input, mapOf(msgs))
+      expect(groups.size, msgs.map((m) => m.id).join(',')).toBe(0)
+      expect(rows).toBe(input)
+    }
   })
 })

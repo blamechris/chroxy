@@ -26,7 +26,7 @@ function renderGroup(over: Partial<React.ComponentProps<typeof PermissionRecordG
   return render(
     <PermissionRecordGroup
       groupId="permission-group-a"
-      firstRequestId="req-a"
+      requestIds={['req-a', 'req-b', 'req-c']}
       tool="shell"
       description="npm registry lookup"
       outcome="allowed"
@@ -69,12 +69,26 @@ describe('PermissionRecordGroup (#6894)', () => {
     expect(screen.getByTestId('perm-group-toggle').getAttribute('aria-label')).toMatch(/3.*shell/i)
   })
 
-  it('carries the perm-desc anchor of the FIRST member while collapsed, and hands it to the member once expanded (no duplicate id)', () => {
+  it('keeps EVERY member\'s perm-desc jump anchor exactly once, collapsed or expanded', () => {
     renderGroup()
-    expect(document.querySelectorAll('[id="perm-desc-req-a"]')).toHaveLength(1)
+    const count = (id: string) => document.querySelectorAll(`[id="perm-desc-${id}"]`).length
+    // Collapsed: the first member's anchor is the toggle; the others are empty
+    // anchors next to it, so the expired summary's "Jump to prompt" lands on the
+    // group line whichever member it names.
+    for (const id of ['req-a', 'req-b', 'req-c']) expect(count(id), `collapsed ${id}`).toBe(1)
+    expect(screen.getByTestId('perm-group-toggle').id).toBe('perm-desc-req-a')
     fireEvent.click(screen.getByTestId('perm-group-toggle'))
-    expect(document.querySelectorAll('[id="perm-desc-req-a"]')).toHaveLength(1)
-    expect(within(screen.getByTestId('perm-group-members')).getAllByTestId('perm-outcome-record')[0]!.querySelector('#perm-desc-req-a')).not.toBeNull()
+    // Expanded: each member record carries its own; the group adds none (no duplicate ids).
+    for (const id of ['req-a', 'req-b', 'req-c']) expect(count(id), `expanded ${id}`).toBe(1)
+    expect(within(screen.getByTestId('perm-group-members')).getAllByTestId('perm-outcome-record')[1]!.querySelector('#perm-desc-req-b')).not.toBeNull()
+  })
+
+  it('a collapsed-group anchor is focusable, so the jump link can move focus onto the group', () => {
+    renderGroup()
+    const anchor = document.getElementById('perm-desc-req-c')!
+    expect(anchor.getAttribute('tabindex')).toBe('-1')
+    anchor.focus()
+    expect(document.activeElement).toBe(anchor)
   })
 
   it('has no Allow / Deny: a group is never actionable', () => {
@@ -103,7 +117,7 @@ describe('PermissionRecordGroup (#6894)', () => {
     const ui = (
       <ChatExpandContext.Provider value={registry}>
         <PermissionRecordGroup
-          groupId="permission-group-a" firstRequestId="req-a" tool="shell" description="d"
+          groupId="permission-group-a" requestIds={['req-a', 'req-b', 'req-c']} tool="shell" description="d"
           outcome="allowed" count={3} renderMembers={members}
         />
       </ChatExpandContext.Provider>
