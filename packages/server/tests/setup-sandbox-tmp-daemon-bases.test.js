@@ -78,7 +78,8 @@ function scanSourceForTmpBases () {
   const found = new Set()
   const unrecognised = []
   for (const file of walk(SRC)) {
-    const rel = file.slice(SRC.length + 1)
+    // EXEMPT_FILES is keyed with '/' (POSIX); on Windows the walk yields '\\'.
+    const rel = file.slice(SRC.length + 1).replace(/\\/g, '/')
     readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
       if (/^\s*(\/\/|\*|\/\*)/.test(line)) return // comments mention tmpdir freely
       if (!/tmpdir/.test(line) || !/chroxy-/.test(line)) return
