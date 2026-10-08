@@ -31,11 +31,15 @@ function resolved(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
   } as ChatMessage
 }
 
-/** A record as `buildPermissionOutcomeMessage` rebuilds it from a replayed `permission_outcome`: no tool input. */
+/**
+ * A record as `buildPermissionOutcomeMessage` rebuilds it from a replayed
+ * `permission_outcome` that carries NO input (an entry journaled before #8503);
+ * pass `toolInput` for one that does.
+ */
 function replayedRecord(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
-  const { toolInput: _toolInput, ...rest } = resolved(id, over)
+  const { toolInput: _toolInput, ...rest } = resolved(id)
   void _toolInput
-  return rest as ChatMessage
+  return { ...rest, ...over } as ChatMessage
 }
 
 function pending(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
@@ -216,17 +220,78 @@ describe('findResolvedPermissionRuns', () => {
     expect(runs[0]!.items).toHaveLength(3)
   })
 
-  // The server journals a prompt's DESCRIPTION, not its input (#8503), and the
+  // A record rebuilt from a history entry that carries NO input (journaled before
+  // #8503) cannot be told apart from another by its description alone: the
   // description is chosen by the agent (redaction.js prefers `input.description`
-  // over `input.command`). Two commands under one rationale are indistinguishable
-  // in a replayed record, so those never fold. Until #8503 journals the input,
-  // grouping happens only where the input is known: live.
-  it('replayed records of the same description (different, unknown commands) do NOT group', () => {
+  // over `input.command`), so two commands under one rationale look identical.
+  // Those never fold; a record that does carry its journaled input is keyed on it.
+  it('replayed records of the same description with NO recorded input (different, unknown commands) do NOT group', () => {
     const msgs = [
       replayedRecord('a', { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed' }),
       replayedRecord('b', { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed' }),
     ]
     expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  // #8503: the journaled input comes back on the replayed record, so grouping works
+  // after a switch or reload exactly as it does live.
+  it('#8503: replayed records of the same description AND the same journaled input group', () => {
+    const input = { command: 'touch smoke-perm.txt', description: 'Clean up' }
+    const msgs = ['a', 'b', 'c'].map((id) =>
+      replayedRecord(id, { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed', toolInput: input }),
+    )
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs).toHaveLength(1)
+    expect(runs[0]!.items.map((i) => i.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('#8503: replayed records that share a description but journaled DIFFERENT inputs do NOT group', () => {
+    const rec = (id: string, command: string) =>
+      replayedRecord(id, { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed', toolInput: { command, description: 'Clean up' } })
+    const msgs = [rec('a', 'rm a'), rec('b', 'rm -rf ~')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('#8503: records whose inputs share a `_truncated` and a `summary` but differ in the command do NOT group (the key reads the whole input)', () => {
+    const rec = (id: string, command: string) =>
+      replayedRecord(id, {
+        tool: 'Bash', content: 'Bash: routine task', answered: 'allow', permissionOutcome: 'allowed',
+        toolInput: { _truncated: true, summary: 'routine task', command, dangerouslyDisableSandbox: true },
+      })
+    const msgs = [rec('a', 'ls'), rec('b', 'rm -rf /important')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('review: replayed allow, allow, allowAlways with one input group the two one-time allows apart from the persistent rule', () => {
+    const input = { command: 'touch smoke-perm.txt' }
+    const rec = (id: string, answered: string) =>
+      replayedRecord(id, { tool: 'Bash', content: 'Bash: Touch', answered, permissionOutcome: 'allowed', toolInput: input })
+    const msgs = [rec('a', 'allow'), rec('b', 'allow'), rec('c', 'allowAlways')]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs.map((r) => r.items.map((i) => i.id))).toEqual([['a', 'b']])
+  })
+
+  it('review: a replayed allowSession does not fold with allow', () => {
+    const input = { command: 'ls' }
+    const rec = (id: string, answered: string) =>
+      replayedRecord(id, { tool: 'Bash', content: 'Bash: ls', answered, permissionOutcome: 'allowed', toolInput: input })
+    const msgs = [rec('a', 'allow'), rec('b', 'allowSession'), rec('c', 'allow')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('#8503: a replayed record with a journaled input does not group with one that has none', () => {
+    const base = { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed' } as const
+    const msgs = [
+      replayedRecord('a', { ...base, toolInput: { command: 'touch x' } }),
+      replayedRecord('b', base),
+    ]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
+  it('#8503: a replayed record and the live one it stood in for share a key when their input matches', () => {
+    const live = resolved('a', { permissionOutcome: 'allowed' })
+    const replayed = replayedRecord('a', { permissionOutcome: 'allowed', toolInput: live.toolInput, requestId: 'req-other' })
+    expect(resolvedPermissionGroupKey(replayed)).toBe(resolvedPermissionGroupKey(live))
   })
 
   it('replayed expired / stopped records do not group either', () => {

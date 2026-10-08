@@ -225,7 +225,7 @@ export function createPermissionResolver({
       // remembers what the prompt was from the moment it was raised, so only the
       // outcome is passed; an unknown id (an unattributed prompt) records nothing.
       try {
-        sm?.recordPermissionOutcome?.(requestId, decision === 'deny' ? 'denied' : 'allowed')
+        sm?.recordPermissionOutcome?.(requestId, decision === 'deny' ? 'denied' : 'allowed', decision)
       } catch { /* the answer already went out; journaling is best-effort */ }
       // Legacy (non-SDK) sessions have no PermissionManager/rule store, so
       // 'allowAlways' here is never durable — tool is the only enrichment.

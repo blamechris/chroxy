@@ -96,6 +96,13 @@ describe('MessageBubble permission outcome record (#8348)', () => {
     expect(tree.root.findAllByProps({ accessibilityRole: 'timer' })).toHaveLength(0);
   });
 
+  it('#8503: a record that holds its journaled tool input is still the compact record, not a full detail card', () => {
+    const tree = render(makeOutcome('allowed', { toolInput: { command: 'touch smoke-perm.txt' } }));
+    expect(tree.root.findAllByProps({ testID: 'permission-outcome-perm-out-1' }).length).toBeGreaterThan(0);
+    expect(tree.root.findAllByProps({ testID: 'approval-card-perm-out-1' })).toHaveLength(0);
+    expect(tree.root.findAllByProps({ accessibilityRole: 'timer' })).toHaveLength(0);
+  });
+
   it('POSITIVE CONTROL: a live prompt with no outcome still shows its countdown', () => {
     const live = {
       id: 'perm-live', type: 'prompt', content: 'Bash: ls', tool: 'Bash', requestId: 'req-live',

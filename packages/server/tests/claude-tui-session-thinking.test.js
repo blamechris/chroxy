@@ -598,6 +598,27 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     })
   })
 
+  it('the late-window timer and the background-task poll coexist, and destroy() clears both (#8511 interaction)', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s, sinkDir } = makeTurnSession()
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    stop(sinkDir)
+    await turn
+    assert.ok(s._thinkingLateTimer, 'precondition: the late window is open')
+    s._armBackgroundTaskPoll()
+    assert.ok(s._backgroundTaskPollTimer, 'precondition: the idle poll is armed')
+    assert.notEqual(s._thinkingLateTimer, s._backgroundTaskPollTimer, 'two independent timers')
+    s._stopBackgroundTaskPoll()
+    assert.equal(s._backgroundTaskPollTimer, null, 'stopping the poll leaves the late window alone')
+    assert.ok(s._thinkingLateTimer)
+    s._armBackgroundTaskPoll()
+    await s.destroy()
+    assert.equal(s._thinkingLateTimer, null)
+    assert.equal(s._backgroundTaskPollTimer, null)
+  })
+
   it('gives up on a block that never lands once the late window has passed, and stops its timer', async () => {
     const sessFile = writeSessFile()
     const transcript = writeJournal(sessFile, [])

@@ -587,6 +587,51 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+  // #8503 — the journaled tool input comes back as the record's `toolInput`, the
+  // field a live card holds it in, so a replayed record and group show what was
+  // approved. An entry without one (older history) leaves the field unset.
+  {
+    name: 'permission_outcome carries the journaled tool input into the record (#8503)',
+    type: 'permission_outcome',
+    init: { sessions: { s1: {} } },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-4',
+      tool: 'Bash', description: 'Touch smoke file', outcome: 'allowed',
+      input: { command: 'touch smoke-perm.txt', run_in_background: true },
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [{
+            type: 'prompt', content: 'Bash: Touch smoke file', tool: 'Bash',
+            requestId: 'perm-4', permissionOutcome: 'allowed', answered: 'allow',
+            toolInput: { command: 'touch smoke-perm.txt', run_in_background: true },
+          }],
+        },
+      },
+    },
+  },
+  // #8503 review — the decision token the user chose rides an allowed outcome, so an
+  // `allowAlways` (a persistent rule) is not read back as a one-time allow.
+  {
+    name: 'permission_outcome records an allowAlways decision as answered "allowAlways" (#8503)',
+    type: 'permission_outcome',
+    init: { sessions: { s1: {} } },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-5',
+      tool: 'Bash', description: 'git status', outcome: 'allowed', decision: 'allowAlways',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [{
+            type: 'prompt', content: 'Bash: git status', tool: 'Bash',
+            requestId: 'perm-5', permissionOutcome: 'allowed', answered: 'allowAlways',
+          }],
+        },
+      },
+    },
+  },
   {
     name: 'permission_outcome records an allowed prompt as answered "allow"',
     type: 'permission_outcome',

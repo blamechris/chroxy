@@ -463,6 +463,19 @@ describe('#8348 -- the JSONL rebuild keeps the saved permission outcomes', () =>
     assert.deepEqual(result.entries.filter((e) => e.type === 'permission_outcome').map((e) => e.requestId), ['perm-new'])
   })
 
+  it('#8503: carries the journaled input through the rebuild, and an older entry stays without one', async () => {
+    const mgr = setup('outcome-input', 'conv-o-7')
+    outcome(mgr, 'perm-a', at('2026-01-15T00:00:05.000Z'))
+    outcome(mgr, 'perm-b', at('2026-01-15T00:00:06.000Z'))
+    mgr.getHistory('s1').find((e) => e.requestId === 'perm-a').input = { command: 'touch smoke-perm.txt' }
+
+    const { entries } = await mgr.getFullHistoryAsync('s1')
+
+    const byId = Object.fromEntries(entries.filter((e) => e.type === 'permission_outcome').map((e) => [e.requestId, e]))
+    assert.deepEqual(byId['perm-a'].input, { command: 'touch smoke-perm.txt' })
+    assert.equal('input' in byId['perm-b'], false)
+  })
+
   it('leaves a transcript with no outcomes exactly as read', async () => {
     const mgr = setup('outcome-none', 'conv-o-5')
     const result = await mgr.getFullHistoryAsync('s1')

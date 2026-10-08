@@ -24,6 +24,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A claude-tui session now reports the subagents it is running (#7396).** The
+  default provider never tracked them, so the agent panel, the "N agents
+  running" badge, the working status on the tab and the Control Room agent nodes
+  were all dark, and a session read idle while a subagent ran. A subagent now
+  shows up when it is launched, a foreground one clears when it returns, and a
+  background one stays until Claude Code reports it finished. It also clears if
+  the turn ends in an error, is stopped, or the session ends, and it is given up
+  on if the session's transcript stops being readable for about a minute or the
+  agent has run for 12 hours without a completion notice.
+
+- **A resolved permission record still shows what was approved after a session
+  switch or a reload (#8503).** The dashboard's compact permission record and its
+  counted group (`Permission allowed ×3`) showed the command or file that was
+  approved while the prompt was answered live, but lost that line once the
+  transcript was rebuilt from history, because the daemon kept only the
+  description. The daemon now also keeps the tool input the prompt was shown with:
+  the same redacted copy, with the same 10,240-character cap, that the live prompt
+  sent, so a replayed record reveals nothing the live one did not. Repeated approvals
+  group again after a rebuild when their input matches, and a prompt answered
+  "always allow" or "allow for session" stays apart from one-time allows, as it is
+  live. History saved before this change has no input to show and renders as it did.
+
 - **Web fetch and web search results render as cards on the default provider
   (#6987).** A WebFetch on a claude-tui session showed its raw JSON envelope
   (`{"bytes":...,"result":...}`) instead of the page text. The dashboard and the

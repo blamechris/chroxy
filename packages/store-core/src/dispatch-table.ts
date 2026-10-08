@@ -1037,6 +1037,10 @@ export interface DispatchMessageMap {
     tool?: string
     description?: string
     outcome?: string
+    // #8503 — the sanitized tool input the prompt was shown with.
+    input?: Record<string, unknown>
+    // #8503 — which allow the user chose on an `allowed` outcome.
+    decision?: string
     timestamp?: number
     historySeq?: number
   }
@@ -2400,8 +2404,8 @@ const ALLOW_TOKENS: readonly string[] = ['allow', 'allowAlways', 'allowSession']
  *
  *   - `allowed` / `denied`: `answered` is the decision. A more specific allow
  *     the user chose (`allowSession`, `allowAlways`) is kept; anything else,
- *     including a card that merely ran out its own countdown, takes the plain
- *     token. `answeredAt` is kept when the card had one.
+ *     including a card that merely ran out its own countdown, takes the token the
+ *     server journaled (#8503), or the plain `allow` for an entry that has none. `answeredAt` is kept when the card had one.
  *   - `expired` / `stopped` (#8374): no decision was made, so `answered` is
  *     cleared, and with it a deny the client inferred from a timeout or a Stop.
  *     A countdown still running is closed (`expiresAt` moves to now); one that
@@ -2426,7 +2430,7 @@ function reconcileHeldPermissionCard(held: ChatMessage, record: ChatMessage, now
   } else {
     base.answered =
       outcome === 'allowed'
-        ? (held.answered && ALLOW_TOKENS.includes(held.answered) ? held.answered : 'allow')
+        ? (held.answered && ALLOW_TOKENS.includes(held.answered) ? held.answered : (record.answered ?? 'allow'))
         : 'deny'
     base.answeredAt = held.answeredAt ?? now
   }

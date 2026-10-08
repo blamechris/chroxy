@@ -171,6 +171,21 @@ describe('TranscriptTaskScanner — thinking capture (#7393)', () => {
     assert.equal(blocks[blocks.length - 1].text, 't599', 'the newest survive')
   })
 
+  it('a rotation reset keeps thinking capture and the pinned-agent set (state of the two features coexists)', () => {
+    write(userEntry('x'.repeat(3000)))
+    const scanner = new TranscriptTaskScanner(path)
+    const pinned = new Set(['toolu_agent_1'])
+    scanner.pinnedToolUseIds = pinned
+    scanner.startThinkingCapture(T0)
+    scanner.scan()
+    write(thinkingEntry({ text: 'after the rewrite', ts: '2026-10-08T12:00:05.000Z' })) // shorter: forces _reset()
+    const snap = scanner.scan()
+    assert.equal(scanner.pinnedToolUseIds, pinned, 'the pin set survives the reset')
+    assert.equal(scanner.readable, true)
+    assert.deepEqual(scanner.drainThinking().map((b) => b.text), ['after the rewrite'], 'capture survived the reset')
+    assert.ok(snap)
+  })
+
   it('leaves the existing scan result untouched (capture is purely additive)', () => {
     write()
     const scanner = new TranscriptTaskScanner(path)

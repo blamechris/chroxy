@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
-import { redactBounded, RECORD_DESCRIPTION_MAX } from './redaction.js'
+import { redactBounded, sanitizeToolInput, isSanitizedToolInput, MAX_INPUT_CHARS, RECORD_DESCRIPTION_MAX } from './redaction.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
@@ -21,7 +21,84 @@ export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'
 // ring buffer and the state file keep, so a long hook-path description (the hook
 // route broadcasts it uncapped) cannot bloat either.
 export const PERMISSION_OUTCOME_TOOL_MAX = 100
+
+/**
+ * #8503: the decision tokens an `allowed` outcome may name. `allowAlways` writes a
+ * persistent rule and `allowSession` a session one, so a record of either must stay
+ * distinguishable from a one-time `allow` after a rebuild (a replayed group of
+ * "allowed x N" must not fold them together). `deny` is not here: a denial needs no
+ * token, and an outcome with no decision at all (expired, stopped) has none to name.
+ */
+export const PERMISSION_ALLOW_DECISIONS = Object.freeze(['allow', 'allowSession', 'allowAlways'])
+
+/**
+ * The decision token an outcome may keep, or `undefined`: only an `allowed` outcome,
+ * only one of {@link PERMISSION_ALLOW_DECISIONS}. One rule for the recorder and the
+ * replay, so a damaged restored entry cannot send what the recorder would not keep.
+ *
+ * @param {unknown} outcome
+ * @param {unknown} decision
+ * @returns {'allow'|'allowSession'|'allowAlways'|undefined}
+ */
+export function permissionOutcomeDecision(outcome, decision) {
+  return outcome === 'allowed' && PERMISSION_ALLOW_DECISIONS.includes(decision) ? decision : undefined
+}
 export const PERMISSION_OUTCOME_DESCRIPTION_MAX = RECORD_DESCRIPTION_MAX
+
+/**
+ * #8503: the most the journaled tool input of a `permission_outcome` may weigh,
+ * SERIALIZED, whatever its shape. `sanitizeToolInput` returns at most
+ * `MAX_INPUT_CHARS` serialized characters, or, past that, a `{ _truncated, summary }`
+ * wrapper whose summary is the first `MAX_INPUT_CHARS` characters of the input's JSON
+ * plus a marker. That summary is itself JSON text, so serializing the wrapper escapes
+ * its quotes and backslashes again: at most twice the summary, plus the wrapper's own
+ * keys. This is that figure, so every value the broadcast ever sends fits and nothing
+ * larger is kept. On disk this is the weight of one entry's `input`; `truncateEntry`
+ * caps it at 50 KB regardless and the ring buffer holds 1000 entries per session, the
+ * bound a `tool_start` entry's input already has.
+ */
+const TRUNCATION_MARKER = '... [truncated]'
+export const PERMISSION_OUTCOME_INPUT_MAX = 2 * (MAX_INPUT_CHARS + TRUNCATION_MARKER.length) + 64
+
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * #8503: the tool input a `permission_outcome` may keep, or `undefined` for none.
+ *
+ * The journal is what the clients were SHOWN: the value `sanitizeToolInput` produced
+ * for the live `permission_request`, handed over by the caller. That value is kept
+ * EXACTLY, never re-shaped, never re-redacted. A wrapper stays the sanitizer's
+ * wrapper, and an input an agent wrote with a `_truncated` or `summary` key stays the
+ * agent's input: nothing here reads the VALUE's content to decide what it is, because
+ * an agent controls every key in it.
+ *
+ * What tells "already broadcast" from "raw" is identity, not content:
+ * `isSanitizedToolInput` is true only for an object `sanitizeToolInput` returned. An
+ * input that is not one (a raw input by a future caller's mistake, a copy that lost
+ * its identity) is sanitized first, so what is journaled is what the broadcast would
+ * have sent for it. The journal is persisted and replayed to every client of the
+ * session, so it does not trust its caller to have done that.
+ *
+ * Not a plain object (a string, an array, a number, null) or absent: no input is kept
+ * and the entry reads like one from before the field. A value heavier than
+ * {@link PERMISSION_OUTCOME_INPUT_MAX} is dropped, not cut: the pull path's larger
+ * sanitized inputs are the one such source, and cutting would re-shape them.
+ *
+ * @param {unknown} input
+ * @returns {object|undefined}
+ */
+export function boundPermissionOutcomeInput(input) {
+  if (!isPlainObject(input)) return undefined
+  try {
+    const kept = isSanitizedToolInput(input) ? input : sanitizeToolInput(input)
+    if (!isPlainObject(kept)) return undefined
+    return JSON.stringify(kept).length <= PERMISSION_OUTCOME_INPUT_MAX ? kept : undefined
+  } catch {
+    return undefined
+  }
+}
 
 // `<turnId>-thinking-<n>` (sdk, byok) and `<turnId>-thinking` (acp).
 const LEGACY_THINKING_ID = /-thinking(?:-\d+)?$/
@@ -46,6 +123,16 @@ export function streamKindOf(entry) {
   if (entry.kind === 'thinking') return 'thinking'
   if (typeof entry.messageId === 'string' && LEGACY_THINKING_ID.test(entry.messageId)) return 'thinking'
   return undefined
+}
+
+/** `{ input }` when there is one, else nothing: an absent input is an absent key. */
+function inputField(input) {
+  return input === undefined ? {} : { input }
+}
+
+/** `{ decision }` when there is one, else nothing. */
+function decisionField(decision) {
+  return decision === undefined ? {} : { decision }
 }
 
 function clipText(value, max) {
@@ -730,6 +817,13 @@ export class SessionMessageHistory extends EventEmitter {
           tool: clipRedacted(data.tool, PERMISSION_OUTCOME_TOOL_MAX),
           description: clipRedacted(data.description, PERMISSION_OUTCOME_DESCRIPTION_MAX),
           outcome: data.outcome,
+          // #8503: the tool input the clients were shown, so a replayed record
+          // and group read the same as a live one. Omitted when there is none,
+          // which is also every entry from before this field.
+          ...inputField(boundPermissionOutcomeInput(data.input)),
+          // #8503: which allow it was (see PERMISSION_ALLOW_DECISIONS). Omitted for
+          // any other outcome and for an entry from before the field.
+          ...decisionField(permissionOutcomeDecision(data.outcome, data.decision)),
           timestamp: Date.now(),
         }, sessionId)
         persistNeeded = true

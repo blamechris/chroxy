@@ -88,13 +88,22 @@ export function handlePermissionRequest(
   const requestId = parseRawStringField(msg, 'requestId')
   const tool = parseRawStringField(msg, 'tool')
   const description = parseRawStringField(msg, 'description')
-  const input =
-    msg.input && typeof msg.input === 'object' && !Array.isArray(msg.input)
-      ? (msg.input as Record<string, unknown>)
-      : null
+  const input = parseToolInput(msg.input)
   const sessionId = parseRawStringField(msg, 'sessionId')
   const remainingMs = typeof msg.remainingMs === 'number' ? msg.remainingMs : null
   return { requestId, tool, description, input, sessionId, remainingMs }
+}
+
+/**
+ * The tool input a wire frame carries, as `ChatMessage.toolInput` holds it: a
+ * non-null, non-array object, else `null`. The ONE rule for it, shared by the live
+ * `permission_request` and the replayed `permission_outcome` (#8503), so a record
+ * rebuilt from history holds exactly what the card it replaces held.
+ */
+function parseToolInput(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
 }
 
 /**
@@ -207,16 +216,28 @@ export function applyPermissionResolved(
  * malformed and parses to `null` (the caller drops it), as does an unknown
  * `outcome` — a card must never be built from a value no renderer knows how to
  * label. `tool` / `description` are what the client was shown when the prompt
- * was raised, defaulted to `''` when absent.
+ * was raised, defaulted to `''` when absent. `input` (#8503) is the tool input it
+ * was shown with, parsed by the same rule as a live `permission_request`'s, or
+ * `null` for an entry journaled before the field existed. `decision` (#8503) is
+ * which allow the user chose on an `allowed` outcome (`allow` / `allowSession` /
+ * `allowAlways`), `null` for any other outcome, an unknown token, or an entry
+ * journaled before the field; it keeps a record of `allowAlways` (a persistent
+ * rule) from being read back as a one-time allow.
  */
 export interface PermissionOutcomePayload {
   requestId: string
   tool: string
   description: string
   outcome: PermissionOutcomeKind
+  input: Record<string, unknown> | null
+  decision: PermissionAllowDecision | null
   sessionId: string | null
   timestamp: number | null
 }
+
+/** The decision tokens an `allowed` outcome may name (the server journals no other). */
+export type PermissionAllowDecision = 'allow' | 'allowSession' | 'allowAlways'
+const PERMISSION_ALLOW_DECISIONS: readonly string[] = ['allow', 'allowSession', 'allowAlways']
 
 const PERMISSION_OUTCOME_KINDS: readonly string[] = ['allowed', 'denied', 'expired', 'stopped']
 
@@ -232,6 +253,11 @@ export function handlePermissionOutcome(
     tool: parseRawStringField(msg, 'tool') ?? '',
     description: parseRawStringField(msg, 'description') ?? '',
     outcome: outcome as PermissionOutcomeKind,
+    input: parseToolInput(msg.input),
+    decision:
+      outcome === 'allowed' && typeof msg.decision === 'string' && PERMISSION_ALLOW_DECISIONS.includes(msg.decision)
+        ? (msg.decision as PermissionAllowDecision)
+        : null,
     sessionId: parseRawStringField(msg, 'sessionId'),
     timestamp: typeof msg.timestamp === 'number' && Number.isFinite(msg.timestamp) ? msg.timestamp : null,
   }
@@ -247,7 +273,7 @@ export function handlePermissionOutcome(
  * leave it unset.
  */
 export function buildPermissionOutcomeMessage(payload: PermissionOutcomePayload): ChatMessage {
-  const { requestId, tool, description, outcome, sessionId, timestamp } = payload
+  const { requestId, tool, description, outcome, input, decision, sessionId, timestamp } = payload
   const content = tool
     ? (description ? `${tool}: ${description}` : tool)
     : (description || 'Permission required')
@@ -257,8 +283,12 @@ export function buildPermissionOutcomeMessage(payload: PermissionOutcomePayload)
     content,
     ...(tool ? { tool } : {}),
     requestId,
+    // #8503: the input the prompt was shown with, when the server journaled it, so
+    // the record (and a group of them) shows what was approved exactly as the live
+    // card did. Absent for an older entry, which then has no input line.
+    ...(input ? { toolInput: input } : {}),
     permissionOutcome: outcome,
-    ...(outcome === 'allowed' ? { answered: 'allow' } : {}),
+    ...(outcome === 'allowed' ? { answered: decision ?? 'allow' } : {}),
     ...(outcome === 'denied' ? { answered: 'deny' } : {}),
     timestamp: timestamp ?? Date.now(),
     ...(sessionId ? { originSessionId: sessionId } : {}),

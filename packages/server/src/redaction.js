@@ -286,9 +286,30 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
   // Final size check on the whole object
   const serialized = JSON.stringify(result)
   if (serialized.length > maxChars) {
-    return { _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' }
+    return markSanitized({ _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' })
   }
-  return result
+  return markSanitized(result)
+}
+
+/**
+ * #8503: the objects `sanitizeToolInput` itself returned, by identity. A consumer
+ * that keeps a tool input (the permission journal) can then tell the value that was
+ * ALREADY broadcast, which it must keep exactly, from a raw one, which it must
+ * sanitize first. The answer cannot come from the value's content: a `_truncated`
+ * key, a `summary`, any shape at all is something an agent can write into its own
+ * tool input, so a content test would let agent-authored data pass for the
+ * sanitizer's output (or have the sanitizer's own output re-shaped as if it were
+ * the agent's). A WeakSet holds no content, is not serialized, and is not reachable
+ * from a tool input.
+ */
+const SANITIZED_INPUTS = new WeakSet()
+function markSanitized(value) {
+  SANITIZED_INPUTS.add(value)
+  return value
+}
+/** @param {unknown} value @returns {boolean} true only for an object `sanitizeToolInput` returned (this process, not a copy of it) */
+function isSanitizedToolInput(value) {
+  return !!value && typeof value === 'object' && SANITIZED_INPUTS.has(value)
 }
 
 /**
@@ -534,4 +555,4 @@ export function describeComposedText(text) {
   return redactBounded(text).slice(0, SERIALIZED_DESCRIPTION_MAX)
 }
 
-export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }
+export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, SENSITIVE_KEY_NAMES, sanitizeToolInput, isSanitizedToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }
