@@ -208,6 +208,19 @@ export const ServerMessageSchema = z.object({
   // zod strips unknown keys, so a schema that omits it would drop it silently.
   // Optional so older servers' envelopes stay valid.
   timeoutMs: z.number().int().positive().optional(),
+  // #6630 / #8282: present on a REPLAYED `messageType: 'response'` frame that was a
+  // reasoning (extended-thinking) stream rather than a reply. A live reasoning
+  // stream is its own `thinking: true` stream_start/_delta/_end, which the
+  // clients render as a thinking bubble; the history records it as one message,
+  // and this field is how the replay says what it was so the client rebuilds the
+  // same bubble. Absent on a reply and on every live frame. A plain string-literal
+  // so a kind a newer server adds does not make an older client reject the frame.
+  kind: z.string().max(32).optional(),
+  // #6630: on a replayed reasoning frame, the elapsed time the live stream_end
+  // carried (`thought for Xs`). Same bound as the stream_end field.
+  thinkingDurationMs: ThinkingDurationMsSchema,
+  // #6630: and the token count the live stream_end carried (` · N tokens`).
+  thinkingTokens: ThinkingTokensSchema,
   // #7454/#7458: present on REPLAYED frames only (both replay paths map the
   // server-internal `_seq` onto the wire; absent on live broadcasts). The
   // #5555.3 delta-replay cursor — and for user_question the #7420

@@ -2,6 +2,8 @@ import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
 import { redactBounded } from './redaction.js'
+import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
+import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
 
 const log = createLogger('session-message-history')
 const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
@@ -19,6 +21,31 @@ export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'
 // route broadcasts it uncapped) cannot bloat either.
 export const PERMISSION_OUTCOME_TOOL_MAX = 100
 export const PERMISSION_OUTCOME_DESCRIPTION_MAX = 500
+
+// `<turnId>-thinking-<n>` (sdk, byok) and `<turnId>-thinking` (acp).
+const LEGACY_THINKING_ID = /-thinking(?:-\d+)?$/
+
+/**
+ * #6630 / #8282: which kind of stream a recorded `response` entry was. Today
+ * only `'thinking'` (extended-thinking reasoning) is distinguished; anything
+ * else is a reply and returns `undefined`.
+ *
+ * The recorder stamps `kind: 'thinking'` on new entries. An entry written
+ * before that field existed (a state file from an older run) is classified by
+ * the message id the providers give a reasoning stream: `<turnId>-thinking-<n>`
+ * (sdk-session, byok-session) and ACP's `<turnId>-thinking` (acp-session), so
+ * those still replay as reasoning instead of as an answer. ONE classifier, used by the replay emitter -- a client reads the
+ * `kind` on the frame and never re-derives it from an id.
+ *
+ * @param {object} entry - a ring-buffer entry
+ * @returns {'thinking'|undefined}
+ */
+export function streamKindOf(entry) {
+  if (!entry || entry.type !== 'message' || entry.messageType !== 'response') return undefined
+  if (entry.kind === 'thinking') return 'thinking'
+  if (typeof entry.messageId === 'string' && LEGACY_THINKING_ID.test(entry.messageId)) return 'thinking'
+  return undefined
+}
 
 function clipText(value, max) {
   const text = typeof value === 'string' ? value : ''
@@ -61,6 +88,10 @@ export class SessionMessageHistory extends EventEmitter {
     // over-size delta for the same message also exceeds the cap and would
     // otherwise re-fire the error). Cleared on stream_end / session clear.
     this._truncatedStreams = new Set()   // sessionId:messageId
+    // #6630 / #8282 -- sessionId:messageId -> stream kind, for the streams that
+    // are not ordinary replies (reasoning). Kept beside `_pendingStreams` rather
+    // than inside its value because that map is read as plain strings elsewhere.
+    this._streamKinds = new Map()
     this._historyTruncated = new Map()  // sessionId -> boolean
     // #5555.3 (lastSeq delta replay) — per-session monotonic history sequence.
     // Every entry pushed into the ring buffer is stamped with a strictly
@@ -152,6 +183,7 @@ export class SessionMessageHistory extends EventEmitter {
         closedMessageIds.push(messageId)
         this._pendingStreams.delete(key)
         this._truncatedStreams.delete(key) // #6431 — release the truncation guard
+        this._streamKinds.delete(key)
       }
     }
     return closedMessageIds
@@ -473,6 +505,8 @@ export class SessionMessageHistory extends EventEmitter {
       case 'stream_start': {
         const key = `${sessionId}:${data.messageId}`
         this._pendingStreams.set(key, '')
+        // #6630 / #8282: a reasoning stream must not be recorded as a reply.
+        if (data.thinking === true) this._streamKinds.set(key, 'thinking')
         break
       }
 
@@ -501,14 +535,36 @@ export class SessionMessageHistory extends EventEmitter {
       case 'stream_end': {
         const key = `${sessionId}:${data.messageId}`
         const content = this._pendingStreams.get(key) || ''
+        const hadStream = this._pendingStreams.has(key)
+        const kind = this._streamKinds.get(key) || (data.thinking === true ? 'thinking' : undefined)
         this._pendingStreams.delete(key)
+        this._streamKinds.delete(key)
         this._truncatedStreams.delete(key) // #6431 — release the once-per-stream guard
-        if (content) {
+        // A reasoning stream is recorded even with no text: current Claude models
+        // return the block with its signature only, so the SDK opens and closes a
+        // thinking stream that never carries a delta. Live, that is a "thought for
+        // Xs" bubble with an empty body; skipping it for want of text made the whole
+        // bubble vanish on replay. A reply with no text is still no entry, and so is
+        // a stream_end whose start this history never saw.
+        if (content || (kind === 'thinking' && hadStream)) {
+          // #6630: a reasoning stream keeps what the live bubble shows -- that it
+          // IS reasoning (`kind`) and how long it took (`thinkingDurationMs`, the
+          // same bounded value the live `stream_end` frame carries). Without them
+          // a replay rebuilt it as a plain answer.
+          const thinkingDurationMs = kind === 'thinking'
+            ? boundedNonNegInt(data.thinkingDurationMs, { max: MAX_SANE_DURATION_MS })
+            : undefined
+          // The live stream_end carries a token count when a provider separates one
+          // out (` · N tokens` in the footer); record it so a replay says the same.
+          const thinkingTokens = kind === 'thinking' ? boundedNonNegInt(data.thinkingTokens) : undefined
           this._pushHistory(history, {
             type: 'message',
             messageType: 'response',
             content,
             messageId: data.messageId,
+            ...(kind ? { kind } : {}),
+            ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+            ...(thinkingTokens !== undefined ? { thinkingTokens } : {}),
             timestamp: Date.now(),
           }, sessionId)
         }
@@ -518,18 +574,28 @@ export class SessionMessageHistory extends EventEmitter {
 
       case 'message':
         this._pushHistory(history, {
-          type: 'message',
-          messageType: data.type,
-          content: data.content,
-          tool: data.tool,
-          options: data.options,
+          // #6630: the SAME envelope the live frame is built from, so a field the
+          // live message carries (the compact_boundary / MCP-prompt-expansion
+          // markers) reaches the replay too.
+          ...buildMessageWire(data),
           // Carry through the stable messageId for user_input entries so
           // clients can dedup rehydrated prompts against their own
           // optimistic/live-echo copies (issue #2902).
           ...(data.messageId ? { messageId: data.messageId } : {}),
           ...(data.source === 'daemon' ? { source: 'daemon' } : {}),
-          timestamp: data.timestamp,
         }, sessionId)
+        persistNeeded = true
+        break
+
+      case 'error':
+        // #6630: an error is a chat bubble live (an error card, or a code-specific
+        // chip: stream stall, resume failure, auth required), so it is part of the
+        // transcript. It was not recorded at all, and so vanished on the first
+        // session switch or reload. Built by the live frame's own builder, so the
+        // `code` and the fields that select a chip travel with it. A malformed
+        // event with no message text is not a bubble live either.
+        if (!data || typeof data.message !== 'string') break
+        this._pushHistory(history, buildErrorWire(data), sessionId)
         persistNeeded = true
         break
 
@@ -540,6 +606,9 @@ export class SessionMessageHistory extends EventEmitter {
           toolUseId: data.toolUseId,
           tool: data.tool,
           input: data.input,
+          // #6630: the MCP server a tool belongs to labels its card; the live
+          // frame carries it, so the replay must.
+          ...(typeof data.serverName === 'string' && data.serverName ? { serverName: data.serverName } : {}),
           timestamp: Date.now(),
         }, sessionId)
         break
@@ -812,6 +881,9 @@ export class SessionMessageHistory extends EventEmitter {
     for (const key of this._truncatedStreams) {
       if (key.startsWith(prefix)) this._truncatedStreams.delete(key)
     }
+    for (const key of this._streamKinds.keys()) {
+      if (key.startsWith(prefix)) this._streamKinds.delete(key)
+    }
   }
 
   /**
@@ -821,6 +893,7 @@ export class SessionMessageHistory extends EventEmitter {
     this._messageHistory.clear()
     this._historyTruncated.clear()
     this._pendingStreams.clear()
+    this._streamKinds.clear()
     this._seqCounters.clear()
   }
 }

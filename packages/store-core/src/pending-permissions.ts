@@ -59,6 +59,22 @@ export function isPermissionDecision(answered: string | undefined | null): boole
 }
 
 /**
+ * The recorded outcome a user's decision token stands for: any of the three
+ * "allow" tokens is `allowed`, `deny` is `denied`, and anything else (no answer,
+ * the `'(resolved)'` placeholder) is `null` -- not a decision, so no outcome.
+ *
+ * It is what lets a prompt a client answered LIVE read as the same transcript
+ * line a replayed `permission_outcome` produces (#6630): the replay says
+ * `allowed` / `denied`, the live card only ever held the token the user chose.
+ */
+export function permissionOutcomeFromDecision(
+  answered: string | undefined | null,
+): 'allowed' | 'denied' | null {
+  if (!isPermissionDecision(answered)) return null
+  return answered === 'deny' ? 'denied' : 'allowed'
+}
+
+/**
  * True iff the permission request `requestId` was ALREADY ANSWERED by a user —
  * the gate both clients apply when a `permission_expired` arrives for it (the
  * #2833 race, which #7375 made routine: `permission_expired` now fires whenever

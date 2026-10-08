@@ -484,3 +484,46 @@ describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
     expect(screen.queryByTestId('perm-dropped-record')).not.toBeInTheDocument()
   })
 })
+
+// #6630: a permission prompt the user answered while it was live renders as the
+// same compact record a replayed outcome does.
+describe('useMessageRenderer — a prompt answered live (#6630)', () => {
+  const answered = (answeredToken: string, content: string): ChatMessage => ({
+    id: 'a1',
+    type: 'prompt',
+    content,
+    tool: 'Bash',
+    requestId: 'req-a1',
+    answered: answeredToken,
+    answeredAt: 5,
+    timestamp: 0,
+  } as ChatMessage)
+
+  function renderAnswered(msg: ChatMessage) {
+    const args = makeArgs({ storeMsgMap: new Map([[msg.id, msg]]), storeMessages: [msg] })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    return render(<>{result.current({ id: msg.id, type: 'response', content: msg.content, timestamp: 0 } as ChatViewMessage)}</>)
+  }
+
+  it('renders the compact "Permission allowed" record, not an assistant bubble', () => {
+    renderAnswered(answered('allow', 'Bash: rm -rf build'))
+    const record = screen.getByTestId('perm-outcome-record')
+    expect(record).toHaveTextContent('Permission allowed')
+    expect(record).toHaveTextContent('rm -rf build')
+  })
+
+  it('a prompt answered AFTER it expired (the #2833 race) drops the "(Expired ...)" note the record would repeat', () => {
+    renderAnswered(answered('allow', 'Bash: rm -rf build\n(Expired — this permission was already handled or timed out)'))
+    const record = screen.getByTestId('perm-outcome-record')
+    expect(record).toHaveTextContent('Permission allowed — Bash: rm -rf build')
+    expect(record.textContent).not.toMatch(/Expired/)
+  })
+
+  it('a denied prompt reads denied, and the "(resolved)" placeholder is not a decision', () => {
+    const { unmount } = renderAnswered(answered('deny', 'Bash: ls'))
+    expect(screen.getByTestId('perm-outcome-record')).toHaveTextContent('Permission denied')
+    unmount()
+    renderAnswered(answered('(resolved)', 'Bash: ls'))
+    expect(screen.queryByTestId('perm-outcome-record')).not.toBeInTheDocument()
+  })
+})

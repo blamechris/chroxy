@@ -34,6 +34,8 @@ import {
   handleToolInputDelta as sharedToolInputDelta,
   handleStreamStart as sharedStreamStart,
   sharedStreamDelta,
+  moveEmptyResponseSlotToEnd,
+  applyMessageReconcile,
   handleStreamEnd as sharedStreamEnd,
   // #6756 — extended-thinking (reasoning) content stream.
   handleThinkingStreamStart as sharedThinkingStart,
@@ -2634,36 +2636,12 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
         ? capturedSessionId
         : null;
       if (targetForReorder) {
-        const ss = get().sessionStates[targetForReorder]!;
-        const idx = ss.messages.findIndex((m) => m.id === deltaId);
-        if (idx >= 0 && idx < ss.messages.length - 1) {
-          const slot = ss.messages[idx]!;
-          if (slot.type === 'response' && slot.content === '') {
-            updateSession(targetForReorder, (s) => ({
-              messages: [
-                ...s.messages.slice(0, idx),
-                ...s.messages.slice(idx + 1),
-                slot,
-              ],
-            }));
-          }
-        }
+        const moved = moveEmptyResponseSlotToEnd(get().sessionStates[targetForReorder]!.messages, deltaId);
+        if (moved) updateSession(targetForReorder, () => ({ messages: moved }));
       } else {
         // Flat-messages fallback (pre-session bootstrap)
-        const flat = get().messages;
-        const idx = flat.findIndex((m) => m.id === deltaId);
-        if (idx >= 0 && idx < flat.length - 1) {
-          const slot = flat[idx]!;
-          if (slot.type === 'response' && slot.content === '') {
-            set((state) => ({
-              messages: [
-                ...state.messages.slice(0, idx),
-                ...state.messages.slice(idx + 1),
-                slot,
-              ],
-            }));
-          }
-        }
+        const moved = moveEmptyResponseSlotToEnd(get().messages, deltaId);
+        if (moved) set(() => ({ messages: moved }));
       }
     },
 
@@ -5956,7 +5934,18 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // #5555.3 — advance this session's cursor as we apply a replayed entry.
       if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
-      if (!result.shouldDispatch) break;
+      if (!result.shouldDispatch) {
+        // #6630: a replayed reasoning entry that is the fuller copy of a bubble the
+        // client holds (its stream was cut off by a disconnect) fills it in.
+        const reconcile = result.reconcile;
+        if (reconcile && targetId && get().sessionStates[targetId]) {
+          updateSession(targetId, (ss) => {
+            const next = applyMessageReconcile(ss.messages, reconcile);
+            return next === ss.messages ? {} : { messages: next };
+          });
+        }
+        break;
+      }
       const newMsg = result.chatMessage;
       if (targetId && get().sessionStates[targetId]) {
         // #7577 — placeholder removal and message append are two different

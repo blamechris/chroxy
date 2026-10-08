@@ -4474,7 +4474,15 @@ export class SessionManager extends EventEmitter {
     }
 
     for (const event of PROXIED_EVENTS) {
-      session.on(event, (data) => {
+      session.on(event, (emitted) => {
+        // #6630: an `error` carries no time of its own, and its wire frame and its
+        // history entry each used to stamp one. A client that held the live bubble
+        // and then took a cursor replay compares them to dedup (an error has no
+        // message id), and two stamps a millisecond apart read as two errors.
+        // Stamp ONCE, here, and let both consumers read it.
+        const data = event === 'error' && emitted && typeof emitted === 'object' && !Number.isFinite(emitted.timestamp)
+          ? { ...emitted, timestamp: Date.now() }
+          : emitted
         if (ACTIVITY_EVENTS.has(event)) this.touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
