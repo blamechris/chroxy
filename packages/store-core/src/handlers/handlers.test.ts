@@ -3212,7 +3212,15 @@ describe('handlePermissionResolved', () => {
   it('extracts requestId and decision', () => {
     expect(
       handlePermissionResolved({ requestId: 'req-1', decision: 'allow' }),
-    ).toEqual({ requestId: 'req-1', decision: 'allow' })
+    ).toEqual({ requestId: 'req-1', decision: 'allow', reason: null })
+  })
+
+  it('#8374: extracts the reason when the frame carries one, null otherwise', () => {
+    expect(
+      handlePermissionResolved({ requestId: 'req-1', decision: 'deny', reason: 'aborted' }).reason,
+    ).toBe('aborted')
+    expect(handlePermissionResolved({ requestId: 'req-1', decision: 'deny' }).reason).toBeNull()
+    expect(handlePermissionResolved({ requestId: 'req-1', decision: 'deny', reason: 3 }).reason).toBeNull()
   })
 
   it('returns null requestId when missing or non-string', () => {

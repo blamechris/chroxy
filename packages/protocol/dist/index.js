@@ -21,8 +21,11 @@ export const PROTOCOL_VERSION = 2;
  * Single source of truth so app and dashboard stay in sync with the server.
  */
 export const CLIENT_CAPABILITIES = {
-    desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1'],
-    mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1'],
+    // `permission_outcome_stopped_v1` (#8374): the client can label a replayed
+    // `permission_outcome` whose outcome is `stopped`. A client without it is sent
+    // `expired` instead, because an older build drops an outcome it cannot parse.
+    desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1'],
+    mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1'],
 };
 /**
  * Minimum protocol version the server will accept from clients.

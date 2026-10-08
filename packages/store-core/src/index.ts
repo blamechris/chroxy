@@ -754,6 +754,11 @@ export {
   // record for it (never a pending card).
   handlePermissionOutcome,
   buildPermissionOutcomeMessage,
+  // #8374 — a `permission_resolved` applied to its prompt message, the ONE place
+  // both clients decide that a Stop-cancelled prompt is `stopped`, not denied.
+  applyPermissionResolved,
+  PERMISSION_STOPPED_REASON,
+  PERMISSION_ABORTED_REASON,
   // #7380 — the one wording for the #2833 already-answered race, shared because
   // the two clients surface it through different channels (toast vs transcript).
   PERMISSION_ALREADY_ANSWERED_NOTICE,
@@ -1083,6 +1088,8 @@ export {
   // #7388 — the ONE "was this permission already answered by a user?" gate,
   // applied by both clients' permission_expired handlers (the #2833 race).
   isPermissionRequestAnswered,
+  // #8374 — the gate for a late permission_expired on a record that already ended.
+  hasPermissionOutcomeRecord,
   firstLivePermissionPrompt,
   livePermissionPrompts,
   countLivePermissionPrompts,

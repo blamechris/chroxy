@@ -883,6 +883,24 @@ describe('conversation-handlers', () => {
       assert.ok(end, 'history_replay_end not sent')
     })
 
+    // #8374: the capabilities a client advertised live on its CLIENT record (the
+    // handler's `client`), not on the raw socket, so the `stopped` -> `expired`
+    // downgrade for a client that cannot label it must read that record.
+    it('sends a stopped permission outcome as stopped only to a client that advertised the capability', async () => {
+      const entry = () => ({ type: 'permission_outcome', requestId: 'p1', tool: 'Bash', description: 'ls', outcome: 'stopped', timestamp: 1, _seq: 1 })
+      const run = async (clientCapabilities) => {
+        const sessions = new Map()
+        sessions.set('s1', { session: createMockSession(), name: 'S', cwd: '/tmp' })
+        const ctx = makeCtx(sessions)
+        ctx.sessions.sessionManager.getFullHistoryAsync = createSpy(async () => ({ entries: [entry()], source: 'ring', truncated: false }))
+        const client = makeClient({ activeSessionId: 's1', clientCapabilities })
+        await conversationHandlers.request_full_history(makeWs(), client, {}, ctx)
+        return ctx._sent.find((m) => m.type === 'permission_outcome')
+      }
+      assert.equal((await run(new Set(['permission_outcome_stopped_v1']))).outcome, 'stopped')
+      assert.equal((await run(new Set())).outcome, 'expired')
+    })
+
     // #7340: `history_replay_start` makes both clients WIPE `activeAgents`, and
     // nothing replayed from history puts it back — a confirmed-backgrounded
     // subagent now outlives its turn, so the wipe would silently empty the badge

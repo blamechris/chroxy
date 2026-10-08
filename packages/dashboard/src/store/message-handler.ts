@@ -90,11 +90,13 @@ import {
   // #7388 — one predicate for "was this permission already answered?", shared
   // with the app so the #2833 suppression cannot drift between the two clients.
   isPermissionRequestAnswered,
+  hasPermissionOutcomeRecord,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — dashboard adopts the shared permission family + the remaining
   // both-sides duplicates
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
+  applyPermissionResolved,
   handlePermissionTimeout as sharedPermissionTimeout,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
@@ -3016,13 +3018,15 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   // #5454: payload parse shared via store-core (same handler the app uses);
   // the flat-messages fallback and #5008 mark-read banner draining below are
   // dashboard-specific.
-  const { requestId: resolvedRequestId, decision: resolvedDecision } =
-    sharedPermissionResolved(msg);
+  const resolved = sharedPermissionResolved(msg);
+  const { requestId: resolvedRequestId } = resolved;
   if (resolvedRequestId) {
+    // #8374: a prompt Stop cancelled becomes a `stopped` record, not an answered
+    // deny. Shared with the app, so the two cannot disagree.
     const updater = (ss: { messages: ChatMessage[] }) => ({
       messages: ss.messages.map((m) =>
         m.requestId === resolvedRequestId && m.type === 'prompt'
-          ? { ...m, answered: resolvedDecision ?? undefined, answeredAt: Date.now(), options: undefined }
+          ? applyPermissionResolved(m, resolved, Date.now())
           : m
       ),
     });
@@ -6211,6 +6215,21 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           expiredRequestId,
           get().messages,
         );
+        // #8374: a record that already ENDED without a user decision (`stopped`,
+        // `expired`) is as immune to a late expiry as an answered one, but must not
+        // be told "your response was already recorded" -- none was. A Stop that
+        // beat a stale Allow from another device is exactly this race.
+        if (!alreadyAnswered && hasPermissionOutcomeRecord(get().sessionStates, expiredRequestId, get().messages)) {
+          const readStamp = Date.now();
+          set((s) => ({
+            sessionNotifications: s.sessionNotifications.map((n) =>
+              n.requestId === expiredRequestId && n.readAt === undefined
+                ? { ...n, readAt: readStamp }
+                : n
+            ),
+          }));
+          break;
+        }
         if (alreadyAnswered) {
           // #5008 — drain the banner stack without dropping the row from the
           // widget's durable history. See handlePermissionResolved for the

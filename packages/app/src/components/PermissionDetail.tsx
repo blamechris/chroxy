@@ -597,12 +597,27 @@ export function PermissionPill({
  * `allowed` / `denied` read like the pill a live answered card collapses to;
  * `expired` (no decision) reads like the dashboard's dismissed-expired record, so
  * the two clients tell the same story: "Permission expired — Bash: ls — dropped".
+ * `stopped` (#8374, the user pressed Stop while it was open) says so the same
+ * way: "Permission stopped — Bash: ls — not run".
  */
 export function PermissionOutcomeRecord({ message }: { message: ChatMessage }) {
   const outcome = message.permissionOutcome;
   const detail = message.content?.trim() || message.tool || 'Permission requested';
   if (outcome === 'expired') {
     const text = `Permission expired \u2014 ${detail} \u2014 dropped`;
+    return (
+      <View
+        style={[styles.permissionPill, styles.permissionPillExpired]}
+        accessibilityRole="text"
+        accessibilityLabel={text}
+        testID={`permission-outcome-${message.id}`}
+      >
+        <Text style={styles.permissionPillTextExpired} numberOfLines={3}>{text}</Text>
+      </View>
+    );
+  }
+  if (outcome === 'stopped') {
+    const text = `Permission stopped \u2014 ${detail} \u2014 not run`;
     return (
       <View
         style={[styles.permissionPill, styles.permissionPillExpired]}

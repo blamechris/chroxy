@@ -1343,6 +1343,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               pairingId: pairId,
               protocolVersion: CLIENT_PROTOCOL_VERSION,
               deviceInfo: { deviceId, ...info },
+              // #8374: without this a freshly paired phone records an EMPTY
+              // capability set (ws-auth.js's pair branch) and the server downgrades
+              // every replayed `stopped` outcome to `expired` for it.
+              capabilities: CLIENT_CAPABILITIES.mobile,
             }));
           } else {
             // #5555 (eager key exchange) — generate this connection's ephemeral

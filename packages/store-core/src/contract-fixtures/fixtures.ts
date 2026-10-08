@@ -2751,6 +2751,111 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    // #8374 — the stale-response race. Mobile sends Allow while desktop presses Stop; Stop
+    // wins at the server, and mobile then gets permission_expired for its stale
+    // response. A stopped record carries no `answered` token (Stop is not a user
+    // decision), so the answered-gate misses it and the card gained "(Expired — …)"
+    // while the replayed record has no such text.
+    //
+    // MUTATION THAT MUST GO RED: drop `hasPermissionOutcomeRecord` from either
+    // client's permission_expired handler and that client appends the expired
+    // suffix to the finished record -- text a replay then removes.
+    name: 'permission_expired leaves a stopped outcome record untouched, with no reassurance either',
+    type: 'permission_expired',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              permissionOutcome: 'stopped',
+              expiresAt: 1,
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'permission_expired',
+      requestId: 'req-1',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+            },
+          ],
+        },
+      },
+      // No decision was made, so nothing was "already recorded": neither the
+      // dashboard's toast nor the app's transcript line applies.
+      infoNotifications: [],
+    },
+  },
+  {
+    // #8374 — a late permission_expired on a record the replay already ended as
+    // `expired` must not decorate it a second time either.
+    //
+    // MUTATION THAT MUST GO RED: drop `hasPermissionOutcomeRecord` from either
+    // client's permission_expired handler and that client appends the expired
+    // suffix to the finished record -- text a replay then removes.
+    name: 'permission_expired leaves an expired outcome record untouched, with no reassurance either',
+    type: 'permission_expired',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              permissionOutcome: 'expired',
+              expiresAt: 1,
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'permission_expired',
+      requestId: 'req-1',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+            },
+          ],
+        },
+      },
+      // No decision was made, so nothing was "already recorded": neither the
+      // dashboard's toast nor the app's transcript line applies.
+      infoNotifications: [],
+    },
+  },
+  {
     // #7388 / #7380 — the INVERSE input, and the reason the gate is
     // `isPermissionDecision` rather than `answered !== undefined`.
     // `history_replay_end` blanket-stamps the placeholder `answered: '(resolved)'`

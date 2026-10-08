@@ -294,6 +294,13 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
 }
 
 /**
+ * #8374: the client capability that says "I can label a `permission_outcome` whose
+ * outcome is `stopped`". Advertised in the auth handshake (CLIENT_CAPABILITIES in
+ * @chroxy/protocol).
+ */
+const CAPABILITY_PERMISSION_OUTCOME_STOPPED = 'permission_outcome_stopped_v1'
+
+/**
  * Write ONE history entry to a client, the way BOTH replay paths must.
  *
  * Two things happen per entry, and both were forgotten by the second copy of
@@ -330,8 +337,11 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
  * @param {WebSocket} ws
  * @param {string} sessionId
  * @param {object} entry - A ring-buffer entry, possibly carrying `_seq`.
+ * @param {{clientCapabilities?: Set<string>}|null} [client] - The client RECORD
+ *   (`clients.get(ws)`), which is where the auth handshake stores the capabilities
+ *   it advertised. NOT `ws`: that is the raw socket and carries none (#8374).
  */
-export function sendHistoryEntry(send, ws, sessionId, entry) {
+export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
   // `sourceToolUseId` (#8336) is server-internal: it lets the restore-time sweep
   // pair a recorded question with its tool_start, and no client reads it. Live
   // broadcasts never carry it (the event normalizer picks fields), so the replay
@@ -340,6 +350,15 @@ export function sendHistoryEntry(send, ws, sessionId, entry) {
   // leave an answered question unmarked, and a replayed question reads as resolved
   // on the client already.
   const { _seq, sourceToolUseId: _sourceToolUseId, answered: _answered, ...wireEntry } = entry
+  // #8374: a client build from before `stopped` existed drops a `permission_outcome`
+  // whose outcome it cannot parse, and a full rebuild then loses the record
+  // altogether. Say `expired` to a client that did not advertise it can label the
+  // new value: the record survives, only its label degrades. The stored entry is
+  // untouched (`wireEntry` is a copy), so a capable client still gets `stopped`.
+  if (wireEntry.type === 'permission_outcome' && wireEntry.outcome === 'stopped'
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_PERMISSION_OUTCOME_STOPPED) ?? false)) {
+    wireEntry.outcome = 'expired'
+  }
   send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
   if (entry && entry.type === 'result') {
     send(ws, { type: 'agent_idle', sessionId })
@@ -1714,7 +1733,7 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // (#7459), and the bufferedAmount gating (#7460) were each missing there.
   sendChunkedWithBackpressure(ws, history, {
     startOffset,
-    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry),
+    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry, client),
     onDone: finishReplay,
   })
 }

@@ -15,7 +15,7 @@ import { Text } from 'react-native';
 import { MessageBubble } from '../chat/MessageBubble';
 import type { ChatMessage } from '../../store/types';
 
-function makeOutcome(outcome: 'allowed' | 'denied' | 'expired', overrides: Partial<ChatMessage> = {}): ChatMessage {
+function makeOutcome(outcome: 'allowed' | 'denied' | 'expired' | 'stopped', overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
     id: 'perm-out-1',
     type: 'prompt',
@@ -68,13 +68,21 @@ describe('MessageBubble permission outcome record (#8348)', () => {
     expect(text(tree.root)).toContain('dropped');
   });
 
+  it('#8374: renders a stopped outcome as its own record, neither Denied nor expired', () => {
+    const tree = render(makeOutcome('stopped'));
+    const record = tree.root.findByProps({ testID: 'permission-outcome-perm-out-1' });
+    expect(record.props.accessibilityLabel).toBe('Permission stopped \u2014 Bash: Commit the restructured fix \u2014 not run');
+    expect(text(tree.root)).toContain('Permission stopped');
+    expect(text(tree.root)).not.toMatch(/Denied|expired/);
+  });
+
   it('renders allowed and denied outcomes with their decision', () => {
     expect(text(render(makeOutcome('allowed')).root)).toMatch(/Allowed: Bash: Commit the restructured fix/);
     expect(text(render(makeOutcome('denied')).root)).toMatch(/Denied: Bash: Commit the restructured fix/);
   });
 
   it('offers no controls: no Allow/Deny, no countdown, no expand', () => {
-    for (const outcome of ['allowed', 'denied', 'expired'] as const) {
+    for (const outcome of ['allowed', 'denied', 'expired', 'stopped'] as const) {
       const tree = render(makeOutcome(outcome));
       expect(tree.root.findAllByProps({ accessibilityRole: 'button' })).toHaveLength(0);
       expect(tree.root.findAllByProps({ accessibilityRole: 'timer' })).toHaveLength(0);

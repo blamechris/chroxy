@@ -382,6 +382,7 @@ export declare const ServerPermissionResolvedSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_resolved">;
     requestId: z.ZodString;
     decision: z.ZodString;
+    reason: z.ZodOptional<z.ZodString>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 /**
@@ -398,12 +399,14 @@ export declare const ServerPermissionResolvedSchema: z.ZodObject<{
  *   - `tool` / `description` -- what the client was shown when the prompt was
  *     raised (the description was redacted and capped then; the server clips it
  *     again, to 100 / 500 characters). No raw tool input is recorded.
- *   - `outcome` -- `allowed`, `denied`, or `expired` (no decision was made: it
- *     timed out, the turn ended or was stopped, or the session cleared it).
+ *   - `outcome` -- `allowed`, `denied`, `stopped` (the user pressed Stop while it
+ *     was open, #8374), or `expired` (no decision was made: it timed out, the
+ *     turn ended, or the session cleared it).
  *   - `timestamp` -- when the server recorded it (ms since the epoch).
  *   - `sessionId` / `historySeq` -- stamped by the replay, like every entry.
  */
 export declare const PermissionOutcomeSchema: z.ZodEnum<{
+    stopped: "stopped";
     expired: "expired";
     allowed: "allowed";
     denied: "denied";
@@ -414,6 +417,7 @@ export declare const ServerPermissionOutcomeSchema: z.ZodObject<{
     tool: z.ZodString;
     description: z.ZodString;
     outcome: z.ZodEnum<{
+        stopped: "stopped";
         expired: "expired";
         allowed: "allowed";
         denied: "denied";

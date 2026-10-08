@@ -2376,9 +2376,10 @@ const ALLOW_TOKENS: readonly string[] = ['allow', 'allowAlways', 'allowSession']
  *     the user chose (`allowSession`, `allowAlways`) is kept; anything else,
  *     including a card that merely ran out its own countdown, takes the plain
  *     token. `answeredAt` is kept when the card had one.
- *   - `expired`: no decision was made, so `answered` is cleared, and with it a
- *     deny the client inferred from a timeout. A countdown still running is
- *     closed (`expiresAt` moves to now); one that already ended keeps its time.
+ *   - `expired` / `stopped` (#8374): no decision was made, so `answered` is
+ *     cleared, and with it a deny the client inferred from a timeout or a Stop.
+ *     A countdown still running is closed (`expiresAt` moves to now); one that
+ *     already ended keeps its time.
  *
  * Returns `held` itself when it already is exactly that, so a repeat delivery
  * does not rewrite the message.
@@ -2392,7 +2393,7 @@ function reconcileHeldPermissionCard(held: ChatMessage, record: ChatMessage, now
     permissionOutcome: outcome,
     options: undefined,
   }
-  if (outcome === 'expired') {
+  if (outcome === 'expired' || outcome === 'stopped') {
     base.answered = undefined
     base.answeredAt = undefined
     if (held.expiresAt !== undefined) base.expiresAt = Math.min(held.expiresAt, now)

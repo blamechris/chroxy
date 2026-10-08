@@ -3644,7 +3644,7 @@ describe('@chroxy/protocol schemas', () => {
   describe('#8348 — permission_outcome (the durable record of a finished prompt)', () => {
     it('ServerPermissionOutcomeSchema accepts a replayed entry in each outcome', async () => {
       const { ServerPermissionOutcomeSchema } = await import('../src/schemas/server/stream.ts')
-      for (const outcome of ['allowed', 'denied', 'expired']) {
+      for (const outcome of ['allowed', 'denied', 'expired', 'stopped']) {
         const r = ServerPermissionOutcomeSchema.safeParse({
           type: 'permission_outcome', requestId: 'perm-1', tool: 'Bash', description: 'ls -la',
           outcome, timestamp: 1700000000000, sessionId: 's1', historySeq: 7,
@@ -3652,6 +3652,17 @@ describe('@chroxy/protocol schemas', () => {
         assert.ok(r.success, `outcome ${outcome} must parse`)
         assert.equal(r.data.historySeq, 7, 'historySeq survives parsing (the replay cursor reads it)')
       }
+    })
+
+    it('#8374: ServerPermissionResolvedSchema carries an optional reason through parsing', async () => {
+      const { ServerPermissionResolvedSchema } = await import('../src/schemas/server/stream.ts')
+      const base = { type: 'permission_resolved', requestId: 'req-1', decision: 'deny', sessionId: 's1' }
+      const withReason = ServerPermissionResolvedSchema.safeParse({ ...base, reason: 'aborted' })
+      assert.ok(withReason.success)
+      assert.equal(withReason.data.reason, 'aborted', 'the reason must survive parsing, not be stripped')
+      const without = ServerPermissionResolvedSchema.safeParse(base)
+      assert.ok(without.success, 'reason is optional: the hook route and other-client broadcasts carry none')
+      assert.equal('reason' in without.data, false)
     })
 
     it('ServerPermissionOutcomeSchema rejects an unknown outcome and a missing requestId', async () => {
