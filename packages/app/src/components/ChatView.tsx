@@ -29,6 +29,7 @@ import { insertCompactionMarkers } from './insertCompactionMarkers';
 import { buildChatViewMessages, isRetryableAskUserQuestionError } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { usePermissionAnnouncer } from '../hooks/usePermissionAnnouncer';
+import type { PermissionEditedInput } from '@chroxy/store-core';
 
 // -- Props --
 
@@ -54,7 +55,7 @@ export interface ChatViewProps {
   // #6543 (feature B): the optional 5th `editedInput` carries a Write/Edit
   // pre-write-diff narrowing straight through to SessionScreen's handler (ChatView
   // forwards the ref unchanged); null/omitted for every other prompt.
-  onSelectOption: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string, editedInput?: Record<string, string> | null) => void;
+  onSelectOption: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string, editedInput?: PermissionEditedInput | null) => void;
   /**
    * #4973 — submit handler for the multi-question AskUserQuestion form.
    * Fires with the per-question answers map; SessionScreen forwards it to

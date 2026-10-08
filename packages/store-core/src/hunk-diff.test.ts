@@ -5,7 +5,8 @@
  * subset application, edge cases, and the size guard.
  */
 import { describe, it, expect } from 'vitest'
-import { computeHunks, applyHunks, MAX_DIFF_LINES } from './hunk-diff'
+import { computeHunks as protocolComputeHunks } from '@chroxy/protocol'
+import { computeHunks, applyHunks, hunkDecisions, MAX_DIFF_LINES } from './hunk-diff'
 
 /** Assert the two round-trip invariants for a case. */
 function assertRoundTrip(original: string, proposed: string) {
@@ -141,5 +142,63 @@ describe('applyHunks robustness + size guard (#6542)', () => {
     // still round-trips through the fallback shape
     expect(applyHunks(big, hunks, () => true)).toBe(bigChanged)
     expect(applyHunks(big, hunks, () => false)).toBe(big)
+  })
+})
+
+describe('hunkDecisions (#8446)', () => {
+  // The same fixture is driven through the server's permission path in
+  // packages/server/tests/edited-input-redaction.test.js, which hard-codes these
+  // ranges: a change to the differ's output or to this helper fails here first.
+  const SECRET = 'sk-' + 'Ab12'.repeat(12)
+  const oldLines = Array.from({ length: 30 }, (_, i) => `line${String(i).padStart(2, '0')}`)
+  oldLines[12] = `const apiKey = "${SECRET}"`
+  const newLines = [...oldLines]
+  newLines[1] = 'line01 CHANGED'
+  newLines[27] = 'line27 CHANGED'
+  // What the reviewing client holds: the REDACTED copy of the tool input.
+  const redact = (s: string) => s.replace(SECRET, '[REDACTED]')
+  const hunks = computeHunks(oldLines.map(redact).join('\n'), newLines.map(redact).join('\n'))
+  const A = { oldStart: 1, oldCount: 5, newStart: 1, newCount: 5 }
+  const B = { oldStart: 25, oldCount: 6, newStart: 25, newCount: 6 }
+
+  it('splits EVERY hunk into dropped and kept by the operator\'s choice', () => {
+    expect(hunks.map((h) => h.header)).toEqual(['@@ -1,5 +1,5 @@', '@@ -25,6 +25,6 @@'])
+    expect(hunkDecisions(hunks, new Set([0]))).toEqual({ droppedHunks: [B], keptHunks: [A] })
+    expect(hunkDecisions(hunks, new Set([1]))).toEqual({ droppedHunks: [A], keptHunks: [B] })
+    expect(hunkDecisions(hunks, [0, 1])).toEqual({ droppedHunks: [], keptHunks: [A, B] })
+    expect(hunkDecisions(hunks, new Set())).toEqual({ droppedHunks: [A, B], keptHunks: [] })
+  })
+
+  it('hunks that change the line count: the new-side ranges are not the old-side ranges', () => {
+    // 1 line -> 3 at the top, one line deleted near the end. Mirrored by the
+    // "line count" cases in the server test.
+    const grown = [...oldLines]
+    grown.splice(27, 1)
+    grown.splice(1, 1, 'line01 CHANGED', 'extra1', 'extra2')
+    const h = computeHunks(oldLines.map(redact).join('\n'), grown.map(redact).join('\n'))
+    expect(h.map((x) => x.header)).toEqual(['@@ -1,5 +1,7 @@', '@@ -25,6 +27,5 @@'])
+    expect(hunkDecisions(h, new Set()).droppedHunks).toEqual([
+      { oldStart: 1, oldCount: 5, newStart: 1, newCount: 7 },
+      { oldStart: 25, oldCount: 6, newStart: 27, newCount: 5 },
+    ])
+  })
+
+  it('a new file is one hunk whose old side is empty', () => {
+    const h = computeHunks('', 'a\nb\nc')
+    expect(hunkDecisions(h, new Set())).toEqual({
+      droppedHunks: [{ oldStart: 0, oldCount: 0, newStart: 1, newCount: 3 }],
+      keptHunks: [],
+    })
+  })
+
+  it('never carries text: only numbers leave the client', () => {
+    const json = JSON.stringify(hunkDecisions(hunks, new Set([0])))
+    expect(json.includes('line') || json.includes('REDACTED')).toBe(false)
+  })
+})
+
+describe('the differ is shared with the server (#8446)', () => {
+  it('store-core\'s computeHunks IS @chroxy/protocol\'s: the server recomputes the client\'s hunks with the same function', () => {
+    expect(computeHunks).toBe(protocolComputeHunks)
   })
 })

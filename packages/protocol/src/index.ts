@@ -119,6 +119,9 @@ export * from './thinking-levels.ts'
 
 // #7822: one canonical serializer keeps the dashboard and mobile wire shape
 // identical as optional selected-context fields are negotiated.
+export { computeHunks, splitContentLines, DEFAULT_CONTEXT_LINES, MAX_DIFF_LINES } from './hunk-diff.ts'
+export type { DiffHunk, DiffHunkLine } from './hunk-diff.ts'
+
 export { buildInputMessage } from './input.ts'
 export type { BuildInputMessageOptions } from './input.ts'
 

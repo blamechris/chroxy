@@ -10,6 +10,7 @@
  *
  * Desktop web port: React Native / Expo dependencies replaced with browser APIs.
  */
+import type { PermissionEditedInput } from '@chroxy/store-core'
 import { create } from 'zustand';
 
 // Re-export server registry types
@@ -4388,7 +4389,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null, reason?: string) => {
+  sendPermissionResponse: (requestId: string, decision: PermissionDecision, editedInput?: PermissionEditedInput | null, reason?: string) => {
     const { socket } = get();
     // #5699 — refuse to answer a permission prompt while disconnected. A
     // permission request is NOT safely queueable: the server expires the pending
