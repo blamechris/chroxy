@@ -1,3 +1,5 @@
+import { isTurnTerminationReason, describeTurnTermination } from '@chroxy/protocol'
+
 // Max size for tool result text forwarded to mobile (10KB)
 export const MAX_TOOL_RESULT_SIZE = 10240
 
@@ -80,6 +82,24 @@ export function emitToolResults(content, emitter, maxSize = MAX_TOOL_RESULT_SIZE
 
     if (images.length > 0) {
       event.images = images
+    }
+
+    // #8363: the provider wrote this result itself because Stop cancelled the
+    // tool's pending permission prompt -- its text says the USER declined, which
+    // is false. The session names the real cause; the result then says so (the
+    // clients render the shared wording and hide this text for a terminated tool)
+    // and carries the same `terminatedReason` the turn-end sweep stamps (#7376).
+    // Only a BaseSession-derived emitter that overrides the hook can ask; for
+    // anything else this is a no-op.
+    if (typeof emitter._terminatedReasonForToolResult === 'function') {
+      const reason = emitter._terminatedReasonForToolResult(block.tool_use_id, block)
+      if (isTurnTerminationReason(reason)) {
+        event.terminatedReason = reason
+        event.result = describeTurnTermination(reason).summary
+        event.truncated = false
+        event.isError = true
+        delete event.images
+      }
     }
 
     // #7346: backfill the finalized tool input recorded via

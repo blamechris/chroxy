@@ -64,12 +64,33 @@ describe('describeTurnTermination (#7376)', () => {
   })
 
   it('no reason asserts the tool did not run or tells the user to blindly re-send (the server cannot know)', () => {
-    for (const r of [...TURN_TERMINATION_REASONS, 'from_the_future', undefined]) {
+    // The one exception is a Stop pressed while the tool's permission prompt was
+    // still pending (#8363): the tool was never approved, so the server DOES know.
+    const KNOWN_NOT_RUN = ['user_stop_before_run']
+    for (const r of [...TURN_TERMINATION_REASONS.filter((x) => !KNOWN_NOT_RUN.includes(x)), 'from_the_future', undefined]) {
       const { summary } = describeTurnTermination(r)
       assert.equal(/did not (finish|run|execute)/i.test(summary), false, `${String(r)}: ${summary}`)
       assert.equal(/Re-send to retry/.test(summary), false, `${String(r)}: ${summary}`)
       assert.ok(/check/i.test(summary), `${String(r)}: ${summary}`)
     }
+  })
+
+  it('a Stop on a pending permission says the tool never ran and was not refused (#8363)', () => {
+    const d = describeTurnTermination('user_stop_before_run')
+    assert.equal(d.label, 'stopped')
+    assert.ok(/^Stopped before this tool ran/.test(d.summary), d.summary)
+    assert.ok(/Stop/.test(d.summary) && /never approved/.test(d.summary), d.summary)
+    // the provider's own text for the cancelled prompt is what this replaces
+    assert.equal(/doesn't want|refus|declin|den(y|ied)/i.test(d.summary), false, d.summary)
+  })
+
+  it('only Stop reasons are badged "stopped"; every other termination keeps "terminated"', () => {
+    for (const r of TURN_TERMINATION_REASONS) {
+      const want = r === 'user_stop' || r === 'user_stop_before_run' ? 'stopped' : 'terminated'
+      assert.equal(describeTurnTermination(r).label, want, r)
+    }
+    assert.equal(describeTurnTermination('from_the_future').label, 'terminated')
+    assert.equal(describeTurnTermination(undefined).label, 'terminated')
   })
 
   it('a daemon restart does NOT claim the tool failed to run (the outcome is unknown)', () => {
