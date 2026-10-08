@@ -54,7 +54,11 @@ function writeTranscript(dirCwd = cwdReal, id = SESSION_ID) {
 
 function makeSession(ctorOpts = {}) {
   const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-8239-skills-'))
-  const s = new ClaudeTuiSession({ cwd, skillsDir, repoSkillsDir: null, ...ctorOpts })
+  // Hermetic on every host: with a real `claude` on PATH the pre-spawn login
+  // probe would run `claude auth status` against the temp HOME, answer
+  // logged-out, and refuse the spawn with AUTH_REQUIRED.
+  const loginProbeRunner = async () => ({ status: 0, stdout: '{"loggedIn":true}', stderr: '' })
+  const s = new ClaudeTuiSession({ cwd, skillsDir, repoSkillsDir: null, loginProbeRunner, ...ctorOpts })
   s._waitForPrompt = async () => true
   s._sessionId = ctorOpts.resumeSessionId || SESSION_ID
   s._settingsPath = join(tmpdir(), 'fixture-settings-8239.json')
@@ -93,9 +97,15 @@ function makeSession(ctorOpts = {}) {
 // claude's Stop hook does.
 async function completeTurnViaStopHook(session, control) {
   session._processReady = true
-  const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-8239-sink-'))
+  // The sink dir's PARENT is the hook-sink base, which the poll re-validates as
+  // owned by this uid (`sink_base_compromised` otherwise, and the Stop hook is
+  // never read). A bare tmpdir() is the user's own on macOS but root's on Linux,
+  // so nest under a base this process owns, as the real SINK_BASE is.
+  const sinkBase = mkdtempSync(join(tmpdir(), 'chroxy-8239-sinkbase-'))
+  const sinkDir = join(sinkBase, 's-test')
+  mkdirSync(sinkDir, { recursive: true, mode: 0o700 })
   session._sinkDir = sinkDir
-  cleanups.push(() => rmSync(sinkDir, { recursive: true, force: true }))
+  cleanups.push(() => rmSync(sinkBase, { recursive: true, force: true }))
   session._hardTimeoutMs = 5000
   session._resultTimeoutMs = 5000
   control.terms[0].write = () => {
@@ -313,6 +323,14 @@ describe('hasPersistedTranscript (#8239)', () => {
     } finally {
       chmodSync(projects, 0o700)
     }
+  })
+
+  it('fails safe when the expected project key is too long to stat (ENAMETOOLONG is not "never saved")', () => {
+    // claude shortens long project keys itself, so the file sits under a name
+    // this probe cannot derive; the first stat throws ENAMETOOLONG, which must
+    // read as "could not look", not "absent".
+    mkdirSync(join(fakeHome, '.claude', 'projects'), { recursive: true })
+    assert.equal(hasPersistedTranscript('/' + 'a'.repeat(300), SESSION_ID), true)
   })
 
   it('fails safe when the expected project dir cannot be stat-ed (EACCES is not "never saved")', () => {
