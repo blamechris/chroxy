@@ -6,6 +6,7 @@
 pub mod config;
 pub mod discovery;
 pub mod node;
+pub mod owned_server;
 pub mod platform;
 pub mod qrcode;
 pub mod server;
@@ -16,7 +17,7 @@ pub mod tray_state;
 pub mod speech;
 pub mod window;
 
-use server::{ServerManager, ServerStatus, StartOrigin};
+use server::{ServerManager, ServerStatus, StartOrigin, StartOutcome};
 use settings::DesktopSettings;
 use tray_state::{is_chroxy_health, MenuState, PortState, TrayPlan, UserAction};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1435,16 +1436,7 @@ pub fn run() {
                         let token = config.api_token.clone();
                         std::thread::spawn(move || {
                             if probe_external_health(port) {
-                                match token {
-                                    Some(t) => window::emit_server_ready(&app_handle, port, Some(&t)),
-                                    None => window::emit_server_error(
-                                        &app_handle,
-                                        &format!(
-                                            "A server is running on port {} but no access token was found. Pair the app or paste a token in Settings.",
-                                            port
-                                        ),
-                                    ),
-                                }
+                                show_adopted_daemon(&app_handle, port, token.as_deref());
                             } else {
                                 window::emit_server_error(
                                     &app_handle,
@@ -1996,27 +1988,50 @@ fn app_server_active(app: &tauri::AppHandle) -> bool {
 
 /// User-initiated Start (tray, app menu, dashboard command). Refuses to start a
 /// second server on a port something else already holds (#8267), and the start it
-/// does run is [`StartOrigin::User`], which never kills a port holder, so a
-/// daemon that appears between the probe and the spawn is not killed either (it
-/// fails with EADDRINUSE instead). The launch-time auto-start calls
-/// [`handle_start`] with [`StartOrigin::Launch`] and still reclaims a stale orphan.
+/// does run is [`StartOrigin::User`], which never stops a port holder, so a
+/// daemon that appears between the probe and the spawn is not stopped either (it
+/// fails with EADDRINUSE instead). Runs under [`START_RESTART_GATE`]: a second
+/// Start or Restart while one is in flight is refused with a notification.
+///
+/// The launch-time auto-start calls [`handle_start`] with [`StartOrigin::Launch`]:
+/// it stops only an orphan of the app's own server, adopts a chroxy daemon it did
+/// not start, and fails on a foreign holder (#8388).
 ///
 /// Probes live rather than trusting the watcher's last sample, which can be up to
 /// one interval old; runs off the caller's thread because the probe can block.
 fn handle_start_checked(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        tray_state::run_guarded_user_start(
-            UserAction::Start,
-            app_server_active(&app),
-            || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
-            |held, msg| {
-                update_port_state(&app, held);
-                send_notification(&app, "Cannot Start Server", &msg);
+        tray_state::run_exclusive(
+            &START_RESTART_GATE,
+            || notify_operation_in_progress(&app),
+            || {
+                tray_state::run_guarded_user_start(
+                    UserAction::Start,
+                    app_server_active(&app),
+                    || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
+                    |held, msg| {
+                        update_port_state(&app, held);
+                        send_notification(&app, "Cannot Start Server", &msg);
+                    },
+                    || handle_start(&app, StartOrigin::User),
+                );
             },
-            || handle_start(&app, StartOrigin::User),
         );
     });
+}
+
+/// One user Start or Restart (and one crash auto-restart) at a time. They hold
+/// the server-manager lock for different stretches, so the lock alone would let
+/// a second one tear down the server the first had just spawned (#8393).
+static START_RESTART_GATE: tray_state::OpGate = tray_state::OpGate::new();
+
+fn notify_operation_in_progress(app: &tauri::AppHandle) {
+    send_notification(
+        app,
+        "Server Busy",
+        "A start or restart is already in progress. Try again in a moment.",
+    );
 }
 
 fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
@@ -2058,12 +2073,13 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
         mgr.set_tunnel_mode(effective_mode);
         mgr.set_node_path(node_path.as_deref());
         mgr.set_expose_on_lan(expose_on_lan);
-        mgr.set_origin(origin);
-        mgr.start()
+        mgr.start(origin)
     };
 
     match result {
-        Ok(()) => {
+        // An automatic start found a healthy daemon it did not start (#8388).
+        Ok(StartOutcome::Adopted(port)) => adopt_external_daemon(app, port),
+        Ok(StartOutcome::Spawned) => {
             update_menu_state(app, MenuState::Running);
 
             // Show window immediately (loading page shows spinner)
@@ -2128,11 +2144,36 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
                             std::thread::sleep(backoff);
 
                             // Attempt restart
-                            let state = app_handle.state::<Mutex<ServerManager>>();
-                            let mut mgr = lock_or_recover(&state);
-                            match mgr.try_auto_restart() {
-                                Ok(()) => {
-                                    drop(mgr);
+                            // A user Start/Restart in flight is already doing this
+                            // work, and a second restart would tear down the server
+                            // it just spawned: leave the crash for the next pass.
+                            let Some(permit) = START_RESTART_GATE.try_acquire() else {
+                                continue;
+                            };
+                            let outcome = {
+                                let state = app_handle.state::<Mutex<ServerManager>>();
+                                let mut mgr = lock_or_recover(&state);
+                                // The user's action may have recovered the server
+                                // while this thread slept through the backoff.
+                                if !(mgr.is_auto_restart_pending()
+                                    && matches!(mgr.status(), ServerStatus::Error(_)))
+                                {
+                                    continue;
+                                }
+                                // Explicitly `Launch`: nobody is watching, so it may
+                                // clear an orphan of the app's own server, and
+                                // nothing else. A daemon that took the port after
+                                // the crash is adopted or refused, never replaced
+                                // (#8388).
+                                mgr.try_auto_restart(StartOrigin::Launch)
+                            };
+                            drop(permit);
+                            match outcome {
+                                Ok(StartOutcome::Adopted(port)) => {
+                                    adopt_external_daemon(&app_handle, port);
+                                    return;
+                                }
+                                Ok(StartOutcome::Spawned) => {
                                     // Wait for server to reach Running again
                                     let recovered =
                                         monitor_startup(&app_handle, StartupContext::Restart);
@@ -2157,18 +2198,14 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
                                     }
                                     // Continue loop — will check for more crashes
                                 }
-                                Err(_) => {
-                                    drop(mgr);
+                                Err(e) => {
                                     update_menu_state(&app_handle, MenuState::Stopped);
-                                    window::emit_server_error(
-                                        &app_handle,
-                                        "Auto-restart failed. Use tray menu to restart manually.",
+                                    let msg = format!(
+                                        "Auto-restart failed: {} Use tray menu to restart manually.",
+                                        e
                                     );
-                                    send_notification(
-                                        &app_handle,
-                                        "Server Unrecoverable",
-                                        "Auto-restart failed. Use tray menu to restart manually.",
-                                    );
+                                    window::emit_server_error(&app_handle, &msg);
+                                    send_notification(&app_handle, "Server Unrecoverable", &msg);
                                     return;
                                 }
                             }
@@ -2188,6 +2225,42 @@ fn handle_start(app: &tauri::AppHandle, origin: StartOrigin) {
             window::emit_server_error(app, &e);
             send_notification(app, "Server Error", &e);
         }
+    }
+}
+
+/// An automatic start found a healthy chroxy daemon on the port that this app did
+/// not start (#8388). Nothing was spawned and nothing was stopped: show the tray's
+/// external-daemon state (#8267) and open the daemon's dashboard in the window.
+fn adopt_external_daemon(app: &tauri::AppHandle, port: u16) {
+    update_menu_state(app, MenuState::Stopped);
+    update_port_state(app, PortState::Chroxy(port));
+    send_notification(
+        app,
+        "Using Existing Daemon",
+        &format!(
+            "A chroxy daemon already serves port {}, so the app connected to it instead of starting its own.",
+            port
+        ),
+    );
+    let token = {
+        let state = app.state::<Mutex<ServerManager>>();
+        let token = lock_or_recover(&state).token();
+        token
+    };
+    show_adopted_daemon(app, port, token.as_deref());
+}
+
+/// Point the window at a daemon the app is adopting, or say why it cannot.
+fn show_adopted_daemon(app: &tauri::AppHandle, port: u16, token: Option<&str>) {
+    match token {
+        Some(t) => window::emit_server_ready(app, port, Some(t)),
+        None => window::emit_server_error(
+            app,
+            &format!(
+                "A server is running on port {} but no access token was found. Pair the app or paste a token in Settings.",
+                port
+            ),
+        ),
     }
 }
 
@@ -2215,15 +2288,21 @@ fn handle_stop(app: &tauri::AppHandle) {
 fn handle_restart(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
-        tray_state::run_guarded_user_start(
-            UserAction::Restart,
-            app_server_active(&app),
-            || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
-            |held, msg| {
-                update_port_state(&app, held);
-                send_notification(&app, "Cannot Restart Server", &msg);
+        tray_state::run_exclusive(
+            &START_RESTART_GATE,
+            || notify_operation_in_progress(&app),
+            || {
+                tray_state::run_guarded_user_start(
+                    UserAction::Restart,
+                    app_server_active(&app),
+                    || tray_state::probe_port(config::load_port(), std::time::Duration::from_millis(1500)),
+                    |held, msg| {
+                        update_port_state(&app, held);
+                        send_notification(&app, "Cannot Restart Server", &msg);
+                    },
+                    || restart_own_server(&app),
+                );
             },
-            || restart_own_server(&app),
         );
     });
 }
@@ -2232,12 +2311,14 @@ fn restart_own_server(app: &tauri::AppHandle) {
     let state = app.state::<Mutex<ServerManager>>();
     let result = {
         let mut mgr = lock_or_recover(&state);
-        mgr.set_origin(StartOrigin::User);
-        mgr.restart()
+        mgr.restart(StartOrigin::User)
     };
 
     match result {
-        Ok(()) => {
+        // A user restart never adopts (it never probes for a holder to replace),
+        // but the type allows it and showing the daemon is the right reading.
+        Ok(StartOutcome::Adopted(port)) => adopt_external_daemon(app, port),
+        Ok(StartOutcome::Spawned) => {
             update_menu_state(app, MenuState::Restarting);
 
             // Spawn monitoring thread to verify server reaches Running
@@ -2557,6 +2638,18 @@ fn handle_bring_all_to_front(app: &tauri::AppHandle) {
     window::show_window(app);
 }
 
+/// Enable or disable the "Check for Updates" item. The handle is copied out and
+/// the `TrayMenuItems` lock released BEFORE the setter runs: from an
+/// async-runtime thread the setter waits on the main thread, and the main-thread
+/// render takes that same lock (#8393).
+fn set_check_updates_enabled(app: &tauri::AppHandle, enabled: bool) {
+    if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
+        tray_state::pick_then_act(&items, |i| i.check_updates.clone(), |item| {
+            let _ = item.set_enabled(enabled);
+        });
+    }
+}
+
 fn handle_check_updates(app: &tauri::AppHandle) {
     /// Guard to prevent concurrent update checks.
     static UPDATE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -2570,10 +2663,7 @@ fn handle_check_updates(app: &tauri::AppHandle) {
     }
 
     // Disable the menu item while the check runs.
-    if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
-        let items = lock_or_recover(&items);
-        let _ = items.check_updates.set_enabled(false);
-    }
+    set_check_updates_enabled(app, false);
 
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -2582,10 +2672,7 @@ fn handle_check_updates(app: &tauri::AppHandle) {
         impl Drop for ResetGuard<'_> {
             fn drop(&mut self) {
                 self.0.store(false, Ordering::SeqCst);
-                if let Some(items) = self.1.try_state::<Mutex<TrayMenuItems>>() {
-                    let items = lock_or_recover(&items);
-                    let _ = items.check_updates.set_enabled(true);
-                }
+                set_check_updates_enabled(&self.1, true);
             }
         }
         let _guard = ResetGuard(&UPDATE_IN_FLIGHT, app_handle.clone());

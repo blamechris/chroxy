@@ -250,6 +250,109 @@ pub fn run_guarded_stop(
     }
 }
 
+/// What an AUTOMATIC start (launch-time auto-start, crash auto-restart) does about
+/// the configured port (#8388). Unlike a user click it has nobody to ask, so it
+/// must never stop a process the app did not start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchDecision {
+    /// Nothing holds the port: spawn.
+    Spawn,
+    /// The holder is a server THIS app spawned in an earlier run and lost track
+    /// of (the app was killed, the node child was reparented): stop it, spawn.
+    ReclaimOwnOrphan,
+    /// A healthy chroxy daemon the app did not start owns the port: use it.
+    /// Nothing is spawned and nothing is stopped.
+    Adopt(u16),
+    /// Something that is neither holds the port: spawn nothing, stop nothing.
+    Refuse(PortState),
+}
+
+/// `(what answers on the port, whether the holder is verifiably this app's own
+/// earlier server) -> what to do`.
+///
+/// "Own" outranks everything the probe says: an orphan of ours that is wedged and
+/// no longer answers `/health` is still ours to reclaim, and a healthy one is
+/// reclaimed rather than adopted because the app's child handle is what lets it
+/// stop and restart the server. Without proof of ownership a holder is somebody
+/// else's, whatever it answers.
+pub fn launch_start_decision(held: PortState, holder_is_own_server: bool) -> LaunchDecision {
+    match held {
+        PortState::Free => LaunchDecision::Spawn,
+        _ if holder_is_own_server => LaunchDecision::ReclaimOwnOrphan,
+        PortState::Chroxy(p) => LaunchDecision::Adopt(p),
+        PortState::Foreign(_) => LaunchDecision::Refuse(held),
+    }
+}
+
+/// User-facing explanation of a refused automatic start.
+pub fn launch_refusal_message(held: PortState) -> String {
+    match held {
+        PortState::Foreign(p) => format!(
+            "Port {} is in use by another program, so the server was not started. Free the port, or change it in config.json.",
+            p
+        ),
+        // Not reachable through `launch_start_decision`; kept total so a future
+        // caller gets a sentence rather than a panic.
+        PortState::Chroxy(p) => format!("A chroxy daemon already serves port {}.", p),
+        PortState::Free => "The port is free.".to_string(),
+    }
+}
+
+/// A flag that lets one Start or Restart run at a time. The operations take the
+/// server-manager lock for different stretches, so the lock alone does not stop
+/// the second from tearing down the child the first just spawned.
+pub struct OpGate(std::sync::atomic::AtomicBool);
+
+/// Held while an operation runs; releases the gate on drop, panic included.
+pub struct OpPermit<'a>(&'a OpGate);
+
+impl OpGate {
+    pub const fn new() -> Self {
+        Self(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// `Some` for the one caller that gets in, `None` for everyone while it runs.
+    pub fn try_acquire(&self) -> Option<OpPermit<'_>> {
+        use std::sync::atomic::Ordering;
+        self.0
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| OpPermit(self))
+    }
+}
+
+impl Default for OpGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for OpPermit<'_> {
+    fn drop(&mut self) {
+        self.0 .0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Run `run` only if no other Start/Restart holds `gate`; otherwise `busy`.
+pub fn run_exclusive(gate: &OpGate, busy: impl FnOnce(), run: impl FnOnce()) {
+    match gate.try_acquire() {
+        Some(_permit) => run(),
+        None => busy(),
+    }
+}
+
+/// Read what a setter needs under `mutex`, release it, THEN act. Tauri's menu
+/// setters called off the main thread block until the main thread has run them,
+/// and the main-thread render takes the same lock, so a setter called with the
+/// lock held can deadlock (#8393).
+pub fn pick_then_act<T, U>(mutex: &std::sync::Mutex<T>, pick: impl FnOnce(&T) -> U, act: impl FnOnce(U)) {
+    let picked = {
+        let guard = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        pick(&guard)
+    };
+    act(picked)
+}
+
 /// Probe `/health` on loopback once and classify what holds `port`.
 pub fn probe_port(port: u16, timeout: Duration) -> PortState {
     let url = format!("http://127.0.0.1:{}/health", port);
@@ -503,6 +606,146 @@ mod tests {
         assert!(refusal_message(UserAction::Start, PortState::Chroxy(7)).contains("Open Dashboard"));
         assert!(refusal_message(UserAction::Restart, PortState::Chroxy(7)).contains("service manager"));
         assert!(refusal_message(UserAction::Start, PortState::Foreign(7)).contains("another program"));
+    }
+
+    // --- automatic start (#8388) ------------------------------------------
+
+    #[test]
+    fn automatic_start_spawns_on_a_free_port() {
+        // The ownership flag is irrelevant when nothing holds the port.
+        for own in [false, true] {
+            assert_eq!(launch_start_decision(PortState::Free, own), LaunchDecision::Spawn);
+        }
+    }
+
+    #[test]
+    fn automatic_start_adopts_a_chroxy_daemon_it_did_not_start() {
+        assert_eq!(
+            launch_start_decision(PortState::Chroxy(8765), false),
+            LaunchDecision::Adopt(8765)
+        );
+    }
+
+    #[test]
+    fn automatic_start_refuses_a_foreign_holder_and_never_reclaims_it() {
+        assert_eq!(
+            launch_start_decision(PortState::Foreign(8765), false),
+            LaunchDecision::Refuse(PortState::Foreign(8765))
+        );
+    }
+
+    #[test]
+    fn automatic_start_reclaims_only_a_holder_proven_to_be_its_own() {
+        for held in [PortState::Chroxy(8765), PortState::Foreign(8765)] {
+            assert_eq!(launch_start_decision(held, true), LaunchDecision::ReclaimOwnOrphan, "{:?}", held);
+        }
+    }
+
+    #[test]
+    fn only_proven_ownership_ever_reaches_the_reclaim() {
+        // The kill is reachable from exactly one cell of the table.
+        for held in [PortState::Free, PortState::Chroxy(1), PortState::Foreign(1)] {
+            for own in [false, true] {
+                let reclaims = launch_start_decision(held, own) == LaunchDecision::ReclaimOwnOrphan;
+                assert_eq!(reclaims, own && held.is_occupied(), "{:?} own={}", held, own);
+            }
+        }
+    }
+
+    #[test]
+    fn launch_refusal_names_the_port_and_the_way_out() {
+        let m = launch_refusal_message(PortState::Foreign(7));
+        assert!(m.contains('7') && m.contains("another program") && m.contains("config.json"), "{}", m);
+    }
+
+    // --- Start/Restart exclusion (#8393) ----------------------------------
+
+    #[test]
+    fn a_second_operation_is_refused_while_the_first_runs() {
+        let gate = OpGate::new();
+        let (mut outer_ran, mut inner_ran, mut inner_busy) = (false, false, false);
+        run_exclusive(
+            &gate,
+            || panic!("the first operation must get in"),
+            || {
+                outer_ran = true;
+                run_exclusive(&gate, || inner_busy = true, || inner_ran = true);
+            },
+        );
+        assert!(outer_ran && inner_busy && !inner_ran, "the second run must not start");
+    }
+
+    #[test]
+    fn the_gate_reopens_after_the_operation_finishes() {
+        let gate = OpGate::new();
+        run_exclusive(&gate, || panic!("busy"), || {});
+        let mut ran = false;
+        run_exclusive(&gate, || panic!("must be free again"), || ran = true);
+        assert!(ran);
+    }
+
+    #[test]
+    fn the_gate_reopens_after_the_operation_panics() {
+        let gate = OpGate::new();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_exclusive(&gate, || {}, || panic!("boom"));
+        }));
+        assert!(r.is_err());
+        assert!(gate.try_acquire().is_some(), "a panic must not wedge Start/Restart forever");
+    }
+
+    #[test]
+    fn concurrent_threads_never_both_run() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::mpsc;
+        let gate = std::sync::Arc::new(OpGate::new());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let g = gate.clone();
+        let first = thread::spawn(move || {
+            run_exclusive(
+                &g,
+                || panic!("first must get in"),
+                || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                },
+            );
+        });
+        entered_rx.recv().unwrap();
+        let ran = AtomicU32::new(0);
+        let busy = AtomicU32::new(0);
+        run_exclusive(&gate, || { busy.fetch_add(1, Ordering::SeqCst); }, || { ran.fetch_add(1, Ordering::SeqCst); });
+        release_tx.send(()).unwrap();
+        first.join().unwrap();
+        assert_eq!((ran.load(Ordering::SeqCst), busy.load(Ordering::SeqCst)), (0, 1));
+    }
+
+    // --- pick_then_act: no lock across a setter (#8393) -------------------
+
+    #[test]
+    fn pick_then_act_releases_the_lock_before_acting() {
+        let m = std::sync::Mutex::new(7u32);
+        let mut act_saw_free_lock = false;
+        pick_then_act(&m, |v| *v + 1, |picked| {
+            assert_eq!(picked, 8);
+            act_saw_free_lock = m.try_lock().is_ok();
+        });
+        assert!(act_saw_free_lock, "the setter must run with the lock released");
+    }
+
+    #[test]
+    fn pick_then_act_recovers_a_poisoned_lock() {
+        let m = std::sync::Arc::new(std::sync::Mutex::new(1u32));
+        let m2 = m.clone();
+        let _ = thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("poison");
+        })
+        .join();
+        let mut got = 0;
+        pick_then_act(&m, |v| *v, |v| got = v);
+        assert_eq!(got, 1);
     }
 
     // --- probe_port against real sockets -----------------------------------
