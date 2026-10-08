@@ -83,7 +83,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
-import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyInFlightMarkers, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -3651,6 +3651,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       credentialTestResults: {},
       pendingPairRequests: [],
       serverStartupLogs: null,
+      // #7579 — the daemon-SNAPSHOT roster: the primaries (`orchestrationRuns`,
+      // `scheduledTasks`, `credentialsStatus`, `byokCredentialsStatus`, their
+      // selections and error) whose satellites are cleared just above, and the
+      // Control Room survey readings. Without it a different-daemon `connect()`
+      // (this action is all it reaches, #8207) showed server A's run list and
+      // A's masked key previews beside B's empty satellites. Spread rather than
+      // spelled out so this site and `_resetSessionMemory` cannot drift. NOT in
+      // `disconnect()` and NOT in `auth_ok`'s non-reconnect branch — each member
+      // is still true of the same daemon across a Disconnect → Connect; see
+      // `createEmptyDaemonSnapshots()` for the per-field decisions.
+      ...createEmptyDaemonSnapshots(),
+      // #7625 — the failed-restore roster carries absolute host `cwd`s and
+      // session ids from the old daemon. `disconnect()` and `_resetSessionMemory`
+      // already null it; this site did not, though its own comment on the
+      // `disconnect()` literal calls the pair "BOTH full-reset sites". The
+      // transcript viewer is the same shape of omission: an overlay of a
+      // conversation pulled from the old daemon, nulled by the other two.
+      failedRestores: null,
+      transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
       // #8331: the queued update describes ONE daemon; never carry it to the next.
       daemonUpdate: null,
       daemonUpdateAction: null,
@@ -3836,6 +3855,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       credentialTestResults: {},
       pendingPairRequests: [],
       serverStartupLogs: null,
+      // #7579 — the daemon-SNAPSHOT roster: the primaries (`orchestrationRuns`,
+      // `scheduledTasks`, `credentialsStatus`, `byokCredentialsStatus`, their
+      // selections and error) whose satellites are cleared just above, and the
+      // Control Room survey readings. Without it a different-daemon `connect()`
+      // (see `forgetSession`) showed server A's run list and
+      // A's masked key previews beside B's empty satellites. Spread rather than
+      // spelled out so this site and `_resetSessionMemory` cannot drift. NOT in
+      // `disconnect()` and NOT in `auth_ok`'s non-reconnect branch — each member
+      // is still true of the same daemon across a Disconnect → Connect; see
+      // `createEmptyDaemonSnapshots()` for the per-field decisions.
+      ...createEmptyDaemonSnapshots(),
       // #8331: the queued update describes ONE daemon; never carry it to the next.
       daemonUpdate: null,
       daemonUpdateAction: null,
