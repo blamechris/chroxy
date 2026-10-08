@@ -61,6 +61,11 @@ export const ServerAuthOkSchema = z.object({
     serverMode: z.literal('cli'),
     serverVersion: z.string(),
     latestVersion: z.string().nullable(),
+    // #8268: id of the dashboard bundle the daemon serves now (a hash of its built
+    // index.html). A dashboard page whose own `<meta name="chroxy-build">` differs is
+    // running a bundle from before an update. Optional: older daemons and daemons with
+    // no built dist omit it, and the client then falls back to comparing versions.
+    dashboardBuildId: z.string().optional(),
     serverCommit: z.string(),
     cwd: z.string().nullable(),
     connectedClients: z.array(ClientInfoSchema),

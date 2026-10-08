@@ -365,6 +365,37 @@ describe('App', () => {
     expect(screen.queryByTestId('reconnect-banner')).not.toBeInTheDocument()
   })
 
+  // #8268 — the wiring from the store into the banners and the unsaved-work probe.
+  it('shows "retrying in Ns" and no attempt counter for an uncapped reconnect', () => {
+    stateOverrides = { connectionPhase: 'reconnecting', reconnectUncapped: true, reconnectRetryAt: Date.now() + 8_000, connectionRetryCount: 30 }
+    render(<App />)
+    const text = screen.getByTestId('reconnect-banner').textContent ?? ''
+    expect(text).toMatch(/retrying in \d+s/)
+    expect(text).not.toContain('attempt')
+  })
+
+  it('keeps the attempt counter for a capped reconnect', () => {
+    stateOverrides = { connectionPhase: 'reconnecting', reconnectUncapped: false, connectionRetryCount: 2 }
+    render(<App />)
+    expect(screen.getByTestId('reconnect-banner').textContent).toContain('attempt 2/5')
+  })
+
+  it('shows the persistent "Chroxy was updated" banner and the client version when the page is stale', () => {
+    stateOverrides = {
+      connectionPhase: 'connected', sessions: [], serverVersion: '99.0.0',
+      staleBundle: { clientVersion: '0.11.4', clientBuildId: 'a', serverVersion: '99.0.0', serverBuildId: 'b' },
+    }
+    render(<App />)
+    expect(screen.getByTestId('stale-bundle-banner')).toBeInTheDocument()
+    expect(screen.getByTestId('client-version-badge')).toBeInTheDocument()
+  })
+
+  it('shows neither for a current page', () => {
+    stateOverrides = { connectionPhase: 'connected', sessions: [], staleBundle: null }
+    render(<App />)
+    expect(screen.queryByTestId('stale-bundle-banner')).not.toBeInTheDocument()
+  })
+
   it('shows welcome screen when connected with no sessions', () => {
     stateOverrides = { connectionPhase: 'connected', sessions: [] }
     render(<App />)

@@ -1,0 +1,160 @@
+/**
+ * #8268 — a dashboard served BY the daemon it talks to keeps retrying with no cap.
+ *
+ * After a daemon update the window sat on "Disconnected" until the user clicked the
+ * server entry: the daemon takes minutes to come back and the client gave up after
+ * ~20 s (the health-probe ladder, #5698) or ~60 s (the socket reconnect ladder).
+ * That cap is deliberate for the mobile app and for a registry server, so the control
+ * cases below pin that a remote target is still capped.
+ *
+ * "Served by" is same origin, and jsdom's page is http://localhost:3000.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { RECONNECT_MAX_RUNG } from '@chroxy/store-core'
+
+const lsStore: Record<string, string> = {}
+Object.defineProperty(globalThis, 'localStorage', {
+  value: {
+    getItem: (k: string) => lsStore[k] ?? null,
+    setItem: (k: string, v: string) => { lsStore[k] = v },
+    removeItem: (k: string) => { delete lsStore[k] },
+    clear: () => { for (const k of Object.keys(lsStore)) delete lsStore[k] },
+    get length() { return Object.keys(lsStore).length },
+    key: (i: number) => Object.keys(lsStore)[i] ?? null,
+  },
+  writable: true,
+})
+vi.mock('../utils/auth', () => ({ getAuthToken: () => null }))
+
+class MockWebSocket {
+  static OPEN = 1
+  static instances: MockWebSocket[] = []
+  url: string
+  readyState = 1
+  onopen: (() => void) | null = null
+  onmessage: ((e: unknown) => void) | null = null
+  onclose: ((e?: unknown) => void) | null = null
+  onerror: ((e?: unknown) => void) | null = null
+  constructor(url: string) { this.url = url; MockWebSocket.instances.push(this) }
+  send() {}
+  close() { this.readyState = 3 }
+}
+;(globalThis as unknown as { WebSocket: unknown }).WebSocket = MockWebSocket
+
+const okFetch = async () => ({ ok: true, status: 200, json: async () => ({ status: 'ok' }) })
+const downFetch = async () => { throw new TypeError('Failed to fetch') }
+const setFetch = (fn: unknown) => { (globalThis as unknown as { fetch: unknown }).fetch = vi.fn(fn as () => Promise<unknown>) }
+
+const { useConnectionStore } = await import('./connection')
+const { resetReconnectAttempt } = await import('./message-handler')
+
+const OWN = `ws://${window.location.host}/ws`
+const REMOTE = 'wss://other-host.example.com/ws'
+
+async function openConnected(url: string): Promise<MockWebSocket> {
+  const before = MockWebSocket.instances.length
+  useConnectionStore.getState().connect(url, 'tok')
+  await vi.advanceTimersByTimeAsync(0)
+  const ws = MockWebSocket.instances[before]!
+  ws.onopen?.()
+  await vi.advanceTimersByTimeAsync(0)
+  useConnectionStore.setState({ connectionPhase: 'connected', userDisconnected: false })
+  return ws
+}
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  MockWebSocket.instances = []
+  resetReconnectAttempt()
+  setFetch(okFetch)
+  vi.spyOn(Math, 'random').mockReturnValue(0)
+  vi.spyOn(console, 'log').mockImplementation(() => {})
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  useConnectionStore.setState({
+    serverRegistry: [], activeServerId: null, connectionPhase: 'disconnected',
+    wsUrl: null, userDisconnected: false, connectionError: null,
+    reconnectUncapped: false, reconnectRetryAt: null,
+  })
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+})
+
+describe('the daemon that served this page is retried with no cap (#8268)', () => {
+  it('the socket-close ladder never goes server_down, however many rungs it climbs', async () => {
+    await openConnected(OWN)
+    expect(useConnectionStore.getState().reconnectUncapped).toBe(true)
+    // Past the point where a registry server gives up (RECONNECT_MAX_RUNG rungs).
+    for (let i = 0; i < RECONNECT_MAX_RUNG + 8; i++) {
+      const socket = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+      const before = MockWebSocket.instances.length
+      socket.onclose?.({ code: 1006 })
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(MockWebSocket.instances.length, `a reconnect socket after drop ${i + 1}`).toBe(before + 1)
+      const next = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+      next.onopen?.() // opened, never authenticated: the ladder keeps climbing
+      await vi.advanceTimersByTimeAsync(0)
+      useConnectionStore.setState({ connectionPhase: 'connected' })
+      expect(useConnectionStore.getState().connectionPhase).not.toBe('server_down')
+    }
+  })
+
+  it('a daemon that stays down for many minutes never lands on "Disconnected", and the window reconnects by itself when it returns', async () => {
+    setFetch(downFetch)
+    useConnectionStore.getState().connect(OWN, 'tok')
+    // 10 minutes: the capped probe ladder gives up after ~20 s.
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    const s = useConnectionStore.getState()
+    expect(s.connectionPhase).not.toBe('disconnected')
+    expect(s.connectionPhase).toBe('reconnecting')
+    expect(MockWebSocket.instances.length).toBe(0)
+    // The next attempt is armed and visible.
+    expect(s.reconnectRetryAt).not.toBeNull()
+
+    // The daemon comes back: the very next probe succeeds and a socket opens, no click.
+    setFetch(okFetch)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(MockWebSocket.instances.length).toBe(1)
+    expect(MockWebSocket.instances[0]!.url).toBe(OWN)
+  })
+
+  it('arms a visible retry time on each drop (what the banner counts down to)', async () => {
+    const ws = await openConnected(OWN)
+    const t0 = Date.now()
+    ws.onclose?.({ code: 1006 })
+    // Rung 0 with zero jitter is 1000 ms.
+    expect(useConnectionStore.getState().reconnectRetryAt).toBe(t0 + 1000)
+  })
+})
+
+describe('a target this page did not come from keeps the cap (#5698, #5725)', () => {
+  it('the probe ladder still ends on "Disconnected" with "Could not reach server"', async () => {
+    setFetch(downFetch)
+    useConnectionStore.getState().connect(REMOTE, 'tok')
+    expect(useConnectionStore.getState().reconnectUncapped).toBe(false)
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+    const s = useConnectionStore.getState()
+    expect(s.connectionPhase).toBe('disconnected')
+    expect(s.connectionError).toBe('Could not reach server')
+  })
+
+  it('the socket-close ladder still goes server_down after RECONNECT_MAX_RUNG rungs', async () => {
+    await openConnected(REMOTE)
+    let cycles = 0
+    for (; cycles < RECONNECT_MAX_RUNG + 3; cycles++) {
+      const socket = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+      const before = MockWebSocket.instances.length
+      socket.onclose?.({ code: 1006 })
+      await vi.advanceTimersByTimeAsync(20_000)
+      if (MockWebSocket.instances.length === before) break
+      const next = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+      next.onopen?.()
+      await vi.advanceTimersByTimeAsync(0)
+      useConnectionStore.setState({ connectionPhase: 'connected' })
+    }
+    expect(cycles).toBe(RECONNECT_MAX_RUNG)
+    expect(useConnectionStore.getState().connectionPhase).toBe('server_down')
+  })
+})

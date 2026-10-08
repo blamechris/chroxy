@@ -408,6 +408,12 @@ export interface CreateReconnectSchedulerOptions {
    * here. Must be idempotent. No-op when `maxRung` is omitted.
    */
   onGaveUp?: () => void
+  /**
+   * Called each time a reconnect timer is armed, with the (jittered) delay it was
+   * armed for. Lets a client show a visible "retrying in Ns" instead of a bare
+   * "reconnecting" (#8268). Not called on the give-up path, where no timer is armed.
+   */
+  onScheduled?: (delayMs: number) => void
 }
 
 /**
@@ -452,6 +458,7 @@ export function createReconnectScheduler(
     jitter = defaultJitter,
     maxRung,
     onGaveUp,
+    onScheduled,
   } = options
 
   let scheduled = false
@@ -477,6 +484,7 @@ export function createReconnectScheduler(
       if (isStale()) return
       reconnect()
     }, delayMs)
+    if (onScheduled) onScheduled(delayMs)
     return true
   }
 

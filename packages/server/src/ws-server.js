@@ -23,6 +23,7 @@ import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo, r
 import { createDevicePreferences } from './device-preferences.js'
 import { isUserShellEnabled, isIdeFeatureEnabled, isOrchestrationEnabled, DEFAULT_MAX_PAYLOAD_BYTES } from './config.js'
 import { createHttpHandler } from './http-routes.js'
+import { getDashboardBuildId } from './dashboard-build.js'
 import { setMcpOAuthCallbackBase } from './byok-mcp-oauth.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -354,7 +355,7 @@ function _isSecureRequest(req) {
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms, streamStallTimeoutMs = stream-stall recovery window in ms (0 = disabled) — #3760, #3905, #4477)
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, dashboardBuildId, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms, streamStallTimeoutMs = stream-stall recovery window in ms (0 = disabled) — #3760, #3905, #4477)
  *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
  *   { type: 'auth_bootstrap', providers, slashCommands, agents, sessionId?, tunnelUrl? } — #5555: connect-time burst folding the provider/slash-command/agent lists so a new client skips its 3-request list_* round trip; tunnelUrl re-advertises the live public URL (sub-item 7)
  *   { type: 'tunnel_url_changed', url, previousUrl? } — #5555 (sub-item 7): quick-tunnel recovery rotated the public URL; clients repoint their stored endpoint. Best-effort for tunnel-connected clients (their socket rode the now-dead old tunnel); durable recovery is auth_bootstrap.tunnelUrl on reconnect
@@ -1016,6 +1017,9 @@ export class WsServer {
       get serverMode() { return self.serverMode },
       serverVersion: SERVER_VERSION,
       get latestVersion() { return self._latestVersion },
+      // #8268 — id of the dashboard bundle on disk NOW (re-evaluated per auth_ok, so a
+      // rebuilt dist is seen without a restart). null when no dist is built.
+      get dashboardBuildId() { return getDashboardBuildId() },
       get gitInfo() { return self._gitInfo },
       get encryptionEnabled() { return self._encryptionEnabled },
       // #5536 — identity keypair for signing the eager exchange public key.

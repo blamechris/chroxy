@@ -21,7 +21,11 @@ export type ShutdownReason = 'restart' | 'shutdown' | 'crash' | null
 export interface ReconnectBannerProps {
   visible: boolean
   attempt: number
-  maxAttempts: number
+  /**
+   * The retry budget. `null` means there is none (#8268: the daemon that served this
+   * page is retried with no cap), so no "attempt N/M" counter is rendered.
+   */
+  maxAttempts: number | null
   message?: string
   onRetry: () => void
   onStartServer?: () => void
@@ -45,6 +49,12 @@ export interface ReconnectBannerProps {
    * `shutdownReason: 'shutdown'` (which is a server-announced shutdown).
    */
   terminal?: boolean
+  /**
+   * #8268 — epoch ms of the next armed reconnect attempt. When set (and the banner is
+   * not in restart-countdown or terminal mode) the banner reads "retrying in Ns",
+   * ticking once a second, so a long outage never looks frozen.
+   */
+  nextRetryAt?: number | null
 }
 
 /**
@@ -55,6 +65,11 @@ function computeRemaining(restartEtaMs: number | null | undefined, restartingSin
   if (!restartEtaMs || restartEtaMs <= 0 || !restartingSince) return null
   const elapsed = Date.now() - restartingSince
   return Math.max(0, Math.ceil((restartEtaMs - elapsed) / 1000))
+}
+
+function secondsUntil(at: number | null | undefined): number | null {
+  if (!at) return null
+  return Math.max(0, Math.ceil((at - Date.now()) / 1000))
 }
 
 function formatCountdown(seconds: number): string {
@@ -72,6 +87,7 @@ export function ReconnectBanner({
   restartingSince,
   shutdownReason,
   terminal,
+  nextRetryAt,
 }: ReconnectBannerProps) {
   // Restart-countdown mode is active only when both the ETA and the anchor
   // timestamp are populated. `shutdownReason === 'shutdown'` and the #5698
@@ -107,6 +123,21 @@ export function ReconnectBanner({
     return () => clearInterval(interval)
   }, [visible, inRestartMode, restartEtaMs, restartingSince])
 
+  // #8268 — "retrying in Ns". Only the plain mode shows it; the restart countdown
+  // and the terminal state already say what is happening.
+  const retryTicking = visible && !terminal && !inRestartMode && !!nextRetryAt
+  const [retryIn, setRetryIn] = useState<number | null>(() => (retryTicking ? secondsUntil(nextRetryAt) : null))
+  useEffect(() => {
+    if (!retryTicking) {
+      setRetryIn(null)
+      return
+    }
+    const update = () => setRetryIn(secondsUntil(nextRetryAt))
+    update()
+    const interval = setInterval(update, 1000)
+    return () => clearInterval(interval)
+  }, [retryTicking, nextRetryAt])
+
   if (!visible) return null
 
   // Build the primary status line. Restart mode overrides the plain message.
@@ -122,6 +153,9 @@ export function ReconnectBanner({
   } else {
     statusText = 'Connection lost. Reconnecting...'
   }
+  if (retryTicking && retryIn != null) {
+    statusText = `${statusText.replace(/\.{3}$/, '')} — ${retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying now'}`
+  }
 
   // Context detail line, restart mode only. `'restart'` → graceful; a null /
   // `'crash'` reason → recovering. `'shutdown'` shows no detail.
@@ -134,7 +168,7 @@ export function ReconnectBanner({
   return (
     <div className="reconnect-banner" data-testid="reconnect-banner" role="status" aria-live="polite">
       <span className="reconnect-message">
-        {statusText}{terminal ? '' : ` (attempt ${attempt}/${maxAttempts})`}
+        {statusText}{terminal || maxAttempts === null ? '' : ` (attempt ${attempt}/${maxAttempts})`}
       </span>
       {detail && (
         <span className="reconnect-detail" data-testid="reconnect-detail">

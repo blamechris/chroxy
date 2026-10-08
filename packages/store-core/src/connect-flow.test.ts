@@ -550,6 +550,44 @@ describe('createReconnectScheduler', () => {
     expect(onGaveUp).not.toHaveBeenCalled()
   })
 
+  // #8268 — the client shows "retrying in Ns", so it must be told the delay the
+  // timer was actually armed for (jitter included), once per armed timer.
+  it('reports the armed delay through onScheduled, once per timer (#8268)', () => {
+    const fake = makeFakeScheduler()
+    const onScheduled = vi.fn()
+    let rung = 2
+    const s = createReconnectScheduler({
+      nextRung: () => rung++,
+      reconnect: vi.fn(),
+      isStale: () => false,
+      scheduler: fake.scheduler,
+      jitter: (d) => d + 7,
+      onScheduled,
+    })
+    expect(s.schedule()).toBe(true)
+    expect(s.schedule()).toBe(false) // paired event: no second timer, no second report
+    expect(onScheduled).toHaveBeenCalledTimes(1)
+    expect(onScheduled).toHaveBeenCalledWith(RETRY_DELAYS[2]! + 7)
+    expect(fake.lastDelay()).toBe(RETRY_DELAYS[2]! + 7)
+  })
+
+  it('does not call onScheduled on the give-up path, where no timer is armed (#8268)', () => {
+    const fake = makeFakeScheduler()
+    const onScheduled = vi.fn()
+    const s = createReconnectScheduler({
+      nextRung: () => 9,
+      reconnect: vi.fn(),
+      isStale: () => false,
+      scheduler: fake.scheduler,
+      jitter: noJitter,
+      maxRung: 3,
+      onGaveUp: vi.fn(),
+      onScheduled,
+    })
+    expect(s.schedule()).toBe(false)
+    expect(onScheduled).not.toHaveBeenCalled()
+  })
+
 })
 
 // ---------------------------------------------------------------------------

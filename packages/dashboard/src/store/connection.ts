@@ -88,6 +88,7 @@ import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeReq
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
 import { getAuthToken } from '../utils/auth';
+import { isLocalDaemonUrl } from '../utils/daemon-origin';
 import { buildAutoModeConfirmMessage } from '../lib/auto-mode-confirm';
 import { hasInterruptibleWork, isSessionBusy } from '../lib/session-busy';
 import {
@@ -1089,6 +1090,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   currentDeviceKey: getCurrentDeviceKey(),
   connectionError: null,
   connectionRetryCount: 0,
+  reconnectUncapped: false,
+  reconnectRetryAt: null,
+  staleBundle: null,
   serverStartupLogs: null,
   latencyMs: null,
   connectionQuality: null,
@@ -2713,15 +2717,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       existing.onmessage = null;
       existing.close();
     }
+    // #8268 — the daemon that served this page (or, in the desktop app, a loopback
+    // daemon) is this machine's own process: an update restarts it for minutes, and
+    // giving up there loses the session view after every update. Retry with no cap,
+    // and show it. The mobile app's cap (#5698, #5725) is untouched, and so is the
+    // cap for a registry server this page did not come from.
+    const uncapped = isLocalDaemonUrl(url);
+    const maxConnectRetries = uncapped ? Infinity : CONNECT_MAX_RETRIES;
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
     // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
     // #8331: a new handshake starts from a clean update banner (see EMPTY_DAEMON_UPDATE).
     clearDaemonUpdateWatchdog();
-    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...EMPTY_DAEMON_UPDATE, ...errorPatch });
+    set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, reconnectUncapped: uncapped, reconnectRetryAt: null, userDisconnected: false, ...EMPTY_DAEMON_UPDATE, ...errorPatch });
 
     if (_retryCount > 0) {
-      console.log(`[ws] Connection attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1}...`);
+      console.log(`[ws] Connection attempt ${_retryCount + 1}/${uncapped ? 'unlimited' : CONNECT_MAX_RETRIES + 1}...`);
     }
 
     // #5597 — re-resolve the live endpoint (URL + token) for the active registry
@@ -2748,7 +2759,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // CONNECT_RETRY_DELAYS defaults directly instead of re-declaring the ladder.
     void runConnectAttempt({
       attempt: _retryCount,
-      maxRetries: CONNECT_MAX_RETRIES,
+      maxRetries: maxConnectRetries,
       retryDelays: CONNECT_RETRY_DELAYS,
       // #5597 seam — re-resolve the endpoint per attempt instead of dialing the
       // closure-captured URL/token forever. The dashboard already re-read the
@@ -2807,7 +2818,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           restartEtaMs,
           restartingSince: currentState.restartingSince || Date.now(),
         });
-        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1})`);
+        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${uncapped ? 'unlimited' : CONNECT_MAX_RETRIES + 1})`);
       },
       onProbeFailed: (reason) => {
         set({ connectionError: reason });
@@ -2826,6 +2837,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       },
       scheduleRetry: (nextAttempt, delayMs) => {
         console.log(`[ws] Retrying in ${delayMs}ms...`);
+        // #8268 — the banner's "retrying in Ns". Cleared when the attempt begins.
+        set({ reconnectRetryAt: Date.now() + delayMs });
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
           // #5597 — re-resolve the registry endpoint so a repointed `wsUrl`
@@ -2900,14 +2913,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5698 — stop the reconnect ladder after RECONNECT_MAX_RUNG rungs and go
       // terminal instead of spinning forever. A user-initiated retryConnection()
       // resets the counter (resetReconnectAttempt), so this is not permanent.
-      maxRung: RECONNECT_MAX_RUNG,
+      // #8268 — except for the daemon that served this page: no cap there (see
+      // `uncapped` above), which `undefined` here means.
+      maxRung: uncapped ? undefined : RECONNECT_MAX_RUNG,
       onGaveUp: () => {
         if (myAttemptId !== connectionAttemptId) return; // superseded — don't clobber a newer attempt
         console.log('[ws] reconnect ladder exhausted — server appears down');
         set({
           connectionPhase: 'server_down',
           connectionError: 'Server appears to be down',
+          reconnectRetryAt: null,
         });
+      },
+      onScheduled: (delayMs) => {
+        if (myAttemptId !== connectionAttemptId) return;
+        set({ reconnectRetryAt: Date.now() + delayMs });
       },
     });
     const scheduleReconnect = (
@@ -3400,6 +3420,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Preserve messages, terminalBuffer, sessions, activeSessionId, sessionStates
     set({
       connectionPhase: 'disconnected',
+      reconnectRetryAt: null,
       sessionStates: cleanedSessionStates,
       socket: null,
       serverMode: null,

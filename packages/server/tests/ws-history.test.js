@@ -153,6 +153,19 @@ describe('sendPostAuthInfo — base auth_ok payload', () => {
     assert.equal(authOk.capabilities.agentConnections, true)
   })
 
+  // #8268 — a dashboard page that outlives a daemon update compares its own build id
+  // with this one. The id comes off the ctx per auth_ok, never frozen at startup.
+  it('carries the served dashboard build id in auth_ok when the daemon has one', () => {
+    ctx.dashboardBuildId = 'b1d2e3f4a5b6c7d8'
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(ctx._sends[0].dashboardBuildId, 'b1d2e3f4a5b6c7d8')
+  })
+
+  it('omits dashboardBuildId (not null) when no dashboard is built', () => {
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(Object.prototype.hasOwnProperty.call(ctx._sends[0], 'dashboardBuildId'), false)
+  })
+
   it('spreads extra fields into auth_ok', () => {
     sendPostAuthInfo(ctx, ws, { customField: 'hello' })
     const authOk = ctx._sends[0]
