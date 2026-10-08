@@ -61,17 +61,30 @@ function makeSession() {
   }
 }
 
-/** Bring a stand-in PTY up, then deliver an unexpected death the way node-pty does. */
-async function killPty(session, terms) {
+/** Bring a stand-in PTY up (the first spawn), as start() would. */
+async function bringUp(session) {
   await session._respawnPty()
   assert.equal(session._processReady, true, 'precondition: the PTY came up')
-  terms[0].exitHandlers[0]({ exitCode: 137, signal: 9 })
+}
+
+/**
+ * Deliver an unexpected death to the NEWEST stand-in PTY the way node-pty does,
+ * then take the scheduled backoff respawn out of the timer's hands.
+ */
+function dieUnexpectedly(session, terms) {
+  const term = terms.at(-1)
+  assert.ok(term.exitHandlers.length > 0, 'precondition: the live stand-in registered an onExit')
+  term.exitHandlers.at(-1)({ exitCode: 137, signal: 9 })
   assert.equal(session._ptyExited, true, 'precondition: _onPtyGone latched the death')
   assert.equal(session._destroying, false, 'precondition: this is an unexpected death, not destroy()')
   assert.equal(session._respawnScheduled, true, 'precondition: a respawn was scheduled')
-  // Take the scheduled respawn out of the timer's hands.
   clearTimeout(session._respawnTimer)
   session._respawnTimer = null
+}
+
+async function killPty(session, terms) {
+  await bringUp(session)
+  dieUnexpectedly(session, terms)
 }
 
 describe('ClaudeTuiSession — an unexpected PTY death keeps the tracked background shells (#8379)', () => {
@@ -115,6 +128,31 @@ describe('ClaudeTuiSession — an unexpected PTY death keeps the tracked backgro
       assert.deepEqual(timedOut, [], 'a tracked shell still blocks the idle timeout after the PTY died')
     } finally {
       mgr.destroy()
+      await cleanup()
+    }
+  })
+
+  it('the shell survives the death AND the respawn that follows it', async () => {
+    const { session, terms, cleanup } = makeSession()
+    try {
+      const workEvents = []
+      session.on('background_work_changed', (d) => workEvents.push(d))
+      // Bring the first PTY up BEFORE tracking the shell, so a clear anywhere in
+      // `_respawnPty` bites only on the respawn after the death, not on bring-up.
+      await bringUp(session)
+      session.trackBackgroundShell({ shellId: 'bg-1', command: 'npm run dev' })
+      workEvents.length = 0
+      dieUnexpectedly(session, terms)
+      assert.equal(terms.length, 1, 'control: no second PTY yet')
+
+      await session._respawnPty()
+
+      assert.equal(terms.length, 2, 'control: the respawn really spawned a second stand-in PTY')
+      assert.equal(session._processReady, true, 'control: the respawned PTY is up')
+      assert.deepEqual(session.getPendingBackgroundShells().map((s) => s.shellId), ['bg-1'])
+      assert.equal(session.isRunning, true)
+      assert.deepEqual(workEvents, [], 'neither the death nor the respawn announced the shell gone')
+    } finally {
       await cleanup()
     }
   })
