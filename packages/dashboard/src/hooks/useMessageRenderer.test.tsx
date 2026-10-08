@@ -334,7 +334,7 @@ describe('useMessageRenderer — terminated singleton tool bubble (#7376)', () =
     const args = makeArgs({ storeMsgMap: new Map([[msg.id, msg]]) })
     const { result } = renderHook(() => useMessageRenderer(args))
     render(<>{result.current({ id: msg.id, type: 'tool_use', content: '', timestamp: 0 } as ChatViewMessage)}</>)
-    expect(screen.getByTestId('tool-bubble-terminated-tu-1')).toHaveTextContent('Re-send to retry')
+    expect(screen.getByTestId('tool-bubble-terminated-tu-1')).toHaveTextContent('Check whether it took effect before retrying')
   })
 
   it('POSITIVE CONTROL: an ordinary singleton tool renders no terminated note', () => {

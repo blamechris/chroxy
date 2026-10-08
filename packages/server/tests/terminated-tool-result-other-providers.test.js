@@ -52,6 +52,71 @@ describe('SdkSession — watchdog deaths name themselves (#7376)', () => {
   })
 })
 
+describe('SdkSession — a Stop that completes normally, and a process exit, are tagged (#7376 review)', () => {
+  // Drives the REAL turn loop (`sendMessage` -> `_callQuery` -> the for-await),
+  // not the funnel directly, so the sequence the review described is the one run.
+  function run(body) {
+    const session = new SdkSession({ cwd: '/tmp' })
+    session._processReady = true
+    const results = []
+    session.on('tool_result', (d) => results.push(d))
+    session.on('error', () => {})
+    session._callQuery = () => body(session)
+    return { session, results }
+  }
+  const bashStart = {
+    type: 'stream_event',
+    event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_cut', name: 'Bash', input: {} } },
+  }
+  const okResult = { type: 'result', session_id: 'sess-x', total_cost_usd: 0, duration_ms: 5, usage: {} }
+
+  it('Stop acknowledged by a NORMAL result tags the cut-off tool user_stop', async () => {
+    const { session, results } = run((s) => (async function* () {
+      yield bashStart
+      await s.interrupt() // the user pressed Stop; the SDK then ends the turn normally
+      yield okResult
+    })())
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(results.length, 1)
+    assert.equal(results[0].toolUseId, 'toolu_cut')
+    assert.equal(results[0].terminatedReason, 'user_stop')
+  })
+
+  it('POSITIVE CONTROL: the same normal result with no Stop stays an untagged failure', async () => {
+    const { session, results } = run(() => (async function* () {
+      yield bashStart
+      yield okResult
+    })())
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(results.length, 1)
+    assert.equal('terminatedReason' in results[0], false)
+  })
+
+  it('a query that throws a process-exit error tags the tool process_exit', async () => {
+    const { session, results } = run(() => (async function* () {
+      yield bashStart
+      throw new Error('Claude Code process exited with code 1')
+    })())
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(results.length, 1)
+    assert.equal(results[0].terminatedReason, 'process_exit')
+  })
+
+  it('POSITIVE CONTROL: any other thrown error keeps the generic sweep', async () => {
+    const { session, results } = run(() => (async function* () {
+      yield bashStart
+      throw new Error('socket hang up')
+    })())
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(results.length, 1)
+    assert.equal('terminatedReason' in results[0], false)
+  })
+})
+
 describe('ClaudeTuiSession — _finishTurnError names the cause (#7376)', () => {
   function standIn({ aborted = false, ptyExited = false } = {}) {
     const calls = []

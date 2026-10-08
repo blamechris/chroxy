@@ -4,8 +4,9 @@
  * A tool call can be cut off because the TURN it belonged to was ended
  * underneath it -- a permission-mode switch respawned the provider child, the
  * user pressed Stop, the child crashed, a watchdog fired, the daemon restarted.
- * Those are not "the command ran and failed": the command never reported at
- * all, and the right next step is to re-send. The server stamps the synthetic
+ * Those are not "the command ran and failed": the command never reported a
+ * result, and whether it took effect is unknown -- the right next step is to
+ * check, then retry if needed. The server stamps the synthetic
  * `tool_result` it fabricates for such a tool with `terminatedReason`, and the
  * clients render a distinct state instead of the failure styling.
  *

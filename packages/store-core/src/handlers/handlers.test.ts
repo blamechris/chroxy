@@ -8296,6 +8296,50 @@ describe('handleToolResult', () => {
     }
   })
 
+  // #7376 (review): a CLI hard-timeout / stream stall clears local state without
+  // killing the child, so a REAL result can follow the synthetic terminated one
+  // for the same tool id (live, or both replayed from history in order). The
+  // renderers give the marker precedence, so a stale one hides the real text.
+  describe('an authoritative result replaces a synthetic terminated one', () => {
+    const toolUse = { id: 'tool-tu-1', type: 'tool_use', tool: 'Bash', toolUseId: 'tu-1', content: '' } as unknown as ChatMessage
+    const terminated = {
+      toolUseId: 'tu-1',
+      result: 'Turn ended (stream stall) before this tool returned a result.',
+      isError: true,
+      terminatedReason: 'stream_stall',
+    }
+    const apply = (msgs: ChatMessage[], m: Record<string, unknown>) => handleToolResult(m, 's')!.applyTo(msgs)
+
+    it('a genuine success clears the marker and shows the real text', () => {
+      const afterSynthetic = apply([toolUse], terminated)
+      expect(afterSynthetic[0]!.toolResultTerminatedReason).toBe('stream_stall')
+      const afterReal = apply(afterSynthetic, { toolUseId: 'tu-1', result: 'built ok' })
+      expect(afterReal[0]!.toolResult).toBe('built ok')
+      expect(afterReal[0]!.toolResultIsError).toBe(false)
+      expect('toolResultTerminatedReason' in afterReal[0]!).toBe(false)
+    })
+
+    it('a genuine is_error result clears the marker and keeps the real failure text', () => {
+      const afterReal = apply(apply([toolUse], terminated), { toolUseId: 'tu-1', result: 'exit 2: boom', isError: true })
+      expect(afterReal[0]!.toolResult).toBe('exit 2: boom')
+      expect(afterReal[0]!.toolResultIsError).toBe(true)
+      expect('toolResultTerminatedReason' in afterReal[0]!).toBe(false)
+    })
+
+    it('replaying both history entries in order ends on the real result', () => {
+      const replayed = [terminated, { toolUseId: 'tu-1', result: 'late real', isError: true }]
+        .reduce(apply, [toolUse])
+      expect(replayed[0]!.toolResult).toBe('late real')
+      expect('toolResultTerminatedReason' in replayed[0]!).toBe(false)
+    })
+
+    it('POSITIVE CONTROL: a terminated result still sets the marker, and a second terminated one keeps it', () => {
+      const once = apply([toolUse], terminated)
+      const twice = apply(once, { ...terminated, terminatedReason: 'hard_timeout' })
+      expect(twice[0]!.toolResultTerminatedReason).toBe('hard_timeout')
+    })
+  })
+
   it('resolves sessionId from message when present', () => {
     const out = handleToolResult(
       { toolUseId: 'tu-1', sessionId: 'sess-1', result: 'ok' },

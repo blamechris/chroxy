@@ -69,7 +69,7 @@ describe('CliSession — a tool cut off by a terminated turn says so (#7376)', (
     assert.equal(results[0].terminatedReason, 'permission_mode_switch')
     // The synthesized text names the cause AND the next step, not just "no result".
     assert.match(results[0].result, /permission-mode switch/)
-    assert.match(results[0].result, /Re-send to retry/)
+    assert.match(results[0].result, /Check whether it took effect before retrying/)
   })
 
   it('a mid-turn model switch is its own reason', () => {
@@ -82,7 +82,89 @@ describe('CliSession — a tool cut off by a terminated turn says so (#7376)', (
     session._handleChildClose(130)
     assert.equal(results.length, 1)
     assert.equal(results[0].terminatedReason, 'user_stop')
-    assert.match(results[0].result, /Stopped before this tool finished/)
+    assert.match(results[0].result, /Stopped before this tool returned a result/)
+    assert.match(results[0].result, /Check whether it took effect before retrying/)
+    assert.doesNotMatch(results[0].result, /did not finish|Re-send to retry/)
+  })
+
+  // #7376 (review): a Stop is not always acknowledged by the child EXITING.
+  // claude can abort the turn and answer with a normal `result`, and the 5s
+  // safety net can fire first. Both used to sweep with the generic reason.
+  it('a Stop the CLI acknowledges with a NORMAL result still tags the cut-off tool user_stop', () => {
+    session.interrupt()
+    session._handleEvent({
+      type: 'result', session_id: 'sess-1', subtype: 'success', result: '',
+      total_cost_usd: 0, duration_ms: 5, usage: {},
+    })
+    assert.equal(results.length, 1)
+    assert.equal(results[0].toolUseId, 'tu-bash')
+    assert.equal(results[0].terminatedReason, 'user_stop')
+    assert.equal(results[0].isError, true)
+  })
+
+  it('POSITIVE CONTROL: the same normal result WITHOUT a Stop stays an untagged failure', () => {
+    session._handleEvent({
+      type: 'result', session_id: 'sess-1', subtype: 'success', result: '',
+      total_cost_usd: 0, duration_ms: 5, usage: {},
+    })
+    assert.equal(results.length, 1)
+    assert.equal('terminatedReason' in results[0], false)
+  })
+
+  it('a Stop requested during one turn does not tag the NEXT turn\'s orphan', async () => {
+    session.interrupt()
+    session._handleEvent({
+      type: 'result', session_id: 'sess-1', subtype: 'success', result: '',
+      total_cost_usd: 0, duration_ms: 5, usage: {},
+    })
+    results.length = 0
+    await session.sendMessage('again')
+    session._trackToolStart('tu-2', 'Bash')
+    session._clearMessageState()
+    assert.equal(results.length, 1)
+    assert.equal('terminatedReason' in results[0], false)
+  })
+
+  it('a Stop pressed while idle never marks the next turn', async () => {
+    session._clearMessageState() // end the turn started in beforeEach
+    results.length = 0
+    session.interrupt() // idle: nothing to stop
+    await session.sendMessage('next')
+    session._trackToolStart('tu-3', 'Bash')
+    session._clearMessageState()
+    assert.equal('terminatedReason' in results[0], false)
+  })
+
+  it('an explicit cause is not overridden by an earlier Stop request', () => {
+    session.interrupt()
+    session._handleHardTimeout()
+    assert.equal(results[0].terminatedReason, 'hard_timeout')
+  })
+
+  // #7376 (review): wording. The hard-timeout and stall handlers clear local
+  // state WITHOUT killing the child, so a real result can still follow; and even
+  // a confirmed kill does not undo a side effect that completed first. No reason
+  // may assert the tool did not run.
+  it('NO termination wording claims the tool did not run or says to blindly re-send', async () => {
+    // A fresh session per cause: a permission/model switch respawns the child.
+    for (const fire of [
+      (x) => x._handleStreamStall(),
+      (x) => x._handleHardTimeout(),
+      (x) => x.setPermissionMode('auto'),
+      (x) => x._onModelChanged(),
+    ]) {
+      const x = createReadySession()
+      const out = []
+      x.on('tool_result', (d) => out.push(d))
+      x.on('error', () => {})
+      await x.sendMessage('run a command')
+      x._trackToolStart('tu-w', 'Bash')
+      fire(x)
+      assert.equal(out.length, 1, 'a result was synthesized')
+      assert.doesNotMatch(out[0].result, /did not finish|Re-send to retry/)
+      assert.match(out[0].result, /Check whether it took effect before retrying/)
+      x.removeAllListeners()
+    }
   })
 
   it('a crash (child exits with nobody asking) is process_exit', () => {
@@ -138,5 +220,26 @@ describe('CliSession — a tool cut off by a terminated turn says so (#7376)', (
     assert.ok(stored, 'tool_result entry persisted')
     assert.equal(stored.terminatedReason, 'permission_mode_switch')
     assert.equal(stored.isError, true)
+  })
+
+  it('a REAL result after the stall sweep is forwarded and persisted UNMARKED (the client then shows it, not the marker)', () => {
+    // The stall handler clears local state without killing the child, so the
+    // genuine result can still arrive. The server deliberately does not drop it
+    // (the real outcome is the more useful one); it must carry no terminated
+    // marker so the replayed pair ends on the real result.
+    session._handleStreamStall()
+    const synthetic = results[0]
+    assert.equal(synthetic.terminatedReason, 'stream_stall')
+
+    const history = new SessionMessageHistory()
+    history.recordHistory('s1', 'tool_result', synthetic)
+    history.recordHistory('s1', 'tool_result', { toolUseId: 'tu-bash', result: 'exit 2: boom', truncated: false, isError: true })
+    const stored = history.getHistory('s1').filter((e) => e.type === 'tool_result')
+    assert.equal(stored.length, 2)
+    assert.equal(stored[0].terminatedReason, 'stream_stall')
+    assert.equal('terminatedReason' in stored[1], false)
+    assert.equal(stored[1].result, 'exit 2: boom')
+    const wire = EVENT_MAP.tool_result({ toolUseId: 'tu-bash', result: 'exit 2: boom', truncated: false, isError: true })
+    assert.equal('terminatedReason' in wire.messages[0].msg, false)
   })
 })

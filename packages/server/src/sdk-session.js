@@ -136,6 +136,21 @@ export function isSdkToolCancellationText(text) {
 }
 
 /**
+ * #7376: did the Claude CLI process die under the query (a crash or an external
+ * kill) rather than the query ending on its own? Distinct from
+ * {@link isQueryCloseError}, which is a DELIBERATE close.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isProcessExitError(err) {
+  if (!err) return false
+  const text = typeof err.message === 'string' ? err.message : String(err)
+  // The SDK transport's shapes for a CLI process that died under the query
+  // ("Claude Code process exited with code N", "... terminated by signal SIGx").
+  return /process exited with code\b|terminated by signal\b/i.test(text)
+}
+
+/**
  * #8300: is this the error the SDK's generator throws after the session
  * itself closed the query (`Query.close()` aborts the transport and kills the
  * CLI)? Only these are swallowed after a deliberate close; anything else is
@@ -2182,10 +2197,15 @@ export class SdkSession extends BaseSession {
         }
       }
       // #7376: a Stop that aborted the query leaves its in-flight tools "stopped",
-      // not failed. Any other throw has no considered cause and keeps the
-      // generic sweep.
+      // and a CLI process that exited under the query leaves them cut off by the
+      // exit; neither is a failed command. Any other throw has no considered
+      // cause and keeps the generic sweep.
       if (!supersededByNewerTurn()) {
-        this._clearMessageState(wasIntentionalStop ? { terminatedReason: 'user_stop' } : undefined)
+        this._clearMessageState(
+          wasIntentionalStop
+            ? { terminatedReason: 'user_stop' }
+            : isProcessExitError(err) ? { terminatedReason: 'process_exit' } : undefined,
+        )
       }
     } finally {
       // #8300: whatever ended the loop — the prompt's result, a throw, a
@@ -3036,6 +3056,7 @@ export class SdkSession extends BaseSession {
     // emit and instead surfaces a quiet `stopped` event. Cleared in the
     // catch/finally (single-use, mirrors CliSession#4602).
     this.markIntentionalStop()
+    this._noteTurnStopRequested() // #7376
 
     // #4828: session-scoped (interrupt() only meaningful with an active query).
     ;(this._log || log).info('Interrupting query')

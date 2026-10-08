@@ -51,14 +51,25 @@ describe('describeTurnTermination (#7376)', () => {
 
   it('the permission-mode switch names itself and the next step', () => {
     const { summary } = describeTurnTermination('permission_mode_switch')
-    assert.ok(/Turn terminated/.test(summary) && /permission-mode switch/.test(summary), summary)
-    assert.ok(/Re-send to retry/.test(summary), summary)
+    assert.ok(/Turn ended/.test(summary) && /permission-mode switch/.test(summary), summary)
+    assert.ok(/before this tool returned a result/.test(summary), summary)
+    assert.ok(/Check whether it took effect before retrying/.test(summary), summary)
   })
 
   it('Stop is worded as a Stop, not as a fault', () => {
     const { summary } = describeTurnTermination('user_stop')
     assert.ok(/^Stopped/.test(summary), summary)
     assert.equal(/terminated/i.test(summary), false)
+    assert.ok(/Check whether it took effect before retrying/.test(summary), summary)
+  })
+
+  it('no reason asserts the tool did not run or tells the user to blindly re-send (the server cannot know)', () => {
+    for (const r of [...TURN_TERMINATION_REASONS, 'from_the_future', undefined]) {
+      const { summary } = describeTurnTermination(r)
+      assert.equal(/did not (finish|run|execute)/i.test(summary), false, `${String(r)}: ${summary}`)
+      assert.equal(/Re-send to retry/.test(summary), false, `${String(r)}: ${summary}`)
+      assert.ok(/check/i.test(summary), `${String(r)}: ${summary}`)
+    }
   })
 
   it('a daemon restart does NOT claim the tool failed to run (the outcome is unknown)', () => {
@@ -71,7 +82,8 @@ describe('describeTurnTermination (#7376)', () => {
     for (const r of ['from_the_future', undefined, null, 5, '']) {
       assert.equal(isTurnTerminationReason(r), false)
       const d = describeTurnTermination(r)
-      assert.ok(/Turn terminated/.test(d.summary) && /Re-send to retry/.test(d.summary), String(r))
+      assert.ok(/Turn ended before this tool returned a result/.test(d.summary), String(r))
+      assert.ok(/Check whether it took effect before retrying/.test(d.summary), String(r))
     }
   })
 })

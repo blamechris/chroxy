@@ -132,7 +132,7 @@ describe('ToolGroup', () => {
   it('renders a terminated tool as terminated, not as a failure (#7376)', () => {
     const messages = [
       tool('1', 'Bash', {
-        toolResult: 'Turn terminated (permission-mode switch) — this tool did not finish. Re-send to retry.',
+        toolResult: 'Turn ended (permission-mode switch) before this tool returned a result. Check whether it took effect before retrying.',
         toolResultIsError: true,
         toolResultTerminatedReason: 'permission_mode_switch',
       }),
@@ -167,8 +167,8 @@ describe('ToolGroup', () => {
     render(<ToolGroup messages={messages} isActive={true} />)
     fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
     const note = screen.getByTestId('tool-group-entry-terminated-note-1')
-    expect(note).toHaveTextContent('Turn terminated (permission-mode switch)')
-    expect(note).toHaveTextContent('Re-send to retry')
+    expect(note).toHaveTextContent('Turn ended (permission-mode switch) before this tool returned a result')
+    expect(note).toHaveTextContent('Check whether it took effect before retrying')
     expect(screen.getByTestId('tool-group-entry-detail-1')).not.toHaveTextContent('synthesized placeholder text')
   })
 
@@ -180,7 +180,7 @@ describe('ToolGroup', () => {
     render(<ToolGroup messages={messages} isActive={true} />)
     expect(screen.getByTestId('tool-group-entry-1')).toHaveAttribute('data-terminated', 'true')
     fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
-    expect(screen.getByTestId('tool-group-entry-terminated-note-1')).toHaveTextContent('Re-send to retry')
+    expect(screen.getByTestId('tool-group-entry-terminated-note-1')).toHaveTextContent('Check whether it took effect before retrying')
   })
 
   it('counts an empty toolResult as complete (server may emit "")', () => {

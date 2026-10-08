@@ -83,10 +83,10 @@ function ActivityEntry({
     (message.toolResultImages?.length ?? 0) > 0;
   const imageCount = message.toolResultImages?.length || 0;
   // #7376: a tool cut off because its TURN was terminated underneath it
-  // (permission-mode switch, Stop, crash, watchdog) never ran to a verdict. It
+  // (permission-mode switch, Stop, crash, watchdog) never reported a result. It
   // is not "the command failed", so it gets its own amber state instead of the
   // red alert icon, and its (server-synthesized) result text is replaced by a
-  // "re-send to retry" sentence. Wins over `toolResultIsError`, which the
+  // "check whether it took effect before retrying" sentence. Wins over `toolResultIsError`, which the
   // server also sets on these synthetic results.
   const termination = hasResult && message.toolResultTerminatedReason
     ? describeTurnTermination(message.toolResultTerminatedReason)

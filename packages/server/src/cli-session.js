@@ -2558,6 +2558,7 @@ export class CliSession extends BaseSession {
     // current turn), the next natural exit will be a real crash — the flag
     // is cleared in _handleChildClose on whichever exit fires first.
     this.markIntentionalStop()
+    this._noteTurnStopRequested() // #7376
 
     // #4828: session-scoped if init has fired.
     ;(this._log || log).info('Sending SIGINT to claude process')

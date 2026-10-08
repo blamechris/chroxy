@@ -653,7 +653,15 @@ export function handleToolResult(
       while (idx >= 0 && !(messages[idx]!.type === 'tool_use' && messages[idx]!.toolUseId === toolUseId)) idx--
       if (idx === -1) return messages
       const updated = [...messages]
-      updated[idx] = { ...updated[idx]!, ...patch }
+      const merged: ChatMessage = { ...updated[idx]!, ...patch }
+      // #7376 (review): an authoritative result WITHOUT a termination reason
+      // replaces the synthetic "turn ended" one. A CLI hard-timeout / stall
+      // clears local state without killing the child, so the real result (a
+      // success or a genuine `is_error`) can still follow for the same id --
+      // and the renderers give the marker precedence, so a stale one would
+      // hide it. The spread above only ever ADDS keys; drop it explicitly.
+      if (!('toolResultTerminatedReason' in patch)) delete merged.toolResultTerminatedReason
+      updated[idx] = merged
       return updated
     },
     // #4308 — remove the in-flight ActiveTool entry by toolUseId.

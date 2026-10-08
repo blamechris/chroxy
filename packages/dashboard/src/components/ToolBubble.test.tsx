@@ -40,8 +40,8 @@ describe('ToolBubble', () => {
       />,
     )
     const note = screen.getByTestId('tool-bubble-terminated-tool-1')
-    expect(note).toHaveTextContent('Turn terminated (permission-mode switch)')
-    expect(note).toHaveTextContent('Re-send to retry')
+    expect(note).toHaveTextContent('Turn ended (permission-mode switch) before this tool returned a result')
+    expect(note).toHaveTextContent('Check whether it took effect before retrying')
     expect(screen.getByTestId('tool-bubble-tool-1')).toHaveAttribute('data-terminated', 'true')
     // not pulsing as "still running" -- it has resolved, just not successfully
     expect(screen.queryByTestId('tool-bubble-pulse-tool-1')).toBeNull()

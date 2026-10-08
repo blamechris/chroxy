@@ -491,6 +491,14 @@ export class BaseSession extends EventEmitter {
     // `finally` safety-net clear (the interrupt-races-result case), and collapsing
     // them would reopen that race.
     this._intentionalStop = false
+    // #7376: a Stop was requested while THIS turn was running. Unlike
+    // `_intentionalStop` (consumed by the child-close / query-catch handler, and
+    // not armed at all when the provider acknowledges the interrupt with a
+    // normal `result`), this one lives exactly as long as the turn: set by
+    // `_noteTurnStopRequested`, read by the orphan sweep, and reset by
+    // `_clearMessageState`. It is what lets a Stop that COMPLETES normally still
+    // tag the tools it cut off as `user_stop`.
+    this._stopRequestedThisTurn = false
     // #4307/#5177/#5247/#5265: pending background-shell tracking + the reaping
     // sweep live in BackgroundShellTracker (#5376). BaseSession composes one and
     // delegates the public surface (trackBackgroundShell / clearBackgroundShell /
@@ -1489,6 +1497,17 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #7376: record that a Stop was requested during the turn that is running
+   * now. A no-op when idle, so a Stop pressed between turns cannot leak into the
+   * next one. Called by the providers whose `interrupt()` can be acknowledged by
+   * a NORMAL `result` (claude-cli, claude-sdk) rather than only by a child exit
+   * or a thrown abort; the flag is turn-scoped and reset by `_clearMessageState`.
+   */
+  _noteTurnStopRequested() {
+    if (this._isBusy) this._stopRequestedThisTurn = true
+  }
+
+  /**
    * #5375: capture-and-clear the user-initiated-stop flag in one step. The
    * provider's close/error handler calls this at the top to decide the
    * stopped-vs-error branch, disarming the flag so the next natural exit is
@@ -1974,6 +1993,12 @@ export class BaseSession extends EventEmitter {
    */
   _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result', exempt = null) {
     if (this._inFlightToolStarts.size === 0) return 0
+    // #7376: a Stop the provider acknowledged with a NORMAL result (or a
+    // completion that raced it) reaches here with a generic reason, because the
+    // path that ended the turn did not know a Stop had been requested. The
+    // turn-scoped flag does, and the tools still unresolved were cut off by it.
+    // An explicit termination reason (a crash, a watchdog) is never overridden.
+    if (this._stopRequestedThisTurn && !isTurnTerminationReason(reason)) reason = 'user_stop'
     let count = 0
     for (const [toolUseId, entry] of [...this._inFlightToolStarts]) {
       // #7340: a confirmed-backgrounded subagent that has not reported back is
@@ -2397,6 +2422,8 @@ export class BaseSession extends EventEmitter {
       isTurnTerminationReason(terminatedReason) ? terminatedReason : 'message_state_cleared',
       survivingAgents,
     )
+    // #7376: the turn is over; a Stop requested during it must not tag the next.
+    this._stopRequestedThisTurn = false
 
     // #7340: complete the tracked subagents this turn end owns, and no more.
     // A confirmed-backgrounded subagent deliberately outlives its turn, so

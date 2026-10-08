@@ -4170,8 +4170,8 @@ button.sidebar-token-view-session-row:hover {
 
 /* #7376 — a tool cut off because its TURN was terminated under it (permission-
    mode switch, Stop, crash, watchdog). Deliberately NOT the failure red: the
-   command never reported, so it did not "fail", and the right next step (re-send)
-   differs. Amber, the same family as the other "needs your attention, nothing is
+   command never reported, so it did not "fail", and the right next step (check
+   whether it took effect, then retry) differs. Amber, the same family as the other "needs your attention, nothing is
    broken" states (expired permission, stream stall). */
 .tool-group-entry-marker--terminated {
   color: var(--accent-orange);

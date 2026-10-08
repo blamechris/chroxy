@@ -2037,7 +2037,7 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       type: 'tool_result',
       sessionId: 's1',
       toolUseId: 'tu-3',
-      result: 'Turn terminated (permission-mode switch) — this tool did not finish. Re-send to retry.',
+      result: 'Turn ended (permission-mode switch) before this tool returned a result. Check whether it took effect before retrying.',
       isError: true,
       terminatedReason: 'permission_mode_switch',
       truncated: false,
@@ -2047,6 +2047,47 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
         s1: {
           messages: [
             { type: 'tool_use', toolUseId: 'tu-3', toolResultIsError: true, toolResultTerminatedReason: 'permission_mode_switch', toolResultTruncated: false },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #7376 (review): a CLI hard-timeout / stall clears local state without
+    // killing the child, so a REAL result can follow the synthetic terminated
+    // one for the same tool id. It must replace it outright -- the termination
+    // marker takes precedence in both renderers, so a stale one would hide the
+    // genuine failure text.
+    name: 'a genuine tool_result replaces a synthetic terminated one and clears the marker',
+    type: 'tool_result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'tool-tu-4', type: 'tool_use', tool: 'Bash', toolUseId: 'tu-4', content: '',
+              toolResult: 'Turn ended (stream stall) before this tool returned a result.',
+              toolResultIsError: true,
+              toolResultTerminatedReason: 'stream_stall',
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'tu-4',
+      result: 'exit 2: boom',
+      isError: true,
+      truncated: false,
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { type: 'tool_use', toolUseId: 'tu-4', toolResult: 'exit 2: boom', toolResultIsError: true, toolResultTerminatedReason: undefined, toolResultTruncated: false },
           ],
         },
       },

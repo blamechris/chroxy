@@ -4,8 +4,9 @@
  * A tool call can be cut off because the TURN it belonged to was ended
  * underneath it -- a permission-mode switch respawned the provider child, the
  * user pressed Stop, the child crashed, a watchdog fired, the daemon restarted.
- * Those are not "the command ran and failed": the command never reported at
- * all, and the right next step is to re-send. The server stamps the synthetic
+ * Those are not "the command ran and failed": the command never reported a
+ * result, and whether it took effect is unknown -- the right next step is to
+ * check, then retry if needed. The server stamps the synthetic
  * `tool_result` it fabricates for such a tool with `terminatedReason`, and the
  * clients render a distinct state instead of the failure styling.
  *
@@ -77,7 +78,15 @@ const CAUSE: Record<TurnTerminationReason, string> = {
   daemon_restart: 'daemon restart',
 }
 
-const RETRY = 'Re-send to retry.'
+/**
+ * What the user should do next. The server cannot know whether the tool took
+ * effect: some paths clear local state WITHOUT killing the provider child (a
+ * hard timeout, a stream stall), so a real result can still follow, and even a
+ * confirmed kill does not undo a side effect that completed before the result
+ * was delivered. So the wording never asserts "did not run" and never tells
+ * the user to blindly retry -- it says no result arrived and to check first.
+ */
+const CHECK = 'Check whether it took effect before retrying.'
 
 /**
  * Wording for a terminated tool. `reason` may be any string (a newer server's
@@ -88,12 +97,12 @@ export function describeTurnTermination(reason?: unknown): TurnTerminationDescri
   if (!isTurnTerminationReason(reason)) {
     return {
       cause: 'turn terminated',
-      summary: `Turn terminated — this tool did not finish. ${RETRY}`,
+      summary: `Turn ended before this tool returned a result. ${CHECK}`,
     }
   }
   const cause = CAUSE[reason]
   if (reason === 'user_stop') {
-    return { cause, summary: `Stopped before this tool finished. ${RETRY}` }
+    return { cause, summary: `Stopped before this tool returned a result. ${CHECK}` }
   }
   if (reason === 'daemon_restart') {
     return {
@@ -103,6 +112,6 @@ export function describeTurnTermination(reason?: unknown): TurnTerminationDescri
   }
   return {
     cause,
-    summary: `Turn terminated (${cause}) — this tool did not finish. ${RETRY}`,
+    summary: `Turn ended (${cause}) before this tool returned a result. ${CHECK}`,
   }
 }

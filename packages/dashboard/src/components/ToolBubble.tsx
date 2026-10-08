@@ -90,7 +90,7 @@ export interface ToolBubbleProps {
    * #7376: the server's `terminatedReason` when this tool was cut off because
    * its TURN was terminated underneath it (permission-mode switch, Stop, crash,
    * watchdog, daemon restart) -- distinct from the command running and failing.
-   * Renders a "turn terminated, re-send" note in place of the (synthesized)
+   * Renders a "turn ended before a result, check before retrying" note in place of the (synthesized)
    * result text. Any non-empty string counts; an unrecognised reason from a newer
    * server gets the generic wording.
    */
@@ -324,7 +324,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result: r
         </span>
       )}
       {/* #7376: always visible (not behind the expand toggle) -- the whole point
-          is that the user can tell "cut off, re-send" from "ran and failed"
+          is that the user can tell "cut off, check before retrying" from "ran and failed"
           without opening anything. */}
       {termination && (
         <div
