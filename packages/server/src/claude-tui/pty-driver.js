@@ -332,7 +332,7 @@ export function ensureCwdTrusted(cwd) {
 // Legacy sessions write this once at start. Explicit native connections rewrite
 // it before every spawn/respawn so the SessionStart route marker carries a fresh
 // nonce. The file remains stable across turns within one PTY process.
-export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonce = null, permissionHookScript = PERMISSION_HOOK_SCRIPT }) {
+export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonce = null, permissionHookScript = PERMISSION_HOOK_SCRIPT, thinkingSummaries = false }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
   // Portable unique-id source for hook filenames — see the UUID note above.
@@ -356,6 +356,14 @@ export function writeHookSettings(sinkDir, { permissionsEnabled, nativeRouteNonc
   }
   const settings = {
     ...(nativeRouteNonce ? { env: claudeNativeRouteSettingsEnv() } : {}),
+    // #7393: ask the API for thinking summaries. claude's interactive default is
+    // to leave the display unset, which current models answer with a thinking
+    // block that carries only its signature; the transcript then has nothing to
+    // show. This is what `showThinkingSummaries` ("Request API-side thinking
+    // summaries and show them in the conversation and in the transcript view")
+    // is for, and the --settings file outranks the user's own settings.json, so
+    // chroxy's choice is the one that applies to a chroxy-owned TUI.
+    ...(thinkingSummaries ? { showThinkingSummaries: true } : {}),
     hooks: {
       ...(nativeRouteNonce ? {
         SessionStart: [

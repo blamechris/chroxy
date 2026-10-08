@@ -51,6 +51,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
+import { ThinkingStreams } from './thinking-stream.js'
 import { hasPersistedTranscript } from './jsonl-reader.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
@@ -197,6 +198,8 @@ const PTY_RESPAWN_EXHAUSTED_MESSAGE = 'Claude kept exiting; stopped restarting i
  *   stream_start  { messageId }
  *   stream_delta  { messageId, delta }
  *   stream_end    { messageId }
+ *   (and the same three with `thinking: true` on a distinct
+ *    `<messageId>-thinking-<n>` id for the model's reasoning, #7393)
  *   result        { cost, duration, usage, sessionId }
  *   tool_start    { messageId, toolUseId, tool, input }
  *   tool_result   { toolUseId, result, truncated }
@@ -571,7 +574,7 @@ export class ClaudeTuiSession extends BaseSession {
     // resumed conversation context).
     this._permissionModeFile = null
     this._consumedFiles = new Set()  // hook payload filenames already processed
-    this._activeTurn = null  // { messageId, startedAt, aborted, synthSeq }
+    this._activeTurn = null  // { messageId, startedAt, aborted, synthSeq, thinking? }
     this._ptyExited = false
     this._ptyExitInfo = null
     // #5321 (WP-4.1) — latched true when warmup classifies claude's output as a
@@ -811,6 +814,14 @@ export class ClaudeTuiSession extends BaseSession {
     this._authFailureBaseline = null
     this._lastAuthTranscriptScanMs = 0
     this._authTranscriptScanMs = ClaudeTuiSession.AUTH_TRANSCRIPT_SCAN_MS
+    // #7393: surface the model's reasoning, read from the same transcript. On by
+    // default; CHROXY_TUI_THINKING=0 (also false/no/off) turns off both halves:
+    // asking claude for thinking summaries (the settings key written into this
+    // session's --settings file) and showing what it writes. A per-instance
+    // field, like `_authTranscriptScanMs`, so a test can shrink the cadence.
+    this._thinkingEnabled = !['0', 'false', 'no', 'off'].includes(String(process.env.CHROXY_TUI_THINKING ?? '').trim().toLowerCase())
+    this._thinkingScanMs = ClaudeTuiSession.THINKING_SCAN_MS
+    this._lastThinkingScanMs = 0
     // #8400: usage-limit / rate-limit / overload, read from the same transcript.
     // `_usageLimitBaseline` is the cumulative count at turn start (null until a
     // scan could read it), `_lastUsageLimitScanMs` throttles the poll-loop scan on
@@ -1783,6 +1794,17 @@ export class ClaudeTuiSession extends BaseSession {
    * `getBackgroundTaskSnapshot()`.
    */
   _scanTranscript() {
+    return this._resolveTranscriptScanner()?.scan() ?? null
+  }
+
+  /**
+   * The incremental scanner for the running PTY's transcript, created (or
+   * replaced, when the path changed) on demand; null when no transcript is
+   * resolvable. Split out of `_scanTranscript()` (#7393) so the thinking drain
+   * can start capture on the scanner BEFORE it reads, which `_scanTranscript()`
+   * (resolve and scan in one step) cannot do.
+   */
+  _resolveTranscriptScanner() {
     const pid = this._term && this._term.pid
     if (!Number.isInteger(pid) || pid <= 0) return null
     const transcriptPath = transcriptPathForSessionFile(ClaudeTuiSession.sessionFilePath(pid))
@@ -1790,7 +1812,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (!this._transcriptTaskScanner || this._transcriptTaskScanner.path !== transcriptPath) {
       this._transcriptTaskScanner = new TranscriptTaskScanner(transcriptPath, this._log || log)
     }
-    return this._transcriptTaskScanner.scan()
+    return this._transcriptTaskScanner
   }
 
   /**
@@ -2019,6 +2041,11 @@ export class ClaudeTuiSession extends BaseSession {
   // is what bounds how long an expired login takes to surface (vs the 90s
   // first-output watchdog).
   static get AUTH_TRANSCRIPT_SCAN_MS() { return 1_000 }
+  // #7393: how often the hook-poll loop reads the transcript for new thinking
+  // blocks while a turn is busy. Tighter than the auth cadence because this one
+  // is what the user watches: a reasoning block shows up within about this long
+  // of claude writing it. The read is incremental (only appended bytes).
+  static get THINKING_SCAN_MS() { return 250 }
   // #8400: how long a reported usage limit shortens a repeat of itself to one line. The
   // longest window claude names is the 5-hour session, so a retry inside six
   // hours of the message is the same episode; past that, the message is a
@@ -2203,7 +2230,7 @@ export class ClaudeTuiSession extends BaseSession {
     // both be elided. Otherwise we'd run two competing permission systems
     // (chroxy's hook + claude's own --dangerously-skip-permissions flag).
     const permissionsEnabled = !!(this._port && this._hookSecret) && !this.skipPermissions
-    this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled })
+    this._settingsPath = this._writeHookSettings({ permissionsEnabled })
 
     // #4013: write the initial permission mode to a sidecar file so the
     // hook script can pick up mid-session changes (env vars on the
@@ -3117,7 +3144,7 @@ export class ClaudeTuiSession extends BaseSession {
     try {
       nativeRouteNonce = this._connectionAuthRoute === 'native' ? randomBytes(16).toString('hex') : null
       if (nativeRouteNonce) {
-        this._settingsPath = writeHookSettings(this._sinkDir, { permissionsEnabled, nativeRouteNonce })
+        this._settingsPath = this._writeHookSettings({ permissionsEnabled, nativeRouteNonce })
       }
     } catch (err) {
       this._blockNativeRouteVerification(err)
@@ -4328,6 +4355,8 @@ export class ClaudeTuiSession extends BaseSession {
     // #8223: baseline the transcript's auth-failure count BEFORE the prompt is
     // written, so a failure the prompt itself causes is always newer than it.
     this._beginAuthFailureWatchForTurn()
+    // #7393: and the point in the transcript this turn's reasoning starts from.
+    this._beginThinkingForTurn()
     // #8223: and the PTY-output boundary the turn-time auth scans start from.
     this._markTurnOutputStart()
 
@@ -4593,6 +4622,10 @@ export class ClaudeTuiSession extends BaseSession {
       if (this._ptyExited) break
       // _handleHardTimeout clears _isBusy; bail out cleanly if it fired.
       if (!this._isBusy) break
+      // #7393: show the reasoning claude has written since the last pass, BEFORE
+      // this pass's hook files: a tool_start that follows a thinking block must
+      // not overtake it on the wire.
+      this._drainTurnThinking()
       await drainHookFiles()
       pollIters++
       // #7875 — drainHookFiles can now tear the turn down SYNCHRONOUSLY
@@ -4699,6 +4732,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._lastTurnStopped = true // #8454
     const duration = this._nowMonotonic() - startedAt
     const text = typeof stopPayload.last_assistant_message === 'string' ? stopPayload.last_assistant_message : ''
+
+    // #7393: claude has finished, so everything it wrote about its reasoning is
+    // in the transcript. Show what the periodic drain has not reached yet BEFORE
+    // the response text, then stop collecting.
+    this._drainTurnThinking({ force: true })
+    this._endThinkingForTurn()
 
     // Deliver the response as a single stream burst so the dashboard renders
     // one assistant bubble (matches CliSession's event shape on Claude's side).
@@ -5636,6 +5675,82 @@ export class ClaudeTuiSession extends BaseSession {
       errorBeforeResult: false,
       gateStreamEndOnMessageId: true,
     })
+  }
+
+  /**
+   * #7393 — write this session's `--settings` file (the hook sink + permission
+   * hook registration) and return its path. The ONE place that decides whether
+   * claude is asked for thinking summaries, so the start and the native-route
+   * rewrite cannot disagree: `showThinkingSummaries` makes claude request
+   * summaries from the API, which is what puts readable text in the transcript's
+   * `thinking` blocks (without it the block carries only its signature).
+   */
+  _writeHookSettings({ permissionsEnabled, nativeRouteNonce = null }) {
+    return writeHookSettings(this._sinkDir, {
+      permissionsEnabled,
+      ...(nativeRouteNonce ? { nativeRouteNonce } : {}),
+      thinkingSummaries: this._thinkingEnabled,
+    })
+  }
+
+  /**
+   * #7393 — start of a turn: drop anything left from the last one and arm
+   * collection from now. Reasoning is read from the transcript (claude-tui has no
+   * stream to read it from), so what separates this turn's blocks from history
+   * is the capture cutoff plus a per-turn set of entry uuids.
+   */
+  _beginThinkingForTurn() {
+    const turn = this._activeTurn
+    if (!turn) return
+    turn.thinking = null
+    this._transcriptTaskScanner?.stopThinkingCapture()
+    if (!this._thinkingEnabled) return
+    const sinceMs = Date.now()
+    turn.thinking = {
+      sinceMs,
+      streams: new ThinkingStreams((event, data) => this.emit(event, data), turn.messageId),
+      seen: new Set(),
+    }
+    this._transcriptTaskScanner?.startThinkingCapture(sinceMs)
+    this._lastThinkingScanMs = this._nowMonotonic()
+  }
+
+  /**
+   * #7393 — emit the thinking blocks claude has written to the transcript since
+   * the last drain, each as its own `thinking: true` stream (see
+   * thinking-stream.js). Throttled to `_thinkingScanMs`; `force` bypasses that
+   * (the final drain at Stop). Never throws: reasoning is a nicety, and nothing
+   * here may cost a turn its answer.
+   */
+  _drainTurnThinking({ force = false } = {}) {
+    const turn = this._activeTurn
+    const thinking = turn?.thinking
+    if (!thinking || turn.aborted) return
+    try {
+      const nowMs = this._nowMonotonic()
+      if (!force && nowMs - this._lastThinkingScanMs < this._thinkingScanMs) return
+      this._lastThinkingScanMs = nowMs
+      const scanner = this._resolveTranscriptScanner()
+      if (!scanner) return
+      // Idempotent while active; re-arms a scanner that was replaced mid-turn.
+      scanner.startThinkingCapture(thinking.sinceMs)
+      scanner.scan()
+      for (const block of scanner.drainThinking()) {
+        if (block.uuid) {
+          if (thinking.seen.has(block.uuid)) continue
+          thinking.seen.add(block.uuid)
+        }
+        thinking.streams.emitBlock(block)
+      }
+    } catch (err) {
+      ;(this._log || log).debug?.(`thinking drain failed: ${err?.message} — no reasoning this pass`)
+    }
+  }
+
+  /** #7393 — the turn has its answer: stop collecting and release what was queued. */
+  _endThinkingForTurn() {
+    if (this._activeTurn) this._activeTurn.thinking = null
+    this._transcriptTaskScanner?.stopThinkingCapture()
   }
 
   /**
