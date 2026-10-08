@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { AUTH_REQUIRED_CODE, AUTH_REQUIRED_MESSAGE } from '../src/claude-tui/pty-driver.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 
 /**
@@ -190,6 +191,107 @@ describe('claude-tui diagnostics stay out of the chat (#8252)', () => {
     assert.equal(errors[0].message, 'Claude kept exiting; stopped restarting it.')
     assertNoTerminalDebris(errors[0].message, 'rate cap')
     assertCleanTailInLog()
+  })
+
+  it('the PTY is already dead before the prompt is written: one plain sentence, tail and code in the log', async () => {
+    turnSession(() => {})
+    // The child dies while the readiness probe is still waiting.
+    session._waitForPrompt = async () => {
+      session._ptyExited = true
+      session._ptyExitInfo = { exitCode: 139, signal: 'SIGSEGV' }
+      return false
+    }
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+
+    mock.timers.reset()
+    const result = await session.sendMessage('hello')
+
+    assert.deepEqual(result, { ok: false, reason: 'pty_exited' })
+    assert.deepEqual(errors.map((e) => e.message), ['Claude exited before your message could be sent.'])
+    assertNoTerminalDebris(errors[0].message, 'exit before write')
+    assertCleanTailInLog()
+    assert.ok(logLines.some((l) => /exited before prompt write \(code=139 signal=SIGSEGV\)/.test(l.message)), 'the exit code stays in the log')
+  })
+
+  describe('a login failure the TUI printed this turn still gets its dedicated error', () => {
+    const BANNER = '\r\nNot logged in \u00b7 Please run /login\r\n'
+
+    it('PTY exit mid-turn with the banner on screen: AUTH_REQUIRED, not "Claude exited"', async () => {
+      turnSession((s) => {
+        s._appendToOutputTail(BANNER)
+        s._ptyExited = true
+        s._ptyExitInfo = { exitCode: 1, signal: null }
+      })
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      mock.timers.reset()
+      await session.sendMessage('hello')
+
+      assert.equal(errors.length, 1)
+      assert.equal(errors[0].code, AUTH_REQUIRED_CODE)
+      assert.equal(errors[0].message, AUTH_REQUIRED_MESSAGE)
+      assertNoTerminalDebris(errors[0].message, 'auth')
+    })
+
+    it('POSITIVE CONTROL: the same exit with no banner stays the plain exit sentence, with no code', async () => {
+      turnSession((s) => {
+        s._ptyExited = true
+        s._ptyExitInfo = { exitCode: 1, signal: null }
+      })
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      mock.timers.reset()
+      await session.sendMessage('hello')
+
+      assert.equal(errors.length, 1)
+      assert.equal('code' in errors[0], false)
+      assert.equal(errors[0].message, 'Claude exited mid-turn \u2014 restarting.')
+    })
+
+    it('POSITIVE CONTROL: a Stop is never relabelled as an auth failure, banner or not', async () => {
+      turnSession((s) => {
+        s._appendToOutputTail(BANNER)
+        s._activeTurn.aborted = true
+      })
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+
+      mock.timers.reset()
+      await session.sendMessage('hello')
+
+      assert.deepEqual(errors.map((e) => e.message), ['Stopped.'])
+      assert.equal('code' in errors[0], false)
+    })
+  })
+
+  describe('a token an escape splits is redacted in the logged tail (#5322, #5358)', () => {
+    const HEAD = 'sk-ant-oat01-' + 'A'.repeat(20)
+    const TAIL = 'B'.repeat(25)
+    const MOVES = {
+      'cursor-forward ESC[2C': '\x1b[2C',
+      'column move ESC[5G': '\x1b[5G',
+      'cursor-up ESC[1A': '\x1b[1A',
+      'cursor-down ESC[1B': '\x1b[1B',
+      'colour ESC[1m': '\x1b[1m',
+    }
+    for (const [name, esc] of Object.entries(MOVES)) {
+      it(`${name}`, () => {
+        session = makeSession()
+        session._appendToOutputTail(`login ok ${HEAD}${esc}${TAIL} done`)
+        session.on('error', () => {})
+        session._onPtyGone({ exitCode: 1, signal: null }, 'exit')
+        const entry = tailLog()
+        assert.ok(entry, 'tail logged')
+        assert.equal(entry.message.includes('sk-ant-oat01-'), false, `token prefix leaked: ${JSON.stringify(entry.message)}`)
+        assert.equal(entry.message.includes('AAAAAAAA'), false, `first half leaked: ${JSON.stringify(entry.message)}`)
+        assert.equal(entry.message.includes('BBBBBBBB'), false, `second half leaked: ${JSON.stringify(entry.message)}`)
+        assert.ok(entry.message.includes('[REDACTED]'), `the token reads as redacted: ${JSON.stringify(entry.message)}`)
+        assert.ok(entry.message.includes('login ok') && entry.message.includes('done'), 'the text around the token survives')
+      })
+    }
   })
 
   it('a token echoed into the tail is redacted in the log (the redaction the chat copy had)', () => {

@@ -245,7 +245,8 @@ describe('CliSession — a tool cut off by a terminated turn says so (#7376)', (
     it(`#8252: ${slug} reads plainly and keeps the slug as metadata, not prose`, () => {
       session._sweepUnresolvedToolStarts(slug)
       assert.equal(results.length, 1)
-      assert.equal(results[0].result, "This tool didn't finish — the turn ended first.")
+      assert.equal(results[0].result, describeTurnTermination().summary, 'the protocol\'s neutral wording, not a second table')
+      assert.equal(/did not run|didn.t run|didn.t finish/i.test(results[0].result), false, 'never asserts the tool did not run')
       assert.equal(results[0].reason, slug, 'the slug is kept as structured metadata')
       assert.equal(results[0].synthetic, true, 'the synthesized flag is kept as structured metadata')
       assert.equal(results[0].result.includes(slug), false, 'no slug in the prose')

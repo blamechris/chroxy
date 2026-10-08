@@ -166,6 +166,11 @@ const DENIED_QUESTION_REAPER_MS = ASK_USER_QUESTION_WATCHDOG_MS
 // plain line each. The terminal tail, the exit code and the signal are
 // diagnostics for the daemon log (`_logPtyDiagnostic`), never part of the
 // message a client renders in a red card.
+
+// #8252: stand-in for a character `redactSensitivePreservingEscapes` redacted,
+// and the run of them that becomes one `[REDACTED]` once escapes are scrubbed.
+const REDACTION_FILL = '\ue000'
+const REDACTION_RUN = /\ue000+(?:[ \n]+\ue000+)*/g
 const TURN_STOPPED_MESSAGE = 'Stopped.'
 const PTY_EXITED_MESSAGE = 'Claude exited — restarting.'
 const PTY_EXITED_BEFORE_PROMPT_MESSAGE = 'Claude exited before your message could be sent.'
@@ -575,10 +580,13 @@ export class ClaudeTuiSession extends BaseSession {
     // Cleared by _onPtyGone the moment the process is confirmed gone (which also
     // closes the pid-reuse window — we only force-kill when onExit never fired).
     this._killTimer = null
-    // Ring buffer of recent PTY output bytes — surfaces in error
-    // messages when the TUI renders a diagnostic (rate-limit, auth
-    // failure, "switch back to API mode") that would otherwise be
-    // silently dropped (#3919). Kept small (~4KB) so it doesn't eat
+    // Ring buffer of recent PTY output bytes — what the TUI rendered when it
+    // failed (rate-limit, auth failure, "switch back to API mode"), which would
+    // otherwise be silently dropped (#3919). Since #8252 it is NOT part of any
+    // `error` message the chat renders: it is written, cleaned and redacted, to
+    // the session log (`_logPtyDiagnostic`), and the auth-failure scans classify
+    // it into the dedicated AUTH_REQUIRED error. Quota / rate-limit text has no
+    // detector and so reaches the log only. Kept small (~4KB) so it doesn't eat
     // memory on long sessions.
     this._outputTail = ''
     // #5794: monotonic count of ALL PTY output bytes ever appended. Unlike
@@ -4388,7 +4396,17 @@ export class ClaudeTuiSession extends BaseSession {
         diagnostic = `Stop hook timeout after ${seconds}s`
       }
       this._logPtyDiagnostic(diagnostic, this._activeTurn?.aborted ? 'info' : 'warn')
-      this._finishTurnError(message, messageId)
+      // #8252 review: the tail used to ride in this message, so a login banner the
+      // TUI rendered was visible in the card. It is in the log now, so classify it
+      // here as the stall, first-output and hard-timeout paths do: an auth failure
+      // still gets its dedicated, actionable error. Not on a Stop the user asked
+      // for. The scan reads only what THIS turn printed (#8223).
+      const authFail = !this._activeTurn?.aborted && this._scanTurnOutputForAuthFailure()
+      this._finishTurnError(
+        authFail ? AUTH_REQUIRED_MESSAGE : message,
+        messageId,
+        authFail ? { code: AUTH_REQUIRED_CODE } : undefined,
+      )
       return
     }
 
@@ -4844,7 +4862,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._refreshObservedModel()
   }
 
-  _finishTurnError(message, callerMessageId) {
+  _finishTurnError(message, callerMessageId, errorExtras) {
     this._assertBusyHasMessageId('_finishTurnError')
     this._logSendMessageSummary('error')
     // #4010: balance the early stream_start with stream_end + result so the
@@ -4862,7 +4880,7 @@ export class ClaudeTuiSession extends BaseSession {
     const messageId = callerMessageId || this._currentMessageId
     const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : 0
     if (messageId) this.emit('stream_end', { messageId })
-    this.emit('error', { message })
+    this.emit('error', errorExtras ? { ...errorExtras, message } : { message })
     // #4072: subscription-billed → cost: null so SessionManager skips
     // accumulation. See companion sites above.
     // #4628: sweep orphan tool_starts before result so the dashboard's
@@ -4894,17 +4912,25 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * The text `_outputTailDiagnostic` cleans. The raw tail when the session has
-   * one: it still carries the escape sequences, so a cursor-forward can become
-   * the word gap it stood for and a private-mode sequence is removed whole
-   * (#8252). The already-stripped tail otherwise (a session that never
-   * received PTY output, or a test that sets `_outputTail` directly).
+   * The text `_outputTailDiagnostic` cleans, and whether its START was cut by
+   * the byte cap. The raw tail when the session has one: it still carries the
+   * escape sequences, so a cursor-forward can become the word gap it stood for
+   * and a private-mode sequence is removed whole (#8252). The already-stripped
+   * tail otherwise (a session that never received PTY output, or a test that
+   * sets `_outputTail` directly).
+   *
+   * @returns {{ text: string, truncatedStart: boolean }}
    */
   _outputTailText() {
     if (this._outputTailRaw && this._outputTailRaw.length > 0) {
-      return this._outputTailRaw.toString('utf8')
+      return {
+        text: this._outputTailRaw.toString('utf8'),
+        // `_totalOutputBytes` never shrinks; the buffer stops growing at the cap.
+        truncatedStart: this._totalOutputBytes > this._outputTailRaw.length,
+      }
     }
-    return this._outputTail || ''
+    const text = this._outputTail || ''
+    return { text, truncatedStart: text.length >= ClaudeTuiSession.PTY_TAIL_BYTES }
   }
 
   /**
@@ -4929,7 +4955,7 @@ export class ClaudeTuiSession extends BaseSession {
    * message: those render in the chat.
    */
   _outputTailDiagnostic() {
-    const source = this._outputTailText()
+    const { text: source, truncatedStart } = this._outputTailText()
     if (!source) return ''
     // #5322 (WP-4.2, security) — this tail is written to the session-scoped log,
     // which fans out to clients and the System tab, so redact any token-shaped run (pasted
@@ -4938,7 +4964,18 @@ export class ClaudeTuiSession extends BaseSession {
     // PTY_TAIL_DIAGNOSTIC_BYTES boundary must be matched in full (and collapse
     // to [REDACTED]) rather than leaving a trailing fragment the regex can't
     // catch. The slice then bounds the already-scrubbed string.
-    return redactSensitive(scrubTerminalText(source))
+    //
+    // #8252 review: redact the RAW text first. The scrubber turns a cursor move
+    // into a space or a newline, so a token an escape interleaved (ESC[2C, ESC[5G,
+    // ESC[1A/B) is no longer contiguous once scrubbed. The escape-preserving pass
+    // sees through the escapes and redacts both halves of a split token (it must
+    // run first: redactSensitive alone would replace the leading half and orphan
+    // the rest). redactSensitive after the scrub is the backstop.
+    // The preserving pass fills a redacted character with a private-use sentinel;
+    // after the scrub, a run of them (a split token's halves now sit either side of
+    // the space or newline their escape became) is one `[REDACTED]`.
+    const redactedRaw = redactSensitivePreservingEscapes(source, REDACTION_FILL)
+    return redactSensitive(scrubTerminalText(redactedRaw, { truncatedStart }).replace(REDACTION_RUN, '[REDACTED]'))
       .slice(-ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
       .replace(/[\r\n]+/g, '\n')
       .replace(/[ \t]{2,}/g, ' ')

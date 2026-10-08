@@ -57,24 +57,40 @@ describe('scrubTerminalText (#8252)', () => {
     assert.equal(scrubTerminalText('ok\x1b'), 'ok')
   })
 
-  it('strips the half of a sequence a byte cap cut off at the START', () => {
-    assert.equal(scrubTerminalText('[2Cthe line'), 'the line')
-    assert.equal(scrubTerminalText('�[>0qthe line'), 'the line')
+  it('removes each private-mode CSI whole, to exact output', () => {
+    // `ESC [ > 0 q` etc.: the `>` / `<` parameter bytes are outside [0-9;?]. A
+    // grammar that stops at those leaves `>0q` behind, so compare whole strings.
+    assert.equal(scrubTerminalText('x\x1b[>0qy'), 'xy')
+    assert.equal(scrubTerminalText('x\x1b[>4my'), 'xy')
+    assert.equal(scrubTerminalText('x\x1b[<uy'), 'xy')
+    assert.equal(scrubTerminalText('x\x1b[=1;2cy'), 'xy')
+    assert.equal(scrubTerminalText('x\x1b[?2004hy'), 'xy')
+    assert.equal(scrubTerminalText('x\x1b7\x1b8y'), 'xy')
+    assert.equal(scrubTerminalText('x\x1b(By'), 'xy')
   })
 
-  it('removes bracket remnants of sequences whose ESC was already stripped', () => {
-    // What `_outputTail` holds: ANSI_STRIP removed the lone ESC and left the rest.
-    const stripped = '78[>0q[>4m[<u[?2004hClaude Code'
-    const out = scrubTerminalText(stripped)
-    assert.equal(out.includes('[>'), false)
-    assert.equal(out.includes('[<'), false)
-    assert.equal(out.includes('[?'), false)
-    assert.ok(out.endsWith('Claude Code'))
+  it('strips the half of a sequence a byte cap cut off at the START, when told the start was cut', () => {
+    assert.equal(scrubTerminalText('[2Cthe line', { truncatedStart: true }), 'the line')
+    assert.equal(scrubTerminalText('�the line', { truncatedStart: true }), 'the line')
   })
 
-  it('does NOT eat ordinary bracketed text', () => {
-    const text = 'see [1] and [x] and [2025-10-04] and a[0] = 3'
-    assert.equal(scrubTerminalText(text), text)
+  it('does not guess at a leading bracket run when the start was not cut', () => {
+    assert.equal(scrubTerminalText('[3D model] preview'), '[3D model] preview')
+    assert.equal(scrubTerminalText('[2Cthe line'), '[2Cthe line')
+  })
+
+  it('does NOT eat ordinary bracketed text, with or without an escape in the buffer', () => {
+    const samples = [
+      'see [1] and [x] and [2025-10-04] and a[0] = 3',
+      'run foo [<filepath>] now',
+      'opt [=value] and usage: cmd [>file] and [?help]',
+      '[3D model] preview',
+      '[link](https://example.com/a?b=c)',
+    ]
+    for (const text of samples) {
+      assert.equal(scrubTerminalText(text), text, `plain: ${text}`)
+      assert.equal(scrubTerminalText(`\x1b[1m${text}\x1b[0m`), text, `with escapes around: ${text}`)
+    }
   })
 
   it('normalises CRLF and drops stray control bytes', () => {

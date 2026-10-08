@@ -99,9 +99,12 @@ const TOKEN_SPLITTING_ESCAPE = new RegExp(
  * marker-prefixed patterns (sk-/AIza/Bearer/JWT/key=value) are the safe set.
  *
  * @param {string} s latin1/utf8 string (one char per byte for the dump path)
+ * @param {string} [fill] the one character each redacted character becomes
+ *   (default 'X'). A caller that goes on to reshape the text can pass a
+ *   character it will not otherwise meet and turn the runs into a marker.
  * @returns {string}
  */
-export function redactSensitivePreservingEscapes(s) {
+export function redactSensitivePreservingEscapes(s, fill = 'X') {
   // Walk s, skipping escape runs, building a stripped copy + index map back to s.
   let stripped = ''
   const map = []
@@ -120,7 +123,7 @@ export function redactSensitivePreservingEscapes(s) {
     pattern.lastIndex = 0
     let match
     while ((match = pattern.exec(stripped)) !== null) {
-      for (let k = match.index; k < match.index + match[0].length; k++) chars[map[k]] = 'X'
+      for (let k = match.index; k < match.index + match[0].length; k++) chars[map[k]] = fill
       changed = true
       if (match[0].length === 0) pattern.lastIndex++ // guard against a zero-width match
     }

@@ -29,8 +29,10 @@ const log = createLogger('base-session')
 
 // #8252: the text of a synthesized `tool_result` for a tool whose turn ended
 // with no result and no termination reason (see `_sweepUnresolvedToolStarts`).
-// A termination reason gets `describeTurnTermination(reason).summary` instead.
-export const UNFINISHED_TOOL_RESULT_TEXT = 'This tool didn\'t finish — the turn ended first.'
+// A termination reason gets its own `describeTurnTermination(reason).summary`;
+// this is the protocol's neutral wording for "no reason known", so the two cannot
+// drift and neither claims the tool did not run.
+export const UNFINISHED_TOOL_RESULT_TEXT = describeTurnTermination().summary
 
 // #3805: opt-in Chroxy context paragraph. Prepended to `_buildSystemPrompt()`
 // output when `chroxyContextHint` is true so the model knows it's running
@@ -2044,10 +2046,13 @@ export class BaseSession extends EventEmitter {
       this.emit('tool_result', {
         toolUseId,
         // #8252: plain words only. The sweep reason is a slug and the fact that
-        // the daemon fabricated this result is bookkeeping; both stay on the
-        // event as `reason` and `synthetic` (diagnostic fields, kept in the
-        // persisted history), not in the text a person reads. The tool's name is
-        // already on the row.
+        // the daemon fabricated this result is bookkeeping, so neither is in the
+        // text a person reads. They stay on the in-process event as `reason` and
+        // `synthetic` for listeners on the session; the wire
+        // (`event-normalizer.js`) and the persisted history
+        // (`session-message-history.js`) carry only `isError` and
+        // `terminatedReason`, so a non-terminated sweep's slug does not leave the
+        // process. The tool's name is already on the row.
         result: terminated
           ? describeTurnTermination(reason).summary
           : UNFINISHED_TOOL_RESULT_TEXT,

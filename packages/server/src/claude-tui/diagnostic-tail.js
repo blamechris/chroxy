@@ -45,29 +45,31 @@ const ESCAPE_SEQUENCE = new RegExp(
 const CURSOR_ACROSS = new Set(['C', 'G', '`', 'a'])
 const CURSOR_DOWN_OR_HOME = new Set(['A', 'B', 'E', 'F', 'H', 'f', 'd', 'e'])
 
-// The remains of a sequence whose ESC was already removed (the already-stripped
-// tail) or was cut off by the byte cap. A private-mode marker makes a bracket
-// run unmistakable; a numeric run is only trusted at the very start, where a
-// byte cap can cut a sequence in half, so ordinary "[1] ..." text elsewhere is
-// left alone.
-const ORPHAN_PRIVATE_CSI = /\[[<>=?][0-9;]*[ -/]*[A-Za-z@`~]/g
+// The remains of a sequence a byte cap cut in half at the START of the buffer
+// (`[2Cthe line`). Only ever trusted when the caller says the start was cut:
+// anywhere else a bracket run is ordinary text (`[3D model]`, `[<filepath>]`,
+// `[=value]`, `[>file]`, `[?help]`), and a pass that guesses deletes real words.
+// A tail whose escapes were already stripped (the `_outputTail` fallback) gets no
+// remnant pass for the same reason: a remnant cannot be told from text.
 const ORPHAN_LEADING_CSI = /^\s*\[[0-9;]+[A-HJKSTfhlmnsu]/
 
 // Block elements, box drawing, geometric shapes and braille: the startup logo
 // and the spinner. Replaced by a space so neighbouring words stay apart.
-const DRAWING_GLYPHS = /[─-▟■-◿⠀-⣿]/g
+const DRAWING_GLYPHS = /[\u2500-\u259f\u25a0-\u25ff\u2800-\u28ff]/g
 
 // Everything below 0x20 except tab and newline, DEL, the C1 controls, and the
 // replacement character a byte cap leaves where it cut a multi-byte sequence.
-const STRAY_CONTROLS = /[\x00-\x08\x0b-\x1f\x7f-\x9f�]/g
+const STRAY_CONTROLS = /[\x00-\x08\x0b-\x1f\x7f-\x9f\ufffd]/g
 
 /**
  * @param {string} text - raw PTY output (escapes intact) or an already-stripped tail
+ * @param {{ truncatedStart?: boolean }} [opts] - `truncatedStart`: the buffer's
+ *   first bytes were cut by a size cap, so a half sequence may open it
  * @returns {string} readable text with cursor-control debris removed
  */
-export function scrubTerminalText(text) {
+export function scrubTerminalText(text, { truncatedStart = false } = {}) {
   if (typeof text !== 'string' || text.length === 0) return ''
-  return text
+  const cleaned = text
     .replace(ESCAPE_SEQUENCE, (_match, _params, final) => {
       if (final === undefined) return ''
       if (CURSOR_ACROSS.has(final)) return ' '
@@ -76,7 +78,6 @@ export function scrubTerminalText(text) {
     })
     .replace(/\r\n?/g, '\n')
     .replace(STRAY_CONTROLS, '')
-    .replace(ORPHAN_PRIVATE_CSI, '')
-    .replace(ORPHAN_LEADING_CSI, '')
+  return (truncatedStart ? cleaned.replace(ORPHAN_LEADING_CSI, '') : cleaned)
     .replace(DRAWING_GLYPHS, ' ')
 }
