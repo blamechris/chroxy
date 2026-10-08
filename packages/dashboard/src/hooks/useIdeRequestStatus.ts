@@ -29,13 +29,16 @@
  * Going unavailable while the palette is open arms a re-request, and the first
  * moment it is available again (the connection edge) fires `reissue` once, IF
  * the palette's last request did not complete on a live connection. That is
- * decided from what actually happened, not from the stored result, because a
- * result can be "current" (same query / a retained table) and still stale (#8429):
+ * decided from what happened to the request as well as from the stored result,
+ * because a result can be "current" (same query / a retained table) and still stale (#8429):
  *
  *  - a request was in flight at the drop: seen as `loading` while available, and
  *    cleared only when the stored result is REPLACED (`result` identity changes).
  *    `loading` itself is not trusted, since #8402's sweep clears it a few store
  *    writes before the phase leaves 'connected';
+ *  - the result is not for what the palette is asking (`!isCurrent`): a reply to an
+ *    OLDER request also replaces `result`, so it can end the in-flight mark while a
+ *    newer request was lost;
  *  - a request was attempted while unavailable: the palette sends through `ask`,
  *    which records the attempt the store's sender silently dropped.
  *
@@ -104,6 +107,8 @@ export function useIdeRequestStatus({ active, loading, isCurrent, result, reissu
   /** A request went out on a live connection and its answer has not replaced `result`. */
   const inFlight = useRef(false)
   const lastResult = useRef(result)
+  const isCurrentRef = useRef(isCurrent)
+  isCurrentRef.current = isCurrent
 
   // Runs after every render and reads only the committed values, so it sees the
   // store writes of a drop one at a time and must not infer "answered" from
@@ -111,7 +116,8 @@ export function useIdeRequestStatus({ active, loading, isCurrent, result, reissu
   useEffect(() => {
     if (result !== lastResult.current) {
       lastResult.current = result
-      if (available) inFlight.current = false
+      // A reply can only land on a live connection, so no availability guard.
+      inFlight.current = false
     }
     if (available && active && loading) inFlight.current = true
   })
@@ -127,7 +133,10 @@ export function useIdeRequestStatus({ active, loading, isCurrent, result, reissu
       reissueArmed.current = true
     } else if (reissueArmed.current) {
       reissueArmed.current = false
-      const owed = attemptedOffline.current || inFlight.current
+      // `!isCurrent` stays an owed re-ask: a reply to an OLDER request replaces
+      // `result` and ends `inFlight` while a newer one was lost, and a palette on a
+      // result that is not for what it asks for would otherwise spin for ever.
+      const owed = attemptedOffline.current || inFlight.current || !isCurrentRef.current
       attemptedOffline.current = false
       inFlight.current = false
       if (owed) reissueRef.current()

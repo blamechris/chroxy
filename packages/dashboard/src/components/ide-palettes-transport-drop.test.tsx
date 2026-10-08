@@ -646,3 +646,36 @@ describe('#8429 the unavailable copy says which kind of unavailable it is', () =
     expect(screen.queryByTestId('code-search-offline')).toBeNull()
   })
 })
+
+/**
+ * #8429 review: a reply to an OLDER request replaces `result` and clears `*Loading`
+ * while a NEWER request is still outstanding. The in-flight mark must not be the
+ * only thing owing the re-ask, or the palette is left on "Searching…" for ever.
+ */
+describe('#8429 review: a reply to an older request does not hide the newer one that was lost', () => {
+  it('code search: ab, abc, the reply for ab lands, drop, reconnect re-asks abc', async () => {
+    const ws = await openConnected()
+    render(<CodeSearchPalette isOpen onClose={() => {}} />)
+    for (const q of ['ab', 'abc']) {
+      fireEvent.change(screen.getByTestId('code-search-input'), { target: { value: q } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(250) })
+    }
+    expect(ws.sentOfType('search_content').map((m) => m.query), 'control: both were asked').toEqual(['ab', 'abc'])
+    reply(ws, { ...SEARCH_REPLY, query: 'ab' })
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('search_content').map((m) => m.query)).toEqual(['abc'])
+  })
+
+  it('references: alpha, beta, the reply for alpha lands, drop, reconnect re-asks beta', async () => {
+    const ws = await openConnected()
+    act(() => { useConnectionStore.getState().requestFindReferences('alpha') })
+    render(<ReferencesPalette isOpen onClose={() => {}} />)
+    act(() => { useConnectionStore.getState().requestFindReferences('beta') })
+    expect(ws.sentOfType('find_references').map((m) => m.symbol), 'control: both were asked').toEqual(['alpha', 'beta'])
+    reply(ws, { ...REFERENCES_REPLY, symbol: 'alpha' })
+    act(() => { ws.onclose?.({ code: 1006 }) })
+    const ws2 = await reconnect()
+    expect(ws2.sentOfType('find_references').map((m) => m.symbol)).toEqual(['beta'])
+  })
+})
