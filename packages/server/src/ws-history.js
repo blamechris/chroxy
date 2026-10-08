@@ -8,7 +8,7 @@ import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from '.
 import { getPermissionModes } from './handler-utils.js'
 import { listProviders, getProvider, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
-import { streamKindOf } from './session-message-history.js'
+import { streamKindOf, permissionOutcomeDecision } from './session-message-history.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { MAX_SANE_DURATION_MS, REPLAY_BACKPRESSURE_MAX_WAIT_MS } from '@chroxy/protocol'
@@ -425,6 +425,20 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
   // so the client rebuilds the thinking bubble the live stream showed rather than
   // an answer. One classifier; the client reads the field and derives nothing.
   if (streamKindOf(entry) === 'thinking') wireEntry.kind = 'thinking'
+  // #8503: a `permission_outcome` carries the tool input its prompt was shown with
+  // (already sanitized and capped when recorded). A restored entry whose `input`
+  // is not a plain object (a damaged or hand-edited state file) is sent without
+  // it rather than as something a client would have to defend against.
+  if (wireEntry.type === 'permission_outcome' && 'input' in wireEntry
+    && !(wireEntry.input && typeof wireEntry.input === 'object' && !Array.isArray(wireEntry.input))) {
+    delete wireEntry.input
+  }
+  // #8503: the decision token an `allowed` outcome carries; a restored entry whose
+  // token is not one the recorder would keep is sent without it.
+  if (wireEntry.type === 'permission_outcome' && 'decision' in wireEntry
+    && permissionOutcomeDecision(wireEntry.outcome, wireEntry.decision) === undefined) {
+    delete wireEntry.decision
+  }
   if (wireEntry.type === 'permission_outcome' && wireEntry.outcome === 'stopped'
     && !(client?.clientCapabilities?.has?.(CAPABILITY_PERMISSION_OUTCOME_STOPPED) ?? false)) {
     wireEntry.outcome = 'expired'

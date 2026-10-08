@@ -8,8 +8,10 @@ import { SessionManager } from '../src/session-manager.js'
 import {
   SessionMessageHistory,
   PERMISSION_OUTCOME_DESCRIPTION_MAX,
+  PERMISSION_OUTCOME_INPUT_MAX,
   PERMISSION_OUTCOME_TOOL_MAX,
 } from '../src/session-message-history.js'
+import { sanitizeToolInput, isSanitizedToolInput, PULL_MAX_INPUT_CHARS } from '../src/redaction.js'
 import { PermissionManager, wirePermissionManager } from '../src/permission-manager.js'
 import { createPermissionHandler } from '../src/ws-permissions.js'
 import { createPermissionResolver } from '../src/permission-resolver.js'
@@ -41,6 +43,8 @@ function tmpStateFile() {
 }
 after(() => { if (tmpDir) rmSync(tmpDir, { recursive: true, force: true }) })
 
+// The size the journal bounds an input by (see PERMISSION_OUTCOME_INPUT_MAX): serialized length, for every shape alike.
+const inputWeight = (input) => JSON.stringify(input).length
 const outcomes = (mgr, sid) => mgr.getHistory(sid).filter((e) => e.type === 'permission_outcome')
 
 describe('SessionMessageHistory permission_outcome (#8348)', () => {
@@ -127,14 +131,235 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     assert.ok(description.length <= PERMISSION_OUTCOME_DESCRIPTION_MAX)
   })
 
-  it('keeps no tool input: only the fields the clients were shown', () => {
+  it('keeps only the fields the clients were shown: the tool input is the SANITIZED one, under `input`, and nothing else rides along (#8503)', () => {
     const h = new SessionMessageHistory()
     h.recordHistory('s1', 'permission_outcome', {
       requestId: 'p', tool: 'Write', description: 'Write a file', outcome: 'allowed',
-      input: { file_path: '/etc/passwd', content: 'SECRET' }, toolInput: { token: 'x' },
+      input: { file_path: '/etc/passwd' }, toolInput: { token: 'x' }, rawInput: { file_path: '/etc/shadow' },
     })
     const [e] = h.getHistory('s1')
+    assert.deepEqual(Object.keys(e).sort(), ['_seq', 'description', 'input', 'outcome', 'requestId', 'timestamp', 'tool', 'type'])
+    assert.deepEqual(e.input, { file_path: '/etc/passwd' })
+  })
+
+  it('an entry with no input stays exactly as it was before #8503 (no `input` key at all)', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'ls', outcome: 'allowed' })
+    const [e] = h.getHistory('s1')
     assert.deepEqual(Object.keys(e).sort(), ['_seq', 'description', 'outcome', 'requestId', 'timestamp', 'tool', 'type'])
+  })
+
+  for (const [label, input] of [
+    ['a string', 'rm -rf /'], ['an array', [{ command: 'ls' }]], ['null', null], ['a number', 7], ['a boolean', true],
+  ]) {
+    it(`journals no input when it is ${label} (a tool input is a plain object)`, () => {
+      const h = new SessionMessageHistory()
+      h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', input })
+      assert.equal('input' in h.getHistory('s1')[0], false)
+    })
+  }
+
+  it('a cyclic input is journaled the way the broadcast cuts it, not thrown on and not lost', () => {
+    const h = new SessionMessageHistory()
+    const cyclic = { command: 'ls' }
+    cyclic.self = cyclic
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', input: cyclic })
+    assert.deepEqual(h.getHistory('s1')[0].input, sanitizeToolInput(cyclic))
+    assert.equal(h.getHistory('s1')[0].input.command, 'ls')
+  })
+
+  it('an input that is already sanitized is journaled unchanged (the recorder adds no second, different redaction)', () => {
+    const h = new SessionMessageHistory()
+    const shown = sanitizeToolInput({
+      command: 'curl -H "Authorization: Bearer sk-ant-api03-' + 'A'.repeat(40) + '" https://x.test',
+      password: 'ordinarySecret123',
+      env: { TOKEN: 'sk-ant-api03-' + 'B'.repeat(40), REGION: 'eu-west-1' },
+      args: ['--region', 'eu-west-1'],
+      n: 3, flag: true, none: null,
+    })
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', input: shown })
+    assert.deepEqual(h.getHistory('s1')[0].input, shown)
+    assert.equal(JSON.stringify(shown).includes('ordinarySecret123'), false, 'the fixture really was sanitized')
+  })
+
+  it('a RAW input handed to the recorder is redacted the way the broadcast redacts it (defence in depth)', () => {
+    const h = new SessionMessageHistory()
+    const raw = {
+      command: 'export TOKEN=sk-ant-api03-' + 'A'.repeat(40),
+      password: 'ordinarySecret123',
+      nested: { api_key: 'nestedSecret456', note: 'ok' },
+    }
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', input: raw })
+    const [e] = h.getHistory('s1')
+    assert.deepEqual(e.input, sanitizeToolInput(raw), 'exactly what the live broadcast would have sent')
+    const serialized = JSON.stringify(e)
+    for (const secret of ['ordinarySecret123', 'nestedSecret456', 'sk-ant-api03-AAAA']) {
+      assert.equal(serialized.includes(secret), false, `${secret} must not be journaled`)
+    }
+  })
+
+  it('journals the broadcast truncation wrapper as it was sent, bounded to the broadcast cap', () => {
+    const h = new SessionMessageHistory()
+    const shown = sanitizeToolInput({ file_path: '/srv/big.ts', content: 'x '.repeat(20_000) })
+    assert.equal(shown._truncated, true, 'the fixture really is the wrapper')
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed', input: shown })
+    const [e] = h.getHistory('s1')
+    assert.deepEqual(e.input, shown)
+    assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX)
+  })
+
+  it('bounds an oversized input: never more than the broadcast cap, whatever the caller handed over', () => {
+    const h = new SessionMessageHistory()
+    h.recordHistory('s1', 'permission_outcome', {
+      requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed',
+      input: { content: 'a'.repeat(500_000), list: Array.from({ length: 5000 }, (_, i) => `item-${i}`) },
+    })
+    const [e] = h.getHistory('s1')
+    assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX, 'bounded')
+    assert.equal(e.input._truncated, true)
+  })
+
+  it('an UNMARKED hand-built `_truncated` object that is over the cap is re-sanitized like any raw input: bounded, no secret', () => {
+    const h = new SessionMessageHistory()
+    const crafted = { _truncated: true, summary: 'sk-ant-api03-' + 'A'.repeat(40) + ' ' + 'z'.repeat(100_000), extra: 'y'.repeat(100_000) }
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed', input: crafted })
+    const [e] = h.getHistory('s1')
+    assert.deepEqual(e.input, sanitizeToolInput(crafted), 'exactly what the broadcast would have sent for it')
+    assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX)
+    assert.equal(JSON.stringify(e.input).includes('sk-ant-api03-AAAA'), false)
+  })
+
+  // Review (finding 1): the decision token. `allowAlways` writes a PERSISTENT rule, so a
+  // record of it must not fold into a group of one-time allows after a rebuild.
+  for (const token of ['allow', 'allowSession', 'allowAlways']) {
+    it(`journals the decision token "${token}" on an allowed outcome, and replays it`, () => {
+      const h = new SessionMessageHistory()
+      h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', decision: token })
+      const [e] = h.getHistory('s1')
+      assert.equal(e.decision, token)
+      const frames = []
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', e)
+      assert.equal(frames[0].decision, token)
+    })
+  }
+
+  it('journals no decision token for a denied, expired or stopped outcome, nor for an unknown or non-string token', () => {
+    const h = new SessionMessageHistory()
+    const rec = (id, outcome, decision) => h.recordHistory('s1', 'permission_outcome', { requestId: id, tool: 'Bash', description: 'x', outcome, decision })
+    rec('a', 'denied', 'deny'); rec('b', 'expired', 'allow'); rec('c', 'stopped', 'allowAlways')
+    rec('d', 'allowed', 'deny'); rec('e', 'allowed', 'sudo'); rec('f', 'allowed', 7); rec('g', 'allowed', { x: 1 }); rec('h', 'allowed', undefined)
+    for (const e of h.getHistory('s1')) assert.equal('decision' in e, false, `${e.requestId} must carry no decision`)
+  })
+
+  it('an entry journaled before the field replays with no `decision` key, and a restored bad token is not sent', () => {
+    const h = new SessionMessageHistory()
+    h.setHistory('s1', [
+      { type: 'permission_outcome', requestId: 'old', tool: 'Bash', description: 'ls', outcome: 'allowed', timestamp: 5 },
+      { type: 'permission_outcome', requestId: 'bad', tool: 'Bash', description: 'ls', outcome: 'allowed', decision: 'sudo', timestamp: 6 },
+      { type: 'permission_outcome', requestId: 'bad2', tool: 'Bash', description: 'ls', outcome: 'denied', decision: 'allowAlways', timestamp: 7 },
+    ])
+    for (const e of h.getHistory('s1')) {
+      const frames = []
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', e)
+      assert.equal('decision' in frames[0], false, e.requestId)
+    }
+  })
+
+  // #8503 review (Codex P2): `_truncated` is a key an agent can put in its own tool
+  // input. The journal must never read it as "this is the sanitizer's wrapper".
+  const CRAFTED = { _truncated: true, summary: 'routine task', command: 'rm -rf /important', dangerouslyDisableSandbox: true }
+
+  it('P2: an agent-authored `_truncated` input keeps its command and its safety flag, exactly as the broadcast sent them', () => {
+    const h = new SessionMessageHistory()
+    const shown = sanitizeToolInput(CRAFTED)
+    assert.deepEqual(shown, CRAFTED, 'precondition: the live sanitizer preserves a small object whatever its keys')
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'routine task', outcome: 'allowed', input: shown })
+    assert.deepEqual(h.getHistory('s1')[0].input, CRAFTED)
+    const frames = []
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+    assert.equal(frames[0].input.command, 'rm -rf /important')
+    assert.equal(frames[0].input.dangerouslyDisableSandbox, true)
+  })
+
+  it('P2: the same holds when the crafted input arrives RAW, and two such inputs with different commands stay different', () => {
+    const h = new SessionMessageHistory()
+    const other = { ...CRAFTED, command: 'ls' }
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'a', tool: 'Bash', description: 'routine task', outcome: 'allowed', input: CRAFTED })
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'b', tool: 'Bash', description: 'routine task', outcome: 'allowed', input: other })
+    const [a, b] = h.getHistory('s1')
+    assert.deepEqual(a.input, CRAFTED)
+    assert.deepEqual(b.input, other)
+    assert.notEqual(a.input.command, b.input.command)
+  })
+
+  // Codex P3: re-redacting a wrapper's serialized summary with the text patterns is not
+  // the object-level redaction the broadcast applied.
+  it('P3: a large input whose key merely ends in "token" is journaled identical to the broadcast, not re-redacted as text', () => {
+    const h = new SessionMessageHistory()
+    const shown = sanitizeToolInput({ not_a_token: 'ordinaryValue', content: 'x'.repeat(20_000) })
+    assert.equal(shown._truncated, true, 'precondition: a real wrapper')
+    assert.ok(shown.summary.includes('ordinaryValue'), 'precondition: the live broadcast kept the value')
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed', input: shown })
+    assert.deepEqual(h.getHistory('s1')[0].input, shown)
+    assert.ok(h.getHistory('s1')[0].input.summary.includes('ordinaryValue'))
+  })
+
+  // The invariant, over many shapes: what the sanitizer BROADCAST is what the journal keeps.
+  const SHAPES = {
+    'a small command': { command: 'touch smoke-perm.txt' },
+    'flags and a description': { command: 'ls', description: 'list', dangerouslyDisableSandbox: true, run_in_background: true },
+    'an empty input': {},
+    'a nested structure': { a: { b: { c: [1, 2, { d: 'e' }] } }, list: ['x', 'y'], n: 3, t: true, none: null },
+    'a key-name secret': { password: 'ordinarySecret123', region: 'eu-west-1' },
+    'a value-shape secret': { command: 'curl -H "x-api-key: sk-ant-api03-' + 'Q'.repeat(40) + '" https://x.test' },
+    'a key that ends in token': { not_a_token: 'ordinaryValue', n: 1 },
+    'a crafted _truncated object': CRAFTED,
+    'a crafted _truncated with no summary': { _truncated: true, command: 'x' },
+    'a crafted _truncated with a non-string summary': { _truncated: true, summary: { a: 1 }, command: 'x' },
+    'a crafted object that looks like a wrapper': { _truncated: true, summary: '{"command":"ls"}... [truncated]' },
+    'a real wrapper (one big string)': { content: 'x'.repeat(30_000), file_path: '/srv/big.ts' },
+    'a real wrapper (many keys)': Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`k${i}`, `value-${i}`])),
+    'a real wrapper full of quotes and backslashes': { content: '"\\"'.repeat(8_000) },
+    'a real wrapper holding a secret': { content: 'x'.repeat(20_000), password: 'ordinarySecret123', env: { A: 'sk-ant-api03-' + 'R'.repeat(40) } },
+    'a cyclic input': (() => { const c = { command: 'ls' }; c.self = c; return c })(),
+    'a deep input': (() => { let d = { leaf: 'x' }; for (let i = 0; i < 20; i++) d = { d }; return d })(),
+    'a unicode input': { command: 'echo \u2603 \ud83d\ude00 "quoted" \\ back' },
+  }
+  for (const [label, raw] of Object.entries(SHAPES)) {
+    it(`property: journal(broadcast(x)) is exactly broadcast(x) -- ${label}`, () => {
+      const h = new SessionMessageHistory()
+      const shown = sanitizeToolInput(raw)
+      assert.equal(isSanitizedToolInput(shown), true, 'the sanitizer marks what it returns')
+      h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', input: shown })
+      const [e] = h.getHistory('s1')
+      assert.deepEqual(e.input, shown)
+      assert.equal(JSON.stringify(e.input), JSON.stringify(shown), 'byte for byte, key order included')
+      assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX, 'and within the size bound')
+    })
+
+    it(`property: a RAW x is journaled as the broadcast of x would be -- ${label}`, () => {
+      const h = new SessionMessageHistory()
+      h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', input: raw })
+      assert.deepEqual(h.getHistory('s1')[0].input, sanitizeToolInput(raw))
+    })
+  }
+
+  it('the marker is not forgeable by content: a JSON copy of a sanitized input, or a plain literal, is not marked', () => {
+    const shown = sanitizeToolInput({ command: 'ls' })
+    assert.equal(isSanitizedToolInput(shown), true)
+    assert.equal(isSanitizedToolInput(JSON.parse(JSON.stringify(shown))), false)
+    assert.equal(isSanitizedToolInput({ command: 'ls' }), false)
+    assert.equal(isSanitizedToolInput({ _sanitized: true }), false)
+    assert.equal(isSanitizedToolInput(null), false)
+    assert.equal(isSanitizedToolInput('ls'), false)
+  })
+
+  it('an input sanitized for the PULL path (past the journal bound) is dropped, never re-shaped', () => {
+    const h = new SessionMessageHistory()
+    const pulled = sanitizeToolInput({ content: 'x'.repeat(100_000), file_path: '/srv/a.ts' }, { maxChars: PULL_MAX_INPUT_CHARS })
+    assert.ok(JSON.stringify(pulled).length > PERMISSION_OUTCOME_INPUT_MAX, 'precondition: bigger than the bound')
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed', input: pulled })
+    assert.equal('input' in h.getHistory('s1')[0], false)
   })
 
   it('shares the ring buffer cap: the oldest entry goes first and the buffer reports truncation', () => {
@@ -168,6 +393,41 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     assert.equal(frames[0].sessionId, 's1')
     assert.equal(typeof frames[0].historySeq, 'number')
     assert.equal(frames[0]._seq, undefined)
+  })
+
+  it('#8503: replays the journaled input on the frame, exactly as recorded', () => {
+    const h = new SessionMessageHistory()
+    const input = { command: 'touch smoke-perm.txt', dangerouslyDisableSandbox: true }
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'Touch smoke file', outcome: 'allowed', input })
+    const frames = []
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+    assert.deepEqual(frames[0].input, input)
+  })
+
+  it('#8503: an entry journaled before the field existed replays with no `input` key', () => {
+    const h = new SessionMessageHistory()
+    h.setHistory('s1', [{ type: 'permission_outcome', requestId: 'p', tool: 'Bash', description: 'ls', outcome: 'allowed', timestamp: 5 }])
+    const frames = []
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+    assert.equal('input' in frames[0], false)
+  })
+
+  it('#8503: a restored entry whose `input` is not a plain object replays without it (a hand-edited or damaged state file)', () => {
+    for (const bad of ['rm -rf /', ['x'], 7, true]) {
+      const h = new SessionMessageHistory()
+      h.setHistory('s1', [{ type: 'permission_outcome', requestId: 'p', tool: 'Bash', description: 'ls', outcome: 'allowed', input: bad, timestamp: 5 }])
+      const frames = []
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+      assert.equal('input' in frames[0], false, `${JSON.stringify(bad)} must not reach a client`)
+    }
+  })
+
+  it('#8503: the state-file serializer keeps the input (it is within its own cap)', () => {
+    const h = new SessionMessageHistory()
+    const input = { command: 'ls -la', run_in_background: true }
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'ls', outcome: 'allowed', input })
+    const persisted = h.truncateEntry(h.getHistory('s1')[0])
+    assert.deepEqual(persisted.input, input)
   })
 
   it('is left out of a session summary transcript (a marker, not conversation)', () => {
@@ -226,6 +486,32 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     assert.equal(e.tool, 'Bash')
     assert.equal(e.description, 'ls -la')
     assert.equal(e.outcome, 'allowed')
+  })
+
+  it('journals the decision token the user answered with: allow, allowSession and allowAlways stay apart; a deny has none', async () => {
+    const seen = {}
+    for (const [sid, token] of [['s1', 'allow'], ['s2', 'allowAlways'], ['s3', 'allowSession'], ['s4', 'deny']]) {
+      const r = raise(sid)
+      r.pm.respondToPermission(r.requestId, token)
+      await r.decided
+      seen[token] = outcomes(mgr, sid)[0]
+    }
+    assert.equal(seen.allow.decision, 'allow')
+    assert.equal(seen.allowAlways.decision, 'allowAlways')
+    assert.equal(seen.allowSession.decision, 'allowSession')
+    assert.equal(seen.allowAlways.outcome, 'allowed')
+    assert.equal(seen.deny.outcome, 'denied')
+    assert.equal('decision' in seen.deny, false)
+  })
+
+  it('an auto-mode allow (no user token) and a timeout journal no more than they did before', async () => {
+    const { session } = makeInProcessSession(mgr, 's1')
+    session.emit('permission_request', { requestId: 'p-auto', tool: 'Bash', description: 'x', input: { command: 'ls' } })
+    session.emit('permission_resolved', { requestId: 'p-auto', decision: 'allow', reason: 'auto_mode' })
+    const t = raise('s2', 'Bash', { command: 'sleep' }, { timeoutMs: 15 })
+    await t.decided
+    assert.equal(outcomes(mgr, 's1')[0].decision, 'allow')
+    assert.equal('decision' in outcomes(mgr, 's2')[0], false, 'an expired prompt has no decision')
   })
 
   it('records "allowed" for allowAlways, "denied" for deny', async () => {
@@ -351,6 +637,105 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     const [e] = outcomes(mgr, 's1')
     assert.equal(e.description, '/Users/me/proj/src/big-file.ts')
     assert.equal(e.description.includes('_truncated'), false)
+  })
+
+  // #8503 -- the journaled input is the input the clients were SHOWN.
+  it('#8503: journals the very input the live permission_request carried', async () => {
+    const { session, pm } = makeInProcessSession(mgr, 's1')
+    pms.push(pm)
+    let shown
+    session.once('permission_request', (d) => { shown = d })
+    const decided = pm.handlePermission('Bash', { command: 'touch smoke-perm.txt', description: 'Touch smoke file', run_in_background: true }, null, 'approve')
+    pm.respondToPermission(shown.requestId, 'allow')
+    await decided
+    const [e] = outcomes(mgr, 's1')
+    assert.deepEqual(e.input, { command: 'touch smoke-perm.txt', description: 'Touch smoke file', run_in_background: true })
+    assert.deepEqual(e.input, shown.input, 'identical to the broadcast')
+  })
+
+  it('#8503: journals the input of every ending, not only an allow', async () => {
+    const a = raise('s1', 'Bash', { command: 'one' })
+    a.pm.respondToPermission(a.requestId, 'deny')
+    await a.decided
+    const b = raise('s2', 'Bash', { command: 'two' }, { timeoutMs: 15 })
+    await b.decided
+    assert.deepEqual(outcomes(mgr, 's1')[0].input, { command: 'one' })
+    assert.equal(outcomes(mgr, 's2')[0].outcome, 'expired')
+    assert.deepEqual(outcomes(mgr, 's2')[0].input, { command: 'two' })
+  })
+
+  it('#8503: the journaled input carries the same redaction as the broadcast, and no secret reaches the state file', async () => {
+    const secret = 'sk-ant-api03-' + 'Z'.repeat(40)
+    const { session, pm } = makeInProcessSession(mgr, 's1')
+    pms.push(pm)
+    let shown
+    session.once('permission_request', (d) => { shown = d })
+    const decided = pm.handlePermission('Bash', {
+      command: `curl -H "x-api-key: ${secret}" https://example.test`,
+      password: 'ordinarySecret123',
+      env: { API_TOKEN: secret, REGION: 'eu-west-1' },
+    }, null, 'approve')
+    pm.respondToPermission(shown.requestId, 'allow')
+    await decided
+    const [e] = outcomes(mgr, 's1')
+    assert.deepEqual(e.input, shown.input)
+    assert.equal(e.input.password, '[REDACTED]')
+    assert.equal(e.input.env.REGION, 'eu-west-1', 'a harmless value is still shown')
+    const serialized = JSON.stringify(mgr.serializeState())
+    assert.equal(serialized.includes('ordinarySecret123'), false)
+    assert.equal(serialized.includes('ZZZZZZZZ'), false, 'the credential embedded under a benign key is not in the state file')
+  })
+
+  it('#8503: a LARGE input is journaled as the same bounded wrapper the broadcast carried', async () => {
+    const { session, pm } = makeInProcessSession(mgr, 's1')
+    pms.push(pm)
+    let shown
+    session.once('permission_request', (d) => { shown = d })
+    const decided = pm.handlePermission('Write', { content: 'x '.repeat(30_000), file_path: '/srv/app/big.ts', password: 'ordinarySecret123' }, null, 'approve')
+    pm.respondToPermission(shown.requestId, 'allow')
+    await decided
+    const [e] = outcomes(mgr, 's1')
+    assert.equal(shown.input._truncated, true, 'precondition: the broadcast copy is the wrapper')
+    assert.deepEqual(e.input, shown.input)
+    assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX)
+    assert.equal(JSON.stringify(mgr.serializeState()).includes('ordinarySecret123'), false)
+  })
+
+  // Review follow-up (Codex P2 / P3), through the real producer: the journal is the broadcast.
+  for (const [label, input] of [
+    ['an agent-authored `_truncated` input (P2)', { _truncated: true, summary: 'routine task', command: 'rm -rf /important', dangerouslyDisableSandbox: true }],
+    ['a large input whose key ends in "token" (P3)', { not_a_token: 'ordinaryValue', content: 'x'.repeat(20_000) }],
+    ['a large input of quotes and backslashes', { content: '"\\"'.repeat(8_000) }],
+  ]) {
+    it(`#8503: ${label} is journaled exactly as the live permission_request carried it`, async () => {
+      const { session, pm } = makeInProcessSession(mgr, 's1')
+      pms.push(pm)
+      let shown
+      session.once('permission_request', (d) => { shown = d })
+      const decided = pm.handlePermission('Bash', input, null, 'approve')
+      pm.respondToPermission(shown.requestId, 'allow')
+      await decided
+      const [e] = outcomes(mgr, 's1')
+      assert.equal(JSON.stringify(e.input), JSON.stringify(shown.input), 'byte for byte')
+      assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX)
+    })
+  }
+
+  it('#8503: the registry keeps no raw input for an open prompt: only what the clients were shown', () => {
+    const { requestId } = raise('s1', 'Bash', { command: 'ls', password: 'ordinarySecret123' })
+    const held = mgr._permissionRequests.get(requestId)
+    assert.equal(JSON.stringify(held).includes('ordinarySecret123'), false)
+  })
+
+  it('#8503: a prompt noted with a non-object input is journaled without one', () => {
+    for (const bad of ['rm -rf /', ['x'], null, 5]) {
+      const id = `perm-bad-${String(bad)}`
+      mgr._sessions.set('s9', mgr._sessions.get('s9') || { session: new EventEmitter(), name: 's9', cwd: '/tmp' })
+      mgr.notePermissionRequest('s9', { requestId: id, tool: 'Bash', description: 'x', input: bad })
+      mgr.recordPermissionOutcome(id, 'allowed')
+    }
+    for (const e of outcomes(mgr, 's9')) assert.equal('input' in e, false)
+    assert.equal(outcomes(mgr, 's9').length, 4)
   })
 
   it('a large input with a credential under a sensitive key still records the path and not the credential', async () => {
@@ -544,6 +929,14 @@ describe('SessionManager records permission outcomes: hook-routed providers (#83
     assert.equal(e.outcome, 'allowed')
   })
 
+  it('journals the decision token on the hook route too: allow vs allowAlways', async () => {
+    for (const token of ['allow', 'allowAlways', 'allowSession']) {
+      const { requestId } = await raise()
+      resolver.resolve(requestId, token, null, { clientId: 'c1' })
+    }
+    assert.deepEqual(outcomes(mgr, 's1').map((e) => e.decision), ['allow', 'allowAlways', 'allowSession'])
+  })
+
   it('records "denied" when the user denies', async () => {
     const { requestId } = await raise()
     resolver.resolve(requestId, 'deny', null, { clientId: 'c1' })
@@ -667,6 +1060,61 @@ describe('SessionManager records permission outcomes: hook-routed providers (#83
     })
   }
 
+  it('#8503: journals the very input the hook-routed permission_request broadcast carried', async () => {
+    const broadcasts = []
+    handler.destroy()
+    handler = createPermissionHandler({
+      sendFn: mock.fn(),
+      broadcastFn: (m) => broadcasts.push(m),
+      validateBearerAuth: mock.fn(() => true),
+      pushManager: null,
+      pendingPermissions,
+      permissionSessionMap,
+      getSessionManager: () => mgr,
+      findSessionByHookSecret: (token) => (token === SECRET ? { session: mgr.getSession('s1').session, sessionId: 's1' } : null),
+    })
+    const secret = 'sk-ant-api03-' + 'Y'.repeat(40)
+    const { requestId } = await raise({
+      tool_name: 'Bash',
+      tool_input: { command: `echo ${secret}`, description: 'say it', password: 'ordinarySecret123', dangerouslyDisableSandbox: true },
+    })
+    resolver.resolve(requestId, 'allow', null, { clientId: 'c1' })
+    const shown = broadcasts.find((m) => m.type === 'permission_request')
+    assert.ok(shown, 'the prompt was broadcast')
+    const [e] = outcomes(mgr, 's1')
+    assert.deepEqual(e.input, shown.input, 'identical to the broadcast')
+    assert.equal(e.input.dangerouslyDisableSandbox, true)
+    assert.equal(e.input.password, '[REDACTED]')
+    const serialized = JSON.stringify(mgr.serializeState())
+    assert.equal(serialized.includes('ordinarySecret123'), false)
+    assert.equal(serialized.includes('YYYYYYYY'), false)
+  })
+
+  for (const [label, tool_input] of [
+    ['an agent-authored `_truncated` input', { _truncated: true, summary: 'routine task', command: 'rm -rf /important', dangerouslyDisableSandbox: true }],
+    ['a large input (the real wrapper)', { content: 'x'.repeat(20_000), file_path: '/srv/a.ts', not_a_token: 'ordinaryValue' }],
+  ]) {
+    it(`#8503: the hook route journals ${label} exactly as it broadcast it`, async () => {
+      const broadcasts = []
+      handler.destroy()
+      handler = createPermissionHandler({
+        sendFn: mock.fn(),
+        broadcastFn: (m) => broadcasts.push(m),
+        validateBearerAuth: mock.fn(() => true),
+        pushManager: null,
+        pendingPermissions,
+        permissionSessionMap,
+        getSessionManager: () => mgr,
+        findSessionByHookSecret: (token) => (token === SECRET ? { session: mgr.getSession('s1').session, sessionId: 's1' } : null),
+      })
+      const { requestId } = await raise({ tool_name: 'Bash', tool_input })
+      resolver.resolve(requestId, 'allow', null, { clientId: 'c1' })
+      const shown = broadcasts.find((m) => m.type === 'permission_request')
+      const [e] = outcomes(mgr, 's1')
+      assert.equal(JSON.stringify(e.input), JSON.stringify(shown.input), 'byte for byte')
+    })
+  }
+
   it('records the file path of a LARGE Write (input past the broadcast cap), not the truncation wrapper', async () => {
     const { res, requestId } = await raise({
       tool_name: 'Write',
@@ -761,6 +1209,40 @@ describe('the replay a session switch triggers delivers the outcome (#8348)', ()
       assert.equal(typeof frames[0].historySeq, 'number')
       // The live frames themselves are still never replayed.
       assert.equal(types.some((t) => t === 'permission_request' || t === 'permission_resolved' || t === 'permission_expired'), false)
+    } finally {
+      mgr.destroyAll()
+    }
+  })
+})
+
+describe('the replay carries the approved input (#8503)', () => {
+  it('a forceFull switch replay sends the input the prompt was shown with, on an answered prompt', async () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    try {
+      const { session, pm } = makeInProcessSession(mgr, 's1')
+      session.getActiveAgents = () => []
+      let requestId
+      session.once('permission_request', (d) => { requestId = d.requestId })
+      const decided = pm.handlePermission('Bash', { command: 'touch smoke-perm.txt', description: 'Touch smoke file' }, null, 'approve')
+      pm.respondToPermission(requestId, 'allow')
+      await decided
+
+      const sent = []
+      const ws = { readyState: 1, send() {}, close() {} }
+      const ctx = {
+        sessionManager: mgr,
+        clients: new Map([[ws, { id: 'c1', activeSessionId: 's1', historyCursors: { s1: 99 } }]]),
+        send: (_ws, payload) => sent.push(payload),
+        permissions: null,
+      }
+      replayHistory(ctx, ws, 's1', { forceFull: true })
+      await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+
+      const [frame] = sent.filter((m) => m.type === 'permission_outcome')
+      assert.equal(frame.requestId, requestId)
+      assert.equal(frame.outcome, 'allowed')
+      assert.deepEqual(frame.input, { command: 'touch smoke-perm.txt', description: 'Touch smoke file' })
     } finally {
       mgr.destroyAll()
     }
@@ -886,6 +1368,33 @@ describe('permission outcomes survive a daemon restart (#8348)', () => {
         outcomes(second.mgr, second.sid).map((e) => [e.requestId, e.tool, e.description, e.outcome]),
         [['perm-1', 'Bash', 'ls', 'expired'], ['perm-2', 'Write', 'notes.txt', 'allowed']],
       )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('#8503: the journaled input survives a save and two restores, and an entry from before the field restores without one', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'perm-outcome-input-rt-'))
+    try {
+      const input = { command: 'touch smoke-perm.txt', description: 'Touch smoke file' }
+      const history = [
+        { type: 'message', messageType: 'user_input', content: 'run it', timestamp: 1 },
+        { type: 'permission_outcome', requestId: 'perm-new', tool: 'Bash', description: 'Touch smoke file', outcome: 'allowed', input, timestamp: 3 },
+        { type: 'permission_outcome', requestId: 'perm-old', tool: 'Bash', description: 'ls', outcome: 'allowed', timestamp: 5 },
+      ]
+      const file1 = join(dir, 'state1.json')
+      writeFileSync(file1, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [{ name: 'S', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history }] }))
+      const first = boot(file1)
+      const byId = (m, sid) => Object.fromEntries(outcomes(m, sid).map((e) => [e.requestId, e]))
+      assert.deepEqual(byId(first.mgr, first.sid)['perm-new'].input, input)
+      assert.equal('input' in byId(first.mgr, first.sid)['perm-old'], false)
+
+      const saved = first.mgr.serializeState().sessions.find((s) => s.id === first.sid)
+      const file2 = join(dir, 'state2.json')
+      writeFileSync(file2, JSON.stringify({ version: 1, timestamp: Date.now(), sessions: [saved] }))
+      const second = boot(file2)
+      assert.deepEqual(byId(second.mgr, second.sid)['perm-new'].input, input, 'kept through save + restore')
+      assert.equal('input' in byId(second.mgr, second.sid)['perm-old'], false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

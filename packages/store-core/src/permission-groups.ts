@@ -22,7 +22,8 @@
  *     (text, a user message, another tool) ends the run.
  *   - "Identical" means the same session, tool, description, tool input, outcome
  *     AND decision, with the input actually recorded (see
- *     {@link resolvedPermissionGroupKey}: a replayed record never groups). Folding an allowed request and a denied one into one line, or two
+ *     {@link resolvedPermissionGroupKey}: a record with no recorded input never
+ *     groups). Folding an allowed request and a denied one into one line, or two
  *     different commands that share a rationale, would lose exactly what the
  *     audit line exists to keep.
  */
@@ -73,13 +74,13 @@ const keyCache = new WeakMap<ChatMessage, string | null>()
  * inside an "allowed x N" of one-time allows.
  *
  * A prompt whose tool input was NOT recorded keys on its own `requestId`, so it
- * never matches another. That is every record rebuilt from a replayed
- * `permission_outcome`: the server journals the description, not the input (#8503),
- * and the description is chosen by the agent (the server prefers
- * `input.description` over `input.command`), so `rm a` and `rm -rf ~` under one
- * rationale look identical there. Letting the description stand in for the input
- * would fold them into one "allowed x 2" with no input line. Until #8503 journals
- * the input, grouping therefore happens only where the input is known: live.
+ * never matches another. That is a record rebuilt from a replayed
+ * `permission_outcome` journaled before #8503: the description is chosen by the
+ * agent (the server prefers `input.description` over `input.command`), so `rm a`
+ * and `rm -rf ~` under one rationale look identical there. Letting the description
+ * stand in for the input would fold them into one "allowed x 2" with no input line.
+ * A record whose outcome DID journal its input keys on it like a live prompt, so
+ * grouping survives a session switch or a reload.
  */
 export function resolvedPermissionGroupKey(m: ChatMessage): string | null {
   if (keyCache.has(m)) return keyCache.get(m)!

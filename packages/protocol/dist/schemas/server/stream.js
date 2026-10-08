@@ -737,10 +737,20 @@ export const ServerPermissionResolvedSchema = z.object({
  *   - `requestId` -- the prompt's id; the key a client collapses a held card on.
  *   - `tool` / `description` -- what the client was shown when the prompt was
  *     raised (the description was redacted and capped then; the server clips it
- *     again, to 100 / 500 characters). No raw tool input is recorded.
+ *     again, to 100 / 500 characters).
+ *   - `input` -- #8503: the tool input the client was shown, the SAME sanitized,
+ *     capped value the live `permission_request` carried (keys that hold secrets
+ *     masked, secret-shaped values redacted, at most ~10 KB; a larger input is the
+ *     `{ _truncated, summary }` wrapper). Never the raw input. Absent on an entry
+ *     journaled before this field existed, and the record then has no input to show.
  *   - `outcome` -- `allowed`, `denied`, `stopped` (the user pressed Stop while it
  *     was open, #8374), or `expired` (no decision was made: it timed out, the
  *     turn ended, or the session cleared it).
+ *   - `decision` -- #8503: on an `allowed` outcome, which allow the user chose:
+ *     `allow` (this once), `allowSession` or `allowAlways` (a persistent rule). It is
+ *     what keeps a record of the last from folding into a group of one-time allows
+ *     after a rebuild. Absent on a `denied` / `expired` / `stopped` outcome and on an
+ *     entry journaled before this field; a client then treats the allow as `allow`.
  *   - `timestamp` -- when the server recorded it (ms since the epoch).
  *   - `sessionId` / `historySeq` -- stamped by the replay, like every entry.
  */
@@ -751,6 +761,8 @@ export const ServerPermissionOutcomeSchema = z.object({
     tool: z.string(),
     description: z.string(),
     outcome: PermissionOutcomeSchema,
+    input: z.record(z.string(), z.unknown()).optional(),
+    decision: z.enum(['allow', 'allowSession', 'allowAlways']).optional(),
     timestamp: z.number().optional(),
     sessionId: z.string().optional(),
     historySeq: z.number().optional(),

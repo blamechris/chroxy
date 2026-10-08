@@ -552,15 +552,15 @@ describe('SettingsScreen — notification-prefs capability gate (#4560)', () => 
     // The early-return must short-circuit BEFORE the wsSend so pre-#4541
     // servers don't log `unknown_message` noise on every mount.
     expect(settingsSource).toMatch(
-      /if\s*\(!notificationPrefsSupported\)\s*return;\s*\n\s*refreshNotificationPrefs\(\);/,
+      /if\s*\(!connected\s*\|\|\s*!notificationPrefsSupported\)\s*return;\s*\n\s*refreshNotificationPrefs\(\);/,
     );
   });
 
-  it('keys the refresh useEffect on notificationPrefsSupported (so reconnects retry)', () => {
+  it('keys the refresh useEffect on connected + notificationPrefsSupported (so reconnects retry, #8496)', () => {
     // The dep array must include the capability flag so a reconnect that
     // flips the flag from false → true triggers the deferred refresh.
     expect(settingsSource).toMatch(
-      /\}, \[notificationPrefsSupported,\s*refreshNotificationPrefs\]\);/,
+      /\}, \[connected,\s*notificationPrefsSupported,\s*refreshNotificationPrefs\]\);/,
     );
   });
 
