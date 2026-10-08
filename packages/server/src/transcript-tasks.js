@@ -57,6 +57,16 @@
 // count — never the entry's TEXT, because a model discussing `/login` in a
 // normal reply carries the same words.
 //
+// #8400 — usage / rate limits. The SAME structured marker carries them:
+//     { "type": "assistant", "isApiErrorMessage": true, "error": "rate_limit",
+//       "apiErrorStatus": 429, "message": { ..., "content": [ { "type": "text",
+//         "text": "You've hit your session limit · resets 11:30pm (America/Los_Angeles)" } ] } }
+// and a 529 overload (`error: "server_error"`, `apiErrorStatus: 529`). The
+// scanner counts them (`usageLimitCount`, cumulative like `authFailureCount`) and
+// keeps the latest classification (`lastUsageLimit`, see claude-tui/usage-limit.js)
+// so a consumer that saw the count rise can say what the limit was. A sidechain
+// (subagent) entry is not counted: the main conversation has not stopped.
+//
 // Robustness contract (#5431 success criterion — degrade silently):
 //   - The transcript format is the harness's INTERNAL representation, not a
 //     stable API. Every parse is defensive; an unparseable line is skipped.
@@ -71,6 +81,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { createLogger } from './logger.js'
 import { encodeProjectPath } from './jsonl-reader.js'
+import { classifyApiErrorEntry } from './claude-tui/usage-limit.js'
 
 const log = createLogger('transcript-tasks')
 
@@ -82,6 +93,9 @@ export const EMPTY_TASK_SNAPSHOT = Object.freeze({
   // #8223: `null` = unknown (the transcript could not be read), as opposed to a
   // known count of 0 — see `TranscriptTaskScanner.scan()`.
   authFailureCount: null,
+  // #8400: same convention -- `null` = unknown, `0` = known none.
+  usageLimitCount: null,
+  lastUsageLimit: null,
 })
 
 // #7327: the harness writes this literal `message.model` on synthetic
@@ -141,7 +155,9 @@ const TOOL_USE_ID_TAG = /<tool-use-id>\s*([^<\s]+)\s*<\/tool-use-id>/g
  *   { backgroundTasks: [{ toolUseId, kind, description, startedAt }],
  *     scheduledWakeup: { at, reason } | null,
  *     observedModel: string | null,
- *     authFailureCount: number | null }
+ *     authFailureCount: number | null,
+ *     usageLimitCount: number | null,   // #8400, same null/0 convention
+ *     lastUsageLimit: UsageLimit | null }
  *
  * `authFailureCount` (#8223) is the cumulative number of structured
  * `authentication_failed` API-error assistant entries seen, `0` for a
@@ -194,12 +210,16 @@ export class TranscriptTaskScanner {
     // assistant entries (see the header). Reset with the rest of the state, so a
     // rotated or truncated transcript is recounted from its start.
     this._authFailureCount = 0
+    // #8400: cumulative count of structured usage-limit / rate-limit / overload
+    // entries, and the classification of the most recent one.
+    this._usageLimitCount = 0
+    this._lastUsageLimit = null
   }
 
   /**
    * Read any new transcript bytes, fold them into the tracked state, and
    * return the outstanding-work snapshot. Never throws.
-   * @returns {{backgroundTasks: Array<{toolUseId:string,kind:string,description:string,startedAt:number}>, scheduledWakeup: {at:number,reason:string}|null, observedModel: string|null, authFailureCount: number|null}}
+   * @returns {{backgroundTasks: Array<{toolUseId:string,kind:string,description:string,startedAt:number}>, scheduledWakeup: {at:number,reason:string}|null, observedModel: string|null, authFailureCount: number|null, usageLimitCount: number|null, lastUsageLimit: object|null}}
    */
   scan() {
     try {
@@ -219,6 +239,8 @@ export class TranscriptTaskScanner {
         scheduledWakeup: null,
         observedModel: null,
         authFailureCount: err?.code === 'ENOENT' ? this._authFailureCount : null,
+        usageLimitCount: err?.code === 'ENOENT' ? this._usageLimitCount : null,
+        lastUsageLimit: err?.code === 'ENOENT' ? this._lastUsageLimit : null,
       }
     }
   }
@@ -314,6 +336,18 @@ export class TranscriptTaskScanner {
       // #8223: both structured markers, never the text (see the header).
       if (entry.isApiErrorMessage === true && entry.error === 'authentication_failed') {
         this._authFailureCount++
+      }
+      // #8400: the same two structured markers, never free text on its own.
+      if (entry.isApiErrorMessage === true && entry.isSidechain !== true) {
+        const blocks = entry?.message?.content
+        const text = Array.isArray(blocks)
+          ? blocks.map((b) => (b && typeof b.text === 'string' ? b.text : '')).join(' ')
+          : ''
+        const limit = classifyApiErrorEntry({ error: entry.error, apiErrorStatus: entry.apiErrorStatus, text })
+        if (limit) {
+          this._usageLimitCount++
+          this._lastUsageLimit = limit
+        }
       }
       // #7327: an OBSERVATION of the model this turn actually ran on — never
       // a stand-in for the requested/configured model. Excludes the
@@ -447,6 +481,8 @@ export class TranscriptTaskScanner {
       scheduledWakeup,
       observedModel: this._observedModel,
       authFailureCount: this._authFailureCount,
+      usageLimitCount: this._usageLimitCount,
+      lastUsageLimit: this._lastUsageLimit,
     }
   }
 }
