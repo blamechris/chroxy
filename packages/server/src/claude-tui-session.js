@@ -42,6 +42,8 @@ import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { nodePtyImportFailureError } from './utils/node-pty-support.js'
+import { redactBounded } from './redaction.js'
+import { sanitizeQuestionsForClients } from './claude-tui/sanitize-question-payload.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration, formatWatchdogDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -4610,8 +4612,11 @@ export class ClaudeTuiSession extends BaseSession {
       // behaviour as sdk-session.js _handleToolUseBlock — keeps TUI
       // parity for the dashboard "waiting on …" chip.
       if (isRunInBackgroundInput(toolName, payload.tool_input)) {
+        // #8373: this text becomes the chip's `command` on the wire and in
+        // history, so redact it here, before anything clips it (a clip first
+        // can leave a token prefix the patterns no longer recognise).
         const cmd = typeof payload.tool_input?.command === 'string'
-          ? payload.tool_input.command : ''
+          ? redactBounded(payload.tool_input.command) : ''
         this._pendingBackgroundCommands.set(toolUseId, cmd)
       }
       // #4307: a BashOutput call means the agent has acknowledged the
@@ -4656,9 +4661,14 @@ export class ClaudeTuiSession extends BaseSession {
       // (collapsed bubble + standalone QuestionPrompt) as MVP; #4279
       // makes the bubble usefully expandable so this is acceptable.
       if (toolName === 'AskUserQuestion') {
-        const questions = (payload.tool_input && Array.isArray(payload.tool_input.questions))
-          ? payload.tool_input.questions
-          : []
+        // #8373: redact + cap every string BEFORE anything keeps or forwards
+        // it. This one copy feeds the live `user_question`, the history entry,
+        // the pending-question replay (`getPendingQuestions`) and the answer
+        // routing below, so there is no second, raw copy to leak. Answer
+        // routing matches the label the client sends back against these same
+        // options, and the form is driven by option position, so nothing
+        // needs the raw text.
+        const questions = sanitizeQuestionsForClients(payload.tool_input?.questions)
         // #4290 / #4604 Chunk B: stash the FULL questions array (not just
         // q[0].options) so respondToQuestion can drive multi-question
         // forms keystroke-by-keystroke. `options` is kept on the entry
