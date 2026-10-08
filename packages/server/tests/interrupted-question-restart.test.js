@@ -10,6 +10,7 @@ import { PermissionManager } from '../src/permission-manager.js'
 import { buildToolStartData } from '../src/claude-stream-parser.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
 import { resolveReplayPlan, sendHistoryEntry } from '../src/ws-history.js'
+import { inputHandlers } from '../src/handlers/input-handlers.js'
 
 /**
  * #8336 — a question cut off by a restart has to be MARKED for the provider
@@ -392,5 +393,162 @@ describe('internal metadata and diagnostics (#8336)', () => {
       pm.clearAll()
       pm.destroy()
     }
+  })
+})
+
+/**
+ * #8362 -- a question the user ANSWERED just before a restart is not interrupted.
+ *
+ * claude-cli and claude-tui deliver the answer to the provider before the tool's
+ * `tool_result` event arrives, so a restart in that window used to label an
+ * answered question "Interrupted -- chroxy restarted before this was answered" on
+ * any client that rebuilds from scratch. These go through the real WS handler
+ * (the one place every provider's answer passes), the real SessionManager state
+ * file, the real restore sweep and the real replay mapper.
+ */
+describe('a question answered before a restart is not labelled interrupted (#8362)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chroxy-8362-'))
+  const managers = []
+  after(() => rmSync(dir, { recursive: true, force: true }))
+  afterEach(() => { for (const m of managers.splice(0)) m.destroyAll() })
+
+  let n = 0
+  function boot(session) {
+    const stateFile = join(dir, `state-${++n}.json`)
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{ name: 'S', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, ...session }],
+    }))
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    managers.push(mgr)
+    const sid = mgr.restoreState()
+    assert.ok(sid, 'a session was restored')
+    return { mgr, sid }
+  }
+
+  const Q = { question: 'Which shape?', options: [{ label: 'Round' }, { label: 'Square' }] }
+
+  /**
+   * A live session that has asked `toolId` (tool_start + user_question recorded as
+   * the proxied session events do), whose provider delivers an answer and emits NO
+   * tool_result -- the claude-cli / claude-tui shape.
+   */
+  function askQuestion(toolId) {
+    const { mgr, sid } = boot({ history: [{ type: 'message', messageType: 'user_input', content: 'go', timestamp: 1 }] })
+    const delivered = []
+    mgr.getSession(sid).session.respondToQuestion = (...args) => { delivered.push(args) }
+    mgr._history.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: toolId, tool: 'AskUserQuestion', input: null })
+    mgr._history.recordHistory(sid, 'user_question', { toolUseId: toolId, questions: [Q] })
+    return { mgr, sid, delivered }
+  }
+
+  /** The `user_question_response` as the dashboard sends it, through the real handler. */
+  function answer(mgr, sid, toolId, msg = {}) {
+    const ctx = {
+      permissions: { questionSessionMap: new Map([[toolId, sid]]) },
+      sessions: { sessionManager: mgr },
+    }
+    const client = { id: 'c1', boundSessionId: sid, activeSessionId: sid }
+    inputHandlers.user_question_response(null, client, { type: 'user_question_response', toolUseId: toolId, answer: 'Round', ...msg }, ctx)
+  }
+
+  /** Restart: persist, boot a fresh daemon from the state file, and replay everything to a client with no history. */
+  function restartAndReplayAll(mgr, sid) {
+    const state = mgr.serializeState().sessions.find((x) => x.id === sid)
+    const next = boot({ history: state.history, historyLastSeq: state.historyLastSeq })
+    const frames = []
+    for (const entry of next.mgr.getHistory(next.sid)) {
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, next.sid, entry)
+    }
+    return frames
+  }
+
+  it('an accepted answer, then a restart before the tool result: the replayed question is NOT interrupted', () => {
+    const { mgr, sid, delivered } = askQuestion('toolu_cli1')
+    answer(mgr, sid, 'toolu_cli1')
+    assert.equal(delivered.length, 1, 'the answer reached the provider')
+
+    const frames = restartAndReplayAll(mgr, sid)
+    const q = frames.filter((f) => f.type === 'user_question')
+    assert.ok(q.length >= 1, 'the question is replayed')
+    assert.equal(q.filter((f) => f.interrupted === true).length, 0, 'answered, so not marked cut off')
+    assert.equal(q.filter((f) => 'answered' in f).length, 0, 'the marker is server-internal, not on the wire')
+    // The TOOL was still in flight at the restart, and is still swept.
+    assert.ok(frames.some((f) => f.type === 'tool_result' && f.toolUseId === 'toolu_cli1' && f.synthetic === true))
+  })
+
+  it('control: an UNANSWERED question is still interrupted', () => {
+    const { mgr, sid } = askQuestion('toolu_cli2')
+    const frames = restartAndReplayAll(mgr, sid)
+    const q = frames.filter((f) => f.type === 'user_question')
+    assert.ok(q.length >= 1)
+    assert.ok(q.every((f) => f.interrupted === true))
+  })
+
+  it('only the answered question is spared when two are in flight', () => {
+    const { mgr, sid } = askQuestion('toolu_a')
+    mgr._history.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: 'toolu_b', tool: 'AskUserQuestion', input: null })
+    mgr._history.recordHistory(sid, 'user_question', { toolUseId: 'toolu_b', questions: [Q] })
+    answer(mgr, sid, 'toolu_a')
+    const q = restartAndReplayAll(mgr, sid).filter((f) => f.type === 'user_question')
+    assert.equal(q.filter((f) => f.toolUseId === 'toolu_a' && f.interrupted === true).length, 0)
+    assert.ok(q.filter((f) => f.toolUseId === 'toolu_b').every((f) => f.interrupted === true))
+  })
+
+  it('an SDK-style question (chroxy ask- id beside the provider id) is spared too', () => {
+    const { mgr, sid } = boot({ history: [] })
+    mgr.getSession(sid).session.respondToQuestion = () => {}
+    mgr._history.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: 'toolu_sdk', tool: 'AskUserQuestion', input: null })
+    mgr._history.recordHistory(sid, 'user_question', { toolUseId: 'ask-n1-1-1', sourceToolUseId: 'toolu_sdk', questions: [Q] })
+    answer(mgr, sid, 'ask-n1-1-1')
+    const q = restartAndReplayAll(mgr, sid).filter((f) => f.type === 'user_question')
+    assert.ok(q.length >= 1)
+    assert.equal(q.filter((f) => f.interrupted === true).length, 0)
+  })
+
+  it('a client that sends no toolUseId marks the newest unanswered question', () => {
+    const { mgr, sid } = askQuestion('toolu_cli3')
+    const ctx = { permissions: { questionSessionMap: new Map() }, sessions: { sessionManager: mgr } }
+    inputHandlers.user_question_response(null, { id: 'c1', boundSessionId: sid, activeSessionId: sid }, { type: 'user_question_response', answer: 'Round' }, ctx)
+    const q = restartAndReplayAll(mgr, sid).filter((f) => f.type === 'user_question')
+    assert.equal(q.filter((f) => f.interrupted === true).length, 0)
+  })
+
+  it('an answer the handler drops (stale route) records nothing', () => {
+    const { mgr, sid, delivered } = askQuestion('toolu_cli4')
+    const ctx = { permissions: { questionSessionMap: new Map() }, sessions: { sessionManager: mgr } }
+    inputHandlers.user_question_response(null, { id: 'c1', boundSessionId: sid, activeSessionId: sid }, { type: 'user_question_response', toolUseId: 'toolu_cli4', answer: 'Round' }, ctx)
+    assert.equal(delivered.length, 0)
+    assert.ok(restartAndReplayAll(mgr, sid).filter((f) => f.type === 'user_question').every((f) => f.interrupted === true))
+  })
+
+  it('an empty answer with no answers map is not an accepted answer', () => {
+    const { mgr, sid } = askQuestion('toolu_cli5')
+    answer(mgr, sid, 'toolu_cli5', { answer: '' })
+    assert.ok(restartAndReplayAll(mgr, sid).filter((f) => f.type === 'user_question').every((f) => f.interrupted === true))
+  })
+
+  it('accepting an answer schedules a persist (the question was saved before it was answered)', () => {
+    const { mgr, sid } = askQuestion('toolu_cli6')
+    let scheduled = 0
+    mgr._schedulePersist = () => { scheduled++ }
+    answer(mgr, sid, 'toolu_cli6')
+    assert.equal(scheduled, 1)
+    answer(mgr, sid, 'toolu_cli6') // a double submit is idempotent
+    assert.equal(scheduled, 1)
+  })
+
+  it('SessionMessageHistory: markQuestionAnswered survives save/restore and the sweep leaves it alone', () => {
+    const history = new SessionMessageHistory({ maxHistory: 50 })
+    history.recordHistory('s', 'tool_start', { messageId: 'm', toolUseId: 'toolu_x', tool: 'AskUserQuestion', input: null })
+    history.recordHistory('s', 'user_question', { toolUseId: 'toolu_x', questions: [Q] })
+    assert.equal(history.markQuestionAnswered('s', 'toolu_x'), true)
+    assert.equal(history.markQuestionAnswered('s', 'toolu_x'), false, 'already marked')
+    assert.equal(history.markQuestionAnswered('s', 'toolu_nope'), false, 'no such question')
+    const persisted = JSON.parse(JSON.stringify(history.getHistory('s').map((e) => history.truncateEntry(e))))
+    const swept = SessionMessageHistory.sweepUnresolvedToolStarts(persisted)
+    assert.equal(swept.filter((e) => e.type === 'user_question' && e.interrupted).length, 0)
+    assert.equal(swept.filter((e) => e.type === 'user_question').length, 1, 'no redelivered copy either')
   })
 })

@@ -3979,6 +3979,21 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8362: the server accepted an answer to a `user_question`. Records it on the
+   * history entry (so the restore-time sweep does not call it interrupted) and
+   * schedules a persist, since a restart can follow immediately and the question
+   * entry was written to the state file before it was answered.
+   *
+   * @param {string} sessionId
+   * @param {string} [toolUseId] - the question's id; omitted by clients that send none
+   */
+  recordQuestionAnswered(sessionId, toolUseId) {
+    if (this._history.markQuestionAnswered(sessionId, toolUseId)) {
+      this._schedulePersist()
+    }
+  }
+
+  /**
    * #8301: a person expressed intent to work with this session — they typed a chat
    * input or submitted a line in its terminal pane. Clears the "user stopped"
    * state (see `recordUserInterrupt`) and does nothing else: no history, no

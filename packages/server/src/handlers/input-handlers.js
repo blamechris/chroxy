@@ -1358,6 +1358,15 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // the trailing arg.
     const opts = hasFreeform ? { freeformText: msg.freeformText } : undefined
     entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId, opts)
+    // #8362: the one place every provider's answer passes through. cli and tui
+    // deliver the answer before the tool's result event arrives, so without this
+    // record a restart in that window labels an answered question interrupted.
+    // Only an actionable answer counts (the TUI driver drops an empty one without
+    // an answers map); anything else stays unanswered and is swept as before.
+    const hasAnswers = msg.answers && typeof msg.answers === 'object' && Object.keys(msg.answers).length > 0
+    if (msg.answer.length > 0 || hasAnswers) {
+      ctx.sessions.sessionManager.recordQuestionAnswered?.(questionSessionId, msg.toolUseId)
+    }
   }
 }
 
