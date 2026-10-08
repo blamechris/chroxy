@@ -72,8 +72,7 @@
  * Exit status: 0 if all cases pass, 1 otherwise.
  */
 
-import { execFile } from 'node:child_process'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -123,7 +122,7 @@ const MIN_HARNESSES = 12
 
 
 /** One case per harness, plus the fixed cases below. */
-const FIXED_CASES = 11
+const FIXED_CASES = 14
 
 /**
  * WHAT COUNTS AS A SUBJECT, and why it is the shebang.
@@ -261,16 +260,75 @@ const test = async (name, fn) => {
 
 const assert = (cond, msg) => { if (!cond) throw new Error(msg) }
 
-const run = (cmd, args, cwd) => new Promise((done) => {
-  // 60s, not the job's own 5 minutes. A per-child timeout equal to the job
-  // budget can never fire: GitHub cancels the job first, and on this repo's
-  // self-hosted runners a cancellation renders as a failure with no diagnostic.
-  // The slowest harness measured 13s on the runner, so this is 4x margin and
-  // still leaves a wedged harness to be reported by the guard's own
-  // "expected exactly one floor line, saw 0" message.
-  execFile(cmd, args, { cwd, env: CLEAN_ENV, timeout: 60_000, maxBuffer: 32 * 1024 * 1024 },
+/**
+ * Per-harness wall-clock budget (#8498).
+ *
+ * This was 60s, and 60s is what killed the guard. check-dist-drift.test.sh
+ * runs about 54s ALONE on a quiet 16-core laptop (builds and git operations,
+ * mostly waiting on process spawns), and this file runs CONCURRENCY harnesses
+ * at once, so on a loaded runner it crossed 60s routinely. Measured: four
+ * copies of this guard run side by side on one machine failed on that harness,
+ * all four, at its H7/H8 mutant cases, and the CI step for the same guard took
+ * a flat 60.0s on a PASSING main run — it was riding the limit.
+ *
+ * The kill was also INVISIBLE. execFile reports a timeout kill as
+ * `err.code === null`, which `?? 1` turned into exit 1, and the assertion
+ * below then said "died for some other reason". So the failure read as a
+ * harness that crashed, at a different case every time, when it was a harness
+ * that was cut off. The outcome now carries `timedOut` and `signal`, and
+ * assertGoesRed says which one it was.
+ *
+ * 150s is not "long enough that it never happens": it is the budget that fits
+ * the job. The Scripts Tests job has timeout-minutes: 5 and has been measured
+ * at ~2m07s before this step starts, so a genuinely wedged harness still
+ * surfaces here, as a named timeout, at ~4m17s — before GitHub cancels the
+ * job and renders it as a failure with no diagnostic. A larger value would
+ * give back the property the original 60s comment wanted.
+ */
+const HARNESS_TIMEOUT_MS = 150_000
 
-    (err, stdout, stderr) => done({ code: err ? (err.code ?? 1) : 0, out: `${stdout}${stderr}` }))
+/**
+ * Run a child to completion or to its timeout and report HOW it ended.
+ *
+ * The child leads its own process group and the whole group is killed on
+ * timeout. execFile's own `timeout` kills only the direct child: a harness is a
+ * bash script whose builds and `sleep`s are grandchildren that keep the stdout
+ * pipe open, so the callback waits for them and the "timeout" does not end the
+ * run. SIGKILL after SIGTERM because a harness with a `trap ... TERM` (several
+ * of them are about signals) can ignore the first.
+ */
+const run = (cmd, args, cwd, timeoutMs = HARNESS_TIMEOUT_MS) => new Promise((resolve) => {
+  const started = Date.now()
+  const child = spawn(cmd, args, { cwd, env: CLEAN_ENV, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  let out = ''
+  let timedOut = false
+  let finished = false
+  const killGroup = (sig) => { try { process.kill(-child.pid, sig) } catch { /* already gone */ } }
+  const finish = (code, signal, extra = '') => {
+    if (finished) return
+    finished = true
+    clearTimeout(term)
+    // `code` is null when a signal ended the child. Keep it null rather than
+    // coercing it to 1: a signal and an exit are different facts.
+    resolve({ code, signal, timedOut, budgetMs: timeoutMs, ms: Date.now() - started, out: out + extra })
+  }
+  child.stdout.on('data', (d) => { out += d })
+  child.stderr.on('data', (d) => { out += d })
+  const term = setTimeout(() => {
+    timedOut = true
+    killGroup('SIGTERM')
+    setTimeout(() => killGroup('SIGKILL'), 2_000).unref()
+    // A grandchild that left the group (a harness that tests setsid, as
+    // run-with-timeout.test.sh does) can hold the pipes open, so 'close' never
+    // fires. Measured: a 20s budget on that harness ended at 56s. Report the
+    // timeout on time rather than whenever the stragglers let go.
+    setTimeout(() => finish(null, 'SIGTERM'), 5_000).unref()
+  }, timeoutMs)
+  child.on('error', (err) => finish(1, null, `spawn failed: ${err.message}`))
+  child.on('close', (code, signal) => {
+    killGroup('SIGKILL') // anything the harness left behind
+    finish(code, signal)
+  })
 })
 
 /**
@@ -299,8 +357,8 @@ const neuterAndRun = async ({ path: relPath, interpreter }) => {
   try {
     writeFileSync(copy, neutered)
     // The interpreter the FILE declared, not one derived from its extension.
-    const { code, out } = await run(isShell ? 'bash' : process.execPath, [copy], dirname(abs))
-    return { substitutions, code, out, neutered, src }
+    const outcome = await run(isShell ? 'bash' : process.execPath, [copy], dirname(abs))
+    return { substitutions, ...outcome, neutered, src }
   } finally {
     rmSync(copy, { force: true })
     liveProbes.delete(copy)
@@ -313,7 +371,7 @@ const neuterAndRun = async ({ path: relPath, interpreter }) => {
  * through the same code the real harnesses do. A control that exercises a
  * different path is not a control.
  */
-const assertGoesRed = ({ substitutions, code, out, neutered, src }, label) => {
+const assertGoesRed = ({ substitutions, code, signal, timedOut, budgetMs, ms, out, neutered, src }, label) => {
   assert(substitutions > 0,
     `${label}: the neuter matched no counter increment — it cannot have stopped anything from counting. ` +
     'Either this harness counts its cases in a spelling the pattern does not know, or the pattern has rotted.')
@@ -321,10 +379,24 @@ const assertGoesRed = ({ substitutions, code, out, neutered, src }, label) => {
     `${label}: the neuter altered a floor constant. It must silence the COUNTERS; a "proof" that ` +
     'lowers the expected number instead would pass while every case still ran.')
   assert(code !== 0, `${label}: exited 0 with its counters silenced — no floor fired`)
+  const tail = out.trim().split('\n').slice(-3).join(' / ')
+  // The two ways a harness can be stopped from OUTSIDE are named before the
+  // floor line is looked for, because neither says anything about the floor: a
+  // run that was cut off never got the chance to print it (#8498). Reporting
+  // that as "exited without a floor line" sent the investigation to a harness
+  // that had not misbehaved.
+  assert(!timedOut,
+    `${label}: KILLED BY TIMEOUT after ${Math.round(ms / 1000)}s (signal ${signal ?? 'none'}), before it reached its ` +
+    `floor — this is the harness being slow or wedged, not its floor failing to fire. Budget is ` +
+    `${Math.round(budgetMs / 1000)}s per harness. Output tail: ${tail}`)
+  assert(signal === null || signal === undefined,
+    `${label}: KILLED BY SIGNAL ${signal} after ${Math.round(ms / 1000)}s without a timeout — something outside ` +
+    `this guard stopped the harness (OOM killer, a cancelled job, a stray kill). Output tail: ${tail}`)
   const hits = [...out.matchAll(FLOOR_LINE)]
   assert(hits.length === 1,
-    `${label}: expected exactly one floor line, saw ${hits.length}. Exit ${code} without one means the ` +
-    `harness died for some other reason and its floor was never reached. Output tail: ${out.trim().split('\n').slice(-3).join(' / ')}`)
+    `${label}: expected exactly one floor line, saw ${hits.length}. The harness EXITED on its own with code ` +
+    `${code} after ${Math.round(ms / 1000)}s, not killed by a timeout or a signal, and never printed its floor. ` +
+    `Output tail: ${tail}`)
   assert(hits[0][1] === '0',
     `${label}: floor fired but the harness still counted ${hits[0][1]} cases — the neuter reached only ` +
     'some of its increments, so this proves nothing about the rest.')
@@ -453,6 +525,16 @@ const CONTROL_DIR = mkdtempSync(join(tmpdir(), 'harness-floor-control-'))
 
  *   movable       hides an increment inside its own     -> rejected: the neuter
  *                 EXPECTED_CASES line                      altered a floor constant
+ *   wedged        never returns (sleeps), so the        -> rejected, and the message
+ *                 control's 3s timeout ends it             must say KILLED BY TIMEOUT
+ *   signalled     kills itself with SIGKILL             -> rejected: KILLED BY SIGNAL
+ *   crashes       exits 3 before its floor              -> rejected: EXITED on its own
+ *
+ * The last three are #8498: a run that was cut off used to be reported as
+ * "died for some other reason", which sent the investigation to a harness that
+ * had done nothing wrong. They assert the MESSAGE (`mentions`), because each is
+ * rejected anyway by "no floor line" and the verdict alone cannot tell them
+ * apart from the old wording.
  */
 const CONTROL_MODES = {
   floored: { verdict: 'accept' },
@@ -465,6 +547,13 @@ const CONTROL_MODES = {
   faker: { verdict: 'reject', because: 'the neuter matched nothing' },
 
   movable: { verdict: 'reject', because: 'the neuter altered a floor constant' },
+
+  // #8498. These two prove the failure MESSAGE, not just the verdict: both are
+  // rejected anyway by "no floor line", so without `mentions` a regression to
+  // the old wording ("died for some other reason") would leave them green.
+  wedged: { verdict: 'reject', because: 'killed by timeout', mentions: 'KILLED BY TIMEOUT' },
+  signalled: { verdict: 'reject', because: 'killed by a signal', mentions: 'KILLED BY SIGNAL' },
+  crashes: { verdict: 'reject', because: 'exited on its own, no floor', mentions: 'EXITED on its own with code 3' },
 }
 
 const floorLine = (ran, expected) =>
@@ -476,6 +565,14 @@ const controlHarness = (mode) => {
     ? 'check() { if [ "$2" = "$3" ]; then ((PASS++)); else ((FAIL++)); fi; }'
     : 'check() { if [ "$2" = "$3" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); fi; }'
 
+  // Dies before the floor, three different ways. `wedged` never returns (the
+  // control's own timeout is what ends it), `signalled` kills itself with a
+  // signal no timeout sent, `crashes` exits non-zero on its own.
+  const preamble = {
+    wedged: 'sleep 600',
+    signalled: 'kill -KILL $$',
+    crashes: 'exit 3',
+  }[mode] ?? ':'
   const decl = mode === 'movable'
     ? 'EXPECTED_CASES=3 # a stray PASS=$((PASS + 1)) in the declaration line itself'
     : 'EXPECTED_CASES=3'
@@ -504,6 +601,7 @@ ${decl}
 PASS=0
 FAIL=0
 ${inc}
+${preamble}
 check "a" 1 1
 check "b" 1 1
 check "c" 1 1
@@ -521,8 +619,10 @@ const runControl = async (mode) => {
   const neutered = src.replace(SHELL_INCREMENT, () => { substitutions++; return ':' })
   const np = `${p}.neutered`
   writeFileSync(np, neutered)
-  const { code, out } = await run('bash', [np], CONTROL_DIR)
-  return { substitutions, code, out, neutered, src }
+  // A wedged control must not wait out the real budget: 3s is ample for bash to
+  // start and print nothing, and it is the timeout path that is under test.
+  const outcome = await run('bash', [np], CONTROL_DIR, mode === 'wedged' ? 3_000 : HARNESS_TIMEOUT_MS)
+  return { substitutions, ...outcome, neutered, src }
 }
 
 /**
@@ -552,6 +652,9 @@ for (const [mode, spec] of Object.entries(CONTROL_MODES)) {
       assert(why !== null,
         `assertGoesRed ACCEPTED the "${mode}" control, which it must reject on ${spec.because}. ` +
         'Without this the corresponding assertion can be deleted with the whole guard still green.')
+      assert(!spec.mentions || why.includes(spec.mentions),
+        `the "${mode}" control was rejected, but not for the stated reason: expected the message to say ` +
+        `"${spec.mentions}", got: ${why}`)
     }
   })
 }
@@ -567,9 +670,11 @@ rmSync(CONTROL_DIR, { recursive: true, force: true })
 const subjects = roster.filter((h) => !selfMatches.includes(h.path))
 const CONCURRENCY = 4
 const queue = [...subjects]
+let slowest = null
 const worker = async () => {
   for (let h = queue.shift(); h !== undefined; h = queue.shift()) {
     const result = await neuterAndRun(h)
+    if (!slowest || result.ms > slowest.ms) slowest = { path: h.path, ms: result.ms }
     await test(`${h.path} goes red when its cases stop counting`, () => assertGoesRed(result, h.path))
   }
 }
@@ -580,6 +685,12 @@ await Promise.all(Array.from({ length: CONCURRENCY }, worker))
 const ran = pass + fail
 const expected = FIXED_CASES + subjects.length
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
+// Printed so the margin is visible in every run's log, not only when it is gone:
+// a harness creeping toward the budget shows up here releases before it flakes.
+if (slowest) {
+  process.stdout.write(`slowest harness: ${slowest.path} ${Math.round(slowest.ms / 1000)}s ` +
+    `of a ${HARNESS_TIMEOUT_MS / 1000}s budget\n`)
+}
 let broken = false
 if (fail > 0) {
   for (const f of failures) process.stderr.write(`\n[FAIL] ${f.name}\n${f.err.stack || f.err.message}\n`)
