@@ -539,6 +539,19 @@ describe('a question answered before a restart is not labelled interrupted (#836
     assert.equal(scheduled, 1)
   })
 
+  it('SessionMessageHistory: with no toolUseId, each answer marks the newest question not yet answered (#8394)', () => {
+    const history = new SessionMessageHistory({ maxHistory: 50 })
+    history.recordHistory('s', 'user_question', { toolUseId: 'toolu_old', questions: [Q] })
+    history.recordHistory('s', 'user_question', { toolUseId: 'toolu_new', questions: [Q] })
+    const answered = () => history.getHistory('s').filter((e) => e.answered === true).map((e) => e.toolUseId)
+
+    assert.equal(history.markQuestionAnswered('s'), true)
+    assert.deepEqual(answered(), ['toolu_new'], 'the newest question is marked first')
+    assert.equal(history.markQuestionAnswered('s'), true, 'a second id-less answer is not swallowed by the marked one')
+    assert.deepEqual(answered().sort(), ['toolu_new', 'toolu_old'], 'it marks the older question')
+    assert.equal(history.markQuestionAnswered('s'), false, 'nothing left to mark')
+  })
+
   it('SessionMessageHistory: markQuestionAnswered survives save/restore and the sweep leaves it alone', () => {
     const history = new SessionMessageHistory({ maxHistory: 50 })
     history.recordHistory('s', 'tool_start', { messageId: 'm', toolUseId: 'toolu_x', tool: 'AskUserQuestion', input: null })
