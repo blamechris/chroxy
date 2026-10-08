@@ -1433,6 +1433,75 @@ describe('service', () => {
       })
     })
 
+    describe('refusal message', () => {
+      it('different tree: names --force and the new tree; offers uninstall when service.json exists', () => {
+        install(BIN_A)
+        let msg
+        try { install(BIN_B) } catch (e) { msg = e.message }
+        assert.ok(msg.includes(`--force to re-point it at ${BIN_B}`), 'names --force and the destination')
+        assert.ok(msg.includes('chroxy service uninstall" first'), 'uninstall offered while it can work')
+        assert.ok(!msg.includes('will not work'))
+      })
+
+      it('same tree: does not claim the daemon switches trees', () => {
+        install(BIN_A)
+        let msg
+        try { install(BIN_A) } catch (e) { msg = e.message }
+        assert.ok(msg.includes('--force'))
+        assert.ok(msg.includes('same tree, nothing moves'))
+        assert.ok(!msg.includes('switches to that tree'))
+      })
+
+      it('service.json missing: says uninstall cannot work and names --force as the recovery', () => {
+        install(BIN_A)
+        rmSync(join(dirs()._stateDir, 'service.json'))
+        let msg
+        try { install(BIN_B) } catch (e) { msg = e.message }
+        assert.ok(msg.includes('--force'))
+        assert.ok(msg.includes('will not work'), 'explains uninstall is unusable here')
+        assert.ok(!msg.includes('Or run "chroxy service uninstall"'), 'does not offer a command that fails')
+      })
+
+      it('uninstall genuinely fails without service.json (the premise of the message above)', () => {
+        install(BIN_A)
+        rmSync(join(dirs()._stateDir, 'service.json'))
+        assert.throws(() => uninstallService({ _stateDir: dirs()._stateDir, _skipUnregister: true }), /not installed/)
+      })
+    })
+
+    describe('forced reinstall on systemd and the wrapper read-back', () => {
+      const linux = (extra = {}) => {
+        const d = dirs()
+        return { ...d, _servicePath: join(tmpDir, 'systemd-user', 'chroxy.service'), _platform: 'linux', ...extra }
+      }
+      it('--force daemon-reloads before enable; a fresh install does not', () => {
+        const calls = []
+        const exec = (cmd, args) => { calls.push(args.join(' ')) }
+        installService({ nodePath: NODE, chroxyBin: BIN_A, cwd: '/h', ...linux({ _skipRegister: false, _exec: exec }) })
+        assert.deepEqual(calls, ['--user enable --now chroxy.service'])
+        calls.length = 0
+        installService({ nodePath: NODE, chroxyBin: BIN_B, cwd: '/h', force: true, ...linux({ _skipRegister: false, _exec: exec }) })
+        assert.deepEqual(calls, ['--user daemon-reload', '--user enable --now chroxy.service'])
+      })
+
+      it('install aborts and records nothing when the written wrapper execs a different tree', () => {
+        const lying = (cfg) => generateServiceWrapper({ ...cfg, chroxyBin: BIN_B })
+        assert.throws(
+          () => install(BIN_A, { _generateWrapper: lying }),
+          (e) => e.message.includes('refusing to record') && e.message.includes(BIN_B),
+        )
+        assert.equal(loadServiceState(dirs()._stateDir), null)
+      })
+
+      it('install aborts when the wrapper cannot be parsed back', () => {
+        assert.throws(
+          () => install(BIN_A, { _generateWrapper: () => '#!/bin/sh\necho nothing\n' }),
+          /unparseable/,
+        )
+        assert.equal(loadServiceState(dirs()._stateDir), null)
+      })
+    })
+
     describe('service.json records what the wrapper execs', () => {
       it('the recorded chroxyBin equals the wrapper exec target after install', () => {
         install(BIN_A)
@@ -1506,6 +1575,42 @@ describe('service', () => {
         const { problems } = checkChroxyTree(bin)
         assert.equal(problems.length, 1)
         assert.ok(problems[0].includes('./dist/index.js'))
+      })
+
+      describe('package main is resolved the way Node does', () => {
+        const withMain = (name, main, files) => {
+          const root = join(tmpDir, name)
+          const bin = makeTree(root, { w: '1' }, { installed: { w: { main } } })
+          for (const f of files) {
+            const full = join(root, 'node_modules', 'w', f)
+            mkdirSync(join(full, '..'), { recursive: true })
+            writeFileSync(full, '')
+          }
+          return bin
+        }
+        it('accepts an extensionless main that resolves to .js', () => {
+          assert.deepEqual(checkChroxyTree(withMain('ext', './lib/index', ['lib/index.js'])).problems, [])
+        })
+        it('accepts a main without a leading ./', () => {
+          assert.deepEqual(checkChroxyTree(withMain('noprefix', 'lib/index.js', ['lib/index.js'])).problems, [])
+        })
+        it('accepts a main that is a directory holding index.js', () => {
+          assert.deepEqual(checkChroxyTree(withMain('dir', './lib', ['lib/index.js'])).problems, [])
+        })
+        it('accepts .json main', () => {
+          assert.deepEqual(checkChroxyTree(withMain('json', './data', ['data.json'])).problems, [])
+        })
+        it('still flags an extensionless main that resolves to nothing', () => {
+          assert.equal(checkChroxyTree(withMain('gone', './lib/index', [])).problems.length, 1)
+        })
+        it('flags a main without ./ that does not exist (no longer silently skipped)', () => {
+          assert.equal(checkChroxyTree(withMain('gone2', 'dist/index.js', [])).problems.length, 1)
+        })
+        it('does not accept an empty directory as a file main', () => {
+          const bin = withMain('emptydir', './lib', [])
+          mkdirSync(join(tmpDir, 'emptydir', 'node_modules', 'w', 'lib'), { recursive: true })
+          assert.equal(checkChroxyTree(bin).problems.length, 1)
+        })
       })
 
       it('follows a symlinked bin to the real tree', { skip: posixOnly }, () => {

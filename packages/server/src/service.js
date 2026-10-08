@@ -1,6 +1,6 @@
 import { homedir, platform } from 'os'
-import { join, dirname, win32 as pathWin32 } from 'path'
-import { existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, writeFileSync, chmodSync, realpathSync } from 'fs'
+import { join, dirname, resolve, win32 as pathWin32 } from 'path'
+import { existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, writeFileSync, chmodSync, realpathSync, statSync } from 'fs'
 import { writeFileRestricted, isWindows } from './platform.js'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
@@ -627,7 +627,7 @@ export function parseWrapperExecTarget(content) {
  * @param {string} [options._stateDir]
  * @param {string} [options._wrapperPath]
  * @param {string} [options._servicePath] - launchd plist / systemd unit
- * @returns {{ installed: boolean, recordedBin: string|null, wrapperBin: string|null,
+ * @returns {{ installed: boolean, hasState: boolean, recordedBin: string|null, wrapperBin: string|null,
  *   wrapperPath: string, drift: boolean }}
  */
 export function inspectInstalledService(options = {}) {
@@ -648,6 +648,8 @@ export function inspectInstalledService(options = {}) {
   const servicePresent = !!options._servicePath && existsSync(options._servicePath)
   return {
     installed: !!state || wrapperPresent || servicePresent,
+    // `chroxy service uninstall` needs service.json, so it only works when this is true.
+    hasState: !!state,
     recordedBin,
     wrapperBin,
     wrapperPath,
@@ -696,13 +698,36 @@ export function assertReinstallAllowed({ chroxyBin, force = false, inspect = {} 
   } else {
     lines.push('Its target tree could not be read from service.json or the wrapper.')
   }
+  const moves = current && current !== chroxyBin
   lines.push(
-    'Re-run with --force to rewrite it (use it deliberately: the running daemon switches to the new tree),',
-    'or run "chroxy service uninstall" first.',
+    moves
+      ? `Re-run with --force to re-point it at ${chroxyBin} (the running daemon switches to that tree).`
+      : 'Re-run with --force to rewrite its wrapper and service definition and reload the job (same tree, nothing moves).',
+  )
+  lines.push(
+    found.hasState
+      ? 'Or run "chroxy service uninstall" first to remove it.'
+      : '"chroxy service uninstall" will not work here (service.json is missing); --force is the way to recover.',
   )
   const err = new Error(lines.join('\n'))
   err.code = 'SERVICE_ALREADY_INSTALLED'
   throw err
+}
+
+/**
+ * Does a package's `main` resolve the way Node's CJS/ESM-legacy loader does?
+ * The exact file, then with .js/.json/.node appended, then as a directory
+ * holding index.js/.json/.node. Written with or without a leading "./".
+ */
+function resolvesAsFile(pkgDir, main) {
+  const isFile = (p) => {
+    try { return statSync(p).isFile() } catch { return false }
+  }
+  const base = resolve(pkgDir, main)
+  const exts = ['.js', '.json', '.node']
+  return isFile(base)
+    || exts.some((e) => isFile(base + e))
+    || exts.some((e) => isFile(join(base, 'index' + e)))
 }
 
 /**
@@ -759,7 +784,7 @@ export function checkChroxyTree(chroxyBin) {
     }
     try {
       const main = JSON.parse(readFileSync(join(found, 'package.json'), 'utf-8')).main
-      if (typeof main === 'string' && /^\.\.?\//.test(main) && !existsSync(join(found, main))) {
+      if (typeof main === 'string' && main !== '' && !resolvesAsFile(found, main)) {
         problems.push(`${name} is linked but its entry ${main} is missing (not built?)`)
       }
     } catch (err) {
@@ -829,6 +854,7 @@ export function writeServiceWrapper(wrapperPath, content) {
  *   Without it an existing install is never touched.
  * @param {(cmd: string, args: string[], opts: object) => void} [config._exec]
  *   Injectable exec for testing (defaults to execFileSync).
+ * @param {Function} [config._generateWrapper] - Override the wrapper generator (testing the read-back check)
  * @param {string} [config._platform] - Override platform (testing)
  */
 export function installService(config) {
@@ -869,7 +895,7 @@ export function installService(config) {
   })
 
   // Write the wrapper that resolves keychain secrets at spawn time (#5491).
-  const wrapperContent = generateServiceWrapper({
+  const wrapperContent = (config._generateWrapper || generateServiceWrapper)({
     nodePath: config.nodePath,
     chroxyBin: config.chroxyBin,
     pathValue,
