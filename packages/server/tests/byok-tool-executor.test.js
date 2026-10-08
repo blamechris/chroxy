@@ -2422,7 +2422,7 @@ describe('executeBuiltinTool', () => {
           }
         }
 
-        it('acquireGlobWalkSlot grants up to the limit, queues FIFO past it, and cancel dequeues without granting', async () => {
+        it('acquireGlobWalkSlot grants up to the limit, queues past it, hands a released slot to the next live waiter, and cancel dequeues without granting', async () => {
           const a = acquireGlobWalkSlot(2)
           const b = acquireGlobWalkSlot(2)
           const c = acquireGlobWalkSlot(2)
@@ -2498,7 +2498,7 @@ describe('executeBuiltinTool', () => {
           process.env.CHROXY_GLOB_MAX_CONCURRENT = '1'
           writeFileSync(join(dir, 'a.ts'), '')
           const held = acquireGlobWalkSlot(1)
-          const releaseHeld = await held.granted
+          const releaseHeld = await withinBound(held.granted, 'the held slot')
 
           process.env.CHROXY_GLOB_TIMEOUT_MS = '50'
           try {
