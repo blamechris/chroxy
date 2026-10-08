@@ -1,48 +1,60 @@
 /**
  * Dashboard Smoke Test — Playwright-based visual verification
  *
- * Connects to a chroxy server (either already running or started
- * automatically by this script), opens the dashboard in a headless
+ * Connects to a chroxy server YOU NAME, opens the dashboard in a headless
  * browser, takes screenshots at each step, and verifies key UI elements.
  *
  * Usage:
- *   node tests/smoke-test.mjs [--headed]    # --headed to see the browser
+ *   node tests/smoke-test.mjs --port 9123 --token <t> [--headed]
+ *   node tests/smoke-test.mjs --url http://127.0.0.1:9123 --token <t>
+ *   node tests/smoke-test.mjs --preview <preview.json> [--headed]
  *
- * If no server is detected, one is started automatically and stopped when done.
+ * There is no default target (#8225). The script used to probe 8765/3131/8080/3000,
+ * read the token from ~/.chroxy and start `chroxy start` with the real config, which
+ * on a dev machine meant the production daemon. It now refuses port 8765 and a
+ * ~/.chroxy config dir unless --i-mean-production is passed, and exits 2 with usage
+ * when no target is given. The resolution lives in tests/helpers/smoke-target.mjs.
  * Screenshots are saved to packages/server/tests/screenshots/ (gitignored).
- * Exit code 0 = all checks pass, 1 = failures found.
+ * Exit code 0 = all checks pass, 1 = failures found, 2 = usage error, 3 = refused.
  */
 
-import { chromium } from 'playwright'
-import { spawn } from 'child_process'
-import { mkdirSync, readFileSync, existsSync } from 'fs'
+import { mkdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
 import { harnessVerdict, SMOKE_MIN_CASES } from './helpers/harness-floor.mjs'
+import { parseSmokeArgs, resolveSmokeTarget, USAGE } from './helpers/smoke-target.mjs'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SCREENSHOT_DIR = join(__dirname, 'screenshots')
-const headed = process.argv.includes('--headed')
 
-// Read config for auth token (config.json first, then OS keychain fallback)
-const configPath = join(process.env.HOME, '.chroxy', 'config.json')
-let apiToken = null
-if (existsSync(configPath)) {
-  const config = JSON.parse(readFileSync(configPath, 'utf8'))
-  apiToken = config.apiToken
+// Resolve the target BEFORE anything else (Playwright, the filesystem, the network)
+// so a refused or malformed invocation touches nothing.
+const parsed = parseSmokeArgs(process.argv.slice(2), process.env)
+if (parsed.args.help) {
+  console.log(USAGE)
+  process.exit(0)
 }
-if (!apiToken) {
-  try {
-    const { execFileSync } = await import('child_process')
-    apiToken = execFileSync('security', ['find-generic-password', '-s', 'chroxy', '-a', 'api-token', '-w'], { encoding: 'utf-8' }).trim() || null
-  } catch { /* keychain not available or no entry */ }
+if (parsed.error) {
+  console.error(`smoke-test: ${parsed.error}\n\n${USAGE}`)
+  process.exit(2)
 }
+const target = resolveSmokeTarget(parsed.args, { home: process.env.HOME })
+if (!target.ok) {
+  console.error(`smoke-test: ${target.error}${target.kind === 'usage' ? `\n\n${USAGE}` : ''}`)
+  process.exit(target.kind === 'refused' ? 3 : 2)
+}
+if (parsed.args.dryRun) {
+  console.log(`smoke-test: would target ${target.origin} (${target.source}); token ${target.token.length} chars`)
+  process.exit(0)
+}
+const headed = parsed.args.headed
+const apiToken = target.token
 
-const SERVER_DIR = join(__dirname, '..')
+// Playwright is imported only once the target is known, so a refusal never needs a browser.
+const { chromium } = await import('playwright')
 
 const results = []
 let browser = null
-let managedServer = null
 
 function log(msg) {
   console.log(`  ${msg}`)
@@ -62,49 +74,6 @@ async function screenshot(page, name) {
   const path = join(SCREENSHOT_DIR, `${name}.png`)
   await page.screenshot({ path, fullPage: false })
   return path
-}
-
-/** Start the chroxy server and return the port it's listening on */
-async function startServer() {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Server start timeout (30s)')), 30000)
-
-    managedServer = spawn('node', ['src/cli.js', 'start'], {
-      cwd: SERVER_DIR,
-      env: { ...process.env, PATH: `/opt/homebrew/opt/node@22/bin:${process.env.PATH}` },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-
-    let output = ''
-    const onData = (chunk) => {
-      output += chunk.toString()
-      // Server prints "listening on 0.0.0.0:PORT" when ready
-      const portMatch = output.match(/listening on.*?:(\d+)/i)
-      if (portMatch) {
-        clearTimeout(timeout)
-        resolve(parseInt(portMatch[1], 10))
-      }
-    }
-
-    managedServer.stdout.on('data', onData)
-    managedServer.stderr.on('data', onData)
-    managedServer.on('error', (err) => { clearTimeout(timeout); reject(err) })
-    managedServer.on('exit', (code) => {
-      clearTimeout(timeout)
-      reject(new Error(`Server exited with code ${code} before ready\nOutput: ${output.slice(-500)}`))
-    })
-  })
-}
-
-/** Find the server port by probing common ports */
-async function findServerPort() {
-  for (const p of [8765, 3131, 8080, 3000]) {
-    try {
-      const res = await fetch(`http://localhost:${p}/`)
-      if (res.ok || res.status === 403) return p
-    } catch {}
-  }
-  return null
 }
 
 /** Wait for the dashboard to reach connected state (WS established) */
@@ -129,24 +98,10 @@ async function run() {
   // Setup
   mkdirSync(SCREENSHOT_DIR, { recursive: true })
 
-  // Find running server or start one
-  let port = await findServerPort()
-  if (!port) {
-    log('No running server found — starting one...')
-    port = await startServer()
-    log(`Server started on port ${port}`)
-  } else {
-    log(`Found existing server on port ${port}`)
-  }
-
-  if (!apiToken) {
-    const msg = 'No API token found in ~/.chroxy/config.json'
-    log(`\x1b[31m${msg}\x1b[0m`)
-    throw new Error(msg)
-  }
+  log(`Target: ${target.origin} (${target.source})`)
 
   // Build dashboard URL
-  const dashboardUrl = `http://localhost:${port}/dashboard/?token=${apiToken}`
+  const dashboardUrl = `${target.origin}/dashboard/?token=${apiToken}`
 
   // Launch browser
   browser = await chromium.launch({ headless: !headed })
@@ -555,25 +510,6 @@ async function run() {
 
   // Cleanup
   if (browser) await browser.close()
-  if (managedServer) {
-    log('Stopping managed server...')
-    // Give the server time to flush session-state.json on SIGTERM before escalating.
-    // SIGKILL bypasses the flush handler and can wipe state (feedback_sigterm_not_sigkill):
-    // wait for a clean exit, only force-kill if the process is genuinely hung.
-    await new Promise((resolve) => {
-      // Resolve only once the child has actually exited so we never leave a
-      // zombie/port-holding process behind. The 'exit' listener fires for both
-      // the graceful SIGTERM flush and a forced SIGKILL.
-      managedServer.once('exit', () => { clearTimeout(grace); resolve() })
-      const grace = setTimeout(() => {
-        if (managedServer.exitCode === null && managedServer.signalCode === null) {
-          log('  server did not exit within 8s of SIGTERM — escalating to SIGKILL')
-          managedServer.kill('SIGKILL')
-        }
-      }, 8000)
-      managedServer.kill('SIGTERM')
-    })
-  }
 
   // RETURNED, not exited. `run()` contains no `process.exit` at all, and that is
   // an invariant a test can enumerate rather than a string it has to find:
@@ -589,9 +525,5 @@ run()
   .catch(err => {
   console.error('Fatal:', err)
   if (browser) browser.close()
-  // Fatal path: send only SIGTERM (no SIGKILL escalation here) so the server
-  // gets a chance to flush session-state on the way out. The graceful cleanup
-  // path above is the one that may escalate to SIGKILL if the process hangs.
-    if (managedServer) managedServer.kill('SIGTERM')
     process.exit(1)
   })
