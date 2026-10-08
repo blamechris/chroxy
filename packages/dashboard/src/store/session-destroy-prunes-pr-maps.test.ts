@@ -1389,6 +1389,13 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       '`environment_sessions_changed`, replacing the whole array — a local prune would race the ' +
       'authoritative replacement and be overwritten by it. The tag is load-bearing, not ' +
       'cosmetic: EnvironmentPanel gates Destroy on `sessions.length > 0`. #7551 / #7552',
+    environmentDestroyRefusals:
+      'Record<environmentId, string[]> — keyed by the environment id a live-session destroy ' +
+      'refusal NAMES (`environment_error.environmentId`); the values are the session ids the ' +
+      'daemon reported, a point-in-time answer rather than an attachment list. Environments are ' +
+      'not session-keyed, so a session-death prune has nothing to match; an entry is dropped when ' +
+      'the operator retries or cancels, or when `environment_list` no longer lists the ' +
+      'environment. #7594',
   }
 
 
@@ -2585,6 +2592,7 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     searchResults: "disconnect() — a search over the OLD daemon's transcripts",
     checkpoints: 'disconnect() — checkpoints belong to a session on the old daemon',
     environments: 'disconnect() — container/worktree environments are per daemon',
+    environmentDestroyRefusals: "disconnect() — a refusal answers the OLD daemon's live-session roster",
     // #7557's twelfth field, adjudicated onto THIS answer rather than onto the
     // two full-reset sites, and it is the one member here whose home was
     // decided against a precedent rather than by its key space. #7528 ruled
@@ -3001,8 +3009,8 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
 
     // The roster is the real one, and it is the size the two issues describe:
     // #7559's sixteen plus #7557's `infoNotifications` plus #7353's
-    // `dismissedExpiredPermissions`.
-    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(18)
+    // `dismissedExpiredPermissions` plus #7594's `environmentDestroyRefusals`.
+    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(19)
     expect([...CONNECTION_SCOPED_RESET_FIELDS].sort()).toEqual([...Object.keys(CLEARED_ON_DISCONNECT)].sort())
 
     // A field OUTSIDE the roster is not lit up by the spread — otherwise the

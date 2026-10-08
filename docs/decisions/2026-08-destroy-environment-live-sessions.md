@@ -249,3 +249,32 @@ where a session attached after the last `environment_list` broadcast. The
 Containers row reacts to the recorded refusal (`liveSessions`) because its inline
 per-row result cell is already the surface a failed action renders into. Both
 are correct; each matches the surface it lives on.
+
+## Follow-up (#7594): the escalation follows the refusal, not local state
+
+The "two sources of truth" choice above did not hold. The EnvironmentPanel's
+`env.sessions` only moves on an `environment_list` broadcast, and a refusal
+sends none, so:
+
+- a session that attached after the last broadcast left the card at 0, Destroy
+  sent a plain request, the daemon refused, and the panel never offered Force
+  (the operator looped on the warning toast);
+- a session that had exited since the last broadcast routed Destroy straight to
+  the cascade, so the first attempt was no longer the refusable one.
+
+Both surfaces now drive Force from the refusal the daemon answered:
+
+- **EnvironmentPanel.** `environment_error` (`ENVIRONMENT_HAS_LIVE_SESSIONS`)
+  is recorded in `environmentDestroyRefusals`, keyed by the payload's
+  `environmentId` with the session ids it reported. The card shows its Force row
+  from that record; `env.sessions` no longer gates anything (it stays a display
+  count). Destroy is always the plain confirm first. A retry, a Cancel, or the
+  environment leaving `environment_list` drops the record; it is also a
+  per-daemon field cleared on disconnect.
+- **Containers.** The Force confirm is held as the container **id**, resolved
+  against the survey at render time rather than at click time. A refusal whose
+  container has since left the survey is surfaced by the section itself, with
+  its own Force, instead of the click silently doing nothing.
+
+`force: true` is still sent only from the explicit force confirm on each
+surface.

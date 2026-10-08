@@ -1065,6 +1065,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   activeModel: null,
   availableProviders: [],
   environments: [],
+  environmentDestroyRefusals: {},
   // #7625: null = never asked; a snapshot with restores: [] = asked, nothing failed.
   failedRestores: null,
   failedRestoresLoading: false,
@@ -5702,8 +5703,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'destroy_environment', environmentId };
       if (force) msg.force = true;
+      // #7594: a fresh attempt supersedes the last refusal — the daemon's next
+      // answer (a refusal again, or the destroy) is the one to act on.
+      get().dismissEnvironmentDestroyRefusal(environmentId);
       wsSend(socket, msg);
     }
+  },
+
+  dismissEnvironmentDestroyRefusal: (environmentId: string) => {
+    const refusals = get().environmentDestroyRefusals;
+    if (!(environmentId in refusals)) return;
+    const next = { ...refusals };
+    delete next[environmentId];
+    set({ environmentDestroyRefusals: next });
   },
 
   fetchConversationHistory: () => {

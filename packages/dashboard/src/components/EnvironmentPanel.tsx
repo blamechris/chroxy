@@ -22,18 +22,31 @@ function StatusBadge({ status }: { status: string }) {
 
 function EnvironmentCard({
   env,
+  refusal,
   onDestroy,
+  onDismissRefusal,
 }: {
   env: EnvironmentInfo
   /**
+   * #7594: the session ids the daemon's live-session destroy refusal reported
+   * for THIS environment, or `undefined` when it has not refused. This — not
+   * `env.sessions` — is what reveals the Force escalation: `env.sessions` only
+   * moves on an `environment_list` broadcast and a refusal sends none, so a
+   * session that attached after the last broadcast would otherwise never
+   * surface a Force at all, and a session that has since exited would route
+   * Destroy straight to a cascade.
+   */
+  refusal: string[] | undefined
+  /**
    * #7568: `force` cascades — the plain path (`force` omitted) sends a normal
    * destroy that the server refuses when sessions are live; only the
-   * live-session confirm below passes `force: true`.
+   * refusal-driven confirm below passes `force: true`.
    */
   onDestroy: (id: string, force?: boolean) => void
+  /** #7594: drop the recorded refusal (the operator backed out of the Force). */
+  onDismissRefusal: (id: string) => void
 }) {
   const [confirming, setConfirming] = useState(false)
-  const liveSessions = env.sessions.length > 0
 
   return (
     <div className="env-card">
@@ -66,25 +79,15 @@ function EnvironmentCard({
         </div>
       </div>
       <div className="env-card-actions">
-        {!confirming ? (
-          // #7568: no longer flatly disabled while sessions are live (the old
-          // `disabled={env.sessions.length > 0}` was a dead end — the operator
-          // could not escalate, and the server refuses the send anyway). Destroy
-          // now always opens a confirm; the live-session branch offers the
-          // `force` cascade.
-          <button
-            className="btn-env-destroy"
-            onClick={() => setConfirming(true)}
-            title={liveSessions ? 'Destroy — will prompt to force-close live sessions' : 'Destroy environment'}
-          >
-            Destroy
-          </button>
-        ) : liveSessions ? (
-          // Live-session refusal path: NAME the sessions and offer the cascade.
+        {refusal !== undefined ? (
+          // #7594: the daemon REFUSED the destroy because sessions are live.
+          // Name the sessions it reported (the payload, not our local roster)
+          // and offer the cascade. Takes precedence over the plain confirm.
           <div className="env-confirm-row" data-testid={`env-force-confirm-${env.id}`}>
             <span>
-              {env.sessions.length} live session{env.sessions.length === 1 ? '' : 's'} running
-              {' '}({env.sessions.join(', ')}). Force destroy will end {env.sessions.length === 1 ? 'it' : 'them'} first.
+              {refusal.length > 0
+                ? `${refusal.length} live session${refusal.length === 1 ? '' : 's'} running (${refusal.join(', ')}). Force destroy will end ${refusal.length === 1 ? 'it' : 'them'} first.`
+                : 'Live sessions are running. Force destroy will end them first.'}
             </span>
             <button
               className="btn-env-force"
@@ -93,8 +96,25 @@ function EnvironmentCard({
             >
               Force destroy
             </button>
-            <button className="btn-env-confirm-no" onClick={() => setConfirming(false)}>Cancel</button>
+            <button
+              className="btn-env-confirm-no"
+              onClick={() => { onDismissRefusal(env.id); setConfirming(false) }}
+            >
+              Cancel
+            </button>
           </div>
+        ) : !confirming ? (
+          // #7594: the FIRST attempt is always the plain, refusable destroy —
+          // whatever `env.sessions` says. The daemon is the authority on whether
+          // sessions are live; it answers a refusal that carries them, and only
+          // that reveals the Force (see `refusal`).
+          <button
+            className="btn-env-destroy"
+            onClick={() => setConfirming(true)}
+            title="Destroy environment"
+          >
+            Destroy
+          </button>
         ) : (
           <div className="env-confirm-row">
             <span>Destroy this environment?</span>
@@ -199,6 +219,8 @@ export function EnvironmentPanel() {
   const environments = useConnectionStore(useShallow(s => s.environments))
   const requestEnvironments = useConnectionStore(s => s.requestEnvironments)
   const destroyEnvironment = useConnectionStore(s => s.destroyEnvironment)
+  const destroyRefusals = useConnectionStore(s => s.environmentDestroyRefusals)
+  const dismissRefusal = useConnectionStore(s => s.dismissEnvironmentDestroyRefusal)
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
 
   const [showCreate, setShowCreate] = useState(false)
@@ -237,7 +259,9 @@ export function EnvironmentPanel() {
           <EnvironmentCard
             key={env.id}
             env={env}
+            refusal={destroyRefusals?.[env.id]}
             onDestroy={destroyEnvironment}
+            onDismissRefusal={dismissRefusal}
           />
         ))}
       </div>

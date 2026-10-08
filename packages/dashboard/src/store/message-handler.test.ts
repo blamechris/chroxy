@@ -163,6 +163,8 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     // clean, well-typed baseline.
     credentialsStatus: null,
     credentialTestResults: {},
+    // #7594: the live-session destroy refusals, keyed by environment id.
+    environmentDestroyRefusals: {},
     sessionStates: {},
     messages: [],
     terminalBuffer: '',
@@ -728,6 +730,48 @@ describe('dashboard message-handler dispatch', () => {
     it('does not surface a toast when there is no error string and no code', () => {
       handleMessage({ type: 'environment_error' }, ctx() as any)
       expect((store.getState() as any).serverErrors).toHaveLength(0)
+    })
+
+    describe('records the refusal against the environment it names (#7594)', () => {
+      const refusal = {
+        type: 'environment_error',
+        environmentId: 'env-1',
+        error: 'Environment "my-project" has 1 live session(s) running in it (sess-a).',
+        code: 'ENVIRONMENT_HAS_LIVE_SESSIONS',
+        sessions: ['sess-a'],
+      }
+
+      it('keys the reported sessions by the payload environmentId', () => {
+        handleMessage(refusal, ctx() as any)
+        expect((store.getState() as any).environmentDestroyRefusals).toEqual({ 'env-1': ['sess-a'] })
+      })
+
+      it('records a refusal that carries no session ids as an empty list (still escalatable)', () => {
+        handleMessage({ ...refusal, sessions: undefined }, ctx() as any)
+        expect((store.getState() as any).environmentDestroyRefusals).toEqual({ 'env-1': [] })
+      })
+
+      it('a refusal that names no environment cannot be attributed to a card — toast only', () => {
+        handleMessage({ ...refusal, environmentId: undefined }, ctx() as any)
+        const state = store.getState() as any
+        expect(state.environmentDestroyRefusals).toEqual({})
+        expect(state.serverErrors).toHaveLength(1)
+      })
+
+      it('a non-live-session error never records a refusal (negative control)', () => {
+        handleMessage(
+          { type: 'environment_error', environmentId: 'env-1', error: 'docker exploded' },
+          ctx() as any,
+        )
+        expect((store.getState() as any).environmentDestroyRefusals).toEqual({})
+      })
+
+      it('environment_list drops refusals for environments that left the roster, keeps the rest', () => {
+        handleMessage(refusal, ctx() as any)
+        handleMessage({ ...refusal, environmentId: 'env-2', sessions: ['sess-b'] }, ctx() as any)
+        handleMessage({ type: 'environment_list', environments: [{ id: 'env-2' }] }, ctx() as any)
+        expect((store.getState() as any).environmentDestroyRefusals).toEqual({ 'env-2': ['sess-b'] })
+      })
     })
 
     it('surfaces a coded error even when the server sends no prose message (#7568 review)', () => {

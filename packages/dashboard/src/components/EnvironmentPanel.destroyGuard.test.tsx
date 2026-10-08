@@ -2,6 +2,11 @@
  * EnvironmentPanel — the Destroy affordance: live-session escalation (#7568,
  * building on the #7552 count + the #7562 server refusal).
  *
+ * #7594: the escalation follows the daemon's REFUSAL, not the card's local
+ * `env.sessions` (which only moves on an `environment_list` broadcast, and a
+ * refusal sends none). The first Destroy attempt is always the plain, refusable
+ * one; Force appears only once the store has recorded a refusal for the card.
+ *
  * #7552 first wired `{env.sessions.length} connected` and flatly DISABLED the
  * Destroy button while sessions were live ("Disconnect all sessions first").
  * That was a dead end: the operator could see there were sessions but had no
@@ -22,8 +27,11 @@ import { EnvironmentPanel } from './EnvironmentPanel'
 const requestEnvironments = vi.fn()
 const destroyEnvironment = vi.fn()
 const createEnvironment = vi.fn()
+const dismissEnvironmentDestroyRefusal = vi.fn()
 
 let environments: any[] = []
+// #7594: the live-session refusals the daemon answered, keyed by environment id.
+let environmentDestroyRefusals: Record<string, string[]> = {}
 
 // The production component reads `environments` via `useShallow`. Stub the hook
 // to the identity function (the same move ActivityIndicator's tests make, #4336)
@@ -39,6 +47,8 @@ vi.mock('../store/connection', () => ({
       environments,
       requestEnvironments,
       destroyEnvironment,
+      environmentDestroyRefusals,
+      dismissEnvironmentDestroyRefusal,
       createEnvironment,
       connectionPhase: 'connected',
       sessionCwd: '/tmp',
@@ -74,24 +84,21 @@ afterEach(() => cleanup())
 beforeEach(() => {
   vi.clearAllMocks()
   environments = []
+  environmentDestroyRefusals = {}
 })
 
-describe('EnvironmentPanel Destroy escalation (#7568)', () => {
-  it('a LIVE-session environment offers a force-destroy naming the sessions', () => {
+describe('EnvironmentPanel Destroy escalation (#7568, #7594)', () => {
+  it('a refusal REVEALS Force even though the local env.sessions is empty (the live-session race)', () => {
+    // A session attached after the last environment_list, so this card's roster
+    // says 0. The daemon's refusal is the authority: it names the live session.
     const sessId = '4f3c2b1a9e8d7c6b5a4f3e2d1c0b9a88'
-    environments = [serverEnv([sessId])]
+    environments = [serverEnv([])]
+    environmentDestroyRefusals = { 'env-1': [sessId] }
     render(<EnvironmentPanel />)
 
-    const destroy = screen.getByRole('button', { name: 'Destroy' })
-    // #7568: no longer flatly disabled — the operator can escalate.
-    expect(destroy).toBeEnabled()
-    expect(screen.getByText('1 connected')).toBeInTheDocument()
-
-    // Clicking opens the live-session confirm — NOT the plain one — and names
-    // the session so the operator knows what force would tear down.
-    fireEvent.click(destroy)
-    expect(screen.queryByText('Destroy this environment?')).not.toBeInTheDocument()
+    expect(screen.getByText('0 connected')).toBeInTheDocument()
     expect(screen.getByTestId('env-force-confirm-env-1')).toBeInTheDocument()
+    // Names the sessions from the refusal payload, not from env.sessions.
     expect(screen.getByText(new RegExp(sessId))).toBeInTheDocument()
     // Nothing sent until the operator confirms the cascade.
     expect(destroyEnvironment).not.toHaveBeenCalled()
@@ -100,13 +107,40 @@ describe('EnvironmentPanel Destroy escalation (#7568)', () => {
     expect(destroyEnvironment).toHaveBeenCalledWith('env-1', true)
   })
 
-  it('cancelling the force confirm sends nothing', () => {
-    environments = [serverEnv(['sess-a'])]
+  it('stale env.sessions does NOT route Destroy to a force — the first attempt is the plain destroy', () => {
+    // The card still lists a session that has since exited. No refusal has come
+    // back, so there is nothing to escalate: Destroy -> plain confirm -> plain
+    // (refusable) destroy, exactly as for an empty environment.
+    environments = [serverEnv(['sess-gone'])]
     render(<EnvironmentPanel />)
-    fireEvent.click(screen.getByRole('button', { name: 'Destroy' }))
+
+    const destroy = screen.getByRole('button', { name: 'Destroy' })
+    expect(destroy).toHaveAttribute('title', 'Destroy environment')
+    fireEvent.click(destroy)
+    expect(screen.getByText('Destroy this environment?')).toBeInTheDocument()
+    expect(screen.queryByTestId('env-force-confirm-env-1')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Force destroy' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+    expect(destroyEnvironment).toHaveBeenCalledTimes(1)
+    expect(destroyEnvironment.mock.calls[0]).toEqual(['env-1'])
+  })
+
+  it('a refusal for ANOTHER environment does not reveal Force on this card', () => {
+    environments = [serverEnv([])]
+    environmentDestroyRefusals = { 'env-other': ['sess-a'] }
+    render(<EnvironmentPanel />)
+    expect(screen.queryByTestId('env-force-confirm-env-1')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Destroy' })).toBeInTheDocument()
+  })
+
+  it('cancelling the force confirm sends nothing and forgets the refusal', () => {
+    environments = [serverEnv([])]
+    environmentDestroyRefusals = { 'env-1': ['sess-a'] }
+    render(<EnvironmentPanel />)
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(destroyEnvironment).not.toHaveBeenCalled()
-    expect(screen.queryByTestId('env-force-confirm-env-1')).not.toBeInTheDocument()
+    expect(dismissEnvironmentDestroyRefusal).toHaveBeenCalledWith('env-1')
   })
 
   it('the count is the real length, not a boolean or a hardcode', () => {
