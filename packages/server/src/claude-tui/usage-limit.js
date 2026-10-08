@@ -58,6 +58,8 @@ export const API_OVERLOADED_CODE = 'api_overloaded'
  * @property {string} code - the error `code` for the chat message
  * @property {string|null} resetsAt - human text, e.g. `11:30pm (America/Los_Angeles)`
  * @property {string} message - one plain sentence for the chat
+ * @property {string} repeatMessage - the short one-line notice for a repeat of
+ *   the same limit (the user sent again and nothing has changed)
  * @property {string|null} episodeKey - same value for repeats within one limit
  *   window; `null` for a transient failure that has no window (rate limit,
  *   overload), where every failed request is its own event
@@ -75,8 +77,17 @@ const LIMIT_REACHED = /(?:(\d+\s*-?\s*hour|weekly|session|opus\s*weekly|opus)\s*
 // Pre-2.x wording: "Claude AI usage limit reached|<epoch>".
 const CLAUDE_USAGE_LIMIT_REACHED = /claude\s*(?:ai\s*)?usage\s*limit\s*reached(?:\s*\|\s*(\d{9,13}))?/i
 const REQUIRES_CREDITS = /requires\s*usage\s*credits/i
-const HTTP_429 = /api\s*error:?\s*429|rate_limit_error/i
-const HTTP_529 = /api\s*error:?\s*529|529\s*overloaded|overloaded_error/i
+// A transcript entry is claude's own structured error, so the bare forms are safe
+// there: the `error` / `apiErrorStatus` fields have already said what it is.
+const HTTP_429_BARE = /api\s*error:?\s*429|rate_limit_error/i
+const HTTP_529_BARE = /api\s*error:?\s*529|529\s*overloaded|overloaded_error/i
+// Rendered PTY output is not: `rate_limit_error`, `overloaded_error` and
+// "API Error: 529" are identifiers that appear in source, diffs and logs the
+// session shows. There they count only inside claude's own API-error sentence
+// ("API Error: 529 Overloaded. This is a server-side issue ...", "API Error: 429
+// {...\"type\":\"rate_limit_error\"...}").
+const HTTP_429_SENTENCE = /api\s*error:?\s*429[\s\S]{0,300}?rate_limit_error/i
+const HTTP_529_SENTENCE = /api\s*error:?\s*529\s*overloaded\W{0,3}this\s*is\s*a\s*server-?side\s*issue/i
 
 const MONTHS = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*'
 // "11:30pm (America/Los_Angeles)", "Jul 22 at 4pm (America/Los_Angeles)", "3pm".
@@ -113,9 +124,17 @@ function extractResetsAt(text, epoch) {
   return null
 }
 
+function quotaLabel(kind) {
+  return kind === 'session' ? 'session ' : kind === 'weekly' ? 'weekly ' : ''
+}
+
+function quotaRepeatMessage(kind, resetsAt) {
+  const head = `Still at the ${quotaLabel(kind)}usage limit`
+  return resetsAt ? `${head} \u2014 resets ${resetsAt}.` : `${head} \u2014 it has not reset yet.`
+}
+
 function quotaMessage(kind, resetsAt) {
-  const label = kind === 'session' ? 'session ' : kind === 'weekly' ? 'weekly ' : ''
-  const head = `Claude's ${label}usage limit was reached.`
+  const head = `Claude's ${quotaLabel(kind)}usage limit was reached.`
   return resetsAt
     ? `${head} It resets ${resetsAt}; messages will not go through until then.`
     : `${head} Messages will not go through until it resets.`
@@ -129,6 +148,7 @@ function quota(kind, text, epoch) {
     code: USAGE_LIMIT_CODE,
     resetsAt,
     message: quotaMessage(kind, resetsAt),
+    repeatMessage: quotaRepeatMessage(kind, resetsAt),
     episodeKey: `${kind}|${resetsAt ?? ''}`,
   }
 }
@@ -144,10 +164,14 @@ function kindOf(label) {
  * Classify a stretch of claude output (or the text of a transcript entry).
  *
  * @param {unknown} text
+ * @param {{ structured?: boolean }} [opts] - `structured`: the text belongs to a
+ *   transcript entry claude itself marked as an API error, so the bare
+ *   `rate_limit_error` / `overloaded_error` / "API Error: 429" tokens count.
+ *   Default `false` (rendered PTY output): those need claude's API-error sentence.
  * @returns {UsageLimit|null} `null` when the text is not one of claude's
  *   limit / rate-limit / overload messages
  */
-export function classifyUsageLimit(text) {
+export function classifyUsageLimit(text, { structured = false } = {}) {
   if (typeof text !== 'string' || text.length === 0) return null
 
   const hit = HIT_YOUR_LIMIT.exec(text)
@@ -165,26 +189,29 @@ export function classifyUsageLimit(text) {
       code: USAGE_LIMIT_CODE,
       resetsAt: null,
       message: 'Claude cannot run this model without usage credits. Switch to another model, or add usage credits, then send your message again.',
+      repeatMessage: 'Still no usage credits for this model \u2014 switch to another model or add usage credits.',
       episodeKey: 'credits|',
     }
   }
 
-  if (HTTP_529.test(text)) {
+  if ((structured ? HTTP_529_BARE : HTTP_529_SENTENCE).test(text)) {
     return {
       kind: 'overloaded',
       code: API_OVERLOADED_CODE,
       resetsAt: null,
       message: "Claude's API is overloaded (HTTP 529). Wait a moment, then send your message again.",
+      repeatMessage: "Claude's API is overloaded (HTTP 529). Wait a moment, then send your message again.",
       episodeKey: null,
     }
   }
 
-  if (HTTP_429.test(text)) {
+  if ((structured ? HTTP_429_BARE : HTTP_429_SENTENCE).test(text)) {
     return {
       kind: 'rate_limit',
       code: API_RATE_LIMIT_CODE,
       resetsAt: null,
       message: "Claude's API rate limit was hit (HTTP 429). Wait a moment, then send your message again.",
+      repeatMessage: "Claude's API rate limit was hit (HTTP 429). Wait a moment, then send your message again.",
       episodeKey: null,
     }
   }
@@ -202,10 +229,10 @@ export function classifyUsageLimit(text) {
  * @returns {UsageLimit|null}
  */
 export function classifyApiErrorEntry({ error, apiErrorStatus, text } = {}) {
-  const fromText = classifyUsageLimit(text)
-  if (apiErrorStatus === 529) return fromText?.kind === 'overloaded' ? fromText : classifyUsageLimit('API Error: 529')
+  const fromText = classifyUsageLimit(text, { structured: true })
+  if (apiErrorStatus === 529) return fromText?.kind === 'overloaded' ? fromText : classifyUsageLimit('API Error: 529', { structured: true })
   if (error === 'rate_limit' || apiErrorStatus === 429) {
-    return fromText ?? classifyUsageLimit('API Error: 429')
+    return fromText ?? classifyUsageLimit('API Error: 429', { structured: true })
   }
   if (error === 'server_error' && fromText?.kind === 'overloaded') return fromText
   return null

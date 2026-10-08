@@ -102,20 +102,63 @@ describe('classifyUsageLimit — other wordings', () => {
     assert.equal(classifyUsageLimit('Claude usage limit reached. Your limit resets in 2 hours 10 minutes.').resetsAt, 'in 2 hours 10 minutes')
   })
 
-  it('API 429 and rate_limit_error', () => {
-    for (const text of [
-      'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit."}}',
-      'rate_limit_error: too many requests',
-    ]) {
-      const r = classifyUsageLimit(text)
-      assert.equal(r.kind, 'rate_limit', text)
-      assert.equal(r.code, API_RATE_LIMIT_CODE)
-      assert.equal(r.episodeKey, null)
+  it('API 429 sentence on the PTY path', () => {
+    const r = classifyUsageLimit('API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit."}}')
+    assert.equal(r.kind, 'rate_limit')
+    assert.equal(r.code, API_RATE_LIMIT_CODE)
+    assert.equal(r.episodeKey, null)
+  })
+
+  it('API 529 sentence on the PTY path', () => {
+    assert.equal(classifyUsageLimit(textOf(overloadedE)).kind, 'overloaded')
+  })
+
+  it('structured mode (a transcript entry claude marked as an API error) also accepts the bare forms', () => {
+    for (const text of ['rate_limit_error: too many requests', 'API Error: 429']) {
+      assert.equal(classifyUsageLimit(text, { structured: true }).kind, 'rate_limit', text)
+    }
+    for (const text of ['overloaded_error: the API is temporarily overloaded', '529 Overloaded', 'API Error: 529']) {
+      assert.equal(classifyUsageLimit(text, { structured: true }).kind, 'overloaded', text)
     }
   })
 
-  it('overloaded_error', () => {
-    assert.equal(classifyUsageLimit('overloaded_error: the API is temporarily overloaded').kind, 'overloaded')
+  it('PTY mode rejects those bare forms: they are identifiers that appear in source and diffs', () => {
+    for (const text of [
+      'rate_limit_error: too many requests',
+      'overloaded_error: the API is temporarily overloaded',
+      '529 Overloaded',
+      'API Error: 529',
+      'API Error: 429',
+      "expect(msg).toMatch('API Error: 429')",
+      'if (status === 529) return "Overloaded. This is fine"',
+    ]) {
+      assert.equal(classifyUsageLimit(text), null, text)
+    }
+  })
+
+  it('the squeezed 529 sentence still matches', () => {
+    assert.equal(classifyUsageLimit(textOf(overloadedE).replace(/\s+/g, '')).kind, 'overloaded')
+  })
+})
+
+describe('classifyUsageLimit — the repeat notice', () => {
+  it('is one short line carrying the reset time', () => {
+    const r = classifyUsageLimit(textOf(sessionE))
+    assert.equal(r.repeatMessage, 'Still at the session usage limit \u2014 resets 11:30pm (America/Los_Angeles).')
+    assert.ok(!r.repeatMessage.includes('\n'))
+    assert.equal(classifyUsageLimit(textOf(weeklyE)).repeatMessage, 'Still at the weekly usage limit \u2014 resets Jul 22 at 4pm (America/Los_Angeles).')
+  })
+
+  it('without a reset time it says it has not reset', () => {
+    assert.equal(classifyUsageLimit("You've hit your session limit").repeatMessage, 'Still at the session usage limit \u2014 it has not reset yet.')
+  })
+
+  it('every kind has one', () => {
+    for (const e of [sessionE, weeklyE, creditsE, overloadedE]) {
+      const r = classifyApiErrorEntry({ error: e.error, apiErrorStatus: e.apiErrorStatus, text: textOf(e) })
+      assert.ok(typeof r.repeatMessage === 'string' && r.repeatMessage.length > 0, r.kind)
+    }
+    assert.ok(classifyApiErrorEntry({ error: 'rate_limit', text: 'x' }).repeatMessage)
   })
 })
 
@@ -183,6 +226,10 @@ describe('classifyApiErrorEntry — the structured marker decides, the text refi
     assert.equal(r.kind, 'rate_limit')
     const none = classifyApiErrorEntry({ error: 'rate_limit', text: undefined })
     assert.equal(none.kind, 'rate_limit')
+  })
+
+  it('a server_error entry whose text is only the bare overloaded_error token is overloaded (the marker vouches for it)', () => {
+    assert.equal(classifyApiErrorEntry({ error: 'server_error', text: 'overloaded_error: the API is temporarily overloaded' }).kind, 'overloaded')
   })
 
   it('a 529 whose text is unfamiliar is overloaded', () => {

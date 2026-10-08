@@ -1959,7 +1959,7 @@ export class ClaudeTuiSession extends BaseSession {
   // is what bounds how long an expired login takes to surface (vs the 90s
   // first-output watchdog).
   static get AUTH_TRANSCRIPT_SCAN_MS() { return 1_000 }
-  // #8400: how long a reported usage limit suppresses a repeat of itself. The
+  // #8400: how long a reported usage limit shortens a repeat of itself to one line. The
   // longest window claude names is the 5-hour session, so a retry inside six
   // hours of the message is the same episode; past that, the message is a
   // reminder, not spam. A successful turn ends the episode at once.
@@ -5409,21 +5409,24 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * #8400 — the `error` payload that says the limit, or `null` when this limit
-   * was already reported and is still inside its window (the turn must still end,
-   * it just must not say it again). A limit without an `episodeKey` (a rate limit
-   * or an overload) is per request and is always said. Recording the episode here
-   * keeps the "said once" decision next to the thing that says it.
+   * #8400 — the `error` payload that says the limit. The first report of a quota
+   * limit (session / weekly / usage / credits) is the full message; a repeat of the
+   * same one inside its window (the user sent again and nothing changed) is its
+   * one-line `repeatMessage`, so a send is never met with silence and the first
+   * card is not duplicated. A limit without an `episodeKey` (a rate limit or an
+   * overload) is per request and is always said in full. The turn is torn down once
+   * per send, so this is one notice per send, not per poll. Recording the episode
+   * here keeps the "said in full once" decision next to the thing that says it.
    * @param {import('./claude-tui/usage-limit.js').UsageLimit} limit
-   * @returns {{ code: string, message: string }|null}
+   * @returns {{ code: string, message: string }}
    */
   _usageLimitPayload(limit) {
     if (limit.episodeKey !== null) {
       const now = this._nowMonotonic()
       const prior = this._usageLimitEpisode
       if (prior && prior.key === limit.episodeKey && now - prior.at < this._usageLimitEpisodeMs) {
-        ;(this._log || log).info(`usage limit repeated (${limit.episodeKey}) — turn ended without repeating the message`)
-        return null
+        ;(this._log || log).info(`usage limit repeated (${limit.episodeKey}) — turn ended with the short notice`)
+        return { code: limit.code, message: limit.repeatMessage }
       }
       this._usageLimitEpisode = { key: limit.episodeKey, at: now }
     }

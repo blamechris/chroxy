@@ -162,6 +162,7 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
     message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text }] },
   })
   const WEEKLY = "You've hit your weekly limit \u00b7 resets Jul 22 at 4pm (America/Los_Angeles)"
+  const SESSION_REPEAT = 'Still at the session usage limit \u2014 resets 11:30pm (America/Los_Angeles).'
   const SESSION_MESSAGE = "Claude's session usage limit was reached. It resets 11:30pm (America/Los_Angeles); messages will not go through until then."
 
   const hook = (sinkDir, name) => writeFileSync(join(sinkDir, name), JSON.stringify({ tool_use_id: `toolu_${name}`, tool_name: 'Bash', tool_input: { command: 'ls' } }))
@@ -255,9 +256,9 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
     assert.deepEqual(deltas, ['ok'])
   })
 
-  // --- episodes: one message per limit window -------------------------------
+  // --- episodes: one full card per limit window, a one-line notice per repeat --
 
-  it('a repeat of the same limit ends the turn but does not say it again; a successful turn re-arms it', async () => {
+  it('a repeat of the same limit ends the turn with ONE short notice, not the full card; a successful turn re-arms it', async () => {
     const sessFile = writeSessFile()
     const transcript = writeJournal(sessFile, [userLine()])
     const { s, events, sinkDir } = makeTurnSession()
@@ -269,13 +270,16 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
     await turn
     assert.equal(events.errors.length, 1)
 
-    // Turn 2, same limit: the turn still ends, with no second message.
+    // Turn 2, same limit: the turn ends with a one-line notice (never silence), not the card again.
     turn = s.sendMessage('two')
     await waitFor(() => turnPolling(s), 'turn 2 baseline')
     appendJournal(transcript, [limitLine()])
     await turn
     assert.deepEqual(events.reasons, ['usage_limit', 'usage_limit'], 'the repeat turn ended through the same teardown')
-    assert.equal(events.errors.length, 1, 'but did not repeat the message')
+    assert.equal(events.errors.length, 2, 'exactly one notice for the second send')
+    assert.equal(events.errors[1].code, 'usage_limit', 'same code, so clients treat it alike')
+    assert.equal(events.errors[1].message, SESSION_REPEAT)
+    assert.ok(events.errors[1].message.length < events.errors[0].message.length, 'shorter than the full card')
     assert.equal(events.results.length, 2, 'and the client left the busy state')
     assert.equal(s._isBusy, false)
 
@@ -291,10 +295,27 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
     await waitFor(() => turnPolling(s), 'turn 4 baseline')
     appendJournal(transcript, [limitLine()])
     await turn
-    assert.equal(events.errors.length, 2)
+    assert.equal(events.errors.length, 3, 'a new episode gets the full card again')
+    assert.equal(events.errors[2].message, SESSION_MESSAGE)
   })
 
-  it('a different reset time is a different episode', async () => {
+  it('the same kind with a different reset time is a different episode: the full card, not the notice', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [userLine()])
+    const { s, events } = makeTurnSession()
+    let turn = s.sendMessage('one')
+    await waitFor(() => turnPolling(s), 'turn 1 baseline')
+    appendJournal(transcript, [limitLine()])
+    await turn
+    turn = s.sendMessage('two')
+    await waitFor(() => turnPolling(s), 'turn 2 baseline')
+    appendJournal(transcript, [limitLine("You've hit your session limit \u00b7 resets 4:10am (America/Los_Angeles)")])
+    await turn
+    assert.equal(events.errors.length, 2)
+    assert.equal(events.errors[1].message, "Claude's session usage limit was reached. It resets 4:10am (America/Los_Angeles); messages will not go through until then.")
+  })
+
+  it('a different kind is a different episode', async () => {
     const sessFile = writeSessFile()
     const transcript = writeJournal(sessFile, [userLine()])
     const { s, events } = makeTurnSession()
@@ -308,24 +329,25 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
     await turn
     assert.equal(events.errors.length, 2)
     assert.ok(/weekly/.test(events.errors[1].message))
+    assert.ok(!events.errors[1].message.startsWith('Still'))
   })
 
-  it('the same limit is said again once its episode window has passed', () => {
+  it('the full card comes back once the episode window has passed', () => {
     let mono = 1_000_000
     const { s } = makeTurnSession({ monotonicNow: () => mono })
-    const limit = { kind: 'session', code: 'usage_limit', message: SESSION_MESSAGE, episodeKey: 'session|11:30pm (America/Los_Angeles)' }
-    assert.equal(s._usageLimitPayload(limit).code, 'usage_limit')
+    const limit = { kind: 'session', code: 'usage_limit', message: SESSION_MESSAGE, repeatMessage: 'REPEAT', episodeKey: 'session|11:30pm (America/Los_Angeles)' }
+    assert.equal(s._usageLimitPayload(limit).message, SESSION_MESSAGE)
     mono += s._usageLimitEpisodeMs - 1
-    assert.equal(s._usageLimitPayload(limit), null, 'inside the window: suppressed')
+    assert.equal(s._usageLimitPayload(limit).message, 'REPEAT', 'inside the window: the short notice')
     mono += 2
-    assert.equal(s._usageLimitPayload(limit).code, 'usage_limit', 'after the window: said again')
+    assert.equal(s._usageLimitPayload(limit).message, SESSION_MESSAGE, 'after the window: said in full again')
   })
 
   it('a transient failure (overload) has no episode: every failed turn says so', () => {
     const { s } = makeTurnSession()
-    const overloaded = { kind: 'overloaded', code: 'api_overloaded', message: 'x', episodeKey: null }
-    assert.ok(s._usageLimitPayload(overloaded))
-    assert.ok(s._usageLimitPayload(overloaded))
+    const overloaded = { kind: 'overloaded', code: 'api_overloaded', message: 'FULL', repeatMessage: 'REPEAT', episodeKey: null }
+    assert.equal(s._usageLimitPayload(overloaded).message, 'FULL')
+    assert.equal(s._usageLimitPayload(overloaded).message, 'FULL', 'every failed request is said in full')
   })
 
   // --- negatives ------------------------------------------------------------
@@ -409,7 +431,7 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
       assert.equal(events.errors[0].message, SESSION_MESSAGE)
     })
 
-    it('a repeat in the stall handler ends the turn without a second message', () => {
+    it('a repeat in the stall handler ends the turn with the one-line notice', () => {
       const { s, events } = busy()
       s._appendToOutputTail("You've hit your session limit \u00b7 resets 11:30pm (America/Los_Angeles)")
       s._handleStreamStall()
@@ -420,8 +442,9 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
       s._markTurnOutputStart()
       s._appendToOutputTail("You've hit your session limit \u00b7 resets 11:30pm (America/Los_Angeles)")
       s._handleStreamStall()
-      assert.equal(events.errors.length, 1, 'no second message')
-      assert.equal(s._isBusy, false, 'but the turn ended')
+      assert.equal(events.errors.length, 2, 'one notice for the second send')
+      assert.equal(events.errors[1].message, SESSION_REPEAT)
+      assert.equal(s._isBusy, false, 'and the turn ended')
     })
 
     it('ordinary output that mentions a limit is still an ordinary stall', () => {
@@ -441,6 +464,27 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
       s._markTurnOutputStart()
       s._handleStreamStall()
       assert.deepEqual(events.errors.map((e) => e.code), ['stream_stall'])
+    })
+
+    it('source, diffs and logs the session shows do not make a stall a limit (bare identifiers)', () => {
+      for (const shown of [
+        "throw new Error('rate_limit_error: too many requests')",
+        '+ { test: /overloaded_error/i, msg: "overloaded" }',
+        "expect(err.message).toMatch('API Error: 529')",
+        "const e = 'API Error: 429'",
+      ]) {
+        const { s, events } = busy()
+        s._appendToOutputTail(shown)
+        s._handleStreamStall()
+        assert.deepEqual(events.errors.map((e) => e.code), ['stream_stall'], shown)
+      }
+    })
+
+    it('claude\'s own API-error sentence still counts on the PTY path', () => {
+      const { s, events } = busy()
+      s._appendToOutputTail('API Error: 529 Overloaded. This is a server-side issue, usually temporary \u2014 try again in a moment.')
+      s._handleStreamStall()
+      assert.deepEqual(events.errors.map((e) => e.code), ['api_overloaded'])
     })
 
     it('an auth banner still wins over limit text in the same output', () => {
