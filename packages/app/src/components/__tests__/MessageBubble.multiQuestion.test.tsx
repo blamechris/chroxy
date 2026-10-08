@@ -286,6 +286,26 @@ describe('MessageBubble question cut off by a restart (#8336)', () => {
   });
 });
 
+// #8470 -- the two more ways a question ends with no answer.
+describe('MessageBubble question that ended with no answer (#8470)', () => {
+  it.each([
+    ['(superseded)', 'question-superseded', 'Replaced by a newer question'],
+    ['(not delivered)', 'question-notDelivered', 'Answer not delivered'],
+  ])('%s: says so, instead of echoing the token or showing an answer chip', (token, testId, text) => {
+    const tree = render(multiQuestionPrompt({ answered: token }), { allowMultiQuestion: true });
+    expect(String(first(tree, testId).props.children)).toContain(text);
+    expect(JSON.stringify(tree.toJSON())).not.toContain(token);
+    expect(present(tree, 'question-multi-summary-flat')).toBe(false);
+    expect(present(tree, 'question-prompt-multi')).toBe(false);
+  });
+
+  it('a single question with options reads the same', () => {
+    const tree = render(multiQuestionPrompt({ answered: '(not delivered)', questions: undefined }));
+    expect(present(tree, 'question-notDelivered')).toBe(true);
+    expect(JSON.stringify(tree.toJSON())).not.toContain('(not delivered)');
+  });
+});
+
 describe('MessageBubble single-question multiSelect (#5776)', () => {
   it('renders the checkbox form when allowSingleMultiSelect is true', () => {
     const tree = render(singleMultiSelectPrompt(), { allowSingleMultiSelect: true });

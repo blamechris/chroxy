@@ -179,6 +179,8 @@ import {
   replayDedupCache,
   REPLAY_RESOLVED_PLACEHOLDER,
   QUESTION_INTERRUPTED_PLACEHOLDER,
+  QUESTION_SUPERSEDED_PLACEHOLDER,
+  isQuestionNoAnswerToken,
 } from './replay-reconcile'
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
 import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
@@ -2298,13 +2300,17 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
         // pending, and a replayed "interrupted" is older than that. The
         // post-replay `resendPendingQuestions` frame would repair it, but the
         // answer controls would be gone until it landed.
+        //
+        // #8470: the same goes for the other verdict the server records on a
+        // question -- a newer question replaced it ("superseded").
+        const verdict = chatMessage.answered
         if (
-          chatMessage.answered === QUESTION_INTERRUPTED_PLACEHOLDER &&
+          (verdict === QUESTION_INTERRUPTED_PLACEHOLDER || verdict === QUESTION_SUPERSEDED_PLACEHOLDER) &&
           (heldAnswered === undefined || heldAnswered === REPLAY_RESOLVED_PLACEHOLDER) &&
           !wasPromptLiveDuringReplay(sessionId, held.id)
         ) {
           const next = ss.messages.slice()
-          next[idx] = { ...held, answered: QUESTION_INTERRUPTED_PLACEHOLDER }
+          next[idx] = { ...held, answered: verdict }
           return { messages: next } as Partial<S>
         }
         return {} as Partial<S>
@@ -2321,19 +2327,21 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
       // failure mode) collapses the same way.
       const next = ss.messages.slice()
       // #7508 F3 — `answered` is a decision TOKEN with exactly one non-decision
-      // value (#6222/#6223), and since #8336 a second ("interrupted"). Clearing
+      // value (#6222/#6223), and since #8336 more ("interrupted", and since #8470
+      // "superseded" and "not delivered"). Clearing
       // the sweep's placeholder IS #7457's fix; clearing a REAL decision is not.
       // A second device can answer after the server's pending-set read and
       // before this frame lands, and nothing on the wire un-sticks a prompt
       // revived on top of that answer — the question variant of
-      // `permission_resolved` emits no message, only a route-map delete, and the
+      // `permission_resolved` emits no message (bar #8470's superseded case,
+      // which is never an answer), only a route-map delete, and the
       // late second answer is dropped as an unmapped toolUseId. So carry a real
       // token across, and clear only the placeholder. A LIVE frame proves the
       // question is pending again, which is why it may also clear "interrupted".
       const keepAnswered =
         heldAnswered !== undefined &&
         heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER &&
-        heldAnswered !== QUESTION_INTERRUPTED_PLACEHOLDER
+        !isQuestionNoAnswerToken(heldAnswered)
       next[idx] = {
         ...chatMessage,
         id: held.id,
@@ -2349,12 +2357,12 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // for a session the store holds nothing for — `noteLivePromptDuringReplay`
   // reads no store state, so only the statement order moved.
   if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, survivingId)
-  // #8336 — an interrupted question is a correction, not a new question: it
+  // #8336 (and #8470, a superseded one) — an ended question is a correction, not a new question: it
   // arrives replayed (in place, or as the tail copy that carries the verdict past
   // a delta cursor) for a question the person was already told about, and nothing
   // is waiting on them. Notifying "has a question" for it, on a session they are
   // not looking at, is a false alarm that fires again on every such replay.
-  if (sessionId && chatMessage.answered !== QUESTION_INTERRUPTED_PLACEHOLDER) {
+  if (sessionId && !isQuestionNoAnswerToken(chatMessage.answered)) {
     adapter.pushSessionNotification(sessionId, 'question', questionText)
   }
 }

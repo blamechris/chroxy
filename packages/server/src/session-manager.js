@@ -1725,6 +1725,11 @@ export class SessionManager extends EventEmitter {
    *   `msg-{N+1}` instead of restarting from `msg-1` and colliding with messages
    *   the dashboard cached from the previous process (#3700). Non-finite or
    *   negative values ignored.
+   * @param {boolean} [options.conversationPersisted] - Internal/restore-only (#8418):
+   *   the previous run's "claude has saved a conversation for `resumeSessionId`" bit,
+   *   handed to a provider that tracks one (claude-tui) so a restart can tell a session
+   *   that never completed a turn from one whose transcript has since been removed.
+   *   Only `true` is forwarded; providers that do not read it ignore it.
    * @param {boolean} [options.skipPersist] - Internal: skip the sync persist flush. Used by
    *   `restoreState()`, which must seed history and budget after createSession before the
    *   state file is rewritten; otherwise each flush would overwrite the on-disk file with
@@ -1753,7 +1758,7 @@ export class SessionManager extends EventEmitter {
    *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1928,6 +1933,12 @@ export class SessionManager extends EventEmitter {
     // signal only originates from SidecarProcess paths).
     if (stdinForwardingDisabled === true) {
       providerOpts.stdinForwardingDisabled = true
+    }
+    // #8418: the restored "claude saved a conversation for this id" bit. Only
+    // `true` is forwarded: absent / false / malformed is the pre-#8418 meaning
+    // ("nothing known"), which is what a provider's own default already is.
+    if (conversationPersisted === true) {
+      providerOpts.conversationPersisted = true
     }
     // #6824: per-session parked (disabled) MCP server names. Byok-local opt —
     // forwarded only when it's a non-empty array of strings so non-BYOK
@@ -3001,6 +3012,17 @@ export class SessionManager extends EventEmitter {
         id,
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
         conversationId: entry.session.resumeSessionId || null,
+        // #8418: has the provider's conversation ever been SAVED (claude-tui: a
+        // turn completed, or the transcript was seen on disk)? `sdkSessionId`
+        // alone cannot say: claude-tui mints and serializes its id before claude
+        // has written anything, so an untouched session and one whose transcript
+        // was later wiped look identical on restore. Only providers that track it
+        // report a boolean; for the rest the key is omitted, and a state file
+        // without it restores exactly as before (an older build reading one
+        // ignores the unknown key: restore copies named fields only).
+        ...(typeof entry.session.conversationPersisted === 'boolean'
+          ? { conversationPersisted: entry.session.conversationPersisted }
+          : {}),
         cwd: entry.cwd,
         model: entry.session.model,
         // Persist the model the underlying CLI actually booted with (#3700b).
@@ -3316,6 +3338,9 @@ export class SessionManager extends EventEmitter {
       model: saved.model,
       permissionMode: saved.permissionMode,
       resumeSessionId: saved.sdkSessionId,
+      // #8418: only a literal `true` counts; a hand-edited or older file restores
+      // as "unknown", exactly as before this field existed.
+      conversationPersisted: saved.conversationPersisted === true ? true : undefined,
       provider: saved.provider || undefined,
       connectionId: typeof saved.agentConnection?.id === 'string' && saved.agentConnection.provenance?.source === 'configured'
         ? saved.agentConnection.id
@@ -4633,6 +4658,12 @@ export class SessionManager extends EventEmitter {
         } else if (event === 'permission_resolved' || event === 'permission_expired') {
           const outcome = permissionOutcomeForEvent(event, data)
           if (outcome) this.recordPermissionOutcome(data.requestId, outcome)
+          // #8470: a question a newer one replaced has no requestId, so the outcome
+          // journal above never sees it. Its verdict is recorded on the question's
+          // own history entry instead.
+          if (event === 'permission_resolved' && data?.reason === 'superseded' && typeof data.toolUseId === 'string') {
+            if (this._history.markQuestionSuperseded(sessionId, data.toolUseId)) this._schedulePersist()
+          }
         }
         // Not journaled yet: a BYOK Task subagent's prompts, which reach this
         // session wrapped in `agent_event { type, payload }`. The client holds such

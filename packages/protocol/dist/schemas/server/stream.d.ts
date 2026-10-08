@@ -390,7 +390,8 @@ export declare const ServerPermissionExpiredSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const ServerPermissionResolvedSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_resolved">;
-    requestId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+    toolUseId: z.ZodOptional<z.ZodString>;
     decision: z.ZodString;
     reason: z.ZodOptional<z.ZodString>;
     sessionId: z.ZodOptional<z.ZodString>;
@@ -590,6 +591,7 @@ export declare const ServerUserQuestionSchema: z.ZodObject<{
     questions: z.ZodArray<z.ZodAny>;
     historySeq: z.ZodOptional<z.ZodNumber>;
     interrupted: z.ZodOptional<z.ZodBoolean>;
+    superseded: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ServerAgentBusySchema: z.ZodObject<{
     type: z.ZodLiteral<"agent_busy">;

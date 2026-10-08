@@ -950,12 +950,19 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // pause (POINTER_PAUSE_MAX_MS) is what makes "can only add" true.
   const pointerDownRef = useRef(false)
   const pointerPauseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // #7405 — the live streaming pin (see the effect below), or null while no
+  // stream is being followed. The pin is event-driven now, so nothing is looping
+  // to notice a pause ending: the release has to run it. Without that, content
+  // that arrived during the hold would sit below the fold until the next delta.
+  const streamPinRef = useRef<(() => void) | null>(null)
   const releasePointerPause = useCallback(() => {
+    const wasHeld = pointerDownRef.current
     pointerDownRef.current = false
     if (pointerPauseTimerRef.current !== null) {
       clearTimeout(pointerPauseTimerRef.current)
       pointerPauseTimerRef.current = null
     }
+    if (wasHeld) streamPinRef.current?.()
   }, [])
   const handlePointerDown = useCallback(() => {
     pointerDownRef.current = true
@@ -1026,8 +1033,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // there while following is harmless-to-helpful (it keeps the tail in view on
   // any geometry change), so we don't try to distinguish the trigger. What this
   // observer does NOT see is streamed content growth: that changes `scrollHeight`,
-  // not the container's own box size, so it never fires here — the streaming RAF
-  // owns that path (no double-pin). Gated on following (`!userScrolledUpRef`) so
+  // not the container's own box size, so it never fires here — the streaming pin
+  // (below; #7405) owns that path, off its own observer on the rows. Gated on following (`!userScrolledUpRef`) so
   // a user reading history is never yanked down (#4652 / AC3). `scrollToBottomNow`
   // keeps the programmatic-scroll suppression contract (#5957) intact, and only
   // ever runs when the #5561 anchor compensation is dormant (it bails unless
@@ -1162,8 +1169,9 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
     requestAnimationFrame(() => { scrollToBottomNow() })
   }, [scrollToBottomSignal, scrollToBottomNow, setScrolledUp])
 
-  // During streaming, continuously re-pin to the bottom via RAF so the growing
-  // tail stays in view. #5954: reuse `scrollToBottomNow()` rather than an inline
+  // During streaming, keep the growing tail in view.
+  //
+  // #5954: pin through `scrollToBottomNow()` rather than an inline
   // `scrollTop = scrollHeight` with a SYNCHRONOUS `programmaticScrollRef` clear.
   // The synchronous clear violated the suppression contract (the flag was
   // already false by the time the write's async `scroll` event reached
@@ -1176,27 +1184,93 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
   // `programmaticScrollRef.current && atBottom` guard reliably ignores the
   // self-induced events.
   //
-  // #7399 — this comment used to end by claiming "a genuine user scroll-up
-  // (atBottom false) is still honored". It was exactly backwards: because the
-  // loop re-pins every frame, `atBottom false` is the state it makes
-  // unreachable, and a user scrolling up during a long turn was pinned to the
-  // bottom for the whole stream. User intent now comes from the GESTURE
-  // handlers above, not from the position, and the tick re-reads the REF so a
-  // gesture stops the pinning in the same tick rather than a render later.
+  // #7399 — user intent comes from the GESTURE handlers above, not from the
+  // position, and the pin re-reads the REF so a gesture stops it in the same
+  // tick rather than a render later.
+  //
+  // #7405 — WHEN it runs. This used to re-arm `requestAnimationFrame` for the
+  // whole stream: ~3600 `scrollTop = scrollHeight` writes a minute, almost all
+  // of them writing the value already there. It now runs only when something
+  // that can move the tail has changed:
+  //   - a row's box changed (ResizeObserver on the list's children). This is the
+  //     precise signal and the one that fires before paint, so the tail is never
+  //     a frame late. It covers text streaming, a tool card or thinking block
+  //     expanding, an image decoding, a font swap — anything that makes a row
+  //     taller, whether or not React rendered. The container's OWN observer
+  //     (above) cannot see these: growing content changes `scrollHeight`, not
+  //     the container's box.
+  //   - the list's DOM changed (MutationObserver), which also keeps the row
+  //     observer's targets current as windowing mounts and unmounts rows, and is
+  //     the net for growth that no row's box reports (overflowing content);
+  //   - an image inside a row finished loading (`load` does not bubble, hence
+  //     the capture listener).
+  // Mutation and load signals are coalesced to one pin per frame; the observer
+  // callback pins directly.
+  //
+  // The pin itself is a no-op when the view is already at the bottom, so a
+  // change that did not make the list taller costs a read and no write. It
+  // yields to a held pointer exactly as the old loop did (`releasePointerPause`
+  // runs it again on release), and re-checks the follow state at the moment it
+  // runs rather than when it was scheduled, so a gesture that lands between a
+  // content change and its pin wins. Anything the loop did NOT do for free —
+  // the initial catch-up when following (re)starts — is the `schedulePin()` at
+  // setup.
   useEffect(() => {
     if (!isStreaming || userScrolledUp) return
-    let rafId: number
-    const tick = () => {
-      // Stop for good: a gesture flipped the ref, and the state update that
-      // tears this effect down is still a render away.
+    const el = containerRef.current
+    if (!el) return
+    const pin = () => {
+      // A gesture flipped the ref; the state update that tears this effect down
+      // is still a render away.
       if (userScrolledUpRef.current) return
-      // Yield to a pointer the user is holding on the scroller (thumb drag) —
-      // keep the loop alive so following resumes on release.
-      if (!pointerDownRef.current) scrollToBottomNow()
-      rafId = requestAnimationFrame(tick)
+      // Held pointer (thumb drag): `releasePointerPause` re-runs this.
+      if (pointerDownRef.current) return
+      // Already there: no write, no programmatic-scroll flag, no scroll event.
+      if (el.scrollHeight - el.clientHeight - el.scrollTop < SCROLL_EPSILON) return
+      scrollToBottomNow()
     }
-    rafId = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(rafId)
+    streamPinRef.current = pin
+    let rafId: number | null = null
+    const schedulePin = () => {
+      if (rafId !== null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        pin()
+      })
+    }
+    const rowObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(pin) : null
+    const watchRows = () => {
+      if (!rowObserver) return
+      // `observe` on an already-watched element is a no-op.
+      for (const row of Array.from(el.children)) rowObserver.observe(row)
+    }
+    watchRows()
+    const mutations = new MutationObserver(records => {
+      let rowsChanged = false
+      for (const record of records) {
+        if (record.target !== el) continue
+        rowsChanged = true
+        // Windowing unmounts rows continuously over a long stream; an observer
+        // that kept them would hold every row the turn ever rendered.
+        for (const node of Array.from(record.removedNodes)) {
+          if (node.nodeType === 1) rowObserver?.unobserve(node as Element)
+        }
+      }
+      if (rowsChanged) watchRows()
+      schedulePin()
+    })
+    mutations.observe(el, { childList: true, characterData: true, subtree: true })
+    el.addEventListener('load', schedulePin, true)
+    // Catch up once on (re)start — e.g. the reader just scrolled back to within
+    // the follow band, or the stream began with the tail short of the bottom.
+    schedulePin()
+    return () => {
+      if (streamPinRef.current === pin) streamPinRef.current = null
+      if (rafId !== null) cancelAnimationFrame(rafId)
+      el.removeEventListener('load', schedulePin, true)
+      mutations.disconnect()
+      rowObserver?.disconnect()
+    }
   }, [isStreaming, userScrolledUp, scrollToBottomNow])
 
   // #6788 — summon the find bar when the parent bumps the nonce. Seeded with the

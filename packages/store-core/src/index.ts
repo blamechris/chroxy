@@ -128,6 +128,11 @@ export {
   sweepUnansweredPromptsAtReplayEnd,
   REPLAY_RESOLVED_PLACEHOLDER,
   QUESTION_INTERRUPTED_PLACEHOLDER,
+  // #8470 — the two more ways a question ends with no answer: replaced by a newer
+  // one, or the answer from this client never reached it.
+  QUESTION_SUPERSEDED_PLACEHOLDER,
+  QUESTION_NOT_DELIVERED_PLACEHOLDER,
+  isQuestionNoAnswerToken,
   // #7455 — the replay window is a REFCOUNT so two overlapping replays of one
   // session compose; #7456 — per-session teardown for the `session_list` prune
   // and `session_timeout` paths, plus the diagnostics both are asserted on.
@@ -768,6 +773,8 @@ export {
   applyPermissionResolved,
   PERMISSION_STOPPED_REASON,
   PERMISSION_ABORTED_REASON,
+  // #8470 — a question a newer one replaced (the question variant of the frame).
+  QUESTION_SUPERSEDED_REASON,
   // #7380 — the one wording for the #2833 already-answered race, shared because
   // the two clients surface it through different channels (toast vs transcript).
   PERMISSION_ALREADY_ANSWERED_NOTICE,
@@ -832,6 +839,12 @@ export {
   handleSearchResults,
   handleUserQuestion,
   normalizeUserQuestion,
+  // #8470 — a question that ended with no answer, and the notice both clients show.
+  QUESTION_NOT_DELIVERED_CODE,
+  handleQuestionNotDelivered,
+  markQuestionEnded,
+  endQuestionInSessions,
+  questionEndedNotice,
   handleUserInput,
   handleMessage,
   handleToolStart,

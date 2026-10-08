@@ -324,6 +324,19 @@ export const CAPABILITY_HISTORY_ERROR_REPLAY = 'history_error_replay_v1'
 export const CAPABILITY_HISTORY_THINKING_REPLAY = 'history_thinking_replay_v1'
 
 /**
+ * #8470: the client capability that says "a replayed `user_question` carrying
+ * `superseded: true` is safe to send me". A newer question replaced it while it
+ * was open, so nobody answered it. A client build from before the flag was
+ * understood ignores the field and builds the question as a LIVE card: its answer
+ * controls are enabled until `history_replay_end` (a replay yields between chunks
+ * and can pause under backpressure), and it is then stamped "(resolved)", which
+ * reads as answered. Neither is true, and there is no older shape that says
+ * "replaced": so such a client is not sent the question at all (the `tool_start`
+ * for its tool is still replayed). Only the replay-aware builds get the verdict.
+ */
+export const CAPABILITY_HISTORY_QUESTION_SUPERSEDED = 'history_question_superseded_v1'
+
+/**
  * Write ONE history entry to a client, the way BOTH replay paths must.
  *
  * Two things happen per entry, and both were forgotten by the second copy of
@@ -382,6 +395,15 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
     entry && streamKindOf(entry) === 'thinking'
     && (typeof entry.content !== 'string' || entry.content.length === 0)
     && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_THINKING_REPLAY) ?? false)
+  ) {
+    return
+  }
+  // #8470: a question a newer one replaced goes only to a client that can read the
+  // flag; see CAPABILITY_HISTORY_QUESTION_SUPERSEDED. Both the in-place entry and the
+  // tail copy carry it, so both are skipped.
+  if (
+    entry && entry.type === 'user_question' && entry.superseded === true
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_QUESTION_SUPERSEDED) ?? false)
   ) {
     return
   }

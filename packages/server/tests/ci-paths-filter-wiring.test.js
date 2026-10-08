@@ -126,7 +126,8 @@ const PATHS_FILTER_ACTION = 'dorny/paths-filter@'
 /**
  * FLOORS: an emptied parse yields zero, and every rule below passes over an
  * empty set. Calibrated 2026-10-01 against 4 outputs (one of them exempt,
- * below) and 3 consuming jobs. MIN_OUTPUTS sits below today's count.
+ * since removed, #7642) and 3 consuming jobs; 3 outputs today, all consumed.
+ * MIN_OUTPUTS sits at today's count.
  * MIN_CONSUMERS EQUALS it — #8193's acceptance asked for "at least as many as
  * there are consumer jobs today" — so retiring a consumer on purpose trips the
  * floor, and the remedy then is to lower MIN_CONSUMERS in that same change, not
@@ -140,16 +141,16 @@ const MIN_CONSUMERS = 3
  * output is a promise that something reads it, so an unread one is either dead
  * or a consumer that lost its wiring — the exemption is how a person says which.
  *
+ * EMPTY: the one entry it ever held, `platform` (written for the Windows job,
+ * #5002, then orphaned when that job lost its `if:`), was removed with the
+ * output itself (#7642). The table stays so the next legitimate case is a
+ * reasoned, self-checking entry rather than a loosened rule.
+ *
  * Every entry is itself checked: it must name a declared output that is still
  * unconsumed, so deleting the output or wiring a consumer to it fails this
  * test until the entry goes too.
  */
-export const UNCONSUMED_OUTPUT_EXEMPTIONS = new Map([
-  [
-    'platform',
-    "written for the Windows platform-tests job (#5002), which no longer reads it: `server-tests-windows` carries no `if:` and runs on every same-repo event (#7642). ci.yml's `changes` job comment and CONTRIBUTING.md's Detect Changed Paths row both record it as consumer-less.",
-  ],
-])
+export const UNCONSUMED_OUTPUT_EXEMPTIONS = new Map()
 
 /**
  * `<job id>/<step label>` -> reason, for a step that legitimately swallows a
@@ -1555,7 +1556,13 @@ for (const layout of LAYOUTS) {
           const indent = indentOf(lines.slice(at + 1).find((l) => l.trim() !== ''))
           const i = lines.findIndex((l, n) => n > at && new RegExp(`^ {${indent}}${out}:\\s*$`).test(l))
           assert.ok(i !== -1, `${ANCHOR}: no '${out}:' filter key at indent ${indent}`)
-          lines.splice(i, 1)
+          // Delete the whole entry (key + its list items and comments), not just
+          // the key line: a bare key delete only parses when ANOTHER filter
+          // precedes it to absorb the orphaned items, which stopped being true
+          // for the first filter once `platform` was removed (#7642).
+          let end = i + 1
+          while (end < lines.length && (lines[end].trim() === '' || indentOf(lines[end]) > indent)) end++
+          lines.splice(i, end - i)
         })
         red(mutant, 'mapping', new RegExp(`output '${out}' reads steps\\.[\\w-]+\\.outputs\\.${out}, but that paths-filter step declares no filter '${out}'`), `filter ${out} deleted`)
       }

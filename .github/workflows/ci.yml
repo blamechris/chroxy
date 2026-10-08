@@ -342,13 +342,12 @@ jobs:
   changes:
     name: Detect Changed Paths
     # Lightweight ubuntu job that classifies which paths a PR touches so
-    # downstream jobs can self-gate. Its live consumers are `Renovate Config`
+    # downstream jobs can self-gate. Its consumers are `Renovate Config`
     # (the `renovate` output), `Docker Image Smoke` (`docker`), and
-    # `Verify Publish Artifacts (PR)` (`publish_artifacts`, #8167). The
-    # `platform` output was written for the Windows platform-tests job
-    # (#5002), which no longer reads it: `server-tests-windows` carries no
-    # `if:` of its own and runs on every same-repo event (#7642). Pushes to
-    # `main` skip this job, and so skip every job gated on it.
+    # `Verify Publish Artifacts (PR)` (`publish_artifacts`, #8167). It does
+    # NOT gate the Windows suite: `server-tests-windows` carries no `if:` of
+    # its own and runs on every same-repo event (#7642). Pushes to `main`
+    # skip this job, and so skip every job gated on it.
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 2
@@ -366,7 +365,6 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      platform: ${{ steps.filter.outputs.platform }}
       renovate: ${{ steps.filter.outputs.renovate }}
       docker: ${{ steps.filter.outputs.docker }}
       publish_artifacts: ${{ steps.filter.outputs.publish_artifacts }}
@@ -377,20 +375,6 @@ jobs:
         uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         with:
           filters: |
-            platform:
-              # Source — the production Windows code path lives in
-              # platform.js today, but glob with `platform*` so a future
-              # `platform-windows.js` / `platform-posix.js` split still
-              # triggers the Windows job without an edit here.
-              - 'packages/server/src/platform*.js'
-              # Tests — both the cross-platform suite (exercises the
-              # Windows branch via `_isWindowsOverride`) and the
-              # Windows-only suite. Glob covers any future
-              # platform-*.test.js additions.
-              - 'packages/server/tests/platform*.test.js'
-              # Workflow itself — so edits to this gating logic always
-              # exercise the gated job on the same PR.
-              - '.github/workflows/ci.yml'
             renovate:
               # #7196 — renovate.json is exercised by nothing else in CI, so an
               # edit can reintroduce invalid or deprecated syntax with nothing
