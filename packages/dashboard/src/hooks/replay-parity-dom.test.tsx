@@ -142,4 +142,12 @@ describe('live vs replayed transcript -- rendered DOM (dashboard, #6630)', () =>
     expect(html).toContain('Permission allowed')
     expect(html).not.toContain('class="msg assistant"')
   })
+
+  it('a reasoning block with no text still shows its "thought for Xs" toggle after a rebuild', () => {
+    const fx = REPLAY_PARITY_FIXTURES.find((f) => f.name === 'thinking-without-text')!
+    for (const html of [dom(live(fx.live)), dom(replayed(fx.replay))]) {
+      expect(html).toContain('data-testid="thinking-toggle"')
+      expect(html).toContain('thought for 1.0s')
+    }
+  })
 })

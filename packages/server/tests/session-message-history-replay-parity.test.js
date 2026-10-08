@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager } from '../src/session-manager.js'
+import { SdkSession } from '../src/sdk-session.js'
 import { SessionMessageHistory, streamKindOf } from '../src/session-message-history.js'
 import { buildMessageWire, buildErrorWire } from '../src/message-wire.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
@@ -124,6 +125,57 @@ describe('SessionMessageHistory: replay parity (#6630)', () => {
       const [a, b] = history.getHistory(S)
       assert.equal(a.thinkingDurationMs, undefined)
       assert.equal(b.thinkingDurationMs, undefined)
+    })
+
+    it('records a reasoning stream that carried no text (the block arrived with only its signature)', () => {
+      history.recordHistory(S, 'stream_start', { messageId: 't1-thinking-0', thinking: true })
+      history.recordHistory(S, 'stream_end', { messageId: 't1-thinking-0', thinking: true, thinkingDurationMs: 1000 })
+      const [entry] = history.getHistory(S)
+      assert.equal(entry.kind, 'thinking')
+      assert.equal(entry.content, '')
+      assert.equal(entry.thinkingDurationMs, 1000)
+    })
+
+    it('still records nothing for an empty reply, or for a thinking stream_end whose start it never saw', () => {
+      history.recordHistory(S, 'stream_start', { messageId: 'm1' })
+      history.recordHistory(S, 'stream_end', { messageId: 'm1' })
+      history.recordHistory(S, 'stream_end', { messageId: 'orphan-thinking-0', thinking: true, thinkingDurationMs: 5 })
+      assert.equal(history.getHistory(S).length, 0)
+    })
+
+    it('records what a real SdkSession emits for a signature-only thinking block, then replays it as a thinking frame', async () => {
+      const session = new SdkSession({ cwd: '/tmp', stateFilePath: tmpStateFile() })
+      session._fetchSupportedModels = () => {}
+      session.on('error', () => {})
+      const events = []
+      for (const name of ['stream_start', 'stream_delta', 'stream_end']) {
+        session.on(name, (d) => { events.push({ name, ...d }); history.recordHistory(S, name, d) })
+      }
+      // The Agent SDK's partial stream for a current model's thinking block: the
+      // block opens, a signature_delta (not reasoning text) arrives, the block
+      // closes. No thinking_delta at all.
+      async function* stream() {
+        yield { type: 'system', subtype: 'init', session_id: 'sdk-1', model: 'claude-x', tools: [] }
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '', signature: '' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } } }
+        await new Promise((r) => setTimeout(r, 12))
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } }
+        yield { type: 'stream_event', event: { type: 'content_block_start', index: 1, content_block: { type: 'text' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Done.' } } }
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 1 } }
+        yield { type: 'result', session_id: 'sdk-1', total_cost_usd: 0.01, duration_ms: 10, usage: {} }
+      }
+      session._callQuery = () => stream()
+      await session.sendMessage('hi')
+
+      const thinking = events.filter((e) => e.thinking === true)
+      assert.deepEqual(thinking.map((e) => e.name), ['stream_start', 'stream_end'], 'no thinking delta was emitted')
+      const frames = []
+      for (const entry of history.getHistory(S)) sendHistoryEntry((_ws, p) => frames.push(p), null, S, entry, null)
+      const replayed = frames.find((f) => f.kind === 'thinking')
+      assert.ok(replayed, 'the reasoning bubble is replayed')
+      assert.equal(replayed.content, '')
+      assert.ok(replayed.thinkingDurationMs > 0)
     })
 
     it('tags a reasoning stream whose stream_start was missed, from the stream_end flag', () => {

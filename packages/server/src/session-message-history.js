@@ -532,11 +532,18 @@ export class SessionMessageHistory extends EventEmitter {
       case 'stream_end': {
         const key = `${sessionId}:${data.messageId}`
         const content = this._pendingStreams.get(key) || ''
+        const hadStream = this._pendingStreams.has(key)
         const kind = this._streamKinds.get(key) || (data.thinking === true ? 'thinking' : undefined)
         this._pendingStreams.delete(key)
         this._streamKinds.delete(key)
         this._truncatedStreams.delete(key) // #6431 — release the once-per-stream guard
-        if (content) {
+        // A reasoning stream is recorded even with no text: current Claude models
+        // return the block with its signature only, so the SDK opens and closes a
+        // thinking stream that never carries a delta. Live, that is a "thought for
+        // Xs" bubble with an empty body; skipping it for want of text made the whole
+        // bubble vanish on replay. A reply with no text is still no entry, and so is
+        // a stream_end whose start this history never saw.
+        if (content || (kind === 'thinking' && hadStream)) {
           // #6630: a reasoning stream keeps what the live bubble shows -- that it
           // IS reasoning (`kind`) and how long it took (`thinkingDurationMs`, the
           // same bounded value the live `stream_end` frame carries). Without them

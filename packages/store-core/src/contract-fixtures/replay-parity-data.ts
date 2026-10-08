@@ -307,6 +307,148 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
       ]
     },
     {
+      "name": "thinking-without-text",
+      "description": "Reasoning whose text the model does not return (the signature_delta-only block current Claude models send): the SDK still opens and closes a thinking stream, so the live client shows a \"thought for Xs\" bubble with an empty body.",
+      "providers": [
+        "claude-sdk"
+      ],
+      "events": [
+        [
+          "stream_start",
+          {
+            "messageId": "t2-thinking-0",
+            "thinking": true
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "t2-thinking-0",
+            "thinking": true,
+            "thinkingDurationMs": 1000
+          }
+        ],
+        [
+          "stream_start",
+          {
+            "messageId": "t2"
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "t2",
+            "delta": "Done."
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "t2"
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.0123,
+            "duration": 4200,
+            "usage": {
+              "input_tokens": 120,
+              "output_tokens": 40
+            },
+            "sessionId": "s1"
+          }
+        ]
+      ],
+      "live": [
+        {
+          "type": "stream_start",
+          "messageId": "t2-thinking-0",
+          "thinking": true,
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "t2-thinking-0",
+          "thinking": true,
+          "thinkingDurationMs": 1000,
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_start",
+          "messageId": "t2",
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_busy",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "t2",
+          "delta": "Done.",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "t2",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ],
+      "replay": [
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "",
+          "messageId": "t2-thinking-0",
+          "kind": "thinking",
+          "thinkingDurationMs": 1000,
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 1
+        },
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "Done.",
+          "messageId": "t2",
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 2
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 3
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ]
+    },
+    {
       "name": "text-around-a-tool",
       "description": "claude-sdk text, a tool call, then more text in the same turn. The live client splits the turn into two bubbles around the tool; the replay records one response entry per stream.",
       "providers": [
