@@ -92,12 +92,71 @@ export function readImageWidth(data: string): number | undefined {
   return undefined
 }
 
+// --- Encoder probe -----------------------------------------------------------
+// WebKit (Safari, Tauri on macOS) cannot encode WebP from a canvas: it answers
+// `toDataURL('image/webp')` with a PNG. Remember the first answer so every
+// later thumbnail goes straight to JPEG instead of paying for a wasted attempt.
+let webpEncodable: boolean | undefined
+
+// --- Decode queue --------------------------------------------------------------
+// Each decode converts the whole base64 payload to a Blob synchronously and
+// holds a transient full-size bitmap inside createImageBitmap. Starting every
+// thumbnail in one tick (8 at once) spikes both, so jobs run through a small
+// module-level queue shared by every ToolBubble / ToolGroup.
+export const MAX_CONCURRENT_THUMBNAIL_DECODES = 2
+let activeDecodes = 0
+const waitingDecodes: Array<() => void> = []
+
+function acquireDecodeSlot(): Promise<void> {
+  if (activeDecodes < MAX_CONCURRENT_THUMBNAIL_DECODES) {
+    activeDecodes++
+    return Promise.resolve()
+  }
+  // The slot is handed over by releaseDecodeSlot without freeing it.
+  return new Promise<void>((resolve) => waitingDecodes.push(resolve))
+}
+
+function releaseDecodeSlot(): void {
+  const next = waitingDecodes.shift()
+  if (next) next()
+  else activeDecodes--
+}
+
+/** Test seam: forget the WebP probe and the decode queue. */
+export function resetThumbnailEncoderState(): void {
+  webpEncodable = undefined
+  activeDecodes = 0
+  waitingDecodes.length = 0
+}
+
+/**
+ * Opaque backdrop for the JPEG path (JPEG has no alpha, so transparent pixels
+ * would turn black). Prefer the theme's elevated-surface token, which is what
+ * `.tool-result-image-thumb` shows behind the image; if no token resolves, a
+ * neutral mid gray reads acceptably on both themes.
+ */
+function thumbnailBackground(): string {
+  const style = getComputedStyle(document.documentElement)
+  return style.getPropertyValue('--bg-elevated').trim() || style.getPropertyValue('--bg-input').trim() || 'gray'
+}
+
 /**
  * Decode `img` at thumbnail size and return it as a small `data:` URI (WebP,
  * or JPEG where the browser cannot encode WebP), or `null` when anything goes
- * wrong. Nothing to revoke.
+ * wrong or `signal` aborts before the job starts. Nothing to revoke. Jobs are
+ * queued (see above); an unmounted thumbnail aborts and never reaches the decoder.
  */
-export async function downscaleToDataUri(img: ToolResultImage): Promise<string | null> {
+export async function downscaleToDataUri(img: ToolResultImage, signal?: AbortSignal): Promise<string | null> {
+  await acquireDecodeSlot()
+  try {
+    if (signal?.aborted) return null
+    return await decodeToDataUri(img)
+  } finally {
+    releaseDecodeSlot()
+  }
+}
+
+async function decodeToDataUri(img: ToolResultImage): Promise<string | null> {
   let bitmap: ImageBitmap | null = null
   try {
     const blob = base64ToBlob(img.data, img.mediaType)
@@ -118,10 +177,26 @@ export async function downscaleToDataUri(img: ToolResultImage): Promise<string |
     canvas.height = height
     const ctx = canvas.getContext('2d')
     if (!ctx) return null
-    ctx.drawImage(bitmap, 0, 0, width, height)
-    // Browsers without a WebP encoder silently answer with PNG.
-    let uri = canvas.toDataURL('image/webp', THUMBNAIL_QUALITY)
-    if (!uri.startsWith('data:image/webp;base64,')) uri = canvas.toDataURL('image/jpeg', THUMBNAIL_QUALITY)
+    const draw = (opaque: boolean) => {
+      if (opaque) {
+        ctx.fillStyle = thumbnailBackground()
+        ctx.fillRect(0, 0, width, height)
+      }
+      ctx.drawImage(bitmap!, 0, 0, width, height)
+    }
+    let uri: string | undefined
+    if (webpEncodable !== false) {
+      draw(false)
+      const attempt = canvas.toDataURL('image/webp', THUMBNAIL_QUALITY)
+      webpEncodable = attempt.startsWith('data:image/webp;base64,')
+      if (webpEncodable) uri = attempt
+    }
+    if (uri === undefined) {
+      // JPEG path. The canvas may already hold a transparent draw from the
+      // WebP probe; paint the backdrop first and draw again over it.
+      draw(true)
+      uri = canvas.toDataURL('image/jpeg', THUMBNAIL_QUALITY)
+    }
     return /^data:image\/(webp|jpeg);base64,./.test(uri) ? uri : null
   } catch {
     return null

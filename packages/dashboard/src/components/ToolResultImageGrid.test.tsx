@@ -108,6 +108,8 @@ describe('ToolResultImageGrid (#6810)', () => {
         return original(...args) as never
       })
       const { rerender } = renderGrid(makeImages(1))
+      // Let the first decode actually start (and stall) before the image changes.
+      await waitFor(() => expect(call).toBe(1))
       const second: ToolResultImage[] = [{ mediaType: 'image/png', data: btoa('changed') }]
       rerender(
         <ToolResultImageGrid images={second} containerTestId="grid" itemTestIdPrefix="grid-item" onOpen={() => {}} />,
@@ -170,20 +172,27 @@ describe('ToolResultImageGrid (#6810)', () => {
       expect(onOpen).toHaveBeenCalledWith(total - 1)
     })
 
-    it('does not let Enter/Space on the show-more button reach an ancestor key handler', () => {
-      const ancestor = vi.fn()
-      render(
-        <div onKeyDown={ancestor}>
-          <ToolResultImageGrid
-            images={makeImages(INITIAL_THUMBNAIL_LIMIT + 2)}
-            containerTestId="grid"
-            itemTestIdPrefix="grid-item"
-            onOpen={() => {}}
-          />
-        </div>,
-      )
-      fireEvent.keyDown(screen.getByTestId('grid-more'), { key: 'Enter' })
-      expect(ancestor).not.toHaveBeenCalled()
+    it('lets non-activation keys from a thumbnail reach document and window listeners (global shortcuts)', () => {
+      const onDoc = vi.fn()
+      const onWin = vi.fn()
+      document.addEventListener('keydown', onDoc)
+      window.addEventListener('keydown', onWin)
+      try {
+        renderGrid(makeImages(INITIAL_THUMBNAIL_LIMIT + 2))
+        const thumb = screen.getByTestId('grid-item-0')
+        const more = screen.getByTestId('grid-more')
+        for (const target of [thumb, more]) {
+          onDoc.mockClear()
+          onWin.mockClear()
+          fireEvent.keyDown(target, { key: 'k', metaKey: true })
+          fireEvent.keyDown(target, { key: 'Escape' })
+          expect(onDoc).toHaveBeenCalledTimes(2)
+          expect(onWin).toHaveBeenCalledTimes(2)
+        }
+      } finally {
+        document.removeEventListener('keydown', onDoc)
+        window.removeEventListener('keydown', onWin)
+      }
     })
   })
 })

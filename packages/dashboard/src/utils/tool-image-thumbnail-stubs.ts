@@ -5,6 +5,7 @@
  * product code.
  */
 import { vi } from 'vitest'
+import { resetThumbnailEncoderState } from './tool-image-thumbnail'
 
 export interface ThumbnailStubs {
   /** The `createImageBitmap` mock (every call's args are recorded). */
@@ -15,6 +16,8 @@ export interface ThumbnailStubs {
   toDataURLCalls: Array<[string | undefined, number | undefined]>
   /** Width/height each canvas was drawn at, in order. */
   canvasSizes: Array<{ width: number; height: number }>
+  /** Canvas 2d calls in order: `drawImage` and `fillRect:<fillStyle at the time>`. */
+  ctxEvents: string[]
   /** Bitmaps returned by the mock, so tests can assert `.close()`. */
   bitmaps: Array<{ width: number; height: number; close: ReturnType<typeof vi.fn> }>
   restore: () => void
@@ -47,6 +50,7 @@ export function installThumbnailStubs(opts: ThumbnailStubOptions = {}): Thumbnai
   const created: string[] = []
   const toDataURLCalls: ThumbnailStubs['toDataURLCalls'] = []
   const canvasSizes: Array<{ width: number; height: number }> = []
+  const ctxEvents: string[] = []
   const bitmaps: ThumbnailStubs['bitmaps'] = []
   let n = 0
 
@@ -64,7 +68,14 @@ export function installThumbnailStubs(opts: ThumbnailStubOptions = {}): Thumbnai
   const prevCib = g.createImageBitmap
   g.createImageBitmap = createImageBitmap
 
-  const ctx = { drawImage: vi.fn() }
+  // Fresh module state (the WebP probe, the decode queue) for every install.
+  resetThumbnailEncoderState()
+
+  const ctx = {
+    fillStyle: '' as string,
+    drawImage: vi.fn(() => { ctxEvents.push('drawImage') }),
+    fillRect: vi.fn(function (this: { fillStyle: string }) { ctxEvents.push(`fillRect:${this.fillStyle}`) }),
+  }
   const getContext = vi
     .spyOn(HTMLCanvasElement.prototype, 'getContext')
     .mockImplementation(function (this: HTMLCanvasElement) {
@@ -86,12 +97,14 @@ export function installThumbnailStubs(opts: ThumbnailStubOptions = {}): Thumbnai
     created,
     toDataURLCalls,
     canvasSizes,
+    ctxEvents,
     bitmaps,
     restore() {
       if (hadCib) g.createImageBitmap = prevCib
       else delete g.createImageBitmap
       getContext.mockRestore()
       toDataURL.mockRestore()
+      resetThumbnailEncoderState()
     },
   }
 }

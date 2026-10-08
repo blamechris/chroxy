@@ -44,15 +44,13 @@ export function useToolImageThumbnail(img: ToolResultImage): ToolImageThumbnail 
 
   useEffect(() => {
     if (!canDownscaleThumbnails()) return
-    let cancelled = false
-    void downscaleToDataUri({ mediaType, data }).then((uri) => {
+    const controller = new AbortController()
+    void downscaleToDataUri({ mediaType, data }, controller.signal).then((uri) => {
       // Unmounted, or the image changed mid-decode: the result is stale.
-      if (cancelled) return
+      if (controller.signal.aborted) return
       setSettled({ mediaType, data, uri })
     })
-    return () => {
-      cancelled = true
-    }
+    return () => controller.abort()
   }, [mediaType, data])
 
   const onError = useCallback(() => {

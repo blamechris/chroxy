@@ -280,6 +280,11 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result: r
   })
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // The result panel holds its own buttons (image thumbnails, "Show more",
+    // line-collapse pill). Their Enter/Space activate THEM; only a key pressed
+    // on the bubble itself toggles it. Keys are deliberately not
+    // stopPropagation'd, so global shortcuts still see them.
+    if (e.target !== e.currentTarget) return
     if (e.key === 'Enter') {
       e.preventDefault()
       toggle()

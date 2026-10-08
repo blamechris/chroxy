@@ -80,10 +80,6 @@ export function ToolResultImageGrid({
     <div
       className="tool-result-images"
       data-testid={containerTestId}
-      // The "Show more" button and thumbnails are buttons nested inside
-      // ToolBubble's role="button" root, whose key handler toggles the whole
-      // bubble on Enter/Space. Keep activation keys local to the grid.
-      onKeyDown={(e) => e.stopPropagation()}
     >
       {images.slice(0, visibleCount).map((img, i) => (
         <ToolResultImageThumb

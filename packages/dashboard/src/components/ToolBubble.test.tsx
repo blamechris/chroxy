@@ -1030,15 +1030,46 @@ describe('ToolBubble — WebSearch/WebFetch structured render (#6757)', () => {
       await waitFor(() => expect(stubs.created).toHaveLength(total))
     })
 
-    it('the "Show more" button does not collapse the bubble (click or Enter)', () => {
+    it('Enter/Space on a thumbnail or the "Show more" button does not toggle the bubble', () => {
       render(<ToolBubble toolName="screenshot" toolUseId="tu-d3" resultImages={mk(INITIAL_THUMBNAIL_LIMIT + 2)} />)
       const root = screen.getByTestId('tool-bubble-tu-d3')
       fireEvent.click(root)
-      const more = screen.getByTestId('tool-result-images-tu-d3-more')
-      fireEvent.keyDown(more, { key: 'Enter' })
+      for (const id of ['tool-result-images-tu-d3-more', 'tool-result-image-tu-d3-0']) {
+        for (const key of ['Enter', ' ']) {
+          fireEvent.keyDown(screen.getByTestId(id), { key })
+          expect(root).toHaveAttribute('aria-expanded', 'true')
+        }
+      }
+      fireEvent.click(screen.getByTestId('tool-result-images-tu-d3-more'))
       expect(root).toHaveAttribute('aria-expanded', 'true')
-      fireEvent.click(more)
+    })
+
+    it('Enter/Space on the bubble itself still toggles it', () => {
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-d3b" resultImages={mk(1)} />)
+      const root = screen.getByTestId('tool-bubble-tu-d3b')
+      fireEvent.keyDown(root, { key: 'Enter' })
       expect(root).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.keyDown(root, { key: ' ' })
+      expect(root).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    it('other keys typed on a thumbnail still reach document and window listeners', () => {
+      const onDoc = vi.fn()
+      const onWin = vi.fn()
+      document.addEventListener('keydown', onDoc)
+      window.addEventListener('keydown', onWin)
+      try {
+        render(<ToolBubble toolName="screenshot" toolUseId="tu-d3c" resultImages={mk(1)} />)
+        fireEvent.click(screen.getByTestId('tool-bubble-tu-d3c'))
+        const thumb = screen.getByTestId('tool-result-image-tu-d3c-0')
+        fireEvent.keyDown(thumb, { key: 'k', metaKey: true })
+        fireEvent.keyDown(thumb, { key: 'Escape' })
+        expect(onDoc).toHaveBeenCalledTimes(2)
+        expect(onWin).toHaveBeenCalledTimes(2)
+      } finally {
+        document.removeEventListener('keydown', onDoc)
+        window.removeEventListener('keydown', onWin)
+      }
     })
 
     it('collapsing drops the thumbnails; re-expanding renders them again', async () => {

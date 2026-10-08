@@ -10,6 +10,7 @@ import {
   downscaleToDataUri,
   readImageWidth,
   THUMBNAIL_DECODE_WIDTH,
+  MAX_CONCURRENT_THUMBNAIL_DECODES,
 } from './tool-image-thumbnail'
 import { installThumbnailStubs, pngHeaderBase64, type ThumbnailStubs } from './tool-image-thumbnail-stubs'
 
@@ -143,5 +144,103 @@ describe('downscaleToDataUri', () => {
     stubs = installThumbnailStubs()
     vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:,')
     expect(await downscaleToDataUri(img)).toBeNull()
+  })
+})
+
+describe('WebP probe and JPEG background (#6810 review)', () => {
+  it('tries WebP once, then goes straight to JPEG on a browser that cannot encode it', async () => {
+    stubs = installThumbnailStubs({ webpSupported: false })
+    for (let i = 0; i < 3; i++) await downscaleToDataUri(img)
+    const types = stubs.toDataURLCalls.map((c) => c[0])
+    expect(types.filter((t) => t === 'image/webp')).toHaveLength(1)
+    expect(types.filter((t) => t === 'image/jpeg')).toHaveLength(3)
+  })
+
+  it('keeps using WebP where it is supported', async () => {
+    stubs = installThumbnailStubs()
+    for (let i = 0; i < 3; i++) await downscaleToDataUri(img)
+    expect(stubs.toDataURLCalls.map((c) => c[0])).toEqual(['image/webp', 'image/webp', 'image/webp'])
+    expect(stubs.ctxEvents.some((e) => e.startsWith('fillRect'))).toBe(false)
+  })
+
+  it('paints an opaque background before drawing on the JPEG path (no black for transparency)', async () => {
+    stubs = installThumbnailStubs({ webpSupported: false })
+    await downscaleToDataUri(img) // probing call: ends with background, then the final draw
+    expect(stubs.ctxEvents.slice(-2)).toEqual([expect.stringMatching(/^fillRect:.+/), 'drawImage'])
+    stubs.ctxEvents.length = 0
+    await downscaleToDataUri(img) // probe already knows: background first
+    expect(stubs.ctxEvents).toEqual([expect.stringMatching(/^fillRect:.+/), 'drawImage'])
+  })
+
+  it('takes the background from the --bg-elevated token when it resolves', async () => {
+    stubs = installThumbnailStubs({ webpSupported: false })
+    document.documentElement.style.setProperty('--bg-elevated', 'rgb(1, 2, 3)')
+    try {
+      await downscaleToDataUri(img)
+      await downscaleToDataUri(img)
+    } finally {
+      document.documentElement.style.removeProperty('--bg-elevated')
+    }
+    expect(stubs.ctxEvents).toContain('fillRect:rgb(1, 2, 3)')
+  })
+})
+
+describe('bounded decode concurrency (#6810 review)', () => {
+  function gated(s: ThumbnailStubs) {
+    const original = s.createImageBitmap.getMockImplementation()! as (...a: unknown[]) => Promise<unknown>
+    let active = 0
+    let peak = 0
+    const releases: Array<() => void> = []
+    s.createImageBitmap.mockImplementation(async (...args: unknown[]) => {
+      active++
+      peak = Math.max(peak, active)
+      await new Promise<void>((r) => releases.push(r))
+      active--
+      return original(...args) as never
+    })
+    return { peak: () => peak, releases }
+  }
+  const tick = () => new Promise((r) => setTimeout(r, 0))
+
+  it('never has more than MAX_CONCURRENT_THUMBNAIL_DECODES in flight, and finishes them all', async () => {
+    stubs = installThumbnailStubs()
+    const g = gated(stubs)
+    const jobs = Array.from({ length: 6 }, () => downscaleToDataUri(img))
+    await tick()
+    expect(stubs.createImageBitmap).toHaveBeenCalledTimes(MAX_CONCURRENT_THUMBNAIL_DECODES)
+    // Drain: release whatever is in flight until every job has settled.
+    let settled = 0
+    void Promise.all(jobs).then(() => { settled = 1 })
+    for (let i = 0; i < 20 && !settled; i++) {
+      g.releases.splice(0).forEach((r) => r())
+      await tick()
+    }
+    expect(settled).toBe(1)
+    expect(g.peak()).toBe(MAX_CONCURRENT_THUMBNAIL_DECODES)
+    expect(stubs.createImageBitmap).toHaveBeenCalledTimes(6)
+    expect((await Promise.all(jobs)).every((u) => u !== null)).toBe(true)
+  })
+
+  it('a queued job whose signal aborts before it starts never reaches the decoder', async () => {
+    stubs = installThumbnailStubs()
+    const g = gated(stubs)
+    const first = Array.from({ length: MAX_CONCURRENT_THUMBNAIL_DECODES }, () => downscaleToDataUri(img))
+    const ac = new AbortController()
+    const queued = downscaleToDataUri(img, ac.signal)
+    await tick()
+    ac.abort()
+    g.releases.splice(0).forEach((r) => r())
+    // Race a timeout so a regression fails fast instead of hanging on the gated decoder.
+    expect(await Promise.race([queued, new Promise((r) => setTimeout(() => r('timeout'), 200))])).toBeNull()
+    await Promise.all(first)
+    expect(stubs.createImageBitmap).toHaveBeenCalledTimes(MAX_CONCURRENT_THUMBNAIL_DECODES)
+  })
+
+  it('a failed decode frees its slot for the next job', async () => {
+    stubs = installThumbnailStubs()
+    stubs.createImageBitmap.mockRejectedValue(new Error('bad'))
+    const results = await Promise.all(Array.from({ length: 5 }, () => downscaleToDataUri(img)))
+    expect(results).toEqual([null, null, null, null, null])
+    expect(stubs.createImageBitmap).toHaveBeenCalledTimes(5)
   })
 })
