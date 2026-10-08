@@ -181,3 +181,39 @@ describe('BackgroundShellTracker — destroy', () => {
     assert.equal(tracker._backgroundShellSweepTimer, null)
   })
 })
+
+describe('BackgroundShellTracker — clearAll (#7611)', () => {
+  it('forgets every pending shell, stops the sweep and emits ONE empty snapshot', () => {
+    const { tracker, events } = makeTracker()
+    tracker.trackBackgroundShell({ shellId: 'a', command: 'sleep 600' })
+    tracker.trackBackgroundShell({ shellId: 'b' })
+    assert.equal(tracker.size, 2, 'control: two shells pending before the clear')
+    assert.ok(tracker._backgroundShellSweepTimer, 'control: the sweep was armed')
+    events.length = 0
+
+    assert.equal(tracker.clearAll(), 2, 'reports how many it forgot')
+
+    assert.equal(tracker.size, 0)
+    assert.equal(tracker._backgroundShellSweepTimer, null, 'no recurring timer for an empty tracker')
+    assert.equal(events.length, 1, 'one change event, not one per shell')
+    assert.equal(events[0].event, 'background_work_changed')
+    assert.deepEqual(events[0].payload, { pending: [] })
+  })
+
+  it('is NOT destroy(): the tracker keeps working and re-arms its sweep on the next shell', () => {
+    const { tracker } = makeTracker()
+    tracker.trackBackgroundShell({ shellId: 'a' })
+    tracker.clearAll()
+
+    assert.equal(tracker.trackBackgroundShell({ shellId: 'b', command: 'npm run dev' }), true)
+    assert.equal(tracker.size, 1, 'a shell tracked after the clear is tracked')
+    assert.ok(tracker._backgroundShellSweepTimer, 'the sweep re-armed')
+    tracker.destroy()
+  })
+
+  it('on an empty tracker it is a no-op and emits nothing', () => {
+    const { tracker, events } = makeTracker()
+    assert.equal(tracker.clearAll(), 0)
+    assert.deepEqual(events, [], 'an idle respawn must not wake every client with an empty snapshot')
+  })
+})

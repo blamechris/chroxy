@@ -1894,6 +1894,18 @@ export class CliSession extends BaseSession {
     // unconditional sweep covers the busy case.
     this._completeAgents()
 
+    // #7611: the same child-is-going-away reasoning for background SHELLS.
+    // `killProcessTree` below (since #7608) signals the child's whole descendant
+    // tree, which includes the shells the agent started with
+    // `run_in_background`, and nothing can poll or hear back from them after
+    // this. Forget them here — before `_emitInterruptedTurnResult`, so a
+    // listener of its `result` already sees the truthful `isRunning` — or the
+    // tracker keeps the session 'running' (immune to the idle timeout) until the
+    // 4 h hard-quiesce reap. NOT `_destroyPendingBackgroundShells`: that is the
+    // end-of-session teardown and also drops the activity tree. A no-op for a
+    // provider that tracks no shells.
+    this._clearPendingBackgroundShells()
+
     // #4471: emit synthetic terminating events BEFORE setting _respawning,
     // otherwise the _handleChildClose guard short-circuits and the dashboard
     // never receives `agent_idle` — Stop stays stuck on panic-button +

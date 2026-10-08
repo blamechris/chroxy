@@ -1405,6 +1405,22 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #7611: forget every pending background shell WITHOUT tearing the session
+   * down — for a provider that has just killed the process tree the shells
+   * lived in and is about to start a fresh one. Unlike
+   * `_destroyPendingBackgroundShells` it leaves the activity registry and the
+   * intra-turn command map alone (the session carries on, and those belong to
+   * the turn machinery), and it emits `background_work_changed` so the banner
+   * drops the dead shells. delegates to BackgroundShellTracker.clearAll().
+   *
+   * @returns {number} how many pending shells were forgotten
+   * @private
+   */
+  _clearPendingBackgroundShells() {
+    return this._backgroundShellTracker.clearAll()
+  }
+
+  /**
    * #4307: clear the pending map on session destroy. Pulled into a
    * helper so subclasses can call it from their own `destroy()` after
    * the existing teardown — keeping the map alive past destroy would
