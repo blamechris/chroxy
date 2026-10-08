@@ -122,7 +122,13 @@ pub fn read_connection_info() -> Result<(String, String), String> {
 
     let json: serde_json::Value =
         serde_json::from_str(&contents).map_err(|e| format!("Invalid JSON: {}", e))?;
+    parse_connection_info(&json)
+}
 
+/// Extract `(hostname, token)` from a connection-info document: either
+/// `connection.json` on disk or the body of the daemon's `GET /connect`, which
+/// carries the same fields.
+fn parse_connection_info(json: &serde_json::Value) -> Result<(String, String), String> {
     // The server writes connectionUrl as "chroxy://hostname?token=TOKEN".
     // Parse hostname and token from it if available.
     if let Some(conn_url) = json.get("connectionUrl").and_then(|v| v.as_str()) {
@@ -161,6 +167,52 @@ pub fn read_connection_info() -> Result<(String, String), String> {
     }
 
     Err("Missing 'connectionUrl' or 'wsUrl' in connection.json".to_string())
+}
+
+/// Fetch `(hostname, token)` from a running daemon's `GET /connect` (#8267).
+///
+/// For a daemon this app did not start there is no app-side state to read, and
+/// `connection.json` may live under a config root the app does not see. `/connect`
+/// is the live source: it requires the PRIMARY token, which is the one the
+/// desktop already holds (config.json, or the OS keychain). The token goes in the
+/// `Authorization` header only: never in the URL and never logged.
+pub fn fetch_daemon_connection_info(port: u16, token: &str) -> Result<(String, String), String> {
+    let url = format!("http://127.0.0.1:{}/connect", port);
+    let resp = ureq::get(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .timeout(std::time::Duration::from_secs(3))
+        .call()
+        .map_err(|e| match e {
+            // Status only: ureq's Display for a status error carries no headers.
+            ureq::Error::Status(code, _) => format!("daemon refused /connect (HTTP {})", code),
+            ureq::Error::Transport(_) => "daemon did not answer /connect".to_string(),
+        })?;
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut std::io::Read::take(resp.into_reader(), 64 * 1024), &mut body)
+        .map_err(|_| "daemon returned an unreadable /connect body".to_string())?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|_| "daemon returned an unreadable /connect body".to_string())?;
+    let (host, tok) = parse_connection_info(&json)?;
+    // An auth-less daemon redacts the token rather than omitting it; a QR built
+    // from the placeholder would pair nothing.
+    if tok == "[REDACTED]" {
+        return Err("daemon did not disclose a token".to_string());
+    }
+    Ok((host, tok))
+}
+
+/// Connection info for a daemon the app did not start: ask it directly, and fall
+/// back to the on-disk files the same way [`get_connection_info`] does.
+pub fn get_external_connection_info(
+    port: u16,
+    token: Option<&str>,
+) -> Result<(String, String), String> {
+    if let Some(t) = token {
+        if let Ok(info) = fetch_daemon_connection_info(port, t) {
+            return Ok(info);
+        }
+    }
+    get_connection_info()
 }
 
 /// Try to get connection info from connection.json, falling back to config.json.
@@ -237,6 +289,75 @@ mod tests {
         let html = build_qr_popup_html("<svg></svg>", "chroxy://test");
         assert!(html.contains("Escape"));
         assert!(html.contains("window.close()"));
+    }
+
+    // --- externally managed daemon (#8267) ---------------------------------
+
+    /// Serve one canned response and hand back the raw request it received.
+    fn serve_once(reply: String) -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let h = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap();
+            let _ = s.write_all(reply.as_bytes());
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+        (port, h)
+    }
+
+    fn json_reply(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    #[test]
+    fn fetch_daemon_connection_info_sends_bearer_header_and_parses_connect_body() {
+        let body = r#"{"connectionUrl":"chroxy://abc.example.com?token=tok123","apiToken":"tok123"}"#;
+        let (port, req) = serve_once(json_reply(body));
+        let info = fetch_daemon_connection_info(port, "tok123").unwrap();
+        assert_eq!(info, ("abc.example.com".to_string(), "tok123".to_string()));
+        let req = req.join().unwrap();
+        assert!(req.starts_with("GET /connect HTTP/1.1"), "{}", req.lines().next().unwrap_or(""));
+        assert!(
+            req.to_lowercase().contains("authorization: bearer tok123"),
+            "token must travel in the Authorization header"
+        );
+        assert!(!req.lines().next().unwrap().contains("tok123"), "token must not be in the URL");
+    }
+
+    #[test]
+    fn fetch_daemon_connection_info_rejects_a_redacted_token() {
+        // An auth-less daemon answers with a placeholder; a QR built from it pairs nothing.
+        let body = r#"{"wsUrl":"ws://localhost:8765","apiToken":"[REDACTED]"}"#;
+        let (port, _req) = serve_once(json_reply(body));
+        assert!(fetch_daemon_connection_info(port, "x").is_err());
+    }
+
+    #[test]
+    fn fetch_daemon_connection_info_surfaces_a_refusal_without_the_token() {
+        let (port, _req) = serve_once(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+        );
+        let err = fetch_daemon_connection_info(port, "s3cret-token").unwrap_err();
+        assert!(err.contains("403"));
+        assert!(!err.contains("s3cret-token"));
+    }
+
+    #[test]
+    fn parse_connection_info_reads_both_document_shapes() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"connectionUrl":"chroxy://h.example?token=t"}"#).unwrap();
+        assert_eq!(parse_connection_info(&v).unwrap(), ("h.example".into(), "t".into()));
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"wsUrl":"wss://w.example","apiToken":"k"}"#).unwrap();
+        assert_eq!(parse_connection_info(&v).unwrap(), ("w.example".into(), "k".into()));
+        assert!(parse_connection_info(&serde_json::json!({})).is_err());
     }
 
     #[test]

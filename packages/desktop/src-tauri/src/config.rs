@@ -165,23 +165,7 @@ pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 /// Load and parse the daemon's `config.json`. Returns default config if file doesn't exist.
 /// Falls back to OS keychain for apiToken if not present in config file.
 pub fn load_config() -> ChroxyConfig {
-    let path = match config_path() {
-        Some(p) => p,
-        None => return ChroxyConfig::default(),
-    };
-
-    let contents = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return ChroxyConfig::default(),
-    };
-
-    let mut config: ChroxyConfig = match serde_json::from_str(&contents) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!("[config] Failed to parse {}: {}", path.display(), e);
-            ChroxyConfig::default()
-        }
-    };
+    let mut config = load_config_file();
 
     // Fallback: if apiToken is missing from config file, check OS keychain.
     // The server migrates tokens from config.json to keychain on first run.
@@ -193,6 +177,69 @@ pub fn load_config() -> ChroxyConfig {
     }
 
     config
+}
+
+/// The configured daemon port, read from `config.json` only. Unlike
+/// [`load_config`] this never consults the OS keychain, so it is cheap and
+/// prompt-free enough for the tray's periodic port probe (#8267).
+pub fn load_port() -> u16 {
+    match load_config_file().port {
+        0 => default_port(),
+        p => p,
+    }
+}
+
+/// Parse `config.json` without the keychain fallback. Returns the default config
+/// if the file is missing or malformed.
+fn load_config_file() -> ChroxyConfig {
+    let path = match config_path() {
+        Some(p) => p,
+        None => return ChroxyConfig::default(),
+    };
+
+    let contents = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return ChroxyConfig::default(),
+    };
+
+    match serde_json::from_str(&contents) {
+        Ok(config) => {
+            note_parse_result(None);
+            config
+        }
+        Err(e) => {
+            let msg = format!("Failed to parse {}: {}", path.display(), e);
+            if note_parse_result(Some(&msg)) {
+                eprintln!("[config] {}", msg);
+            }
+            ChroxyConfig::default()
+        }
+    }
+}
+
+/// The last parse failure that was logged, so a malformed `config.json` read on
+/// every tray poll (#8267) is reported once per change, not every few seconds.
+static LAST_PARSE_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Record a parse outcome (`None` = parsed fine). Returns true when `err` is a
+/// new failure that should be logged.
+fn note_parse_result(err: Option<&str>) -> bool {
+    let mut last = LAST_PARSE_ERROR.lock().unwrap_or_else(|e| e.into_inner());
+    should_log_parse_error(&mut last, err)
+}
+
+fn should_log_parse_error(last: &mut Option<String>, err: Option<&str>) -> bool {
+    match err {
+        None => {
+            *last = None;
+            false
+        }
+        Some(msg) if last.as_deref() == Some(msg) => false,
+        Some(msg) => {
+            *last = Some(msg.to_string());
+            true
+        }
+    }
 }
 
 /// Read the API token from the OS keychain.
@@ -244,6 +291,17 @@ pub(crate) fn parse_config(json: &str) -> Result<ChroxyConfig, serde_json::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_parse_failure_is_logged_once_and_a_change_logs_again() {
+        let mut last = None;
+        assert!(should_log_parse_error(&mut last, Some("bad at 1")));
+        assert!(!should_log_parse_error(&mut last, Some("bad at 1")));
+        assert!(!should_log_parse_error(&mut last, Some("bad at 1")));
+        assert!(should_log_parse_error(&mut last, Some("bad at 2")), "a different failure logs");
+        assert!(!should_log_parse_error(&mut last, None), "a good read logs nothing");
+        assert!(should_log_parse_error(&mut last, Some("bad at 2")), "failing again after a fix logs again");
+    }
 
     #[test]
     fn default_config_has_zero_port() {
