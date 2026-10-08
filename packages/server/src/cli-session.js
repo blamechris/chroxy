@@ -1631,12 +1631,7 @@ export class CliSession extends BaseSession {
         // SdkSession's `result` are the ONLY two sites that may pass this flag;
         // see the contract on `BaseSession._clearMessageState`.
         // #7376: `completion: 'normal'` -- the child's own `result` ended the
-        // turn, so a Stop requested during it is what cut its tools off.
-        // Also disarm the user-stop flag: the child survived the SIGINT (this
-        // is its answer to it), and `_clearMessageState` cancels the 5s timer
-        // that would otherwise have disarmed it, so without this a crash in
-        // the NEXT turn read as the user's Stop.
-        this._clearIntentionalStop()
+        // turn, so a Stop requested during it may have cut its tools off.
         this._clearMessageState({ turnEndedCleanly: true, completion: 'normal' })
         break
       }

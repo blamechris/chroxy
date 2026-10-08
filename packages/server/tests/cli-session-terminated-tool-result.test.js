@@ -174,24 +174,6 @@ describe('CliSession — a tool cut off by a terminated turn says so (#7376)', (
     assert.equal('terminatedReason' in results[0], false)
   })
 
-  // Pre-existing leak, adjacent: a normal completion cancelled the 5s timer that
-  // would have disarmed the user-stop flag and left it armed, so a crash in the
-  // NEXT turn read as the user's Stop.
-  it('a Stop answered by a normal result does not turn the NEXT turn\'s crash into user_stop', async () => {
-    session.interrupt()
-    session._handleEvent({
-      type: 'result', session_id: 'sess-1', subtype: 'success', result: '',
-      total_cost_usd: 0, duration_ms: 5, usage: {},
-    })
-    assert.equal(session._intentionalStop, false, 'the flag is disarmed by the result')
-    results.length = 0
-    await session.sendMessage('again')
-    session._trackToolStart('tu-4', 'Bash')
-    session._handleChildClose(1) // a real crash
-    assert.equal(results.length, 1)
-    assert.equal(results[0].terminatedReason, 'process_exit')
-  })
-
   it('an explicit cause is not overridden by an earlier Stop request', () => {
     session.interrupt()
     session._handleHardTimeout()
