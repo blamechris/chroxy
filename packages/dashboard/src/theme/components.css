@@ -4667,6 +4667,127 @@ button.sidebar-token-view-session-row:hover {
   white-space: normal;
 }
 
+/* #6894: an answered record expands to its detail, and a run of identical
+   resolved prompts collapses to one counted line. Colours are tokens only
+   (--text-muted for the line, as the dropped record above; --text-secondary and
+   --accent-blue for the controls). Every control clears the 44px tap-target floor
+   (CLAUDE.md "Tap targets") by growing the visible box, not by hitSlop. */
+.permission-prompt.perm-record-expandable {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.permission-prompt .perm-record-toggle,
+.perm-group .perm-group-toggle {
+  min-height: 44px;
+  min-width: 44px;
+  box-sizing: border-box;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.permission-prompt .perm-record-toggle {
+  padding: 0 8px;
+  border-radius: 6px;
+  font-weight: 500;
+  text-decoration: underline;
+}
+
+.permission-prompt .perm-record-toggle:hover,
+.perm-group .perm-group-toggle:hover {
+  color: var(--text-primary);
+}
+
+.permission-prompt .perm-record-toggle:focus-visible,
+.perm-group .perm-group-toggle:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: -2px;
+}
+
+.perm-record-detail {
+  flex-basis: 100%;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.perm-record-input {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.perm-record-decision,
+.perm-record-session {
+  margin-top: 2px;
+}
+
+.perm-group {
+  align-self: flex-start;
+  max-width: 85%;
+}
+
+.perm-group .perm-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 12px;
+  border-radius: 10px;
+  text-align: left;
+}
+
+.perm-group-input {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  margin-top: 2px;
+  font-family: var(--font-mono, monospace);
+  font-style: normal;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.perm-group-chevron {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.perm-group-count {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.perm-group-anchor {
+  display: block;
+  height: 0;
+  overflow: hidden;
+}
+
+.perm-group-members {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 12px;
+}
+
 /* ---- Question Prompt (#1193) ---- */
 .question-prompt {
   background: var(--bg-secondary);
@@ -8160,6 +8281,7 @@ button.sidebar-token-view-session-row:hover {
   .msg, .msg-row, .tool-bubble, .permission-prompt, .question-prompt { max-width: 92%; font-size: var(--text-base); }
   /* The dropped record's own rule (0,2,0) outranks the line above (0,1,0). */
   .permission-prompt.permission-prompt-dropped { max-width: 92%; }
+  .perm-group { max-width: 92%; }
   .input-bar { padding: 8px 10px; gap: 6px; }
   .input-bar textarea { padding: 8px 10px; font-size: var(--text-base); }
   .btn-send, .btn-interrupt { padding: 8px 12px; font-size: var(--text-base); }

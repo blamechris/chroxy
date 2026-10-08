@@ -137,6 +137,9 @@ export function TranscriptViewer({ conversationId, status, messages, error, onCl
     // this is Claude Code's own log of what the CLI/SDK actually did, not
     // chroxy's queue bookkeeping — see permission-turn-summary.ts's doc.
     turnBoundarySource: 'user_input',
+    // #6894 — a closed conversation has no resolved-permission state and no
+    // group payloads to draw a `permission-group` row from.
+    groupResolvedPermissions: false,
   })
 
   const renderMessage = useCallback(

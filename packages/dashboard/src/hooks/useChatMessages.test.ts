@@ -435,3 +435,76 @@ describe('useChatMessages', () => {
     })
   })
 })
+
+// #6894 -- consecutive identical RESOLVED permission prompts collapse to one
+// synthetic `permission-group` row; a pending prompt never joins one.
+describe('useChatMessages -- resolved permission prompt groups (#6894)', () => {
+  function resolvedPrompt(id: string, over: Partial<ChatMessage> = {}): ChatMessage {
+    return msg({
+      id,
+      type: 'prompt',
+      content: 'shell: Do you want to allow npm registry lookup?',
+      tool: 'shell',
+      requestId: `req-${id}`,
+      // a live prompt carries the broadcast tool input; a replayed record does not
+      toolInput: { command: 'npm view @chroxy/server version' },
+      answered: 'allow',
+      answeredAt: 1,
+      ...over,
+    })
+  }
+  const pendingPrompt = (id: string) =>
+    resolvedPrompt(id, { answered: undefined, answeredAt: undefined, expiresAt: Date.now() + 60_000 })
+
+  it('collapses a run of identical resolved prompts into one group row with a payload', () => {
+    const messages = [
+      msg({ id: 'u1', type: 'user_input', content: 'go' }),
+      resolvedPrompt('p1'),
+      resolvedPrompt('p2'),
+      resolvedPrompt('p3'),
+    ]
+    const { result } = renderHook(() => useChatMessages({ storeMessages: messages, streamingMessageId: null }))
+    const rows = result.current.chatMessages
+    expect(rows.map((r) => r.type)).toEqual(['user_input', 'permission-group'])
+    expect(result.current.permissionPromptGroups.get(rows[1]!.id)).toEqual(['p1', 'p2', 'p3'])
+  })
+
+  it('does not group a pending prompt with anything', () => {
+    const messages = [resolvedPrompt('p1'), resolvedPrompt('p2'), pendingPrompt('p3'), pendingPrompt('p4')]
+    const { result } = renderHook(() => useChatMessages({ storeMessages: messages, streamingMessageId: null }))
+    expect(result.current.chatMessages.map((r) => r.id)).toEqual(['permission-group-p1', 'p3', 'p4'])
+  })
+
+  it('has an empty group map when nothing groups', () => {
+    const { result } = renderHook(() =>
+      useChatMessages({ storeMessages: [resolvedPrompt('p1')], streamingMessageId: null }),
+    )
+    expect(result.current.permissionPromptGroups.size).toBe(0)
+    expect(result.current.chatMessages.map((r) => r.id)).toEqual(['p1'])
+  })
+
+  it('does NOT group records rebuilt from replayed history: their tool input is unknown, so identical descriptions may be different commands', () => {
+    const rec = (id: string): ChatMessage => {
+      const { toolInput: _t, ...rest } = resolvedPrompt(id, { answered: undefined, answeredAt: undefined, permissionOutcome: 'expired' })
+      void _t
+      return rest as ChatMessage
+    }
+    const { result } = renderHook(() =>
+      useChatMessages({ storeMessages: [rec('p1'), rec('p2')], streamingMessageId: null }),
+    )
+    expect(result.current.chatMessages.map((r) => r.id)).toEqual(['p1', 'p2'])
+    expect(result.current.permissionPromptGroups.size).toBe(0)
+  })
+
+  it('can be switched off (the closed-transcript viewer cannot render a group row)', () => {
+    const { result } = renderHook(() =>
+      useChatMessages({
+        storeMessages: [resolvedPrompt('p1'), resolvedPrompt('p2')],
+        streamingMessageId: null,
+        groupResolvedPermissions: false,
+      }),
+    )
+    expect(result.current.chatMessages.map((r) => r.id)).toEqual(['p1', 'p2'])
+    expect(result.current.permissionPromptGroups.size).toBe(0)
+  })
+})

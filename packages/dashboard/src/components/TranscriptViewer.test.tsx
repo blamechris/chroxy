@@ -284,4 +284,27 @@ describe('TranscriptViewer (#6863)', () => {
       expect(links[1]).toHaveAttribute('href', '#perm-desc-req-2')
     })
   })
+
+  // #6894 -- the live chat folds a run of identical resolved permission prompts
+  // into one counted row. A closed conversation has no group payloads to draw it
+  // from, so it must keep every prompt as its own line rather than a blank row.
+  describe('resolved permission prompts are not grouped in a closed transcript (#6894)', () => {
+    it('renders each of two identical answered prompts, with no group row', () => {
+      render(
+        <TranscriptViewer
+          conversationId="conv-1"
+          status="ready"
+          messages={[
+            makeMessage({ id: 'p1', type: 'prompt', content: 'Bash: ls /tmp/unique-marker', requestId: 'req-1', tool: 'Bash', answered: 'allow' }),
+            makeMessage({ id: 'p2', type: 'prompt', content: 'Bash: ls /tmp/unique-marker', requestId: 'req-2', tool: 'Bash', answered: 'allow' }),
+          ]}
+          error={null}
+          onClose={vi.fn()}
+          onRetry={vi.fn()}
+        />,
+      )
+      expect(screen.queryByTestId('perm-group')).not.toBeInTheDocument()
+      expect(screen.getAllByText(/unique-marker/)).toHaveLength(2)
+    })
+  })
 })

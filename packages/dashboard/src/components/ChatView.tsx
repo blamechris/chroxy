@@ -108,8 +108,11 @@ export interface ChatViewMessage {
    * by `useChatMessages.ts` (`utils/permissionExpiredSummaryRows.ts`) and
    * always rendered through `renderMessage` via a payload lookup, the same
    * shape `tool_group` uses.
+   * `permission-group` (#6894) is synthetic too: one compact line for a run of
+   * identical resolved permission prompts, spliced in by `useChatMessages.ts`
+   * (`utils/permissionGroupRows.ts`) and rendered through `renderMessage`.
    */
-  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group' | 'permission-expired-summary'
+  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group' | 'permission-expired-summary' | 'permission-group'
   content: string
   timestamp: number
   isStreaming?: boolean

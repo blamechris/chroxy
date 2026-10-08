@@ -68,10 +68,14 @@ import { isTurnOutcomeMarker } from './turn-outcome-marker'
  * mobile calls this same pure function but never sees the type constructed,
  * since mobile consumes `displayGroups`, not the dashboard's spliced
  * `chatMessages`.
+ *
+ * `permission-group` (#6894) is synthetic in the same way: one compact line for a
+ * run of identical resolved permission prompts, spliced in dashboard-only by
+ * `useChatMessages.ts` (`utils/permissionGroupRows.ts`).
  */
 export interface ChatViewMessage {
   id: string
-  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group' | 'permission-expired-summary'
+  type: 'response' | 'user_input' | 'system' | 'error' | 'thinking' | 'tool_use' | 'tool_group' | 'permission-expired-summary' | 'permission-group'
   content: string
   timestamp: number
   isStreaming?: boolean
