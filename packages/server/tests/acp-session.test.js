@@ -8,6 +8,8 @@ import { createAcpSessionClass, registerAcpProviders, labelAcpSpawnFailure } fro
 import { BINARY_STATUS } from '../src/utils/verify-binary.js'
 import { validateAcpProviders } from '../src/acp-config.js'
 import { getProvider, listProviders, getRegisteredProviderNames } from '../src/providers.js'
+import { EventNormalizer } from '../src/event-normalizer.js'
+import { ServerResultSchema } from '@chroxy/protocol'
 
 // #7319 — the config-driven ACP provider. These tests drive a REAL spawned
 // child process running the scripted fake-acp-agent.js fixture over stdio —
@@ -770,5 +772,69 @@ describe('AcpSession — which spawn failures get a label (#8035 review)', () =>
     await s.destroy().catch(() => {})
     cleanup()
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+// #7326 -- ACP's StopReason is a closed set of five. Before this, four of them
+// (end_turn aside) read as a normal finished turn and `cancelled` surfaced as a
+// bare error; a reply cut off by a token limit or refused by the model looked
+// exactly like a complete one. Each is driven through the real fixture agent,
+// then through the real event normalizer, and the assertion is on the wire frame
+// a client receives -- the "rendered reason".
+describe('AcpSession -- StopReason surfaces as the turn outcome (#7326)', () => {
+  const CASES = [
+    ['end_turn', 'completed'],
+    ['max_tokens', 'truncated'],
+    ['max_turn_requests', 'truncated'],
+    ['refusal', 'refused'],
+    ['cancelled', 'stopped'],
+  ]
+
+  for (const [stopReason, outcome] of CASES) {
+    it(`${stopReason} -> a result frame carrying turnOutcome "${outcome}"`, async () => {
+      const { s, cleanup } = mkSession()
+      const ev = capture(s, ['result', 'error', 'stopped'])
+      await s.start()
+      const resultP = waitFor(s, 'result')
+      await s.sendMessage(`STOP_REASON:${stopReason}`, [])
+      const result = await resultP
+      await s.destroy()
+      cleanup()
+
+      assert.equal(result.turnOutcome, outcome)
+      assert.deepEqual(
+        ev.map(([e]) => e),
+        ['result'],
+        'the turn ends with exactly one result: no bare error for a cancel the agent reported itself, and no stopped (nobody pressed Stop)',
+      )
+
+      const out = new EventNormalizer().normalize('result', result, { sessionId: 's1', mode: 'multi', getSessionEntry: () => null })
+      const frame = out.messages.find(({ msg }) => msg.type === 'result').msg
+      assert.equal(frame.turnOutcome, outcome, 'the reason survives onto the wire frame')
+      assert.ok(ServerResultSchema.safeParse(frame).success, 'and the frame satisfies the protocol schema')
+      if (outcome === 'completed') {
+        assert.equal('timestamp' in frame, false, 'a finished turn needs no marker identity')
+      } else {
+        assert.equal(typeof frame.timestamp, 'number', 'a marked turn carries the identity the client dedups its chip on')
+      }
+    })
+  }
+
+  it('a user Stop is still `stopped`, not a result: the outcome vocabulary does not replace the interrupt path', async () => {
+    const { s, cleanup } = mkSession()
+    await s.start()
+    const ev = capture(s, ['result', 'stopped', 'error'])
+    const waiting = new Promise((resolve) => {
+      s.on('stream_delta', (d) => { if (d.delta === 'WAITING') resolve() })
+    })
+    const stoppedP = waitFor(s, 'stopped')
+    const sendP = s.sendMessage('HANG_UNTIL_CANCEL', [])
+    await waiting
+    await s.interrupt()
+    await stoppedP
+    await sendP
+    await s.destroy()
+    cleanup()
+    assert.deepEqual(ev.map(([e]) => e), ['stopped'])
   })
 })

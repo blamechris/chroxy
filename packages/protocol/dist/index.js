@@ -110,6 +110,9 @@ export * from "./error-categories.js";
 // #7376: why a turn was terminated under an in-flight tool call, and the shared
 // wording the clients and the server's fallback result text agree on.
 export * from "./turn-termination.js";
+// #7326: how a TURN ended (completed / truncated / refused / stopped), the field
+// the `result` frame carries it in, and the wording both clients share.
+export * from "./turn-outcome.js";
 // #6871: shared scheduled-task HEALTH derivation. Zod-free and pure so BOTH the
 // `chroxy schedule` CLI (#6868) and the dashboard panel import one mapping — a
 // second copy would be free to drift toward reporting a never-run / refused /

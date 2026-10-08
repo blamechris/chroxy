@@ -4,6 +4,7 @@ import { createLogger } from './logger.js'
 import { busyStateOf } from './session-busy-state.js'
 import { buildPermissionRequestMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
+import { turnOutcomeField } from './turn-outcome.js'
 
 const log = createLogger('event-normalizer')
 
@@ -595,6 +596,13 @@ Object.assign(EVENT_MAP, {
           // session emitted one — providers with no occupancy signal keep
           // the field off the wire so clients render their honest dash state.
           ...(data.contextOccupancy ? { contextOccupancy: data.contextOccupancy } : {}),
+          // #7326: how the turn ended (completed / truncated / refused /
+          // stopped), when the provider said. Absent = unknown, which clients
+          // render as nothing; an unrecognised value never reaches the wire.
+          ...turnOutcomeField(data.turnOutcome),
+          // The marker's identity (see BaseSession.emit): the replayed history
+          // entry carries the same value.
+          ...(Number.isFinite(data.timestamp) ? { timestamp: data.timestamp } : {}),
         },
       },
       { msg: { type: 'agent_idle' } },

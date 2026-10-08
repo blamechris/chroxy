@@ -53,6 +53,7 @@ import {
 } from './byok-mcp-trust.js'
 import { getSubagentProfile, SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
 import { configPath } from './config-dir.js'
+import { turnOutcomeField, outcomeFromAnthropicStopReason } from './turn-outcome.js'
 
 const log = createLogger('byok-session')
 
@@ -1607,6 +1608,9 @@ export class ClaudeByokSession extends BaseSession {
         sessionId: null,
         messageId,
         stopReason: lastStopReason,
+        // #7326: the provider-neutral form of the stop reason above, for the wire.
+        // (A different key on purpose: `stopReason` is the raw Anthropic string.)
+        ...turnOutcomeField(outcomeFromAnthropicStopReason(lastStopReason)),
         duration: Date.now() - turnStartedAt,
         usage: turnUsage,
         ...(finalRoundOccupancy ? { contextOccupancy: finalRoundOccupancy } : {}),

@@ -33,6 +33,12 @@
 //                                  "PERMISSION_RESULT:<value>" so a test can
 //                                  assert on the decision without any
 //                                  protocol extension. Then respond end_turn.
+//   STOP_REASON:<value>           — stream "Partial answer", then respond with
+//                                  { stopReason: '<value>' } (end_turn |
+//                                  max_tokens | max_turn_requests | refusal |
+//                                  cancelled — the five ACP StopReason values,
+//                                  #7326). `cancelled` here is the AGENT's own
+//                                  cancel, not an answer to a session/cancel.
 //   HANG_UNTIL_CANCEL              — do NOT respond to this session/prompt
 //                                  until a session/cancel notification
 //                                  arrives for the same session id; then
@@ -91,6 +97,13 @@ async function handlePrompt(id, params) {
     : ''
 
   const update = (u) => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: u } })
+
+  const stopReasonMatch = text.match(/STOP_REASON:([a-z_]+)/)
+  if (stopReasonMatch) {
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Partial answer' } })
+    send({ jsonrpc: '2.0', id, result: { stopReason: stopReasonMatch[1] } })
+    return
+  }
 
   if (text.includes('HANG_UNTIL_CANCEL')) {
     // Emit an observable signal the moment we're about to hang, so a test

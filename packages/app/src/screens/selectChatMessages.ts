@@ -27,6 +27,7 @@
  *   (SessionScreen's `viewMode === 'system'`). `systemMessages` is derived
  *   separately from the unfiltered list, so markers appear there too.
  */
+import { isTurnOutcomeMarker } from '@chroxy/store-core';
 import type { ChatMessage } from '../store/connection';
 
 export interface SelectChatMessagesOptions {
@@ -44,7 +45,10 @@ export function shouldShowInChat(
   // Markers pass regardless of compact mode; every other system event is the
   // System tab's. This branch MUST stay above the compact check — see
   // INVARIANT 1.
-  if (m.type === 'system') return m.compactMetadata != null;
+  // #7326: a turn-outcome chip ("Reply cut off") is positional like a compaction
+  // marker -- it describes the turn above it -- so it passes too. ChatView gets
+  // it from the shared buildChatViewMessages pipeline, which lets it through.
+  if (m.type === 'system') return m.compactMetadata != null || isTurnOutcomeMarker(m);
   if (chatFilterCompact && isHiddenInCompactMode(m.type)) return false;
   return true;
 }

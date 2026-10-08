@@ -50,6 +50,8 @@ import {
   handleThinkingDelta as sharedThinkingDelta,
   handleThinkingStreamEnd as sharedThinkingEnd,
   finalizeThinkingStreams,
+  // #7326 — the chip for a truncated / refused / stopped turn (turn-outcome-marker.ts).
+  appendTurnOutcomeMarker,
   handleAuthOk as sharedAuthOk,
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
@@ -3185,7 +3187,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
               ...resultPatch,
               // #6756 — `result` is the guaranteed turn boundary; finalise any
               // thinking bubble whose own stream_end was dropped.
-              messages: finalizeThinkingStreams([...ss.messages]),
+              // #7326 — a turn that was truncated / refused / stopped gets a chip.
+              messages: appendTurnOutcomeMarker(finalizeThinkingStreams([...ss.messages]), normalized.turnOutcome, replayDedupCache(effectiveId, ss.messages)),
               ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
             };
           });

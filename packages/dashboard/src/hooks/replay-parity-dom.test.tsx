@@ -157,4 +157,30 @@ describe('live vs replayed transcript -- rendered DOM (dashboard, #6630)', () =>
       expect(html).toContain('thought for 1.2s · 128 tokens')
     }
   })
+
+  // #7326 -- the point of the whole change: a turn that was cut off, refused or
+  // stopped is VISIBLY not a finished one, live and after a rebuild from history.
+  // Asserted on the rendered chip, not on a field, so removing the server-side
+  // mapping (no `turnOutcome` on the frame) or the client-side marker turns this
+  // red rather than leaving a green transcript that looks complete.
+  it('a truncated, a refused and a stopped turn each render a labelled chip; a completed one renders none (#7326)', () => {
+    const fx = REPLAY_PARITY_FIXTURES.find((f) => f.name === 'turn-outcomes')!
+    for (const html of [dom(live(fx.live)), dom(replayed(fx.replay))]) {
+      const chips = [...html.matchAll(/data-testid="turn-outcome-marker" data-outcome="(\w+)"/g)].map((m) => m[1])
+      expect(chips).toEqual(['truncated', 'refused', 'stopped'])
+      expect(html).toContain('Reply cut off')
+      expect(html).toContain('The model declined')
+      expect(html).toContain('>Stopped<')
+      // The turn that finished normally is the last reply and has nothing after it.
+      expect(html.indexOf('A normal, finished reply.')).toBeGreaterThan(html.lastIndexOf('data-outcome="stopped"'))
+      expect(html.slice(html.indexOf('A normal, finished reply.'))).not.toContain('turn-outcome-marker')
+    }
+  })
+
+  it('a refusal with no reply text still gets its chip (there is no bubble to hang it on) (#7326)', () => {
+    const fx = REPLAY_PARITY_FIXTURES.find((f) => f.name === 'turn-outcomes')!
+    const refusal = fx.live.find((f) => f.type === 'result' && f.turnOutcome === 'refused')!
+    const html = dom(live([refusal]))
+    expect(html).toContain('data-outcome="refused"')
+  })
 })

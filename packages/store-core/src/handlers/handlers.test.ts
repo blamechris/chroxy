@@ -9251,6 +9251,8 @@ describe('handleResultUsage', () => {
       contextOccupancy: null,
       lastResultCost: 0.42,
       lastResultDuration: 1234,
+      // #7326: no `turnOutcome` on the frame -> nothing to mark.
+      turnOutcome: null,
     })
   })
 

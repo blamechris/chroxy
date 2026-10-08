@@ -169,9 +169,9 @@ export declare const RunSummarySchema: z.ZodObject<{
     title: z.ZodString;
     preset: z.ZodNullable<z.ZodString>;
     status: z.ZodEnum<{
+        completed: "completed";
         failed: "failed";
         cancelled: "cancelled";
-        completed: "completed";
         created: "created";
         planning: "planning";
         plan_review: "plan_review";
@@ -223,9 +223,9 @@ export declare const RunDetailSchema: z.ZodObject<{
     title: z.ZodString;
     preset: z.ZodNullable<z.ZodString>;
     status: z.ZodEnum<{
+        completed: "completed";
         failed: "failed";
         cancelled: "cancelled";
-        completed: "completed";
         created: "created";
         planning: "planning";
         plan_review: "plan_review";
@@ -409,9 +409,9 @@ export declare const ServerOrchestrationRunsSnapshotSchema: z.ZodObject<{
         title: z.ZodString;
         preset: z.ZodNullable<z.ZodString>;
         status: z.ZodEnum<{
+            completed: "completed";
             failed: "failed";
             cancelled: "cancelled";
-            completed: "completed";
             created: "created";
             planning: "planning";
             plan_review: "plan_review";
@@ -473,9 +473,9 @@ export declare const ServerOrchestrationRunSnapshotSchema: z.ZodObject<{
         title: z.ZodString;
         preset: z.ZodNullable<z.ZodString>;
         status: z.ZodEnum<{
+            completed: "completed";
             failed: "failed";
             cancelled: "cancelled";
-            completed: "completed";
             created: "created";
             planning: "planning";
             plan_review: "plan_review";
@@ -665,9 +665,9 @@ export declare const ServerOrchestrationRunDeltaSchema: z.ZodObject<{
         title: z.ZodString;
         preset: z.ZodNullable<z.ZodString>;
         status: z.ZodEnum<{
+            completed: "completed";
             failed: "failed";
             cancelled: "cancelled";
-            completed: "completed";
             created: "created";
             planning: "planning";
             plan_review: "plan_review";

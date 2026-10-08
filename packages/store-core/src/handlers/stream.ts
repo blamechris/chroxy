@@ -20,6 +20,8 @@ import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
 import type { SessionPatch } from './_shared'
 import { handleContainerLost } from './session-lifecycle'
+import { readResultTurnOutcome } from '../turn-outcome-marker'
+import type { TurnOutcomeEvent } from '../turn-outcome-marker'
 
 // ---------------------------------------------------------------------------
 // message
@@ -2011,6 +2013,13 @@ export interface ResultUsagePayload {
   lastResultCost: number | null
   /** Numeric `duration` from the message, or null when missing/non-numeric. */
   lastResultDuration: number | null
+  /**
+   * #7326: the outcome to MARK in the transcript -- `truncated`, `refused` or
+   * `stopped` -- or null for `completed`, an absent field (older server, or a
+   * provider that did not say) and a value this build cannot word. Callers hand
+   * it to `appendTurnOutcomeMarker`; null means "add nothing".
+   */
+  turnOutcome: TurnOutcomeEvent | null
 }
 
 /**
@@ -2102,6 +2111,7 @@ export function handleResultUsage(
     contextOccupancy,
     lastResultCost,
     lastResultDuration,
+    turnOutcome: readResultTurnOutcome(msg),
   }
 }
 

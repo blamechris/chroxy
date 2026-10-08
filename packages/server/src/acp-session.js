@@ -26,7 +26,7 @@
  *   - `agent_message_chunk`         → stream_start / stream_delta / stream_end
  *   - `agent_thought_chunk`         → stream_start / stream_delta / stream_end (thinking:true)
  *   - `tool_call` / `tool_call_update` (terminal status only) → tool_start / tool_result
- *   - `StopReason`                  → result (or stopped/error for a cancelled turn)
+ *   - `StopReason`                  → result (carrying `turnOutcome`, #7326) or stopped
  *   - `plan` / `available_commands_update` / `current_mode_update` — DROPPED.
  *     None of these map onto an existing outbound event; a new one would drag
  *     in ~3 separate protocol coverage guards (#7319 issue body), so they are
@@ -50,6 +50,7 @@ import { CHROXY_SECRET_DENYLIST, STANDARD_ALLOWLIST } from './utils/spawn-env.js
 import { validateAcpProviders } from './acp-config.js'
 import { registerProvider, getRegisteredProviderNames } from './providers.js'
 import { BILLING_CLASSES } from './billing-class.js'
+import { turnOutcomeField, outcomeFromAcpStopReason } from './turn-outcome.js'
 import { createLogger, loggerForSession } from './logger.js'
 
 const log = createLogger('acp-session')
@@ -648,16 +649,18 @@ export function createAcpSessionClass(rawEntry) {
     /**
      * `session/prompt` resolved. `StopReason` (`end_turn` / `max_tokens` /
      * `max_turn_requests` / `refusal` / `cancelled`) maps onto Chroxy's
-     * existing turn-boundary events: `cancelled` — OR any turn that resolved
-     * while `interrupt()`'s intentional-stop flag was armed, regardless of
-     * what the agent reported — is a `stopped`/`error` exactly like every
-     * other provider's interrupt path; everything else is a normal `result`.
-     * The other three reasons (`max_tokens`/`max_turn_requests`/`refusal`)
-     * have no dedicated wire signal anywhere in this codebase today (the SDK
-     * provider doesn't distinguish a max-turns stop from a clean one either)
-     * — inventing one here would be exactly the protocol-surface growth the
-     * issue asks to avoid, so they read as a normal completed turn; any
-     * explanation the agent gave already streamed as ordinary assistant text.
+     * existing turn-boundary events: any turn that resolved while
+     * `interrupt()`'s intentional-stop flag was armed, regardless of what the
+     * agent reported, is a `stopped` exactly like every other provider's
+     * interrupt path; everything else is a `result`.
+     *
+     * #7326: that `result` now says HOW the turn ended, through the
+     * provider-neutral `turnOutcome` (turn-outcome.js): `end_turn` completed,
+     * `max_tokens` / `max_turn_requests` truncated, `refusal` refused,
+     * `cancelled` stopped. A `cancelled` the agent reports on its own (we did
+     * not ask for it) used to surface as a loud error with no turn boundary; it
+     * is now a `result` carrying `stopped`, so the turn ends cleanly and the
+     * clients mark it, rather than showing a failure nobody caused.
      */
     _finishTurn(res) {
       const t = this._activeTurn
@@ -665,16 +668,20 @@ export function createAcpSessionClass(rawEntry) {
       this._closeOpenStreams(t)
       this._activeTurn = null
       const wasIntentional = this._consumeIntentionalStop()
-      const stopReason = res?.stopReason
-      if (wasIntentional || stopReason === 'cancelled') {
-        if (wasIntentional) this.emit('stopped', {})
-        else this.emit('error', { message: 'The agent turn was cancelled.' })
+      if (wasIntentional) {
+        this.emit('stopped', {})
         this._clearMessageState()
         this._maybeDequeue()
         return
       }
       this._emitResult(
-        { cost: null, duration: null, usage: null, sessionId: this._sessionId },
+        {
+          cost: null,
+          duration: null,
+          usage: null,
+          sessionId: this._sessionId,
+          ...turnOutcomeField(outcomeFromAcpStopReason(res?.stopReason)),
+        },
         'turn_ended_with_orphan_tool_start',
       )
       this._clearIntentionalStop()

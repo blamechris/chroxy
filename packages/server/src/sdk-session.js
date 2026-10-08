@@ -27,6 +27,7 @@ import { detectThinkingKeyword } from './detect-thinking-keyword.js'
 import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { turnOutcomeField, outcomeFromSdkResult } from './turn-outcome.js'
 
 const log = createLogger('sdk')
 
@@ -1585,6 +1586,9 @@ export class SdkSession extends BaseSession {
           // Wire field is contextOccupancy — NOT contextUsage — so it can
           // never be confused with the billing `usage` aggregate above.
           ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
+          // #7326: why the turn ended (truncated by max_tokens / max turns /
+          // budget, refused, ...). Omitted when the SDK reported nothing we map.
+          ...turnOutcomeField(outcomeFromSdkResult(msg)),
         }, 'turn_ended_with_orphan_tool_start', { completion: 'normal' }) // #7376
 
         // #7340: NOT `{ turnEndedCleanly: true }`, however much this looks

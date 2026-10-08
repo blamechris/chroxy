@@ -8,6 +8,7 @@
 import { z } from 'zod'
 
 import { MAX_SANE_DURATION_MS } from './connection.ts'
+import { TURN_OUTCOMES } from '../../turn-outcome.ts'
 import type { ServerPermissionRequestMessage } from './messages.ts'
 
 // #5515 (epic #5514): optional, additive wall-clock (ms epoch) timestamp
@@ -390,6 +391,19 @@ export const ServerResultSchema = z.object({
   // #6769: occupancy snapshot (see ServerContextOccupancySnapshotSchema).
   // Absent from older servers and from providers with no occupancy signal.
   contextOccupancy: ServerContextOccupancySnapshotSchema.nullable().optional(),
+  // #7326: how the turn ended -- `completed` | `truncated` (a token / turn /
+  // budget limit) | `refused` | `stopped` -- mapped from each provider's own
+  // signal (ACP StopReason, Anthropic stop_reason, Agent SDK result subtype).
+  // OMITTED when the provider said nothing we map; clients read an absent field
+  // like `completed`: no marker. Absent from older servers. Vocabulary and
+  // wording live in ../../turn-outcome.ts, shared with both clients.
+  turnOutcome: z.enum(TURN_OUTCOMES).optional(),
+  // #7326: the server's stamp for the moment the turn ended, present when
+  // `turnOutcome` is a marked one (`truncated` / `refused` / `stopped`). The live
+  // frame and the history entry a replay re-sends carry the SAME value, which is
+  // how a client tells a replayed result from one it already holds and shows the
+  // turn's marker once. (Replayed frames carry the entry timestamp in any case.)
+  timestamp: z.number().optional(),
   // #7454/#7458: present on REPLAYED frames only (both replay paths map the
   // server-internal `_seq` onto the wire; absent on live broadcasts). The
   // #5555.3 delta-replay cursor — and for user_question the #7420

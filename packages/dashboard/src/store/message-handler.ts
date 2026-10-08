@@ -133,6 +133,9 @@ import {
   // #7365 (review round 2) — stamp the position-independent turn-end marker
   // on `result`, live or replayed alike (see turn-boundaries.ts).
   markTurnBoundary,
+  // #7326 — the chip for a truncated / refused / stopped turn, appended on the
+  // same unconditional live-or-replayed `result` path (turn-outcome-marker.ts).
+  appendTurnOutcomeMarker,
   handleServerError as sharedServerError,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
@@ -6152,14 +6155,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             // live-or-replayed path. Order doesn't matter here: finalizing a
             // thinking stream never changes WHICH message is last, only its
             // own `thinkingStreaming` field.
-            messages: markTurnBoundary(finalizeThinkingStreams([...ss.messages])),
+            // #7326 — marker BEFORE the boundary stamp, so the boundary lands on
+            // the marker (the true end of the turn) rather than the bubble above it.
+            messages: markTurnBoundary(appendTurnOutcomeMarker(finalizeThinkingStreams([...ss.messages]), normalized.turnOutcome, replayDedupCache(targetId, ss.messages))),
             ...(reconciledQueue !== currentQueue ? { queuedMessages: reconciledQueue } : {}),
           };
           if (ss.activeTools.length > 0) patch.activeTools = [];
           return patch;
         });
       } else {
-        set((s) => ({ ...resultPatch, messages: markTurnBoundary(finalizeThinkingStreams([...s.messages])) }));
+        set((s) => ({ ...resultPatch, messages: markTurnBoundary(appendTurnOutcomeMarker(finalizeThinkingStreams([...s.messages]), normalized.turnOutcome)) }));
       }
       break;
     }

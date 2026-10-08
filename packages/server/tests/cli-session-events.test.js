@@ -1016,6 +1016,32 @@ describe('CliSession stream-event handling', () => {
       assert.equal(streams.length, 0)
     })
 
+    // #7326: the CLI's stream-json result is the same message the Agent SDK
+    // yields, so its stop_reason / subtype map onto the same turn outcome.
+    for (const [extra, outcome] of [
+      [{ subtype: 'success', stop_reason: 'end_turn' }, 'completed'],
+      [{ subtype: 'success', stop_reason: 'max_tokens' }, 'truncated'],
+      [{ subtype: 'success', stop_reason: 'refusal' }, 'refused'],
+      [{ subtype: 'error_max_turns', stop_reason: 'tool_use' }, 'truncated'],
+    ]) {
+      it(`reports turnOutcome "${outcome}" for ${extra.subtype} / ${extra.stop_reason} (#7326)`, () => {
+        const session = createSession()
+        const results = []
+        session.on('result', (r) => results.push(r))
+        session._handleEvent({ type: 'result', session_id: 'sess-1', result: '', total_cost_usd: 0, duration_ms: 100, usage: {}, ...extra })
+        assert.equal(results.length, 1)
+        assert.equal(results[0].turnOutcome, outcome)
+      })
+    }
+
+    it('reports no turnOutcome when the CLI result carries no stop_reason (#7326)', () => {
+      const session = createSession()
+      const results = []
+      session.on('result', (r) => results.push(r))
+      session._handleEvent({ type: 'result', session_id: 'sess-1', result: '', total_cost_usd: 0, duration_ms: 100, usage: {} })
+      assert.equal('turnOutcome' in results[0], false)
+    })
+
     it('does not emit fallback when a stream already fired (normal streamed turn)', () => {
       const session = createSession()
       const messages = []

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A reply that was cut off, refused or stopped no longer looks finished (#7326).**
+  - The `result` frame now carries an optional `turnOutcome` (`completed`,
+    `truncated`, `refused`, `stopped`), mapped from each provider's own signal:
+    ACP `StopReason` (all five values), the Claude Agent SDK and CLI result
+    (`stop_reason`, `error_max_turns`, budget), and the Anthropic stop reason
+    on the BYOK path. Providers that say nothing leave the field off.
+  - The dashboard and the mobile app show a small chip at the end of a
+    truncated, refused or stopped turn ("Reply cut off", "The model declined",
+    "Stopped"). It is recorded in the session history, so it survives a session
+    switch or a reload, and a reconnect never shows it twice.
+  - An ACP agent that reports `cancelled` on its own now ends the turn with a
+    `result` marked stopped, instead of a bare error.
+
 - **A permission prompt's description matches its input (#8384, #8397).**
   - When a prompt has no identifying field (command, file_path, ...), its
     description is now built from the sanitized input, on every provider path

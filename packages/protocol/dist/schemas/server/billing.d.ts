@@ -283,9 +283,9 @@ export declare const ServerWebTaskCreatedSchema: z.ZodObject<{
         prompt: z.ZodString;
         status: z.ZodEnum<{
             pending: "pending";
+            completed: "completed";
             running: "running";
             failed: "failed";
-            completed: "completed";
         }>;
         createdAt: z.ZodNumber;
         updatedAt: z.ZodNumber;
@@ -301,9 +301,9 @@ export declare const ServerWebTaskUpdatedSchema: z.ZodObject<{
         prompt: z.ZodString;
         status: z.ZodEnum<{
             pending: "pending";
+            completed: "completed";
             running: "running";
             failed: "failed";
-            completed: "completed";
         }>;
         createdAt: z.ZodNumber;
         updatedAt: z.ZodNumber;
@@ -347,9 +347,9 @@ export declare const ServerWebTaskListSchema: z.ZodObject<{
         prompt: z.ZodString;
         status: z.ZodEnum<{
             pending: "pending";
+            completed: "completed";
             running: "running";
             failed: "failed";
-            completed: "completed";
         }>;
         createdAt: z.ZodNumber;
         updatedAt: z.ZodNumber;

@@ -3,6 +3,7 @@
  *
  * Re-exported via ../types (barrel) — see ./index.ts.
  */
+import type { MarkedTurnOutcome } from '@chroxy/protocol';
 
 /** Attachment metadata stored on a ChatMessage (base64 data cleared after send) */
 export interface MessageAttachment {
@@ -355,6 +356,15 @@ export interface ChatMessage {
    * `markTurnBoundary` (`turn-boundaries.ts`) — never written directly.
    */
   turnBoundary?: boolean;
+  /**
+   * #7326 — set on the `type: 'system'` ChatMessage that marks a turn which did
+   * not end cleanly: `truncated` (a token / turn / budget limit), `refused` (the
+   * model declined) or `stopped`. Built from the `result` frame's `turnOutcome`
+   * by `appendTurnOutcomeMarker` (`turn-outcome-marker.ts`) -- never written
+   * directly. `completed` and an absent outcome produce no message at all.
+   * Renderers show a small labelled chip (`content` carries the label).
+   */
+  turnOutcome?: MarkedTurnOutcome;
 }
 
 /**
