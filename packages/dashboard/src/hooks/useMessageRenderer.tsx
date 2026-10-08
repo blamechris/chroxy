@@ -1,7 +1,7 @@
 import { useCallback } from 'react'
 import type { ReactNode } from 'react'
 import type { ChatMessage, SessionInfo, ExpiredPermissionTurnSummary } from '@chroxy/store-core'
-import { providerSupportsSingleMultiSelect, isRetryableAskUserQuestionError } from '@chroxy/store-core'
+import { providerSupportsSingleMultiSelect, isRetryableAskUserQuestionError, permissionOutcomeFromDecision } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import type { ConnectionState } from '../store/connection'
 import type { ProviderCapabilities } from '../store/types'
@@ -167,6 +167,29 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           outcome={storeMsg.permissionOutcome}
         />
       )
+    }
+
+    // #6630: a prompt the user ANSWERED while it was live. The server's
+    // `permission_resolved` echo stamps `answered` on the card, and nothing below
+    // matches an answered permission prompt, so it fell through to the default
+    // row -- an assistant-styled bubble reading "Bash: rm -rf build", text the
+    // assistant never said -- while the same prompt rebuilt from history is the
+    // compact record above. Same line for both: it IS the same event. Only a real
+    // decision token qualifies (`'(resolved)'` and the like are not one).
+    {
+      const answeredOutcome = storeMsg.type === 'prompt' && storeMsg.requestId
+        ? permissionOutcomeFromDecision(storeMsg.answered)
+        : null
+      if (answeredOutcome) {
+        return (
+          <PermissionOutcomeRecord
+            requestId={storeMsg.requestId!}
+            tool={storeMsg.tool || 'Unknown'}
+            description={permissionPromptDescription(storeMsg.content, storeMsg.tool) || 'Permission requested'}
+            outcome={answeredOutcome}
+          />
+        )
+      }
     }
 
     // Permission prompt

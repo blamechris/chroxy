@@ -42,6 +42,7 @@ import {
   handleToolInputDelta as sharedToolInputDelta,
   handleStreamStart as sharedStreamStart,
   sharedStreamDelta,
+  moveEmptyResponseSlotToEnd,
   handleStreamEnd as sharedStreamEnd,
   // #6756 — extended-thinking (reasoning) content stream.
   handleThinkingStreamStart as sharedThinkingStart,
@@ -2901,7 +2902,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // hot path (post-permission split, single-hop defensive remap, post-tool
       // continuation split with the #4999/#5014 sentence gate and #4975
       // mid-word peel, buffered append + 100ms flush) lives in store-core.
-      // The app has no terminal-data write, no #4297 reorder, and no flat-
+      // The app has no terminal-data write and no flat-
       // `messages` fallback (it only operates on `sessionStates`), so those
       // context hooks are no-ops / session-only here.
       sharedStreamDelta(msg, {
@@ -2920,9 +2921,19 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
 
         // No terminal view on the app side.
         appendTerminalDelta: () => {},
-        // The app never reordered the empty response slot (#4297 is dashboard-
-        // only) — no-op.
-        reorderEmptyResponseSlot: () => {},
+        // #4297 / #6630: claude-tui opens its response stream at the START of a
+        // turn and delivers the text in one burst at the end, so the empty slot
+        // sits above every tool the turn ran. Move it to the end on its first
+        // delta, as the dashboard does -- otherwise the wrap-up reads ABOVE the
+        // tools it summarises here, while a session switch or reload (which
+        // records the response when the stream ends) puts it below them. The
+        // shared helper gates on an empty response, so a replayed response is
+        // never shifted. Session-backed targets only (no flat fallback).
+        reorderEmptyResponseSlot: (deltaId, capturedSessionId) => {
+          if (!capturedSessionId || !get().sessionStates[capturedSessionId]) return;
+          const moved = moveEmptyResponseSlotToEnd(get().sessionStates[capturedSessionId].messages, deltaId);
+          if (moved) updateSession(capturedSessionId, () => ({ messages: moved }));
+        },
 
         // Append a fresh response slot + set streamingMessageId. Resolve the
         // effective session the way the app originally did: prefer the passed

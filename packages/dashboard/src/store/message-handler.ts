@@ -34,6 +34,7 @@ import {
   handleToolInputDelta as sharedToolInputDelta,
   handleStreamStart as sharedStreamStart,
   sharedStreamDelta,
+  moveEmptyResponseSlotToEnd,
   handleStreamEnd as sharedStreamEnd,
   // #6756 — extended-thinking (reasoning) content stream.
   handleThinkingStreamStart as sharedThinkingStart,
@@ -2634,36 +2635,12 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
         ? capturedSessionId
         : null;
       if (targetForReorder) {
-        const ss = get().sessionStates[targetForReorder]!;
-        const idx = ss.messages.findIndex((m) => m.id === deltaId);
-        if (idx >= 0 && idx < ss.messages.length - 1) {
-          const slot = ss.messages[idx]!;
-          if (slot.type === 'response' && slot.content === '') {
-            updateSession(targetForReorder, (s) => ({
-              messages: [
-                ...s.messages.slice(0, idx),
-                ...s.messages.slice(idx + 1),
-                slot,
-              ],
-            }));
-          }
-        }
+        const moved = moveEmptyResponseSlotToEnd(get().sessionStates[targetForReorder]!.messages, deltaId);
+        if (moved) updateSession(targetForReorder, () => ({ messages: moved }));
       } else {
         // Flat-messages fallback (pre-session bootstrap)
-        const flat = get().messages;
-        const idx = flat.findIndex((m) => m.id === deltaId);
-        if (idx >= 0 && idx < flat.length - 1) {
-          const slot = flat[idx]!;
-          if (slot.type === 'response' && slot.content === '') {
-            set((state) => ({
-              messages: [
-                ...state.messages.slice(0, idx),
-                ...state.messages.slice(idx + 1),
-                slot,
-              ],
-            }));
-          }
-        }
+        const moved = moveEmptyResponseSlotToEnd(get().messages, deltaId);
+        if (moved) set(() => ({ messages: moved }));
       }
     },
 
