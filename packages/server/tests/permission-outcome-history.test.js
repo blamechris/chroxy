@@ -116,12 +116,15 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     assert.equal(e.description.includes('BBBB'), false)
   })
 
-  it('oversized text with no whitespace to cut at is dropped, not clipped raw', () => {
+  it('oversized text with no whitespace is redacted whole, then clipped: it keeps its beginning', () => {
     const h = new SessionMessageHistory()
+    const text = `eyJ${'A'.repeat(20)}.${'B'.repeat(20000)}`
     h.recordHistory('s1', 'permission_outcome', {
-      requestId: 'p', tool: 'Bash', description: `eyJ${'A'.repeat(20)}.${'B'.repeat(20000)}`, outcome: 'allowed',
+      requestId: 'p', tool: 'Bash', description: text, outcome: 'allowed',
     })
-    assert.equal(h.getHistory('s1')[0].description, '')
+    const description = h.getHistory('s1')[0].description
+    assert.ok(description.startsWith(text.slice(0, 40)), 'nothing in it is secret-shaped, so the beginning is kept')
+    assert.ok(description.length <= PERMISSION_OUTCOME_DESCRIPTION_MAX)
   })
 
   it('keeps no tool input: only the fields the clients were shown', () => {

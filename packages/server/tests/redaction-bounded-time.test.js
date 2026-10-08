@@ -332,16 +332,22 @@ describe('redactBounded and scanWindow', () => {
     assert.equal(redactBounded(12345), '12345')
   })
 
-  it('past a ceiling, drops the tail at whitespace and the last 2 KiB, so no piece of a key is kept', () => {
+  it('past the ceiling, drops the tail at whitespace and the last 2 KiB, so no piece of a key is kept', () => {
     // The key starts 20 characters before the ceiling: a plain cut would leave "sk-ant-api03-AAAAA".
-    const text = `${'w'.repeat(4979)} ${ANT_KEY} tail`
-    const cut = redactBounded(text, 5000)
+    const pad = 'w '.repeat((REDACT_ADMISSION_MAX - 20) / 2)
+    const cut = redactBounded(`${pad}${ANT_KEY} tail`)
     assert.ok(!cut.includes('sk-ant'), cut.slice(-40))
-    assert.equal(cut, 'w'.repeat(4979 - REDACT_SCAN_MARGIN))
+    assert.equal(cut, pad.slice(0, pad.length - 1 - REDACT_SCAN_MARGIN))
   })
 
-  it('past a ceiling, drops a run that has no whitespace rather than half-keeping it', () => {
-    assert.equal(redactBounded(`sk-ant-api03-${'A'.repeat(500)}`, 100), '')
+  it('past the ceiling, drops a run that has no whitespace rather than half-keeping it', () => {
+    assert.equal(redactBounded(`sk-ant-api03-${'A'.repeat(REDACT_ADMISSION_MAX + 10)}`), '')
+  })
+
+  it('a maximum is an output budget: the result is redacted whole, then sliced to it', () => {
+    const text = `${ANT_KEY} ${'w '.repeat(5000)}`
+    assert.equal(redactBounded(text, 30), '[REDACTED] w w w w w w w w w w')
+    assert.equal(redactBounded(text, 100000), `[REDACTED] ${'w '.repeat(5000)}`)
   })
 
   it('clipRedacted keeps at most max characters less the final 2 KiB, then the marker', () => {

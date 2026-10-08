@@ -157,11 +157,13 @@ describe('ClaudeTuiSession hook payloads take the shared redaction floor (#8373)
       assert.ok(session._deniedQuestionReapers.has('toolu_q5b'), 'a multi-select question is a denied shape, so its reaper is armed')
     })
 
-    it('shows a readable placeholder, not nothing, when an over-cap question text has no whitespace to cut at', () => {
+    it('shows the start of an over-cap question text that has no whitespace, then the marker', () => {
       const events = []
       session.on('user_question', (e) => events.push(e))
       askQuestion('toolu_q5c', { questions: [{ question: 'x'.repeat(200 * 1024), options: [{ label: 'A' }] }] })
-      assert.equal(events[0].questions[0].question, '[too large to display]')
+      const shown = events[0].questions[0].question
+      assert.ok(shown.startsWith('xxxx') && shown.endsWith('... [truncated]'), shown.slice(-30))
+      assert.ok(shown.length < 9000)
     })
 
     it('does not keep a raw copy for answer routing or the pending-question replay', () => {

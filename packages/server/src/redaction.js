@@ -301,10 +301,10 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
 const PULL_MAX_INPUT_CHARS = 512 * 1024 // 512K chars
 
 /**
- * How much text the description builders hand to the pattern redactor in one call.
- * A bound on the scan, far above any length a description shows.
+ * How many characters of redacted text the callers that keep a field for display
+ * or for a record keep: an OUTPUT budget, applied after the whole text is redacted.
  */
-const MAX_REDACT_SCAN = 8192
+export const REDACT_KEEP_MAX = 8192
 
 /**
  * The most text the pattern redactor is ever handed in one call, in characters. It
@@ -380,20 +380,21 @@ export function redactWhole(text, ceiling = REDACT_ADMISSION_MAX) {
 }
 
 /**
- * Redact `text` over a bounded scan and return it, for callers that cut the result
- * themselves (the description builders, the transcript, the question payloads).
- * Text longer than `maxScan` is cut at the last whitespace inside it, a run with none
- * is discarded, and the end of what remains is dropped as well
+ * Redact the whole of `text` (up to the admission ceiling) and return it, for
+ * callers that cut the result themselves. Only text past the ceiling loses its tail
+ * first, and then the end of what remains is dropped as well
  * ({@link withoutUnsafeTail}): a fragment of a match the discarded text would have
- * completed is not kept.
+ * completed is not kept. `max`, when given, is an OUTPUT budget: the redacted result
+ * is sliced to it, which keeps the readable prefix and cannot expose a matched secret.
  *
  * @param {unknown} text
- * @param {number} [maxScan]
+ * @param {number} [max]
  * @returns {string}
  */
-export function redactBounded(text, maxScan = MAX_REDACT_SCAN) {
-  const { text: redacted, clipped } = redactWhole(text, maxScan)
-  return clipped ? withoutUnsafeTail(redacted) : redacted
+export function redactBounded(text, max) {
+  const { text: redacted, clipped } = redactWhole(text)
+  const kept = clipped ? withoutUnsafeTail(redacted) : redacted
+  return max === undefined ? kept : kept.slice(0, max)
 }
 
 /**
@@ -444,8 +445,7 @@ const OMITTED_TEXT = '[omitted]'
  * string value is redacted as the RAW string, before it is JSON-escaped (an
  * escaped `\n` hides a credential from patterns that expect a word boundary) and
  * before it is shortened (a clip can leave a prefix no pattern recognises). A
- * string longer than the scan bound is read by `redactBounded`, which drops what
- * it cannot scan rather than keeping an unscanned tail.
+ * string is redacted whole by `redactBounded` before it is shortened.
  *
  * @param {*} value
  * @param {number} depth
@@ -493,7 +493,7 @@ function redactedForDescription(value, depth, seen, budget) {
  * once.
  *
  * - An input with an identifying field (command, file_path, ...) is described by
- *   that field, redacted over the bounded scan.
+ *   that field, redacted whole, then clipped.
  * - Anything else is described by a structurally redacted copy of the input
  *   (`redactedForDescription`), serialized: a value under a sensitive key reads
  *   `[REDACTED]` exactly as it does in the prompt's `input`, and secrets in
@@ -511,7 +511,7 @@ function redactedForDescription(value, depth, seen, budget) {
 export function describeToolInput(rawInput, emptyFallback = '') {
   const named = namedField(rawInput)
   if (named) {
-    const text = redactBounded(String(named))
+    const text = redactBounded(String(named), REDACT_KEEP_MAX)
     if (text) return text
   }
   if (rawInput && typeof rawInput === 'object' && Object.keys(rawInput).length > 0) {
@@ -523,7 +523,7 @@ export function describeToolInput(rawInput, emptyFallback = '') {
 
 /**
  * A prompt description composed by a producer from its own fields (not derived
- * from a tool input): redacted over the bounded scan, then clipped to the length
+ * from a tool input): redacted whole, then clipped to the length
  * a client shows. The MCP trust prompt uses it, so every description follows one
  * policy.
  *

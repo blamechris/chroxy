@@ -26,19 +26,19 @@
  * broken with a position suffix, `[REDACTED] (2)`, and the stored copy carries
  * the same unique labels the client sees.
  */
-import { sanitizeToolInput, redactBounded } from '../redaction.js'
+import { sanitizeToolInput, redactBounded, REDACT_KEEP_MAX } from '../redaction.js'
 
 const TRUNCATED_MARKER = '... [truncated]'
 const TOO_LARGE = '[too large to display]'
 
-// A text field that alone overflows the cap: redact first, then clip. The
-// bounded scan drops everything from the last whitespace before its limit, and
-// a text with no whitespace at all comes back empty, so say so instead of
-// showing nothing.
+// A text field that alone overflows the cap: redact the whole text first, then
+// keep the first REDACT_KEEP_MAX characters of the result. A text past the
+// redactor's admission ceiling with no whitespace comes back empty, so say so
+// instead of showing nothing.
 function clipText(text) {
-  const redacted = redactBounded(text)
+  const redacted = redactBounded(text, REDACT_KEEP_MAX)
   if (redacted.length === 0 && text.length > 0) return TOO_LARGE
-  return text.length > redacted.length && text.length > 8192 ? redacted + TRUNCATED_MARKER : redacted
+  return text.length > redacted.length && text.length > REDACT_KEEP_MAX ? redacted + TRUNCATED_MARKER : redacted
 }
 
 // `sanitizeToolInput` on one object. Over the cap it answers with a
