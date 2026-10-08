@@ -11,7 +11,8 @@
  * Pipeline:
  *   storeMessages
  *     -> filter(m => m.type !== 'system')   // System events render on
- *                                           //   the System tab.
+ *                                           //   the System tab (#7326: except
+ *                                           //   a turn-outcome marker).
  *     -> groupMessages                      // (#3747) collapse contiguous
  *                                           //   tool_use runs into
  *                                           //   ActivityGroups (#6756:
@@ -48,6 +49,7 @@ import {
 } from './group-messages'
 import { isRetryableAskUserQuestionError } from './ask-user-question-errors'
 import type { ChatMessage, MessageAttachment } from './types'
+import { isTurnOutcomeMarker } from './turn-outcome-marker'
 
 /**
  * Flattened chat-view row.
@@ -266,7 +268,10 @@ export function buildChatViewMessages(
   // compact filter is on, also drop tool_use + thinking session-wide (before
   // grouping, so no `tool_group` collapse row forms for a run of hidden tools).
   const chatFilteredMessages = storeMessages.filter(m => {
-    if (m.type === 'system') return false
+    // #7326: a turn-outcome marker is the one `system` row that belongs in the
+    // chat flow -- "this reply was cut off" means nothing on a separate tab,
+    // away from the turn it describes.
+    if (m.type === 'system') return isTurnOutcomeMarker(m)
     if (hideToolAndThinking && isHiddenInCompactMode(m.type)) return false
     return true
   })
@@ -313,9 +318,17 @@ export function buildChatViewMessages(
     }
   })
 
-  const chatTailMessageId = chatMessages.length > 0
-    ? chatMessages[chatMessages.length - 1]!.id
-    : null
+  // #7326: the tail is the last REAL row. A turn-outcome marker trails every
+  // truncated / refused / stopped turn, and counting it would move the tail off
+  // a final tool run, collapsing the group #4305/#4309 keep expanded.
+  const markerIds = new Set(storeMessages.filter(isTurnOutcomeMarker).map((m) => m.id))
+  let chatTailMessageId: string | null = null
+  for (let i = chatMessages.length - 1; i >= 0; i--) {
+    if (!markerIds.has(chatMessages[i]!.id)) {
+      chatTailMessageId = chatMessages[i]!.id
+      break
+    }
+  }
 
   // O(1) lookup map for renderMessage — keyed by store id, value is the
   // original ChatMessage so the renderer can inspect fields the

@@ -372,7 +372,7 @@ function _isSecureRequest(req) {
  *   { type: 'tool_input_delta', messageId, toolUseId, partialJson } — #4080/#4081: incremental partial JSON for the streaming tool_use `input`; concatenate per-toolUseId for the live bubble preview
  *   { type: 'tool_result',  toolUseId, result, truncated, images?, isError? }  — tool result (images: [{mediaType, data}]; #6712 isError flags a failed tool for the error affordance)
  *   { type: 'mcp_servers',  servers: [{ name, status, enabled?, canToggle?, authUrl? }] } — configured MCP servers (#6824: enabled + canToggle per-server; BYOK lane sets canToggle:true so clients render the enable/disable toggle; status 'disabled' = parked; #6822: status 'oauth-required' + authUrl surfaces the browser authorization URL a remote server needs)
- *   { type: 'result',       ... }                     — query stats
+ *   { type: 'result',       ... }                     — query stats; #7326 turnOutcome? ('completed'|'truncated'|'refused'|'stopped') says how the turn ended, timestamp? is the marker's identity for the marked ones
  *   { type: 'status',       connected: true }         — connection status
  *   { type: 'claude_ready' }                          — Claude Code ready for input
  *   { type: 'model_changed', model: '...' }          — active model updated

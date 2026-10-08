@@ -87,6 +87,11 @@ export { buildInputMessage } from '@chroxy/protocol'
 // fallback result text).
 export { describeTurnTermination, isTurnTerminationReason } from '@chroxy/protocol'
 export type { TurnTerminationReason, TurnTerminationDescription } from '@chroxy/protocol'
+// #7326: how a TURN ended (completed / truncated / refused / stopped) and the
+// shared wording for the chip both clients show. Distinct from the tool-level
+// termination above.
+export { describeTurnOutcome, isTurnOutcome, isMarkedTurnOutcome, TURN_OUTCOMES } from '@chroxy/protocol'
+export type { TurnOutcome, MarkedTurnOutcome, TurnOutcomeDescription } from '@chroxy/protocol'
 export type { BuildInputMessageOptions } from '@chroxy/protocol'
 
 // #6774 — combined "approve plan + auto-accept edits" action. Shared so both
@@ -1143,6 +1148,17 @@ export {
 // the handler makes no distinction) so a turn's end survives a send-while-busy
 // follow-up planting a `user_input` row mid-turn at its enqueue position.
 export { markTurnBoundary } from './turn-boundaries'
+
+// #7326 — the transcript chip for a turn that was truncated, refused or stopped.
+// Both clients append it from `case 'result'` and render it from the same
+// `turnOutcome` field, so neither can drift on when it appears or what it says.
+export {
+  appendTurnOutcomeMarker,
+  readResultTurnOutcome,
+  isTurnOutcomeMarker,
+  TURN_OUTCOME_MARKER_TESTID,
+} from './turn-outcome-marker'
+export type { TurnOutcomeEvent } from './turn-outcome-marker'
 
 // #7365 — per-turn aggregation of permission prompts that expired unanswered.
 // Dashboard-only consumer today (the web transcript's end-of-turn summary);

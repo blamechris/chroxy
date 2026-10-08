@@ -170,6 +170,7 @@ const MODEL_FIELDS = [
   'thinkingTruncated',
   'requestId',
   'permissionOutcome',
+  'turnOutcome',
   'answered',
   'options',
 ] as const

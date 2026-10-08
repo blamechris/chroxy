@@ -26,6 +26,7 @@ import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils
 import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
+import { turnOutcomeField, outcomeFromSdkResult } from './turn-outcome.js'
 
 const log = createLogger('cli-session')
 
@@ -1622,6 +1623,9 @@ export class CliSession extends BaseSession {
           numTurns: Number.isFinite(data.num_turns) ? data.num_turns : null,
           apiDurationMs: Number.isFinite(data.duration_api_ms) ? data.duration_api_ms : null,
           modelUsage: normalizeSdkModelUsage(data.modelUsage),
+          // #7326: the CLI's result is the same message the SDK's is, so it
+          // carries the same stop_reason / subtype / terminal_reason.
+          ...turnOutcomeField(outcomeFromSdkResult(data)),
         })
 
         // Message complete — ready for next message.

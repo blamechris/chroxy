@@ -4,6 +4,7 @@ import { truncateTitle } from './session-title.js'
 import { redactBounded, RECORD_DESCRIPTION_MAX } from './redaction.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
+import { turnOutcomeField } from './turn-outcome.js'
 
 const log = createLogger('session-message-history')
 const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
@@ -659,7 +660,12 @@ export class SessionMessageHistory extends EventEmitter {
           cost: data.cost,
           duration: data.duration,
           usage: data.usage,
-          timestamp: Date.now(),
+          // #7326: durable, so a session switch or reload re-shows the marker.
+          // Omitted when unknown, so ordinary entries are unchanged.
+          ...turnOutcomeField(data.turnOutcome),
+          // #7326: a result that was stamped at emit keeps that stamp, so the
+          // replayed entry and the live frame share the marker's identity.
+          timestamp: Number.isFinite(data.timestamp) ? data.timestamp : Date.now(),
         }, sessionId)
         persistNeeded = true
         break

@@ -1301,6 +1301,31 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    // #7326: the Anthropic stop_reason the loop already tracked is now carried to
+    // the wire as the provider-neutral `turnOutcome` (BYOK is the third provider
+    // after ACP and the Agent SDK). `stopReason` itself stays the raw string.
+    for (const [stop, outcome] of [['end_turn', 'completed'], ['max_tokens', 'truncated'], ['refusal', 'refused']]) {
+      it(`maps stop_reason "${stop}" onto turnOutcome "${outcome}" (#7326)`, async () => {
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session._client = {
+          messages: {
+            stream: () => fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: stop } }],
+              { stop_reason: stop, content: [{ type: 'text', text: 'x' }], usage: { input_tokens: 1, output_tokens: 1 } },
+            ),
+          },
+        }
+        const captured = captureEvents(session)
+        await session.start()
+        await session.sendMessage('go')
+        const result = captured.find((e) => e.name === 'result')
+        assert.ok(result, 'result must fire')
+        assert.equal(result.payload.turnOutcome, outcome)
+        assert.equal(result.payload.stopReason, stop, 'the raw provider string is still reported as before')
+        await session.destroy()
+      })
+    }
+
     // #6769: the result's `contextOccupancy` snapshot must be the FINAL
     // round's individual prompt size (input + cache_read + cache_creation of
     // that one API call = the conversation as last sent), NEVER the summed

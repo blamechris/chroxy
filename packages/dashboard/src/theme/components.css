@@ -12027,6 +12027,40 @@ button.sidebar-token-view-session-row:hover {
   word-break: break-word;
 }
 
+/* #7326 — turn-outcome chip: a quiet, non-interactive status line at the end of
+   a turn that was cut off by a limit (amber), declined by the model (red) or
+   stopped (dim). It is information, not a control, so it sits at its content
+   size rather than the 44px tap floor. */
+.turn-outcome-marker {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  padding: 4px 10px;
+  margin: 4px 0;
+  border: 1px solid var(--border-primary, rgba(255, 255, 255, 0.08));
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--text-dim);
+  font-size: var(--text-xs, 11px);
+}
+
+.turn-outcome-marker-icon {
+  flex-shrink: 0;
+}
+
+.turn-outcome-marker-truncated {
+  color: var(--accent-orange);
+  border-color: color-mix(in srgb, var(--accent-orange) 40%, transparent);
+  background: color-mix(in srgb, var(--accent-orange) 12%, transparent);
+}
+
+.turn-outcome-marker-refused {
+  color: var(--accent-red);
+  border-color: color-mix(in srgb, var(--accent-red) 40%, transparent);
+  background: color-mix(in srgb, var(--accent-red) 12%, transparent);
+}
+
 /* #6845 — MCP-prompt expansion marker: a collapsible honesty surface for a
    server-controlled `/mcp__server__prompt` expansion injected as the user turn.
    Warm-tinted (distinct from the blue evaluator-rewrite banner) to flag that

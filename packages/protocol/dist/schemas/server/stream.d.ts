@@ -203,6 +203,13 @@ export declare const ServerResultSchema: z.ZodObject<{
             "final-round-prompt": "final-round-prompt";
         }>>;
     }, z.core.$strip>>>;
+    turnOutcome: z.ZodOptional<z.ZodEnum<{
+        completed: "completed";
+        truncated: "truncated";
+        refused: "refused";
+        stopped: "stopped";
+    }>>;
+    timestamp: z.ZodOptional<z.ZodNumber>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerModelChangedSchema: z.ZodObject<{

@@ -113,4 +113,21 @@ describe('selectChatMessages', () => {
       },
     );
   });
+
+  // #7326 -- a turn-outcome chip ("Reply cut off") describes the turn above it,
+  // so it belongs in the Chat feed; the other system rows still do not.
+  describe('turn-outcome chips (#7326)', () => {
+    const chip = (outcome: 'truncated' | 'refused' | 'stopped' = 'truncated'): ChatMessage =>
+      msg({ id: `chip-${outcome}`, type: 'system', content: 'Reply cut off', turnOutcome: outcome } as Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'type'>);
+
+    it.each(['truncated', 'refused', 'stopped'] as const)('keeps the %s chip, compact mode on or off', (outcome) => {
+      expect(shouldShowInChat(chip(outcome), opts(false))).toBe(true);
+      expect(shouldShowInChat(chip(outcome), opts(true))).toBe(true);
+    });
+
+    it('still drops an ordinary system row sitting next to it', () => {
+      const messages = [msg({ id: 's1', type: 'system', content: 'connected' }), chip()];
+      expect(selectChatMessages(messages, opts(false)).map((m) => m.id)).toEqual(['chip-truncated']);
+    });
+  });
 });

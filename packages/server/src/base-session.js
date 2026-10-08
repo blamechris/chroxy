@@ -24,6 +24,7 @@ import { assertProviderPermissionModeSupported, getProviderPermissionModeSupport
 import { AGENT_DESCRIPTION_MAX } from './claude-stream-parser.js'
 import { sanitizeToolInput } from './redaction.js'
 import { isTurnTerminationReason, describeTurnTermination } from '@chroxy/protocol'
+import { isTurnOutcome } from './turn-outcome.js'
 
 const log = createLogger('base-session')
 
@@ -2146,6 +2147,23 @@ export class BaseSession extends EventEmitter {
         payload = { ...payload, queueLength: this._outgoingQueue ? this._outgoingQueue.length : 0 }
       }
       payload = normalizeResultDuration(payload)
+      // #7326: the wire carries a closed vocabulary. Anything else a provider
+      // puts on `turnOutcome` is dropped here rather than left to fail the
+      // client's parse of the whole `result` frame.
+      if (payload && typeof payload === 'object' && payload.turnOutcome !== undefined && !isTurnOutcome(payload.turnOutcome)) {
+        const { turnOutcome: _dropped, ...rest } = payload
+        payload = rest
+      }
+      // #7326: a marked outcome (anything but `completed`) becomes a chip in the
+      // transcript, and the chip needs an identity that the live `result` frame
+      // and the history entry replayed later AGREE on -- a `result` has no id, and
+      // without one a reconnect that replays the turn the client already watched
+      // would add a second chip. The timestamp is stamped ONCE, here, and both
+      // the event normalizer and the history ring read it off this payload.
+      if (payload && typeof payload === 'object' && isTurnOutcome(payload.turnOutcome) && payload.turnOutcome !== 'completed'
+        && typeof payload.timestamp !== 'number') {
+        payload = { ...payload, timestamp: Date.now() }
+      }
       if (payload !== args[0]) args[0] = payload
     }
     return super.emit(event, ...args)

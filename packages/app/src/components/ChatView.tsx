@@ -24,6 +24,7 @@ import { MessageBubble } from './chat/MessageBubble';
 import type { SelectOptionValue } from './chat/MessageBubble';
 import type { MultiQuestionAnswersMap } from './chat/MultiQuestionForm';
 import { CompactionMarker } from './CompactionMarker';
+import { TurnOutcomeMarker } from './TurnOutcomeMarker';
 import { insertCompactionMarkers } from './insertCompactionMarkers';
 import { buildChatViewMessages, isRetryableAskUserQuestionError } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
@@ -472,6 +473,22 @@ export function ChatView({
             reduceMotion={reduceMotion}
           >
             <CompactionMarker meta={msg.compactMetadata} />
+          </AnimatedMessage>
+        );
+      }
+      // #7326 — the chip for a turn that was truncated, refused or stopped. The
+      // shared buildChatViewMessages pipeline lets this one `system` row into
+      // the Chat feed (it describes the turn above it), so no reinsertion step
+      // is needed here, unlike the compaction marker.
+      if (msg.type === 'system' && msg.turnOutcome) {
+        return (
+          <AnimatedMessage
+            type={msg.type}
+            timestamp={msg.timestamp}
+            mountTime={mountTimeRef.current}
+            reduceMotion={reduceMotion}
+          >
+            <TurnOutcomeMarker outcome={msg.turnOutcome} />
           </AnimatedMessage>
         );
       }

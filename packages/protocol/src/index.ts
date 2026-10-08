@@ -231,6 +231,10 @@ export * from './error-categories.ts'
 // wording the clients and the server's fallback result text agree on.
 export * from './turn-termination.ts'
 
+// #7326: how a TURN ended (completed / truncated / refused / stopped), the field
+// the `result` frame carries it in, and the wording both clients share.
+export * from './turn-outcome.ts'
+
 // #6871: shared scheduled-task HEALTH derivation. Zod-free and pure so BOTH the
 // `chroxy schedule` CLI (#6868) and the dashboard panel import one mapping — a
 // second copy would be free to drift toward reporting a never-run / refused /

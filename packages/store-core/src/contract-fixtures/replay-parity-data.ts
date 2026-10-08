@@ -1631,6 +1631,345 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "historySeq": 1
         }
       ]
+    },
+    {
+      "name": "turn-outcomes",
+      "description": "How a turn ended: a reply cut off by a limit, a refusal with no text at all, a stopped turn, and a normal one. Each non-clean turn ends in a marker chip; the clean one does not.",
+      "providers": [
+        "claude-sdk"
+      ],
+      "events": [
+        [
+          "stream_start",
+          {
+            "messageId": "o1"
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "o1",
+            "delta": "The first half of an answer that ran into the token limit"
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "o1"
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.01,
+            "duration": 1500,
+            "usage": {
+              "input_tokens": 50,
+              "output_tokens": 20
+            },
+            "turnOutcome": "truncated",
+            "timestamp": 1700000001000
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.01,
+            "duration": 1500,
+            "usage": {
+              "input_tokens": 50,
+              "output_tokens": 20
+            },
+            "turnOutcome": "refused",
+            "timestamp": 1700000002000
+          }
+        ],
+        [
+          "stream_start",
+          {
+            "messageId": "o3"
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "o3",
+            "delta": "Partial text before the turn was stopped"
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "o3"
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.01,
+            "duration": 1500,
+            "usage": {
+              "input_tokens": 50,
+              "output_tokens": 20
+            },
+            "turnOutcome": "stopped",
+            "timestamp": 1700000003000
+          }
+        ],
+        [
+          "stream_start",
+          {
+            "messageId": "o4"
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "o4",
+            "delta": "A normal, finished reply."
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "o4"
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.01,
+            "duration": 1500,
+            "usage": {
+              "input_tokens": 50,
+              "output_tokens": 20
+            },
+            "turnOutcome": "completed"
+          }
+        ]
+      ],
+      "live": [
+        {
+          "type": "stream_start",
+          "messageId": "o1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_busy",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "o1",
+          "delta": "The first half of an answer that ran into the token limit",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "o1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.01,
+          "duration": 1500,
+          "usage": {
+            "input_tokens": 50,
+            "output_tokens": 20
+          },
+          "sessionId": "s1",
+          "turnOutcome": "truncated",
+          "timestamp": 1700000001000
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.01,
+          "duration": 1500,
+          "usage": {
+            "input_tokens": 50,
+            "output_tokens": 20
+          },
+          "sessionId": "s1",
+          "turnOutcome": "refused",
+          "timestamp": 1700000002000
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_start",
+          "messageId": "o3",
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_busy",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "o3",
+          "delta": "Partial text before the turn was stopped",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "o3",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.01,
+          "duration": 1500,
+          "usage": {
+            "input_tokens": 50,
+            "output_tokens": 20
+          },
+          "sessionId": "s1",
+          "turnOutcome": "stopped",
+          "timestamp": 1700000003000
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_start",
+          "messageId": "o4",
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_busy",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "o4",
+          "delta": "A normal, finished reply.",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "o4",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.01,
+          "duration": 1500,
+          "usage": {
+            "input_tokens": 50,
+            "output_tokens": 20
+          },
+          "sessionId": "s1",
+          "turnOutcome": "completed"
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ],
+      "replay": [
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "The first half of an answer that ran into the token limit",
+          "messageId": "o1",
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 1
+        },
+        {
+          "type": "result",
+          "cost": 0.01,
+          "duration": 1500,
+          "usage": {
+            "input_tokens": 50,
+            "output_tokens": 20
+          },
+          "turnOutcome": "truncated",
+          "timestamp": 1700000001000,
+          "sessionId": "s1",
+          "historySeq": 2
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.01,
+          "duration": 1500,
+          "usage": {
+            "input_tokens": 50,
+            "output_tokens": 20
+          },
+          "turnOutcome": "refused",
+          "timestamp": 1700000002000,
+          "sessionId": "s1",
+          "historySeq": 3
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "Partial text before the turn was stopped",
+          "messageId": "o3",
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 4
+        },
+        {
+          "type": "result",
+          "cost": 0.01,
+          "duration": 1500,
+          "usage": {
+            "input_tokens": 50,
+            "output_tokens": 20
+          },
+          "turnOutcome": "stopped",
+          "timestamp": 1700000003000,
+          "sessionId": "s1",
+          "historySeq": 5
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "A normal, finished reply.",
+          "messageId": "o4",
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 6
+        },
+        {
+          "type": "result",
+          "cost": 0.01,
+          "duration": 1500,
+          "usage": {
+            "input_tokens": 50,
+            "output_tokens": 20
+          },
+          "turnOutcome": "completed",
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 7
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ]
     }
   ]
 } /* json:end */

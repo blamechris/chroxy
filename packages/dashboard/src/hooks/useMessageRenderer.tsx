@@ -14,6 +14,7 @@ import { PermissionExpiredSummary } from '../components/PermissionExpiredSummary
 import { QuestionPrompt } from '../components/QuestionPrompt'
 import { EvaluatorRewriteBanner } from '../components/EvaluatorPrompts'
 import { CompactionMarker } from '../components/CompactionMarker'
+import { TurnOutcomeMarker } from '../components/TurnOutcomeMarker'
 import { McpPromptExpansionMarker } from '../components/McpPromptExpansionMarker'
 import { StreamStallChip } from '../components/StreamStallChip'
 import { AskUserQuestionStallChip } from '../components/AskUserQuestionStallChip'
@@ -328,6 +329,13 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     // literal string `compact_boundary`.
     if (storeMsg.type === 'system' && storeMsg.compactMetadata) {
       return <CompactionMarker meta={storeMsg.compactMetadata} />
+    }
+
+    // #7326: the chip for a turn that was truncated, refused or stopped. Built
+    // from the `result` frame by store-core's `appendTurnOutcomeMarker`; the
+    // pipeline lets this one `system` row into the chat flow.
+    if (storeMsg.type === 'system' && storeMsg.turnOutcome) {
+      return <TurnOutcomeMarker outcome={storeMsg.turnOutcome} />
     }
 
     // #6845: honesty marker for a server-controlled MCP-prompt expansion
