@@ -92,6 +92,30 @@ describe('hide then show the Output tab (#8254)', () => {
     ])
   })
 
+  it('switching A -> B -> A on the Output tab sends A its size again (A was reset when its mirror was unsubscribed)', () => {
+    const two = [{ sessionId: 's1' }, { sessionId: 's2' }]
+    storeState.sessionStates = { s1: { terminalRawBuffer: '' }, s2: { terminalRawBuffer: '' } }
+    proposed = PANE
+    storeState.activeSessionId = 's1'
+    const { rerender } = render(<MultiTerminalView sessions={two} activeSessionId="s1" visible />)
+    expect(mockRequestTerminalResize.mock.calls).toEqual([['s1', PANE.cols, PANE.rows]])
+
+    storeState.activeSessionId = 's2'
+    rerender(<MultiTerminalView sessions={two} activeSessionId="s2" visible />)
+    expect(mockRequestTerminalResize.mock.calls).toEqual([
+      ['s1', PANE.cols, PANE.rows],
+      ['s2', PANE.cols, PANE.rows],
+    ])
+
+    storeState.activeSessionId = 's1'
+    rerender(<MultiTerminalView sessions={two} activeSessionId="s1" visible />)
+    expect(mockRequestTerminalResize.mock.calls).toEqual([
+      ['s1', PANE.cols, PANE.rows],
+      ['s2', PANE.cols, PANE.rows],
+      ['s1', PANE.cols, PANE.rows],
+    ])
+  })
+
   it('a pane shown again after the connection dropped and came back sends its size once more', () => {
     proposed = PANE
     const { rerender } = render(<MultiTerminalView sessions={sessions} activeSessionId="s1" visible />)

@@ -75,6 +75,15 @@ export function MultiTerminalView({ sessions, activeSessionId, className, visibl
   useEffect(() => {
     if (!visible || connectionPhase !== 'connected') lastSentRef.current.clear()
   }, [visible, connectionPhase])
+  // #8254: the same goes for a session that stops being the active one. Switching
+  // A -> B on the Output tab unsubscribes A's mirror, and the server puts A's PTY
+  // back at the default; coming back to A measures the same pane size, which the
+  // dedupe would drop. Keep only the active session's entry.
+  useEffect(() => {
+    for (const id of [...lastSentRef.current.keys()]) {
+      if (id !== activeSessionId) lastSentRef.current.delete(id)
+    }
+  }, [activeSessionId])
   const handleMeasure = useCallback((sessionId: string, cols: number, rows: number) => {
     // #8254: only the terminal tab that is actually on screen sizes the PTY.
     if (!visibleRef.current) return

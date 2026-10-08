@@ -1279,13 +1279,13 @@ describe('session-handlers', () => {
 
       // What the dashboard sends on showing the Output tab: the measured size
       // (TerminalView), then the mirror opt-in + repaint (App effect).
-      function show(ctx, client) {
-        sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', ...PANE }, ctx)
-        sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
-        sessionHandlers.terminal_resync(makeWs(), client, { type: 'terminal_resync', sessionId: 'sess-1' }, ctx)
+      function show(ctx, client, sid = 'sess-1') {
+        sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: sid, ...PANE }, ctx)
+        sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: sid }, ctx)
+        sessionHandlers.terminal_resync(makeWs(), client, { type: 'terminal_resync', sessionId: sid }, ctx)
       }
-      function hide(ctx, client) {
-        sessionHandlers.terminal_unsubscribe(makeWs(), client, { type: 'terminal_unsubscribe', sessionId: 'sess-1' }, ctx)
+      function hide(ctx, client, sid = 'sess-1') {
+        sessionHandlers.terminal_unsubscribe(makeWs(), client, { type: 'terminal_unsubscribe', sessionId: sid }, ctx)
       }
 
       it('the pane size is applied on every visit, after the reset that comes with leaving', () => {
@@ -1315,6 +1315,54 @@ describe('session-handlers', () => {
           ptyCalls.length = 0
           show(ctx, client)
           assert.deepEqual(ptyCalls.at(-1), [PANE.cols, PANE.rows])
+        } finally { cleanup() }
+      })
+
+      it('switching A -> B -> A on the Output tab: A is reset when it is left and follows the pane when it is back', () => {
+        // The dashboard's wire order on a session switch: the App effect cleanup
+        // unsubscribes the old session, then the new pane's measure and the new
+        // subscribe go out.
+        const { ctx, session: a, clients, cleanup } = liveSession()
+        const skillsDirB = mkdtempSync(join(tmpdir(), 'tui-8254-skills-'))
+        const b = new ClaudeTuiSession({ cwd: '/tmp', port: 0, skillsDir: skillsDirB, repoSkillsDir: null })
+        b._term = { resize: () => {} }
+        b._ptyExited = false
+        ctx._sessions.set('sess-2', { session: b, cwd: '/tmp', name: 'S2' })
+        ctx.transport.syncTerminalMirror = (sid) => {
+          const target = ctx._sessions.get(sid).session
+          target.setTerminalMirrorActive(clients.some((c) => c.terminalSessionIds?.has(sid)))
+        }
+        try {
+          const client = makeClient({ activeSessionId: 'sess-1', subscribedSessionIds: new Set(['sess-1', 'sess-2']) })
+          clients.push(client)
+          show(ctx, client, 'sess-1')
+          assert.deepEqual(a.getTerminalSize(), PANE)
+          hide(ctx, client, 'sess-1')
+          assert.deepEqual(a.getTerminalSize(), DEFAULT, 'A is reset the moment its mirror is unsubscribed')
+          client.activeSessionId = 'sess-2'
+          show(ctx, client, 'sess-2')
+          assert.deepEqual(b.getTerminalSize(), PANE)
+          hide(ctx, client, 'sess-2')
+          client.activeSessionId = 'sess-1'
+          show(ctx, client, 'sess-1')
+          assert.deepEqual(a.getTerminalSize(), PANE, 'A follows the pane again when it is switched back to')
+          assert.deepEqual(b.getTerminalSize(), DEFAULT, 'and B was reset when it was left')
+        } finally { cleanup(); rmSync(skillsDirB, { recursive: true, force: true }) }
+      })
+
+      it('two viewers: the size holds while either remains, and resets only when the last one leaves', () => {
+        const { ctx, session, clients, cleanup } = liveSession()
+        try {
+          const first = makeClient({ id: 'client-1', activeSessionId: 'sess-1' })
+          const second = makeClient({ id: 'client-2', activeSessionId: 'sess-1' })
+          clients.push(first, second)
+          show(ctx, first)
+          sessionHandlers.terminal_subscribe(makeWs(), second, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
+          assert.deepEqual(session.getTerminalSize(), PANE)
+          hide(ctx, second)
+          assert.deepEqual(session.getTerminalSize(), PANE, 'one viewer leaving does not reset the size another is using')
+          hide(ctx, first)
+          assert.deepEqual(session.getTerminalSize(), DEFAULT, 'the last viewer leaving does')
         } finally { cleanup() }
       })
 
