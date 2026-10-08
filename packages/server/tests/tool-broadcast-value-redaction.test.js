@@ -33,6 +33,21 @@ describe('#6029 tool-broadcast value redaction', () => {
     assert.ok(out.url.includes('[REDACTED]'), 'should mark the redaction')
   })
 
+  // #6630 / #8416: a JSON property whose KEY is quoted, and whose VALUE is quoted and
+  // may hold any character up to the closing quote.
+  it('redacts a quoted key and a quoted value inside a benign-keyed value', () => {
+    const rows = [
+      [String.raw`curl -d '{"password":"Abcdefgh!Secret"}'`, 'Abcdefgh!Secret'],
+      [String.raw`curl -d '{"token":"p@ssw0rd!2024xyz"}'`, 'p@ssw0rd!2024xyz'],
+      [String.raw`echo "{\"password\":\"x!y z-secret\"}"`, 'x!y z-secret'],
+    ]
+    for (const [command, secret] of rows) {
+      const out = sanitizeToolInput({ command })
+      assert.ok(!out.command.includes(secret), `leaked: ${out.command}`)
+      assert.ok(out.command.includes('[REDACTED]'))
+    }
+  })
+
   it('redacts a JWT embedded in a benign-keyed value', () => {
     const out = sanitizeToolInput({ description: `auth header eyJ token ${FAKE_JWT}` })
     assert.ok(!out.description.includes(FAKE_JWT), 'JWT must not leak')

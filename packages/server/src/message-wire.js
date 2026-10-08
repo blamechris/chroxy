@@ -180,26 +180,33 @@ export function buildMessageWire(data) {
 }
 
 /**
- * Ceiling on the text of one error, in characters. The same 50 KiB the persisted
- * copy is clipped to (`SessionMessageHistory.truncateEntry`), applied here at
- * ADMISSION so the live frame, the ring buffer and every replay hold the same
- * bounded text -- the persistence clip alone left the in-memory entry (and each
- * retransmission of it) unbounded.
+ * The most text the redactor is ever handed at once, in characters. This bounds the
+ * redaction scan: the redactor's cost on adversarial input grows faster than the
+ * input's length, and it runs synchronously on the event loop, so what it is given
+ * must be small (measured: 16 KiB of hostile input costs tens of milliseconds, 256 KiB
+ * costs seconds).
  */
-export const ERROR_TEXT_MAX = 50 * 1024
+export const ERROR_REDACT_SCAN_MAX = 16 * 1024
 
 /**
- * Hard ceiling on the text the redactor is ever handed (characters). An error body
- * can in principle be megabytes (a proxy's HTML page); the patterns are linear, but
- * there is no reason to scan more than this to keep a 50 KiB result.
+ * Ceiling on the text of one error message, in characters: the scan bound above,
+ * applied at ADMISSION so the live frame, the ring buffer and every replay hold the
+ * same bounded text. It is below the 50 KiB `SessionMessageHistory.truncateEntry`
+ * clips a saved entry to, so the saved copy is never cut again.
  */
-export const ERROR_REDACT_SCAN_MAX = 1024 * 1024
+export const ERROR_TEXT_MAX = ERROR_REDACT_SCAN_MAX
 
 /**
- * Text appended to an error message that was cut. Counted INSIDE the 50 KiB budget:
- * the saved copy (`SessionMessageHistory.truncateEntry`) clips anything over 50 KiB
- * and appends its own marker, so a message that overshot by this much came out as
- * `...\n[t[truncated]`. Within the budget the persisted copy is the live one.
+ * How far below the scan bound a kept result must stay for the cut at the bound to
+ * be harmless: a secret straddling the bound starts at most this far before it, and
+ * is therefore already redacted out of the part that is kept.
+ */
+const SCAN_BOUND_SAFETY_MARGIN = 2048
+
+/**
+ * Text appended to an error message that was cut. Counted INSIDE the message budget,
+ * so the saved copy is the live one (a message that overshot its budget by the marker
+ * was clipped again when saved and came out as `...\n[t[truncated]`).
  */
 const ERROR_TRUNCATION_MARKER = '\n[truncated]'
 
@@ -213,14 +220,18 @@ const ERROR_TRUNCATION_MARKER = '\n[truncated]'
  * recorded entry are identical.
  *
  * ORDER matters: redact the COMPLETE text, then cut. Cutting first can leave the
- * front of a key the patterns no longer recognise (a 40-character floor on `sk-ant-`
- * keys; an `AIza` key cut 29 characters in) when the bound falls inside it. After
- * redaction the keys are already gone, so the cut can be a plain slice (the
- * post-create caps have always sliced rather than dropped, and a test pins it). The
- * one exception is input past the redaction scan ceiling, which cannot be scanned
- * whole: it is cut at the last whitespace inside the ceiling (`redactBounded`'s
- * rule: a run with no whitespace to stop at is dropped, never half-kept) before it
- * is redacted.
+ * front of a key the patterns no longer recognise when the bound falls inside it.
+ * After redaction the keys are already gone, so the cut can be a plain slice (the
+ * post-create caps have always sliced rather than dropped, and a test pins it).
+ *
+ * Text longer than the scan bound cannot be scanned whole. It is cut at the bound
+ * first, and what that cut can do to a key at the bound decides the rest:
+ *   - when the result kept is at least a safety margin shorter than the bound (the
+ *     8 KiB output streams), a key at the bound lies entirely beyond what is kept,
+ *     so the slice is safe and nothing more is done;
+ *   - otherwise (the message, whose budget IS the bound) the cut backs up to the last
+ *     whitespace, and a run with no whitespace to stop at is discarded, never
+ *     half-kept (`redactBounded`'s rule).
  *
  * @param {string} text
  * @param {number} max  character budget for the result, marker included
@@ -231,8 +242,12 @@ export function redactAndClip(text, max, marker = '') {
   let clipped = false
   if (text.length > ERROR_REDACT_SCAN_MAX) {
     const head = text.slice(0, ERROR_REDACT_SCAN_MAX)
-    const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'), head.lastIndexOf('\r'))
-    text = cut > 0 ? head.slice(0, cut) : ''
+    if (max + SCAN_BOUND_SAFETY_MARGIN <= ERROR_REDACT_SCAN_MAX) {
+      text = head
+    } else {
+      const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'), head.lastIndexOf('\r'))
+      text = cut > 0 ? head.slice(0, cut) : ''
+    }
     clipped = true
   }
   const redacted = redactValue(text)
@@ -241,7 +256,7 @@ export function redactAndClip(text, max, marker = '') {
   return redacted.slice(0, Math.max(0, max - marker.length)) + marker
 }
 
-/** The error message: redacted, then bounded to 50 KiB with a marker that fits inside it. */
+/** The error message: redacted, then bounded with a marker that fits inside the budget. */
 function errorMessageText(message) {
   return redactAndClip(String(message), ERROR_TEXT_MAX, ERROR_TRUNCATION_MARKER)
 }

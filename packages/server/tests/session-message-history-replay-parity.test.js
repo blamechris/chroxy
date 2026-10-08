@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { SessionManager } from '../src/session-manager.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { SessionMessageHistory, streamKindOf } from '../src/session-message-history.js'
-import { buildMessageWire, buildErrorWire, redactAndClip, ERROR_REDACT_SCAN_MAX } from '../src/message-wire.js'
+import { buildMessageWire, buildErrorWire, redactAndClip, ERROR_REDACT_SCAN_MAX, ERROR_TEXT_MAX } from '../src/message-wire.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
 import { sendHistoryEntry, CAPABILITY_HISTORY_ERROR_REPLAY, CAPABILITY_HISTORY_THINKING_REPLAY } from '../src/ws-history.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
@@ -395,7 +395,7 @@ describe('error text is redacted and bounded before it is recorded (#6630 review
     const history = new SessionMessageHistory()
     history.recordHistory(S, 'error', { message: 'boom '.repeat(100_000) })
     const [entry] = history.getHistory(S)
-    assert.ok(entry.content.length <= 50 * 1024, `held ${entry.content.length} characters`)
+    assert.ok(entry.content.length <= ERROR_TEXT_MAX, `held ${entry.content.length} characters`)
     assert.ok(entry.content.endsWith('[truncated]'), 'says it was cut')
   })
 
@@ -551,7 +551,7 @@ describe('quoted JSON keys are redacted in recorded errors (#6630 round 2, #8416
     ['a nested access token', `{"data":{"access_token":"${secret}"}}`],
     ['an api_key', `{"api_key":"${secret}"}`],
     ['single quotes', `{'secret': '${secret}'}`],
-    ['JSON inside a string (escaped quotes)', `request body: {\"token\":\"${secret}\"}`],
+    ['JSON inside a string (backslash-escaped quotes)', String.raw`request body: {\"token\":\"${secret}\"}`],
     ['an unquoted assignment (unchanged)', `TOKEN=${secret}`],
   ]
   for (const [label, text] of cases) {
@@ -566,7 +566,7 @@ describe('quoted JSON keys are redacted in recorded errors (#6630 round 2, #8416
 
   it('leaves text that merely mentions the word alone', () => {
     assert.equal(buildErrorWire({ message: 'the token is invalid' }).content, 'the token is invalid')
-    assert.equal(buildErrorWire({ message: '{"token":"short"}' }).content, '{"token":"short"}')
+    assert.equal(buildErrorWire({ message: '{"note":"password rules apply"}' }).content, '{"note":"password rules apply"}')
   })
 })
 
@@ -576,13 +576,13 @@ describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2
   const KEYS = [['sk-ant', ANT_KEY], ['AIza', GOOGLE_KEY]]
 
   for (const [name, key] of KEYS) {
-    it(`${name} key across the 50 KiB message bound, with no whitespace anywhere`, () => {
-      const wire = buildErrorWire({ message: straddle(key, 50 * 1024, 'x') })
+    it(`${name} key across the message bound, with no whitespace anywhere`, () => {
+      const wire = buildErrorWire({ message: straddle(key, ERROR_TEXT_MAX, 'x') })
       assert.ok(!wire.content.includes(key.slice(0, 14)), 'no prefix of the key survives')
-      assert.ok(wire.content.length <= 50 * 1024)
+      assert.ok(wire.content.length <= ERROR_TEXT_MAX)
     })
-    it(`${name} key across the 50 KiB message bound, in whitespace-separated text`, () => {
-      const wire = buildErrorWire({ message: straddle(key, 50 * 1024, 'word ') })
+    it(`${name} key across the message bound, in whitespace-separated text`, () => {
+      const wire = buildErrorWire({ message: straddle(key, ERROR_TEXT_MAX, 'word ') })
       assert.ok(!wire.content.includes(key.slice(0, 14)))
     })
     it(`${name} key across the 8 KiB bound of stdout and stderr`, () => {
@@ -597,11 +597,11 @@ describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2
     })
   }
 
-  it('input past the scan ceiling is cut at whitespace, and a key crossing THAT is dropped whole', () => {
-    const filler = 'y'.repeat(1024 * 1024 - 20)
+  it('a message past the scan bound is cut at whitespace, and a key crossing THAT is dropped whole', () => {
+    const filler = 'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)
     const wire = buildErrorWire({ message: `${filler}${ANT_KEY}${'z'.repeat(100)}` })
     assert.ok(!wire.content.includes('sk-ant'))
-    assert.ok(wire.content.length <= 50 * 1024)
+    assert.ok(wire.content.length <= ERROR_TEXT_MAX)
     assert.ok(wire.content.endsWith('[truncated]'))
   })
 
@@ -612,10 +612,16 @@ describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2
     assert.ok(out.endsWith('[cut]'))
   })
 
-  it('still slices (rather than drops) a long whitespace-free message that holds no secret', () => {
-    const wire = buildErrorWire({ message: 'a'.repeat(100_000), code: 'post_create_command_failed', stdout: 'b'.repeat(20_000) })
+  it('still slices (rather than drops) a whitespace-free output stream longer than its cap that holds no secret', () => {
+    // 20,000 characters: past the scan bound, but the 8 KiB kept is far enough below it that the cut is harmless.
+    const wire = buildErrorWire({ message: 'm', code: 'post_create_command_failed', stdout: 'b'.repeat(20_000), stderr: 'c'.repeat(8_193) })
     assert.equal(wire.stdout.length, 8192)
-    assert.ok(wire.content.length > 40_000 && wire.content.length <= 50 * 1024)
+    assert.equal(wire.stderr.length, 8192)
+  })
+
+  it('keeps a whitespace-free message that fits, and drops the unsafe run of one that does not', () => {
+    assert.equal(buildErrorWire({ message: 'a'.repeat(ERROR_TEXT_MAX) }).content.length, ERROR_TEXT_MAX)
+    assert.equal(buildErrorWire({ message: 'a'.repeat(ERROR_TEXT_MAX + 1) }).content, '\n[truncated]')
   })
 })
 
@@ -624,7 +630,7 @@ describe('a clipped error reads the same live and persisted (#6630 round 2)', ()
     const history = new SessionMessageHistory()
     history.recordHistory(S, 'error', { message: 'boom '.repeat(100_000) })
     const [entry] = history.getHistory(S)
-    assert.ok(entry.content.length <= 50 * 1024, `${entry.content.length}`)
+    assert.ok(entry.content.length <= ERROR_TEXT_MAX, `${entry.content.length}`)
     assert.ok(entry.content.endsWith('\n[truncated]'))
     const saved = history.truncateEntry(entry)
     assert.equal(saved.content, entry.content)
@@ -633,14 +639,14 @@ describe('a clipped error reads the same live and persisted (#6630 round 2)', ()
   })
 
   it('a message just over the bound is clipped with the marker inside the budget', () => {
-    const wire = buildErrorWire({ message: 'q'.repeat(50 * 1024 + 5) })
-    assert.equal(wire.content.length, 50 * 1024)
+    const wire = buildErrorWire({ message: 'qq '.repeat(ERROR_TEXT_MAX / 3 + 10) })
+    assert.ok(wire.content.length <= ERROR_TEXT_MAX)
     assert.ok(wire.content.endsWith('\n[truncated]'))
   })
 
   it('a message that fits is untouched', () => {
-    const wire = buildErrorWire({ message: 'q'.repeat(50 * 1024) })
-    assert.equal(wire.content.length, 50 * 1024)
+    const wire = buildErrorWire({ message: 'qq '.repeat(Math.floor(ERROR_TEXT_MAX / 3)) })
+    assert.ok(wire.content.length <= ERROR_TEXT_MAX)
     assert.ok(!wire.content.includes('[truncated]'))
   })
 })
@@ -752,5 +758,78 @@ describe('BYOK gives every thinking stream of a turn its own id (#6630 round 2)'
     const entries = history.getHistory(S).filter((e) => e.kind === 'thinking')
     assert.deepEqual(entries.map((e) => e.content), ['First thought.', 'A completely different second-round thought.'])
     await session.destroy()
+  })
+})
+
+describe('quoted values are redacted to their closing quote (#6630 round 3)', () => {
+  const rows = [
+    ['a value with punctuation', String.raw`{"password":"Abcdefgh!Secret"}`, 'Abcdefgh!Secret'],
+    ['a value that is all punctuation and digits', String.raw`{"password":"p@ssw0rd!2024xyz"}`, 'p@ssw0rd!2024xyz'],
+    ['a short quoted value', String.raw`{"token":"ab"}`, 'ab'],
+    ['a value with a space', String.raw`{"secret": "two words!"}`, 'two words!'],
+    ['single quotes', String.raw`{'password': 'p@ss w0rd!'}`, 'p@ss w0rd!'],
+    ['an escaped quote inside the value', String.raw`{"password":"a\"b!c-secret"}`, 'b!c-secret'],
+    ['backslash-escaped quotes (JSON inside a string)', String.raw`log: {\"password\":\"x!y z-secret\"}`, 'x!y z-secret'],
+    ['a nested key', String.raw`{"auth":{"api_key":"k3y!value#99"}}`, 'k3y!value#99'],
+    ['a value with no closing quote (the text was cut)', String.raw`{"password":"unterminated12345`, 'unterminated12345'],
+  ]
+  for (const [label, text, secret] of rows) {
+    it(`${label}: the secret is absent from the message, stdout and stderr`, () => {
+      const wire = buildErrorWire({ message: text, code: 'post_create_command_failed', stdout: text, stderr: text })
+      for (const field of ['content', 'stdout', 'stderr']) {
+        assert.ok(!wire[field].includes(secret), `${field}: ${wire[field]}`)
+        assert.ok(wire[field].includes('[REDACTED]'), `${field}: ${wire[field]}`)
+      }
+    })
+  }
+
+  it('the text around a redacted quoted value is kept', () => {
+    const out = buildErrorWire({ message: String.raw`400 {"error":"bad","password":"Abcdefgh!Secret","id":7}` }).content
+    assert.ok(out.includes('"error":"bad"'))
+    assert.ok(out.includes('"id":7'))
+  })
+})
+
+describe('the redaction scan is bounded (#6630 round 3)', () => {
+  // Units whose repetition is the slowest to redact: cost grows faster than length.
+  const HOSTILE_UNITS = ['eyJ-', '-eyJ', '--eyJ', 'eyJa', 'a-eyJ', 'eyJsk-', '-sk-eyJ']
+  const hostile = (unit, n) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n)
+  const time = (fn) => {
+    const start = process.hrtime.bigint()
+    fn()
+    return Number(process.hrtime.bigint() - start) / 1e6
+  }
+
+  // Generous: the bounded scan costs tens of milliseconds here, and an unbounded one
+  // of this size costs seconds, so the margin keeps the test steady on a slow runner.
+  const LIMIT_MS = 500
+
+  for (const unit of HOSTILE_UNITS) {
+    it(`hostile input far past the bound (${JSON.stringify(unit)} x 256 KiB) is redacted in under ${LIMIT_MS} ms`, () => {
+      const text = hostile(unit, 256 * 1024)
+      // Each field on its own, so the bound is per redaction, not per frame.
+      for (const field of [{ message: text }, { message: 'm', code: 'post_create_command_failed', stdout: text }, { message: 'm', code: 'post_create_command_failed', stderr: text }]) {
+        const ms = time(() => buildErrorWire(field))
+        assert.ok(ms < LIMIT_MS, `took ${ms.toFixed(0)} ms`)
+      }
+    })
+    it(`hostile input exactly at the bound (${JSON.stringify(unit)}) is redacted in under ${LIMIT_MS} ms`, () => {
+      const text = hostile(unit, ERROR_REDACT_SCAN_MAX)
+      const ms = time(() => buildErrorWire({ message: text }))
+      assert.ok(ms < LIMIT_MS, `took ${ms.toFixed(0)} ms`)
+    })
+  }
+
+  it('the bound is small enough for that: 64 KiB or less', () => {
+    assert.ok(ERROR_REDACT_SCAN_MAX <= 64 * 1024)
+  })
+
+  it('quoted values stay linear: 1 MB of hostile quoted-key input redacts in under 500 ms', async () => {
+    const { redactValue } = await import('../src/redaction.js')
+    for (const unit of ['token":"', 'password":"a', String.raw`secret\":\"`, `api_key':'`, `token":"${'a'.repeat(900)}`, 'authorization:"\\', 'token"']) {
+      const text = hostile(unit, 1024 * 1024)
+      const ms = time(() => redactValue(text))
+      assert.ok(ms < LIMIT_MS, `${JSON.stringify(unit.slice(0, 20))}: ${ms.toFixed(0)} ms`)
+    }
   })
 })

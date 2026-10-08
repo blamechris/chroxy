@@ -34,6 +34,22 @@ describe('#6038 SDK permission broadcast redaction', () => {
     pm.destroy()
   })
 
+  // #6630 / #8416: a quoted key with a quoted value in the command.
+  it('redacts a quoted key and quoted value in the broadcast input and description', () => {
+    const pm = new PermissionManager({ log: silentLog })
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+
+    pm.handlePermission('Bash', { command: `curl -d '{"password":"Abcdefgh!Secret"}'` }, null, 'approve')
+
+    const ev = events[0]
+    assert.ok(ev, 'permission_request should be emitted')
+    assert.ok(!JSON.stringify(ev.input).includes('Abcdefgh!Secret'), 'secret must not leak in broadcast input')
+    assert.ok(!ev.description.includes('Abcdefgh!Secret'), 'secret must not leak in the description')
+
+    pm.destroy()
+  })
+
   it('redacts a secret nested inside an object value', () => {
     const pm = new PermissionManager({ log: silentLog })
     const events = []
