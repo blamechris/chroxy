@@ -538,15 +538,7 @@ export class SessionMessageHistory extends EventEmitter {
         // BYOK never sets `data.input` (its `_getTrackedToolInput` is
         // never even reached — see tool-result.js), so this loop is a
         // no-op for it and its tool_start entries are unchanged.
-        if (data.input !== undefined) {
-          for (let i = history.length - 1; i >= 0; i--) {
-            const entry = history[i]
-            if (entry && entry.type === 'tool_start' && entry.toolUseId === data.toolUseId) {
-              entry.input = data.input
-              break
-            }
-          }
-        }
+        this.backfillToolInput(sessionId, data.toolUseId, data.input)
         this._pushHistory(history, {
           type: 'tool_result',
           toolUseId: data.toolUseId,
@@ -616,6 +608,43 @@ export class SessionMessageHistory extends EventEmitter {
       history.shift()
       this._historyTruncated.set(sessionId, true)
     }
+  }
+
+  /**
+   * #7346 / #8371: set the finalized `input` on the matching `tool_start`
+   * entry. `tool_start` is write-once (`_pushHistory` only appends) and every
+   * claude provider emits it with `input: null`, so without this a replay
+   * rebuilds from history that never had the input to rebuild WITH.
+   *
+   * Two callers, one rule: `tool_result` (#7346, the input rode the result)
+   * and `BaseSession._recordToolInput` via the session manager (#8371, the
+   * moment the provider knows the input, which is BEFORE the tool runs -- a
+   * replay during a still-running tool otherwise shows no INPUT). Both pass an
+   * already-sanitised, size-capped value (`sanitizeToolInput`); this method
+   * stores nothing else and applies no second copy of the redaction.
+   *
+   * Does not schedule a persist and returns no flag for one: `tool_start` and
+   * `tool_result` themselves never set `persistNeeded` (the next message or
+   * result persists the whole history, `truncateEntry` bounding the input).
+   * Searches backward, so a repeated toolUseId backfills the most recent.
+   *
+   * @param {string} sessionId
+   * @param {string} toolUseId
+   * @param {unknown} input - sanitised input; `undefined` is ignored
+   * @returns {boolean} true when a tool_start entry was updated
+   */
+  backfillToolInput(sessionId, toolUseId, input) {
+    if (input === undefined) return false
+    const history = this._messageHistory.get(sessionId)
+    if (!Array.isArray(history)) return false
+    for (let i = history.length - 1; i >= 0; i--) {
+      const entry = history[i]
+      if (entry && entry.type === 'tool_start' && entry.toolUseId === toolUseId) {
+        entry.input = input
+        return true
+      }
+    }
+    return false
   }
 
   /**

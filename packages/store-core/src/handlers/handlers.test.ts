@@ -7918,6 +7918,14 @@ describe('handleToolStart', () => {
       expect(after[0].toolResult).toBe('ok')
     })
 
+    it('claude-sdk replay DURING a running tool (#8371): the replayed tool_start carries the input and no tool_result follows -> toolInput is set', () => {
+      const replayedStart = { type: 'tool_start', messageId: 'toolu_r1', toolUseId: 'toolu_r1', tool: 'Bash', input: { command: 'sleep 20' }, timestamp: 1700000000000 }
+      const start = handleToolStart(replayedStart, 'sess-1', true, [])
+      expect(start.shouldDispatch).toBe(true)
+      expect(start.chatMessage!.toolInput).toEqual({ command: 'sleep 20' })
+      expect(start.chatMessage!.toolResult).toBeUndefined()
+    })
+
     it('a later tool_result.input still wins over the tool_start input', () => {
       const start = handleToolStart(
         { messageId: 'toolu_x', toolUseId: 'toolu_x', tool: 'Bash', input: { command: 'early' } },
