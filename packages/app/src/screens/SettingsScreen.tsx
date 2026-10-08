@@ -131,6 +131,16 @@ export function SettingsScreen() {
     (s) => !!s.serverCapabilities?.notificationPrefs,
   );
 
+  // #8496 (#8485 parity with the dashboard): keyed on the live connection. The
+  // server never pushes a prefs snapshot on connect, so a fresh handshake has to
+  // ask — and it must not write over a socket that is not connected. This effect
+  // used to re-run only when `notificationPrefsSupported` flipped, so a switch
+  // between two daemons that both advertise the capability left the new one
+  // unasked. It now requests once per completed handshake and never while the
+  // connection is down (`connected` is derived from `connectionPhase`, so each
+  // reconnect that reaches 'connected' re-requests).
+  const connected = useConnectionLifecycleStore((s) => s.connectionPhase === 'connected');
+
   useEffect(() => {
     // #4559: ignore the boolean return on initial refresh — a closed
     // socket on mount is the common case (mobile re-opens the app while
@@ -144,9 +154,9 @@ export function SettingsScreen() {
     // rejected as an `unknown_message` error or silently dropped — either
     // way no snapshot lands and the loading hint sits forever. Skipping
     // the WS write also keeps the gated render decisions self-consistent.
-    if (!notificationPrefsSupported) return;
+    if (!connected || !notificationPrefsSupported) return;
     refreshNotificationPrefs();
-  }, [notificationPrefsSupported, refreshNotificationPrefs]);
+  }, [connected, notificationPrefsSupported, refreshNotificationPrefs]);
 
   // #4559: thin wrappers around the four notification-prefs setters. Each
   // delegates to the store action (which returns `true` when sent, `false`

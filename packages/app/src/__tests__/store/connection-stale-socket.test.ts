@@ -144,6 +144,35 @@ describe('#8485 a superseded socket cannot write to the new connection (mobile a
     ws.restore();
   });
 
+  it('same-daemon reconnect: a late frame from the dropped socket leaves the new one alone', async () => {
+    const ws = installMockWebSocket();
+    const a = await openConnected(ws, URL_A);
+    await authOk(a);
+    const lateA = a.onmessage as Handler;
+
+    // Transport drop on A; onclose (still the CURRENT socket's) schedules the reconnect.
+    a.readyState = 3;
+    a.onclose?.({ code: 1006 });
+    jest.advanceTimersByTime(10_000); // past the first reconnect rung
+    await flushPromises();
+    const b = ws.instances[ws.instances.length - 1]!;
+    expect(b).not.toBe(a);
+    b.readyState = 1;
+    b.onopen?.();
+    await flushPromises();
+    await authOk(b);
+    expect(useConnectionLifecycleStore.getState().wsUrl).toBe(URL_A); // same daemon
+
+    useConnectionLifecycleStore.getState().setServerInfo({ serverMode: null });
+    lateA({ data: JSON.stringify({ type: 'server_mode', mode: 'cli' }) });
+    expect(useConnectionLifecycleStore.getState().serverMode).toBeNull();
+
+    // Control: the same frame on the CURRENT socket lands.
+    b.onmessage?.({ data: JSON.stringify({ type: 'server_mode', mode: 'cli' }) });
+    expect(useConnectionLifecycleStore.getState().serverMode).toBe('cli');
+    ws.restore();
+  });
+
   it('a socket still MID-HANDSHAKE when the user switches is retired too', async () => {
     const ws = installMockWebSocket();
     const a = await openConnected(ws, URL_A);
@@ -193,6 +222,21 @@ describe('#8485 a superseded socket cannot write to the new connection (mobile a
     expect(getEncryptionState()?.recvNonce).toBe(1);
     expect(useConnectionStore.getState().serverErrors.length).toBeGreaterThan(errorsBefore);
     setEncryptionState(null);
+    ws.restore();
+  });
+
+  it('disconnect() retires the socket: a late frame afterwards changes nothing', async () => {
+    const ws = installMockWebSocket();
+    const a = await openConnected(ws, URL_A);
+    await authOk(a);
+    const lateA = a.onmessage as Handler; // the handler the socket held before disconnect
+
+    useConnectionStore.getState().disconnect();
+    expect(a.onmessage).toBeNull();
+    useConnectionLifecycleStore.getState().setServerInfo({ serverMode: null });
+
+    lateA({ data: JSON.stringify({ type: 'server_mode', mode: 'cli' }) });
+    expect(useConnectionLifecycleStore.getState().serverMode).toBeNull();
     ws.restore();
   });
 
