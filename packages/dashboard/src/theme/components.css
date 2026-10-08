@@ -3670,9 +3670,10 @@ button.sidebar-token-view-session-row:hover {
   font-size: 12px;
   line-height: 1;
   color: var(--text-muted);
-  /* theme-neutral fallbacks (matches .msg-copy-btn, #6631) so the control
-     reads correctly in both light and dark. */
-  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  /* #7338: an opaque themed surface, as on .msg-copy-btn. `--surface-raised`
+     is defined by no theme, so its rgba fallback always applied and the code
+     underneath showed through the control. */
+  background: var(--bg-card);
   border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
   border-radius: var(--radius-sm, 6px);
   cursor: pointer;

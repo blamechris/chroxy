@@ -89,17 +89,25 @@ describe('CopyButton (#6631)', () => {
     const decl = (rule: string, prop: string) =>
       rule.match(new RegExp(`(?:^|[\\s;{])${prop}:\\s*([^;]+);`))?.[1]?.trim()
 
-    it('paints an opaque, defined surface (no see-through fallback)', async () => {
+    // Every top-level rule for exactly this selector, so a later duplicate that
+    // wins the cascade cannot hide behind the first match.
+    const rulesFor = (css: string, selector: string) => {
+      const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      return [...css.matchAll(new RegExp(`\\n${esc}\\s*\\{([^}]+)\\}`, 'g'))].map((m) => m[1]!)
+    }
+
+    it.each(['.msg-copy-btn', '.code-copy-btn'])('%s paints an opaque, defined surface (no see-through fallback)', async (selector) => {
       const css = await readCss()
-      const rule = css.match(/\n\.msg-copy-btn\s*\{([^}]+)\}/)?.[1] ?? ''
-      expect(rule.length > 0, 'the .msg-copy-btn rule exists').toBe(true)
-      expect(decl(rule, 'background')).toBe('var(--bg-card)')
+      const backgrounds = rulesFor(css, selector).map((r) => decl(r, 'background')).filter((v) => v !== undefined)
+      expect(backgrounds, `${selector} sets its background in exactly one rule`).toEqual(['var(--bg-card)'])
     })
 
     it('assistant bubbles reserve a right gutter at least as wide as the control footprint', async () => {
       const css = await readCss()
       const btn = css.match(/\n\.msg-copy-btn\s*\{([^}]+)\}/)?.[1] ?? ''
-      const bubble = css.match(/\n\.msg\.assistant\s*\{([^}]+)\}/)?.[1] ?? ''
+      const bubbles = rulesFor(css, '.msg.assistant').filter((r) => /(?:^|[\s;{])padding(?:-right)?:/.test(r))
+      expect(bubbles.length, '.msg.assistant sets its padding in exactly one rule').toBe(1)
+      const bubble = bubbles[0]!
       const width = parseFloat(decl(btn, 'width') ?? 'NaN')
       const right = parseFloat(decl(btn, 'right') ?? 'NaN')
       // `padding: <top> <right> <bottom> <left>` — the second value is the right.
