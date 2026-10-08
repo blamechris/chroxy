@@ -13,15 +13,9 @@ jest.mock('expo-secure-store', () => ({
 }));
 
 import * as SecureStore from 'expo-secure-store';
-import { PONG_TIMEOUT_MS } from '@chroxy/store-core';
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
-import {
-  resetReconnectAttempt,
-  reconnectAttempt,
-  HANDSHAKE_TIMEOUT_MS,
-  HEARTBEAT_INTERVAL_MS,
-} from '../../store/message-handler';
+import { resetReconnectAttempt } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 import { setEncryptionState, getEncryptionState } from '../../store/message-handler';
 import { createKeyPair, deriveSharedKey, encrypt, DIRECTION_SERVER } from '../../utils/crypto';
