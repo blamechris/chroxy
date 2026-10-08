@@ -250,10 +250,13 @@ export {
 
 export type {
   IncomingReplayEntry,
+  HeldResponseCompletion,
 } from './replay-dedup'
 
 export {
   isReplayDuplicate,
+  isResponseStreamBubbleId,
+  completeHeldResponseStream,
 } from './replay-dedup'
 
 export type {
@@ -835,6 +838,8 @@ export {
   moveEmptyResponseSlotToEnd,
   // #6630 — fill a held message in from a fuller replayed copy.
   applyMessageReconcile,
+  // #8444 — the session-level apply (messages + the stale streaming marker), used by both clients.
+  applyMessageReconcileToSession,
   handleStreamEnd,
   // #6756 — extended-thinking (reasoning) stream handlers.
   handleThinkingStreamStart,
@@ -1039,6 +1044,8 @@ export {
   REPLAY_PARITY_FIXTURES,
   REPLAY_PARITY_DIVERGENCES,
   REPLAY_PARITY_SESSION_ID,
+  // #8444 — hand-authored multi-tool-round turns for the cursor-replay tests.
+  CURSOR_REPLAY_SCENARIOS,
   replayParityModel,
 } from './contract-fixtures/replay-parity-fixtures'
 export type {
@@ -1046,6 +1053,7 @@ export type {
   ReplayParityFrame,
   ReplayParityRow,
   ReplayParityDivergence,
+  CursorReplayScenario,
 } from './contract-fixtures/replay-parity-fixtures'
 
 // epic #5556, sub-item 6: the encrypted-handshake fake-WS driver. The real

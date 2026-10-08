@@ -66,6 +66,82 @@ export type ReplayParityRow = Record<string, unknown>
 export const REPLAY_PARITY_SESSION_ID = 's1'
 
 /**
+ * #8444 -- turns the server-generated scenarios above do not cover: ONE stream id
+ * carrying several text blocks around tool calls, which is how every provider
+ * lays out a turn that uses tools (the id is minted per turn, the history records
+ * one `response` entry under it, and a live client splits it into `m1`,
+ * `m1-cont-<ts>`, ... bubbles). Hand-authored, in the wire shape the generated
+ * scenarios use (compare `text-around-a-tool`), and only for the cursor-replay
+ * tests: a full-rebuild replay of such a turn differs from the live one by design
+ * until #8438, so these are not run through the live-vs-replay comparison.
+ */
+export interface CursorReplayScenario {
+  name: string
+  description: string
+  /** What a connected client receives live, in order. */
+  live: ReplayParityFrame[]
+  /** What a cursor replay delivers after the turn (entries, in history order). */
+  replay: ReplayParityFrame[]
+}
+
+const SID = 's1'
+const TS = 1700000000000
+const liveDelta = (delta: string): ReplayParityFrame => ({ type: 'stream_delta', messageId: 'm1', delta, sessionId: SID })
+const liveTool = (id: string, tool: string, input: Record<string, unknown>, result: string): ReplayParityFrame[] => [
+  { type: 'tool_start', messageId: id, toolUseId: id, tool, input: null, sessionId: SID },
+  { type: 'tool_result', toolUseId: id, result, truncated: false, input, sessionId: SID },
+]
+const replayTool = (id: string, tool: string, input: Record<string, unknown>, result: string, seq: number): ReplayParityFrame[] => [
+  { type: 'tool_start', messageId: id, toolUseId: id, tool, input, timestamp: TS, sessionId: SID, historySeq: seq },
+  { type: 'tool_result', toolUseId: id, result, truncated: false, timestamp: TS, sessionId: SID, historySeq: seq + 1 },
+]
+const replayReply = (content: string, seq: number): ReplayParityFrame => ({
+  type: 'message', messageType: 'response', content, messageId: 'm1', timestamp: TS, sessionId: SID, historySeq: seq,
+})
+const turnEnd = (seq: number): ReplayParityFrame[] => [
+  { type: 'result', cost: 0.01, duration: 1000, usage: { input_tokens: 1, output_tokens: 1 }, timestamp: TS, sessionId: SID, historySeq: seq },
+  { type: 'agent_idle', sessionId: SID },
+]
+const liveTurnEnd: ReplayParityFrame[] = [
+  { type: 'stream_end', messageId: 'm1', sessionId: SID },
+  { type: 'result', cost: 0.01, duration: 1000, usage: { input_tokens: 1, output_tokens: 1 }, sessionId: SID },
+  { type: 'agent_idle', sessionId: SID },
+]
+
+export const CURSOR_REPLAY_SCENARIOS: CursorReplayScenario[] = [
+  {
+    name: 'long-reply',
+    description: 'A reply with no tools, delivered in several chunks.',
+    live: [
+      { type: 'stream_start', messageId: 'm1', sessionId: SID },
+      liveDelta('The build '), liveDelta('passed on '), liveDelta('every platform, '), liveDelta('so it can ship.'),
+      ...liveTurnEnd,
+    ],
+    replay: [replayReply('The build passed on every platform, so it can ship.', 1), ...turnEnd(2)],
+  },
+  {
+    name: 'two-tool-rounds',
+    description:
+      'One stream id across two tool rounds (the provider mints the id per turn): a live client lays it out as the first bubble and two continuation bubbles.',
+    live: [
+      { type: 'stream_start', messageId: 'm1', sessionId: SID },
+      liveDelta('Reading '), liveDelta('the file. '),
+      ...liveTool('tu1', 'Read', { file_path: '/repo/a.js' }, 'export const x = 1'),
+      liveDelta('Then '), liveDelta('running tests. '),
+      ...liveTool('tu2', 'Bash', { command: 'npm test' }, '3 passing'),
+      liveDelta('All '), liveDelta('green.'),
+      ...liveTurnEnd,
+    ],
+    replay: [
+      ...replayTool('tu1', 'Read', { file_path: '/repo/a.js' }, 'export const x = 1', 1),
+      ...replayTool('tu2', 'Bash', { command: 'npm test' }, '3 passing', 3),
+      replayReply('Reading the file. Then running tests. All green.', 5),
+      ...turnEnd(6),
+    ],
+  },
+]
+
+/**
  * The fields of a store message that decide what the user SEES (and what a
  * renderer's branch ladder switches on). Everything else on a `ChatMessage`
  * (`timestamp`, `answeredAt`, a countdown's `expiresAt`) is bookkeeping a clock
@@ -108,7 +184,9 @@ function stableId(id: unknown): unknown {
   if (typeof id !== 'string') return id
   return id
     .replace(/^([a-z]+)-\d+-\d{9,}$/, '$1-#')
-    .replace(/-(cont|post)-\d{9,}$/, '-$1-#')
+    // A split is made from the id of the slot it continues, so the suffixes chain
+    // (`m1-cont-<ts>-cont-<ts>`): every clock part is normalised, not only the last.
+    .replace(/-(cont|post)-\d{9,}/g, '-$1-#')
 }
 
 /**
