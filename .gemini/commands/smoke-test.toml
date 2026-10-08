@@ -66,15 +66,30 @@ env -i HOME="$HOME" USER="$USER" TERM=xterm-256color LANG=en_US.UTF-8 TMPDIR="$T
   > "$SMOKE/daemon.log" 2>&1 &
 PID=$!
 
+# Any failure from here stops OUR daemon (SIGTERM only, bounded wait, never SIGKILL) and
+# removes the scratch dir, which holds the token. A daemon that will not exit is left
+# running, with its scratch dir, and reported.
+abort() {
+  kill -TERM "$PID" 2>/dev/null
+  for i in $(seq 1 30); do kill -0 "$PID" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$PID" 2>/dev/null; then echo "daemon $PID still running after 30s; scratch kept at $SMOKE" >&2
+  else rm -rf -- "${SMOKE:?}"; fi
+  echo "$1" >&2; exit 1
+}
+
 # Wait for /health, then prove it is OUR daemon on OUR port with OUR config.
 for i in $(seq 1 40); do curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
-test "$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t)" = "$PID" || { kill "$PID"; echo "port $PORT is not ours"; exit 1; }
-grep -m1 'Config/state root:' "$SMOKE/daemon.log" | grep -q "$SMOKE/config" || { kill "$PID"; echo "daemon is not using the scratch config"; exit 1; }
-printf '{"pid":%s,"port":%s,"configDir":"%s/config","fixture":"%s/fixture"}\n' "$PID" "$PORT" "$SMOKE" "$SMOKE" > "$SMOKE/preview.json"
+curl -s "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 || abort "daemon did not answer /health"
+test "$(lsof -nP -iTCP:$PORT -sTCP:LISTEN -t)" = "$PID" || abort "port $PORT is not held by our daemon"
+case "$(grep -m1 'Config/state root:' "$SMOKE/daemon.log")" in
+  *"Config/state root: $SMOKE/config (from CHROXY_CONFIG_DIR)"*) ;;
+  *) abort "daemon is not using the scratch config" ;;
+esac
+printf '{"smoke":"%s","pid":%s,"port":%s,"configDir":"%s/config","fixture":"%s/fixture"}\n' "$SMOKE" "$PID" "$PORT" "$SMOKE" "$SMOKE" > "$SMOKE/preview.json"
 echo "$SMOKE/preview.json"
 ```
 
-Shell variables do not survive between Bash calls: read `pid`, `port` and the scratch path back from `$SMOKE/preview.json` in every later call. Stop the daemon by that PID only (step 5), never with `pkill`, `killall` or a pattern kill. `scripts/preview-daemon.sh` (#8305) will replace this recipe with one tested script.
+Shell variables do not survive between Bash calls: the last line printed is the `preview.json` path; read `smoke`, `pid` and `port` back from it in every later call. Stop the daemon by that PID only (step 5), never with `pkill`, `killall` or a pattern kill. `scripts/preview-daemon.sh` (#8305) will replace this recipe with one tested script.
 
 ### 2. Run the Smoke Test
 
@@ -142,7 +157,8 @@ Output a summary table:
 **Visual issues found:** M (describe any issues)
 
 If the test failed, check:
-- Is the throwaway daemon up? (`curl http://127.0.0.1:$PORT/health`, with `$PORT` read from `$SMOKE/preview.json`)
+- Is the throwaway daemon up? (`curl http://127.0.0.1:$PORT/health`, with `$PORT` read from the preview record)
+- A run against a daemon without the IDE feature (`features.ide` off, no `SMOKE_REQUIRE_IDE`) records 16 cases and exits 1 with `HARNESS BROKEN: ran 16 cases, expected at least 18` although every case passed. That is the floor, not a regression (#8435); judge the PASS/FAIL lines, not the exit code, until it is fixed.
 - Did the dashboard rebuild? (`npm run build -w @chroxy/dashboard`)
 - Are there console errors in the browser? (check screenshots or run with `--headed`)
 ```
@@ -160,9 +176,15 @@ fi
 Stop the daemon this skill started (step 1) and remove its scratch directory, which holds the token. Skip this when `--preview` was passed: that daemon belongs to whoever started it.
 
 ```bash
-PID=$(node -p "require('$SMOKE/preview.json').pid")
-ps -o command= -p "$PID" | grep -q "$SMOKE" && kill -TERM "$PID"   # only a PID whose command line names $SMOKE
-while kill -0 "$PID" 2>/dev/null; do sleep 1; done
+# PREVIEW is the preview.json path step 1 printed.
+SMOKE=$(node -p "require('$PREVIEW').smoke"); PID=$(node -p "require('$PREVIEW').pid")
+case "$SMOKE" in "$HOME"/chroxy-smoke.?*) ;; *) echo "not a smoke scratch dir: $SMOKE" >&2; exit 1 ;; esac
+if kill -0 "$PID" 2>/dev/null; then
+  case "$(ps -o command= -p "$PID")" in *"$SMOKE"*) ;; *) echo "PID $PID is not ours; leaving it" >&2; exit 1 ;; esac
+  kill -TERM "$PID"                      # SIGTERM only: never SIGKILL, it skips the state flush
+  for i in $(seq 1 30); do kill -0 "$PID" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$PID" 2>/dev/null; then echo "daemon $PID still running after 30s; report it, scratch kept at $SMOKE" >&2; exit 1; fi
+fi
 rm -rf -- "$SMOKE"
 ```
 

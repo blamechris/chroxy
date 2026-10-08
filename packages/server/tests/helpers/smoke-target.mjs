@@ -19,7 +19,10 @@
  *
  * Refused unless `--i-mean-production` is passed:
  *   - port 8765, by any route (`--port`, `--url`, `--preview`)
- *   - a preview whose configDir is the real `~/.chroxy`
+ *   - a preview whose configDir is a production config dir, by IDENTITY ((dev, ino), so
+ *     a differently-cased spelling on a case-insensitive volume is caught): `$HOME/.chroxy`,
+ *     the account's own home `.chroxy` (`os.userInfo().homedir`, which `HOME=` cannot
+ *     change), or the `CHROXY_CONFIG_DIR` of the calling shell
  * With the flag, and only then, a missing token is read from `~/.chroxy/config.json`.
  * Nothing in this module ever consults the keychain.
  *
@@ -29,7 +32,8 @@
  * doing. The port and config-dir checks are what is enforced.
  */
 
-import { readFileSync, realpathSync } from 'node:fs'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { userInfo } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
 export const PRODUCTION_PORT = 8765
@@ -48,7 +52,8 @@ Target (required; there is no default and no port probing):
 Options:
   --headed                show the browser window
   --dry-run               resolve and print the target, then exit without running
-  ${PRODUCTION_FLAG}   permit port ${PRODUCTION_PORT} and a ~/.chroxy config dir.
+  ${PRODUCTION_FLAG}   permit port ${PRODUCTION_PORT} and a production config dir
+                          (~/.chroxy, the account's home, or $CHROXY_CONFIG_DIR).
                           This drives the real daemon. Do not pass it from an
                           agent session.
   --help                  print this text
@@ -118,24 +123,55 @@ function parsePort(value) {
   return n >= 1 && n <= 65535 ? n : null
 }
 
-function sameDir(a, b, realpath) {
+/**
+ * Whether two paths name the same directory. Identity, not spelling: on a
+ * case-insensitive volume (the macOS default) `<home>/.CHROXY` IS `<home>/.chroxy`,
+ * and `realpathSync` keeps the spelling it was given, so it alone lets that through.
+ * (dev, ino) settles it; the native realpath is the fallback when a path cannot be
+ * stat'ed.
+ */
+function sameDir(a, b, { realpath, stat }) {
+  try {
+    const sa = stat(a)
+    const sb = stat(b)
+    if (sa.dev === sb.dev && sa.ino === sb.ino) return true
+  } catch { /* one of them does not exist: fall through to the spelling check */ }
   const real = (p) => { try { return realpath(p) } catch { return resolve(p) } }
   return real(a) === real(b)
+}
+
+function osHome() {
+  try { return userInfo().homedir } catch { return null }
 }
 
 /**
  * Turn parsed args into a target, or a reason there isn't one.
  *
  * @param {object} args From parseSmokeArgs.
- * @param {{ home: string, readFile?: (p: string, enc: string) => string, realpath?: (p: string) => string }} deps
+ * @param {{ home: string, userHome?: string|null, env?: Record<string, string|undefined>,
+ *   readFile?: (p: string, enc: string) => string, realpath?: (p: string) => string,
+ *   stat?: (p: string) => { dev: number, ino: number|bigint } }} deps
  * @returns {{ ok: true, origin: string, port: number, token: string, source: string }
  *         | { ok: false, kind: 'usage'|'refused', error: string }}
  */
-export function resolveSmokeTarget(args, { home, readFile = readFileSync, realpath = realpathSync }) {
+export function resolveSmokeTarget(args, {
+  home,
+  userHome = osHome(),
+  env = {},
+  readFile = readFileSync,
+  realpath = realpathSync.native,
+  stat = statSync,
+}) {
   const usage = (error) => ({ ok: false, kind: 'usage', error })
   const refused = (error) => ({ ok: false, kind: 'refused', error })
   if (!home) return usage('cannot resolve a home directory')
   const realDir = join(home, '.chroxy')
+  // Every place the production daemon's config can live from this shell: $HOME can be
+  // overridden (HOME=/tmp/x node ...) while the account's real home cannot, and
+  // CHROXY_CONFIG_DIR is where a daemon started from this shell would read.
+  const productionDirs = [realDir]
+  if (userHome) productionDirs.push(join(userHome, '.chroxy'))
+  if (env.CHROXY_CONFIG_DIR && isAbsolute(env.CHROXY_CONFIG_DIR)) productionDirs.push(env.CHROXY_CONFIG_DIR)
 
   if (args.preview && (args.url || args.port || args.token)) {
     return usage('--preview supplies the port and token; do not combine it with --url, --port or --token')
@@ -184,8 +220,9 @@ export function resolveSmokeTarget(args, { home, readFile = readFileSync, realpa
     if (port === PRODUCTION_PORT) {
       return refused(`port ${PRODUCTION_PORT} is the production daemon; refusing (pass ${PRODUCTION_FLAG} to override)`)
     }
-    if (configDir && sameDir(configDir, realDir, realpath)) {
-      return refused(`preview configDir is the real ${realDir}; refusing (pass ${PRODUCTION_FLAG} to override)`)
+    const hit = configDir && productionDirs.find(d => sameDir(configDir, d, { realpath, stat }))
+    if (hit) {
+      return refused(`preview configDir is the real config dir ${hit}; refusing (pass ${PRODUCTION_FLAG} to override)`)
     }
   }
 

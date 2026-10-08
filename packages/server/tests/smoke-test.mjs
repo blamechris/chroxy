@@ -38,7 +38,7 @@ if (parsed.error) {
   console.error(`smoke-test: ${parsed.error}\n\n${USAGE}`)
   process.exit(2)
 }
-const target = resolveSmokeTarget(parsed.args, { home: process.env.HOME })
+const target = resolveSmokeTarget(parsed.args, { home: process.env.HOME, env: process.env })
 if (!target.ok) {
   console.error(`smoke-test: ${target.error}${target.kind === 'usage' ? `\n\n${USAGE}` : ''}`)
   process.exit(target.kind === 'refused' ? 3 : 2)

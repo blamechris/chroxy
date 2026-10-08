@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -80,7 +80,10 @@ describe('smoke target: resolution and refusals (#8225)', () => {
   })
   after(() => rmSync(root, { recursive: true, force: true }))
 
-  const resolveFrom = (argv, env = {}) => resolveSmokeTarget(parseSmokeArgs(argv, env).args, { home })
+  // userHome: null keeps the resolver from stat'ing the account's REAL ~/.chroxy here;
+  // the cases that exercise that path inject a temp dir for it instead.
+  const resolveFrom = (argv, env = {}, deps = {}) =>
+    resolveSmokeTarget(parseSmokeArgs(argv, env).args, { home, userHome: null, env: {}, ...deps })
 
   it('NO target is a usage error, never a fallback to production', () => {
     const r = resolveFrom([])
@@ -152,6 +155,64 @@ describe('smoke target: resolution and refusals (#8225)', () => {
     const r2 = resolveFrom(['--preview', viaLink])
     assert.equal(r2.ok, false)
     assert.equal(r2.kind, 'refused')
+  })
+
+  it('refuses a configDir that is the real dir under another SPELLING (case-insensitive volumes)', () => {
+    // Identity is (dev, ino), not the path text: `.CHROXY` is `.chroxy` on a
+    // case-insensitive volume and realpath keeps the spelling it was given.
+    const rec = join(root, 'upper.json')
+    const upper = join(home, '.CHROXY')
+    writeFileSync(rec, JSON.stringify({ port: 9444, configDir: upper }))
+    const stat = (p) => (p === upper || p === join(home, '.chroxy') ? { dev: 7, ino: 42 } : { dev: 7, ino: 1 })
+    const r = resolveFrom(['--preview', rec], {}, { stat, realpath: (p) => p })
+    assert.equal(r.ok, false)
+    assert.equal(r.kind, 'refused')
+    // CONTROL: a directory with a different identity is not caught by the same code.
+    const other = resolveFrom(['--preview', join(preview, 'preview.json')], {}, { stat, realpath: (p) => p })
+    assert.equal(other.ok, true)
+  })
+
+  it('on the real filesystem, a differently-cased spelling of the real dir is refused when the volume folds case', (t) => {
+    const probe = join(root, 'CasE-probe')
+    mkdirSync(probe)
+    if (!existsSync(join(root, 'case-probe'))) return t.skip('case-sensitive volume: the spelling cannot alias here')
+    const rec = join(root, 'upper-real.json')
+    writeFileSync(rec, JSON.stringify({ port: 9444, configDir: join(home, '.CHROXY') }))
+    const r = resolveFrom(['--preview', rec])
+    assert.equal(r.ok, false)
+    assert.equal(r.kind, 'refused')
+  })
+
+  it("refuses the ACCOUNT's home .chroxy even when $HOME points elsewhere", () => {
+    const acct = join(root, 'account-home')
+    mkdirSync(join(acct, '.chroxy'), { recursive: true })
+    writeFileSync(join(acct, '.chroxy', 'config.json'), JSON.stringify({ apiToken: 'ACCOUNT-PROD-TOKEN' }))
+    const rec = join(root, 'acct.json')
+    writeFileSync(rec, JSON.stringify({ port: 9444, configDir: join(acct, '.chroxy') }))
+    const r = resolveFrom(['--preview', rec], {}, { userHome: acct })
+    assert.equal(r.ok, false)
+    assert.equal(r.kind, 'refused')
+    assert.ok(!JSON.stringify(r).includes('ACCOUNT-PROD-TOKEN'))
+    // CONTROL: with no userHome to compare against, that same record resolves, so the
+    // refusal above came from the userInfo comparison and not from something else.
+    assert.equal(resolveFrom(['--preview', rec], {}, { userHome: null }).ok, true)
+    // And the flag lifts it, as it does for $HOME's.
+    assert.equal(resolveFrom(['--preview', rec, PRODUCTION_FLAG], {}, { userHome: acct }).ok, true)
+  })
+
+  it('refuses a configDir equal to CHROXY_CONFIG_DIR from the environment', () => {
+    const envDir = join(root, 'env-config')
+    mkdirSync(envDir)
+    writeFileSync(join(envDir, 'config.json'), JSON.stringify({ apiToken: 'ENV-TOKEN' }))
+    const rec = join(root, 'envdir.json')
+    writeFileSync(rec, JSON.stringify({ port: 9444, configDir: envDir }))
+    const r = resolveFrom(['--preview', rec], {}, { env: { CHROXY_CONFIG_DIR: envDir } })
+    assert.equal(r.ok, false)
+    assert.equal(r.kind, 'refused')
+    // CONTROL: unset (or a different dir), the same record resolves.
+    assert.equal(resolveFrom(['--preview', rec], {}, { env: {} }).ok, true)
+    assert.equal(resolveFrom(['--preview', rec], {}, { env: { CHROXY_CONFIG_DIR: join(root, 'else') } }).ok, true)
+    assert.equal(resolveFrom(['--preview', rec, PRODUCTION_FLAG], {}, { env: { CHROXY_CONFIG_DIR: envDir } }).ok, true)
   })
 
   it('the production flag lifts both refusals and, only then, reads the real token', () => {
@@ -250,6 +311,14 @@ describe('smoke-test.mjs entry point (#8225)', () => {
     const r = run(['--preview', f])
     assert.equal(r.status, 3, r.stderr)
     assert.ok(!/REAL-PROD-TOKEN/.test(r.stdout + r.stderr))
+  })
+
+  it('a preview at the CHROXY_CONFIG_DIR of the calling shell: exits 3', () => {
+    const f = join(root, 'envdir.json')
+    writeFileSync(f, JSON.stringify({ port: 9444, configDir: join(root, 'config') }))
+    const r = run(['--preview', f], { CHROXY_CONFIG_DIR: join(root, 'config') })
+    assert.equal(r.status, 3, r.stderr)
+    assert.ok(!/preview-token/.test(r.stdout + r.stderr))
   })
 
   it('an unknown argument: exits 2', () => {
