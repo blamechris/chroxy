@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A permission prompt that expired or was answered no longer vanishes from
+  the transcript when you switch sessions or reload (#8348).**
+  - Permission prompts are live-only frames and are not kept in a session's
+    history, so a switch or reload rebuilt the transcript without any prompt
+    that had already ended. That also took out the compact "Permission expired
+    ... dropped" record added for a dismissed expired card (#7353).
+  - The daemon now records one `permission_outcome` entry per prompt
+    (allowed, denied, or expired) in the session history, on both the
+    in-process providers (claude-sdk) and the hook-routed ones (claude-tui).
+    It keeps only what the clients were already shown: the tool and the
+    (redacted, capped) description. It is saved in `session-state.json`, so it
+    also survives a daemon restart.
+  - Both clients replay it as a compact line: "Permission expired - Bash: ls
+    - dropped", or "Permission allowed / denied - ...". It collapses onto a
+    card the client already holds, never doubles up, and never becomes a
+    pending card.
+  - A prompt that was open when the daemon restarted has no recorded outcome.
+
 ## [0.11.4] - 2026-10-07
 
 ### Fixed

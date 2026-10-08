@@ -3641,6 +3641,34 @@ describe('@chroxy/protocol schemas', () => {
     })
   })
 
+  describe('#8348 — permission_outcome (the durable record of a finished prompt)', () => {
+    it('ServerPermissionOutcomeSchema accepts a replayed entry in each outcome', async () => {
+      const { ServerPermissionOutcomeSchema } = await import('../src/schemas/server/stream.ts')
+      for (const outcome of ['allowed', 'denied', 'expired']) {
+        const r = ServerPermissionOutcomeSchema.safeParse({
+          type: 'permission_outcome', requestId: 'perm-1', tool: 'Bash', description: 'ls -la',
+          outcome, timestamp: 1700000000000, sessionId: 's1', historySeq: 7,
+        })
+        assert.ok(r.success, `outcome ${outcome} must parse`)
+        assert.equal(r.data.historySeq, 7, 'historySeq survives parsing (the replay cursor reads it)')
+      }
+    })
+
+    it('ServerPermissionOutcomeSchema rejects an unknown outcome and a missing requestId', async () => {
+      const { ServerPermissionOutcomeSchema } = await import('../src/schemas/server/stream.ts')
+      const base = { type: 'permission_outcome', requestId: 'perm-1', tool: 'Bash', description: 'ls', outcome: 'expired' }
+      assert.ok(ServerPermissionOutcomeSchema.safeParse(base).success)
+      assert.equal(ServerPermissionOutcomeSchema.safeParse({ ...base, outcome: 'maybe' }).success, false)
+      assert.equal(ServerPermissionOutcomeSchema.safeParse({ ...base, requestId: undefined }).success, false)
+    })
+
+    it('is exported from the schemas entry point', async () => {
+      const mod = await import('../src/schemas/index.ts')
+      assert.ok(mod.ServerPermissionOutcomeSchema)
+      assert.ok(mod.PermissionOutcomeSchema)
+    })
+  })
+
   describe('PermissionRuleSchema path scope (#6803, PR #6873 review)', () => {
     it('accepts an unscoped rule (no path) and a valid path scope', async () => {
       const { PermissionRuleSchema } = await import('../src/schemas/client.ts')

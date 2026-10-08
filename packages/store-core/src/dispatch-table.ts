@@ -135,6 +135,9 @@ import {
   handleMessageQueued,
   handleMessageDequeued,
   type QueuedMessagesBuilder,
+  // --- permission_outcome (#8348) — the durable record of a finished prompt ---
+  handlePermissionOutcome,
+  buildPermissionOutcomeMessage,
   // --- user_question (#5618) — byte-identical parse + append + notify ---
   handleUserQuestion,
   OTHER_OPTION_VALUE,
@@ -181,6 +184,7 @@ import {
 // #7728 — available_models lands in a provider-keyed map, not one global slot.
 import { mergeModelsByProvider, type ModelsByProvider } from './models-by-provider'
 import { applyInputAcknowledgement, type InputDeliveryMap } from './input-delivery'
+import { isPermissionDecision } from './pending-permissions'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -1009,6 +1013,20 @@ export interface DispatchMessageMap {
     // #8336 — set on a REPLAYED question whose tool was in flight when the
     // daemon shut down (see `handleUserQuestion`). Never on a live frame.
     interrupted?: boolean
+  }
+  // --- permission_outcome (#8348) ---
+  // How a permission prompt ended, recorded by the server in history and
+  // delivered ONLY inside a replay (the live permission_* frames are transient).
+  // `historySeq` is stamped by the replay like every entry; it is not read here.
+  permission_outcome: {
+    type: 'permission_outcome'
+    sessionId?: string
+    requestId?: string
+    tool?: string
+    description?: string
+    outcome?: string
+    timestamp?: number
+    historySeq?: number
   }
   // --- multi_question_intervention (#5618) — the deny-event the builder reads ---
   multi_question_intervention: {
@@ -2326,6 +2344,77 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
 }
 
 /**
+ * `permission_outcome` (#8348) — the server's durable record of how a permission
+ * prompt ended, replayed so a session switch or a reload can still show it.
+ *
+ * `permission_request` / `permission_resolved` / `permission_expired` are
+ * transient: a full-rebuild replay swaps in a message list built from history
+ * alone, so a prompt that had already expired or been answered used to vanish
+ * from the transcript — taking with it the only trace of a tool call the agent
+ * asked for and did not get. This entry is what the replay carries instead.
+ *
+ * It becomes a compact record (a `prompt` message that is never pending: no
+ * options, no `expiresAt`), with two rules about prompts the client ALREADY holds:
+ *
+ *   - NEVER TWO FOR ONE `requestId`. The search runs over `replayDedupCache`, the
+ *     view a rebuild will KEEP (#7508): in a delta replay that is everything, so a
+ *     card the client watched live collapses the outcome into itself; in a full
+ *     rebuild it is the appended tail only, so the live card in the discarded
+ *     prefix does not suppress the outcome that has to replace it. A record
+ *     already in the tail (the same entry replayed twice) is left as it is.
+ *   - NEVER A PENDING CARD. A held card that is already answered, or already past
+ *     its `expiresAt`, is left exactly as it is (it IS the record). A held card
+ *     still showing live Allow/Deny controls for a prompt the server says is over
+ *     (the client missed the `permission_resolved` while disconnected) is retired:
+ *     answered with the recorded decision, or marked expired — the same two
+ *     transitions the live frames make, because leaving it actionable would put
+ *     a button on a dead prompt.
+ *
+ * No notification, unlike a live prompt: this is history, not an event.
+ */
+function dispatchPermissionOutcome<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['permission_outcome'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const payload = handlePermissionOutcome(msg as Record<string, unknown>)
+  if (!payload) return
+  const sessionId = payload.sessionId ?? adapter.getActiveSessionId()
+  const record = buildPermissionOutcomeMessage(payload)
+  if (!sessionId || !adapter.hasSession(sessionId)) {
+    adapter.addMessage(record)
+    return
+  }
+  adapter.updateSession(sessionId, (ss) => {
+    const searchable = replayDedupCache(sessionId, ss.messages)
+    // The view is either the array itself or a tail slice of it, so the
+    // difference in length IS the offset back into `ss.messages`.
+    const offset = ss.messages.length - searchable.length
+    const found = searchable.findIndex((m) => m.type === 'prompt' && m.requestId === payload.requestId)
+    if (found === -1) return { messages: [...ss.messages, record] } as Partial<S>
+    const idx = found + offset
+    const held = ss.messages[idx]!
+    // The same entry replayed again: the record is already here.
+    if (held.permissionOutcome) return {} as Partial<S>
+    // A live card that already carries its outcome (answered, or past its
+    // countdown) IS the record of this prompt.
+    if (isPermissionDecision(held.answered)) return {} as Partial<S>
+    if (held.expiresAt !== undefined && held.expiresAt <= Date.now()) return {} as Partial<S>
+    // A live card still offering controls for a prompt the server says is over.
+    const next = ss.messages.slice()
+    next[idx] =
+      payload.outcome === 'expired'
+        ? { ...held, options: undefined, expiresAt: Date.now() }
+        : {
+            ...held,
+            answered: payload.outcome === 'allowed' ? 'allow' : 'deny',
+            answeredAt: Date.now(),
+            options: undefined,
+          }
+    return { messages: next } as Partial<S>
+  })
+}
+
+/**
  * `multi_question_intervention` (#5618/#4653) — chroxy's permission-hook denied a
  * multi-question AskUserQuestion; append a {@link SessionIntervention} so the
  * session-header/footer counter ticks, and on the FIRST intervention per session
@@ -2521,6 +2610,8 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     },
     // --- user_question (#5618) — byte-identical append + notify ---
     user_question: dispatchUserQuestion,
+    // --- permission_outcome (#8348) — the durable record of a finished prompt ---
+    permission_outcome: dispatchPermissionOutcome,
     // --- multi_question_intervention (#5618) — byte-identical builder + append ---
     multi_question_intervention: dispatchMultiQuestionIntervention,
     // --- checkpoint cases (#5618 Batch 6) ---
@@ -2617,6 +2708,8 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'thinking_level_changed',
   // --- user_question (#5618) — byte-identical append + notify ---
   'user_question',
+  // --- permission_outcome (#8348) — the durable record of a finished prompt ---
+  'permission_outcome',
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
   'multi_question_intervention',
   // --- checkpoint cases (#5618 Batch 6) ---

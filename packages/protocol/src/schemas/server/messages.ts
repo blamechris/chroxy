@@ -8,7 +8,7 @@
 import { z } from 'zod'
 
 import { BillingCanarySnapshotSchema, BillingCanaryWarningSchema, ServerAuthOkSchema, ServerPairPendingSchema, ServerPairRequestPendingSchema, ServerPairResolvedSchema, ServerPairResultSchema } from './connection.ts'
-import { ServerPermissionRequestSchema, ServerPermissionInputSchema, ServerPermissionExpiredSchema, ServerPermissionResolvedSchema, ServerStreamDeltaSchema, ServerShellPendingApprovalSchema } from './stream.ts'
+import { ServerPermissionRequestSchema, ServerPermissionInputSchema, ServerPermissionExpiredSchema, ServerPermissionResolvedSchema, ServerPermissionOutcomeSchema, PermissionOutcomeSchema, ServerStreamDeltaSchema, ServerShellPendingApprovalSchema } from './stream.ts'
 import { ActivityEntrySchema, ActivityKindSchema, ActivityOutputRefSchema, ActivityStatusSchema, ServerActivityDeltaSchema, ServerActivitySnapshotSchema, ServerCancelActivityAckSchema, ServerMessageDequeuedSchema, ServerMessageQueuedSchema } from './activity.ts'
 import { ExternalSessionEntrySchema, HostStatusSummarySchema, IntegrationActionCountsSchema, IntegrationCliStatusSchema, IntegrationRepoSchema, IntegrationStatusSummarySchema, MailboxDeliveryEventSchema, MailboxRegistrationSchema, RepoEventSchema, ServerRepoEventsDeltaSchema, RepoWebhookDeliveriesSchema, ServerGithubWebhookConfigSchema, RepoMemoryCacheSchema, RepoMemoryReportSchema, RepoMemoryStatusSchema, RepoRelayRunSchema, RepoRelayStatusSchema, RepoRelayVerdictSchema, RepoRunnersSchema, RepoRuntimeConfigEntrySchema, RepoStatusSchema, RepoTreeSchema, RepoVerdictSchema, RunnerInfoSchema, RunnerServiceStateSchema, RunnerStatusSummarySchema, RunnerVerdictSchema, ServerByokPoolActionAckSchema, ServerByokPoolStatusSnapshotSchema, ServerContainersActionAckSchema, ServerContainersStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerHostPruneActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerSessionPresetDisclosureSchema, ServerSessionPresetFullSchema, ServerSessionPresetSnapshotSchema, ServerSimulatorActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerSummarizeSessionResultSchema, ServerWslActionAckSchema, ServerWslStatusSnapshotSchema, SkillInventoryEntrySchema, SkillInventoryRepoSchema } from './control-room.ts'
 import { ServerFailedRestoresListSchema, CumulativeUsageSchema, ServerAuthBootstrapSchema, ServerConversationIdSchema, ServerInputAckSchema, ServerSessionPrStatusSchema, ServerSessionPrThreadsSchema, ServerSessionStoppedSchema, ServerSkillTrustGrantInvalidAuthorSchema, ServerSkillTrustGrantOkSchema, ServerSkillsListSchema, ServerStatuslineOutputSchema, ServerTunnelUrlChangedSchema, SessionPrCheckCountsSchema, SessionPrChecksSchema, SessionPrMergeSchema, SessionPrRefSchema } from './session.ts'
@@ -33,6 +33,10 @@ export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequ
 // schema — a pending prompt expiring, and a prompt resolving (requestId variant).
 export type ServerPermissionExpiredMessage = z.infer<typeof ServerPermissionExpiredSchema>
 export type ServerPermissionResolvedMessage = z.infer<typeof ServerPermissionResolvedSchema>
+// #8348: the durable record of how a permission prompt ended, delivered inside a
+// history replay.
+export type ServerPermissionOutcomeMessage = z.infer<typeof ServerPermissionOutcomeSchema>
+export type PermissionOutcome = z.infer<typeof PermissionOutcomeSchema>
 // #6891: typed alias for the SDK conversation-handle stamp used for session
 // portability.
 export type ServerConversationIdMessage = z.infer<typeof ServerConversationIdSchema>

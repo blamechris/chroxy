@@ -585,6 +585,55 @@ export function PermissionPill({
 }
 
 // ---------------------------------------------------------------------------
+// PermissionOutcomeRecord — the transcript line for a prompt that has ENDED
+// ---------------------------------------------------------------------------
+
+/**
+ * #8348 — the compact record of a permission prompt rebuilt from the server's
+ * durable `permission_outcome` history entry (a session switch or a reload: the
+ * live card is not replayed). Non-interactive: there is nothing to expand (the
+ * entry keeps no tool input) and nothing to answer.
+ *
+ * `allowed` / `denied` read like the pill a live answered card collapses to;
+ * `expired` (no decision) reads like the dashboard's dismissed-expired record, so
+ * the two clients tell the same story: "Permission expired — Bash: ls — dropped".
+ */
+export function PermissionOutcomeRecord({ message }: { message: ChatMessage }) {
+  const outcome = message.permissionOutcome;
+  const detail = message.content?.trim() || message.tool || 'Permission requested';
+  if (outcome === 'expired') {
+    const text = `Permission expired \u2014 ${detail} \u2014 dropped`;
+    return (
+      <View
+        style={[styles.permissionPill, styles.permissionPillExpired]}
+        accessibilityRole="text"
+        accessibilityLabel={text}
+        testID={`permission-outcome-${message.id}`}
+      >
+        <Text style={styles.permissionPillTextExpired} numberOfLines={3}>{text}</Text>
+      </View>
+    );
+  }
+  const isDenied = outcome === 'denied';
+  const statusLabel = isDenied ? 'Denied' : 'Allowed';
+  return (
+    <View
+      style={[styles.permissionPill, isDenied ? styles.permissionPillDenied : styles.permissionPillAllowed]}
+      accessibilityRole="text"
+      accessibilityLabel={`${statusLabel}: ${detail}`}
+      testID={`permission-outcome-${message.id}`}
+    >
+      <Text
+        style={isDenied ? styles.permissionPillTextDenied : styles.permissionPillTextAllowed}
+        numberOfLines={3}
+      >
+        {isDenied ? ICON_CLOSE : ICON_CHECK} {statusLabel}: {detail}
+      </Text>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Styles
 // ---------------------------------------------------------------------------
 
@@ -710,6 +759,16 @@ const styles = StyleSheet.create({
     color: COLORS.accentRed,
     fontSize: 13,
     fontWeight: '600',
+  },
+  // #8348: a prompt that ended with no decision — muted, not green or red.
+  permissionPillExpired: {
+    backgroundColor: COLORS.backgroundTertiary,
+    borderColor: COLORS.accentGrayBorder,
+  },
+  permissionPillTextExpired: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    fontStyle: 'italic',
   },
 
   // Collapse link (used by ChatView for expanded pill)

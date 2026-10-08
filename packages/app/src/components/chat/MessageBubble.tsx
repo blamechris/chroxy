@@ -21,7 +21,7 @@ import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { FormattedResponse } from '../MarkdownRenderer';
-import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, permissionStyles } from '../PermissionDetail';
+import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, PermissionOutcomeRecord, permissionStyles } from '../PermissionDetail';
 import { PreWriteDiffReview, isReviewableTool } from '../PreWriteDiffReview';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ToolBubble } from './ToolBubble';
@@ -492,6 +492,15 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   // that fixes it (selectable, to copy into a host terminal).
   if (isError && message.code === 'AUTH_REQUIRED') {
     return <AuthRequiredChip errorText={message.content ?? ''} />;
+  }
+
+  // #8348: a permission prompt that has ENDED, rebuilt from the server's durable
+  // `permission_outcome` history entry (a session switch or a reload — the live
+  // card is not replayed). A compact, non-interactive record. Ahead of the pill so
+  // an allowed/denied record (which also carries `answered`) does not offer an
+  // "expand" there is nothing behind.
+  if (isPrompt && message.requestId && message.permissionOutcome) {
+    return <PermissionOutcomeRecord message={message} />;
   }
 
   if (showAsPill) {

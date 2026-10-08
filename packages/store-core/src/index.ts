@@ -133,6 +133,8 @@ export type {
   MessageAttachment,
   ToolResultImage,
   ChatMessage,
+  // #8348 — how a permission prompt ended, as recorded in the transcript
+  PermissionOutcomeKind,
   // #5016 — one nested wire event from a Task subagent, attached to
   // the parent Task tool_use bubble via `ChatMessage.childAgentEvents[]`.
   ChildAgentEvent,
@@ -608,6 +610,8 @@ export type {
   PermissionRule,
   PermissionRequestPayload,
   PermissionResolvedPayload,
+  // #8348
+  PermissionOutcomePayload,
   PermissionRulesUpdatedPayload,
   SessionTimeoutPayload,
   SessionRestoreFailedPayload,
@@ -730,6 +734,10 @@ export {
   handlePermissionRequest,
   handlePermissionResolved,
   handlePermissionExpired,
+  // #8348 — a replayed `permission_outcome`: parse it, and build the transcript
+  // record for it (never a pending card).
+  handlePermissionOutcome,
+  buildPermissionOutcomeMessage,
   // #7380 — the one wording for the #2833 already-answered race, shared because
   // the two clients surface it through different channels (toast vs transcript).
   PERMISSION_ALREADY_ANSWERED_NOTICE,

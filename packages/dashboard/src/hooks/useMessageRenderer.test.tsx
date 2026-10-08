@@ -368,3 +368,72 @@ describe('useMessageRenderer — pending AskUserQuestion permission (#8264)', ()
     expect(screen.getByText('Red')).toBeInTheDocument()
   })
 })
+
+// #8348: a permission prompt that has ENDED is rebuilt from the server's durable
+// `permission_outcome` history entry on a session switch or reload; it renders as
+// the compact record, never as an actionable card.
+describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
+  function outcomeMsg(outcome: 'allowed' | 'denied' | 'expired', over: Partial<ChatMessage> = {}): ChatMessage {
+    return {
+      id: 'o1',
+      type: 'prompt',
+      content: 'Bash: Commit the restructured fix',
+      tool: 'Bash',
+      requestId: 'req-o1',
+      permissionOutcome: outcome,
+      ...(outcome === 'allowed' ? { answered: 'allow' } : {}),
+      ...(outcome === 'denied' ? { answered: 'deny' } : {}),
+      timestamp: 0,
+      ...over,
+    } as ChatMessage
+  }
+
+  function renderOutcome(msg: ChatMessage) {
+    const args = makeArgs({ storeMsgMap: new Map([[msg.id, msg]]), storeMessages: [msg] })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    return render(<>{result.current({ id: msg.id, type: 'response', content: msg.content, timestamp: 0 } as ChatViewMessage)}</>)
+  }
+
+  it('renders an expired outcome as the #7353 dropped record, with no controls', () => {
+    renderOutcome(outcomeMsg('expired'))
+    const record = screen.getByTestId('perm-dropped-record')
+    expect(record).toHaveTextContent('Permission expired')
+    expect(record).toHaveTextContent('Bash')
+    expect(record).toHaveTextContent('Commit the restructured fix')
+    expect(record).toHaveTextContent('dropped')
+    expect(record.getAttribute('role')).toBe('status')
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
+  })
+
+  it('does not repeat the tool label (the stored content is "<tool>: <description>")', () => {
+    renderOutcome(outcomeMsg('expired'))
+    expect(screen.getByTestId('perm-dropped-record').textContent).not.toMatch(/Bash: Bash/)
+  })
+
+  it('renders allowed and denied outcomes as a compact record that says which way', () => {
+    const { unmount } = renderOutcome(outcomeMsg('allowed'))
+    expect(screen.getByTestId('perm-outcome-record')).toHaveTextContent('Permission allowed')
+    expect(screen.getByTestId('perm-outcome-record')).toHaveTextContent('Commit the restructured fix')
+    expect(screen.getByTestId('perm-outcome-record')).not.toHaveTextContent('dropped')
+    unmount()
+    renderOutcome(outcomeMsg('denied'))
+    expect(screen.getByTestId('perm-outcome-record')).toHaveTextContent('Permission denied')
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+  })
+
+  it('is never an actionable card, even if a stray expiresAt is left on it', () => {
+    renderOutcome(outcomeMsg('expired', { expiresAt: Date.now() + 60_000 }))
+    expect(screen.getByTestId('perm-dropped-record')).toBeInTheDocument()
+    expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
+  })
+
+  it('POSITIVE CONTROL: a live prompt (no outcome) still renders the actionable card', () => {
+    const live = promptMsg('p1', 'Bash: ls', 'Bash', 'req-live')
+    const args = makeArgs({ storeMsgMap: new Map([['p1', live]]), storeMessages: [live] })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    render(<>{result.current({ id: 'p1', type: 'response', content: live.content, timestamp: 0 } as ChatViewMessage)}</>)
+    expect(screen.getByTestId('permission-prompt')).toBeInTheDocument()
+    expect(screen.queryByTestId('perm-dropped-record')).not.toBeInTheDocument()
+  })
+})

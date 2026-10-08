@@ -659,6 +659,36 @@ export const ServerPermissionResolvedSchema = z.object({
     sessionId: z.string().optional(),
 });
 /**
+ * #8348: how a permission prompt ENDED, as a durable history entry.
+ *
+ * `permission_request`, `permission_resolved` and `permission_expired` are live
+ * frames the server never records, so a full-rebuild replay (session switch,
+ * reload) cannot show a prompt that already expired or was answered. The server
+ * records one `permission_outcome` per prompt instead, and the replay delivers
+ * it. It is NEVER broadcast live: a client that watched the prompt already holds
+ * its card, and a replayed outcome collapses onto that card by `requestId`.
+ *
+ *   - `requestId` -- the prompt's id; the key a client collapses a held card on.
+ *   - `tool` / `description` -- what the client was shown when the prompt was
+ *     raised (the description was redacted and capped then; the server clips it
+ *     again, to 100 / 500 characters). No raw tool input is recorded.
+ *   - `outcome` -- `allowed`, `denied`, or `expired` (no decision was made: it
+ *     timed out, the turn ended or was stopped, or the session cleared it).
+ *   - `timestamp` -- when the server recorded it (ms since the epoch).
+ *   - `sessionId` / `historySeq` -- stamped by the replay, like every entry.
+ */
+export const PermissionOutcomeSchema = z.enum(['allowed', 'denied', 'expired']);
+export const ServerPermissionOutcomeSchema = z.object({
+    type: z.literal('permission_outcome'),
+    requestId: z.string(),
+    tool: z.string(),
+    description: z.string(),
+    outcome: PermissionOutcomeSchema,
+    timestamp: z.number().optional(),
+    sessionId: z.string().optional(),
+    historySeq: z.number().optional(),
+});
+/**
  * #6543 (IDE P3, feature B) — reply to a `get_permission_input`. The
  * `permission_request` broadcast truncates `input` at ~10K (secret-safe), so a
  * client building a per-hunk pre-write diff PULLS the full (still

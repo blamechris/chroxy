@@ -179,6 +179,14 @@ export function createPermissionResolver({
       const toolName = pendingPermissions.get(requestId)?.data?.tool
       consumeRoute(requestId)
       resolveLegacyPermission(requestId, decision)
+      // #8348: a hook-routed prompt (claude-tui, claude-cli) has no
+      // PermissionManager to announce its end, so the answer is journaled here --
+      // the one place both transports (WS and HTTP) pass through. The manager
+      // remembers what the prompt was from the moment it was raised, so only the
+      // outcome is passed; an unknown id (an unattributed prompt) records nothing.
+      try {
+        sm?.recordPermissionOutcome?.(requestId, decision === 'deny' ? 'denied' : 'allowed')
+      } catch { /* the answer already went out; journaling is best-effort */ }
       // Legacy (non-SDK) sessions have no PermissionManager/rule store, so
       // 'allowAlways' here is never durable — tool is the only enrichment.
       audit(clientId, originSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})

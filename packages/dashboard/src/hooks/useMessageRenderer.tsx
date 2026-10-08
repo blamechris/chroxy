@@ -8,6 +8,7 @@ import type { ProviderCapabilities } from '../store/types'
 import { ToolGroup } from '../components/ToolGroup'
 import { ToolBubble } from '../components/ToolBubble'
 import { PermissionPrompt } from '../components/PermissionPrompt'
+import { PermissionOutcomeRecord } from '../components/PermissionOutcomeRecord'
 import { PermissionExpiredSummary } from '../components/PermissionExpiredSummary'
 import { QuestionPrompt } from '../components/QuestionPrompt'
 import { EvaluatorRewriteBanner } from '../components/EvaluatorPrompts'
@@ -151,6 +152,22 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     }
     const storeMsg = storeMsgMap.get(msg.id)
     if (!storeMsg) return null
+
+    // #8348: a permission prompt that has ENDED, rebuilt from the server's
+    // durable `permission_outcome` history entry (a session switch or a reload —
+    // the live card is not replayed). A compact record: never actionable, never
+    // pending. Ahead of the live-prompt branch so a record can never be read as
+    // one, whatever fields a later write leaves on it.
+    if (storeMsg.type === 'prompt' && storeMsg.requestId && storeMsg.permissionOutcome) {
+      return (
+        <PermissionOutcomeRecord
+          requestId={storeMsg.requestId}
+          tool={storeMsg.tool || 'Unknown'}
+          description={permissionPromptDescription(storeMsg.content, storeMsg.tool) || 'Permission requested'}
+          outcome={storeMsg.permissionOutcome}
+        />
+      )
+    }
 
     // Permission prompt
     if (storeMsg.requestId && storeMsg.expiresAt && !storeMsg.answered) {

@@ -67,6 +67,12 @@ export function defaultStateFile() {
 // viewer sees the "[shell exited]" marker before the session vanishes.
 const AUTO_REMOVE_ON_EXIT_DELAY_MS = 1500
 
+// #8348 -- how many permission prompts SessionManager remembers (tool and
+// description, by requestId) while they are open, so the outcome can be recorded
+// when they end. A prompt leaves the registry the moment its outcome is recorded;
+// the cap only bounds prompts that never end (a session that dies with one open).
+const MAX_TRACKED_PERMISSION_REQUESTS = 256
+
 /**
  * Zero-initialized cumulative usage record (#4072). Lives on the session
  * entry; increments on every priced `result` event. Field names are
@@ -256,6 +262,48 @@ const warnedUnknownCtorOptKeys = new Set()
  * came to silently override it.
  */
 const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+
+/**
+ * #8348: the history outcome for a session's `permission_resolved` /
+ * `permission_expired` event, or null when it is not a permission prompt's end
+ * (an AskUserQuestion's resolution carries a `toolUseId`, not a `requestId`).
+ *
+ * `permission_resolved` also fires for prompts that ended with NO decision: the
+ * in-process providers resolve a timed-out, stopped or cleared prompt as a deny
+ * and say so only in `reason`. Those are `expired` (the tool call was dropped),
+ * not `denied` (nobody refused it) -- the distinction #8256 asks the clients for.
+ *
+ * @param {'permission_resolved'|'permission_expired'} event
+ * @param {object} data
+ * @returns {'allowed'|'denied'|'expired'|null}
+ */
+function permissionOutcomeForEvent(event, data) {
+  if (!data || typeof data.requestId !== 'string' || !data.requestId) return null
+  if (event === 'permission_expired') return 'expired'
+  if (data.reason === 'timeout' || data.reason === 'aborted' || data.reason === 'cleared') return 'expired'
+  return data.decision === 'deny' ? 'denied' : 'allowed'
+}
+
+/**
+ * #8348: the description the transcript keeps for a permission prompt. Normally
+ * the description the clients already received. An AskUserQuestion prompt is the
+ * exception: its description is the tool input as truncated JSON, which reads as
+ * noise in a one-line record, so it is replaced by the question that was asked
+ * (taken from the same already-sanitized input the clients received).
+ *
+ * @param {string|undefined} tool
+ * @param {string|undefined} description
+ * @param {object|undefined} input
+ * @returns {string}
+ */
+function describePermissionForOutcome(tool, description, input) {
+  if (tool === 'AskUserQuestion') {
+    const first = Array.isArray(input?.questions) ? input.questions[0] : null
+    const question = first && typeof first.question === 'string' ? first.question.trim() : ''
+    if (question) return question
+  }
+  return typeof description === 'string' ? description : ''
+}
 
 export class SessionManager extends EventEmitter {
   /**
@@ -757,6 +805,10 @@ export class SessionManager extends EventEmitter {
 
     // Message history (delegated to SessionMessageHistory)
     this._history = new SessionMessageHistory({ maxMessages: maxMessages ?? maxHistory, maxToolInput })
+    // #8348: open permission prompts, requestId -> { sessionId, tool, description }.
+    // The end-of-prompt events carry only the requestId, so what the transcript
+    // should say about the prompt is kept from the moment it was raised.
+    this._permissionRequests = new Map()
     // Backward-compatible accessors for tests that reference internal state
     this._maxHistory = this._history.maxHistory
     this._messageHistory = this._history._messageHistory
@@ -906,6 +958,9 @@ export class SessionManager extends EventEmitter {
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
     this._userStopped.delete(sessionId)
+    for (const [requestId, pending] of this._permissionRequests) {
+      if (pending.sessionId === sessionId) this._permissionRequests.delete(requestId)
+    }
     // #8092: prune this session's survey-throttle record(s) for the SAME
     // reason the environment untag above lives here rather than on
     // `session_destroyed` — the restore-rebind branch of
@@ -2701,6 +2756,16 @@ export class SessionManager extends EventEmitter {
    */
   destroyAll() {
     this.stopSessionTimeouts()
+    // #8348: a permission prompt still open at shutdown can never be answered --
+    // its hook is denied and its in-process request is cleared -- and the sessions
+    // are about to be serialized and torn down with their listeners removed, so
+    // nothing later would journal it. Record it as expired NOW, ahead of the final
+    // write below, so a client that reconnects to the restarted daemon is shown
+    // the dropped call instead of finding the card silently gone (or, on a delta
+    // replay, still offering a dead Allow).
+    for (const requestId of [...this._permissionRequests.keys()]) {
+      this.recordPermissionOutcome(requestId, 'expired')
+    }
     this._persistence.cancelPersist()
     try {
       this.serializeState()
@@ -4114,6 +4179,76 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * #8348: remember an open permission prompt so its outcome can be recorded.
+   *
+   * Two feeders, one per pipeline: the session's own `permission_request` event
+   * (the in-process providers, via `_wireSessionEvents`) and ws-permissions.js
+   * (the hook-routed providers, whose prompts never pass through a session
+   * event). Only what the clients were already shown is kept: the tool, and the
+   * description they received (clipped by the history layer on recording).
+   *
+   * @param {string} sessionId
+   * @param {{ requestId?: string, tool?: string, description?: string, input?: object }} request
+   */
+  notePermissionRequest(sessionId, request) {
+    const requestId = request?.requestId
+    if (typeof sessionId !== 'string' || !sessionId) return
+    if (typeof requestId !== 'string' || !requestId) return
+    // Re-noting an id moves it to the Map's tail, so the cap evicts the stalest.
+    this._permissionRequests.delete(requestId)
+    this._permissionRequests.set(requestId, {
+      sessionId,
+      tool: typeof request.tool === 'string' ? request.tool : '',
+      description: describePermissionForOutcome(request.tool, request.description, request.input),
+    })
+    while (this._permissionRequests.size > MAX_TRACKED_PERMISSION_REQUESTS) {
+      const oldest = this._permissionRequests.keys().next().value
+      if (oldest === undefined) break
+      this._permissionRequests.delete(oldest)
+    }
+  }
+
+  /**
+   * #8348: record how a permission prompt ended, in the session's history, so a
+   * full-rebuild replay (session switch, reload) can show it. The live
+   * `permission_*` frames are transient and are not replayed.
+   *
+   * ONE outcome per requestId: the registry entry is consumed here, so a second
+   * ending for the same prompt (the hook path can report both a user answer and
+   * the turn's death) finds nothing and records nothing. A prompt this manager
+   * never saw raised records nothing either -- there is no tool or description
+   * to show, and the clients were never shown the prompt.
+   *
+   * Never throws: it is called from inside a session's event emission and from
+   * the permission response paths, and a failure to journal an outcome must not
+   * take either down.
+   *
+   * @param {string} requestId
+   * @param {'allowed'|'denied'|'expired'} outcome
+   * @returns {boolean} true when an entry was recorded
+   */
+  recordPermissionOutcome(requestId, outcome) {
+    try {
+      if (typeof requestId !== 'string' || !requestId) return false
+      const pending = this._permissionRequests.get(requestId)
+      if (!pending) return false
+      this._permissionRequests.delete(requestId)
+      const entry = this._sessions.get(pending.sessionId)
+      if (!entry || entry._destroying) return false
+      this._recordHistory(pending.sessionId, 'permission_outcome', {
+        requestId,
+        tool: pending.tool,
+        description: pending.description,
+        outcome,
+      })
+      return true
+    } catch (err) {
+      log.warn(`Failed to record permission outcome for ${requestId}: ${err?.message || err}`)
+      return false
+    }
+  }
+
+  /**
    * Push an entry to the history array, trimming to max size.
    * Backward-compatible delegate to SessionMessageHistory._pushHistory.
    * @param {Array} history - The session history array to push to
@@ -4381,6 +4516,15 @@ export class SessionManager extends EventEmitter {
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {
       session.on(event, (data) => {
+        // #8348: journal the prompt's lifecycle BEFORE it is announced, so a
+        // client that sees it end can always find the durable record. The
+        // frames themselves stay transient; only the outcome is kept.
+        if (event === 'permission_request') {
+          this.notePermissionRequest(sessionId, data)
+        } else if (event === 'permission_resolved' || event === 'permission_expired') {
+          const outcome = permissionOutcomeForEvent(event, data)
+          if (outcome) this.recordPermissionOutcome(data.requestId, outcome)
+        }
         this.emit('session_event', { sessionId, event, data })
       })
     }
