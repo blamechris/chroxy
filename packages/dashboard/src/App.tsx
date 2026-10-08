@@ -82,7 +82,7 @@ import { useTrayBadgeSync } from './hooks/useTrayBadgeSync'
 import { useChatKeyboard } from './hooks/useChatKeyboard'
 import { useTauriMenuWiring } from './hooks/useTauriMenuWiring'
 import { isTauri } from './utils/tauri'
-import { registerUnsavedWorkProbe } from './utils/unsaved-work'
+import { composerHasUnsavedWork, registerUnsavedWorkProbe } from './utils/unsaved-work'
 import { getClientVersion, reloadPage } from './utils/stale-bundle'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
@@ -1968,11 +1968,12 @@ export function App() {
   // persisted, so the stale-bundle auto-reload must know about them. Read through a
   // ref so the probe registers once and always sees the latest values.
   const unsavedComposerRef = useRef<() => boolean>(() => false)
-  unsavedComposerRef.current = () => {
-    for (const draft of inputDraftsRef.current.values()) if (draft.trim() !== '') return true
-    for (const blocks of pastedTextBlocksRef.current.values()) if (blocks.length > 0) return true
-    return fileAttachments.length > 0 || imageAttachments.length > 0
-  }
+  unsavedComposerRef.current = () => composerHasUnsavedWork({
+    drafts: inputDraftsRef.current.values(),
+    pastedBlocks: pastedTextBlocksRef.current.values(),
+    fileAttachments,
+    imageAttachments,
+  })
   useEffect(() => registerUnsavedWorkProbe(() => unsavedComposerRef.current()), [])
 
   // #3800 / #3977: single eviction point for the three per-session composer

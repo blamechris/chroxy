@@ -189,6 +189,8 @@ import {
   // #5621 — the shared retry-ladder defaults (was duplicated verbatim here).
   CONNECT_MAX_RETRIES,
   CONNECT_RETRY_DELAYS,
+  // #8268 — the slower-tailed ladder for a client with no retry cap.
+  UNCAPPED_RETRY_DELAYS,
   type ProbeResult,
   type ConnectEndpoint,
   // #5939 (epic #5935 ④): optimistic queued-message helpers for the
@@ -2723,7 +2725,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // and show it. The mobile app's cap (#5698, #5725) is untouched, and so is the
     // cap for a registry server this page did not come from.
     const uncapped = isLocalDaemonUrl(url);
+    // `uncapped` is recomputed for every attempt, not fixed for the ladder: each retry
+    // (scheduleRetry) and each socket-close reconnect re-enters connect() with the
+    // endpoint resolved for THAT attempt (#5597), so a registry entry repointed
+    // mid-ladder is judged by its new URL on the next attempt.
     const maxConnectRetries = uncapped ? Infinity : CONNECT_MAX_RETRIES;
+    const retryLadder = uncapped ? UNCAPPED_RETRY_DELAYS : CONNECT_RETRY_DELAYS;
     const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
     // Only clear connectionError on fresh user-initiated connections (not retries/reconnects)
     const errorPatch = _retryCount === 0 && !isReconnect ? { connectionError: null } : {};
@@ -2760,7 +2767,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     void runConnectAttempt({
       attempt: _retryCount,
       maxRetries: maxConnectRetries,
-      retryDelays: CONNECT_RETRY_DELAYS,
+      retryDelays: retryLadder,
       // #5597 seam — re-resolve the endpoint per attempt instead of dialing the
       // closure-captured URL/token forever. The dashboard already re-read the
       // registry TOKEN per reconnect (#5281); this mirrors that for the URL, so
@@ -2782,6 +2789,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const timeoutId = setTimeout(() => controller.abort(), 5000);
         try {
           const res = await fetch(httpUrl, { method: 'GET', signal: controller.signal });
+          // #8268 — without a cap a refused probe would retry for ever. A 401/403
+          // is a gate in front of the daemon (a proxy, an access policy) that
+          // retrying cannot lift, so it ends the ladder with the auth error.
+          if (uncapped && (res.status === 401 || res.status === 403)) {
+            return { kind: 'auth_failed', reason: getHealthCheckErrorMessage({ message: `HTTP ${res.status}` }) };
+          }
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           try {
             const body = await res.json();
@@ -2851,6 +2864,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         set({ connectionPhase: 'disconnected', connectionError: 'Server restart timed out' });
         console.warn(`[chroxy] Connection Failed: The server is still restarting. Try again later.`);
       },
+      onAuthFailed: ({ reason }) => {
+        // The same end state the capped ladder reached (disconnected, saved
+        // connection cleared), but with the auth error rather than "Could not
+        // reach server", and after one probe instead of six.
+        set({ connectionPhase: 'disconnected', connectionError: reason, reconnectRetryAt: null });
+        console.warn(`[chroxy] Connection Failed: ${reason}`);
+        void get().clearSavedConnection();
+      },
       onProbeGaveUp: () => {
         set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
         console.warn(`[chroxy] Connection Failed: Could not reach the Chroxy server. Make sure it's running.`);
@@ -2909,7 +2930,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         get().connect(next.url, next.token);
       },
       isStale: () => myAttemptId !== connectionAttemptId,
-      retryDelays: CONNECT_RETRY_DELAYS,
+      retryDelays: retryLadder,
       // #5698 — stop the reconnect ladder after RECONNECT_MAX_RUNG rungs and go
       // terminal instead of spinning forever. A user-initiated retryConnection()
       // resets the counter (resetReconnectAttempt), so this is not permanent.

@@ -17,7 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loaded with the build the daemon serves: if they differ it reloads, or, when a reload
   would lose an unsent message or an attachment, shows a persistent "Chroxy was updated
   - Reload" banner. The header shows the window's own version beside the server's when
-  they differ. The mobile app and other servers in the list keep their retry cap.
+  they differ. The mobile app and other servers in the list keep their retry cap. With
+  no cap, retries back off to one every 30 seconds after a few minutes, and a 401 or 403
+  from the daemon's address stops the retrying and shows the auth error.
 
 ## [0.11.4] - 2026-10-07
 

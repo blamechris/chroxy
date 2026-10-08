@@ -17,6 +17,7 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   runConnectAttempt,
   createReconnectScheduler,
+  UNCAPPED_RETRY_DELAYS,
   retryDelayForAttempt,
   selectReconnectEndpoint,
   CONNECT_MAX_RETRIES,
@@ -144,6 +145,76 @@ describe('runConnectAttempt — success path', () => {
       jitter: noJitter,
     })
     expect(openSocket).not.toHaveBeenCalled()
+  })
+})
+
+describe('runConnectAttempt — auth_failed path (#8268)', () => {
+  const base = () => ({
+    attempt: 0,
+    resolveEndpoint: () => ENDPOINT,
+    isStale: () => false,
+    openSocket: vi.fn(),
+    onRestarting: vi.fn(),
+    onProbeFailed: vi.fn(),
+    onRestartGaveUp: vi.fn(),
+    onProbeGaveUp: vi.fn(),
+    scheduleRetry: vi.fn(),
+    jitter: noJitter,
+  })
+
+  it('stops through onAuthFailed: no retry, no socket, no failed-probe write', async () => {
+    const o = base()
+    const onAuthFailed = vi.fn()
+    await runConnectAttempt({
+      ...o, onAuthFailed, maxRetries: Infinity,
+      probe: async () => ({ kind: 'auth_failed', reason: 'Server rejected the connection — check your token' }),
+    })
+    expect(onAuthFailed).toHaveBeenCalledWith({ reason: 'Server rejected the connection — check your token' })
+    expect(o.scheduleRetry).not.toHaveBeenCalled()
+    expect(o.openSocket).not.toHaveBeenCalled()
+    expect(o.onProbeFailed).not.toHaveBeenCalled()
+  })
+
+  it('a client that does not wire onAuthFailed keeps the old failed-probe ladder', async () => {
+    const o = base()
+    await runConnectAttempt({ ...o, probe: async () => ({ kind: 'auth_failed', reason: 'nope' }) })
+    expect(o.onProbeFailed).toHaveBeenCalledWith('nope')
+    expect(o.scheduleRetry).toHaveBeenCalledWith(1, RETRY_DELAYS[0])
+    const o2 = base()
+    await runConnectAttempt({ ...o2, attempt: 5, probe: async () => ({ kind: 'auth_failed', reason: 'nope' }) })
+    expect(o2.onProbeGaveUp).toHaveBeenCalledTimes(1)
+  })
+
+  it('does nothing when the attempt went stale during the probe', async () => {
+    const o = base()
+    const onAuthFailed = vi.fn()
+    await runConnectAttempt({
+      ...o, onAuthFailed, isStale: () => true,
+      probe: async () => ({ kind: 'auth_failed', reason: 'x' }),
+    })
+    expect(onAuthFailed).not.toHaveBeenCalled()
+  })
+})
+
+describe('UNCAPPED_RETRY_DELAYS (#8268)', () => {
+  it('starts as the ordinary ladder, so a returning daemon is found within ~8-12 s early on', () => {
+    expect(UNCAPPED_RETRY_DELAYS.slice(0, RETRY_DELAYS.length)).toEqual([...RETRY_DELAYS])
+    // Through the first ~2 minutes (>= 20 attempts) no wait exceeds the ordinary 8 s rung.
+    let elapsed = 0
+    let i = 0
+    while (elapsed < 100_000) { elapsed += retryDelayForAttempt(i, UNCAPPED_RETRY_DELAYS); i++ }
+    for (let k = 0; k < i; k++) expect(retryDelayForAttempt(k, UNCAPPED_RETRY_DELAYS)).toBeLessThanOrEqual(8000)
+  })
+
+  it('backs off to 30 s after a few minutes and stays there', () => {
+    let elapsed = 0
+    let i = 0
+    // Bounded: a ladder with no 30 s tail must fail this test, not spin it.
+    while (i < 1000 && retryDelayForAttempt(i, UNCAPPED_RETRY_DELAYS) < 30_000) { elapsed += retryDelayForAttempt(i, UNCAPPED_RETRY_DELAYS); i++ }
+    expect(i).toBeLessThan(1000)
+    expect(elapsed).toBeGreaterThan(3 * 60_000)
+    expect(elapsed).toBeLessThan(6 * 60_000)
+    expect(retryDelayForAttempt(i + 1000, UNCAPPED_RETRY_DELAYS)).toBe(30_000)
   })
 })
 

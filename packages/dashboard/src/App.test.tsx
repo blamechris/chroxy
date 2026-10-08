@@ -396,6 +396,45 @@ describe('App', () => {
     expect(screen.queryByTestId('stale-bundle-banner')).not.toBeInTheDocument()
   })
 
+  // #8268 — App feeds its own refs and attachment state to the unsaved-work check the
+  // stale-bundle auto-reload consults. composerHasUnsavedWork has the per-branch unit
+  // tests; these pin that App passes the right data into it. In each, the visible
+  // textarea is EMPTY at the moment of the check, so the DOM scan cannot be what
+  // answers, and the ref is the only thing that knows.
+  describe('the composer feeds the unsaved-work check (#8268)', () => {
+    const mk = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null })
+    const two = { connectionPhase: 'connected', sessions: [mk('s1'), mk('s2')] }
+
+    it('is false for a clean composer', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      render(<App />)
+      expect(hasUnsavedWork()).toBe(false)
+    })
+
+    it('a draft for a session that is not the visible tab counts', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      const { rerender } = render(<App />)
+      fireEvent.change(screen.getByRole('textbox', { name: /message input/i }), { target: { value: 'unsent thought' } })
+      stateOverrides = { ...two, activeSessionId: 's2' }
+      rerender(<App />)
+      expect((screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement).value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+
+    it('a pasted-text chip counts even after its marker was deleted from the textarea', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      render(<App />)
+      const box = screen.getByRole('textbox', { name: /message input/i })
+      fireEvent.paste(box, { clipboardData: { getData: (t: string) => (t === 'text/plain' ? 'line\n'.repeat(50) : ''), items: [], files: [] } })
+      fireEvent.change(box, { target: { value: '' } })
+      expect((box as HTMLTextAreaElement).value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+  })
+
   it('shows welcome screen when connected with no sessions', () => {
     stateOverrides = { connectionPhase: 'connected', sessions: [] }
     render(<App />)
