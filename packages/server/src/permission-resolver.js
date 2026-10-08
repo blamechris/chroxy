@@ -172,8 +172,14 @@ export function createPermissionResolver({
           // agent's tool result, so nothing is written and the prompt does not
           // outlive an answer the client already shows as given (a client marks it
           // answered when it sends). The caller tells the operator why.
-          entry.session.respondToPermission(requestId, 'deny', undefined, err.message)
+          //
+          // The deny must land in the manager that HOLDS the request (a BYOK
+          // subagent's prompt lives in its child's manager; the parent routes to it)
+          // and its return value says whether it did: a deny that found nothing to
+          // resolve is not audited as one.
+          const denied = entry.session.respondToPermission(requestId, 'deny', undefined, err.message)
           consumeRoute(requestId)
+          if (!denied) return { kind: 'expired', sessionId: originSessionId }
           audit(clientId, originSessionId, requestId, 'deny', { ...(toolName ? { tool: toolName } : {}), reason: 'edit_refused' })
           return { kind: 'edit_refused', sessionId: originSessionId, message: err.message }
         }

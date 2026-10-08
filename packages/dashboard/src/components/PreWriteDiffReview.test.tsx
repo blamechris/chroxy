@@ -27,7 +27,7 @@ describe('PreWriteDiffReview (#6543)', () => {
     fireEvent.click(toggles[0]!) // drop the only hunk
     // The diff is over the REDACTED tool input, so only WHICH hunk leaves the
     // client; the server rebuilds the text from the raw input.
-    expect(onChange).toHaveBeenLastCalledWith({ droppedHunks: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }] })
+    expect(onChange).toHaveBeenLastCalledWith({ droppedHunks: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }], keptHunks: [] })
   })
 
   it('Write: diffs ""→content; dropping the hunk emits its range (#8446)', () => {
@@ -35,7 +35,7 @@ describe('PreWriteDiffReview (#6543)', () => {
     render(<PreWriteDiffReview tool="Write" input={{ content: 'x\ny\nz' }} onEditedInputChange={onChange} />)
     const toggles = screen.getAllByTestId('hunk-toggle')
     fireEvent.click(toggles[0]!) // drop the all-additions hunk
-    expect(onChange).toHaveBeenLastCalledWith({ droppedHunks: [{ oldStart: 0, oldCount: 0, newStart: 1, newCount: 3 }] })
+    expect(onChange).toHaveBeenLastCalledWith({ droppedHunks: [{ oldStart: 0, oldCount: 0, newStart: 1, newCount: 3 }], keptHunks: [] })
   })
 
   it('#8446: never sends text, so a redaction placeholder in the reviewed copy cannot be sent back', () => {
@@ -45,7 +45,7 @@ describe('PreWriteDiffReview (#6543)', () => {
     fireEvent.click(screen.getAllByTestId('hunk-toggle')[0]!)
     const last = onChange.mock.calls[onChange.mock.calls.length - 1]!
     expect(JSON.stringify(last).includes('REDACTED')).toBe(false)
-    expect(Object.keys(last[0])).toEqual(['droppedHunks'])
+    expect(Object.keys(last[0]).sort()).toEqual(['droppedHunks', 'keptHunks'])
   })
 
   it('emits null when every hunk is kept (a plain Allow)', () => {

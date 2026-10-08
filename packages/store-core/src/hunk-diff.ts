@@ -216,13 +216,13 @@ export function applyHunks(
 }
 
 /**
- * A hunk the operator dropped, as the server needs to find it again: the numbers of
+ * A hunk of the reviewed diff, as the server needs to find it again: the numbers of
  * its `@@ -oldStart,oldCount +newStart,newCount @@` header. The server rebuilds the
  * approved Write/Edit from the RAW tool input and these ranges (#8446), because the
  * client only ever sees the redacted copy and must not send content the server
  * writes. Git's convention, as `computeHunks` emits it.
  */
-export interface DroppedHunkRange {
+export interface HunkRange {
   oldStart: number
   oldCount: number
   newStart: number
@@ -231,24 +231,32 @@ export interface DroppedHunkRange {
 
 /**
  * The `editedInput` a permission response carries: text fields the server's content
- * whitelist reads (a Bash `command`), and for a hunk-reviewed Write/Edit the
- * `droppedHunks` decisions.
+ * whitelist reads (a Bash `command`), and for a hunk-reviewed Write/Edit the hunk
+ * decisions, `droppedHunks` and `keptHunks`.
  */
-export type PermissionEditedInput = { [field: string]: string | DroppedHunkRange[] }
+export type PermissionEditedInput = { [field: string]: string | HunkRange[] }
+
+/** Every hunk of a reviewed diff, split into the ones the operator dropped and kept. */
+export type HunkDecisions = {
+  droppedHunks: HunkRange[]
+  keptHunks: HunkRange[]
+}
 
 /**
- * The header ranges of every hunk NOT in `selected` — the operator's drop decisions.
- * `selected` is the set of KEPT hunk indices, as `applyHunks` takes it. A hunk whose
- * header cannot be parsed is not reported; `computeHunks` never produces one.
+ * The header ranges of EVERY hunk, split by the operator's choice. `selected` is the
+ * set of KEPT hunk indices, as `applyHunks` takes it. Both lists are sent: the server
+ * checks that the lines outside all hunks are unchanged lines, which is what proves
+ * each range is a region of the real diff. A hunk whose header cannot be parsed is not
+ * reported; `computeHunks` never produces one.
  */
-export function droppedHunkRanges(hunks: DiffHunk[], selected: Set<number> | number[]): DroppedHunkRange[] {
+export function hunkDecisions(hunks: DiffHunk[], selected: Set<number> | number[]): HunkDecisions {
   const kept = selected instanceof Set ? selected : new Set(selected)
-  const ranges: DroppedHunkRange[] = []
+  const decisions: HunkDecisions = { droppedHunks: [], keptHunks: [] }
   hunks.forEach((hunk, index) => {
-    if (kept.has(index)) return
     const m = /^@@ -(\d+),(\d+) \+(\d+),(\d+) @@/.exec(hunk.header)
     if (!m) return
-    ranges.push({ oldStart: Number(m[1]), oldCount: Number(m[2]), newStart: Number(m[3]), newCount: Number(m[4]) })
+    const range = { oldStart: Number(m[1]), oldCount: Number(m[2]), newStart: Number(m[3]), newCount: Number(m[4]) }
+    ;(kept.has(index) ? decisions.keptHunks : decisions.droppedHunks).push(range)
   })
-  return ranges
+  return decisions
 }

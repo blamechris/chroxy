@@ -5,7 +5,7 @@
  * subset application, edge cases, and the size guard.
  */
 import { describe, it, expect } from 'vitest'
-import { computeHunks, applyHunks, droppedHunkRanges, MAX_DIFF_LINES } from './hunk-diff'
+import { computeHunks, applyHunks, hunkDecisions, MAX_DIFF_LINES } from './hunk-diff'
 
 /** Assert the two round-trip invariants for a case. */
 function assertRoundTrip(original: string, proposed: string) {
@@ -144,7 +144,7 @@ describe('applyHunks robustness + size guard (#6542)', () => {
   })
 })
 
-describe('droppedHunkRanges (#8446)', () => {
+describe('hunkDecisions (#8446)', () => {
   // The same fixture is driven through the server's permission path in
   // packages/server/tests/edited-input-redaction.test.js, which hard-codes these
   // ranges: a change to the differ's output or to this helper fails here first.
@@ -157,13 +157,15 @@ describe('droppedHunkRanges (#8446)', () => {
   // What the reviewing client holds: the REDACTED copy of the tool input.
   const redact = (s: string) => s.replace(SECRET, '[REDACTED]')
   const hunks = computeHunks(oldLines.map(redact).join('\n'), newLines.map(redact).join('\n'))
+  const A = { oldStart: 1, oldCount: 5, newStart: 1, newCount: 5 }
+  const B = { oldStart: 25, oldCount: 6, newStart: 25, newCount: 6 }
 
-  it('reports the header ranges of exactly the hunks that are not kept', () => {
+  it('splits EVERY hunk into dropped and kept by the operator\'s choice', () => {
     expect(hunks.map((h) => h.header)).toEqual(['@@ -1,5 +1,5 @@', '@@ -25,6 +25,6 @@'])
-    expect(droppedHunkRanges(hunks, new Set([0]))).toEqual([{ oldStart: 25, oldCount: 6, newStart: 25, newCount: 6 }])
-    expect(droppedHunkRanges(hunks, new Set([1]))).toEqual([{ oldStart: 1, oldCount: 5, newStart: 1, newCount: 5 }])
-    expect(droppedHunkRanges(hunks, [0, 1])).toEqual([])
-    expect(droppedHunkRanges(hunks, new Set())).toHaveLength(2)
+    expect(hunkDecisions(hunks, new Set([0]))).toEqual({ droppedHunks: [B], keptHunks: [A] })
+    expect(hunkDecisions(hunks, new Set([1]))).toEqual({ droppedHunks: [A], keptHunks: [B] })
+    expect(hunkDecisions(hunks, [0, 1])).toEqual({ droppedHunks: [], keptHunks: [A, B] })
+    expect(hunkDecisions(hunks, new Set())).toEqual({ droppedHunks: [A, B], keptHunks: [] })
   })
 
   it('hunks that change the line count: the new-side ranges are not the old-side ranges', () => {
@@ -174,7 +176,7 @@ describe('droppedHunkRanges (#8446)', () => {
     grown.splice(1, 1, 'line01 CHANGED', 'extra1', 'extra2')
     const h = computeHunks(oldLines.map(redact).join('\n'), grown.map(redact).join('\n'))
     expect(h.map((x) => x.header)).toEqual(['@@ -1,5 +1,7 @@', '@@ -25,6 +27,5 @@'])
-    expect(droppedHunkRanges(h, new Set())).toEqual([
+    expect(hunkDecisions(h, new Set()).droppedHunks).toEqual([
       { oldStart: 1, oldCount: 5, newStart: 1, newCount: 7 },
       { oldStart: 25, oldCount: 6, newStart: 27, newCount: 5 },
     ])
@@ -182,11 +184,14 @@ describe('droppedHunkRanges (#8446)', () => {
 
   it('a new file is one hunk whose old side is empty', () => {
     const h = computeHunks('', 'a\nb\nc')
-    expect(droppedHunkRanges(h, new Set())).toEqual([{ oldStart: 0, oldCount: 0, newStart: 1, newCount: 3 }])
+    expect(hunkDecisions(h, new Set())).toEqual({
+      droppedHunks: [{ oldStart: 0, oldCount: 0, newStart: 1, newCount: 3 }],
+      keptHunks: [],
+    })
   })
 
   it('never carries text: only numbers leave the client', () => {
-    const json = JSON.stringify(droppedHunkRanges(hunks, new Set()))
+    const json = JSON.stringify(hunkDecisions(hunks, new Set([0])))
     expect(json.includes('line') || json.includes('REDACTED')).toBe(false)
   })
 })

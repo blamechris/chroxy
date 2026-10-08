@@ -20,7 +20,7 @@ import {
 // redaction.js (a leaf module — no import cycle / HTTP-handler weight).
 import { sanitizeToolInput, redactValue, describeByNamedField, describeToolInput, describeComposedText } from './redaction.js'
 import { redactMcpUrl, resolveTrustAddress, MCP_SERVER_SOURCE_VALUES } from './byok-mcp-config.js'
-import { DROPPED_HUNKS_KEY, isHunkReviewedTool, narrowByDroppedHunks, assertNoNewRedactionMarkers } from './edited-input.js'
+import { DROPPED_HUNKS_KEY, KEPT_HUNKS_KEY, EditedInputRefusedError, isHunkReviewedTool, narrowByDroppedHunks, assertClientTextAllowed } from './edited-input.js'
 // #6842 review (Copilot) — audit entries must carry the store's NORMALIZED
 // project key, not the raw session cwd, or a relative / `..`-laden cwd
 // produces entries that never correlate with the persisted rule they audit.
@@ -248,40 +248,44 @@ const MAX_DENY_REASON_LEN = 2000
  * #8446 — what reaches the tool executor is built from `originalInput`, the RAW
  * input held here, never from content the client saw. The client reviewed a
  * REDACTED copy, so text it builds carries `[REDACTED]` where a secret was:
- *  - a Write/Edit narrowed by dropped hunks is rebuilt here from the raw input and
- *    the client's `droppedHunks` (see edited-input.js); any content the client also
- *    sent for that field is ignored;
+ *  - a Write/Edit whose `editedInput` has a `droppedHunks` key (an empty list
+ *    included) is rebuilt here from the raw input and those ranges (see
+ *    edited-input.js); any text the client also sent for that field is ignored;
  *  - any other whitelisted text (an older client's content, a Bash command) is
- *    refused when it carries a redaction placeholder the raw input did not.
+ *    refused when redaction changed the copy it was drawn from, whatever the text
+ *    contains.
+ * Anything that goes wrong while doing this is a refusal, never a throw of another
+ * kind: the caller answers a refusal by denying the request.
  *
  * @param {object} originalInput  the agent's proposed tool input
  * @param {*} editedInput         the client-supplied override (untrusted)
  * @param {string} toolName       the tool the permission is for
  * @returns {object}
- * @throws {EditedInputRefusedError} the edit cannot be applied without writing a
- *   placeholder (or without guessing); nothing has been changed
+ * @throws {EditedInputRefusedError} the edit cannot be applied safely; nothing has
+ *   been changed
  */
 export function mergeEditedInput(originalInput, editedInput, toolName) {
   if (!editedInput || typeof editedInput !== 'object' || Array.isArray(editedInput)) return originalInput
   const allowed = EDITABLE_INPUT_FIELDS[toolName]
   if (!allowed) return originalInput
-  const merged = { ...originalInput }
-  let narrowedField = null
-  if (isHunkReviewedTool(toolName)
-    && Object.prototype.hasOwnProperty.call(editedInput, DROPPED_HUNKS_KEY)
-    && !(Array.isArray(editedInput[DROPPED_HUNKS_KEY]) && editedInput[DROPPED_HUNKS_KEY].length === 0)) {
-    narrowedField = allowed[0]
-    merged[narrowedField] = narrowByDroppedHunks(originalInput, toolName, editedInput[DROPPED_HUNKS_KEY])
-  }
-  for (const field of allowed) {
-    if (field === narrowedField) continue
-    if (Object.prototype.hasOwnProperty.call(editedInput, field) && typeof editedInput[field] === 'string') {
-      // Text may be made of the raw field, and for an Edit of the text it replaces.
-      assertNoNewRedactionMarkers(editedInput[field], [originalInput?.[field], isHunkReviewedTool(toolName) ? originalInput?.old_string : undefined])
-      merged[field] = editedInput[field]
+  try {
+    const merged = { ...originalInput }
+    // The key being present puts the field in hunk mode, an empty list included.
+    const hunkMode = isHunkReviewedTool(toolName)
+      && Object.prototype.hasOwnProperty.call(editedInput, DROPPED_HUNKS_KEY)
+    if (hunkMode) merged[allowed[0]] = narrowByDroppedHunks(originalInput, toolName, editedInput[DROPPED_HUNKS_KEY], editedInput[KEPT_HUNKS_KEY])
+    for (const field of allowed) {
+      if (hunkMode && field === allowed[0]) continue
+      if (Object.prototype.hasOwnProperty.call(editedInput, field) && typeof editedInput[field] === 'string') {
+        assertClientTextAllowed(originalInput, toolName, field)
+        merged[field] = editedInput[field]
+      }
     }
+    return merged
+  } catch (err) {
+    if (err instanceof EditedInputRefusedError) throw err
+    throw new EditedInputRefusedError('This edit could not be applied, so the request was denied.')
   }
-  return merged
 }
 
 /**

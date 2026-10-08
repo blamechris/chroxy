@@ -7,10 +7,10 @@
  *
  * Wires the feature-B stack together on mobile:
  *   - the pulled tool input (#6550 `get_permission_input` → `permissionInputs`),
- *   - the client differ (#6546 `computeHunks`/`droppedHunkRanges`),
+ *   - the client differ (#6546 `computeHunks`/`hunkDecisions`),
  *   - the selectable hunk component (#6548 `DiffHunkView`),
- *   - the server merge (#6552, #8446) — we send only WHICH hunks were dropped
- *     (`droppedHunks`, their `@@` ranges), never content: the diff drawn here is
+ *   - the server merge (#6552, #8446) — we send only WHICH hunks were dropped and kept
+ *     (`droppedHunks` and `keptHunks`, their `@@` ranges), never content: the diff drawn here is
  *     over the REDACTED tool input, so the server rebuilds the narrowed content
  *     from the raw input it holds. The path can't be redirected from here either.
  *
@@ -20,7 +20,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { computeHunks, droppedHunkRanges } from '@chroxy/store-core';
+import { computeHunks, hunkDecisions } from '@chroxy/store-core';
 import { DiffHunkView } from './DiffViewer';
 import { COLORS } from '../constants/colors';
 import type { PermissionEditedInput } from '@chroxy/store-core';
@@ -71,7 +71,7 @@ export function PreWriteDiffReview({ tool, input, onEditedInputChange }: PreWrit
       if (next.has(i)) next.delete(i);
       else next.add(i);
       const allKept = next.size === hunks.length;
-      onEditedInputChange(allKept ? null : { droppedHunks: droppedHunkRanges(hunks, next) });
+      onEditedInputChange(allKept ? null : hunkDecisions(hunks, next));
       return next;
     });
   }

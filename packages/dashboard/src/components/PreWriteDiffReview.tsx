@@ -6,10 +6,10 @@
  *
  * Wires the whole feature-B stack together:
  *   - the pulled tool input (#6550 `get_permission_input`),
- *   - the client differ (#6546 `computeHunks`/`droppedHunkRanges`),
+ *   - the client differ (#6546 `computeHunks`/`hunkDecisions`),
  *   - the selectable hunk component (#6548 `HunkView`),
- *   - the server merge (#6552, #8446) — we send only WHICH hunks were dropped
- *     (`droppedHunks`, their `@@` ranges), never content: the diff drawn here is
+ *   - the server merge (#6552, #8446) — we send only WHICH hunks were dropped and kept
+ *     (`droppedHunks` and `keptHunks`, their `@@` ranges), never content: the diff drawn here is
  *     over the REDACTED tool input, so the server rebuilds the narrowed content
  *     from the raw input it holds. The path can't be redirected from here either.
  *
@@ -18,7 +18,7 @@
  * follow-up). Emits `null` when every hunk is kept (no edit → a plain Allow).
  */
 import { useEffect, useMemo, useState } from 'react'
-import { computeHunks, droppedHunkRanges } from '@chroxy/store-core'
+import { computeHunks, hunkDecisions } from '@chroxy/store-core'
 import { HunkView } from './DiffViewerPanel'
 import type { PermissionEditedInput } from '@chroxy/store-core'
 
@@ -69,7 +69,7 @@ export function PreWriteDiffReview({ tool, input, onEditedInputChange }: PreWrit
       else next.add(i)
       const allKept = next.size === hunks.length
       // Idempotent (parent setState); StrictMode's dev double-invoke is harmless.
-      onEditedInputChange(allKept ? null : { droppedHunks: droppedHunkRanges(hunks, next) })
+      onEditedInputChange(allKept ? null : hunkDecisions(hunks, next))
       return next
     })
   }

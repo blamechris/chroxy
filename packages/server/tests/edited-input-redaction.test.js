@@ -7,8 +7,9 @@ import { join } from 'node:path'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { PermissionManager, wirePermissionManager, mergeEditedInput } from '../src/permission-manager.js'
 import { createPermissionResolver } from '../src/permission-resolver.js'
-import { EditedInputRefusedError, DROPPED_HUNKS_KEY } from '../src/edited-input.js'
-import { sanitizeToolInput, countRedactionMarkers, PULL_MAX_INPUT_CHARS } from '../src/redaction.js'
+import { ClaudeByokSession } from '../src/byok-session.js'
+import { EditedInputRefusedError, DROPPED_HUNKS_KEY, KEPT_HUNKS_KEY } from '../src/edited-input.js'
+import { sanitizeToolInput, PULL_MAX_INPUT_CHARS } from '../src/redaction.js'
 import { createSpy, nsCtx } from './test-helpers.js'
 
 /**
@@ -33,6 +34,12 @@ const ROTATED = 'sk-' + 'Zy98'.repeat(12)
 
 const HUNK_A = { oldStart: 1, oldCount: 5, newStart: 1, newCount: 5 }   // lines 00-04
 const HUNK_B = { oldStart: 25, oldCount: 6, newStart: 25, newCount: 6 } // lines 24-29
+
+/** What the client sends: every hunk it was shown, split into the ones it dropped and the ones it kept. */
+const decide = (dropped, all = [HUNK_A, HUNK_B]) => ({
+  [DROPPED_HUNKS_KEY]: dropped,
+  [KEPT_HUNKS_KEY]: all.filter((h) => !dropped.includes(h)),
+})
 
 /** 30 lines; the secret on `secretAt`; `line01` and `line27` change in the proposal. */
 function fixture({ secretAt = 12, rotate = false, pad = 0 } = {}) {
@@ -79,7 +86,7 @@ function harness(tool, rawInput, { mode = 'default', cwd, audit = null } = {}) {
   const sent = () => ctx.transport.send.calls.map((c) => c[1])
 
   return {
-    dir, requestId, outcome, sent,
+    dir, requestId, outcome, sent, pm,
     /** What the reviewing client is shown. */
     pull() {
       settingsHandlers.get_permission_input(ws, client, { type: 'get_permission_input', requestId }, ctx)
@@ -117,7 +124,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     const f = fixture({ secretAt: 12 })
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
     h.pull()
-    h.respond({ [DROPPED_HUNKS_KEY]: [HUNK_B] })
+    h.respond({ ...decide([HUNK_B]) })
     const result = await h.outcome
     assert.equal(result.behavior, 'allow')
 
@@ -135,7 +142,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     const f = fixture({ secretAt: 3 }) // inside hunk A's context
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
     h.pull()
-    h.respond({ [DROPPED_HUNKS_KEY]: [HUNK_A] })
+    h.respond({ ...decide([HUNK_A]) })
     const result = await h.outcome
 
     const expected = [...f.newLines]
@@ -149,7 +156,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     const f = fixture({ secretAt: 3 })
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
     h.pull()
-    h.respond({ [DROPPED_HUNKS_KEY]: [HUNK_B] })
+    h.respond({ ...decide([HUNK_B]) })
     const result = await h.outcome
     const expected = [...f.newLines]
     expected[27] = f.oldLines[27]
@@ -163,7 +170,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     const shown = h.pull()
     // The client cannot see the rotation: both sides read the same to it.
     assert.equal(shown.input.old_string.split('\n')[12], shown.input.new_string.split('\n')[12])
-    h.respond({ [DROPPED_HUNKS_KEY]: [HUNK_B] })
+    h.respond({ ...decide([HUNK_B]) })
     const result = await h.outcome
     const expected = [...f.newLines]
     expected[27] = f.oldLines[27]
@@ -177,7 +184,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     assert.ok(f.old_string.length > 10_240)
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
     assert.equal(h.pull().found, true)
-    h.respond({ [DROPPED_HUNKS_KEY]: [HUNK_B] })
+    h.respond({ ...decide([HUNK_B]) })
     const result = await h.outcome
     assert.equal(result.behavior, 'allow')
     const expected = [...f.newLines]
@@ -200,7 +207,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
       const f = grown()
       const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
       h.pull()
-      h.respond({ [DROPPED_HUNKS_KEY]: dropped })
+      h.respond({ ...decide(dropped, [A, B]) })
       return { f, result: await h.outcome }
     }
 
@@ -225,7 +232,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     const f = fixture()
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
     h.pull()
-    h.respond({ [DROPPED_HUNKS_KEY]: [HUNK_B, HUNK_A] }) // order on the wire does not matter
+    h.respond({ ...decide([HUNK_B, HUNK_A]) }) // order on the wire does not matter
     const result = await h.outcome
     assert.equal(result.updatedInput.new_string, f.old_string)
   })
@@ -234,7 +241,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     const f = fixture()
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
     h.pull()
-    h.respond({ new_string: 'attacker text [REDACTED]', [DROPPED_HUNKS_KEY]: [HUNK_B] })
+    h.respond({ new_string: 'attacker text [REDACTED]', ...decide([HUNK_B]) })
     const result = await h.outcome
     const expected = [...f.newLines]
     expected[27] = f.oldLines[27]
@@ -245,7 +252,7 @@ describe('#8446 hunk-reviewed Edit is rebuilt from the raw input', () => {
     const f = fixture()
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
     h.pull()
-    h.respond({ file_path: '/etc/passwd', old_string: 'x', [DROPPED_HUNKS_KEY]: [HUNK_B] })
+    h.respond({ file_path: '/etc/passwd', old_string: 'x', ...decide([HUNK_B]) })
     const result = await h.outcome
     assert.equal(result.updatedInput.file_path, '/repo/target.js')
     assert.equal(result.updatedInput.old_string, f.old_string)
@@ -259,7 +266,8 @@ describe('#8446 Write', () => {
     const raw = content()
     const h = harness('Write', { file_path: '/repo/new.js', content: raw })
     h.pull()
-    h.respond({ [DROPPED_HUNKS_KEY]: [{ oldStart: 0, oldCount: 0, newStart: 1, newCount: 3 }] })
+    const only = { oldStart: 0, oldCount: 0, newStart: 1, newCount: 3 }
+    h.respond({ ...decide([only], [only]) })
     const result = await h.outcome
     assert.equal(result.updatedInput.content, '')
     assert.equal(result.updatedInput.file_path, '/repo/new.js')
@@ -275,7 +283,9 @@ describe('#8446 Write', () => {
   })
 })
 
-describe('#8446 a client that sends text carrying a placeholder the raw input did not is refused', () => {
+describe('#8446 text a client sends is refused wherever redaction changed what it was shown', () => {
+  const REFUSED = /redacted before you saw it/
+
   it('an older client\'s narrowed content built from the redacted copy: denied, nothing written, the client is told why', async () => {
     const f = fixture()
     const h = harness('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string })
@@ -288,55 +298,52 @@ describe('#8446 a client that sends text carrying a placeholder the raw input di
 
     assert.equal(result.behavior, 'deny', 'fail closed: nothing may run')
     assert.equal(result.updatedInput, undefined)
-    assert.ok(/redaction placeholder/.test(result.message), 'the agent is told why')
+    assert.ok(REFUSED.test(result.message), 'the agent is told why')
     const err = h.sent().find((m) => m.type === 'error')
     assert.equal(err.code, 'PERMISSION_EDIT_REFUSED')
     assert.equal(err.requestId, h.requestId)
-    assert.ok(/redaction placeholder/.test(err.message))
+    assert.ok(REFUSED.test(err.message))
     assert.ok(!err.message.includes(SECRET) && !result.message.includes(SECRET), 'the refusal leaks nothing')
   })
 
-  it('text that keeps only the placeholders the raw input already had is accepted', () => {
-    const raw = { file_path: '/a', old_string: 'x', new_string: 'docs say [REDACTED] here\nmore' }
-    const merged = mergeEditedInput(raw, { new_string: 'docs say [REDACTED] here' }, 'Edit')
-    assert.equal(merged.new_string, 'docs say [REDACTED] here')
-    assert.throws(
-      () => mergeEditedInput(raw, { new_string: 'docs say [REDACTED] [REDACTED]' }, 'Edit'),
-      EditedInputRefusedError,
-    )
-  })
-
-  it('an Edit may keep a literal placeholder that was in the text it replaces, and no more', () => {
-    const raw = { file_path: '/a', old_string: 'docs: [REDACTED]\nx', new_string: 'y' }
-    assert.equal(mergeEditedInput(raw, { new_string: 'docs: [REDACTED]\nx' }, 'Edit').new_string, 'docs: [REDACTED]\nx')
-    assert.throws(() => mergeEditedInput(raw, { new_string: 'docs: [REDACTED] [REDACTED]' }, 'Edit'), EditedInputRefusedError)
-  })
-
-  it('every kind of placeholder the redactor writes is recognised', () => {
-    let deep = { leaf: 'x' }
-    for (let i = 0; i < 12; i++) deep = { child: deep } // past the redactor's depth cap
-    const cyc = { name: 'n' }
-    cyc.self = cyc
-    const outputs = [
-      sanitizeToolInput({ k: `token=${'A'.repeat(20)}` }),
-      sanitizeToolInput({ password: 'p' }),
-      sanitizeToolInput(deep),
-      sanitizeToolInput(cyc),
-      sanitizeToolInput({ s: 'y'.repeat(300) }, { maxChars: 100 }),
-    ]
-    for (const out of outputs) {
-      assert.ok(countRedactionMarkers(JSON.stringify(out)) > 0, `a placeholder in ${JSON.stringify(out).slice(0, 60)} was not counted`)
+  it('a placeholder that was already in the text cannot launder one that moved: an old client dropping every hunk', () => {
+    // The text really contains `[REDACTED]` (line 1) and a secret the redactor replaced (line 2).
+    const raw = {
+      file_path: '/a',
+      old_string: 'docs: [REDACTED]\nsecret=abcdefgh\nx',
+      new_string: 'docs: [REDACTED]\nsecret=abcdefgh\ny',
     }
-    assert.equal(countRedactionMarkers('plain text'), 0)
-    assert.equal(countRedactionMarkers(undefined), 0)
+    const shown = sanitizeToolInput(raw)
+    assert.equal(shown.old_string, 'docs: [REDACTED]\nsecret= [REDACTED]\nx')
+    // An old client that dropped the only hunk sends the redacted old text back.
+    assert.throws(() => mergeEditedInput(raw, { new_string: shown.old_string }, 'Edit'), EditedInputRefusedError)
   })
 
-  it('a Bash command edited around a redacted secret is refused; the same edit without one is accepted', () => {
-    const raw = { command: `curl -H "Authorization: Bearer ${'k'.repeat(30)}" https://x.test` }
+  it('a Bash command whose literal placeholder hides a redacted secret is refused', () => {
+    const raw = { command: "printf '[REDACTED]'; export TOKEN=abcdefgh" }
     const shown = sanitizeToolInput(raw).command
-    assert.ok(shown.includes('[REDACTED]'))
-    assert.throws(() => mergeEditedInput(raw, { command: `${shown} -v` }, 'Bash'), EditedInputRefusedError)
+    assert.equal(shown, "printf '[REDACTED]'; export TOKEN= [REDACTED]")
+    assert.throws(() => mergeEditedInput(raw, { command: shown }, 'Bash'), EditedInputRefusedError)
+    // Even text with no placeholder at all: the client was shown a copy, so it is not the base of an edit.
+    assert.throws(() => mergeEditedInput(raw, { command: "printf 'x'" }, 'Bash'), EditedInputRefusedError)
+  })
+
+  it('a field redaction did not change takes the client\'s text, a literal placeholder included', () => {
+    const raw = { file_path: '/a', old_string: 'docs: [REDACTED] here', new_string: 'docs: [REDACTED] here\nmore' }
+    assert.deepEqual(sanitizeToolInput(raw), raw, 'nothing was redacted')
+    assert.equal(mergeEditedInput(raw, { new_string: 'docs: [REDACTED] here' }, 'Edit').new_string, 'docs: [REDACTED] here')
     assert.equal(mergeEditedInput({ command: 'ls' }, { command: 'ls -la' }, 'Bash').command, 'ls -la')
+  })
+
+  it('an Edit whose replaced text was redacted refuses client text for new_string too', () => {
+    // new_string is clean, but the text an old client narrows from includes old_string.
+    const raw = { file_path: '/a', old_string: 'secret=abcdefgh', new_string: 'ok' }
+    assert.throws(() => mergeEditedInput(raw, { new_string: 'ok' }, 'Edit'), EditedInputRefusedError)
+  })
+
+  it('an input too large to have been shown whole refuses client text', () => {
+    const raw = { file_path: '/a', old_string: 'a', new_string: 'x'.repeat(PULL_MAX_INPUT_CHARS) }
+    assert.throws(() => mergeEditedInput(raw, { new_string: 'x' }, 'Edit'), EditedInputRefusedError)
   })
 })
 
@@ -345,8 +352,8 @@ describe('#8446 a decision the server cannot map back to the raw text is refused
     const f = fixture()
     return { f, raw: { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string } }
   }
-  const refused = (raw, dropped) => assert.throws(
-    () => mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: dropped }, 'Edit'),
+  const refused = (raw, dropped, kept = []) => assert.throws(
+    () => mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: dropped, [KEPT_HUNKS_KEY]: kept }, 'Edit'),
     EditedInputRefusedError,
   )
 
@@ -382,6 +389,80 @@ describe('#8446 a decision the server cannot map back to the raw text is refused
   it('an input too large to have been shown whole', () => {
     const big = 'x'.repeat(PULL_MAX_INPUT_CHARS)
     refused({ file_path: '/a', old_string: 'a', new_string: big }, [{ oldStart: 1, oldCount: 1, newStart: 1, newCount: 1 }])
+  })
+
+  it('a range that is not a real hunk: the lines outside the ranges must agree between original and proposal', () => {
+    // The reviewed diff of A,B,C -> A,X,C has one hunk (1,3,1,3 or just B->X). This range
+    // skips line 1 on one side only, and would write A,A,C.
+    const raw = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nX\nC' }
+    refused(raw, [{ oldStart: 1, oldCount: 1, newStart: 2, newCount: 1 }])
+    // A real range for the same change is fine.
+    assert.equal(mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }], [KEPT_HUNKS_KEY]: [] }, 'Edit').new_string, 'A\nB\nC')
+  })
+
+  it('a zero-count side cannot fabricate an insertion or a deletion', () => {
+    const same = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nB\nC' }
+    refused(same, [{ oldStart: 1, oldCount: 0, newStart: 2, newCount: 1 }]) // invent a deletion of B
+    refused(same, [{ oldStart: 2, oldCount: 1, newStart: 1, newCount: 0 }]) // invent an insertion of B
+    const changed = { file_path: '/a', old_string: 'A\nC', new_string: 'A\nB\nC' }
+    // The real hunk: B was inserted after line 1. Dropping it restores A,C.
+    assert.equal(mergeEditedInput(changed, { [DROPPED_HUNKS_KEY]: [{ oldStart: 1, oldCount: 0, newStart: 2, newCount: 1 }], [KEPT_HUNKS_KEY]: [] }, 'Edit').new_string, 'A\nC')
+    // The same insertion claimed one line late.
+    refused(changed, [{ oldStart: 2, oldCount: 0, newStart: 2, newCount: 1 }])
+  })
+
+  it('lines outside every listed hunk that differ are refused; listing the hunk that changed them makes it valid', () => {
+    const raw = { file_path: '/a', old_string: 'A\nB\nC\nD', new_string: 'A\nX\nC\nY' }
+    const drop = [{ oldStart: 4, oldCount: 1, newStart: 4, newCount: 1 }]
+    const keep = [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }]
+    refused(raw, drop) // line 2 differs and is not listed
+    const out = mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: drop, [KEPT_HUNKS_KEY]: keep }, 'Edit')
+    assert.equal(out.new_string, 'A\nX\nC\nD')
+  })
+
+  it('a kept range that is not a real hunk is refused just like a dropped one', () => {
+    const raw = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nX\nC' }
+    refused(raw, [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }], [{ oldStart: 1, oldCount: 1, newStart: 2, newCount: 1 }])
+  })
+
+  it('droppedHunks without keptHunks cannot be checked and is refused', () => {
+    const raw = { file_path: '/a', old_string: 'A\nB\nC', new_string: 'A\nX\nC' }
+    assert.throws(
+      () => mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [{ oldStart: 2, oldCount: 1, newStart: 2, newCount: 1 }] }, 'Edit'),
+      EditedInputRefusedError,
+    )
+  })
+
+  it('a droppedHunks key that is present, empty included, puts the field in hunk mode: client text is ignored', () => {
+    const raw = { file_path: '/a', old_string: 'A\nB', new_string: 'A\nX' }
+    assert.equal(mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [], new_string: 'UNRELATED' }, 'Edit').new_string, 'A\nX')
+    assert.equal(mergeEditedInput({ file_path: '/a', content: 'raw' }, { [DROPPED_HUNKS_KEY]: [], content: 'UNRELATED' }, 'Write').content, 'raw')
+    refused(raw, null)
+  })
+
+  it('a 150001-line hunk is restored without a stack-size failure', () => {
+    // 300K characters as JSON: under the pull cap, over V8's argument limit for a spread.
+    const lines = 150_001
+    const raw = { file_path: '/a', old_string: '\n'.repeat(lines - 1), new_string: 'x' }
+    const out = mergeEditedInput(raw, { [DROPPED_HUNKS_KEY]: [{ oldStart: 1, oldCount: lines, newStart: 1, newCount: 1 }], [KEPT_HUNKS_KEY]: [] }, 'Edit')
+    assert.equal(out.new_string, raw.old_string)
+  })
+
+  it('any unexpected failure while applying an edit denies the request instead of leaving it pending', async () => {
+    const { raw } = edit()
+    const h = harness('Edit', raw)
+    h.pull()
+    // Make reading the input throw something that is not a refusal.
+    h.pm._pendingPermissions.get(h.requestId).input = {
+      file_path: '/repo/target.js',
+      get old_string() { throw new Error('boom') },
+      new_string: 'x',
+    }
+    h.respond({ ...decide([HUNK_B]) })
+    const result = await Promise.race([h.outcome, new Promise((r) => setTimeout(() => r('PENDING'), 500))])
+    assert.notEqual(result, 'PENDING', 'the request must not be left pending')
+    assert.equal(result.behavior, 'deny')
+    assert.equal(h.sent().filter((m) => m.type === 'error' && m.code === 'PERMISSION_EDIT_REFUSED').length, 1)
   })
 
   it('a refusal is a deny at the resolver, is audited as one, and the answering client gets an error', async () => {
@@ -422,11 +503,72 @@ describe('#8446 both pipelines', () => {
     // 'auto' would have allowed it outright: a prompt is the floor holding.
     assert.ok(h.requestId, 'raised a prompt although the mode is auto')
     h.pull()
-    h.respond({ file_path: join(dir, 'elsewhere'), [DROPPED_HUNKS_KEY]: [HUNK_B] })
+    h.respond({ file_path: join(dir, 'elsewhere'), ...decide([HUNK_B]) })
     const result = await h.outcome
     assert.equal(result.behavior, 'allow')
     assert.equal(result.updatedInput.file_path, envPath)
     assert.ok(!result.updatedInput.new_string.includes('[REDACTED'))
+  })
+
+  it('BYOK subagent: a refused edit denies the request in the CHILD manager that holds it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-8446-byok-'))
+    dirs.push(dir)
+    const f = fixture()
+    const childPm = new PermissionManager({ log: quiet, cwd: dir, timeoutMs: 60_000 })
+    const child = new EventEmitter()
+    child.respondToPermission = (...a) => childPm.respondToPermission(...a)
+    wirePermissionManager(child, childPm)
+    let requestId = null
+    child.on('permission_request', (d) => { requestId = d.requestId })
+    const outcome = childPm.handlePermission('Edit', { file_path: '/repo/target.js', old_string: f.old_string, new_string: f.new_string }, null, 'default')
+
+    const parent = new ClaudeByokSession({ cwd: dir })
+    parent._subagentPermissionRouting.set(requestId, child)
+    const permissionSessionMap = new Map([[requestId, 's1']])
+    const audit = { logDecision: createSpy() }
+    const ctx = nsCtx({
+      send: createSpy(),
+      sessionManager: { getSession: (id) => (id === 's1' ? { session: parent } : undefined) },
+      permissionSessionMap,
+      pendingPermissions: new Map(),
+      permissionAudit: audit,
+      unregisterPermissionRoute: (id) => permissionSessionMap.delete(id),
+    })
+    const ws = { readyState: 1, send() {} }
+    // An edit the server refuses (client text over redacted content).
+    settingsHandlers.permission_response(ws, { id: 'c1', activeSessionId: 's1' }, {
+      type: 'permission_response', requestId, decision: 'allow', editedInput: { new_string: 'anything' },
+    }, ctx)
+
+    const result = await Promise.race([outcome, new Promise((r) => setTimeout(() => r('PENDING'), 500))])
+    assert.notEqual(result, 'PENDING', 'the child must not be left waiting for its timeout')
+    assert.equal(result.behavior, 'deny')
+    assert.equal(audit.logDecision.callCount, 1)
+    assert.equal(audit.logDecision.lastCall[0].reason, 'edit_refused')
+    assert.equal(childPm._pendingPermissions.size, 0)
+    assert.equal(parent._subagentPermissionRouting.has(requestId), false, 'the route is gone once the child resolved')
+    await parent.destroy()
+  })
+
+  it('a refusal whose deny reaches no pending request is not audited as a deny', () => {
+    const session = {
+      _lastPermissionData: new Map(),
+      respondToPermission: createSpy((id, decision) => {
+        if (decision === 'allow') throw new EditedInputRefusedError('nope')
+        return false // the deny found nothing to resolve
+      }),
+    }
+    const audit = { logDecision: createSpy() }
+    const resolver = createPermissionResolver({
+      permissionSessionMap: new Map([['r1', 's1']]),
+      pendingPermissions: new Map(),
+      getSessionManager: () => ({ getSession: () => ({ session }) }),
+      resolveLegacyPermission: createSpy(),
+      getPermissionAudit: () => audit,
+    })
+    const result = resolver.resolve('r1', 'allow', null, { clientId: 'c1', editedInput: { content: 'x' } })
+    assert.equal(result.kind, 'expired')
+    assert.equal(audit.logDecision.callCount, 0)
   })
 
   it('hook-routed prompts carry no edit: the resolver hands the legacy store only the decision', () => {

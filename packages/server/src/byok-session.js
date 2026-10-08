@@ -2646,14 +2646,19 @@ export class ClaudeByokSession extends BaseSession {
     // already authorized against the parent session by ws-permissions.
     const child = this._subagentPermissionRouting.get(requestId)
     if (child) {
-      // Drop the routing entry first so a duplicate/late response can't
-      // re-resolve a stale id. The child also emits permission_resolved
-      // which our relay listener uses to clear the same entry — deleting
-      // here too is idempotent and closes the lifetime tightly.
-      this._subagentPermissionRouting.delete(requestId)
       // #6543: forward the operator's per-hunk editedInput to the child too.
       // #6773: the deny `reason` forwards to the child as well.
-      return child.respondToPermission(requestId, decision, editedInput, reason)
+      const resolved = child.respondToPermission(requestId, decision, editedInput, reason)
+      // Drop the routing entry once the child has taken the response, so a
+      // duplicate/late response can't re-resolve a stale id. The child also emits
+      // permission_resolved which our relay listener uses to clear the same entry
+      // — deleting here too is idempotent and closes the lifetime tightly.
+      // #8446: NOT before the call. A child that REFUSES an edit throws with its
+      // request still pending, and the caller's follow-up deny must find the route
+      // to reach it; a route dropped first sent that deny to this manager, which
+      // does not hold the request, and the child waited out its timeout.
+      this._subagentPermissionRouting.delete(requestId)
+      return resolved
     }
     return this._permissions.respondToPermission(requestId, decision, editedInput, reason)
   }

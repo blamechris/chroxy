@@ -374,15 +374,24 @@ an approve with edits can do, and it lives in `edited-input.js` and
   path. A guard test fails if a path field is ever added.
 - **The client sends decisions, never content.** The review is drawn over the REDACTED
   tool input (`get_permission_input`), so text built from it carries `[REDACTED]` where
-  a secret was. The client sends `editedInput.droppedHunks`, the `@@` ranges of the
-  hunks it dropped, and the server rebuilds the written text from the RAW input it
-  holds: the proposed text with each dropped hunk's lines replaced by the original's.
-  Content a client also sends for that field is ignored.
-- **Refusal is a deny.** Text a client sends (an older client, or an edited Bash
-  command) that carries a redaction placeholder the raw input did not is refused, as
-  are ranges that are malformed, out of range, overlapping, or that cannot be mapped
-  back because redaction changed the line count. The request is DENIED (nothing runs,
-  the agent's tool result says why) and the answering client gets a
+  a secret was. The client sends `editedInput.droppedHunks` and `keptHunks`, the `@@`
+  ranges of every hunk it was shown, and the server rebuilds the written text from the
+  RAW input it holds: the proposed text with each dropped hunk's lines replaced by the
+  original's. The lines outside all listed hunks must be the same lines on both sides,
+  in count and content (compared over the shown copy), which is what makes each range a
+  region of the real diff and stops a zero-count side from inventing an insertion or a
+  deletion. A `droppedHunks` key, an empty list included, puts the field in hunk mode,
+  and any text the client also sends for that field is ignored.
+- **Text from a client is a base only where redaction changed nothing.** An older
+  client's narrowed text, or an edited Bash command, is refused outright when redaction
+  changed the copy it was drawn from (the field, and for an Edit the text it replaces),
+  whatever the text contains: counting placeholders cannot say where one came from.
+  Where redaction changed nothing, a literal `[REDACTED]` in the text is just text.
+- **Refusal is a deny.** Ranges that are malformed, out of range, overlapping, not a real
+  diff, or that cannot be mapped back because redaction changed the line count are
+  refused, as is any unexpected failure while applying an edit. The request is DENIED
+  (nothing runs, the agent's tool result says why), in the manager that holds it (a BYOK
+  subagent's prompt lives in its child), and the answering client gets a
   `PERMISSION_EDIT_REFUSED` error. It is not left pending: a client marks a prompt
   answered the moment it sends.
 - **Only the in-process pipeline applies edits.** Hook-routed prompts (claude-tui,

@@ -32,7 +32,7 @@ describe('PreWriteDiffReview emits drop decisions (#8446)', () => {
       toggle.props.onPress();
     });
     const last = onChange.mock.calls[onChange.mock.calls.length - 1]![0];
-    expect(last).toEqual({ droppedHunks: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }] });
+    expect(last).toEqual({ droppedHunks: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }], keptHunks: [] });
     expect(JSON.stringify(last).includes('REDACTED')).toBe(false);
   });
 

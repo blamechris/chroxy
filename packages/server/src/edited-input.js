@@ -10,31 +10,42 @@
  * keep that from happening, and both live here so the permission manager has one
  * place to call:
  *
- *  1. HUNK DECISIONS, NOT CONTENT. The client says which hunks it dropped (their
- *     line ranges, the `@@` header numbers of the diff it rendered). The server
- *     rebuilds the result from the RAW input it holds, so the written text is made
- *     only of lines the agent proposed.
- *  2. A PLACEHOLDER IS NEVER NEW. Content a client sends as text (an older client,
- *     or the Bash command editor) is refused when it carries more redaction
- *     placeholders than the raw input did.
+ *  1. HUNK DECISIONS, NOT CONTENT. The client says which hunks it dropped and
+ *     which it kept (their line ranges, the `@@` header numbers of the diff it
+ *     rendered). The server rebuilds the result from the RAW input it holds, so the
+ *     written text is made only of lines the agent proposed.
+ *  2. TEXT IS NEVER A BASE. Text a client sends (an older client, or the Bash
+ *     command editor) was edited from the copy it was shown. Where redaction
+ *     changed that copy the text cannot be trusted to be the original with an
+ *     edit, whatever it contains: counting placeholders cannot say where one came
+ *     from, so such text is refused outright and only `droppedHunks` may narrow
+ *     the field. Where redaction changed nothing, the text is just text.
  *
  * A refusal throws {@link EditedInputRefusedError}; nothing is written.
  */
-import { sanitizeToolInput, PULL_MAX_INPUT_CHARS, countRedactionMarkers } from './redaction.js'
+import { sanitizeToolInput, PULL_MAX_INPUT_CHARS } from './redaction.js'
 
 /**
  * The reserved key of `permission_response.editedInput` that carries the hunk
- * decisions: an array of {@link DroppedHunkRange}. It is not a content field, so
- * the content whitelist never reads it as one.
+ * decisions: an array of {@link HunkRange}, the hunks the operator dropped. Its
+ * presence puts the field in hunk mode. It is not a content field, so the content
+ * whitelist never reads it as one.
  */
 export const DROPPED_HUNKS_KEY = 'droppedHunks'
 
-/** A permission response naming more dropped hunks than this is not a real diff. */
-export const MAX_DROPPED_HUNKS = 1000
+/**
+ * The hunks the operator kept: with `droppedHunks`, every hunk of the diff it was shown.
+ * Needed so the lines OUTSIDE all hunks can be checked to be unchanged lines (see
+ * {@link narrowByDroppedHunks}). Required whenever `droppedHunks` is not empty.
+ */
+export const KEPT_HUNKS_KEY = 'keptHunks'
+
+/** A permission response naming more hunks than this, in either list, is not a real diff. */
+export const MAX_HUNKS_PER_LIST = 1000
 
 /**
- * @typedef {object} DroppedHunkRange
- * @property {number} oldStart  `@@ -oldStart,oldCount` of the dropped hunk
+ * @typedef {object} HunkRange
+ * @property {number} oldStart  `@@ -oldStart,oldCount` of the hunk
  * @property {number} oldCount
  * @property {number} newStart  `@@ +newStart,newCount`
  * @property {number} newCount
@@ -83,65 +94,101 @@ function lineIndex(start, count) {
 }
 
 /**
- * Read and order the client's dropped hunks, refusing anything that is not a set of
- * disjoint, in-range line regions of the two texts.
+ * Read one list of hunk ranges, refusing anything malformed.
  *
- * @returns {Array<{ oldIdx: number, oldCount: number, newIdx: number, newCount: number }>}
+ * @returns {Array<{ oldIdx: number, oldCount: number, newIdx: number, newCount: number, dropped: boolean }>}
  */
-function readDroppedHunks(dropped, baseLen, proposedLen) {
-  if (!Array.isArray(dropped) || dropped.length > MAX_DROPPED_HUNKS) {
-    throw new EditedInputRefusedError('The dropped hunks were not a list the server can read, so the edit was not applied.')
+function readRanges(list, dropped) {
+  if (!Array.isArray(list) || list.length > MAX_HUNKS_PER_LIST) {
+    throw new EditedInputRefusedError('The hunks were not a list the server can read, so the edit was not applied.')
   }
-  const regions = dropped.map((h) => {
+  return list.map((h) => {
     if (!h || typeof h !== 'object'
       || !isCount(h.oldStart) || !isCount(h.oldCount) || !isCount(h.newStart) || !isCount(h.newCount)) {
-      throw new EditedInputRefusedError('A dropped hunk was malformed, so the edit was not applied.')
+      throw new EditedInputRefusedError('A hunk was malformed, so the edit was not applied.')
     }
     return {
       oldIdx: lineIndex(h.oldStart, h.oldCount),
       oldCount: h.oldCount,
       newIdx: lineIndex(h.newStart, h.newCount),
       newCount: h.newCount,
+      dropped,
     }
   })
-  regions.sort((a, b) => a.newIdx - b.newIdx)
+}
+
+/**
+ * Every hunk of the reviewed diff, dropped and kept, in order, refusing anything that
+ * is not a set of disjoint, in-range line regions of the two texts.
+ */
+function readHunks(dropped, kept, baseLen, proposedLen) {
+  const cells = [...readRanges(dropped, true), ...readRanges(kept, false)]
+  cells.sort((a, b) => a.newIdx - b.newIdx || a.oldIdx - b.oldIdx)
   let prevOldEnd = 0
   let prevNewEnd = 0
-  for (const r of regions) {
+  for (const r of cells) {
     const inRange = r.oldIdx >= 0 && r.newIdx >= 0
       && r.oldIdx + r.oldCount <= baseLen && r.newIdx + r.newCount <= proposedLen
     // Disjoint and in the same order on both sides: a diff's hunks are.
     if (!inRange || r.oldIdx < prevOldEnd || r.newIdx < prevNewEnd) {
-      throw new EditedInputRefusedError('A dropped hunk lay outside the content, so the edit was not applied.')
+      throw new EditedInputRefusedError('A hunk lay outside the content, so the edit was not applied.')
     }
     prevOldEnd = r.oldIdx + r.oldCount
     prevNewEnd = r.newIdx + r.newCount
   }
-  return regions
+  return cells
 }
 
+/** Append `lines[from, to)` to `out`. A loop, not a spread: a hunk may be 100K+ lines. */
+function pushRange(out, lines, from, to) {
+  for (let i = from; i < to; i++) out.push(lines[i])
+}
+
+/** Whether `a[aFrom, aTo)` and `b[bFrom, bTo)` are the same lines, in count and content. */
+function sameLines(a, aFrom, aTo, b, bFrom, bTo) {
+  if (aTo - aFrom !== bTo - bFrom) return false
+  for (let i = 0; i < aTo - aFrom; i++) {
+    if (a[aFrom + i] !== b[bFrom + i]) return false
+  }
+  return true
+}
+
+const NOT_A_DIFF = 'The dropped hunks do not match the change that was proposed, so the edit was not applied.'
+
 /**
- * Build a Write/Edit's narrowed content from the RAW input and the client's dropped
- * hunks: the proposed text with each dropped hunk's lines replaced by the base
+ * Build a Write/Edit's narrowed content from the RAW input and the client's hunk
+ * decisions: the proposed text with each dropped hunk's lines replaced by the original
  * text's lines, every line taken from the raw input.
  *
- * The client drew its hunks over the redacted copy, so its line numbers only mean
- * the same lines in the raw text when redaction kept the line count (it never adds a
- * newline; a pattern that spanned one removes it). When the counts differ the
- * numbers cannot be mapped back and the edit is refused rather than guessed at.
+ * The client lists EVERY hunk it was shown, dropped or kept, and the lines OUTSIDE all
+ * of them (before the first, between two, after the last) must be the same lines on
+ * both sides, in count and content. Those are a diff's unchanged lines, and checking
+ * them is what makes each range a region of a real diff: a range cannot land off its
+ * hunk, and a zero-count side cannot invent an insertion or a deletion, because the
+ * unchanged lines on either side would then not line up. The comparison is over the
+ * copy the client was shown (where the diff was drawn), so two keys that differ only
+ * inside a redacted span still read as unchanged lines, and the lines kept there are
+ * the proposal's.
+ *
+ * The client's line numbers only mean the same lines in the raw text when redaction
+ * kept the line count (it never adds a line break; a pattern that spanned one removes
+ * it). When the counts differ the edit is refused rather than guessed at.
  *
  * @param {object} rawInput   the agent's proposed tool input, as held server-side
  * @param {string} toolName   'Write' | 'Edit'
  * @param {unknown} dropped   the client's `editedInput.droppedHunks`
+ * @param {unknown} kept      the client's `editedInput.keptHunks`
  * @returns {string} the narrowed content for the tool's content field
  */
-export function narrowByDroppedHunks(rawInput, toolName, dropped) {
+export function narrowByDroppedHunks(rawInput, toolName, dropped, kept) {
   const review = HUNK_REVIEW[toolName]
   const rawProposed = rawInput[review.field]
   const rawBase = review.base(rawInput)
   if (typeof rawProposed !== 'string' || typeof rawBase !== 'string') {
     throw new EditedInputRefusedError(`This ${toolName} has no text content to narrow, so the edit was not applied.`)
   }
+  // Nothing dropped: the proposal as it stands.
+  if (Array.isArray(dropped) && dropped.length === 0) return rawProposed
 
   // The copy the client was shown: the same call `get_permission_input` makes.
   const shown = sanitizeToolInput(rawInput, { maxChars: PULL_MAX_INPUT_CHARS })
@@ -153,35 +200,56 @@ export function narrowByDroppedHunks(rawInput, toolName, dropped) {
 
   const baseLines = toLines(rawBase)
   const proposedLines = toLines(rawProposed)
-  if (baseLines.length !== toLines(shownBase).length || proposedLines.length !== toLines(shownProposed).length) {
+  const shownBaseLines = toLines(shownBase)
+  const shownProposedLines = toLines(shownProposed)
+  if (baseLines.length !== shownBaseLines.length || proposedLines.length !== shownProposedLines.length) {
     throw new EditedInputRefusedError(
       'Redacting this content changed its line structure, so the hunks you dropped cannot be mapped back to the original text and the edit was not applied.',
     )
   }
 
-  const regions = readDroppedHunks(dropped, baseLines.length, proposedLines.length)
-  // Last region first, so earlier line numbers stay valid while the tail changes.
-  const out = [...proposedLines]
-  for (let i = regions.length - 1; i >= 0; i--) {
-    const r = regions[i]
-    out.splice(r.newIdx, r.newCount, ...baseLines.slice(r.oldIdx, r.oldIdx + r.oldCount))
+  const cells = readHunks(dropped, kept, baseLines.length, proposedLines.length)
+  const out = []
+  let oldAt = 0
+  let newAt = 0
+  for (const r of cells) {
+    if (!sameLines(shownBaseLines, oldAt, r.oldIdx, shownProposedLines, newAt, r.newIdx)) {
+      throw new EditedInputRefusedError(NOT_A_DIFF)
+    }
+    pushRange(out, proposedLines, newAt, r.newIdx)
+    if (r.dropped) pushRange(out, baseLines, r.oldIdx, r.oldIdx + r.oldCount)
+    else pushRange(out, proposedLines, r.newIdx, r.newIdx + r.newCount)
+    oldAt = r.oldIdx + r.oldCount
+    newAt = r.newIdx + r.newCount
   }
+  if (!sameLines(shownBaseLines, oldAt, baseLines.length, shownProposedLines, newAt, proposedLines.length)) {
+    throw new EditedInputRefusedError(NOT_A_DIFF)
+  }
+  pushRange(out, proposedLines, newAt, proposedLines.length)
   return out.join('\n')
 }
 
 /**
- * Refuse text content a client sent when it carries redaction placeholders the raw
- * input did not. `allowed` is the raw text(s) the content may legitimately be made
- * of; a file that really contains `[REDACTED]` keeps the occurrences it had.
+ * Refuse text a client sent for `field` when redaction changed any of the text it was
+ * drawn from. `field` is a whitelisted content field; for a hunk-reviewed tool the text
+ * an older client narrowed from is the field AND the text it replaces.
  *
- * @param {string} candidate  the client-supplied text
- * @param {Array<unknown>} allowed  raw strings the candidate may draw from
+ * Fails closed: an input too large to have been shown whole reads as changed.
+ *
+ * @param {object} rawInput
+ * @param {string} toolName
+ * @param {string} field
  */
-export function assertNoNewRedactionMarkers(candidate, allowed) {
-  const allowance = allowed.reduce((n, text) => n + countRedactionMarkers(text), 0)
-  if (countRedactionMarkers(candidate) > allowance) {
-    throw new EditedInputRefusedError(
-      'The edited content contains a redaction placeholder that was not in the original, so it was not applied. Approve the unedited request, or deny it.',
-    )
+export function assertClientTextAllowed(rawInput, toolName, field) {
+  const shown = sanitizeToolInput(rawInput, { maxChars: PULL_MAX_INPUT_CHARS })
+  const names = isHunkReviewedTool(toolName) ? [field, 'old_string'] : [field]
+  for (const name of names) {
+    const raw = rawInput?.[name]
+    if (typeof raw !== 'string') continue
+    if (shown?.[name] !== raw) {
+      throw new EditedInputRefusedError(
+        'Part of this request was redacted before you saw it, so text edited from that copy cannot be applied. Narrow it with the hunk review, or approve or deny it as it is.',
+      )
+    }
   }
 }

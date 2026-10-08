@@ -119,7 +119,7 @@ describe('ViewerPreWriteReview', () => {
     // Edit diffs old→new; dropping the only hunk is sent as its range, never as text.
     fireEvent.click(screen.getAllByTestId('hunk-toggle')[0]!)
     fireEvent.click(screen.getByTestId('viewer-prewrite-approve'))
-    expect(mockSendPermissionResponse).toHaveBeenCalledWith('req-1', 'allow', { droppedHunks: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }] })
+    expect(mockSendPermissionResponse).toHaveBeenCalledWith('req-1', 'allow', { droppedHunks: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }], keptHunks: [] })
   })
 
   it('Deny never carries an editedInput even after dropping a hunk', () => {
