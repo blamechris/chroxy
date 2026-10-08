@@ -696,7 +696,9 @@ export class SdkSession extends BaseSession {
     // attaches `sourceToolUseId` to that resolution only -- so a Deny, a timeout or a
     // rule decision made in the same window keeps its own row.
     this._permissions.on('permission_resolved', (d) => {
-      if (typeof d?.sourceToolUseId === 'string') this._stopCancelledToolUseIds.add(d.sourceToolUseId)
+      if (typeof d?.sourceToolUseId !== 'string') return
+      this._stopCancelledToolUseIds.add(d.sourceToolUseId)
+      this._stopResolvedToolUseIds.add(d.sourceToolUseId)
     })
     wirePermissionManager(this, this._permissions, {
       onRequest: () => this._pauseResultTimeoutForPermission(),
@@ -749,6 +751,11 @@ export class SdkSession extends BaseSession {
     // it: it leaves `_pendingPermissionToolUseIds` first.
     this._pendingPermissionToolUseIds = new Set()
     this._stopCancelledToolUseIds = new Set()
+    // #8430: the subset of those that a Stop-caused RESOLUTION confirmed. The
+    // snapshot in `interrupt()` marks a prompt provisionally (the provider can
+    // write its own denial before this session's resolution runs); a decision that
+    // lands first -- a Deny, a timeout -- is not confirmed and takes the mark off.
+    this._stopResolvedToolUseIds = new Set()
 
     // #4881: provider parity with CliSession's #4602 _intentionalStop flag.
     // Set by `interrupt()` immediately before aborting the active SDK query
@@ -954,6 +961,7 @@ export class SdkSession extends BaseSession {
     // #7376: a turn starts with no Stop requested, whatever the last one did.
     this._stopRequestedThisTurn = false
     this._stopCancelledToolUseIds.clear() // #8363
+    this._stopResolvedToolUseIds.clear() // #8430
     // #8430: ...and with no user Stop in flight, whatever the last turn left (a
     // turn superseded before its teardown never reaches `_clearMessageState`).
     this._permissions.clearUserStopInFlight()
@@ -2150,6 +2158,11 @@ export class SdkSession extends BaseSession {
       // Mirrors CliSession._handleChildClose (#4602).
       // A superseded turn leaves the Stop flag to the turn it belongs to.
       const wasIntentionalStop = supersededByNewerTurn() ? false : this._consumeIntentionalStop()
+      // #8430: whether the USER's Stop is what ended this turn is decided NOW, with
+      // `wasIntentionalStop`. The failure handling below can await (container
+      // classification), and a Stop that lands during that await did not end a turn
+      // that had already failed.
+      const userStopEndedTurn = this._permissions.isUserStopInFlight()
       if (!this._destroying) {
         if (closedAfterResult && isQueryCloseError(err)) {
           // #8300: finishTurn already emitted this turn's result and closed
@@ -2238,11 +2251,12 @@ export class SdkSession extends BaseSession {
       // exit; neither is a failed command. Any other throw has no considered
       // cause and keeps the generic sweep.
       if (!supersededByNewerTurn()) {
-        this._clearMessageState(
-          wasIntentionalStop
+        this._clearMessageState({
+          ...(wasIntentionalStop
             ? { terminatedReason: 'user_stop' }
-            : isProcessExitError(err) ? { terminatedReason: 'process_exit' } : undefined,
-        )
+            : isProcessExitError(err) ? { terminatedReason: 'process_exit' } : {}),
+          userStop: userStopEndedTurn,
+        })
       }
     } finally {
       // #8300: whatever ended the loop — the prompt's result, a throw, a
@@ -2827,7 +2841,14 @@ export class SdkSession extends BaseSession {
     this._pendingPermissionToolUseIds.add(toolUseId)
     const settled = (result) => {
       this._pendingPermissionToolUseIds.delete(toolUseId)
-      if (result?.behavior === 'allow') this._stopCancelledToolUseIds.delete(toolUseId)
+      if (result?.behavior === 'allow') {
+        this._stopCancelledToolUseIds.delete(toolUseId)
+        this._stopResolvedToolUseIds.delete(toolUseId)
+      } else if (!this._stopResolvedToolUseIds.has(toolUseId)) {
+        // #8430: settled by something other than the Stop (the user's Deny, a
+        // timeout, a rule): the tool row keeps that decision's own reading.
+        this._stopCancelledToolUseIds.delete(toolUseId)
+      }
     }
     return Promise.resolve(decision).then(
       (result) => { settled(result); return result },
@@ -2846,6 +2867,7 @@ export class SdkSession extends BaseSession {
    * @returns {string|undefined}
    */
   _terminatedReasonForToolResult(toolUseId, block) {
+    this._stopResolvedToolUseIds.delete(toolUseId)
     if (!this._stopCancelledToolUseIds.delete(toolUseId)) return undefined
     return block?.is_error === true ? 'user_stop_before_run' : undefined
   }
@@ -3136,7 +3158,12 @@ export class SdkSession extends BaseSession {
     // already settling) so an interrupt never strands a queued message.
     this.clearOutgoingQueue()
 
-    if (!this._query) return
+    if (!this._query) {
+      // #8430: a Stop with nothing to interrupt -- no query yet -- and no prompt
+      // open has nothing to label; do not leave it armed for the rest of the turn.
+      if (!this._permissions.hasPendingPrompt()) this._permissions.clearUserStopInFlight()
+      return
+    }
 
     // #4881: mark the imminent query teardown as user-initiated so the
     // _callQuery catch block suppresses the AbortError-flavored "Query error"
@@ -3149,13 +3176,21 @@ export class SdkSession extends BaseSession {
     // tool_result for each as soon as it sees the interrupt, which can be before
     // this session's abort listeners have run.
     //
+    // #8430: only for a USER Stop. Any other interrupt (an orchestration deadline,
+    // the scheduler) is not one, and its prompts' rows must not read as the user's
+    // doing. The mark is provisional: the prompt's own resolution confirms it (a
+    // Stop-caused one) or removes it (a Deny or timeout that won first), see
+    // `_trackPermissionDecision`.
+    //
     // Only a prompt that is STILL waiting. A decision delivered in this same
     // synchronous tick (the scheduler denies, then interrupts, back to back) has
     // already left the permission manager's pending state, though its id leaves
     // `_pendingPermissionToolUseIds` a microtask later; that call was refused,
     // not stopped.
-    for (const id of this._pendingPermissionToolUseIds) {
-      if (this._permissions.hasPendingForToolUse(id)) this._stopCancelledToolUseIds.add(id)
+    if (this._permissions.isUserStopInFlight()) {
+      for (const id of this._pendingPermissionToolUseIds) {
+        if (this._permissions.hasPendingForToolUse(id)) this._stopCancelledToolUseIds.add(id)
+      }
     }
 
     // #4828: session-scoped (interrupt() only meaningful with an active query).
@@ -3356,7 +3391,8 @@ export class SdkSession extends BaseSession {
     // #8430: read the user Stop BEFORE the base teardown clears it. A live Stop
     // ends the turn on the generator's AbortError, so the prompts still open are
     // resolved by `clearAll()` below, not by the abort listener.
-    const userStop = this._permissions.isUserStopInFlight()
+    // The teardown of a failed query passes the cause it established earlier.
+    const userStop = opts?.userStop ?? this._permissions.isUserStopInFlight()
     super._clearMessageState(opts)
     this._permissions.clearAll({ userStop })
     // Pause counter is tied to the previous message — reset so the next

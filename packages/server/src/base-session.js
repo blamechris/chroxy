@@ -1540,11 +1540,6 @@ export class BaseSession extends EventEmitter {
     this._permissions?.markUserStopInFlight?.()
   }
 
-  /** #8430: has the user pressed Stop on the turn that is running? */
-  isUserStopInFlight() {
-    return this._permissions?.isUserStopInFlight?.() === true
-  }
-
   /**
    * #7376: record that a Stop was requested during the turn that is running
    * now. A no-op when idle, so a Stop pressed between turns cannot leak into the

@@ -1455,11 +1455,11 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
       const { s, cleanup } = mkApprovalSession()
       s._isBusy = true
       s.markUserStopInFlight()
-      assert.equal(s.isUserStopInFlight(), true)
+      assert.equal(s._permissions.isUserStopInFlight(), true)
       s._isBusy = false
       s._client.request = async () => ({ turn: { id: 't1' } })
       await s.sendMessage('next turn')
-      assert.equal(s.isUserStopInFlight(), false)
+      assert.equal(s._permissions.isUserStopInFlight(), false)
       cleanup()
     })
 

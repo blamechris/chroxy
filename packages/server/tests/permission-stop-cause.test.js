@@ -154,9 +154,9 @@ describe('BaseSession.markUserStopInFlight (#8374)', () => {
     s._permissions = pm
     s._isBusy = true
     s.markUserStopInFlight()
-    assert.equal(s.isUserStopInFlight(), true)
+    assert.equal(s._permissions.isUserStopInFlight(), true)
     s._clearMessageState()
-    assert.equal(s.isUserStopInFlight(), false)
+    assert.equal(s._permissions.isUserStopInFlight(), false)
     pm.destroy()
   })
 
@@ -322,7 +322,7 @@ describe('ClaudeByokSession and the user Stop (#8430)', () => {
     await decided
     assert.deepEqual(reasons, ['stopped'])
     session._finishTurn()
-    assert.equal(session.isUserStopInFlight(), false)
+    assert.equal(session._permissions.isUserStopInFlight(), false)
     session.destroy()
   })
 
@@ -332,7 +332,7 @@ describe('ClaudeByokSession and the user Stop (#8430)', () => {
     session._isBusy = true
     session._permissions.markUserStopInFlight() // pressed on turn A
     session._finishTurn()
-    assert.equal(session.isUserStopInFlight(), false, 'A\'s own teardown')
+    assert.equal(session._permissions.isUserStopInFlight(), false, 'A\'s own teardown')
     // A leaked flag, as if a path had skipped teardown: the next turn starts clear, and
     // a turn that fails before it starts clears it again on the way out.
     session._permissions.markUserStopInFlight()
@@ -341,13 +341,13 @@ describe('ClaudeByokSession and the user Stop (#8430)', () => {
     let seenAtStart
     session._matchMcpPromptCommand = () => ({ prefixedName: 'mcp__x__y' })
     session._resolveMcpPromptToText = async () => {
-      seenAtStart = session.isUserStopInFlight()
+      seenAtStart = session._permissions.isUserStopInFlight()
       session._permissions.markUserStopInFlight() // pressed while the expansion is awaited
       throw new Error('dead server')
     }
     await session.sendMessage('/mcp__x__y')
     assert.equal(seenAtStart, false, 'the new turn started clear')
-    assert.equal(session.isUserStopInFlight(), false, 'the failed expansion cleared it')
+    assert.equal(session._permissions.isUserStopInFlight(), false, 'the failed expansion cleared it')
     // ...so turn C's interrupt is not a Stop
     const reasons = []
     session._permissions.on('permission_resolved', (d) => reasons.push(d.reason))

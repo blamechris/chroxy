@@ -417,6 +417,19 @@ function normalizeStoredRule(rule) {
 }
 
 /**
+ * #8430: a prompt or question the user's Stop resolved carries the provider's id
+ * for the tool call, so the session can mark that tool row stopped. Only for a
+ * `stopped` resolution: a Deny, a timeout or a rule decision made in the same
+ * window must keep its own row. The event normalizer picks its wire fields, so this never
+ * reaches a client.
+ */
+function stoppedToolUseField(reason, toolUseId) {
+  return reason === 'stopped' && typeof toolUseId === 'string' && toolUseId.length > 0
+    ? { sourceToolUseId: toolUseId }
+    : {}
+}
+
+/**
  * Manages in-process permission requests for SDK-style sessions.
  *
  * Handles the lifecycle of permission prompts:
@@ -431,19 +444,6 @@ function normalizeStoredRule(rule) {
  *   permission_request  { requestId, tool, description, input, remainingMs, createdAt }
  *   user_question       { toolUseId, questions }
  */
-/**
- * #8430: a prompt the user's Stop resolved carries the provider's id for the tool
- * call, so the session can mark that tool row stopped. Only for a `stopped`
- * resolution: a Deny, a timeout or a rule decision made in the same window must
- * keep its own row. The event normalizer picks its wire fields, so this never
- * reaches a client.
- */
-function stoppedToolUseField(reason, toolUseId) {
-  return reason === 'stopped' && typeof toolUseId === 'string' && toolUseId.length > 0
-    ? { sourceToolUseId: toolUseId }
-    : {}
-}
-
 export class PermissionManager extends EventEmitter {
   constructor({ timeoutMs, log, maxPendingPermissions, cwd, ruleStore, mcpTrustLookup } = {}) {
     super()
@@ -1007,11 +1007,13 @@ export class PermissionManager extends EventEmitter {
       if (signal) {
         signal.addEventListener('abort', () => {
           if (this._pendingUserAnswer) {
+            // #8430: same cause attribution as a permission prompt's abort.
+            const reason = this._userStopInFlight ? 'stopped' : 'aborted'
             this._clearQuestionTimer()
             this._pendingUserAnswer = null
             this._waitingForAnswer = false
             resolve({ behavior: 'deny', message: 'Cancelled' })
-            this.emit('permission_resolved', { toolUseId, reason: 'aborted' })
+            this.emit('permission_resolved', { toolUseId, reason, ...stoppedToolUseField(reason, sourceToolUseId) })
           }
         }, { once: true })
       }
@@ -1426,7 +1428,11 @@ export class PermissionManager extends EventEmitter {
       // questionSessionMap on the cleared path. The SdkSession
       // timeout-pause listener (#2831) ignores fields it doesn't know
       // about, so the extra toolUseId is harmless there.
-      this.emit('permission_resolved', { toolUseId: clearedUserAnswer.toolUseId, reason: 'cleared' })
+      this.emit('permission_resolved', {
+        toolUseId: clearedUserAnswer.toolUseId,
+        reason: requestReason,
+        ...stoppedToolUseField(requestReason, clearedUserAnswer.sourceToolUseId),
+      })
     }
   }
 
