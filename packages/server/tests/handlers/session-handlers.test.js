@@ -2,7 +2,11 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { sessionHandlers } from '../../src/handlers/session-handlers.js'
 import { createSpy, createMockSession, waitFor, makeSessionIndexCtx, nsCtx } from '../test-helpers.js'
-import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+import { DEFAULT_PROVIDER, CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ClaudeTuiSession } from '../../src/claude-tui-session.js'
 // #7759 — the codex registry must resolve to the real CodexSession class, which
 // importing providers.js registers.
 import '../../src/providers.js'
@@ -1246,6 +1250,89 @@ describe('session-handlers', () => {
       const observer = makeClient({ id: 'client-1', activeSessionId: 'sess-1' })
       sessionHandlers.terminal_resize(makeWs(), observer, { type: 'terminal_resize', sessionId: 'sess-1', cols: 200, rows: 60 }, ctx)
       assert.equal(calls.length, 0)
+    })
+
+    // #8254: the dashboard sends terminal_resize BEFORE terminal_subscribe when its
+    // Output tab is shown again, and the server resets the PTY to the default when
+    // the last viewer unsubscribes. These drive the REAL ClaudeTuiSession through
+    // the real handlers in the order the dashboard sends them.
+    describe('hide then show again (#8254)', () => {
+      const PANE = { cols: 146, rows: 42 }
+      const DEFAULT = { cols: CLAUDE_TUI_PTY_SIZE.cols, rows: CLAUDE_TUI_PTY_SIZE.rows }
+
+      function liveSession() {
+        const skillsDir = mkdtempSync(join(tmpdir(), 'tui-8254-skills-'))
+        const session = new ClaudeTuiSession({ cwd: '/tmp', port: 0, skillsDir, repoSkillsDir: null })
+        const ptyCalls = []
+        session._term = { resize: (c, r) => ptyCalls.push([c, r]) }
+        session._ptyExited = false
+        const ctx = makeCtx()
+        ctx._sessions.set('sess-1', { session, cwd: '/tmp', name: 'S1' })
+        // The real WsServer._syncTerminalMirror: the gate is on while ANY client
+        // is subscribed to the session's terminal.
+        const clients = []
+        ctx.transport.syncTerminalMirror = (sid) => {
+          session.setTerminalMirrorActive(clients.some((c) => c.terminalSessionIds?.has(sid)))
+        }
+        return { ctx, session, ptyCalls, clients, cleanup: () => rmSync(skillsDir, { recursive: true, force: true }) }
+      }
+
+      // What the dashboard sends on showing the Output tab: the measured size
+      // (TerminalView), then the mirror opt-in + repaint (App effect).
+      function show(ctx, client) {
+        sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', ...PANE }, ctx)
+        sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
+        sessionHandlers.terminal_resync(makeWs(), client, { type: 'terminal_resync', sessionId: 'sess-1' }, ctx)
+      }
+      function hide(ctx, client) {
+        sessionHandlers.terminal_unsubscribe(makeWs(), client, { type: 'terminal_unsubscribe', sessionId: 'sess-1' }, ctx)
+      }
+
+      it('the pane size is applied on every visit, after the reset that comes with leaving', () => {
+        const { ctx, session, clients, cleanup } = liveSession()
+        try {
+          const client = makeClient({ activeSessionId: 'sess-1' })
+          clients.push(client)
+          show(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), PANE, 'first visit follows the pane')
+          hide(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), DEFAULT, 'leaving puts the PTY back at the default')
+          show(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), PANE, 'second visit follows the pane again')
+          hide(ctx, client)
+          show(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), PANE, 'and a third')
+        } finally { cleanup() }
+      })
+
+      it('the live PTY itself ends at the pane size, not only the tracked size', () => {
+        const { ctx, ptyCalls, clients, cleanup } = liveSession()
+        try {
+          const client = makeClient({ activeSessionId: 'sess-1' })
+          clients.push(client)
+          show(ctx, client)
+          hide(ctx, client)
+          ptyCalls.length = 0
+          show(ctx, client)
+          assert.deepEqual(ptyCalls.at(-1), [PANE.cols, PANE.rows])
+        } finally { cleanup() }
+      })
+
+      it('a viewer that is an OBSERVER cannot size the PTY on re-show — it stays at the default', () => {
+        // The smoke driver's own control socket sent `input` and claimed primary, so the
+        // dashboard became "Read-only — another device is driving this session" and its
+        // resize was (correctly) ignored. This is the authority gate, not a reset race.
+        const { ctx, session, clients, cleanup } = liveSession()
+        try {
+          const client = makeClient({ id: 'client-1', activeSessionId: 'sess-1' })
+          clients.push(client)
+          show(ctx, client)
+          hide(ctx, client)
+          ctx.transport.claimPrimary('sess-1', 'other-client')
+          show(ctx, client)
+          assert.deepEqual(session.getTerminalSize(), DEFAULT)
+        } finally { cleanup() }
+      })
     })
 
     it('resize to a non-existent session is a no-op', () => {
