@@ -107,6 +107,27 @@ describe('PermissionOutcomeRecord -- what was approved (#6894)', () => {
     expect(screen.getByTestId('perm-record-detail')).toHaveTextContent('Touch smoke file')
   })
 
+  it('a 1500-character command plus dangerouslyDisableSandbox shows the flag first in the record detail (#8505)', () => {
+    renderRecord({ detail: { decision: 'allow', toolInput: { command: 'x'.repeat(1500), dangerouslyDisableSandbox: true } } })
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    const box = screen.getByTestId('perm-record-input')
+    expect(box.textContent!.startsWith('dangerouslyDisableSandbox: true\n')).toBe(true)
+    expect(box.querySelector('[data-testid="perm-input-flag"]')).toHaveTextContent('dangerouslyDisableSandbox: true')
+    expect(box.textContent).toMatch(/truncated/)
+  })
+
+  it('a multi-line command plus the flag shows the flag in the record detail (#8505)', () => {
+    renderRecord({ detail: { decision: 'allow', toolInput: { command: 'a\nb\nc\nd', dangerouslyDisableSandbox: true } } })
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    expect(screen.getByTestId('perm-record-input').textContent!.startsWith('dangerouslyDisableSandbox: true\na')).toBe(true)
+  })
+
+  it('a non-scalar flag value shows the placeholder in the record detail (#8505)', () => {
+    renderRecord({ detail: { decision: 'allow', toolInput: { command: 'ls', dangerouslyDisableSandbox: [1] } } })
+    fireEvent.click(screen.getByTestId('perm-record-toggle'))
+    expect(screen.getByTestId('perm-input-flag')).toHaveTextContent('dangerouslyDisableSandbox: <array>')
+  })
+
   it('renders the input as TEXT: markup in a command creates no element', () => {
     renderRecord({ detail: { decision: 'allow', toolInput: { command: '<img src=x onerror=alert(1)><b>bold</b>' } } })
     fireEvent.click(screen.getByTestId('perm-record-toggle'))

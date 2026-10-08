@@ -4764,6 +4764,13 @@ button.sidebar-token-view-session-row:hover {
   overflow-wrap: anywhere;
 }
 
+.perm-input-flag {
+  /* Safety-relevant flag (#8505): weight + token color on top of the literal
+     "key: value" text, so it never rests on color alone. */
+  color: var(--warning-fg);
+  font-weight: 700;
+}
+
 .perm-group-chevron {
   flex: none;
   color: var(--text-muted);
