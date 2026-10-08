@@ -2235,6 +2235,36 @@ export class ClaudeTuiSession extends BaseSession {
     // it (matches _clearTurnEndState / base _clearMessageState). On respawn the
     // next turn starts clean; on destroy _clearMessageState would clear it anyway.
     this._pendingBackgroundCommands.clear()
+    // #8379: the cross-turn BackgroundShellTracker is deliberately NOT cleared
+    // here (contrast CliSession._killAndRespawn, #7611, which calls
+    // _clearPendingBackgroundShells()). That clear is right only where chroxy
+    // itself signals the shells' whole process tree. Here it does not, and for an
+    // UNEXPECTED death (crash, OOM, SIGKILL) the shells do not die with the PTY:
+    // claude starts every Bash-tool shell in its OWN process group (observed:
+    // each `zsh -c` child of a live claude has pgid == its own pid, != claude's),
+    // so a PTY teardown — the SIGHUP the kernel sends the foreground group, a
+    // master close, or SIGTERM/SIGKILL of claude — never reaches them; and
+    // destroy()'s SIGKILL escalation targets only claude's group (-pid). Probed
+    // with node-pty on macOS: a shell in the PTY child's own group died on
+    // SIGKILL, SIGTERM and master close, but one in its own group (spawn
+    // `detached`) or run under `nohup` survived all three.
+    //
+    // NOT verified: what a REAL claude does with its own tasks on a clean exit
+    // (`/exit`, code 0) or a graceful SIGTERM. It may reap them itself, in which
+    // case this keeps a pin for shells that are gone. A follow-up tracks the
+    // real-claude check; if it shows a graceful exit reaps tasks, the clear
+    // belongs here for `exitCode === 0` / SIGTERM, and only there.
+    //
+    // What the keep costs if the shells ARE gone: `isRunning` stays true and the
+    // idle timeout stays suppressed. The output-mtime sweep does NOT release
+    // them — it only marks an entry `quiesced`, which drops it from the banner;
+    // the entry stays in the map. After the respawn the new claude has no handle
+    // for the old shellId, so no BashOutput poll will ever clear it either. The
+    // only release is the BACKGROUND_SHELL_HARD_QUIESCE_MS reap (4 h of output
+    // silence; from startedAt when there is no output path), and with
+    // CHROXY_BACKGROUND_SHELL_HARD_QUIESCE_MS=0 the pin is unbounded. For a
+    // surviving shell the keep is the right side to fail on: clearing it would
+    // let the idle timeout kill a session with a live dev server (#4307).
     // #5777 (#5788): cancel a pending first-turn submit nudge directly here.
     // _onPtyGone is the one teardown path that does NOT route through
     // _clearFirstOutputWatchdog, so without this an armed nudge would only be
