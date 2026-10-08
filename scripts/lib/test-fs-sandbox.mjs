@@ -189,7 +189,7 @@ export const FS_PROMISES_EXEMPTIONS = {
  *
  * Each name is the leaf of one `static get <X>_BASE()` in `packages/server/src`
  * (`join(tmpdir(), '<name>')`). This list is a LIST beside a set that grows, so
- * `packages/server/tests/setup-sandbox-coverage.test.js` cross-checks it against
+ * `packages/server/tests/setup-sandbox-tmp-daemon-bases.test.js` cross-checks it against
  * the source in BOTH directions: a new `join(tmpdir(), 'chroxy-…')` base in
  * `src/` with no row here fails, and a row here that no source getter produces
  * fails. It is not derived by importing the getters because this module is
