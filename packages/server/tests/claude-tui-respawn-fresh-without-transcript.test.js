@@ -208,6 +208,11 @@ describe('claude-tui respawn without a persisted transcript (#8239)', () => {
     assert.ok(notice, 'the #7847/#5417 classifier still reports the rejected resume')
     assert.equal(notice.attemptedResumeId, SESSION_ID)
     assert.ok(/could not be resumed/.test(notice.message))
+    // #8418: the latch describes ONE id. The fallback minted a new one that claude has
+    // never seen, so it must not inherit "a conversation was saved".
+    assert.notEqual(session._sessionId, SESSION_ID, 'precondition: the fallback minted a new id')
+    assert.equal(session._conversationEverPersisted, false, 'the replacement conversation has saved nothing')
+    assert.equal(session.conversationPersisted, false)
   })
 
   it('a session restored from state with no transcript starts fresh on its first spawn', async () => {
