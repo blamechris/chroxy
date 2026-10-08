@@ -14,6 +14,8 @@ vi.mock('../store/connection', () => {
     requestWorkspaceSymbols: mockRequestWorkspaceSymbols,
     workspaceSymbols: mockWorkspaceSymbols,
     workspaceSymbolsLoading: false,
+    // #8404 — the palettes read the connection phase (via useIdeRequestStatus).
+    connectionPhase: 'connected',
     openFileInBrowser: mockOpenFileInBrowser,
   })
   const useConnectionStore = Object.assign(
