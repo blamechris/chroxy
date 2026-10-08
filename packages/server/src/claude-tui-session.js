@@ -2411,6 +2411,7 @@ export class ClaudeTuiSession extends BaseSession {
     // with activeTurn=null and the helper no-ops → dir leaks until destroy().
     // The cleanup is idempotent (rmSync force:true) so a later call is fine.
     this._cleanupTurnAttachments(this._activeTurn)
+    this._endThinkingForTurn() // #7393
     this._activeTurn = null
     // #7382: the PTY is gone, so every PreToolUse hook it had blocked on died
     // with it — the prompt can never be answered. Reached on 'exit', 'error'
@@ -4568,6 +4569,13 @@ export class ClaudeTuiSession extends BaseSession {
         this._handleSinkBaseCompromised(postCheck.reason)
         return
       }
+      // #7393 (#8513 review): the transcript entry for a thinking block is written
+      // before the tool_use it precedes, and so before that tool's PreToolUse hook
+      // file. Bring the wire up to the transcript NOW, synchronously, right before
+      // this batch's events go out, so a tool_start can never overtake it. The
+      // unforced drain at the top of the pass is throttled (250 ms against a 150 ms
+      // poll) and runs before this pass's async file reads, so it cannot promise that.
+      this._drainTurnThinking({ force: true })
       for (const { name, full, parsed } of pending) {
         this._consumedFiles.add(name)
         drainedThisPass++
@@ -5168,6 +5176,10 @@ export class ClaudeTuiSession extends BaseSession {
    * didn't run the base per-turn reset.
    */
   _clearTurnEndState() {
+    // #7393: every non-Stop way a turn ends (error, abort, interrupt, hard
+    // timeout, stall) funnels here, and none of them reaches the Stop path's own
+    // call. Without this the scanner keeps queueing reasoning on every idle scan.
+    this._endThinkingForTurn()
     // #7382: the turn is ending, so any prompt it was blocked on can never be
     // answered — the hook died with the turn. Expire them BEFORE the state below
     // is torn down, so the clients retire the card and #7381's release
@@ -6078,6 +6090,7 @@ export class ClaudeTuiSession extends BaseSession {
     // to attachmentsDir; no-op when the turn had no attachments.
     this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
     this._cleanupTurnAttachments(this._activeTurn)
+    this._endThinkingForTurn() // #7393
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
@@ -6206,6 +6219,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._destroying = true
     this._processReady = false
     this._isBusy = false
+    this._endThinkingForTurn() // #7393
     this._activeTurn = null
     // #5315 (WP-2.1) — cancel any pending respawn so a scheduled _respawnPty
     // can't fire after teardown and spawn a fresh claude into a destroyed

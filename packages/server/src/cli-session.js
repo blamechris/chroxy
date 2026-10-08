@@ -1405,7 +1405,7 @@ export class CliSession extends BaseSession {
             // #7393: a new API message (the next round of a tool loop) restarts
             // block indexes at 0. A reasoning block the last message never closed
             // must not absorb this one's block 0.
-            ctx.thinking?.closeAll()
+            this._closeThinking(ctx)
             break
           }
 
@@ -1584,7 +1584,7 @@ export class CliSession extends BaseSession {
 
         // #7393: a turn can end under an open reasoning block; finalise it so the
         // client's "Thinking…" settles, before anything else this result emits.
-        ctx?.thinking?.closeAll()
+        this._closeThinking(ctx)
 
         // #5064 — Fallback for turns that complete without ever emitting
         // streamed assistant text. The canonical case is `/compact`: the
@@ -1849,6 +1849,20 @@ export class CliSession extends BaseSession {
    */
   _thinkingStreams(ctx, messageId) {
     return (ctx.thinking ??= new ThinkingStreams((event, data) => this.emit(event, data), messageId))
+  }
+
+  /**
+   * #7393 — finish every open reasoning block of `ctx` and forget which of them
+   * were `redacted_thinking`. The two must go together: a redacted block that
+   * never got its stop would otherwise leave its index in the set, and a later
+   * plain block at that index would be shown as the redacted marker.
+   */
+  _closeThinking(ctx) {
+    if (!ctx) return
+    // A redacted block closes as the marker even when its stop never came.
+    for (const key of ctx.redactedThinking ?? []) ctx.thinking?.close(key, { redacted: true })
+    ctx.thinking?.closeAll()
+    ctx.redactedThinking?.clear()
   }
 
   /**
@@ -2314,7 +2328,7 @@ export class CliSession extends BaseSession {
     if (!this._isBusy || !this._currentMessageId) return
     const messageId = this._currentMessageId
     const sessionId = this._sessionId
-    this._currentCtx?.thinking?.closeAll() // #7393
+    this._closeThinking(this._currentCtx) // #7393
     if (this._currentCtx?.hasStreamStarted) {
       this.emit('stream_end', { messageId })
     }

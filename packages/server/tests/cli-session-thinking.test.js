@@ -126,6 +126,17 @@ describe('CliSession — thinking blocks from stream-json (#7393)', () => {
     assert.equal(t.filter((f) => f.name === 'stream_end').length, 2)
   })
 
+  it('a redacted block that never got its stop does not make the next plain block at that index a marker', () => {
+    const { session, frames } = createSession()
+    for (const e of [
+      start(0, { type: 'redacted_thinking', data: 'ENCRYPTED' }), // no content_block_stop
+      ev({ type: 'message_start', message: { id: 'msg_02', role: 'assistant', content: [] } }),
+      thinkingStart(0), thinkingDelta('real reasoning', 0), stop(0),
+    ]) session._handleEvent(e)
+    const deltas = thinkingOf(frames).filter((f) => f.name === 'stream_delta').map((f) => f.delta)
+    assert.deepEqual(deltas, ['[redacted thinking]', 'real reasoning'])
+  })
+
   it('a redacted_thinking block carries the marker, never the encrypted payload', () => {
     const { session, frames } = createSession()
     for (const e of [start(0, { type: 'redacted_thinking', data: 'ENCRYPTED-PAYLOAD' }), stop(0)]) session._handleEvent(e)

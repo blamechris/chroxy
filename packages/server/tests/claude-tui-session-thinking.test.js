@@ -100,7 +100,6 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     s._sinkDir = sinkDir
     s._waitForPrompt = async () => true
     s._authTranscriptScanMs = 0
-    s._thinkingScanMs = 0
     s._term = { pid: fakePid, write: () => {}, kill: () => {} }
     const frames = []
     const events = { frames, errors: [], results: [] }
@@ -363,6 +362,11 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     await waitFor(() => turnPolling(s), 'the turn to be polling')
     // The transcript entry and the PreToolUse hook file appear together: claude
     // writes the thinking block, then the tool_use, and the hook fires for it.
+    // At the PRODUCTION cadence (the 250 ms throttle is NOT zeroed for this
+    // session): a periodic drain has just run, so the next pass's unforced drain
+    // is throttled, and the hook files in this pass must still not overtake the
+    // block. (#8513 review: the throttle let tool_start through first.)
+    s._lastThinkingScanMs = s._nowMonotonic()
     appendJournal(transcript, [thinkingEntry({ text: 'I should list the directory.', ts: now() }), toolUseEntry({ ts: now(1) })])
     writeFileSync(join(sinkDir, 'pre-aaa.json'), JSON.stringify({
       tool_use_id: 'toolu_a', tool_name: 'Bash', tool_input: { command: 'ls' },
@@ -371,6 +375,37 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     stop(sinkDir)
     await turn
     assert.deepEqual(order, ['thinking_end', 'tool_start'])
+  })
+
+  it('picks up reasoning that lands while a hook batch is being consumed, still ahead of the response', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    // The batch is a PreToolUse file then the Stop file. The reasoning that
+    // precedes the Stop is written while the first file's unlink is in flight,
+    // i.e. after the batch-start drain and before the Stop is processed.
+    let injected = false
+    const realFs = s._boundedHookFs.bind(s)
+    s._boundedHookFs = async (op, ...args) => {
+      const out = await realFs(op, ...args)
+      if (op === 'unlink' && !injected) {
+        injected = true
+        appendJournal(transcript, [thinkingEntry({ text: 'written mid-batch', durationMs: 5, ts: now() })])
+      }
+      return out
+    }
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    writeFileSync(join(sinkDir, 'pre-aaa.json'), JSON.stringify({
+      tool_use_id: 'toolu_a', tool_name: 'Bash', tool_input: { command: 'ls' },
+    }))
+    writeFileSync(join(sinkDir, 'stop-zzz.json'), JSON.stringify({ last_assistant_message: 'done' }))
+    await turn
+    assert.equal(injected, true, 'precondition: the entry landed mid-batch')
+    const t = thinkingFrames(events.frames)
+    assert.deepEqual(t.map((f) => f.name), ['stream_start', 'stream_delta', 'stream_end'])
+    const respDelta = events.frames.findIndex((f) => f.name === 'stream_delta' && f.thinking !== true)
+    assert.ok(events.frames.lastIndexOf(t[2]) < respDelta, 'thinking precedes the response')
   })
 
   it('picks up reasoning that lands in the same instant as the Stop hook (final drain before the response)', async () => {
@@ -460,6 +495,74 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     assert.equal(t.length, 1)
     assert.equal(t[0].content, '')
     assert.equal(t[0].thinkingDurationMs, 700)
+  })
+
+  // --- capture lifetime (#8513 review) ----------------------------------------
+
+  const captureOff = (s) => s._transcriptTaskScanner?._thinkingSinceMs === null
+
+  it('stops collecting once the turn is answered, so idle scans queue nothing', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    appendJournal(transcript, [thinkingEntry({ text: 'during', ts: now() })])
+    await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end'), 'thinking')
+    stop(sinkDir)
+    await turn
+    assert.ok(s._transcriptTaskScanner, 'precondition: the scanner exists')
+    assert.equal(captureOff(s), true, 'capture is off after the answer')
+    appendJournal(transcript, [thinkingEntry({ text: 'between turns', ts: now(50) })])
+    s._scanTranscript() // what the idle background-task poll does
+    assert.deepEqual(s._transcriptTaskScanner.drainThinking(), [], 'nothing is retained while idle')
+  })
+
+  it('stops collecting when the turn is stopped by the user (the error/abort path, not the Stop hook)', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events } = makeTurnSession()
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    appendJournal(transcript, [thinkingEntry({ text: 'before the stop', ts: now() })])
+    await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end'), 'thinking')
+    assert.equal(captureOff(s), false, 'precondition: capturing mid-turn')
+    s.interrupt()
+    await turn
+    assert.equal(s._isBusy, false)
+    assert.equal(captureOff(s), true, 'capture is off after an aborted turn')
+    appendJournal(transcript, [thinkingEntry({ text: 'after the abort', ts: now(50) })])
+    s._scanTranscript()
+    assert.deepEqual(s._transcriptTaskScanner.drainThinking(), [])
+  })
+
+  it('stops collecting when the turn dies on the hard timeout', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s, events } = makeTurnSession()
+    s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    s._drainTurnThinking({ force: true }) // make sure the scanner is capturing
+    assert.equal(captureOff(s), false, 'precondition')
+    s._handleHardTimeout()
+    await waitFor(() => !s._isBusy, 'the turn to end')
+    assert.equal(captureOff(s), true)
+    assert.ok(events.errors.length >= 1)
+  })
+
+  it('shows no reasoning for a turn that has been aborted', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    appendJournal(transcript, [thinkingEntry({ text: 'written after the user pressed Stop', ts: now() })])
+    s._activeTurn.aborted = true
+    s._drainTurnThinking({ force: true })
+    assert.deepEqual(thinkingFrames(events.frames), [])
+    s._activeTurn.aborted = false
+    stop(sinkDir)
+    await turn
   })
 
   // --- opt-out, capability, settings ---------------------------------------
