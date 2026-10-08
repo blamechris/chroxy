@@ -126,8 +126,10 @@ const ELEVEN = [
  * clears them on a transport drop (#6691 S-3), but a USER-initiated `disconnect()`
  * nulls `socket.onclose` first to suppress auto-reconnect, so `onclose` never
  * runs — and neither `auth_ok`'s non-reconnect branch nor `connect()` touches
- * them on a same-server Disconnect → Connect. So `disconnect()` clears them with
- * an explicit `set()` literal in its own payload.
+ * them on a same-server Disconnect → Connect. So `disconnect()` clears them
+ * itself — since #7586 through the shared in-flight marker roster
+ * (`createEmptyInFlightMarkers()`, spread into its payload), which is exercised
+ * for every marker in `connection-inflight-markers.test.ts`.
  */
 const DISCONNECT_CLEARS_VIA_SET = [
   'orchestrationRunDetailLoading',

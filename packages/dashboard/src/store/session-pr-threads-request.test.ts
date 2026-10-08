@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { createEmptyInFlightMarkers } from './utils'
 
 vi.mock('./crypto', () => ({
   createKeyPair: vi.fn(() => ({ publicKey: 'mock-pub', secretKey: 'mock-sec' })),
@@ -115,20 +116,21 @@ describe('#7430 — requestSessionPrThreads', () => {
     // disabled forever — the disabled control cannot issue the request that
     // would clear it.
     //
-    // Asserted at SOURCE level, and the reason is worth stating rather than
-    // hiding: the reset lives on `socket.onclose`, not on `disconnect()`, and
-    // no unit test in this package drives a real close (the sibling
-    // `sessionPrStatusLoading` reset is likewise unpinned). A behavioural test
-    // written against `disconnect()` would pass for the wrong reason. So this
-    // pins the line inside the ONCLOSE region specifically — an anchored slice,
-    // never a file-wide grep, which the initial-state declaration would satisfy
-    // on its own.
+    // Since #7586 the reset is no longer a `sessionPrThreadsLoading: {}` literal
+    // inside `socket.onclose`: onclose sweeps the shared in-flight marker roster
+    // (`createEmptyInFlightMarkers()`), and the behavioural proof that a real
+    // close and a user disconnect() both empty every member lives in
+    // `connection-inflight-markers.test.ts`. This pins the two halves of the
+    // wiring that file cannot see from here: the field IS a roster member, and
+    // the ONCLOSE region (an anchored slice, never a file-wide grep, which the
+    // initial-state declaration would satisfy on its own) sweeps that roster.
+    expect(Object.keys(createEmptyInFlightMarkers())).toContain('sessionPrThreadsLoading')
     const src = readFileSync(resolve(__dirname, 'connection.ts'), 'utf8')
     const start = src.indexOf('socket.onclose = (event?: CloseEvent) =>')
     expect(start, 'connection.ts should define socket.onclose').toBeGreaterThan(-1)
     const region = src.slice(start, src.indexOf('socket.onerror', start))
     expect(region.length).toBeGreaterThan(0)
-    expect(region.includes('sessionPrThreadsLoading: {}')).toBe(true)
+    expect(region.includes('staleInFlightMarkers(get)')).toBe(true)
   })
 
   it('positive control: the onclose slice does NOT reach the whole file', () => {

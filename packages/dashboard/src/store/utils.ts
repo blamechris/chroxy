@@ -265,6 +265,94 @@ export function createEmptyConnectionScope() {
  */
 
 /**
+ * #7586 — the IN-FLIGHT marker roster: every store field that records "a
+ * request is outstanding on this socket" (a spinner, a disabled control, a
+ * throttle stamp), so that the reply which would clear it can never arrive once
+ * the socket is gone.
+ *
+ * ## Why it is a roster
+ *
+ * These were cleared by `socket.onclose`, one `if (size > 0) set(...)` block per
+ * field, and by nothing else on the user-initiated path: `disconnect()` nulls
+ * `socket.onclose` to suppress auto-reconnect, so the sweep never ran for a
+ * user Disconnect. A container action started, then Disconnect → Connect to
+ * the same server, left the row stuck "actioning" forever (#7586). #7572 fixed
+ * the two orchestration markers by copying them into `disconnect()`; this is
+ * the rest, done once.
+ *
+ * `socket.onclose` (through `staleInFlightMarkers` in `connection.ts`),
+ * `disconnect()`, `forgetSession` and `_resetSessionMemory` all take their set
+ * from THIS factory, so a marker added here is cleared on every path that ends
+ * a connection, and a marker that is NOT added here is cleared on none of them
+ * — which a roster test (`connection-inflight-markers.test.ts`) can see, where
+ * four hand-copied lists drifting apart could not.
+ *
+ * ## What is deliberately NOT in it
+ *
+ * Records that stay TRUE of the same daemon across Disconnect → Connect: the
+ * `*Results` maps beside each marker (the outcome of an action that already
+ * finished), the survey snapshots (kept so the "generated Nm ago" line can
+ * signal staleness), and the #7557 family (`orchestrationRunDetails`,
+ * `credentialTestResults`, `serverStartupLogs`, `pendingPairRequests`, …).
+ * #7572 / #7570 settled that split; this roster is only the request markers.
+ *
+ * A fresh object per call: these are mutable collections handed to the store.
+ */
+export function createEmptyInFlightMarkers() {
+  return {
+    // #5277: an in-flight cancel_activity's ack/failure is socket-scoped. The
+    // tree re-seeds from activity_snapshot on resubscribe.
+    cancellingActivityIds: new Set<string>(),
+    // #5500 / #5502: in-flight reindex / relay re-run requests. The server-side
+    // work keeps running; the next survey refresh shows its effect.
+    reindexingRepoPaths: new Set<string>(),
+    relayRerunningRepoPaths: new Set<string>(),
+    // #6134-#6140: in-flight lifecycle actions on a container / BYOK pool /
+    // host prune / simulator / emulator / WSL distro.
+    containerActioningIds: new Set<string>(),
+    byokPoolActioningIds: new Set<string>(),
+    hostPruneActioningIds: new Set<string>(),
+    simulatorActioningIds: new Set<string>(),
+    emulatorActioningIds: new Set<string>(),
+    wslActioningIds: new Set<string>(),
+    // #7625: a pending restore retry can never be acked on a dead socket.
+    retryingRestoreIds: new Set<string>(),
+    // #6691 (S-3): an in-flight orchestration detail request and a pending
+    // mutating action.
+    orchestrationRunDetailLoading: new Set<string>(),
+    orchestrationPendingActions: {},
+    // #7344 / #7430: the session-keyed PR/CI request markers, and the auto-pull
+    // throttle window (per CONNECTION: a request made on a socket that no longer
+    // exists must not suppress the first re-survey after a reconnect).
+    sessionPrStatusLoading: {},
+    sessionPrStatusRequestedAt: {},
+    sessionPrThreadsLoading: {},
+    // #6472: the IDE symbol-table request.
+    symbolsLoading: false,
+    // #6153: every Control Room survey *Loading flag. Each section computes
+    // refreshDisabled = loading || !connected, so a refresh in flight when the
+    // socket dies would leave loading=true forever. The stale snapshots are KEPT.
+    hostStatusLoading: false,
+    runnerStatusLoading: false,
+    containersStatusLoading: false,
+    repoRuntimeConfigLoading: false,
+    byokPoolStatusLoading: false,
+    hostPruneStatusLoading: false,
+    simulatorStatusLoading: false,
+    emulatorStatusLoading: false,
+    wslStatusLoading: false,
+    integrationStatusLoading: false,
+    skillsInventoryLoading: false,
+    mailboxStatusLoading: false,
+    externalSessionsLoading: false,
+    repoEventsLoading: false,
+    githubWebhookConfigLoading: false,
+    orchestrationRunsLoading: false,
+    failedRestoresLoading: false,
+  } satisfies Partial<ConnectionState>;
+}
+
+/**
  * #7470 — drop every id in `removedIds` from a session-keyed map, returning a
  * NEW object only when something was actually removed.
  *
