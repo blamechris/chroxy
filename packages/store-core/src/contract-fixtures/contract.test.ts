@@ -123,15 +123,32 @@ function assertExpectation(result: AdapterResult, exp: FixtureExpectation, fx: C
     expect(result.switchedSessions, `${fx.name}: expected no switchSession`).toHaveLength(0)
     expect(result.rotatedTunnelUrls, `${fx.name}: expected no applyRotatedTunnelUrl`).toHaveLength(0)
     expect(result.terminalWrites, `${fx.name}: expected no appendTerminalData`).toHaveLength(0)
-    // …and every seeded session is untouched beyond its shell: it must carry
-    // only the keys it was seeded with (the `{ sessionId, messages }` shell plus
-    // the fixture's own `init.sessions[id]` keys). A handler that wrote a NEW
-    // field onto a session despite the no-op contract is caught here.
+    // …and every session is untouched: it must hold EXACTLY what it was seeded
+    // with — the `{ sessionId, messages: [] }` shell the adapter builds, overlaid
+    // by the fixture's own `init.sessions[id]` — in both KEYS and VALUES.
+    //
+    // The key check alone (#7531) allowed every seeded key, so a handler that
+    // OVERWROTE a seeded field with a different value satisfied `noop` — the
+    // exact mutation the flag exists to catch, and invisible because success and
+    // not-checking were the same observable outcome. The value check below closes
+    // that: each baseline key must still deep-equal its seeded value. The key
+    // check stays for the opposite miss, a NEW field a handler added.
+    //
+    // A seeded session must also still EXIST — a handler that deleted one is a
+    // mutation the loop over `result.sessions` alone would never visit.
     const seeded = fx.init?.sessions ?? {}
+    for (const id of Object.keys(seeded)) {
+      expect(result.sessions[id], `${fx.name}: seeded session ${id} removed on a no-op`).toBeDefined()
+    }
     for (const [id, session] of Object.entries(result.sessions)) {
-      const allowedKeys = new Set(['sessionId', 'messages', ...Object.keys(seeded[id] ?? {})])
-      const extraKeys = Object.keys(session).filter((k) => !allowedKeys.has(k))
-      expect(extraKeys, `${fx.name}: session ${id} mutated on a no-op`).toEqual([])
+      const baseline: Record<string, unknown> = { sessionId: id, messages: [], ...(seeded[id] ?? {}) }
+      // Own keys only: `in` would also match an inherited Object.prototype name
+      // (`constructor`, `toString`, ...), so such a gained key would slip through.
+      const extraKeys = Object.keys(session).filter((k) => !Object.hasOwn(baseline, k))
+      expect(extraKeys, `${fx.name}: session ${id} gained keys on a no-op`).toEqual([])
+      for (const [key, value] of Object.entries(baseline)) {
+        expect(session[key], `${fx.name}: session ${id}.${key} overwritten on a no-op`).toEqual(value)
+      }
     }
     return
   }
@@ -290,6 +307,123 @@ describe('what the static parity guard could not catch (#5556.5)', () => {
     expect(() => {
       expect(drifted.sessions.s1.isIdle).toEqual(correct.sessions.s1.isIdle)
     }).toThrow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7531 red-proof — `noop: true` must see a same-key OVERWRITE.
+//
+// `noop` used to allow every key the fixture SEEDED, so a handler that rewrote a
+// seeded field to a different value satisfied it: the flag was green on exactly
+// the mutation it exists to catch. These tests DRIVE that mutation through a
+// deliberately-mutating handler stub and assert `assertExpectation` rejects it,
+// so weakening the branch back to a key-set check goes red here.
+//
+// Each rejection is paired with a CONTROL (the same subject, un-mutated, passes).
+// Without the control, a `noop` branch that denied everything would satisfy every
+// `toThrow` below and the proofs would pass for the wrong reason (#7273).
+// ---------------------------------------------------------------------------
+
+describe('noop fixtures see a same-key overwrite (#7531)', () => {
+  // The issue's concrete miss: a seeded `isIdle` that the handler rewrites.
+  const subject: ContractFixture = {
+    name: '#7531 subject — noop over a seeded isIdle',
+    type: 'session_activity',
+    init: { sessions: { s1: { isIdle: true } } },
+    message: { type: 'session_activity', sessionId: 's1', isBusy: 'yes', lastCost: null },
+    expect: { noop: true },
+  }
+
+  /** Drive `subject` through a table whose `session_activity` entry is `handler`. */
+  function runWithHandler(
+    handler: (
+      msg: unknown,
+      adapter: { updateSession(id: string, u: (s: FixtureSession) => Partial<FixtureSession>): void },
+    ) => void,
+    kind: ClientKind = 'app',
+  ): AdapterResult {
+    const env = makeClientEnv(kind, subject.init)
+    const table = createDispatchTable<FixtureSession>()
+    ;(table as Record<string, unknown>).session_activity = handler
+    runDispatch(table, subject.message, env.adapter)
+    return env.result
+  }
+
+  it('CONTROL: a handler that does nothing leaves the subject untouched and noop passes', () => {
+    // A stub, not the real handler: this control is about the HARNESS, and must
+    // not go red when someone mutates `handleSessionActivity` itself.
+    for (const kind of ['app', 'dashboard'] as const) {
+      const result = runWithHandler(() => {}, kind)
+      expect(() => assertExpectation(result, subject.expect!, subject)).not.toThrow()
+    }
+  })
+
+  it('CONTROL: a handler that writes the seeded value back unchanged still passes', () => {
+    const result = runWithHandler((_msg, adapter) => {
+      adapter.updateSession('s1', () => ({ isIdle: true }))
+    })
+    expect(() => assertExpectation(result, subject.expect!, subject)).not.toThrow()
+  })
+
+  for (const kind of ['app', 'dashboard'] as const) {
+    it(`DRIVEN (${kind}): overwriting a seeded key with a different value fails noop`, () => {
+      // The `typeof isBusy !== 'boolean'` -> `=== undefined` relaxation the issue
+      // measured: `!'yes'` is false, so the idle session is marked busy.
+      const result = runWithHandler((msg, adapter) => {
+        const m = msg as { sessionId: string; isBusy: unknown }
+        adapter.updateSession(m.sessionId, () => ({ isIdle: !m.isBusy }))
+      }, kind)
+      expect(result.sessions.s1.isIdle).toBe(false) // the mutant really fired
+      expect(Object.keys(result.sessions.s1), 'no NEW key: only the old check could not see it').toEqual(
+        Object.keys(run(kind, subject).sessions.s1),
+      )
+      expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/isIdle overwritten/)
+    })
+  }
+
+  it('DRIVEN: a seeded key rewritten to a falsy value (null) still fails noop', () => {
+    const result = runWithHandler((_msg, adapter) => {
+      adapter.updateSession('s1', () => ({ isIdle: null as unknown as boolean }))
+    })
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/isIdle overwritten/)
+  })
+
+  it('DRIVEN: an overwritten seeded key that is an object (deep value) fails noop', () => {
+    const deep: ContractFixture = {
+      ...subject,
+      init: { sessions: { s1: { activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 }] } } },
+    }
+    const env = makeClientEnv('app', deep.init)
+    env.adapter.updateSession('s1', () => ({
+      activeTools: [{ toolUseId: 'tu-1', tool: 'Bash', startedAt: 2 }],
+    }))
+    expect(() => assertExpectation(env.result, deep.expect!, deep)).toThrow(/activeTools overwritten/)
+  })
+
+  it('still fails when a handler ADDS a key (the original check is kept)', () => {
+    const result = runWithHandler((_msg, adapter) => {
+      adapter.updateSession('s1', () => ({ someUnrelatedFlag: true }))
+    })
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/gained keys/)
+  })
+
+  it('fails when a handler adds a key named like an Object.prototype member', () => {
+    const result = runWithHandler((_msg, adapter) => {
+      adapter.updateSession('s1', () => ({ constructor: 'x' }) as never)
+    })
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/gained keys/)
+  })
+
+  it('fails when a seeded session has been removed', () => {
+    const result = run('app', subject)
+    delete result.sessions.s1
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/s1 removed/)
+  })
+
+  it('fails when the session shell (messages) is rewritten', () => {
+    const result = run('app', subject)
+    result.sessions.s1.messages = [{ id: 'x', type: 'system', content: 'x', timestamp: 1 }] as never
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/messages overwritten/)
   })
 })
 

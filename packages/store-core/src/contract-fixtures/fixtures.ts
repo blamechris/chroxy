@@ -417,17 +417,14 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
   {
-    // NOTE the explicit `isIdle` assertion rather than `noop: true`. `noop` checks
-    // for keys a handler ADDED to a seeded session; it cannot see a same-key
-    // OVERWRITE, so on a field the fixture itself seeds it is satisfied by the
-    // very mutation these rows exist to catch — measured, not assumed: the
-    // isBusy-coercion mutant left this row green. Harness fix tracked in #7531;
-    // assert the value until then.
+    // `noop` here is load-bearing: the seeded `isIdle` is the very field a
+    // fallback-to-active mutant would overwrite, and `noop` compares seeded VALUES
+    // (#7531), not just added keys, so it goes red on that overwrite.
     name: 'session_activity does NOT fall back to the active session without a sessionId',
     type: 'session_activity',
     init: { activeSessionId: 'active', sessions: { active: { isIdle: true } } },
     message: { type: 'session_activity', isBusy: true, lastCost: null },
-    expect: { sessions: { active: { isIdle: true } }, added: [] },
+    expect: { noop: true },
   },
   {
     // Truthy arm: `!'yes'` is false, so a coercing handler marks an IDLE session
@@ -438,7 +435,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     type: 'session_activity',
     init: { sessions: { s1: { isIdle: true } } },
     message: { type: 'session_activity', sessionId: 's1', isBusy: 'yes', lastCost: null },
-    expect: { sessions: { s1: { isIdle: true } }, added: [] },
+    expect: { noop: true },
   },
   {
     // Falsy arm: `!null` is true, so a coercing handler "heals" a genuinely BUSY
@@ -447,7 +444,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     type: 'session_activity',
     init: { sessions: { s1: { isIdle: false } } },
     message: { type: 'session_activity', sessionId: 's1', isBusy: null, lastCost: null },
-    expect: { sessions: { s1: { isIdle: false } }, added: [] },
+    expect: { noop: true },
   },
 
   // 3b. model_changed (#5618) — set the target session's activeModel. Reconciled
