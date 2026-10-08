@@ -450,9 +450,60 @@ describe('#7600 DockerByokSession — the vanished container never reaches a suc
     session.notifyContainerVanished()
 
     await session.destroy()
-    assert.ok(execFile.calls.some((c) => c.cmd === 'docker' && c.args[0] === 'rm' && c.args.includes(CTR)), 'docker rm -f of the dead id')
+    // #7610: the removal runs through pool.forget() (one docker rm -f, the
+    // pool's), not a second session-side rm.
+    assert.deepEqual(pool.rmCalls, [['rm', '-f', CTR]], 'docker rm -f of the dead id, exactly once')
+    assert.equal(execFile.calls.filter((c) => c.args[0] === 'rm').length, 0, 'no second, session-side rm')
     assert.equal(pool.size(), 0)
     assert.equal(pool.acquire(key), null, 'a successor acquire misses')
+  })
+
+  it('#7610: vanish then destroy leaves no _soiledIds / _createdAt entry for the dead id', async () => {
+    const { session, pool } = buildSession()
+    const key = session._poolKey()
+    // Reproduce a pool-acquired container: release then acquire leaves the
+    // birth-time entry in place (acquire deliberately keeps _createdAt).
+    await pool.release(key, CTR)
+    assert.equal(pool.acquire(key), CTR)
+    assert.equal(pool._createdAt.has(CTR), true, 'precondition: acquire keeps _createdAt')
+    pool.rmCalls.length = 0
+
+    session.notifyContainerVanished()
+    assert.equal(pool.isSoiled(CTR), true, 'precondition: the vanish soils the id')
+
+    await session.destroy()
+    assert.equal(pool.isSoiled(CTR), false, 'soiled marker must not outlive the container')
+    assert.equal(pool._soiledIds.size, 0)
+    assert.equal(pool._createdAt.has(CTR), false, 'birth-time entry must not outlive the container')
+    assert.equal(pool._createdAt.size, 0)
+    assert.deepEqual(pool.rmCalls, [['rm', '-f', CTR]], 'removed exactly once')
+    assert.equal(pool.size(), 0)
+    assert.equal(pool.acquire(key), null)
+  })
+
+  it('#7610: a pool-less session is unaffected — destroy() after a vanish still does its own single docker rm -f', async () => {
+    const execFile = execFileStub()
+    const session = new DockerByokSession({ cwd: '/host/cwd', _execFile: execFile, _dockerBackend: backendStub() })
+    session._containerReady = true
+    session._containerId = CTR
+    session.on('error', () => {})
+    assert.equal(session._pool, null)
+
+    session.notifyContainerVanished()
+    await session.destroy()
+    const rm = execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rm.length, 1)
+    assert.ok(rm[0].args.includes(CTR))
+  })
+
+  it('#7610: pool.forget() of an id the pool never knew is a safe no-op on the bookkeeping', async () => {
+    const pool = realPool()
+    await pool.forget('ctr-never-seen')
+    assert.equal(pool._soiledIds.size, 0)
+    assert.equal(pool._createdAt.size, 0)
+    assert.equal(pool.size(), 0)
+    await pool.forget('')
+    await pool.forget(null)
   })
 
   it('belt-and-braces: a release() of the soiled id evicts inline rather than pooling it', async () => {
@@ -471,6 +522,7 @@ describe('#7600 DockerByokSession — the vanished container never reaches a suc
     const key = session._poolKey()
     await session.destroy()
     assert.equal(pool.size(), 1)
+    assert.equal(pool.rmCalls.length, 0, '#7610: a healthy destroy releases, it does not forget/remove')
     assert.equal(pool.acquire(key), CTR)
   })
 })

@@ -1172,11 +1172,14 @@ describe('DockerByokSession — across-session pool (#5022)', () => {
     await session.start()
 
     assert.equal(session._containerReady, false)
-    // Pool was never released — the dirty container was docker-rm-f'd.
+    // Pool was never released — the dirty container was removed through
+    // pool.forget() (#7610: it runs the docker rm -f and clears the pool's
+    // bookkeeping; the stub records the call instead of shelling out).
     assert.equal(pool.calls.release.length, 0)
-    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
-    assert.ok(rmCalls.some((c) => c.args.includes('CONTAINER_HALF')),
-      'half-started container must be rm-f\'d, not pooled')
+    assert.deepEqual(pool.calls.forget, ['CONTAINER_HALF'],
+      'half-started container must be forgotten (rm-f\'d), not pooled')
+    assert.equal(_execFile.calls.filter((c) => c.args[0] === 'rm').length, 0,
+      'no second, session-side rm')
   })
 })
 
