@@ -28,6 +28,93 @@ const SENSITIVE_PATTERNS = [
   /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.){1,1024}"|'(?:[^'\\\r\n]|\\.){1,1024}'|\\"(?:[^\\\r\n]|\\(?!")){1,1024}\\"|(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?)/gi,
 ]
 
+// JWT shape: `eyJ` + base64url, a dot, base64url, a dot, base64url, each segment at
+// least 8 characters, the `eyJ` starting on a word boundary. This is matched by a scan
+// rather than by one regex (`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`),
+// so that the time taken is linear in the length of the text: the segments are maximal
+// runs (the class holds no `.`), a candidate's outcome depends only on the runs that
+// follow it, and the scan reads each run a bounded number of times, skipping the other
+// candidates that share a failed candidate's first run. It reports exactly the spans
+// the regex does (tests/redaction-bounded-time.test.js compares the two).
+const JWT_SEGMENT_MIN = 8
+
+function isWordChar(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95
+}
+
+// The end of the base64url run starting at `i` ([A-Za-z0-9_-]).
+function tokenRunEnd(s, i) {
+  while (i < s.length) {
+    const c = s.charCodeAt(i)
+    if (!isWordChar(c) && c !== 45) break
+    i++
+  }
+  return i
+}
+
+/**
+ * First JWT span at or after `from`, as `[start, end]` (end exclusive), or null.
+ * @param {string} s
+ * @param {number} from
+ * @returns {[number, number]|null}
+ */
+function findJwtSpan(s, from) {
+  let p = s.indexOf('eyJ', from)
+  while (p !== -1) {
+    if (p === 0 || !isWordChar(s.charCodeAt(p - 1))) {
+      const e1 = tokenRunEnd(s, p + 3)
+      if (e1 - (p + 3) >= JWT_SEGMENT_MIN && s.charCodeAt(e1) === 46) {
+        const e2 = tokenRunEnd(s, e1 + 1)
+        if (e2 - (e1 + 1) >= JWT_SEGMENT_MIN && s.charCodeAt(e2) === 46) {
+          const e3 = tokenRunEnd(s, e2 + 1)
+          if (e3 - (e2 + 1) >= JWT_SEGMENT_MIN) return [p, e3]
+        }
+      }
+      // Every later `eyJ` inside this first run sees the same runs after it.
+      p = s.indexOf('eyJ', Math.max(p + 1, e1))
+    } else {
+      p = s.indexOf('eyJ', p + 1)
+    }
+  }
+  return null
+}
+
+/**
+ * The JWT matcher, shaped like a global RegExp for the two ways the patterns are
+ * used: `string.replace(pattern, '[REDACTED]')` (the replacement is literal text)
+ * and the `lastIndex` / `exec` loop in the logger's escape-aware pass.
+ */
+const JWT_PATTERN = {
+  global: true,
+  lastIndex: 0,
+  exec(s) {
+    s = String(s)
+    const span = findJwtSpan(s, this.lastIndex)
+    if (!span) {
+      this.lastIndex = 0
+      return null
+    }
+    this.lastIndex = span[1]
+    const match = [s.slice(span[0], span[1])]
+    match.index = span[0]
+    match.input = s
+    return match
+  },
+  test(s) {
+    return findJwtSpan(String(s), 0) !== null
+  },
+  [Symbol.replace](s, replacement) {
+    s = String(s)
+    let out = ''
+    let last = 0
+    for (let span = findJwtSpan(s, 0); span; span = findJwtSpan(s, last)) {
+      out += s.slice(last, span[0]) + replacement
+      last = span[1]
+    }
+    return last === 0 ? s : out + s.slice(last)
+  },
+}
+
 // Provider API key patterns (#2961). These run separately so we can emit a
 // bare "[REDACTED]" regardless of any surrounding key/value syntax — the raw
 // key often appears mid-sentence in stderr (e.g., "invalid api key sk-...").
@@ -50,7 +137,8 @@ const API_KEY_PATTERNS = [
   // marker). header.payload.signature, each base64url; the header always starts
   // `eyJ` (base64 of `{"`), which makes this specific enough to avoid matching
   // ordinary dotted tokens. Length floors keep it off short `a.b.c` strings.
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // Matched by a linear scan rather than a regex: see JWT_PATTERN above.
+  JWT_PATTERN,
   // #5413: Discord webhook URLs. The token segment after the numeric webhook
   // id grants post/edit/delete on the channel, so the URL is a credential.
   // Covers discordapp.com (legacy), ptb/canary builds, and optional /vN/ API
@@ -131,9 +219,13 @@ const MAX_SANITIZE_DEPTH = 8
  */
 function redactDeep(value, depth, seen, maxChars = MAX_INPUT_CHARS) {
   if (typeof value === 'string') {
-    const redacted = redactValue(value)
-    return redacted.length > maxChars
-      ? redacted.slice(0, maxChars) + '... [truncated]'
+    // Redact the whole string, then cut the redacted result (`clipRedacted`).
+    const { text: redacted, clipped } = redactWhole(value)
+    return clipped || redacted.length > maxChars
+      // The cap is taken from the text before the unsafe tail, so a value longer than
+      // the cap by more than the margin keeps exactly maxChars (and a whole input
+      // that is still over the cap is summarized, as it always was).
+      ? clipRedacted(redacted, maxChars + REDACT_SCAN_MARGIN, '... [truncated]')
       : redacted
   }
   if (!value || typeof value !== 'object') return value
@@ -209,33 +301,100 @@ function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
 const PULL_MAX_INPUT_CHARS = 512 * 1024 // 512K chars
 
 /**
- * How much text is handed to the pattern redactor in one go. A bound on the scan,
- * far above any length a record keeps.
+ * How many characters of redacted text the callers that keep a field for display
+ * or for a record keep: an OUTPUT budget, applied after the whole text is redacted.
  */
-const MAX_REDACT_SCAN = 8192
+export const REDACT_KEEP_MAX = 8192
 
 /**
- * Redact `text` without ever persisting a piece of a secret that a length bound
- * cut in two.
+ * The most text the pattern redactor is ever handed in one call, in characters. It
+ * is an admission ceiling for pathological sizes, far above any text a caller shows
+ * or keeps: matching is linear, so text up to the ceiling is redacted WHOLE and the
+ * caller cuts the redacted result afterwards, which cannot expose a secret.
+ */
+export const REDACT_ADMISSION_MAX = 4 * 1024 * 1024
+
+/**
+ * The part of `text` the patterns are handed when no more than `scanMax` characters
+ * may be scanned. Text within the bound is returned whole. Longer text is cut at the
+ * last whitespace inside the bound, and a run with no whitespace to stop at is
+ * discarded, never half-kept, so the cut does not leave the front of a token that the
+ * patterns can no longer recognise. This is the only lossy step in redaction, and it
+ * applies only past the admission ceiling.
  *
- * Text longer than the scan bound is cut at the last whitespace inside it (or
- * dropped entirely when it has none), so the cut never lands inside a token: a
- * secret that crosses the bound is left out whole instead of being redacted
- * from a prefix the patterns no longer recognise. Redaction runs on what
- * remains; callers clip AFTER this, never before.
+ * @param {string} text
+ * @param {number} scanMax
+ * @returns {{ text: string, clipped: boolean }}
+ */
+export function scanWindow(text, scanMax) {
+  if (text.length <= scanMax) return { text, clipped: false }
+  const head = text.slice(0, scanMax)
+  const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'), head.lastIndexOf('\r'))
+  return { text: cut > 0 ? head.slice(0, cut) : '', clipped: true }
+}
+
+/**
+ * How much of the end of a clipped, redacted result is not kept. A pattern fragment
+ * that straddled a cut (the front of a key, an unterminated quoted value) is at most
+ * this far from the end of the kept text: the quoted-value bound is 1024 characters
+ * and every other pattern needs far less, and replacements before the fragment only
+ * shorten the text ahead of it.
+ */
+export const REDACT_SCAN_MARGIN = 2048
+
+/** `text` without the last {@link REDACT_SCAN_MARGIN} characters. */
+export function withoutUnsafeTail(text) {
+  return text.slice(0, Math.max(0, text.length - REDACT_SCAN_MARGIN))
+}
+
+/**
+ * The one rule for every cut of redacted text. Keep at most `max` characters of
+ * `redacted`, drop the last {@link REDACT_SCAN_MARGIN} of those, and append `marker`.
+ * Callers use it whenever the result is clipped, whether by length or because the
+ * tail of the raw text was discarded at the ceiling; unclipped text is returned as it
+ * is, without calling this.
  *
- * @param {unknown} text
- * @param {number} [maxScan]
+ * @param {string} redacted
+ * @param {number} max
+ * @param {string} [marker]
  * @returns {string}
  */
-export function redactBounded(text, maxScan = MAX_REDACT_SCAN) {
-  let s = typeof text === 'string' ? text : String(text ?? '')
-  if (s.length > maxScan) {
-    const head = s.slice(0, maxScan)
-    const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'))
-    s = cut > 0 ? head.slice(0, cut) : ''
-  }
-  return redactValue(s)
+export function clipRedacted(redacted, max, marker = '') {
+  return withoutUnsafeTail(redacted.slice(0, Math.max(0, max))) + marker
+}
+
+/**
+ * Redact the whole of `text`, up to the admission ceiling. `clipped` says the text
+ * was longer than the ceiling and its tail was discarded (see {@link scanWindow});
+ * the redacted text can then end in a fragment of a match that the discarded tail
+ * would have completed, and the caller cuts it with {@link clipRedacted}.
+ *
+ * @param {unknown} text
+ * @param {number} [ceiling]
+ * @returns {{ text: string, clipped: boolean }}
+ */
+export function redactWhole(text, ceiling = REDACT_ADMISSION_MAX) {
+  const s = typeof text === 'string' ? text : String(text ?? '')
+  const window = scanWindow(s, ceiling)
+  return { text: redactValue(window.text), clipped: window.clipped }
+}
+
+/**
+ * Redact the whole of `text` (up to the admission ceiling) and return it, for
+ * callers that cut the result themselves. Only text past the ceiling loses its tail
+ * first, and then the end of what remains is dropped as well
+ * ({@link withoutUnsafeTail}): a fragment of a match the discarded text would have
+ * completed is not kept. `max`, when given, is an OUTPUT budget: the redacted result
+ * is sliced to it, which keeps the readable prefix and cannot expose a matched secret.
+ *
+ * @param {unknown} text
+ * @param {number} [max]
+ * @returns {string}
+ */
+export function redactBounded(text, max) {
+  const { text: redacted, clipped } = redactWhole(text)
+  const kept = clipped ? withoutUnsafeTail(redacted) : redacted
+  return max === undefined ? kept : kept.slice(0, max)
 }
 
 /**
@@ -286,8 +445,7 @@ const OMITTED_TEXT = '[omitted]'
  * string value is redacted as the RAW string, before it is JSON-escaped (an
  * escaped `\n` hides a credential from patterns that expect a word boundary) and
  * before it is shortened (a clip can leave a prefix no pattern recognises). A
- * string longer than the scan bound is read by `redactBounded`, which drops what
- * it cannot scan rather than keeping an unscanned tail.
+ * string is redacted whole by `redactBounded` before it is shortened.
  *
  * @param {*} value
  * @param {number} depth
@@ -335,7 +493,7 @@ function redactedForDescription(value, depth, seen, budget) {
  * once.
  *
  * - An input with an identifying field (command, file_path, ...) is described by
- *   that field, redacted over the bounded scan.
+ *   that field, redacted whole, then clipped.
  * - Anything else is described by a structurally redacted copy of the input
  *   (`redactedForDescription`), serialized: a value under a sensitive key reads
  *   `[REDACTED]` exactly as it does in the prompt's `input`, and secrets in
@@ -353,7 +511,7 @@ function redactedForDescription(value, depth, seen, budget) {
 export function describeToolInput(rawInput, emptyFallback = '') {
   const named = namedField(rawInput)
   if (named) {
-    const text = redactBounded(String(named))
+    const text = redactBounded(String(named), REDACT_KEEP_MAX)
     if (text) return text
   }
   if (rawInput && typeof rawInput === 'object' && Object.keys(rawInput).length > 0) {
@@ -365,7 +523,7 @@ export function describeToolInput(rawInput, emptyFallback = '') {
 
 /**
  * A prompt description composed by a producer from its own fields (not derived
- * from a tool input): redacted over the bounded scan, then clipped to the length
+ * from a tool input): redacted whole, then clipped to the length
  * a client shows. The MCP trust prompt uses it, so every description follows one
  * policy.
  *
@@ -376,4 +534,4 @@ export function describeComposedText(text) {
   return redactBounded(text).slice(0, SERIALIZED_DESCRIPTION_MAX)
 }
 
-export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }
+export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }

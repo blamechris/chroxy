@@ -138,14 +138,19 @@ describe('describeToolInput (#8384)', () => {
 
   it('describes an oversized input from its own redacted entries', () => {
     const text = describeToolInput({ a: 'x'.repeat(20000), b: 'short', password: SECRET })
-    assert.ok(text.startsWith('{"a":"[omitted]"'), text.slice(0, 40))
-    assert.ok(text.includes('"b":"short"'), text)
+    // The long string is redacted whole, then its readable prefix is kept (the description shows 200 characters).
+    assert.ok(text.startsWith('{"a":"xxxx'), text.slice(0, 40))
     assertNoSecret(text, 'description')
+    const second = describeToolInput({ a: 'x'.repeat(100), b: 'short', password: SECRET })
+    assert.ok(second.includes('"b":"short"'), second)
+    assertNoSecret(second, 'description')
   })
 
-  it('describeComposedText redacts the bounded scan, then clips to what a client shows', () => {
+  it('describeComposedText redacts the whole text, then clips to what a client shows', () => {
     assert.equal(describeComposedText('Spawn x running /bin/y'), 'Spawn x running /bin/y')
-    assert.equal(describeComposedText(`Spawn x running ${'a'.repeat(9000)}`), 'Spawn x running')
+    // A long unbroken run after a few words keeps the words and the sliced run.
+    assert.equal(describeComposedText(`Spawn x running ${'a'.repeat(9000)}`), `Spawn x running ${'a'.repeat(184)}`)
+    assert.equal(describeComposedText(`${'w '.repeat(3000)}${'a'.repeat(9000)}`).length, 200)
     assert.equal(describeComposedText('w '.repeat(300)).length, 200)
   })
 
@@ -201,14 +206,14 @@ describe('in-process producer: PermissionManager.handlePermission (claude-sdk, c
     assert.ok(payload.description.includes('resource-123'), payload.description)
   })
 
-  it('describes the mcp_spawn prompt as it always has, and bounds the scan of a huge command', async () => {
+  it('describes the mcp_spawn prompt as it always has, and a huge unbroken argument still shows its words and the sliced argument', async () => {
     const shown = []
     pm.on('permission_request', (d) => shown.push(d))
     const first = pm.requestMcpTrust({ name: 'files', command: '/usr/local/bin/mcp-files', args: ['--root', '/tmp'], envKeys: [] })
     const second = pm.requestMcpTrust({ name: 'files', command: 'a'.repeat(9000), args: [], envKeys: [] })
     assert.equal(shown[0].description, 'Spawn MCP server "files" running /usr/local/bin/mcp-files --root')
     assert.equal(shown[0].recordDescription, shown[0].description)
-    assert.equal(shown[1].description, 'Spawn MCP server "files" running')
+    assert.equal(shown[1].description, `Spawn MCP server "files" running ${'a'.repeat(9000)}`.slice(0, 200))
     assert.equal(shown[1].recordDescription, shown[1].description)
     pm.clearAll()
     await Promise.all([first, second])

@@ -43,7 +43,7 @@ import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
 import { nodePtyImportFailureError } from './utils/node-pty-support.js'
-import { redactBounded } from './redaction.js'
+import { redactBounded, REDACT_KEEP_MAX } from './redaction.js'
 import { sanitizeQuestionsForClients } from './claude-tui/sanitize-question-payload.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration, formatWatchdogDuration } from './session-timeout-manager.js'
@@ -4684,7 +4684,7 @@ export class ClaudeTuiSession extends BaseSession {
         // history, so redact it here, before anything clips it (a clip first
         // can leave a token prefix the patterns no longer recognise).
         const cmd = typeof payload.tool_input?.command === 'string'
-          ? redactBounded(payload.tool_input.command) : ''
+          ? redactBounded(payload.tool_input.command, REDACT_KEEP_MAX) : ''
         this._pendingBackgroundCommands.set(toolUseId, cmd)
       }
       // #4307: a BashOutput call means the agent has acknowledged the

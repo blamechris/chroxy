@@ -20,7 +20,7 @@ import {
   openSync, readSync, closeSync, writeFileSync, truncateSync,
 } from 'fs'
 import { join } from 'path'
-import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue } from './redaction.js'
+import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue, redactWhole, clipRedacted } from './redaction.js'
 import { configPath } from './config-dir.js'
 
 function defaultLogDir() {
@@ -65,10 +65,28 @@ export function redactSensitive(msg) {
   return redactValue(msg)
 }
 
+// The most of one log line that is kept, in characters. The whole line is redacted
+// first (up to the redactor's admission ceiling) and the redacted text is then cut
+// by `clipRedacted`: a slice that also drops the end of what it kept, so a fragment of
+// a pattern at the cut is not shown.
+// `redactSensitive` itself keeps all of its result: its callers redact first and then
+// keep a tail or a slice of their own.
+const LOG_LINE_MAX = 64 * 1024
+const LOG_TRUNCATION_MARKER = '... [truncated]'
+
+function redactLogMessage(msg) {
+  if (typeof msg !== 'string') return redactSensitive(msg)
+  const { text, clipped } = redactWhole(msg)
+  return clipped || text.length > LOG_LINE_MAX
+    ? clipRedacted(text, LOG_LINE_MAX, LOG_TRUNCATION_MARKER)
+    : text
+}
+
 // #5358: escape/control sequences a TUI can interleave INTO a token while
 // styling it (e.g. `sk-ant-oat01-AAAA\x1b[1mBBBB`), splitting the run so the
 // contiguous patterns above miss it. Mirrors the claude-tui ANSI_STRIP set,
-// kept local so logger.js stays dependency-free.
+// kept local so logger.js stays dependency-free. Sticky: it is asked for a match AT
+// the current offset, and a global search would scan the rest of the text each time.
 const TOKEN_SPLITTING_ESCAPE = new RegExp(
   [
     '\\x1b\\[[0-9;?]*[\\x40-\\x7E]', // CSI
@@ -77,7 +95,7 @@ const TOKEN_SPLITTING_ESCAPE = new RegExp(
     '\\x1b[=>cN]', // single-char terminal-mode codes
     '[\\x00-\\x08\\x0b-\\x1f\\x7f]', // stray C0 controls (except \t and \n)
   ].join('|'),
-  'g',
+  'y',
 )
 
 /**
@@ -112,7 +130,7 @@ export function redactSensitivePreservingEscapes(s, fill = 'X') {
   while (i < s.length) {
     TOKEN_SPLITTING_ESCAPE.lastIndex = i
     const m = TOKEN_SPLITTING_ESCAPE.exec(s)
-    if (m && m.index === i) { i += m[0].length || 1; continue }
+    if (m) { i += m[0].length || 1; continue }
     stripped += s[i]
     map.push(i)
     i++
@@ -413,7 +431,7 @@ export function createLogger(component, context = {}) {
     // listener broadcast, file write) is identical to a normal line.
     if (!always && LOG_LEVELS[level] < _logLevel) return
 
-    const safeMsg = redactSensitive(msg)
+    const safeMsg = redactLogMessage(msg)
     const timestamp = new Date().toISOString()
     const line = _jsonMode
       ? JSON.stringify({ ts: timestamp, level, component, msg: safeMsg })

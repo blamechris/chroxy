@@ -17,7 +17,7 @@
  * (`contract-fixtures/replay-parity-data.ts`) prove it.
  */
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
-import { redactValue } from './redaction.js'
+import { redactWhole, clipRedacted } from './redaction.js'
 
 /**
  * #6941 review (Copilot) — coerce+bound a footer-stat numeric field
@@ -180,28 +180,18 @@ export function buildMessageWire(data) {
 }
 
 /**
- * The most text the redactor is ever handed at once, in characters. This bounds the
- * redaction scan: the redactor's cost on adversarial input grows faster than the
- * input's length, and it runs synchronously on the event loop, so what it is given
- * must be small (measured: 16 KiB of hostile input costs tens of milliseconds, 256 KiB
- * costs seconds).
+ * The length of one error message, in characters: the budget the saved copy of an
+ * error is held to.
  */
 export const ERROR_REDACT_SCAN_MAX = 16 * 1024
 
 /**
- * Ceiling on the text of one error message, in characters: the scan bound above,
+ * Ceiling on the text of one error message, in characters: the budget above,
  * applied at ADMISSION so the live frame, the ring buffer and every replay hold the
  * same bounded text. It is below the 50 KiB `SessionMessageHistory.truncateEntry`
  * clips a saved entry to, so the saved copy is never cut again.
  */
 export const ERROR_TEXT_MAX = ERROR_REDACT_SCAN_MAX
-
-/**
- * How far below the scan bound a kept result must stay for the cut at the bound to
- * be harmless: a secret straddling the bound starts at most this far before it, and
- * is therefore already redacted out of the part that is kept.
- */
-const SCAN_BOUND_SAFETY_MARGIN = 2048
 
 /**
  * Text appended to an error message that was cut. Counted INSIDE the message budget,
@@ -219,19 +209,11 @@ const ERROR_TRUNCATION_MARKER = '\n[truncated]'
  * use (`redactValue`), here in the shared builder so the live frame and the
  * recorded entry are identical.
  *
- * ORDER matters: redact the COMPLETE text, then cut. Cutting first can leave the
- * front of a key the patterns no longer recognise when the bound falls inside it.
- * After redaction the keys are already gone, so the cut can be a plain slice (the
- * post-create caps have always sliced rather than dropped, and a test pins it).
- *
- * Text longer than the scan bound cannot be scanned whole. It is cut at the bound
- * first, and what that cut can do to a key at the bound decides the rest:
- *   - when the result kept is at least a safety margin shorter than the bound (the
- *     8 KiB output streams), a key at the bound lies entirely beyond what is kept,
- *     so the slice is safe and nothing more is done;
- *   - otherwise (the message, whose budget IS the bound) the cut backs up to the last
- *     whitespace, and a run with no whitespace to stop at is discarded, never
- *     half-kept (`redactBounded`'s rule).
+ * ORDER matters: redact the COMPLETE text (`redactWhole`), then cut it with
+ * `clipRedacted`, which also drops the last 2 KiB it would have kept, so a fragment of
+ * a pattern at the cut is not shown (a key that sits against the text before it and so
+ * is not recognised, or the front of a quoted value whose end was discarded at the
+ * redactor's admission ceiling). Text that is not clipped is returned as redacted.
  *
  * @param {string} text
  * @param {number} max  character budget for the result, marker included
@@ -239,21 +221,9 @@ const ERROR_TRUNCATION_MARKER = '\n[truncated]'
  * @returns {string}
  */
 export function redactAndClip(text, max, marker = '') {
-  let clipped = false
-  if (text.length > ERROR_REDACT_SCAN_MAX) {
-    const head = text.slice(0, ERROR_REDACT_SCAN_MAX)
-    if (max + SCAN_BOUND_SAFETY_MARGIN <= ERROR_REDACT_SCAN_MAX) {
-      text = head
-    } else {
-      const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'), head.lastIndexOf('\r'))
-      text = cut > 0 ? head.slice(0, cut) : ''
-    }
-    clipped = true
-  }
-  const redacted = redactValue(text)
+  const { text: redacted, clipped } = redactWhole(text)
   if (redacted.length <= max && !clipped) return redacted
-  if (redacted.length <= max - marker.length) return redacted + marker
-  return redacted.slice(0, Math.max(0, max - marker.length)) + marker
+  return clipRedacted(redacted, max - marker.length, marker)
 }
 
 /** The error message: redacted, then bounded with a marker that fits inside the budget. */
