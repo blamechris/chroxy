@@ -1055,6 +1055,16 @@ a.dev-preview-chip__link:focus-visible {
   min-width: 180px;
   font-size: var(--text-sm);
   color: var(--text-primary);
+  /* #8483 — taller than the viewport (44px rows: 7 items is ~330px) scrolls
+   * instead of being clipped. 16px keeps a margin; the dvh line wins where
+   * supported so a mobile URL bar does not hide the bottom rows. The
+   * component ignores scroll events inside the menu, so scrolling it does not
+   * dismiss it. */
+  box-sizing: border-box;
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* #8467 — every row clears the 44px tap-target floor (CLAUDE.md "Tap targets")
