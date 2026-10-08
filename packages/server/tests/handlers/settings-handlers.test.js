@@ -5,6 +5,8 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
 import { PermissionAuditLog } from '../../src/permission-audit.js'
+import { PermissionManager } from '../../src/permission-manager.js'
+import { PermissionRuleStore } from '../../src/permission-rule-store.js'
 import { registerProvider } from '../../src/providers.js'
 import { addLogListener, removeLogListener } from '../../src/logger.js'
 import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
@@ -1269,6 +1271,137 @@ describe('settings-handlers', () => {
           'legacy pendingPermissions resolver must not be invoked on the hijack path')
         assert.equal(ctx.permissions.permissionSessionMap.get('perm-legacy-leak'), 's1',
           'mapping preserved on guard rejection — legitimate client can still respond')
+      })
+    })
+  })
+
+  // #8398: `permission_rules_updated` follows a rule change. An `allowAlways`
+  // changes the rules ONLY when an in-process session's PermissionManager
+  // persisted it (resolver `via: 'sdk'`). A legacy-store answer (an unmapped
+  // HTTP-held prompt, or a hook-routed prompt) has no rule store behind it, so
+  // nothing changed and the frame would be a wasted refresh -- for an unmapped
+  // prompt sent to whichever session the answerer happened to be viewing. The
+  // HTTP handler (ws-permissions.js) already gates on `via === 'sdk'`.
+  describe('permission_response allowAlways -> permission_rules_updated (#8398)', () => {
+    const rulesFrames = (ctx) => ctx._sessionBroadcasts.filter((b) => b.msg.type === 'permission_rules_updated')
+    const resolvedFrames = (ctx) => ctx.transport.broadcast.calls.filter((a) => a[0]?.type === 'permission_resolved')
+
+    // A session that exposes the rules getters (as SdkSession does) but whose
+    // prompts are answered through the LEGACY store, so its rules never move.
+    function viewedSession() {
+      const session = createMockSession()
+      session.getPermissionRules = createSpy(() => [])
+      session.getPersistentPermissionRules = createSpy(() => [])
+      delete session.respondToPermission
+      return session
+    }
+
+    it('an UNMAPPED legacy allowAlways sends no permission_rules_updated to the answerer\'s session', () => {
+      const viewed = viewedSession()
+      const ctx = makeCtx(new Map([['s9', { session: viewed, name: 'S', cwd: '/tmp' }]]))
+      ctx.permissions.pendingPermissions = new Map([['req-un', { data: { tool: 'Write' } }]])
+      ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+      const client = makeClient({ id: 'client-resolver', activeSessionId: 's9' })
+
+      settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-un', decision: 'allowAlways' }, ctx)
+
+      assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1, 'the held request is released')
+      assert.equal(resolvedFrames(ctx).length, 1, 'the resolution is still announced (#8359)')
+      assert.equal(rulesFrames(ctx).length, 0, 'no rule changed, so no rules refresh')
+      assert.equal(viewed.getPersistentPermissionRules.callCount, 0, 'the answerer\'s session rules were not even read')
+    })
+
+    it('a MAPPED legacy (hook-routed) allowAlways sends no permission_rules_updated either', () => {
+      const hook = viewedSession()
+      const ctx = makeCtx(new Map([['s1', { session: hook, name: 'S', cwd: '/tmp' }]]))
+      ctx.permissions.permissionSessionMap.set('req-hook', 's1')
+      ctx.permissions.pendingPermissions = new Map([['req-hook', { data: { tool: 'Write' } }]])
+      ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+      const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+
+      settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-hook', decision: 'allowAlways' }, ctx)
+
+      assert.equal(resolvedFrames(ctx).length, 1)
+      assert.equal(rulesFrames(ctx).length, 0)
+    })
+
+    describe('in-process session with a real PermissionManager + durable rule store', () => {
+      let dir
+      let pm
+      afterEach(() => {
+        pm?.destroy()
+        pm = null
+        if (dir) rmSync(dir, { recursive: true, force: true })
+        dir = null
+      })
+
+      // The shape SdkSession exposes to the resolver and the handler.
+      function liveSession(cwd) {
+        dir = mkdtempSync(join(tmpdir(), 'chroxy-8398-'))
+        const ruleStore = new PermissionRuleStore({ filePath: join(dir, 'permission-rules.json') }).load()
+        pm = new PermissionManager({ log: { info() {}, warn() {}, error() {} }, cwd, ruleStore })
+        const session = createMockSession()
+        session.cwd = cwd
+        session.respondToPermission = (id, decision, edited, reason) => pm.respondToPermission(id, decision, edited, reason)
+        session.getPermissionRules = () => pm.getRules()
+        session.getPersistentPermissionRules = () => pm.getPersistentRules()
+        Object.defineProperty(session, '_lastPermissionData', { get: () => pm._lastPermissionData })
+        return session
+      }
+
+      function raise(tool, input) {
+        let requestId
+        pm.once('permission_request', (d) => { requestId = d.requestId })
+        const decided = pm.handlePermission(tool, input, null, 'approve')
+        return { requestId, decided }
+      }
+
+      it('control: an SDK allowAlways still sends exactly one permission_rules_updated carrying the new durable rule', async () => {
+        const cwd = join(tmpdir(), 'chroxy-8398-proj')
+        const session = liveSession(cwd)
+        const ctx = makeCtx(new Map([['s1', { session, name: 'S', cwd }]]))
+        const { requestId, decided } = raise('Write', { file_path: join(cwd, 'a.js') })
+        ctx.permissions.permissionSessionMap.set(requestId, 's1')
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+
+        settingsHandlers.permission_response(makeWs(), client, { requestId, decision: 'allowAlways' }, ctx)
+
+        assert.equal((await decided).behavior, 'allow')
+        const frames = rulesFrames(ctx)
+        assert.equal(frames.length, 1)
+        assert.equal(frames[0].sessionId, 's1')
+        assert.equal(frames[0].msg.sessionId, 's1')
+        assert.ok(
+          frames[0].msg.persistentRules.some((r) => r.tool === 'Write' && r.decision === 'allow'),
+          'the frame carries the rule the manager just persisted',
+        )
+      })
+
+      it('floor: an allowAlways rule never auto-approves a floored target (the rule exists, the prompt still comes)', async () => {
+        const cwd = join(tmpdir(), 'chroxy-8398-floor')
+        const session = liveSession(cwd)
+        const ctx = makeCtx(new Map([['s1', { session, name: 'S', cwd }]]))
+        const first = raise('Write', { file_path: join(cwd, 'a.js') })
+        ctx.permissions.permissionSessionMap.set(first.requestId, 's1')
+        const client = makeClient({ id: 'client-resolver', activeSessionId: 's1' })
+        settingsHandlers.permission_response(makeWs(), client, { requestId: first.requestId, decision: 'allowAlways' }, ctx)
+        await first.decided
+        assert.ok(pm.getPersistentRules().some((r) => r.tool === 'Write' && r.decision === 'allow'), 'precondition: the durable rule exists')
+
+        // Same tool, ordinary target: the standing grant silently approves.
+        const ordinary = await pm.handlePermission('Write', { file_path: join(cwd, 'b.js') }, null, 'approve')
+        assert.equal(ordinary.behavior, 'allow')
+
+        // Same tool, floored targets: the rule must NOT short-circuit; a prompt is raised.
+        for (const target of [join(cwd, '.env'), join(cwd, '.git', 'config'), join(cwd, '.claude', 'settings.json')]) {
+          const events = []
+          pm.once('permission_request', (d) => events.push(d))
+          const pending = pm.handlePermission('Write', { file_path: target }, null, 'approve')
+          assert.equal(events.length, 1, `${target} must raise a prompt despite the allowAlways rule`)
+          assert.equal(events[0].floored, true)
+          pm.respondToPermission(events[0].requestId, 'deny')
+          assert.equal((await pending).behavior, 'deny')
+        }
       })
     })
   })
