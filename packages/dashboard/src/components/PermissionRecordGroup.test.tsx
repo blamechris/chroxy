@@ -96,6 +96,52 @@ describe('PermissionRecordGroup (#6894)', () => {
     expect(screen.getByTestId('perm-group-input')).toHaveTextContent('touch smoke-perm.txt')
   })
 
+  it('a 1500-character command plus dangerouslyDisableSandbox shows the flag on the collapsed group line, styled apart (#8505)', () => {
+    renderGroup({ toolInput: { command: 'x'.repeat(1500), dangerouslyDisableSandbox: true } })
+    const line = screen.getByTestId('perm-group-input')
+    const flag = within(line).getByTestId('perm-input-flag')
+    expect(flag).toHaveTextContent('dangerouslyDisableSandbox: true')
+    // first in the line, so the two-line clamp keeps it
+    expect(line.textContent!.startsWith('dangerouslyDisableSandbox: true')).toBe(true)
+  })
+
+  it('a multi-line command plus the flag shows the flag on the group line (#8505)', () => {
+    renderGroup({ toolInput: { command: 'a\nb\nc\nd', dangerouslyDisableSandbox: true } })
+    expect(screen.getByTestId('perm-group-input').textContent!.startsWith('dangerouslyDisableSandbox: true\na')).toBe(true)
+  })
+
+  it('a non-scalar flag value shows the placeholder on the group line (#8505)', () => {
+    renderGroup({ toolInput: { command: 'ls', dangerouslyDisableSandbox: { a: 1 } } })
+    expect(screen.getByTestId('perm-input-flag')).toHaveTextContent('dangerouslyDisableSandbox: <object>')
+  })
+
+  it('a long safety-flag string is cut on the group line so both safety flags fit; the record detail keeps it (#8505)', () => {
+    const long = 'v'.repeat(150)
+    renderGroup({ toolInput: { command: 'ls', run_in_background: long, dangerouslyDisableSandbox: long } })
+    const flags = within(screen.getByTestId('perm-group-input')).getAllByTestId('perm-input-flag')
+    expect(flags).toHaveLength(2)
+    for (const f of flags) expect(f.textContent!.length).toBeLessThan(110)
+  })
+
+  it('a plain command has no flag element', () => {
+    renderGroup({ toolInput: { command: 'ls' } })
+    expect(screen.queryByTestId('perm-input-flag')).not.toBeInTheDocument()
+  })
+
+  it('the flag styling is a token color plus weight, never a raw color literal (css contract)', () => {
+    const css = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+    const rule = (/\.perm-input-flag\s*\{([^}]*)\}/.exec(css)?.[1] ?? '').replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(rule).toMatch(/color:\s*var\(--[a-z-]+\)/)
+    expect(rule).toMatch(/font-weight:\s*(bold|[6-9]00)/)
+    // defence in depth against bidi reordering of the flag text
+    expect(rule).toMatch(/unicode-bidi:\s*isolate/)
+    for (const sel of ['perm-group-input', 'perm-record-input']) {
+      const box = (new RegExp(`\\.${sel}\\s*\\{([^}]*)\\}`).exec(css)?.[1] ?? '')
+      expect(box, sel).toMatch(/unicode-bidi:\s*isolate/)
+    }
+    expect(rule).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/)
+  })
+
   it('renders the group-line input as text, not markup', () => {
     renderGroup({ toolInput: { command: '<b>x</b>' } })
     expect(screen.getByTestId('perm-group-input').querySelector('b')).toBeNull()

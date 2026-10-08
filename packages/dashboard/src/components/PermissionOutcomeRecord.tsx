@@ -31,7 +31,8 @@
 import { useState } from 'react'
 import type { PermissionOutcomeKind } from '@chroxy/store-core'
 import { useInitialExpanded } from './chatExpandRegistry'
-import { permissionInputText } from '../utils/permissionInputText'
+import { permissionInputParts } from '../utils/permissionInputText'
+import { PermissionInputContent } from './PermissionInputContent'
 
 export interface PermissionRecordDetail {
   /** The decision token the user answered with (`allow`, `allowSession`, `allowAlways`, `deny`). */
@@ -94,7 +95,7 @@ export function PermissionOutcomeRecord({ requestId, tool, description, outcome,
   const { initial, persist } = useInitialExpanded(`perm-record:${requestId}`, false)
   const [expanded, setExpanded] = useState(initial)
   const detailId = `perm-record-detail-${requestId}`
-  const inputText = detail ? permissionInputText(tool, detail.toolInput) : null
+  const inputParts = detail ? permissionInputParts(tool, detail.toolInput) : null
   return (
     <div
       className={`permission-prompt permission-prompt-dropped${detail ? ' perm-record-expandable' : ''}`}
@@ -130,8 +131,8 @@ export function PermissionOutcomeRecord({ requestId, tool, description, outcome,
           <div className="perm-record-full">
             <span className="perm-tool">{tool}</span>: {description}
           </div>
-          {inputText && (
-            <pre className="perm-record-input" data-testid="perm-record-input">{inputText}</pre>
+          {inputParts && (
+            <pre className="perm-record-input" data-testid="perm-record-input"><PermissionInputContent parts={inputParts} /></pre>
           )}
           {detail.decision && <div className="perm-record-decision">{permissionDecisionLabel(detail.decision)}</div>}
           {detail.sessionLabel && <div className="perm-record-session">{detail.sessionLabel}</div>}
