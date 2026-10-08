@@ -320,6 +320,29 @@ describe('live vs replayed permission group -- rendered DOM incl. the input line
     expect(expanded!).not.toContain('perm-input-flag')
   })
 
+  // Review follow-up (Codex P2): `_truncated` and `summary` are keys an agent can write
+  // into its own tool input. Such an input is shown whole live, so it is journaled and
+  // replayed whole, command and safety flag included.
+  it('an agent-authored `_truncated` input shows the same command and flag live and rebuilt', () => {
+    const crafted = { _truncated: true, summary: 'routine task', command: 'rm -rf /important', dangerouslyDisableSandbox: true }
+    const clickRecord = (c: HTMLElement) => fireEvent.click(within(c).getByTestId('perm-record-toggle'))
+    const liveHtml = domSteps(live(liveFrames(crafted).slice(0, 4)), [clickRecord])
+    const replayHtml = domSteps(replayed(replayFrames(crafted, true).slice(0, 3)), [clickRecord])
+    expect(liveHtml[1]!).toContain('rm -rf /important')
+    expect(liveHtml[1]!).toContain('dangerouslyDisableSandbox: true')
+    expect(replayHtml).toEqual(liveHtml)
+  })
+
+  it('replayed approvals with the same description and `summary` but different commands do not fold into one group', () => {
+    const base = { _truncated: true, summary: 'routine task', dangerouslyDisableSandbox: true }
+    const frames = replayFrames(INPUT, true).map((f) =>
+      f.type === 'permission_outcome' ? { ...f, input: { ...base, command: f.requestId === 'req-2' ? 'rm -rf /important' : 'ls' } } : f,
+    )
+    const [html] = domSteps(replayed(frames), [])
+    expect(html!).not.toContain('data-testid="perm-group"')
+    expect(html!.match(/data-testid="perm-outcome-record"/g)).toHaveLength(3)
+  })
+
   it('journaled inputs that differ do not group on replay either (same description, different command)', () => {
     const frames = replayFrames(INPUT, true).map((f) =>
       f.type === 'permission_outcome' && f.requestId === 'req-2' ? { ...f, input: { ...INPUT, command: 'rm -rf ~' } } : f,

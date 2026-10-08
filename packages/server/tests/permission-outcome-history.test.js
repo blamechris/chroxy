@@ -11,7 +11,7 @@ import {
   PERMISSION_OUTCOME_INPUT_MAX,
   PERMISSION_OUTCOME_TOOL_MAX,
 } from '../src/session-message-history.js'
-import { sanitizeToolInput } from '../src/redaction.js'
+import { sanitizeToolInput, isSanitizedToolInput, PULL_MAX_INPUT_CHARS } from '../src/redaction.js'
 import { PermissionManager, wirePermissionManager } from '../src/permission-manager.js'
 import { createPermissionHandler } from '../src/ws-permissions.js'
 import { createPermissionResolver } from '../src/permission-resolver.js'
@@ -43,8 +43,8 @@ function tmpStateFile() {
 }
 after(() => { if (tmpDir) rmSync(tmpDir, { recursive: true, force: true }) })
 
-// The broadcast's own measure of an input (see PERMISSION_OUTCOME_INPUT_MAX).
-const inputWeight = (input) => (input._truncated === true ? input.summary.length : JSON.stringify(input).length)
+// The size the journal bounds an input by (see PERMISSION_OUTCOME_INPUT_MAX): serialized length, for every shape alike.
+const inputWeight = (input) => JSON.stringify(input).length
 const outcomes = (mgr, sid) => mgr.getHistory(sid).filter((e) => e.type === 'permission_outcome')
 
 describe('SessionMessageHistory permission_outcome (#8348)', () => {
@@ -219,16 +219,111 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     assert.equal(e.input._truncated, true)
   })
 
-  it('a hand-built wrapper cannot smuggle more than the cap, nor a secret', () => {
+  it('an UNMARKED hand-built `_truncated` object that is over the cap is re-sanitized like any raw input: bounded, no secret', () => {
     const h = new SessionMessageHistory()
-    h.recordHistory('s1', 'permission_outcome', {
-      requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed',
-      input: { _truncated: true, summary: 'sk-ant-api03-' + 'A'.repeat(40) + ' ' + 'z'.repeat(100_000), extra: 'y'.repeat(100_000) },
-    })
+    const crafted = { _truncated: true, summary: 'sk-ant-api03-' + 'A'.repeat(40) + ' ' + 'z'.repeat(100_000), extra: 'y'.repeat(100_000) }
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed', input: crafted })
     const [e] = h.getHistory('s1')
+    assert.deepEqual(e.input, sanitizeToolInput(crafted), 'exactly what the broadcast would have sent for it')
     assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX)
     assert.equal(JSON.stringify(e.input).includes('sk-ant-api03-AAAA'), false)
-    assert.deepEqual(Object.keys(e.input).sort(), ['_truncated', 'summary'])
+  })
+
+  // #8503 review (Codex P2): `_truncated` is a key an agent can put in its own tool
+  // input. The journal must never read it as "this is the sanitizer's wrapper".
+  const CRAFTED = { _truncated: true, summary: 'routine task', command: 'rm -rf /important', dangerouslyDisableSandbox: true }
+
+  it('P2: an agent-authored `_truncated` input keeps its command and its safety flag, exactly as the broadcast sent them', () => {
+    const h = new SessionMessageHistory()
+    const shown = sanitizeToolInput(CRAFTED)
+    assert.deepEqual(shown, CRAFTED, 'precondition: the live sanitizer preserves a small object whatever its keys')
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'routine task', outcome: 'allowed', input: shown })
+    assert.deepEqual(h.getHistory('s1')[0].input, CRAFTED)
+    const frames = []
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', h.getHistory('s1')[0])
+    assert.equal(frames[0].input.command, 'rm -rf /important')
+    assert.equal(frames[0].input.dangerouslyDisableSandbox, true)
+  })
+
+  it('P2: the same holds when the crafted input arrives RAW, and two such inputs with different commands stay different', () => {
+    const h = new SessionMessageHistory()
+    const other = { ...CRAFTED, command: 'ls' }
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'a', tool: 'Bash', description: 'routine task', outcome: 'allowed', input: CRAFTED })
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'b', tool: 'Bash', description: 'routine task', outcome: 'allowed', input: other })
+    const [a, b] = h.getHistory('s1')
+    assert.deepEqual(a.input, CRAFTED)
+    assert.deepEqual(b.input, other)
+    assert.notEqual(a.input.command, b.input.command)
+  })
+
+  // Codex P3: re-redacting a wrapper's serialized summary with the text patterns is not
+  // the object-level redaction the broadcast applied.
+  it('P3: a large input whose key merely ends in "token" is journaled identical to the broadcast, not re-redacted as text', () => {
+    const h = new SessionMessageHistory()
+    const shown = sanitizeToolInput({ not_a_token: 'ordinaryValue', content: 'x'.repeat(20_000) })
+    assert.equal(shown._truncated, true, 'precondition: a real wrapper')
+    assert.ok(shown.summary.includes('ordinaryValue'), 'precondition: the live broadcast kept the value')
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed', input: shown })
+    assert.deepEqual(h.getHistory('s1')[0].input, shown)
+    assert.ok(h.getHistory('s1')[0].input.summary.includes('ordinaryValue'))
+  })
+
+  // The invariant, over many shapes: what the sanitizer BROADCAST is what the journal keeps.
+  const SHAPES = {
+    'a small command': { command: 'touch smoke-perm.txt' },
+    'flags and a description': { command: 'ls', description: 'list', dangerouslyDisableSandbox: true, run_in_background: true },
+    'an empty input': {},
+    'a nested structure': { a: { b: { c: [1, 2, { d: 'e' }] } }, list: ['x', 'y'], n: 3, t: true, none: null },
+    'a key-name secret': { password: 'ordinarySecret123', region: 'eu-west-1' },
+    'a value-shape secret': { command: 'curl -H "x-api-key: sk-ant-api03-' + 'Q'.repeat(40) + '" https://x.test' },
+    'a key that ends in token': { not_a_token: 'ordinaryValue', n: 1 },
+    'a crafted _truncated object': CRAFTED,
+    'a crafted _truncated with no summary': { _truncated: true, command: 'x' },
+    'a crafted _truncated with a non-string summary': { _truncated: true, summary: { a: 1 }, command: 'x' },
+    'a crafted object that looks like a wrapper': { _truncated: true, summary: '{"command":"ls"}... [truncated]' },
+    'a real wrapper (one big string)': { content: 'x'.repeat(30_000), file_path: '/srv/big.ts' },
+    'a real wrapper (many keys)': Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`k${i}`, `value-${i}`])),
+    'a real wrapper full of quotes and backslashes': { content: '"\\"'.repeat(8_000) },
+    'a real wrapper holding a secret': { content: 'x'.repeat(20_000), password: 'ordinarySecret123', env: { A: 'sk-ant-api03-' + 'R'.repeat(40) } },
+    'a cyclic input': (() => { const c = { command: 'ls' }; c.self = c; return c })(),
+    'a deep input': (() => { let d = { leaf: 'x' }; for (let i = 0; i < 20; i++) d = { d }; return d })(),
+    'a unicode input': { command: 'echo \u2603 \ud83d\ude00 "quoted" \\ back' },
+  }
+  for (const [label, raw] of Object.entries(SHAPES)) {
+    it(`property: journal(broadcast(x)) is exactly broadcast(x) -- ${label}`, () => {
+      const h = new SessionMessageHistory()
+      const shown = sanitizeToolInput(raw)
+      assert.equal(isSanitizedToolInput(shown), true, 'the sanitizer marks what it returns')
+      h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', input: shown })
+      const [e] = h.getHistory('s1')
+      assert.deepEqual(e.input, shown)
+      assert.equal(JSON.stringify(e.input), JSON.stringify(shown), 'byte for byte, key order included')
+      assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX, 'and within the size bound')
+    })
+
+    it(`property: a RAW x is journaled as the broadcast of x would be -- ${label}`, () => {
+      const h = new SessionMessageHistory()
+      h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', input: raw })
+      assert.deepEqual(h.getHistory('s1')[0].input, sanitizeToolInput(raw))
+    })
+  }
+
+  it('the marker is not forgeable by content: a JSON copy of a sanitized input, or a plain literal, is not marked', () => {
+    const shown = sanitizeToolInput({ command: 'ls' })
+    assert.equal(isSanitizedToolInput(shown), true)
+    assert.equal(isSanitizedToolInput(JSON.parse(JSON.stringify(shown))), false)
+    assert.equal(isSanitizedToolInput({ command: 'ls' }), false)
+    assert.equal(isSanitizedToolInput({ _sanitized: true }), false)
+    assert.equal(isSanitizedToolInput(null), false)
+    assert.equal(isSanitizedToolInput('ls'), false)
+  })
+
+  it('an input sanitized for the PULL path (past the journal bound) is dropped, never re-shaped', () => {
+    const h = new SessionMessageHistory()
+    const pulled = sanitizeToolInput({ content: 'x'.repeat(100_000), file_path: '/srv/a.ts' }, { maxChars: PULL_MAX_INPUT_CHARS })
+    assert.ok(JSON.stringify(pulled).length > PERMISSION_OUTCOME_INPUT_MAX, 'precondition: bigger than the bound')
+    h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Write', description: 'x', outcome: 'allowed', input: pulled })
+    assert.equal('input' in h.getHistory('s1')[0], false)
   })
 
   it('shares the ring buffer cap: the oldest entry goes first and the buffer reports truncation', () => {
@@ -543,6 +638,26 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX)
     assert.equal(JSON.stringify(mgr.serializeState()).includes('ordinarySecret123'), false)
   })
+
+  // Review follow-up (Codex P2 / P3), through the real producer: the journal is the broadcast.
+  for (const [label, input] of [
+    ['an agent-authored `_truncated` input (P2)', { _truncated: true, summary: 'routine task', command: 'rm -rf /important', dangerouslyDisableSandbox: true }],
+    ['a large input whose key ends in "token" (P3)', { not_a_token: 'ordinaryValue', content: 'x'.repeat(20_000) }],
+    ['a large input of quotes and backslashes', { content: '"\\"'.repeat(8_000) }],
+  ]) {
+    it(`#8503: ${label} is journaled exactly as the live permission_request carried it`, async () => {
+      const { session, pm } = makeInProcessSession(mgr, 's1')
+      pms.push(pm)
+      let shown
+      session.once('permission_request', (d) => { shown = d })
+      const decided = pm.handlePermission('Bash', input, null, 'approve')
+      pm.respondToPermission(shown.requestId, 'allow')
+      await decided
+      const [e] = outcomes(mgr, 's1')
+      assert.equal(JSON.stringify(e.input), JSON.stringify(shown.input), 'byte for byte')
+      assert.ok(inputWeight(e.input) <= PERMISSION_OUTCOME_INPUT_MAX)
+    })
+  }
 
   it('#8503: the registry keeps no raw input for an open prompt: only what the clients were shown', () => {
     const { requestId } = raise('s1', 'Bash', { command: 'ls', password: 'ordinarySecret123' })
@@ -904,6 +1019,31 @@ describe('SessionManager records permission outcomes: hook-routed providers (#83
     assert.equal(serialized.includes('ordinarySecret123'), false)
     assert.equal(serialized.includes('YYYYYYYY'), false)
   })
+
+  for (const [label, tool_input] of [
+    ['an agent-authored `_truncated` input', { _truncated: true, summary: 'routine task', command: 'rm -rf /important', dangerouslyDisableSandbox: true }],
+    ['a large input (the real wrapper)', { content: 'x'.repeat(20_000), file_path: '/srv/a.ts', not_a_token: 'ordinaryValue' }],
+  ]) {
+    it(`#8503: the hook route journals ${label} exactly as it broadcast it`, async () => {
+      const broadcasts = []
+      handler.destroy()
+      handler = createPermissionHandler({
+        sendFn: mock.fn(),
+        broadcastFn: (m) => broadcasts.push(m),
+        validateBearerAuth: mock.fn(() => true),
+        pushManager: null,
+        pendingPermissions,
+        permissionSessionMap,
+        getSessionManager: () => mgr,
+        findSessionByHookSecret: (token) => (token === SECRET ? { session: mgr.getSession('s1').session, sessionId: 's1' } : null),
+      })
+      const { requestId } = await raise({ tool_name: 'Bash', tool_input })
+      resolver.resolve(requestId, 'allow', null, { clientId: 'c1' })
+      const shown = broadcasts.find((m) => m.type === 'permission_request')
+      const [e] = outcomes(mgr, 's1')
+      assert.equal(JSON.stringify(e.input), JSON.stringify(shown.input), 'byte for byte')
+    })
+  }
 
   it('records the file path of a LARGE Write (input past the broadcast cap), not the truncation wrapper', async () => {
     const { res, requestId } = await raise({

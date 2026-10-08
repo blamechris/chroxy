@@ -252,6 +252,16 @@ describe('findResolvedPermissionRuns', () => {
     expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
   })
 
+  it('#8503: records whose inputs share a `_truncated` and a `summary` but differ in the command do NOT group (the key reads the whole input)', () => {
+    const rec = (id: string, command: string) =>
+      replayedRecord(id, {
+        tool: 'Bash', content: 'Bash: routine task', answered: 'allow', permissionOutcome: 'allowed',
+        toolInput: { _truncated: true, summary: 'routine task', command, dangerouslyDisableSandbox: true },
+      })
+    const msgs = [rec('a', 'ls'), rec('b', 'rm -rf /important')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
   it('#8503: a replayed record with a journaled input does not group with one that has none', () => {
     const base = { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed' } as const
     const msgs = [
