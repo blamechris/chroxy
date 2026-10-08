@@ -1433,6 +1433,21 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
     assert.deepEqual(permModes.modes, DEFAULT_PROVIDER_MODES)
   })
 
+  it('tags the auth_ok roster and the discrete frame with the provider they describe (#8224)', () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-cx', name: 'Codex', cwd: '/repo', provider: 'codex' },
+    ])
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager, defaultSessionId: 'sess-cx' })
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    const frame = ctx._sends.find(m => m.type === 'available_permission_modes')
+    assert.equal(authOk.availablePermissionModesProvider, 'codex')
+    assert.equal(frame.provider, 'codex')
+  })
+
   it('a codex active session at connect gets codex-tuned mode copy (#6638)', () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-cx', name: 'Codex', cwd: '/repo', provider: 'codex' },
@@ -1664,6 +1679,49 @@ describe('sendPostAuthInfo — auth_bootstrap (#5555)', () => {
 })
 
 // ── sendSessionInfo ────────────────────────────────────────────────────────
+
+// #8224 — the permission-mode roster is a fact about the session's PROVIDER
+// (claude-tui cannot plan, claude-sdk can). `switch_session` used to be the only
+// path that sent it after connect, so creating a session — which auto-switches
+// the creator and calls `sendSessionInfo`, never the switch handler — left the
+// previous session's roster ("Plan (unavailable)") in the client. Every path
+// that surfaces a session goes through `sendSessionInfo`, so that is where the
+// provider-tagged roster is sent.
+describe('sendSessionInfo — provider-tagged permission-mode roster (#8224)', () => {
+  const planOf = (frame) => frame.modes.find(m => m.id === 'plan')
+
+  function sendInfoFor(provider, ProviderClass, opts) {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Alpha', cwd: '/alpha', provider },
+    ])
+    manager.getSession('sess-1').session.constructor = ProviderClass
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+    sendSessionInfo(ctx, ws, 'sess-1', opts)
+    return ctx._sends.filter(m => m.type === 'available_permission_modes')
+  }
+
+  it('sends the claude-sdk roster with Plan available, tagged claude-sdk', () => {
+    const frames = sendInfoFor('claude-sdk', getProvider('claude-sdk'))
+    assert.equal(frames.length, 1, 'exactly one roster frame')
+    assert.equal(frames[0].provider, 'claude-sdk')
+    assert.equal(planOf(frames[0]).supported, true)
+    assert.equal(planOf(frames[0]).label, 'Plan')
+  })
+
+  it('sends the claude-tui roster with Plan unavailable, tagged claude-tui', () => {
+    const frames = sendInfoFor('claude-tui', getProvider('claude-tui'))
+    assert.equal(frames.length, 1)
+    assert.equal(frames[0].provider, 'claude-tui')
+    assert.equal(planOf(frames[0]).supported, false)
+    assert.match(planOf(frames[0]).label, /unavailable/)
+  })
+
+  it('skipModels (the connect burst, which sends its own tagged roster) does not send a second one', () => {
+    assert.equal(sendInfoFor('claude-sdk', getProvider('claude-sdk'), { skipModels: true }).length, 0)
+  })
+})
 
 describe('sendSessionInfo', () => {
   it('does nothing when sessionManager is absent', () => {

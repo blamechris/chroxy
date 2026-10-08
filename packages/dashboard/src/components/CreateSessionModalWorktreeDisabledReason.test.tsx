@@ -38,7 +38,7 @@ function mockStore() {
         // shows up as a stale-closure failure in the payload case. A fresh `{}`
         // here would rebuild the callback each render and hide that regression.
         availableProviders: [TUI_PROVIDER],
-        availablePermissionModes: [],
+        permissionModesByProvider: {},
         environments: [],
         requestDirectoryListing: () => {},
         setDirectoryListingCallback: () => {},

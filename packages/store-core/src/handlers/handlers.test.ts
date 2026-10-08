@@ -1552,6 +1552,8 @@ describe('handleAuthOk', () => {
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto' },
       ],
+      // #8224 — the provider that roster describes.
+      availablePermissionModesProvider: 'claude-sdk',
     })
     expect(result).toEqual({
       serverMode: 'cli',
@@ -1576,6 +1578,7 @@ describe('handleAuthOk', () => {
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto' },
       ],
+      availablePermissionModesProvider: 'claude-sdk',
     })
   })
 
@@ -1830,6 +1833,7 @@ describe('handleAuthOk', () => {
       newIdentityKey: null,
       rotationCert: null,
       availablePermissionModes: null,
+      availablePermissionModesProvider: null,
     })
   })
 })

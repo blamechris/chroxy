@@ -176,9 +176,9 @@ export function createEmptyFlatSessionMirror(): Pick<SessionState, FlatSessionFi
  * `serverCapabilities` is the FAIL-OPEN one: an empty map is the "fail-closed
  * for any capability-gated affordance" state (#3272 review), so server A's
  * advertised capabilities gating server B's UI is the failure this clear
- * prevents. `availablePermissionModes` is the SHARP one: `auth_ok` re-sets it
+ * prevents. `permissionModesByProvider` is the SHARP one: `auth_ok` re-sets it
  * only CONDITIONALLY (`message-handler.ts`, `if (auth.availablePermissionModes)`),
- * so an older server B that omits the field leaves server A's mode list driving
+ * so an older server B that omits the field leaves server A's mode rosters driving
  * the permission-mode picker — nothing else overwrites it (#7564 review).
  *
  * ## This roster is the STORE-STATE portion, not all connection-scoped state
@@ -219,9 +219,9 @@ export function createEmptyConnectionScope() {
     availableProviders: [],
     // The model rosters are per daemon/provider (#7728: one per provider).
     modelsByProvider: {},
-    // The mode enum is advertised per daemon, and `auth_ok` re-sets it only
-    // when the server sends it — see the docstring above.
-    availablePermissionModes: [],
+    // The mode rosters are advertised per daemon (#8224: one per provider), and
+    // `auth_ok` re-sets one only when the server sends it — see the docstring.
+    permissionModesByProvider: {},
     // The presence roster belongs to the dropped socket.
     connectedClients: [],
     // Web-task list is per daemon.

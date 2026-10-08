@@ -86,7 +86,7 @@ beforeEach(() => {
     defaultModel: null,
     modelsByProvider: {},
     availableProviders: [SDK_READY, CODEX_UNREADY, GEMINI_UNREADY],
-    availablePermissionModes: [],
+    permissionModesByProvider: {},
     environments: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},

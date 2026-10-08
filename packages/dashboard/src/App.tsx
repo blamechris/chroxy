@@ -23,6 +23,8 @@ import {
   // #7728 — the model roster is keyed by PROVIDER; this reads the one the
   // active session's provider offers (never "whichever roster arrived last").
   selectModelsForProvider,
+  // #8224 — the permission-mode roster is keyed by PROVIDER too.
+  selectPermissionModesForProvider,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -245,9 +247,18 @@ export function App() {
   )
   const availableModels = activeProviderModels.models
   const defaultModelId = activeProviderModels.defaultModelId
+  const permissionModesByProvider = useConnectionStore(s => s.permissionModesByProvider)
+  // #8224 — the permission-mode roster the ACTIVE session's provider offers,
+  // derived here at read time. The server used to refresh one flat list only on
+  // an explicit session switch, so a session created beside an active
+  // claude-tui one inherited that roster's "Plan (unavailable)" until the tab
+  // was re-selected; keyed by provider, there is no refresh to miss.
+  const availablePermissionModes = useMemo(
+    () => selectPermissionModesForProvider(permissionModesByProvider, activeSessionProvider),
+    [permissionModesByProvider, activeSessionProvider],
+  )
   // #5184: header cost-badge display mode (Settings-driven, persisted).
   const costBadgeMode = useConnectionStore(s => s.costBadgeMode)
-  const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const availableProviders = useConnectionStore(s => s.availableProviders)
   const serverErrors = useConnectionStore(s => s.serverErrors)
   const infoNotifications = useConnectionStore(s => s.infoNotifications ?? [])

@@ -189,7 +189,7 @@ vi.mock('./store/connection', () => {
     availableProviders: [],
     // #7728 — rosters are keyed by the provider that broadcast them.
     modelsByProvider: {},
-    availablePermissionModes: [],
+    permissionModesByProvider: {},
     serverErrors: [],
     connectionRetryCount: 0,
     terminalRawBuffer: '',
@@ -779,7 +779,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-tui'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-tui': permissionModes },
         permissionMode: 'approve',
       }
       const { container } = render(<App />)
@@ -795,7 +795,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-sdk'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-sdk', capabilities: { planMode: true } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-sdk': permissionModes },
         permissionMode: 'approve',
       }
       const { container } = render(<App />)
@@ -809,7 +809,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-sdk'),
         activeSessionId: 's1',
         availableProviders: [],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-sdk': permissionModes },
         permissionMode: 'approve',
       }
       const { container } = render(<App />)
@@ -824,7 +824,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-tui'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-tui': permissionModes },
         permissionMode: 'approve',
         setPermissionMode,
       }
@@ -840,7 +840,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-sdk'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-sdk', capabilities: { planMode: true } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-sdk': permissionModes },
         permissionMode: 'approve',
         setPermissionMode,
       }
@@ -860,7 +860,7 @@ describe('App', () => {
         sessions: sessionWithProvider('claude-tui'),
         activeSessionId: 's1',
         availableProviders: [{ name: 'claude-tui', capabilities: { planMode: false } }],
-        availablePermissionModes: permissionModes,
+        permissionModesByProvider: { 'claude-tui': permissionModes },
         permissionMode: 'plan',
         previousPermissionMode: 'approve',
         setPermissionMode,
@@ -2885,10 +2885,10 @@ describe('App', () => {
           { id: 'sonnet', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200000 },
           { id: 'opus', label: 'Opus 4.7', fullId: 'claude-opus-4-7', contextWindow: 200000 },
           ], defaultModelId: null } },
-      availablePermissionModes: [
+      permissionModesByProvider: { 'claude-sdk': [
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto Approve' },
-      ],
+      ] },
     }
 
     it('renders the model dropdown, permission select, bell, overflow, and cost slot together', () => {

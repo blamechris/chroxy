@@ -37,6 +37,7 @@ import {
   getLiveReplayLedgerSessionIds,
   DELTA_FLUSH_FLOOR_MS,
   DELTA_FLUSH_MAX_MS,
+  selectPermissionModesForProvider,
 } from '@chroxy/store-core';
 import { clearPersistedSession } from '../../store/persistence';
 import { setCallback, clearAllCallbacks } from '../../store/imperative-callbacks';
@@ -7269,7 +7270,11 @@ describe('auth_bootstrap (#5555)', () => {
       availablePermissionModes: [{ id: 'approve', label: 'Approve' }],
     });
 
-    expect(store.getState().availablePermissionModes).toEqual([{ id: 'approve', label: 'Approve' }]);
+    // #8224: filed under the provider the roster describes — untagged here, as an
+    // older server sends it, so it lands in the untagged bucket.
+    expect(selectPermissionModesForProvider(store.getState().permissionModesByProvider, null)).toEqual([
+      { id: 'approve', label: 'Approve' },
+    ]);
   });
 
   it('applies a subsequent auth_bootstrap burst to the provider/slash/agent stores', () => {

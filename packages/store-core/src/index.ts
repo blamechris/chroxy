@@ -43,6 +43,16 @@ export {
   selectOwnModelsForProvider,
 } from './models-by-provider'
 export type { ModelsByProvider, ProviderModelRoster } from './models-by-provider'
+
+// #8224: provider-keyed permission-mode rosters — the same fix for the same
+// defect (a flat slot that only some events refresh). The active session's
+// roster is derived at read time via `selectPermissionModesForProvider`.
+export {
+  EMPTY_PERMISSION_MODES,
+  mergePermissionModesByProvider,
+  selectPermissionModesForProvider,
+} from './permission-modes-by-provider'
+export type { PermissionModesByProvider } from './permission-modes-by-provider'
 export type { AgentConnection, AgentConnectionAuthRoute } from '@chroxy/protocol'
 
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an

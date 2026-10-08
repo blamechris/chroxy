@@ -1037,7 +1037,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   modelsByProvider: {},
   permissionMode: null,
   previousPermissionMode: null,
-  availablePermissionModes: [],
+  permissionModesByProvider: {},
   myClientId: null,
   connectedClients: [],
   primaryClientId: null,
@@ -3415,7 +3415,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       streamingMessageId: null,
       activeModel: null,
       // #7559 — the connection-scoped roster (permissionInputs, serverCapabilities,
-      // availablePermissionModes, environments, checkpoints, … and #7557's
+      // permissionModesByProvider, environments, checkpoints, … and #7557's
       // infoNotifications), shared with `_resetSessionMemory` so a switchServer made
       // from an ALREADY-disconnected tab clears them too. These were sixteen literals
       // here; the reasons for each moved with them into `createEmptyConnectionScope()`.
@@ -6066,7 +6066,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
    * When `serverId`'s `wsUrl` is not the one the store last connected to, this is
    * a context SWITCH however it was reached, and it runs the same teardown as
    * `switchServer` — otherwise the connection-scoped roster (`serverCapabilities`,
-   * `availablePermissionModes`, `environments`, `checkpoints`, …) crosses to the
+   * `permissionModesByProvider`, `environments`, `checkpoints`, …) crosses to the
    * other daemon, because `connect()`'s url-differs self-clear runs
    * `forgetSession()`, which does not clear it. A roster crossing to a DIFFERENT
    * daemon needs `activeServerId` to move without `switchServer` (the registry

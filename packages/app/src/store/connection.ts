@@ -187,6 +187,8 @@ import {
   clearContainerLostPatch,
   // #7728: read ONE provider's roster out of the provider-keyed map.
   selectModelsForProvider,
+  // #8224: read ONE provider's permission-mode roster out of the keyed map.
+  selectPermissionModesForProvider,
   buildInputMessage,
   beginInputDelivery,
   cancelInputDelivery,
@@ -198,7 +200,7 @@ import {
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
-import type { InputSettings, QueuedSessionMessage, ProviderModelRoster } from '@chroxy/store-core';
+import type { InputSettings, QueuedSessionMessage, ProviderModelRoster, PermissionMode } from '@chroxy/store-core';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
@@ -392,6 +394,18 @@ export const selectActiveProviderModels = (s: ConnectionState): ProviderModelRos
   const id = s.activeSessionId;
   const provider = id ? s.sessions.find((sess) => sess.sessionId === id)?.provider ?? null : null;
   return selectModelsForProvider(s.modelsByProvider, provider);
+};
+/**
+ * The permission modes the ACTIVE session's provider offers (#8224). Derived at
+ * read time from the provider-keyed map, so it is right the instant a created
+ * session becomes active — no `available_permission_modes` refresh has to have
+ * arrived first. Referentially stable (the stored array, or the shared frozen
+ * empty one), so it is safe as a zustand selector.
+ */
+export const selectActivePermissionModes = (s: ConnectionState): PermissionMode[] => {
+  const id = s.activeSessionId;
+  const provider = id ? s.sessions.find((sess) => sess.sessionId === id)?.provider ?? null : null;
+  return selectPermissionModesForProvider(s.permissionModesByProvider, provider);
 };
 // #5938 — the active session's outgoing queue (messages sent mid-turn, awaiting
 // flush). Stable empty fallback so an idle/empty session keeps a referentially
@@ -587,7 +601,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   activity: createEmptyActivityState(),
   // #7728 — one roster per provider (see ModelsAndPermissionsData).
   modelsByProvider: {},
-  availablePermissionModes: [],
+  permissionModesByProvider: {},
   availableProviders: [],
   myClientId: null,
   connectedClients: [],
@@ -1635,7 +1649,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       socket: null,
       // #7728 — the model rosters are per daemon/provider.
       modelsByProvider: {},
-      availablePermissionModes: [],
+      permissionModesByProvider: {},
       availableProviders: [],
       myClientId: null,
       connectedClients: [],

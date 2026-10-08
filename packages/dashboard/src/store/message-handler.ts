@@ -181,6 +181,8 @@ import {
   formatMemoryAppendNotice,
   // #7728 — read a roster for ONE provider out of the provider-keyed map.
   selectModelsForProvider,
+  // #8224 — file a permission-mode roster under the provider it describes.
+  mergePermissionModesByProvider,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
 import type { ServerFailedRestoresListMessage } from '@chroxy/protocol'
@@ -4808,7 +4810,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // (null) and the discrete frame still lands; new servers send both and
       // this just wins the race harmlessly (idempotent set).
       if (auth.availablePermissionModes) {
-        set({ availablePermissionModes: auth.availablePermissionModes });
+        const modes = auth.availablePermissionModes;
+        // #8224 — filed under the provider the roster describes (null from an
+        // older server → the untagged bucket, like the discrete frame).
+        set((s) => ({
+          permissionModesByProvider: mergePermissionModesByProvider(
+            s.permissionModesByProvider,
+            auth.availablePermissionModesProvider,
+            modes,
+          ),
+        }));
       }
 
       // #5555 (auth_bootstrap) — when the server advertises the bootstrap

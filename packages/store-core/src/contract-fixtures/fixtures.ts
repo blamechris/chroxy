@@ -304,12 +304,13 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     message: { type: 'terminal_output', sessionId: 's1', data: 'term-line file.txt' },
     expect: { terminalWrites: ['term-line file.txt'] },
   },
-  // 1. available_permission_modes — flat list replace
+  // 1. available_permission_modes — replace that provider's roster (#8224)
   {
-    name: 'available_permission_modes sets the flat mode list when payload parses',
+    name: 'available_permission_modes files the roster under its provider when payload parses',
     type: 'available_permission_modes',
     message: {
       type: 'available_permission_modes',
+      provider: 'claude-sdk',
       modes: [
         { id: 'default', label: 'Default' },
         { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
@@ -317,10 +318,12 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     },
     expect: {
       flat: {
-        availablePermissionModes: [
-          { id: 'default', label: 'Default' },
-          { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
-        ],
+        permissionModesByProvider: {
+          'claude-sdk': [
+            { id: 'default', label: 'Default' },
+            { id: 'plan', label: 'Plan', description: 'Plan mode', supported: true, enforcement: 'chroxy' },
+          ],
+        },
       },
     },
   },

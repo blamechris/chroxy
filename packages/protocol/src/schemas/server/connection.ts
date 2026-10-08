@@ -182,6 +182,11 @@ export const ServerAuthOkSchema = z.object({
     supported: z.boolean().optional(),
     enforcement: z.enum(['chroxy', 'native-sandbox', 'unsupported', 'unknown']).optional(),
   })).optional(),
+  // #8224 — the provider whose roster `availablePermissionModes` is (the
+  // active session's, or the daemon's resolved default with no session). The
+  // roster is a fact about a provider, so clients file it under this tag and
+  // derive the active session's picker from it. Absent from older servers.
+  availablePermissionModesProvider: z.string().optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({

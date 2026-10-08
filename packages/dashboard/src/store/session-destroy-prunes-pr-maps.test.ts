@@ -1247,9 +1247,9 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     modelsByProvider:
       'Record<provider, {models, defaultModelId}> — keyed by PROVIDER (#7728). The server\'s model ' +
       'rosters, connection-wide; one per provider that broadcast one.',
-    availablePermissionModes:
-      'PermissionMode[] — keyed by `id`. The server\'s PERMISSION_MODES table, connection-wide ' +
-      '(#4019).',
+    permissionModesByProvider:
+      'Record<provider, PermissionMode[]> — keyed by PROVIDER (#8224). The server\'s PERMISSION_MODES ' +
+      'table as each provider reports it, connection-wide; one per provider that sent one (#4019).',
     connectedClients:
       'ConnectedClient[] — keyed by `clientId`. Clients, not sessions; replaced wholesale from ' +
       'each `auth_ok` / clients broadcast.',
@@ -2296,7 +2296,7 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
  * weakest: `auth_ok` full-replaces it unconditionally on BOTH branches, and
  * store-core's auth handler normalises an omitted `capabilities` to `{}`, so
  * even an older server B overwrites the stale map. The genuinely sharp one is
- * `availablePermissionModes`, re-set only CONDITIONALLY (`message-handler.ts`,
+ * `permissionModesByProvider`, re-set only CONDITIONALLY (`message-handler.ts`,
  * `if (auth.availablePermissionModes)`).
  *
  * The fix did NOT touch the phase guard. What that guard protects is the SOCKET
@@ -2562,7 +2562,7 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
       'cannot have its UI gates left enabled by stale state (empty = fail-closed)',
     availableProviders: 'disconnect() — the provider registry is per daemon',
     modelsByProvider: 'disconnect() — the model rosters are per daemon/provider',
-    availablePermissionModes: 'disconnect() — the mode enum is advertised per daemon',
+    permissionModesByProvider: 'disconnect() — the mode rosters are advertised per daemon/provider',
     connectedClients: 'disconnect() — the presence roster belongs to the dropped socket',
     webTasks: 'disconnect() — web-task list is per daemon',
     slashCommands: 'disconnect() — project commands differ per daemon and per session cwd',

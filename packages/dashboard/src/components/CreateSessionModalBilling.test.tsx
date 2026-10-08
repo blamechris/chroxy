@@ -52,7 +52,7 @@ function buildState(defaultProvider: string, providers: ProviderInfo[]) {
     defaultModel: '',
     modelsByProvider: {},
     availableProviders: providers,
-    availablePermissionModes: [],
+    permissionModesByProvider: {},
     environments: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},
