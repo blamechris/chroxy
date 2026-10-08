@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Web fetch and web search results render as cards on the default provider
+  (#6987).** A WebFetch on a claude-tui session showed its raw JSON envelope
+  (`{"bytes":...,"result":...}`) instead of the page text. The dashboard and the
+  mobile app now show the source link, the page text and the HTTP status and
+  size, and flag a non-2xx fetch. WebSearch results from Claude Agent SDK and
+  CLI sessions, and either tool's result cut at the 10KB cap, also render as a
+  result list or readable text instead of falling back to raw text.
+
 - **A finished session no longer shows as working in the other tabs and the mobile session list (#8502).**
   When a turn ended, the server refreshed the session list before the session
   had finished clearing its busy state, so a dashboard tab or the mobile app

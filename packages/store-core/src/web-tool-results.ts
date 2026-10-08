@@ -19,12 +19,28 @@
  *     serialized to JSON text by the time they reach `emitToolResults`.
  *     A markdown-link-list fallback (`- [title](url)`) covers providers
  *     that pre-format the result text instead.
+ *     Two more WebSearch shapes (#6987, verified against a real session
+ *     transcript): the flattened text a Claude Agent SDK / CLI session
+ *     forwards (`Web search results for query: "<q>"\n\nLinks: [{title,
+ *     url}, ...]\n\n<commentary>`), and either JSON form cut at the
+ *     server's 10KB per-result cap (`MAX_TOOL_RESULT_SIZE`), which no
+ *     longer parses as JSON — the complete `{title,url}` hits that
+ *     survive the cut are recovered instead of dropping to raw text.
  *   - WebFetch: the BYOK executor (`packages/server/src/
  *     byok-tool-executor.js` `runWebFetch`) emits
  *     `Prompt: <prompt>\nURL: <url>\n\n<content>` — parsed into its
  *     three parts so the client can show the source URL as a link and
- *     the body as formatted text. Any other shape still renders — the
- *     whole string becomes `content` with no `url`/`prompt` extracted.
+ *     the body as formatted text. The claude-tui provider (the default)
+ *     forwards the Agent SDK's `WebFetchOutput` as
+ *     `JSON.stringify({ bytes, code, codeText, result, durationMs, url })`
+ *     (`claude-tui-tool-response.js` has no WebFetch rule, so the hook's
+ *     `tool_response` hits its JSON.stringify floor) — parsed into
+ *     `url` / `content` / status (#6987), including the cut-at-10KB form,
+ *     where `url` (written last) is lost but the status and the readable
+ *     body prefix are kept. A Claude Agent SDK / CLI session instead
+ *     forwards just the processed `result` text, which carries no URL.
+ *     Any other shape still renders — the whole string becomes
+ *     `content` with no `url`/`prompt` extracted.
  *
  * Both parsers are defensive: malformed / unrecognized-shape input never
  * throws. `parseWebSearchResults` returns `null` (caller falls back to
@@ -65,6 +81,14 @@ export interface ParsedWebFetchResult {
   prompt?: string
   /** The fetched page content (or the entire input, if no header matched). */
   content: string
+  /** HTTP status of the fetch, when the result is a `WebFetchOutput` (#6987). */
+  code?: number
+  /** HTTP status text (`OK`, `Not Found`, ...), alongside `code`. */
+  codeText?: string
+  /** Size of the fetched content in bytes, when reported. */
+  bytes?: number
+  /** Time the fetch + processing took, when reported. */
+  durationMs?: number
 }
 
 const OPENABLE_SCHEME = /^https?:\/\//i
@@ -155,6 +179,66 @@ function collectResultCandidates(value: unknown, depth = 0): Array<{ title?: str
 const MD_LINK_LINE_RE = /^\s*(?:[-*]|\d+[.)])\s*\[([^\]]+)\]\(([^)]+)\)\s*$/
 const SNIPPET_LINE_RE = /^\s{2,}(\S.*)$/
 
+/** Decode the body of a JSON string literal (the text between its quotes). */
+function decodeJsonStringBody(raw: string): string | undefined {
+  try {
+    const v: unknown = JSON.parse(`"${raw}"`)
+    return typeof v === 'string' ? v : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// One complete `{"title":"...","url":"..."}` hit, as Claude Code writes it.
+// Used to recover hits from text that is no longer valid JSON because the
+// server cut it at its per-result size cap (#6987): every hit that is whole
+// is kept, the half-written final one never matches.
+const TITLE_URL_PAIR_RE = /\{"title":"((?:[^"\\]|\\.)*)","url":"((?:[^"\\]|\\.)*)"\}/g
+
+function salvageTitleUrlPairs(text: string): Array<{ title?: string; url?: string }> {
+  const out: Array<{ title?: string; url?: string }> = []
+  for (const m of text.matchAll(TITLE_URL_PAIR_RE)) {
+    const url = decodeJsonStringBody(m[2] ?? '')
+    if (url === undefined) continue
+    out.push({ title: coerceString(decodeJsonStringBody(m[1] ?? '')), url })
+  }
+  return out
+}
+
+const JSON_QUERY_HEAD_RE = /^\s*\{\s*"query"\s*:\s*"((?:[^"\\]|\\.)*)"/
+// The text a Claude Agent SDK / CLI session forwards for WebSearch (#6987):
+// `Web search results for query: "<q>"` header line(s), `Links:` line(s) of
+// JSON (JSON.stringify never emits a raw newline), then the model's free-form
+// commentary. Only the leading block of header / `Links:` / blank lines is
+// read; the first line of anything else starts the commentary, and from there
+// on nothing is scanned -- a `Links: [...]` line the model (or a fetched page
+// it quotes) wrote in its commentary must not become a result row.
+const FLAT_QUERY_RE = /^Web search results for query: "(.*)"[ \t]*$/
+const FLAT_LINKS_RE = /^Links:[ \t]*(\[.*)$/
+
+function parseFlatSearchText(text: string): { query?: string; candidates: Array<{ title?: string; url?: string; snippet?: string }> } {
+  const candidates: Array<{ title?: string; url?: string; snippet?: string }> = []
+  let query: string | undefined
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/\r$/, '')
+    if (line.trim() === '') continue
+    const header = line.match(FLAT_QUERY_RE)
+    if (header) {
+      query ??= coerceString(header[1]?.trim())
+      continue
+    }
+    const links = line.match(FLAT_LINKS_RE)
+    if (!links) break // first commentary line
+    const json = (links[1] ?? '').trimEnd()
+    try {
+      candidates.push(...collectResultCandidates(JSON.parse(json)))
+    } catch {
+      candidates.push(...salvageTitleUrlPairs(json))
+    }
+  }
+  return query ? { query, candidates } : { candidates }
+}
+
 function parseMarkdownLinkList(text: string): WebSearchResultItem[] {
   const lines = text.split('\n')
   const results: WebSearchResultItem[] = []
@@ -204,8 +288,21 @@ export function parseWebSearchResults(text: string): ParsedWebSearchResults | nu
       }
       candidates = collectResultCandidates(parsed)
     } catch {
-      // Not JSON (or truncated JSON) — fall through to the markdown-link
-      // fallback below.
+      // Truncated at the server's per-result cap (#6987): keep the complete
+      // hits and the query written ahead of them. Anything else falls
+      // through to the fallbacks below.
+      candidates = salvageTitleUrlPairs(trimmed)
+      if (candidates.length > 0) {
+        query = coerceString(decodeJsonStringBody(trimmed.match(JSON_QUERY_HEAD_RE)?.[1] ?? ''))
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    const flat = parseFlatSearchText(text)
+    if (flat.candidates.length > 0) {
+      candidates = flat.candidates
+      query = flat.query
     }
   }
 
@@ -232,6 +329,122 @@ const WEBFETCH_HEADER_RE = /^Prompt:[ \t]*(.*)\r?\nURL:[ \t]*(\S+)(?:[ \t]*\[[^\
 // A lighter header some providers may emit: just the URL, no prompt echo.
 const WEBFETCH_URL_ONLY_RE = /^URL:[ \t]*(\S+)\r?\n\r?\n([\s\S]*)$/
 
+// The head of a `JSON.stringify(WebFetchOutput)` cut at the wire cap, in the
+// key order Claude Code writes (`bytes, code, codeText, result, durationMs,
+// url` — sdk-tools.d.ts declares them in that order and a real transcript's
+// `toolUseResult` has it). A different order simply doesn't match and the
+// text renders as plain content, exactly as it did before #6987.
+const SDK_FETCH_HEAD_RE = /^\s*\{\s*"bytes"\s*:\s*(\d+)\s*,\s*"code"\s*:\s*(\d{3})\s*,\s*"codeText"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"result"\s*:\s*"/
+const SDK_FETCH_DURATION_RE = /"durationMs"\s*:\s*(\d+)/
+const SDK_FETCH_URL_RE = /"url"\s*:\s*"((?:[^"\\]|\\.)*)"/
+const MAX_CODE_TEXT = 80
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
+function buildSdkFetchResult(f: {
+  url?: string; content: string; code: number; codeText?: string; bytes?: number; durationMs?: number
+}): ParsedWebFetchResult {
+  const codeText = f.codeText?.trim().slice(0, MAX_CODE_TEXT)
+  return {
+    ...(isSafeWebUrl(f.url) ? { url: f.url.trim() } : {}),
+    content: f.content,
+    code: f.code,
+    ...(codeText ? { codeText } : {}),
+    ...(isFiniteNumber(f.bytes) ? { bytes: f.bytes } : {}),
+    ...(isFiniteNumber(f.durationMs) ? { durationMs: f.durationMs } : {}),
+  }
+}
+
+/** Decode a JSON string body that may have been cut anywhere, including in
+ *  the middle of an escape sequence (`\`, `\u00e`) or a surrogate pair. */
+function decodeCutJsonString(raw: string): string | undefined {
+  for (let trim = 0; trim <= 12 && trim <= raw.length; trim++) {
+    const decoded = decodeJsonStringBody(raw.slice(0, raw.length - trim))
+    if (decoded === undefined) continue
+    // A cut between the halves of a surrogate pair leaves a lone high surrogate.
+    return decoded.replace(/[\ud800-\udbff]$/, '')
+  }
+  return undefined
+}
+
+/**
+ * Recognize the Agent SDK's `WebFetchOutput` as the claude-tui provider
+ * forwards it: `JSON.stringify({ bytes, code, codeText, result, durationMs,
+ * url })` (#6987). Strict on purpose — `code` (number), `result` (string)
+ * and `url` (string) must all be present, so an arbitrary fetched JSON
+ * document that merely has a `url` or `result` key is left as plain content.
+ */
+function parseSdkWebFetchOutput(text: string): ParsedWebFetchResult | null {
+  try {
+    const o: unknown = JSON.parse(text)
+    if (o && typeof o === 'object' && !Array.isArray(o)) {
+      const r = o as Record<string, unknown>
+      if (isFiniteNumber(r.code) && typeof r.result === 'string' && typeof r.url === 'string') {
+        return buildSdkFetchResult({
+          url: r.url,
+          content: r.result,
+          code: r.code,
+          codeText: coerceString(r.codeText),
+          bytes: isFiniteNumber(r.bytes) ? r.bytes : undefined,
+          durationMs: isFiniteNumber(r.durationMs) ? r.durationMs : undefined,
+        })
+      }
+    }
+    return null
+  } catch {
+    // Cut at the server's per-result cap: recover from the head below.
+  }
+
+  const head = text.match(SDK_FETCH_HEAD_RE)
+  if (!head) return null
+  const body = text.slice(head[0].length)
+  let end = -1
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i]
+    if (c === '\\') i++
+    else if (c === '"') { end = i; break }
+  }
+  const content = decodeCutJsonString(end === -1 ? body : body.slice(0, end))
+  if (content === undefined) return null
+  // The body closed inside the cut, so `durationMs` / `url` (written after it)
+  // may have survived. Only whole values count; a url cut mid-string does not.
+  const tail = end === -1 ? '' : body.slice(end + 1)
+  const url = decodeJsonStringBody(tail.match(SDK_FETCH_URL_RE)?.[1] ?? '')
+  return buildSdkFetchResult({
+    url,
+    content,
+    code: Number(head[2]),
+    codeText: decodeJsonStringBody(head[3] ?? ''),
+    bytes: Number(head[1]),
+    durationMs: Number(tail.match(SDK_FETCH_DURATION_RE)?.[1] ?? Number.NaN),
+  })
+}
+
+function formatByteSize(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * One-line fetch status for a header above the body (#6987), shared by both
+ * clients: `HTTP 200 OK · 1.5 KB`. `ok` is false for any non-2xx code so a
+ * renderer can flag it. Returns `null` when the result carries neither a
+ * status code nor a size (every non-SDK shape), so no line is drawn.
+ */
+export function formatWebFetchStatus(parsed: ParsedWebFetchResult): { text: string; ok: boolean } | null {
+  const hasCode = isFiniteNumber(parsed.code) && parsed.code > 0
+  const hasBytes = isFiniteNumber(parsed.bytes) && parsed.bytes >= 0
+  if (!hasCode && !hasBytes) return null
+  const parts: string[] = []
+  if (hasCode) parts.push(`HTTP ${parsed.code}${parsed.codeText ? ` ${parsed.codeText}` : ''}`)
+  if (hasBytes) parts.push(formatByteSize(parsed.bytes!))
+  const ok = !hasCode || (parsed.code! >= 200 && parsed.code! < 300)
+  return { text: parts.join(' \u00b7 '), ok }
+}
+
 /**
  * Parse a WebFetch tool_result string. Always succeeds for non-empty
  * input — WebFetch's body is free-form fetched text, which is always
@@ -247,6 +460,11 @@ const WEBFETCH_URL_ONLY_RE = /^URL:[ \t]*(\S+)\r?\n\r?\n([\s\S]*)$/
  */
 export function parseWebFetchResult(text: string): ParsedWebFetchResult | null {
   if (typeof text !== 'string' || text.length === 0) return null
+
+  if (text.trimStart()[0] === '{') {
+    const sdk = parseSdkWebFetchOutput(text)
+    if (sdk) return sdk
+  }
 
   const full = text.match(WEBFETCH_HEADER_RE)
   if (full) {

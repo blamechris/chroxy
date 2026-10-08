@@ -287,6 +287,70 @@ describe('WebFetchResult render', () => {
   });
 });
 
+describe('Agent SDK WebFetchOutput (#6987)', () => {
+  const out = (over: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      bytes: 1497,
+      code: 200,
+      codeText: 'OK',
+      result: 'A job that is skipped reports Success.',
+      durationMs: 2568,
+      url: 'https://docs.github.com/en/actions/using-jobs',
+      ...over,
+    });
+
+  it('routes a JSON-stringified WebFetchOutput to the fetch shape with url, body and status', () => {
+    const parsed = parseWebToolResult('WebFetch', out());
+    expect(parsed?.kind).toBe('fetch');
+    if (parsed?.kind !== 'fetch') throw new Error('unreachable');
+    expect(parsed.fetch.url).toBe('https://docs.github.com/en/actions/using-jobs');
+    expect(parsed.fetch.content).toBe('A job that is skipped reports Success.');
+    expect(parsed.fetch.code).toBe(200);
+  });
+
+  it('renders the source link and a status line for a 2xx fetch', () => {
+    const parsed = parseWebToolResult('WebFetch', out());
+    const root = render(<WebToolResultView parsed={parsed!} />);
+    expect(pressableByTestId(root, 'web-fetch-source')).toBeTruthy();
+    const status = byTestId(root, 'web-fetch-status')[0]!;
+    expect(JSON.stringify(status.props.children)).toContain('HTTP 200 OK');
+    expect(status.props.accessibilityLabel ?? '').toContain('HTTP 200 OK');
+  });
+
+  it('marks a non-2xx fetch distinctly from a 2xx one', () => {
+    const ok = render(<WebFetchResult parsed={{ content: 'x', code: 200, codeText: 'OK' }} />);
+    const bad = render(<WebFetchResult parsed={{ content: 'x', code: 404, codeText: 'Not Found' }} />);
+    const okStyle = StyleSheetFlatten(byTestId(ok, 'web-fetch-status')[0]!.props.style);
+    const badStyle = StyleSheetFlatten(byTestId(bad, 'web-fetch-status')[0]!.props.style);
+    expect(JSON.stringify(badStyle)).not.toEqual(JSON.stringify(okStyle));
+    expect(JSON.stringify(byTestId(bad, 'web-fetch-status')[0]!.props.children)).toContain('HTTP 404 Not Found');
+  });
+
+  it('draws no status line when the result carries no status', () => {
+    const root = render(<WebFetchResult parsed={{ url: 'https://example.com/', content: 'x' }} />);
+    expect(byTestId(root, 'web-fetch-status')).toHaveLength(0);
+  });
+
+  it('produces no tappable element for a hostile WebFetchOutput url', () => {
+    const parsed = parseWebToolResult('WebFetch', out({ url: 'javascript:alert(1)' }));
+    const root = render(<WebToolResultView parsed={parsed!} />);
+    expect(byTestId(root, 'web-fetch-source')).toHaveLength(0);
+    expect(allPressHandlers(root)).toHaveLength(0);
+  });
+
+  it('routes the flattened SDK/CLI WebSearch text to the search shape', () => {
+    const text =
+      'Web search results for query: "q"\n\nLinks: ' +
+      JSON.stringify([{ title: 'T', url: 'https://t.example/' }]) +
+      '\n\nREMINDER: cite sources.';
+    const parsed = parseWebToolResult('WebSearch', text);
+    expect(parsed?.kind).toBe('search');
+    if (parsed?.kind !== 'search') throw new Error('unreachable');
+    expect(parsed.search.query).toBe('q');
+    expect(parsed.search.results).toEqual([{ title: 'T', url: 'https://t.example/' }]);
+  });
+});
+
 describe('WebToolResultView dispatch', () => {
   it('renders the search list for a search shape', () => {
     const root = render(<WebToolResultView parsed={{ kind: 'search', search: SAFE_SEARCH }} />);

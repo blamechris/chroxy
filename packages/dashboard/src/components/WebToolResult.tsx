@@ -20,7 +20,7 @@
  */
 import { useMemo } from 'react'
 import type { ParsedWebSearchResults, ParsedWebFetchResult } from '@chroxy/store-core'
-import { isSafeWebUrl } from '@chroxy/store-core'
+import { isSafeWebUrl, formatWebFetchStatus } from '@chroxy/store-core'
 import { renderMarkdown } from '../lib/markdown'
 import { handleMarkdownLinkClick } from '../lib/links'
 import './WebToolResult.css'
@@ -90,8 +90,15 @@ export interface WebFetchResultProps {
 export function WebFetchResult({ parsed }: WebFetchResultProps) {
   const html = useMemo(() => renderMarkdown(parsed.content), [parsed.content])
   const safeUrl = parsed.url && isSafeWebUrl(parsed.url) ? parsed.url : undefined
+  // #6987: HTTP status + size, present only for an Agent SDK `WebFetchOutput`.
+  const status = formatWebFetchStatus(parsed)
   return (
     <div className="web-fetch-result" data-testid="web-fetch-result">
+      {status && (
+        <div className="web-fetch-status" data-testid="web-fetch-status" data-ok={status.ok ? 'true' : 'false'}>
+          {status.text}
+        </div>
+      )}
       {safeUrl && (
         <div className="web-fetch-source" data-testid="web-fetch-source">
           <a href={safeUrl} target="_blank" rel="noopener noreferrer">{safeUrl}</a>

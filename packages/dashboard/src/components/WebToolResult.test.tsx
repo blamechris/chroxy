@@ -145,3 +145,32 @@ describe('WebFetchResult', () => {
     expect(link).toHaveAttribute('target', '_blank')
   })
 })
+
+describe('WebFetchResult status line (#6987)', () => {
+  it('shows the HTTP status and size above the body for a WebFetchOutput', () => {
+    render(<WebFetchResult parsed={{ url: 'https://example.com/a', content: 'Body.', code: 200, codeText: 'OK', bytes: 1497 }} />)
+    const status = screen.getByTestId('web-fetch-status')
+    expect(status).toHaveTextContent('HTTP 200 OK \u00b7 1.5 KB')
+    expect(status).toHaveAttribute('data-ok', 'true')
+  })
+
+  it('flags a non-2xx fetch and still renders the body', () => {
+    render(<WebFetchResult parsed={{ content: 'No such page.', code: 404, codeText: 'Not Found', bytes: 13 }} />)
+    const status = screen.getByTestId('web-fetch-status')
+    expect(status).toHaveTextContent('HTTP 404 Not Found')
+    expect(status).toHaveAttribute('data-ok', 'false')
+    expect(screen.getByTestId('web-fetch-content')).toHaveTextContent('No such page.')
+  })
+
+  it('draws no status line for shapes that carry no status (BYOK header, plain text)', () => {
+    render(<WebFetchResult parsed={{ url: 'https://example.com/a', content: 'Body.' }} />)
+    expect(screen.queryByTestId('web-fetch-status')).not.toBeInTheDocument()
+  })
+
+  it('renders the status as text, never as markup', () => {
+    render(<WebFetchResult parsed={{ content: 'x', code: 200, codeText: '<img src=x onerror=alert(1)>' }} />)
+    expect(document.querySelector('img[src="x"]')).not.toBeInTheDocument()
+    expect(screen.getByTestId('web-fetch-status')).toHaveTextContent('<img src=x onerror=alert(1)>')
+  })
+})
+

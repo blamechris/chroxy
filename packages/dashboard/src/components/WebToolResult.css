@@ -55,6 +55,18 @@ a.web-search-result-title:hover {
   word-break: break-word;
 }
 
+.web-fetch-status {
+  margin-bottom: var(--space-1, 4px);
+  font-size: 0.8em;
+  color: var(--text-muted);
+}
+
+/* A non-2xx fetch is flagged so a "page not found" body isn't read as content. */
+.web-fetch-status[data-ok="false"] {
+  color: var(--accent-orange);
+  font-weight: 600;
+}
+
 .web-fetch-source {
   margin-bottom: var(--space-2, 8px);
   font-size: 0.85em;
