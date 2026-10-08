@@ -1436,8 +1436,13 @@ describe('ChatView', () => {
         await act(() => { vi.advanceTimersByTime(50) })
         const writes = scroller.writes
         const before = scroller.top
-        await act(() => {
-          scroller.grow(800) // content changed; the pin is queued...
+        await act(async () => {
+          scroller.grow(800) // content changed...
+          // Let the MutationObserver deliver, so the pin is really scheduled
+          // before the gesture lands; without this flush the wheel sets the ref
+          // first and the test cannot tell a pin that re-reads it from one that
+          // read it at schedule time.
+          await Promise.resolve()
           scroller.drag(-40)
           fireEvent.wheel(container, { deltaY: -40 }) // ...and the reader gestures before it runs
           vi.advanceTimersByTime(100)
