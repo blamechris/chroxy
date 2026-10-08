@@ -48,6 +48,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
+import { hasPersistedTranscript } from './jsonl-reader.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { BILLING_CLASSES } from './billing-class.js'
@@ -489,6 +490,16 @@ export class ClaudeTuiSession extends BaseSession {
     // "the persisted conversation is gone from this machine" vs fresh = "it
     // was likely never persisted before the PTY died").
     this._seededFromPersisted = this._resumedFromPersisted
+    // #8239 — has claude ever persisted a transcript for `_sessionId`? claude
+    // writes `<id>.jsonl` on the first turn, not at launch, so the id minted at
+    // start() (and serialized as soon as the session is ready) names NO
+    // conversation until a turn has completed. Resuming it makes claude exit
+    // with "No conversation found" and the user sees a bogus "could not be
+    // resumed" notice. Latched true by a completed turn (Stop hook) or by
+    // seeing the transcript on disk (`_conversationPersisted`); never cleared,
+    // so a transcript that existed and later vanishes still takes the
+    // `--resume` -> #5348/#7847 classifier path with its honest message.
+    this._conversationEverPersisted = false
     // #5348 — one-shot latch for the retry-FRESH fallback (mirrors
     // cli-session.js's `_didFallbackFromUnknownResume`). Re-armed by a respawn
     // that survives warmup, so a FUTURE doomed-resume window can fall back
@@ -1957,6 +1968,23 @@ export class ClaudeTuiSession extends BaseSession {
     return this._sessionId
   }
 
+  /**
+   * #8239 — does claude hold a conversation for `_sessionId`? True once a turn
+   * has completed in this process, or when the transcript is on disk (the only
+   * signal a daemon restart leaves). The disk probe fails safe: it answers
+   * `false` only when it could look and the file was absent, so an unreadable
+   * `~/.claude` keeps today's `--resume`. A test seam: stub this method.
+   * @param {string} cwdReal - realpath of the dir claude is launched in
+   * @param {Record<string, string|undefined>} env - the env claude is spawned
+   *   with, so the probe reads the same `CLAUDE_CONFIG_DIR` claude writes to
+   */
+  _conversationPersisted(cwdReal, env) {
+    if (this._conversationEverPersisted) return true
+    if (!hasPersistedTranscript(cwdReal, this._sessionId, env)) return false
+    this._conversationEverPersisted = true
+    return true
+  }
+
   // #5307 (WP-0.1) — SessionManager.serializeState reads `resumeSessionId` off
   // the session and persists it as `sdkSessionId`; restoreState passes it back
   // into the constructor so the conversation resumes. Without this getter the
@@ -3077,7 +3105,15 @@ export class ClaudeTuiSession extends BaseSession {
     // local array is opaque to it (same as any dynamic/spread argv), which
     // made this whole call unresolvable and untraceable at an ELEMENT level.
     // Same final array contents either way; this is a shape change only.
-    const args = this._resumedFromPersisted
+    // #8239: `_resumedFromPersisted` says "this session has run before", not
+    // "claude holds a conversation for the id". Only `--resume` an id claude has
+    // actually persisted; otherwise relaunch fresh on the SAME id (nothing was
+    // ever saved under it, so claude cannot call it "already in use").
+    const resumeExisting = this._resumedFromPersisted && this._conversationPersisted(cwdReal, env)
+    if (this._resumedFromPersisted && !resumeExisting) {
+      log.info(`no persisted claude transcript for ${this._sessionId.slice(0, 8)} (no turn completed) — spawning fresh with --session-id instead of --resume (#8239)`)
+    }
+    const args = resumeExisting
       ? ['--resume', this._sessionId]
       : ['--session-id', this._sessionId]
     args.push(
@@ -4399,6 +4435,9 @@ export class ClaudeTuiSession extends BaseSession {
       return
     }
 
+    // #8239: a Stop hook means claude completed a turn, so it has saved the
+    // conversation; every later respawn must `--resume` it.
+    this._conversationEverPersisted = true
     const duration = this._nowMonotonic() - startedAt
     const text = typeof stopPayload.last_assistant_message === 'string' ? stopPayload.last_assistant_message : ''
 
