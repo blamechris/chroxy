@@ -618,6 +618,13 @@ export class ClaudeTuiSession extends BaseSession {
     // is startup chrome plus whatever `claude --resume` re-rendered, so a limit
     // banner in it is history, not why claude died. Reset for every spawn.
     this._turnStartedOnThisPty = false
+    // #8454: where the usage-limit scans start reading PTY output. Unlike
+    // `_turnOutputStartBytes` it moves forward twice: past the terminal's echo of
+    // the prompt (`_markPromptWritten`), and past a turn's output once that turn
+    // has ended and reported its outcome (`_markTurnOutputEnd`). And whether the
+    // last turn ended on a Stop, after which an idle exit is never a limit.
+    this._limitScanFromBytes = 0
+    this._lastTurnStopped = false
     // #4031 (review): _outputTail is ANSI-stripped for readability +
     // probe stability, so the hex-dump diagnostic sourced from it
     // could never surface the very escape/control bytes we wanted to
@@ -2378,7 +2385,9 @@ export class ClaudeTuiSession extends BaseSession {
         // that ended claude would be invisible here. Only when a turn ran on this
         // PTY: before one, the tail is re-rendered history (see
         // `_turnStartedOnThisPty`). The generic sentence stays for everything else.
-        const limit = this._turnStartedOnThisPty ? classifyUsageLimit(this._outputSinceTurnStart()) : null
+        // #8454: and only what claude printed after the last turn ended, never a
+        // completed turn's reply or a failure that turn already reported.
+        const limit = classifyUsageLimit(this._outputForIdleExit())
         this.emit('error', limit ? this._usageLimitPayload(limit) : { message: PTY_EXITED_MESSAGE })
       }
     }
@@ -3914,6 +3923,28 @@ export class ClaudeTuiSession extends BaseSession {
   _markTurnOutputStart() {
     this._turnOutputStartBytes = this._totalOutputBytes
     this._turnStartedOnThisPty = true // #8441
+    this._limitScanFromBytes = this._totalOutputBytes // #8454
+    this._lastTurnStopped = false
+  }
+
+  /**
+   * #8454 — the prompt has been written. The terminal echoes what is typed, so
+   * the bytes since `_markTurnOutputStart` include the user's own prompt, and a
+   * prompt that pastes a limit sentence would classify as claude's. The limit
+   * scans start here instead. (The auth scans keep the turn-start boundary: their
+   * tests, and the real banner, can arrive while the prompt is still being typed.)
+   */
+  _markPromptWritten() {
+    this._limitScanFromBytes = this._totalOutputBytes
+  }
+
+  /**
+   * #8454 — the turn just ended (every path: success, error, watchdog teardown).
+   * Whatever claude printed up to here belongs to that turn, whose outcome was
+   * already reported, so an idle exit afterwards must not classify it again.
+   */
+  _markTurnOutputEnd() {
+    this._limitScanFromBytes = this._totalOutputBytes
   }
 
   /**
@@ -3927,6 +3958,8 @@ export class ClaudeTuiSession extends BaseSession {
     this._outputTailRaw = Buffer.alloc(0)
     this._tailTruncated = false // #8401
     this._turnStartedOnThisPty = false // #8441
+    // #8454: `_limitScanFromBytes` / `_lastTurnStopped` need no reset: both are read
+    // only behind `_turnStartedOnThisPty`, and the next turn's mark rewrites them.
   }
 
   /**
@@ -3940,7 +3973,28 @@ export class ClaudeTuiSession extends BaseSession {
    * tail), so a PTY replaced mid-turn only shortens the slice via the `min`.
    */
   _outputSinceTurnStart() {
-    const fresh = this._totalOutputBytes - this._turnOutputStartBytes
+    return this._outputSinceBytes(this._turnOutputStartBytes)
+  }
+
+  /**
+   * #8454 — what claude printed when no turn is in flight and it then died: only
+   * the output after the last turn ENDED (or, if none did, after its prompt was
+   * written). Null (nothing to classify) before any turn ran on this PTY
+   * (re-rendered `--resume` history, #8441) and after a turn that ended on a Stop:
+   * that turn succeeded, so its output, which may quote a limit sentence, cannot
+   * be why claude died, and a redraw after the Stop (a terminal resize repaints
+   * the screen) must not revive it. A turn that ended without a Stop already
+   * reported its failure (a limit included), so only text printed after that
+   * report counts, not the text that was reported.
+   * @returns {string|null}
+   */
+  _outputForIdleExit() {
+    if (!this._turnStartedOnThisPty || this._lastTurnStopped) return null
+    return this._outputSinceBytes(this._limitScanFromBytes)
+  }
+
+  _outputSinceBytes(startBytes) {
+    const fresh = this._totalOutputBytes - startBytes
     if (!(fresh > 0)) return ''
     const raw = this._outputTailRaw
     if (!raw || raw.length === 0) return ''
@@ -4223,6 +4277,8 @@ export class ClaudeTuiSession extends BaseSession {
       return { ok: false, reason: 'write_failed' } // #5813: typed failure
     }
 
+    // #8454: the usage-limit scans start after the terminal's echo of the prompt.
+    this._markPromptWritten()
     reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
 
     // Arm soft + hard inactivity timers (#3920). Each new hook file the
@@ -4547,6 +4603,7 @@ export class ClaudeTuiSession extends BaseSession {
     // #8239: a Stop hook means claude completed a turn, so it has saved the
     // conversation; every later respawn must `--resume` it.
     this._conversationEverPersisted = true
+    this._lastTurnStopped = true // #8454
     const duration = this._nowMonotonic() - startedAt
     const text = typeof stopPayload.last_assistant_message === 'string' ? stopPayload.last_assistant_message : ''
 
@@ -5002,6 +5059,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._clearAskUserQuestionLock()
     this._clearAllAskUserQuestionWatchdogs()
     this._pendingBackgroundCommands.clear()
+    this._markTurnOutputEnd() // #8454
     // #7327: the turn that just ended is the readiness edge most likely to
     // have written a fresh `message.model` to the transcript — re-scan and
     // tell clients if it changed. See `_refreshObservedModel` doc for why
@@ -5584,7 +5642,7 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _detectTurnUsageLimit() {
     return this._checkTranscriptForUsageLimit({ force: true })
-      ?? classifyUsageLimit(this._outputSinceTurnStart())
+      ?? classifyUsageLimit(this._outputSinceBytes(this._limitScanFromBytes))
   }
 
   /**
@@ -5835,6 +5893,7 @@ export class ClaudeTuiSession extends BaseSession {
     // #4307: drop the ephemeral intra-turn run_in_background tool_use→command
     // map on this turn-end too (matches _clearTurnEndState / base _clearMessageState).
     this._pendingBackgroundCommands.clear()
+    this._markTurnOutputEnd() // #8454
     // 5. Error + result emit, in the order the caller requests. The two
     // existing callers disagree (hard-timeout: error first; stream-stall:
     // result first), and that asymmetry is preserved exactly.

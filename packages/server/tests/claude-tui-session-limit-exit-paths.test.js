@@ -1,9 +1,10 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { classifyUsageLimit } from '../src/claude-tui/usage-limit.js'
 
 /**
  * #8441 (follow-up to #8400 / #8426 and #8252 / #8387): a usage limit that ENDS
@@ -66,16 +67,25 @@ describe('claude-tui surfaces a usage limit from the exit paths (#8441)', () => 
     return session
   }
 
-  // A session ready to run one turn. `onWrite` runs once the prompt is written,
-  // i.e. after the turn is active and its PTY-output boundary is marked.
-  function turnSession(onWrite) {
+  // A session ready to run one turn. `echo` is what the terminal echoes while the
+  // prompt is typed (#8454), so it lands during the write. `onWrite` runs once the
+  // prompt is written and the turn's scan boundaries are marked, i.e. it is what
+  // claude prints in reply; it runs as the watchdogs are armed, right after the
+  // write returns.
+  function turnSession(onWrite, { echo = '' } = {}) {
     const s = makeSession()
     s._processReady = true
     s._sessionId = 'sess-8441'
     s._sinkDir = join(sinkBase, 's-test')
     mkdirSync(s._sinkDir, { recursive: true, mode: 0o700 })
-    s._waitForPrompt = async () => true
-    s._writePtyTextThrottled = async () => { onWrite(s); return true }
+    let replied = false
+    s._waitForPrompt = async () => { replied = false; return true } // once per send
+    s._writePtyTextThrottled = async () => { if (echo) s._appendToOutputTail(echo); return true }
+    const realArm = s._armResultTimeout.bind(s)
+    s._armResultTimeout = (...args) => {
+      if (!replied) { replied = true; onWrite(s) }
+      return realArm(...args)
+    }
     s._term = { write: () => {}, kill: () => {}, pid: 2 ** 30 } // a pid that names no process
     const errors = []
     s.on('error', (e) => errors.push(e))
@@ -252,6 +262,179 @@ describe('claude-tui surfaces a usage limit from the exit paths (#8441)', () => 
       const s = makeSession()
       const errors = idleExit(s, framed(SESSION_LIMIT) + '\r\nNot logged in · Run /login\r\n')
       assert.deepEqual(errors.map((e) => e.code), ['AUTH_REQUIRED'])
+    })
+  })
+  // --- #8454: a limit sentence that is not claude's saying it ------------------
+
+  const stopTurn = (reply) => (x) => {
+    x._appendToOutputTail(reply)
+    writeFileSync(join(x._sinkDir, 'stop-done.json'), JSON.stringify({ last_assistant_message: 'done' }))
+  }
+  const timeoutAfterWrite = (output) => (x) => {
+    x._appendToOutputTail(output)
+    x._checkTranscriptForAuthFailure = () => { mono += x._hardTimeoutMs + 1; return false }
+  }
+  const idleKill = (s) => {
+    s._scheduleRespawn = () => {} // the respawn is not under test; keep real timers out
+    s._onPtyGone({ exitCode: null, signal: 'SIGKILL' }, 'exit')
+  }
+
+  describe('claude dies at idle after a turn that already ended (#8454)', () => {
+    it('a COMPLETED turn whose reply quoted the limit sentence is not the limit', async () => {
+      const { s, errors } = turnSession(stopTurn(framed(SESSION_LIMIT)))
+      await send(s)
+      assert.deepEqual(errors, [], 'the turn itself succeeded')
+      idleKill(s)
+      assert.deepEqual(errors, [{ message: GENERIC_IDLE }])
+    })
+
+    it('a repaint of the screen AFTER a completed turn does not revive its quoted limit', async () => {
+      const { s, errors } = turnSession(stopTurn(framed(SESSION_LIMIT)))
+      await send(s)
+      s._appendToOutputTail(framed(SESSION_LIMIT)) // e.g. a terminal resize repaints the visible screen
+      idleKill(s)
+      assert.deepEqual(errors, [{ message: GENERIC_IDLE }])
+    })
+
+    it('a limit ALREADY reported for the last turn is not reported again by an unrelated idle exit', async () => {
+      const { s, errors } = turnSession(timeoutAfterWrite(framed(SESSION_LIMIT)))
+      await send(s)
+      assert.deepEqual(errors.map((e) => e.message), [SESSION_MESSAGE])
+      idleKill(s)
+      assert.deepEqual(errors.map((e) => e.message), [SESSION_MESSAGE, GENERIC_IDLE], 'no "Still at the session usage limit"')
+    })
+
+    it('a limit reported by a stall teardown is not reported again by an unrelated idle exit', () => {
+      const s = makeSession()
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s._term = { write: () => {}, kill: () => {} } // no pid: no transcript
+      s._isBusy = true
+      s._currentMessageId = 'msg-stall'
+      s._activeTurn = { startedAt: s._nowMonotonic() - 100, aborted: false }
+      s._markTurnOutputStart()
+      s._markPromptWritten()
+      s._appendToOutputTail(framed(SESSION_LIMIT))
+      s._handleStreamStall()
+      assert.deepEqual(errors.map((e) => e.code), ['usage_limit'])
+      idleKill(s)
+      assert.deepEqual(errors.map((e) => e.message), [SESSION_MESSAGE, GENERIC_IDLE])
+    })
+
+    it('CONTROL: after a completed turn, a LATER turn that ends without a Stop still counts as one that can die of a limit', async () => {
+      const { s, errors } = turnSession((x) => {
+        if (x._turns === 1) return stopTurn(framed('All done.'))(x)
+        return timeoutAfterWrite(framed('Still thinking about it.'))(x)
+      })
+      s._turns = 1
+      await send(s)
+      s._turns = 2
+      await send(s)
+      assert.equal(errors.length, 1, 'the second turn timed out')
+      s._appendToOutputTail(framed(SESSION_LIMIT))
+      idleKill(s)
+      assert.deepEqual(errors.slice(1), [{ code: 'usage_limit', message: SESSION_MESSAGE }])
+    })
+
+    it('CONTROL: a limit printed AFTER that turn ended is still reported', async () => {
+      const { s, errors } = turnSession(timeoutAfterWrite(framed('Still thinking about it.')))
+      await send(s)
+      assert.equal(errors.length, 1)
+      s._appendToOutputTail(framed(SESSION_LIMIT)) // claude hits the limit later, with no turn in flight, and dies
+      idleKill(s)
+      assert.deepEqual(errors.slice(1), [{ code: 'usage_limit', message: SESSION_MESSAGE }])
+    })
+  })
+
+  describe('the terminal\'s echo of the user\'s own prompt is not claude\'s output (#8454)', () => {
+    // The user pastes claude's own sentence into their prompt; the terminal echoes it
+    // as it is typed, before claude has said anything.
+    const echo = `> ${PAINT(`why does it say ${SESSION_LIMIT}?`)}\r\n`
+
+    it('the prompt echoed, then claude exits mid-turn: the generic sentence, not a limit', async () => {
+      const { s, errors } = turnSession((x) => exitMidTurn(x, ''), { echo })
+      await send(s)
+      assert.deepEqual(errors, [{ message: GENERIC_MID_TURN }])
+    })
+
+    it('the prompt echoed, then the loop runs out its timeout: "did not finish", not a limit', async () => {
+      const { s, errors } = turnSession(timeoutAfterWrite(''), { echo })
+      await send(s)
+      assert.equal(errors.length, 1)
+      assert.ok(/^Claude did not finish responding/.test(errors[0].message), errors[0].message)
+      assert.equal('code' in errors[0], false)
+    })
+
+    it('CONTROL: the same echo followed by a REAL limit is still the limit', async () => {
+      const { s, errors } = turnSession((x) => exitMidTurn(x, framed(SESSION_LIMIT)), { echo })
+      await send(s)
+      assert.deepEqual(errors, [{ code: 'usage_limit', message: SESSION_MESSAGE }])
+    })
+
+    describe('the stall handlers, which read the same slice', () => {
+      function busyAfterEcho() {
+        const s = makeSession()
+        const errors = []
+        s.on('error', (e) => errors.push(e))
+        s._term = { write: () => {}, kill: () => {} } // no pid: no transcript
+        s._isBusy = true
+        s._currentMessageId = 'msg-echo'
+        s._activeTurn = { startedAt: s._nowMonotonic() - 100, aborted: false }
+        s._markTurnOutputStart()
+        s._appendToOutputTail(echo) // typed while the prompt was written
+        s._markPromptWritten()
+        return { s, errors }
+      }
+
+      it('_handleStreamStall is a stall, not a limit', () => {
+        const { s, errors } = busyAfterEcho()
+        s._handleStreamStall()
+        assert.deepEqual(errors.map((e) => e.code), ['stream_stall'])
+      })
+
+      it('CONTROL: a limit older than the turn start stays excluded when the turn was marked but the prompt-written mark never ran', () => {
+        const s = makeSession()
+        const errors = []
+        s.on('error', (e) => errors.push(e))
+        s._term = { write: () => {}, kill: () => {} }
+        s._markPromptWritten() // an earlier turn's prompt mark, left over from before the banner
+        s._appendToOutputTail(framed(SESSION_LIMIT)) // that turn's banner
+        s._isBusy = true
+        s._currentMessageId = 'msg-old'
+        s._activeTurn = { startedAt: s._nowMonotonic() - 100, aborted: false }
+        s._appendToOutputTail(framed('Newer output.'))
+        s._markTurnOutputStart()
+        s._handleStreamStall()
+        assert.deepEqual(errors.map((e) => e.code), ['stream_stall'])
+      })
+
+      it('_handleFirstOutputTimeout is a stall, not a limit', () => {
+        const { s, errors } = busyAfterEcho()
+        s._handleFirstOutputTimeout()
+        assert.deepEqual(errors.map((e) => e.code), ['stream_stall'])
+      })
+    })
+  })
+
+  describe('the no-Stop branch reads the transcript, not only the terminal (#8454)', () => {
+    it('a structured limit entry with an EMPTY PTY tail (a narrow terminal paints nothing) is the limit', async () => {
+      const limit = classifyUsageLimit(SESSION_LIMIT, { structured: true })
+      let entries = 0
+      const { s, errors } = turnSession((x) => {
+        entries = 1 // claude wrote the limit to the transcript, then died before the poll loop looked
+        exitMidTurn(x, '')
+      })
+      // Baselined at turn start (count 0); one entry newer than that by the time the loop gives up.
+      s._scanTranscript = () => ({ authFailureCount: 0, usageLimitCount: entries, lastUsageLimit: entries ? limit : null })
+      await send(s)
+      assert.deepEqual(errors, [{ code: 'usage_limit', message: SESSION_MESSAGE }])
+    })
+
+    it('CONTROL: no new transcript entry and an empty tail stays the generic sentence', async () => {
+      const { s, errors } = turnSession((x) => exitMidTurn(x, ''))
+      s._scanTranscript = () => ({ authFailureCount: 0, usageLimitCount: 0, lastUsageLimit: null })
+      await send(s)
+      assert.deepEqual(errors, [{ message: GENERIC_MID_TURN }])
     })
   })
 })
