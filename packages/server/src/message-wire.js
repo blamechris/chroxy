@@ -17,7 +17,7 @@
  * (`contract-fixtures/replay-parity-data.ts`) prove it.
  */
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
-import { redactValue } from './redaction.js'
+import { redactValue, scanWindow } from './redaction.js'
 
 /**
  * #6941 review (Copilot) — coerce+bound a footer-stat numeric field
@@ -181,10 +181,8 @@ export function buildMessageWire(data) {
 
 /**
  * The most text the redactor is ever handed at once, in characters. This bounds the
- * redaction scan: the redactor's cost on adversarial input grows faster than the
- * input's length, and it runs synchronously on the event loop, so what it is given
- * must be small (measured: 16 KiB of hostile input costs tens of milliseconds, 256 KiB
- * costs seconds).
+ * redaction scan: the redactor runs synchronously on the event loop, so what it is
+ * given must be small.
  */
 export const ERROR_REDACT_SCAN_MAX = 16 * 1024
 
@@ -195,13 +193,6 @@ export const ERROR_REDACT_SCAN_MAX = 16 * 1024
  * clips a saved entry to, so the saved copy is never cut again.
  */
 export const ERROR_TEXT_MAX = ERROR_REDACT_SCAN_MAX
-
-/**
- * How far below the scan bound a kept result must stay for the cut at the bound to
- * be harmless: a secret straddling the bound starts at most this far before it, and
- * is therefore already redacted out of the part that is kept.
- */
-const SCAN_BOUND_SAFETY_MARGIN = 2048
 
 /**
  * Text appended to an error message that was cut. Counted INSIDE the message budget,
@@ -239,18 +230,8 @@ const ERROR_TRUNCATION_MARKER = '\n[truncated]'
  * @returns {string}
  */
 export function redactAndClip(text, max, marker = '') {
-  let clipped = false
-  if (text.length > ERROR_REDACT_SCAN_MAX) {
-    const head = text.slice(0, ERROR_REDACT_SCAN_MAX)
-    if (max + SCAN_BOUND_SAFETY_MARGIN <= ERROR_REDACT_SCAN_MAX) {
-      text = head
-    } else {
-      const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'), head.lastIndexOf('\r'))
-      text = cut > 0 ? head.slice(0, cut) : ''
-    }
-    clipped = true
-  }
-  const redacted = redactValue(text)
+  const { text: scanned, clipped } = scanWindow(text, max, ERROR_REDACT_SCAN_MAX)
+  const redacted = redactValue(scanned)
   if (redacted.length <= max && !clipped) return redacted
   if (redacted.length <= max - marker.length) return redacted + marker
   return redacted.slice(0, Math.max(0, max - marker.length)) + marker

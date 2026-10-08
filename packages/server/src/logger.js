@@ -20,7 +20,7 @@ import {
   openSync, readSync, closeSync, writeFileSync, truncateSync,
 } from 'fs'
 import { join } from 'path'
-import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue } from './redaction.js'
+import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue, redactBounded } from './redaction.js'
 import { configPath } from './config-dir.js'
 
 function defaultLogDir() {
@@ -63,6 +63,21 @@ const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
  */
 export function redactSensitive(msg) {
   return redactValue(msg)
+}
+
+// The most text of one log line the redactor is handed, in characters. A line is
+// written synchronously, so what it is scanned over is bounded; a longer line is cut
+// at the last whitespace inside the bound (redaction runs first, a trailing run with
+// no whitespace to stop at is dropped, never half-kept) and says so. `redactSensitive`
+// itself stays unbounded: its callers redact first and then keep a tail or a slice.
+const LOG_REDACT_SCAN_MAX = 64 * 1024
+const LOG_TRUNCATION_MARKER = '... [truncated]'
+
+function redactLogMessage(msg) {
+  if (typeof msg === 'string' && msg.length > LOG_REDACT_SCAN_MAX) {
+    return redactBounded(msg, LOG_REDACT_SCAN_MAX) + LOG_TRUNCATION_MARKER
+  }
+  return redactSensitive(msg)
 }
 
 // #5358: escape/control sequences a TUI can interleave INTO a token while
@@ -413,7 +428,7 @@ export function createLogger(component, context = {}) {
     // listener broadcast, file write) is identical to a normal line.
     if (!always && LOG_LEVELS[level] < _logLevel) return
 
-    const safeMsg = redactSensitive(msg)
+    const safeMsg = redactLogMessage(msg)
     const timestamp = new Date().toISOString()
     const line = _jsonMode
       ? JSON.stringify({ ts: timestamp, level, component, msg: safeMsg })

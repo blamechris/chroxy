@@ -28,6 +28,93 @@ const SENSITIVE_PATTERNS = [
   /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)(?:\\?["'])?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.){1,1024}"|'(?:[^'\\\r\n]|\\.){1,1024}'|\\"(?:[^\\\r\n]|\\(?!")){1,1024}\\"|(?:\\?["'])?[A-Za-z0-9_\-./+=]{8,}(?:\\?["'])?)/gi,
 ]
 
+// JWT shape: `eyJ` + base64url, a dot, base64url, a dot, base64url, each segment at
+// least 8 characters, the `eyJ` starting on a word boundary. This is matched by a scan
+// rather than by one regex (`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`),
+// so that the time taken is linear in the length of the text: the segments are maximal
+// runs (the class holds no `.`), a candidate's outcome depends only on the runs that
+// follow it, and the scan reads each run a bounded number of times, skipping the other
+// candidates that share a failed candidate's first run. It reports exactly the spans
+// the regex does (tests/redaction-bounded-time.test.js compares the two).
+const JWT_SEGMENT_MIN = 8
+
+function isWordChar(c) {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95
+}
+
+// The end of the base64url run starting at `i` ([A-Za-z0-9_-]).
+function tokenRunEnd(s, i) {
+  while (i < s.length) {
+    const c = s.charCodeAt(i)
+    if (!isWordChar(c) && c !== 45) break
+    i++
+  }
+  return i
+}
+
+/**
+ * First JWT span at or after `from`, as `[start, end]` (end exclusive), or null.
+ * @param {string} s
+ * @param {number} from
+ * @returns {[number, number]|null}
+ */
+function findJwtSpan(s, from) {
+  let p = s.indexOf('eyJ', from)
+  while (p !== -1) {
+    if (p === 0 || !isWordChar(s.charCodeAt(p - 1))) {
+      const e1 = tokenRunEnd(s, p + 3)
+      if (e1 - (p + 3) >= JWT_SEGMENT_MIN && s.charCodeAt(e1) === 46) {
+        const e2 = tokenRunEnd(s, e1 + 1)
+        if (e2 - (e1 + 1) >= JWT_SEGMENT_MIN && s.charCodeAt(e2) === 46) {
+          const e3 = tokenRunEnd(s, e2 + 1)
+          if (e3 - (e2 + 1) >= JWT_SEGMENT_MIN) return [p, e3]
+        }
+      }
+      // Every later `eyJ` inside this first run sees the same runs after it.
+      p = s.indexOf('eyJ', Math.max(p + 1, e1))
+    } else {
+      p = s.indexOf('eyJ', p + 1)
+    }
+  }
+  return null
+}
+
+/**
+ * The JWT matcher, shaped like a global RegExp for the two ways the patterns are
+ * used: `string.replace(pattern, '[REDACTED]')` (the replacement is literal text)
+ * and the `lastIndex` / `exec` loop in the logger's escape-aware pass.
+ */
+const JWT_PATTERN = {
+  global: true,
+  lastIndex: 0,
+  exec(s) {
+    s = String(s)
+    const span = findJwtSpan(s, this.lastIndex)
+    if (!span) {
+      this.lastIndex = 0
+      return null
+    }
+    this.lastIndex = span[1]
+    const match = [s.slice(span[0], span[1])]
+    match.index = span[0]
+    match.input = s
+    return match
+  },
+  test(s) {
+    return findJwtSpan(String(s), 0) !== null
+  },
+  [Symbol.replace](s, replacement) {
+    s = String(s)
+    let out = ''
+    let last = 0
+    for (let span = findJwtSpan(s, 0); span; span = findJwtSpan(s, last)) {
+      out += s.slice(last, span[0]) + replacement
+      last = span[1]
+    }
+    return last === 0 ? s : out + s.slice(last)
+  },
+}
+
 // Provider API key patterns (#2961). These run separately so we can emit a
 // bare "[REDACTED]" regardless of any surrounding key/value syntax — the raw
 // key often appears mid-sentence in stderr (e.g., "invalid api key sk-...").
@@ -50,7 +137,8 @@ const API_KEY_PATTERNS = [
   // marker). header.payload.signature, each base64url; the header always starts
   // `eyJ` (base64 of `{"`), which makes this specific enough to avoid matching
   // ordinary dotted tokens. Length floors keep it off short `a.b.c` strings.
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
+  // Matched by a linear scan rather than a regex: see JWT_PATTERN above.
+  JWT_PATTERN,
   // #5413: Discord webhook URLs. The token segment after the numeric webhook
   // id grants post/edit/delete on the channel, so the URL is a credential.
   // Covers discordapp.com (legacy), ptb/canary builds, and optional /vN/ API
@@ -131,8 +219,12 @@ const MAX_SANITIZE_DEPTH = 8
  */
 function redactDeep(value, depth, seen, maxChars = MAX_INPUT_CHARS) {
   if (typeof value === 'string') {
-    const redacted = redactValue(value)
-    return redacted.length > maxChars
+    // Redact before any cut, over a bounded scan: `scanWindow` keeps the text the
+    // patterns are handed to maxChars plus a margin, so a secret that straddles the
+    // bound lies past what is shown, and discards an unsafe trailing run otherwise.
+    const { text, clipped } = scanWindow(value, maxChars, maxChars + REDACT_SCAN_MARGIN)
+    const redacted = redactValue(text)
+    return clipped || redacted.length > maxChars
       ? redacted.slice(0, maxChars) + '... [truncated]'
       : redacted
   }
@@ -215,6 +307,37 @@ const PULL_MAX_INPUT_CHARS = 512 * 1024 // 512K chars
 const MAX_REDACT_SCAN = 8192
 
 /**
+ * How far below a scan bound a kept result must stay for a plain cut at the bound to
+ * be harmless: a secret straddling the bound starts at most this far before it, and
+ * is therefore already redacted out of the part that is kept.
+ */
+export const REDACT_SCAN_MARGIN = 2048
+
+/**
+ * The part of `text` the patterns are handed when no more than `scanMax` characters
+ * may be scanned, given that the caller goes on to keep at most `keep` characters of
+ * the redacted result (`Infinity` when it keeps all of it).
+ *
+ * Text within the bound is returned whole. Longer text is cut at the bound. When the
+ * kept part stays a margin below the bound the cut is a plain slice; otherwise it
+ * backs up to the last whitespace, and a run with no whitespace to stop at is
+ * discarded, never half-kept, so the cut never leaves the front of a token that the
+ * patterns can no longer recognise.
+ *
+ * @param {string} text
+ * @param {number} keep
+ * @param {number} scanMax
+ * @returns {{ text: string, clipped: boolean }}
+ */
+export function scanWindow(text, keep, scanMax) {
+  if (text.length <= scanMax) return { text, clipped: false }
+  const head = text.slice(0, scanMax)
+  if (keep + REDACT_SCAN_MARGIN <= scanMax) return { text: head, clipped: true }
+  const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'), head.lastIndexOf('\r'))
+  return { text: cut > 0 ? head.slice(0, cut) : '', clipped: true }
+}
+
+/**
  * Redact `text` without ever persisting a piece of a secret that a length bound
  * cut in two.
  *
@@ -229,13 +352,8 @@ const MAX_REDACT_SCAN = 8192
  * @returns {string}
  */
 export function redactBounded(text, maxScan = MAX_REDACT_SCAN) {
-  let s = typeof text === 'string' ? text : String(text ?? '')
-  if (s.length > maxScan) {
-    const head = s.slice(0, maxScan)
-    const cut = Math.max(head.lastIndexOf(' '), head.lastIndexOf('\n'), head.lastIndexOf('\t'))
-    s = cut > 0 ? head.slice(0, cut) : ''
-  }
-  return redactValue(s)
+  const s = typeof text === 'string' ? text : String(text ?? '')
+  return redactValue(scanWindow(s, Infinity, maxScan).text)
 }
 
 /**
@@ -254,4 +372,4 @@ export function describeByNamedField(rawInput) {
   return named ? redactBounded(String(named)) : undefined
 }
 
-export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }
+export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }
