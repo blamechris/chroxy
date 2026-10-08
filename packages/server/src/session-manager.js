@@ -1730,10 +1730,6 @@ export class SessionManager extends EventEmitter {
    *   handed to a provider that tracks one (claude-tui) so a restart can tell a session
    *   that never completed a turn from one whose transcript has since been removed.
    *   Only `true` is forwarded; providers that do not read it ignore it.
-   * @param {string} [options.conversationTranscriptRoot] - Internal/restore-only (#8418):
-   *   the transcript root (`<CLAUDE_CONFIG_DIR or ~/.claude>/projects`) the bit was
-   *   saved under, so a provider can tell "removed" from "looking somewhere else".
-   *   Non-string / empty ignored.
    * @param {boolean} [options.skipPersist] - Internal: skip the sync persist flush. Used by
    *   `restoreState()`, which must seed history and budget after createSession before the
    *   state file is rewritten; otherwise each flush would overwrite the on-disk file with
@@ -1762,7 +1758,7 @@ export class SessionManager extends EventEmitter {
    *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, conversationPersisted, conversationTranscriptRoot, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1943,9 +1939,6 @@ export class SessionManager extends EventEmitter {
     // ("nothing known"), which is what a provider's own default already is.
     if (conversationPersisted === true) {
       providerOpts.conversationPersisted = true
-      if (typeof conversationTranscriptRoot === 'string' && conversationTranscriptRoot.length > 0) {
-        providerOpts.conversationTranscriptRoot = conversationTranscriptRoot
-      }
     }
     // #6824: per-session parked (disabled) MCP server names. Byok-local opt —
     // forwarded only when it's a non-empty array of strings so non-BYOK
@@ -3030,14 +3023,6 @@ export class SessionManager extends EventEmitter {
         ...(typeof entry.session.conversationPersisted === 'boolean'
           ? { conversationPersisted: entry.session.conversationPersisted }
           : {}),
-        // #8418: where the bit was observed. A transcript's absence proves a wipe
-        // only under the root it was saved under (a changed CLAUDE_CONFIG_DIR / HOME
-        // looks at another tree), so the root travels with the claim.
-        ...(entry.session.conversationPersisted === true
-          && typeof entry.session.conversationTranscriptRoot === 'string'
-          && entry.session.conversationTranscriptRoot.length > 0
-          ? { conversationTranscriptRoot: entry.session.conversationTranscriptRoot }
-          : {}),
         cwd: entry.cwd,
         model: entry.session.model,
         // Persist the model the underlying CLI actually booted with (#3700b).
@@ -3356,9 +3341,6 @@ export class SessionManager extends EventEmitter {
       // #8418: only a literal `true` counts; a hand-edited or older file restores
       // as "unknown", exactly as before this field existed.
       conversationPersisted: saved.conversationPersisted === true ? true : undefined,
-      conversationTranscriptRoot: saved.conversationPersisted === true && typeof saved.conversationTranscriptRoot === 'string'
-        ? saved.conversationTranscriptRoot
-        : undefined,
       provider: saved.provider || undefined,
       connectionId: typeof saved.agentConnection?.id === 'string' && saved.agentConnection.provenance?.source === 'configured'
         ? saved.agentConnection.id
@@ -4463,16 +4445,6 @@ export class SessionManager extends EventEmitter {
     const sessionLog = log.withSession(sessionId)
     // Events worth logging to the System tab (skip noisy delta/tool_result)
     const LOGGED_EVENTS = new Set(['ready', 'stream_start', 'stream_end', 'result', 'error'])
-
-    // #8418: the provider replaced its upstream conversation id (a restored
-    // conversation's transcript was found gone, and the session started a new
-    // one). The id and the notice recorded just before this event must be on disk
-    // before `ready` is announced or any input accepted: the debounced save is
-    // up to seconds away, and a crash inside that window would restart on the
-    // lost id and tell it again, or orphan a conversation that had already begun.
-    session.on('conversation_replaced', () => {
-      this._flushPersistOrWarn(sessionId)
-    })
 
     // #5835 Phase 1: claude-tui live PTY mirror (the "remote viewer" / authenticity
     // surface). These are transient, high-frequency redraw bytes — proxy them to

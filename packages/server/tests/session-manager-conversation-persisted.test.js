@@ -32,7 +32,6 @@ class ReportingProvider extends EventEmitter {
     this.isRunning = false
     this.resumeSessionId = opts.resumeSessionId || null
     this.conversationPersisted = opts.conversationPersisted === true
-    this.conversationTranscriptRoot = typeof opts.conversationTranscriptRoot === 'string' ? opts.conversationTranscriptRoot : null
     this._messageCounter = 0
     this.bootedModel = null
   }
@@ -99,7 +98,7 @@ describe('conversationPersisted survives a restart (#8418)', () => {
 
   it('round trip: a persisted bit comes back to the provider', () => {
     const first = newMgr()
-    first.createSession({ name: 'R', cwd: '/tmp', provider: 'test-reporting-8418', resumeSessionId: LOST_ID, conversationPersisted: true, conversationTranscriptRoot: '/roots/a/projects' })
+    first.createSession({ name: 'R', cwd: '/tmp', provider: 'test-reporting-8418', resumeSessionId: LOST_ID, conversationPersisted: true })
     first.serializeState()
     first.destroyAll()
     ctorOpts = []
@@ -107,27 +106,7 @@ describe('conversationPersisted survives a restart (#8418)', () => {
     assert.ok(second.restoreState(), 'restored')
     assert.equal(ctorOpts.length, 1)
     assert.strictEqual(ctorOpts[0].conversationPersisted, true)
-    assert.equal(ctorOpts[0].conversationTranscriptRoot, '/roots/a/projects', 'the root the bit was saved under travels with it')
     assert.equal(ctorOpts[0].resumeSessionId, LOST_ID)
-  })
-
-  it('serializeState writes the root beside the bit, and omits it when the provider has none', () => {
-    const mgr = newMgr()
-    const a = mgr.createSession({ name: 'A', cwd: '/tmp', provider: 'test-reporting-8418', conversationPersisted: true, conversationTranscriptRoot: '/roots/a/projects' })
-    const b = mgr.createSession({ name: 'B', cwd: '/tmp', provider: 'test-reporting-8418' })
-    const byId = new Map(mgr.serializeState().sessions.map((s) => [s.id, s]))
-    assert.equal(byId.get(a).conversationTranscriptRoot, '/roots/a/projects')
-    assert.equal(Object.prototype.hasOwnProperty.call(byId.get(b), 'conversationTranscriptRoot'), false)
-  })
-
-  it('a malformed root restores as unknown', () => {
-    for (const bad of [42, '', {}, [], null, true]) {
-      ctorOpts = []
-      writeState({ conversationPersisted: true, conversationTranscriptRoot: bad })
-      const mgr = newMgr()
-      assert.ok(mgr.restoreState())
-      assert.equal(Object.prototype.hasOwnProperty.call(ctorOpts[0], 'conversationTranscriptRoot'), false, JSON.stringify(bad))
-    }
   })
 
   it('an older state file with no bit restores exactly as before: the provider is not handed one', () => {
@@ -213,7 +192,6 @@ describe('a restored claude-tui session whose transcript is gone (#8418)', () =>
     rmSync(root, { recursive: true, force: true })
   })
 
-  const savedRoot = () => join(home, '.claude', 'projects')
   const readState = () => JSON.parse(readFileSync(stateFile, 'utf-8'))
   const noticesIn = (history) => history.filter((h) => h.messageType === 'error' && h.code === 'resume_unknown')
 
@@ -224,7 +202,6 @@ describe('a restored claude-tui session whose transcript is gone (#8418)', () =>
       sessions: [{
         id: RESTORED_SESSION_ID, name: 'TUI', cwd: realpathSync(cwd), model: null, permissionMode: 'approve',
         provider: 'claude-tui', sdkSessionId: LOST_ID, conversationPersisted: true,
-        conversationTranscriptRoot: savedRoot(),
         history: [{ type: 'message', messageType: 'user_input', content: 'earlier question', timestamp: Date.now() - 1000 }],
         ...overrides,
       }],
@@ -235,13 +212,8 @@ describe('a restored claude-tui session whose transcript is gone (#8418)', () =>
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: cwd, stateFilePath: stateFile })
     mgrs.push(mgr)
     const seen = []
-    const snapshotAtReady = []
-    mgr.on('session_event', (e) => {
-      seen.push(e)
-      // Read the FILE the instant the session reports ready, with nobody calling serializeState.
-      if (e.event === 'ready') snapshotAtReady.push(readState().sessions[0])
-    })
-    return { mgr, seen, snapshotAtReady }
+    mgr.on('session_event', (e) => seen.push(e))
+    return { mgr, seen }
   }
 
   async function until(pred, what) {
@@ -250,83 +222,76 @@ describe('a restored claude-tui session whose transcript is gone (#8418)', () =>
     assert.ok(pred(), what)
   }
 
-  it('the notice and the new id are on disk BEFORE ready, and a second restart does not announce A again', async () => {
+  it('fresh on the same id; the notice is in history after the restored history and in the state file', async () => {
     writeSaved()
-    const { mgr, seen, snapshotAtReady } = boot()
+    const { mgr, seen } = boot()
     const id = mgr.restoreState()
     assert.ok(id, 'restored')
     await until(() => seen.some((e) => e.event === 'ready'), 'the restored session became ready')
 
     assert.equal(spawns.length, 1)
-    assert.equal(spawns[0][0], '--session-id', 'no --resume of a transcript that is gone')
-    const newId = spawns[0][1]
-    assert.notEqual(newId, LOST_ID)
-
-    // Durable before ready: the file read inside the ready event already has everything.
-    const atReady = snapshotAtReady[0]
-    assert.equal(atReady.sdkSessionId, newId, 'the state file names the new id by the time ready is announced')
-    assert.strictEqual(atReady.conversationPersisted, false)
-    assert.equal(Object.prototype.hasOwnProperty.call(atReady, 'conversationTranscriptRoot'), false, 'the old claim is gone with the old id')
-    assert.equal(noticesIn(atReady.history).length, 1, 'and so is the notice')
-    assert.equal(noticesIn(atReady.history)[0].attemptedResumeId, LOST_ID)
-    assert.ok(atReady.history.some((h) => h.content === 'earlier question'), 'next to the restored history')
+    assert.deepEqual(spawns[0].slice(0, 2), ['--session-id', LOST_ID], 'no --resume of a transcript that is gone; same id')
 
     const history = mgr.getHistory(id)
-    assert.ok(history.indexOf(noticesIn(history)[0]) > history.findIndex((h) => h.content === 'earlier question'))
-    assert.equal(mgr._sessions.get(id).session.resumeSessionId, newId)
+    const notice = noticesIn(history)
+    assert.equal(notice.length, 1, 'exactly one notice, so a reconnect or cursor replay shows it once')
+    assert.equal(notice[0].attemptedResumeId, LOST_ID)
+    assert.ok(history.indexOf(notice[0]) > history.findIndex((h) => h.content === 'earlier question'),
+      'it follows the history it explains')
+    assert.equal(mgr._sessions.get(id).session.resumeSessionId, LOST_ID, 'the conversation id is untouched')
 
-    // "Crash": a second manager reads the file as it is, no shutdown flush from the first.
-    spawns.length = 0
-    const second = boot()
-    assert.ok(second.mgr.restoreState())
-    await until(() => second.seen.some((e) => e.event === 'ready'), 'second restart became ready')
-    assert.deepEqual(spawns[0].slice(0, 2), ['--session-id', newId], 'the new, still-empty conversation is started fresh on its own id')
-    const history2 = second.mgr.getHistory(second.mgr.listSessions()[0].sessionId)
-    assert.equal(noticesIn(history2).length, 1, 'A is not announced a second time')
+    mgr.serializeState()
+    const saved = readState().sessions[0]
+    assert.equal(saved.sdkSessionId, LOST_ID)
+    assert.strictEqual(saved.conversationPersisted, false, 'nothing is saved under the fresh conversation yet')
+    assert.equal(noticesIn(saved.history).length, 1, 'the notice is persisted with the history')
   })
 
-  it('a start that fails after the wipe decision parks the ORIGINAL state, and the retry announces the loss once', async () => {
+  it('a restart before any new turn is a silent ordinary fresh start (the history keeps the one notice)', async () => {
+    writeSaved()
+    const first = boot()
+    first.mgr.restoreState()
+    await until(() => first.seen.some((e) => e.event === 'ready'), 'ready')
+    first.mgr.serializeState()
+    first.mgr.destroyAll()
+
+    spawns.length = 0
+    const second = boot()
+    const id2 = second.mgr.restoreState()
+    await until(() => second.seen.some((e) => e.event === 'ready'), 'second ready')
+    assert.deepEqual(spawns[0].slice(0, 2), ['--session-id', LOST_ID])
+    assert.equal(noticesIn(second.mgr.getHistory(id2)).length, 1, 'no second announcement')
+  })
+
+  it('a start that fails before the notice parks the ORIGINAL claim, and the retry announces the loss once', async () => {
     writeSaved()
     const { mgr, seen } = boot()
     failSpawn = true
-    const id = mgr.restoreState()
-    assert.ok(id)
+    mgr.restoreState()
     await until(() => mgr.getFailedRestores().length === 1, 'the failed start was parked')
     assert.equal(seen.some((e) => e.event === 'ready'), false)
 
-    const [parked] = mgr.getFailedRestores()
     const onDisk = readState().sessions.find((x) => x.id === RESTORED_SESSION_ID)
-    for (const snap of [onDisk]) {
-      assert.equal(snap.sdkSessionId, LOST_ID, 'the lost conversation is still the restore target')
-      assert.strictEqual(snap.conversationPersisted, true)
-      assert.equal(snap.conversationTranscriptRoot, savedRoot())
-      assert.equal(noticesIn(snap.history).length, 0, 'nothing was announced')
-    }
-    assert.ok(parked)
+    assert.equal(onDisk.sdkSessionId, LOST_ID)
+    assert.strictEqual(onDisk.conversationPersisted, true, 'the claim survives the failed start')
+    assert.equal(noticesIn(onDisk.history).length, 0, 'nothing was announced')
 
     failSpawn = false
-    const result = await mgr.retryFailedRestore(parked.sessionId ?? RESTORED_SESSION_ID)
+    const result = await mgr.retryFailedRestore(RESTORED_SESSION_ID)
     assert.equal(result.ok, true)
     await until(() => seen.some((e) => e.event === 'ready'), 'the retried session became ready')
-    const retriedId = result.sessionId
-    const history = mgr.getHistory(retriedId)
-    assert.equal(noticesIn(history).length, 1, 'announced exactly once, by the attempt that succeeded')
-    assert.equal(noticesIn(history)[0].attemptedResumeId, LOST_ID)
-    assert.notEqual(spawns[0][1], LOST_ID)
+    const notice = noticesIn(mgr.getHistory(result.sessionId))
+    assert.equal(notice.length, 1, 'announced exactly once, by the attempt that succeeded')
+    assert.equal(notice[0].attemptedResumeId, LOST_ID)
+    assert.deepEqual(spawns[0].slice(0, 2), ['--session-id', LOST_ID])
   })
 
-  it('a root the bit was not saved under is not a wipe: same id, no notice, the claim is kept on disk', async () => {
-    writeSaved({ conversationTranscriptRoot: '/some/other/profile/projects' })
-    const { mgr, seen, snapshotAtReady } = boot()
+  it('a session that never completed a turn restores fresh with no notice', async () => {
+    writeSaved({ conversationPersisted: false })
+    const { mgr, seen } = boot()
     const id = mgr.restoreState()
     await until(() => seen.some((e) => e.event === 'ready'), 'ready')
     assert.deepEqual(spawns[0].slice(0, 2), ['--session-id', LOST_ID])
     assert.equal(noticesIn(mgr.getHistory(id)).length, 0)
-    mgr.serializeState()
-    const saved = readState().sessions[0]
-    assert.equal(saved.sdkSessionId, LOST_ID)
-    assert.strictEqual(saved.conversationPersisted, true)
-    assert.equal(saved.conversationTranscriptRoot, '/some/other/profile/projects')
-    assert.ok(snapshotAtReady.length >= 1)
   })
 })

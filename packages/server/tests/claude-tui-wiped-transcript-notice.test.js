@@ -13,8 +13,8 @@ import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
  * been wiped went fresh with only a `log.info`: the model forgot everything and
  * nobody was told. SessionManager now persists whether claude ever saved the
  * conversation (`conversationPersisted`); a session restored with that bit set
- * and no transcript starts a NEW conversation and says so with the existing
- * `resume_unknown` frame.
+ * and no transcript starts fresh on the same id (as before) and says so with the
+ * existing `resume_unknown` frame.
  *
  * These run the REAL `start()` / `_spawnPty` / `_respawnPty` against a node-pty
  * stand-in (the `_ptyModOverride` seam) and the REAL transcript probe under a
@@ -63,9 +63,6 @@ describe('claude-tui restored session whose transcript is gone (#8418)', () => {
     for (const d of [fakeHome, fakeCwd, skillsDir]) rmSync(d, { recursive: true, force: true })
   })
 
-  // The projects root the previous run saved the bit under: ~/.claude/projects of the temp HOME.
-  const savedRoot = () => join(fakeHome, '.claude', 'projects')
-
   function writeTranscript(id) {
     const dir = join(fakeHome, '.claude', 'projects', encodeProjectPath(cwdReal))
     mkdirSync(dir, { recursive: true })
@@ -84,8 +81,6 @@ describe('claude-tui restored session whose transcript is gone (#8418)', () => {
     s._ptyModOverride = {
       spawn: (_cmd, args) => {
         control.spawns.push(args.slice())
-        // What a save in the middle of the transition would read off the provider.
-        control.viewAtSpawn = { id: s.resumeSessionId, persisted: s.conversationPersisted, root: s.conversationTranscriptRoot }
         const term = {
           pid: fakePid + control.spawns.length,
           exitHandlers: [],
@@ -103,7 +98,6 @@ describe('claude-tui restored session whose transcript is gone (#8418)', () => {
     const events = []
     s.on('error', (e) => events.push({ type: 'error', ...e }))
     s.on('ready', (e) => events.push({ type: 'ready', ...e }))
-    s.on('conversation_replaced', (e) => events.push({ type: 'conversation_replaced', ...e }))
     return { s, control, events }
   }
 
@@ -117,118 +111,99 @@ describe('claude-tui restored session whose transcript is gone (#8418)', () => {
     await s._respawnPty()
   }
 
-  it('persisted bit + transcript gone: starts a NEW conversation under a NEW id and tells the user', async () => {
-    const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true, conversationTranscriptRoot: savedRoot() })
+  it('persisted bit + transcript gone: fresh on the SAME id, and the user is told', async () => {
+    const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true })
     assert.equal(s.conversationPersisted, true, 'precondition: the latch is seeded from saved state')
     await s.start()
 
-    const [flag, newId] = idArgs(control.spawns[0])
-    assert.equal(flag, '--session-id', 'a vanished transcript cannot be resumed, so the spawn is fresh')
+    assert.deepEqual(idArgs(control.spawns[0]), ['--session-id', OLD_ID],
+      'a vanished transcript cannot be resumed, so the spawn is fresh, on the id the restore started from')
     assert.equal(control.spawns[0].includes('--resume'), false)
-    assert.notEqual(newId, OLD_ID, 'the lost id is not reused')
-    assert.equal(s.resumeSessionId, newId, 'what is persisted and reported next is the id claude now holds')
+    assert.equal(s.resumeSessionId, OLD_ID, 'the conversation id is not changed: a false alarm can never abandon a conversation')
 
     const notices = noticesOf(events)
     assert.equal(notices.length, 1, 'exactly one visible notice')
-    assert.equal(notices[0].attemptedResumeId, OLD_ID, 'it names the conversation that was lost')
+    assert.equal(notices[0].attemptedResumeId, OLD_ID, 'it names the conversation')
     assert.ok(/could not be resumed/.test(notices[0].message))
     assert.ok(/transcript/.test(notices[0].message))
-    const order = events.map((e) => e.type)
-    assert.deepEqual(order, ['error', 'conversation_replaced', 'ready'],
-      'notice, then the id-change signal the manager persists on, then ready: nothing is announced before it is durable')
-    const replaced = events.find((e) => e.type === 'conversation_replaced')
-    assert.equal(replaced.from, OLD_ID)
-    assert.equal(replaced.to, newId)
-    assert.equal(events.find((e) => e.type === 'ready').sessionId, newId, 'ready carries the new id')
-    assert.equal(s.conversationPersisted, false, 'the new conversation has saved nothing yet')
-    assert.equal(s.conversationTranscriptRoot, null)
-    assert.deepEqual(control.viewAtSpawn, { id: OLD_ID, persisted: true, root: savedRoot() },
-      'while the fresh conversation is still starting, a save would still name the ORIGINAL one')
+    assert.deepEqual(events.map((e) => e.type), ['error', 'ready'], 'the notice comes before ready')
+    assert.equal(s.conversationPersisted, false, 'nothing is saved under the fresh conversation yet')
   })
 
-  it('a start that fails after the decision keeps the ORIGINAL restore state and announces nothing', async () => {
-    const { s, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true, conversationTranscriptRoot: savedRoot() })
-    s._ptyModOverride = { spawn: () => { throw new Error('spawn failed') } }
-    await assert.rejects(s.start())
-    assert.equal(events.filter((e) => e.type === 'error' && e.code === 'resume_unknown').length, 0, 'no notice for a conversation that never began')
-    assert.equal(events.some((e) => e.type === 'conversation_replaced'), false)
-    // What a failed-restore snapshot reads off the provider (SessionManager._serializeSessionEntry):
-    assert.equal(s.resumeSessionId, OLD_ID, 'the lost id is still the restore target')
-    assert.strictEqual(s.conversationPersisted, true, 'and the claim is still carried')
-    assert.equal(s.conversationTranscriptRoot, savedRoot())
-    // And nothing else in the provider still believes in the abandoned new id.
-    assert.equal(s.sessionId, OLD_ID, 'the id the provider reports about itself is the original again')
-    assert.equal(s._conversationEverPersisted, true, 'so is the latch')
-  })
-
-  it('the retry of a failed start announces the loss exactly once', async () => {
-    const opts = { resumeSessionId: OLD_ID, conversationPersisted: true, conversationTranscriptRoot: savedRoot() }
+  it('a failed start leaves the claim intact, and the retry announces the loss once', async () => {
+    const opts = { resumeSessionId: OLD_ID, conversationPersisted: true }
     const failing = make(opts)
     failing.s._ptyModOverride = { spawn: () => { throw new Error('spawn failed') } }
     await assert.rejects(failing.s.start())
-    // The manager re-creates the session from the snapshot the failed provider reports.
-    const retry = make({
-      resumeSessionId: failing.s.resumeSessionId,
-      conversationPersisted: failing.s.conversationPersisted,
-      conversationTranscriptRoot: failing.s.conversationTranscriptRoot,
-    })
+    assert.equal(noticesOf(failing.events).length, 0, 'nothing was announced for a conversation that never started')
+    // What a failed-restore snapshot reads off the provider (SessionManager._serializeSessionEntry):
+    assert.equal(failing.s.resumeSessionId, OLD_ID)
+    assert.strictEqual(failing.s.conversationPersisted, true, 'the claim survives the failed start')
+
+    // The manager re-creates the session from that snapshot.
+    const retry = make({ resumeSessionId: failing.s.resumeSessionId, conversationPersisted: failing.s.conversationPersisted })
     await retry.s.start()
     const notices = noticesOf(retry.events)
-    assert.equal(notices.length, 1)
-    assert.equal(notices[0].attemptedResumeId, OLD_ID, 'it still names A')
-    assert.equal(noticesOf(failing.events).length, 0)
+    assert.equal(notices.length, 1, 'announced by the attempt that succeeded')
+    assert.equal(notices[0].attemptedResumeId, OLD_ID)
   })
 
-  it('a changed transcript root is not a wipe: fresh on the SAME id, no notice, the claim is kept', async () => {
+  it('the notice is told once: a respawn before any turn starts fresh, silently, and so does the next save', async () => {
+    const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true })
+    await s.start()
+    assert.equal(s.conversationPersisted, false, 'the bit a restart would read is now false')
+    control.terms[0].exitHandlers[0]({ exitCode: 1 })
+    await respawnNow(s)
+    assert.deepEqual(idArgs(control.spawns[1]), ['--session-id', OLD_ID],
+      'the latch dropped, so the empty conversation is not --resumed')
+    assert.equal(noticesOf(events).length, 1, 'no second notice')
+  })
+
+  it('a restart before any new turn is an ordinary silent fresh start', async () => {
+    const first = make({ resumeSessionId: OLD_ID, conversationPersisted: true })
+    await first.s.start()
+    assert.equal(noticesOf(first.events).length, 1)
+    // The manager would have saved exactly this and restores from it.
+    const second = make({ resumeSessionId: first.s.resumeSessionId, conversationPersisted: first.s.conversationPersisted })
+    await second.s.start()
+    assert.deepEqual(idArgs(second.control.spawns[0]), ['--session-id', OLD_ID])
+    assert.equal(noticesOf(second.events).length, 0, 'the transcript is gone either way; nothing new to say')
+  })
+
+  it('a wiped session that then completes a turn is a normal conversation again', async () => {
+    const { s, control } = make({ resumeSessionId: OLD_ID, conversationPersisted: true })
+    await s.start()
+    s._conversationEverPersisted = true // what the Stop hook latches on a completed turn
+    assert.equal(s.conversationPersisted, true)
+    control.terms[0].exitHandlers[0]({ exitCode: 1 })
+    await respawnNow(s)
+    assert.deepEqual(idArgs(control.spawns[1]), ['--resume', OLD_ID])
+  })
+
+  it('a false alarm (the config root is somewhere else this boot) costs a notice, never the conversation', async () => {
     const otherRoot = mkdtempSync(join(tmpdir(), 'chroxy-8418-otherroot-'))
     try {
-      const { s, control, events } = make({
-        resumeSessionId: OLD_ID, conversationPersisted: true, conversationTranscriptRoot: savedRoot(),
+      writeTranscript(OLD_ID) // intact under the usual root
+      const away = make({
+        resumeSessionId: OLD_ID, conversationPersisted: true,
         connectionChildEnv: { ...process.env, CLAUDE_CONFIG_DIR: otherRoot },
       })
-      await s.start()
-      assert.deepEqual(idArgs(control.spawns[0]), ['--session-id', OLD_ID],
-        'as main does: the id survives, so putting the environment back recovers the conversation')
-      assert.equal(s.resumeSessionId, OLD_ID)
-      assert.equal(noticesOf(events).length, 0, 'absence under a different root proves nothing')
-      assert.strictEqual(s.conversationPersisted, true, 'the claim is carried to the next save')
-      assert.equal(s.conversationTranscriptRoot, savedRoot(), 'under the root it was made in, not the one we are looking at now')
-      // A respawn in this process must not --resume an id this root has never seen.
-      control.terms[0].exitHandlers[0]({ exitCode: 1 })
-      await respawnNow(s)
-      assert.deepEqual(idArgs(control.spawns[1]), ['--session-id', OLD_ID])
-      // Once a turn completes under THIS root the claim moves to it.
-      s._conversationEverPersisted = true
-      assert.equal(s.conversationTranscriptRoot, join(otherRoot, 'projects'))
+      await away.s.start()
+      assert.deepEqual(idArgs(away.control.spawns[0]), ['--session-id', OLD_ID], 'the id survives')
+      assert.equal(noticesOf(away.events).length, 1, 'the look-alike is announced')
+      // Environment put back: the same id resumes, whatever the saved bit now says.
+      const back = make({ resumeSessionId: away.s.resumeSessionId, conversationPersisted: away.s.conversationPersisted })
+      await back.s.start()
+      assert.deepEqual(idArgs(back.control.spawns[0]), ['--resume', OLD_ID])
+      assert.equal(noticesOf(back.events).length, 0)
     } finally {
       rmSync(otherRoot, { recursive: true, force: true })
     }
   })
 
-  it('a bit saved with no root cannot prove a wipe: fresh on the same id, no notice', async () => {
-    const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true })
-    await s.start()
-    assert.deepEqual(idArgs(control.spawns[0]), ['--session-id', OLD_ID])
-    assert.equal(s.resumeSessionId, OLD_ID)
-    assert.equal(noticesOf(events).length, 0)
-    assert.strictEqual(s.conversationPersisted, true)
-  })
-
-  it('the notice is told once: a respawn before any turn starts fresh on the new id, silently', async () => {
-    const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true, conversationTranscriptRoot: savedRoot() })
-    await s.start()
-    const newId = s.resumeSessionId
-    control.terms[0].exitHandlers[0]({ exitCode: 1 })
-    await respawnNow(s)
-    assert.deepEqual(idArgs(control.spawns[1]), ['--session-id', newId],
-      'the latch was reset with the id, so the empty new conversation is not --resumed')
-    assert.equal(noticesOf(events).length, 1, 'no second notice')
-    assert.equal(s.resumeSessionId, newId)
-  })
-
   it('persisted bit + transcript present: resumes the same id with no notice', async () => {
     writeTranscript(OLD_ID)
-    const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true, conversationTranscriptRoot: savedRoot() })
+    const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true })
     await s.start()
     assert.deepEqual(idArgs(control.spawns[0]), ['--resume', OLD_ID])
     assert.equal(s.resumeSessionId, OLD_ID)
@@ -283,7 +258,7 @@ describe('claude-tui restored session whose transcript is gone (#8418)', () => {
     mkdirSync(projects, { recursive: true })
     chmodSync(projects, 0o100) // searchable, not listable: the probe could not look
     try {
-      const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true, conversationTranscriptRoot: savedRoot() })
+      const { s, control, events } = make({ resumeSessionId: OLD_ID, conversationPersisted: true })
       await s.start()
       assert.deepEqual(idArgs(control.spawns[0]), ['--resume', OLD_ID])
       assert.equal(noticesOf(events).length, 0, 'could not look is not "wiped"')
@@ -294,7 +269,7 @@ describe('claude-tui restored session whose transcript is gone (#8418)', () => {
 
   it('a later PTY death with a live latch still takes the --resume classifier path (a mid-run wipe is not handled here)', async () => {
     writeTranscript(OLD_ID)
-    const { s, control } = make({ resumeSessionId: OLD_ID, conversationPersisted: true, conversationTranscriptRoot: savedRoot() })
+    const { s, control } = make({ resumeSessionId: OLD_ID, conversationPersisted: true })
     await s.start()
     control.terms[0].exitHandlers[0]({ exitCode: 1 })
     await respawnNow(s)
