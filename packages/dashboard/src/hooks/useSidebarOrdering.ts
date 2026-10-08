@@ -4,6 +4,8 @@ import {
   loadPersistedSidebarRepoOrder,
   loadPersistedSidebarSessionOrder,
   loadPersistedSessionTabOrder,
+  loadPersistedSidebarRepoNames,
+  persistSidebarRepoNames,
   persistSidebarRepoOrder,
   persistSidebarSessionOrder,
   persistSessionTabOrder,
@@ -16,9 +18,16 @@ export interface SidebarOrdering {
   sidebarRepoOrder: string[]
   /** User-defined order for sessions within each sidebar repo group (#4832). */
   sidebarSessionOrder: Record<string, string[]>
+  /** User-chosen sidebar repo-group labels keyed by group path (#7330). */
+  sidebarRepoNames: Record<string, string>
   handleReorderTabs: (nextOrder: string[]) => void
   handleReorderRepos: (orderedPaths: string[]) => void
   handleReorderSidebarSessions: (repoPath: string, orderedIds: string[]) => void
+  /**
+   * Rename a sidebar repo group (#7330). A blank name removes the override so
+   * the group shows its derived label again.
+   */
+  handleRenameRepo: (repoPath: string, name: string) => void
 }
 
 /**
@@ -45,6 +54,9 @@ export function useSidebarOrdering(): SidebarOrdering {
   const [sidebarRepoOrder, setSidebarRepoOrder] = useState<string[]>(() => loadPersistedSidebarRepoOrder())
   const [sidebarSessionOrder, setSidebarSessionOrder] = useState<Record<string, string[]>>(() => loadPersistedSidebarSessionOrder())
 
+  // #7330 — user-chosen repo-group labels, persisted alongside the orders.
+  const [sidebarRepoNames, setSidebarRepoNames] = useState<Record<string, string>>(() => loadPersistedSidebarRepoNames())
+
   // #4831 — `loadPersistedSessionTabOrder` reads under the *current* server
   // scope (set by `setServerScope` on server-switch). The initial `useState`
   // only fires once on mount, so without this effect a server switch in the
@@ -64,6 +76,7 @@ export function useSidebarOrdering(): SidebarOrdering {
   useEffect(() => {
     setSidebarRepoOrder(loadPersistedSidebarRepoOrder())
     setSidebarSessionOrder(loadPersistedSidebarSessionOrder())
+    setSidebarRepoNames(loadPersistedSidebarRepoNames())
   }, [activeServerId])
 
   const handleReorderTabs = useCallback((nextOrder: string[]) => {
@@ -88,12 +101,30 @@ export function useSidebarOrdering(): SidebarOrdering {
     })
   }, [])
 
+  const handleRenameRepo = useCallback((repoPath: string, name: string) => {
+    const trimmed = name.trim()
+    setSidebarRepoNames(prev => {
+      if (trimmed === '') {
+        if (!(repoPath in prev)) return prev
+        const { [repoPath]: _dropped, ...rest } = prev
+        persistSidebarRepoNames(rest)
+        return rest
+      }
+      if (prev[repoPath] === trimmed) return prev
+      const next = { ...prev, [repoPath]: trimmed }
+      persistSidebarRepoNames(next)
+      return next
+    })
+  }, [])
+
   return {
     tabOrder,
     sidebarRepoOrder,
     sidebarSessionOrder,
+    sidebarRepoNames,
     handleReorderTabs,
     handleReorderRepos,
     handleReorderSidebarSessions,
+    handleRenameRepo,
   }
 }

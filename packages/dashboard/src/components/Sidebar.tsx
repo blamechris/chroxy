@@ -4,7 +4,7 @@
  * Shows repos with active/resumable sessions, filter, status footer.
  * Collapsible with Cmd+B toggle.
  */
-import { useState, useCallback, useRef, useMemo } from 'react'
+import { useState, useCallback, useRef, useMemo, useEffect } from 'react'
 import type { CumulativeUsage, McpServer, SessionInfo, SessionVisualStatus, SessionRole, ChatActivityState } from '@chroxy/store-core'
 import { formatCostBadge, formatCostBreakdown, getProviderInfo } from '@chroxy/store-core'
 import { useShallow } from 'zustand/react/shallow'
@@ -22,6 +22,7 @@ import {
   persistSidebarPanelCollapsed,
 } from '../store/persistence'
 import { moveItem, orderToIds } from '../utils/reorderById'
+import { isImeComposing } from '../utils/ime'
 import { useShortcutRegistry } from '../shortcuts/useShortcutRegistry'
 import { formatBindingForAria } from '../shortcuts/registry'
 
@@ -50,7 +51,13 @@ export interface ResumableSessionNode {
 
 export interface RepoNode {
   path: string
+  /** Display label: the user's rename (#7330) when set, else `defaultName`. */
   name: string
+  /**
+   * #7330 — the label derived from the session cwd, used to restore the default
+   * when a rename is cleared. Optional: when absent, `name` is the default.
+   */
+  defaultName?: string
   source: 'auto' | 'manual'
   exists: boolean
   activeSessions: ActiveSessionNode[]
@@ -123,6 +130,14 @@ export interface SidebarProps {
   // them up.
   onReorderRepos?: (orderedRepoPaths: string[]) => void
   onReorderSessions?: (repoPath: string, orderedSessionIds: string[]) => void
+  // #7330 — rename a repo group header. `name` is the new label; '' restores
+  // the derived default. Without it the header is not renamable.
+  onRenameRepo?: (repoPath: string, name: string) => void
+  // #7330 — ask the sidebar to start the inline rename on a header from outside
+  // it (the repo context menu's Rename). `nonce` makes repeat requests for the
+  // same repo distinct; the sidebar consumes it and calls the handled callback.
+  repoRenameRequest?: { path: string; nonce: number } | null
+  onRepoRenameRequestHandled?: () => void
   // #5200 — open the Control Room (a wide host/repo table) in the main
   // content area, launched from the bottom panel slot's header. Optional so
   // existing tests/callers don't need to wire it.
@@ -206,11 +221,75 @@ export function Sidebar({
   initialPanelCollapsed = false,
   onReorderRepos,
   onReorderSessions,
+  onRenameRepo,
+  repoRenameRequest,
+  onRepoRenameRequestHandled,
   onOpenControlRoom,
 }: SidebarProps) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [focusedIndex, setFocusedIndex] = useState(0)
   const treeRef = useRef<HTMLDivElement>(null)
+
+  // #7330 — inline rename of a repo group header. `repoRenameDoneRef` marks the
+  // edit as already finished (Enter/Escape) so the blur that follows the input
+  // unmounting does not commit a second time. `refocusRepoRef` returns focus to
+  // the header's treeitem after Enter/Escape (not after a blur-commit, where
+  // focus has deliberately moved elsewhere).
+  const [renamingRepo, setRenamingRepo] = useState<string | null>(null)
+  const [repoDraft, setRepoDraft] = useState('')
+  const repoRenameInputRef = useRef<HTMLInputElement>(null)
+  const repoRenameDoneRef = useRef(false)
+  const refocusRepoRef = useRef<string | null>(null)
+
+  const startRepoRename = useCallback((repo: RepoNode) => {
+    repoRenameDoneRef.current = false
+    refocusRepoRef.current = null
+    setRepoDraft(repo.name)
+    setRenamingRepo(repo.path)
+  }, [])
+
+  const finishRepoRename = useCallback((repo: RepoNode, mode: 'commit' | 'cancel', refocus: boolean) => {
+    if (repoRenameDoneRef.current) return
+    repoRenameDoneRef.current = true
+    if (mode === 'commit') {
+      const trimmed = repoDraft.trim()
+      // Blank, or the derived label typed back in, clears the override so the
+      // group follows its session cwd again. Unchanged text is a no-op.
+      if (trimmed !== repo.name) {
+        onRenameRepo?.(repo.path, trimmed === (repo.defaultName ?? '') ? '' : trimmed)
+      }
+    }
+    refocusRepoRef.current = refocus ? repo.path : null
+    setRenamingRepo(null)
+  }, [repoDraft, onRenameRepo])
+
+  useEffect(() => {
+    if (renamingRepo !== null && repoRenameInputRef.current) {
+      repoRenameInputRef.current.focus()
+      repoRenameInputRef.current.select()
+    }
+  }, [renamingRepo])
+
+  useEffect(() => {
+    if (renamingRepo !== null || refocusRepoRef.current === null) return
+    const path = refocusRepoRef.current
+    refocusRepoRef.current = null
+    const rows = treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? []
+    for (const row of rows) {
+      if (row.getAttribute('data-testid') === `sidebar-repo-${path}`) { row.focus(); break }
+    }
+  }, [renamingRepo])
+
+  // #7330 — consume an outside rename request (the repo context menu). An
+  // unknown path is dropped, not queued; the handled callback always fires.
+  useEffect(() => {
+    if (!repoRenameRequest) return
+    const target = repos.find(r => r.path === repoRenameRequest.path)
+    if (target && onRenameRepo) startRepoRename(target)
+    onRepoRenameRequestHandled?.()
+    // Keyed on the request object: a new request is a new object (nonce).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoRenameRequest])
   // #4972 — Sidebar reorder ladder now consults the registry so a user
   // rebind in Settings actually changes runtime behaviour. The aria-
   // keyshortcuts attribute also reads from the registry so screen
@@ -837,7 +916,7 @@ export function Sidebar({
                   // filter is applied. Reordering during an active filter is
                   // ambiguous (the on-screen list is a subset of the real
                   // order) and would persist a confusing order; gate it off.
-                  draggable={!!onReorderRepos && !filter}
+                  draggable={!!onReorderRepos && !filter && renamingRepo !== repo.path}
                   data-testid={`sidebar-repo-${repo.path}`}
                   data-drop-position={repoDragOver ?? undefined}
                   tabIndex={visibleIds.indexOf(`repo:${repo.path}`) === focusedIndex ? 0 : -1}
@@ -890,7 +969,39 @@ export function Sidebar({
                     onClick={() => toggleRepo(repo.path)}
                   >
                     <span className="sidebar-chevron">{isCollapsed ? '\u25B6' : '\u25BC'}</span>
-                    <span className="sidebar-repo-name">{repo.name}</span>
+                    {renamingRepo === repo.path ? (
+                      <input
+                        ref={repoRenameInputRef}
+                        className="sidebar-repo-rename-input"
+                        data-testid={`repo-rename-input-${repo.path}`}
+                        data-unsaved-ignore
+                        type="text"
+                        aria-label={`Rename ${repo.name}`}
+                        maxLength={80}
+                        value={repoDraft}
+                        onChange={e => setRepoDraft(e.target.value)}
+                        onKeyDown={e => {
+                          // The input sits inside the treeitem: keep its keys
+                          // away from the tree's arrow/Space/Enter handling,
+                          // the reorder ladder and the context-menu shortcut.
+                          e.stopPropagation()
+                          // Don't let an IME composition's commit key (usually
+                          // Enter) read as "commit the rename" (#8064).
+                          if (isImeComposing(e)) return
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            finishRepoRename(repo, 'commit', true)
+                          } else if (e.key === 'Escape') {
+                            e.preventDefault()
+                            finishRepoRename(repo, 'cancel', true)
+                          }
+                        }}
+                        onBlur={() => finishRepoRename(repo, 'commit', false)}
+                        onClick={e => e.stopPropagation()}
+                      />
+                    ) : (
+                      <span className="sidebar-repo-name">{repo.name}</span>
+                    )}
                     {repo.source === 'manual' && (
                       <span className="sidebar-repo-badge">pinned</span>
                     )}

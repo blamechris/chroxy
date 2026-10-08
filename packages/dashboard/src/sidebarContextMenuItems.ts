@@ -8,7 +8,7 @@
  * Per-branch items:
  *   - `session` — Rename (#7329), Duplicate Session, Copy transcript (#5547), Summarize & start
  *     new session (#5547), Open in Finder (Tauri+cwd), Close Session
- *   - `repo`    — New Session Here, Summarize & start new session targeting the
+ *   - `repo`    — New Session Here, Rename (#7330), Summarize & start new session targeting the
  *     group's most-recent session (or one item per live session when several,
  *     #5547), Open in Finder (Tauri)
  *   - `resumable` (#4249) — Resume Conversation, View Conversation (#6863,
@@ -87,6 +87,11 @@ export interface BuildSidebarContextMenuItemsArgs {
    * editor a double-click on the tab opens.
    */
   requestRenameSession: (sessionId: string) => void
+  /**
+   * #7330: start the inline rename editor on a repo-group header. The editor
+   * lives in the Sidebar header; this only raises the request.
+   */
+  requestRenameRepo: (repoPath: string) => void
 }
 
 export function buildSidebarContextMenuItems(
@@ -108,6 +113,7 @@ export function buildSidebarContextMenuItems(
     summarizeAndCreateSession,
     confirmCloseSession,
     requestRenameSession,
+    requestRenameRepo,
   } = args
 
   // Reveal helper that mirrors the App.tsx error-toast pattern so each
@@ -214,6 +220,11 @@ export function buildSidebarContextMenuItems(
         id: 'new-session',
         label: 'New Session Here',
         onClick: () => openCreateSessionAt(repoPath),
+      },
+      {
+        id: 'rename',
+        label: 'Rename',
+        onClick: () => requestRenameRepo(repoPath),
       },
       ...summarizeItems,
       {

@@ -188,6 +188,7 @@ import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiCh
 import { createShortcutRegistry } from './shortcuts/registry'
 import { DEFAULT_SHORTCUTS } from './shortcuts/defaults'
 import { __setSharedRegistryForTesting } from './shortcuts/useShortcutRegistry'
+import { persistSidebarRepoNames } from './store/persistence'
 
 // Mutable state override — tests can change this before rendering
 let stateOverrides: Record<string, unknown> = {}
@@ -2667,6 +2668,157 @@ describe('App', () => {
         fireEvent.keyDown(input, { key: 'Escape' })
         expect(document.querySelector('.tab-rename-input')).toBeNull()
       }
+    })
+  })
+
+  // #7330 — a repo group header's label is derived from the session cwd, so it
+  // could not be renamed. The header's context menu (right-click, ContextMenu
+  // key, Shift+F10) now offers Rename, which edits the label inline and stores
+  // it by group path next to the sidebar orderings.
+  describe('sidebar repo-group Rename (#7330)', () => {
+    const REPO = '/tmp/fixture'
+    const headerId = `repo-header-${REPO}`
+    const repoState = () => ({
+      connectionPhase: 'connected' as const,
+      sessions: [
+        { sessionId: 's1', name: 'Alpha', cwd: REPO, type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null },
+      ],
+      activeSessionId: 's1',
+    })
+    const groupLabel = () => screen.getByTestId(headerId).querySelector('.sidebar-repo-name')?.textContent
+    const startRename = () => {
+      fireEvent.contextMenu(screen.getByTestId(headerId))
+      fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename' }))
+      return screen.getByTestId(`repo-rename-input-${REPO}`) as HTMLInputElement
+    }
+    const resetNames = () => persistSidebarRepoNames({})
+    beforeEach(resetNames)
+    afterEach(resetNames)
+
+    it('defaults to the label derived from the cwd', () => {
+      stateOverrides = repoState()
+      render(<App />)
+      expect(groupLabel()).toBe('fixture')
+    })
+
+    it('right-click → Rename opens a focused inline input prefilled with the label; Enter commits', () => {
+      stateOverrides = repoState()
+      render(<App />)
+      const input = startRename()
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+      expect(input.value).toBe('fixture')
+      expect(document.activeElement).toBe(input)
+      fireEvent.change(input, { target: { value: '  Renamed  ' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(screen.queryByTestId(`repo-rename-input-${REPO}`)).toBeNull()
+      expect(groupLabel()).toBe('Renamed')
+      // Focus returns to the group's treeitem so the keyboard user keeps place.
+      expect(document.activeElement).toBe(screen.getByTestId(headerId).closest('[role="treeitem"]'))
+    })
+
+    it('Escape cancels without changing the label', () => {
+      stateOverrides = repoState()
+      render(<App />)
+      const input = startRename()
+      fireEvent.change(input, { target: { value: 'Discarded' } })
+      fireEvent.keyDown(input, { key: 'Escape' })
+      expect(screen.queryByTestId(`repo-rename-input-${REPO}`)).toBeNull()
+      expect(groupLabel()).toBe('fixture')
+      expect(Object.keys(localStorage).some(k => k.includes('sidebar_repo_names'))).toBe(false)
+    })
+
+    it('survives an app remount (reload)', () => {
+      stateOverrides = repoState()
+      const first = render(<App />)
+      const input = startRename()
+      fireEvent.change(input, { target: { value: 'Kept' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      first.unmount()
+      render(<App />)
+      expect(groupLabel()).toBe('Kept')
+    })
+
+    it('clearing the name restores the derived label, and that survives a remount too', () => {
+      stateOverrides = repoState()
+      const first = render(<App />)
+      let input = startRename()
+      fireEvent.change(input, { target: { value: 'Temp' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(groupLabel()).toBe('Temp')
+      input = startRename()
+      expect(input.value).toBe('Temp')
+      fireEvent.change(input, { target: { value: '   ' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(groupLabel()).toBe('fixture')
+      first.unmount()
+      render(<App />)
+      expect(groupLabel()).toBe('fixture')
+    })
+
+    it('the ContextMenu key on a focused group opens the menu; Rename then Enter works from the keyboard', () => {
+      stateOverrides = repoState()
+      render(<App />)
+      const treeitem = screen.getByTestId(headerId).closest('[role="treeitem"]') as HTMLElement
+      treeitem.focus()
+      fireEvent.keyDown(treeitem, { key: 'ContextMenu' })
+      const menu = screen.getByRole('menu')
+      // Menu opens on its first item; arrow to Rename and activate with Enter.
+      const rename = within(menu).getByRole('menuitem', { name: 'Rename' })
+      let guard = 0
+      while (document.activeElement !== rename && guard++ < 10) {
+        fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'ArrowDown' })
+      }
+      expect(document.activeElement).toBe(rename)
+      fireEvent.keyDown(rename, { key: 'Enter' })
+      const input = screen.getByTestId(`repo-rename-input-${REPO}`) as HTMLInputElement
+      expect(document.activeElement).toBe(input)
+      fireEvent.change(input, { target: { value: 'ViaKeys' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(groupLabel()).toBe('ViaKeys')
+    })
+
+    it('Shift+F10 on a focused group opens the same menu', () => {
+      stateOverrides = repoState()
+      render(<App />)
+      const treeitem = screen.getByTestId(headerId).closest('[role="treeitem"]') as HTMLElement
+      treeitem.focus()
+      fireEvent.keyDown(treeitem, { key: 'F10', shiftKey: true })
+      expect(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename' })).toBeInTheDocument()
+    })
+
+    it('typing in the input does not toggle the group or leak keys to the tree', () => {
+      stateOverrides = repoState()
+      render(<App />)
+      const input = startRename()
+      const row = screen.getByTestId(headerId).closest('[role="treeitem"]') as HTMLElement
+      expect(row.getAttribute('aria-expanded')).toBe('true')
+      fireEvent.click(input)
+      fireEvent.keyDown(input, { key: ' ' })
+      fireEvent.keyDown(input, { key: 'ArrowLeft' })
+      // Shift+F10 inside the input must not open the group's context menu.
+      fireEvent.keyDown(input, { key: 'F10', shiftKey: true })
+      expect(screen.queryByRole('menu')).toBeNull()
+      expect(row.getAttribute('aria-expanded')).toBe('true')
+      expect(row.getAttribute('draggable')).toBe('false')
+    })
+
+    it('a worktree-grouped repo renames with no special case (keyed by the group path)', () => {
+      const chroxy = '/Users/me/Projects/chroxy'
+      stateOverrides = {
+        connectionPhase: 'connected' as const,
+        sessions: [
+          { sessionId: 's1', name: 'Plain', cwd: chroxy, type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null, provider: 'claude-sdk', worktree: false },
+          { sessionId: 's2', name: 'WT', cwd: '/Users/me/.chroxy/worktrees/34914672f8578ecdf71accf8f8aec47e', repoCwd: chroxy, type: 'cli' as const, hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: 2, conversationId: null, provider: 'claude-sdk', worktree: true },
+        ],
+        activeSessionId: 's1',
+      }
+      render(<App />)
+      fireEvent.contextMenu(screen.getByTestId(`repo-header-${chroxy}`))
+      fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename' }))
+      const input = screen.getByTestId(`repo-rename-input-${chroxy}`)
+      fireEvent.change(input, { target: { value: 'Chroxy main' } })
+      fireEvent.keyDown(input, { key: 'Enter' })
+      expect(screen.getByTestId(`repo-header-${chroxy}`).querySelector('.sidebar-repo-name')?.textContent).toBe('Chroxy main')
     })
   })
 
