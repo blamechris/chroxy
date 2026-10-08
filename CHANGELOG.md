@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A permission prompt that expired or was answered no longer vanishes from
+  the transcript when you switch sessions or reload (#8348).**
+  - Permission prompts are live-only frames and are not kept in a session's
+    history, so a switch or reload rebuilt the transcript without any prompt
+    that had already ended. That also took out the compact "Permission expired
+    ... dropped" record added for a dismissed expired card (#7353).
+  - The daemon now records one `permission_outcome` entry per prompt
+    (allowed, denied, or expired) in the session history, on both the
+    in-process providers (claude-sdk) and the hook-routed ones (claude-tui).
+    It keeps only what the clients were already shown: the tool and the
+    (redacted, capped) description. It is saved in `session-state.json`, so it
+    also survives a daemon restart.
+  - Both clients replay it as a compact line: "Permission expired - Bash: ls
+    - dropped", or "Permission allowed / denied - ...". It collapses onto a
+    card the client already holds, never doubles up, and never becomes a
+    pending card.
+  - "Sync Full History" keeps the records: they are merged into the rebuilt
+    transcript by time.
+  - The recorded description is the prompt's identifying field (command, file
+    path, ...) even for a very large input, and is otherwise built from the
+    sanitised tool input, so values under sensitive keys are masked in it.
+  - Prompts raised by a BYOK Task subagent are not recorded yet (their cards
+    live inside the Task bubble, which the client cannot reconcile).
+  - A card the client already holds is corrected to the recorded outcome (for
+    example, a timed-out prompt shown as denied is relabelled expired).
+  - A prompt that was open when the daemon crashed has no recorded outcome.
 - **A dashboard window now reconnects by itself after a daemon update, and no longer
   keeps running the old dashboard code (#8268).** The window the daemon serves (the
   desktop app, a browser tab on the daemon's own address) retries with no cap and says

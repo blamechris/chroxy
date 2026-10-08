@@ -50,6 +50,9 @@ export function flattenHistory(history) {
   const lines = []
   for (const entry of history) {
     if (!entry || typeof entry !== 'object') continue
+    // #8348: a permission prompt's outcome is a transcript marker, not
+    // conversation; its `tool` field would otherwise flatten to a bare "[Bash]".
+    if (entry.type === 'permission_outcome') continue
     // extractSearchableText reads entry.message.content; chroxy history entries
     // store their text on `content`. Normalize so the shared flattener sees a
     // message-shaped object regardless of which source produced the entry.

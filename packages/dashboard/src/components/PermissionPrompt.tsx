@@ -37,6 +37,7 @@ import { isMacPlatform } from '../utils/platform'
 import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
 import { PermissionCommandEdit, isEditableCommandTool } from './PermissionCommandEdit'
 import { ASK_USER_QUESTION_TOOL, AskUserQuestionPermissionBody, askUserQuestionSummary } from './AskUserQuestionPermissionBody'
+import { PermissionOutcomeRecord } from './PermissionOutcomeRecord'
 
 // #7939: which of the three MCP config scopes a spawn-trust server came from
 // (mirrors MCP_SERVER_SOURCE in packages/server/src/byok-mcp-config.js and
@@ -302,18 +303,9 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     const droppedDescription = tool === ASK_USER_QUESTION_TOOL
       ? askUserQuestionSummary(toolInput)
       : stripExpiredNote(description) || 'Permission requested'
-    return (
-      <div
-        className="permission-prompt permission-prompt-dropped"
-        data-testid="perm-dropped-record"
-        role="status"
-        title={`${tool}: ${droppedDescription}`}
-      >
-        <span className="perm-dropped-text" id={`perm-desc-${requestId}`} tabIndex={-1}>
-          Permission expired — <span className="perm-tool">{tool}</span>: {droppedDescription} — dropped
-        </span>
-      </div>
-    )
+    // #8348: the same line a replayed `permission_outcome` renders, so the two
+    // cannot drift.
+    return <PermissionOutcomeRecord requestId={requestId} tool={tool} description={droppedDescription} outcome="expired" />
   }
 
   return (

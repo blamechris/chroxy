@@ -135,6 +135,9 @@ import {
   handleMessageQueued,
   handleMessageDequeued,
   type QueuedMessagesBuilder,
+  // --- permission_outcome (#8348) — the durable record of a finished prompt ---
+  handlePermissionOutcome,
+  buildPermissionOutcomeMessage,
   // --- user_question (#5618) — byte-identical parse + append + notify ---
   handleUserQuestion,
   OTHER_OPTION_VALUE,
@@ -1014,6 +1017,20 @@ export interface DispatchMessageMap {
     // #8336 — set on a REPLAYED question whose tool was in flight when the
     // daemon shut down (see `handleUserQuestion`). Never on a live frame.
     interrupted?: boolean
+  }
+  // --- permission_outcome (#8348) ---
+  // How a permission prompt ended, recorded by the server in history and
+  // delivered ONLY inside a replay (the live permission_* frames are transient).
+  // `historySeq` is stamped by the replay like every entry; it is not read here.
+  permission_outcome: {
+    type: 'permission_outcome'
+    sessionId?: string
+    requestId?: string
+    tool?: string
+    description?: string
+    outcome?: string
+    timestamp?: number
+    historySeq?: number
   }
   // --- multi_question_intervention (#5618) — the deny-event the builder reads ---
   multi_question_intervention: {
@@ -2342,6 +2359,119 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   }
 }
 
+const ALLOW_TOKENS: readonly string[] = ['allow', 'allowAlways', 'allowSession']
+
+/**
+ * #8348: bring a card the client already holds into line with the server's
+ * recorded outcome, keeping the card's identity (id, position, timestamp, tool
+ * input).
+ *
+ * The result always carries `permissionOutcome` (what makes the renderers show a
+ * finished-prompt record and the stale-request guard ignore a late
+ * `permission_request`), the clean `"<tool>: <description>"` content (dropping
+ * the "(Expired ...)" note a live expiry appended), and NO actionable fields
+ * (`options`). Then, by outcome:
+ *
+ *   - `allowed` / `denied`: `answered` is the decision. A more specific allow
+ *     the user chose (`allowSession`, `allowAlways`) is kept; anything else,
+ *     including a card that merely ran out its own countdown, takes the plain
+ *     token. `answeredAt` is kept when the card had one.
+ *   - `expired`: no decision was made, so `answered` is cleared, and with it a
+ *     deny the client inferred from a timeout. A countdown still running is
+ *     closed (`expiresAt` moves to now); one that already ended keeps its time.
+ *
+ * Returns `held` itself when it already is exactly that, so a repeat delivery
+ * does not rewrite the message.
+ */
+function reconcileHeldPermissionCard(held: ChatMessage, record: ChatMessage, now: number): ChatMessage {
+  const outcome = record.permissionOutcome!
+  const base: ChatMessage = {
+    ...held,
+    content: record.content,
+    ...(record.tool ? { tool: record.tool } : {}),
+    permissionOutcome: outcome,
+    options: undefined,
+  }
+  if (outcome === 'expired') {
+    base.answered = undefined
+    base.answeredAt = undefined
+    if (held.expiresAt !== undefined) base.expiresAt = Math.min(held.expiresAt, now)
+  } else {
+    base.answered =
+      outcome === 'allowed'
+        ? (held.answered && ALLOW_TOKENS.includes(held.answered) ? held.answered : 'allow')
+        : 'deny'
+    base.answeredAt = held.answeredAt ?? now
+  }
+  const same =
+    held.permissionOutcome === base.permissionOutcome &&
+    held.content === base.content &&
+    held.tool === base.tool &&
+    held.options === undefined &&
+    held.answered === base.answered &&
+    held.expiresAt === base.expiresAt
+  return same ? held : base
+}
+
+/**
+ * `permission_outcome` (#8348) — the server's durable record of how a permission
+ * prompt ended, replayed so a session switch or a reload can still show it.
+ *
+ * `permission_request` / `permission_resolved` / `permission_expired` are
+ * transient: a full-rebuild replay swaps in a message list built from history
+ * alone, so a prompt that had already expired or been answered used to vanish
+ * from the transcript — taking with it the only trace of a tool call the agent
+ * asked for and did not get. This entry is what the replay carries instead.
+ *
+ * It becomes a compact record (a `prompt` message that is never pending: no
+ * options, no `expiresAt`), with two rules about prompts the client ALREADY holds:
+ *
+ *   - NEVER TWO FOR ONE `requestId`. The search runs over `replayDedupCache`, the
+ *     view a rebuild will KEEP (#7508): in a delta replay that is everything, so a
+ *     card the client watched live collapses the outcome into itself; in a full
+ *     rebuild it is the appended tail only, so the live card in the discarded
+ *     prefix does not suppress the outcome that has to replace it.
+ *   - THE RECORDED OUTCOME IS AUTHORITATIVE. What a held card says is only what
+ *     the client inferred from the live frames, and that can be wrong: an
+ *     in-process provider resolves a TIMED-OUT or stopped prompt as a deny, so
+ *     the card was stamped `answered: 'deny'` for a prompt nobody refused; a card
+ *     that ran out its own countdown never learned that the user had answered it
+ *     from another device. Every matched card is therefore reconciled with the
+ *     outcome (see {@link reconcileHeldPermissionCard}), whatever it held, and
+ *     stamped with it, so the stale-request guard in the clients' `permission_request`
+ *     handlers recognises it as finished.
+ *
+ * No notification, unlike a live prompt: this is history, not an event.
+ */
+function dispatchPermissionOutcome<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['permission_outcome'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const payload = handlePermissionOutcome(msg as Record<string, unknown>)
+  if (!payload) return
+  const sessionId = payload.sessionId ?? adapter.getActiveSessionId()
+  const record = buildPermissionOutcomeMessage(payload)
+  if (!sessionId || !adapter.hasSession(sessionId)) {
+    adapter.addMessage(record)
+    return
+  }
+  adapter.updateSession(sessionId, (ss) => {
+    const searchable = replayDedupCache(sessionId, ss.messages)
+    // The view is either the array itself or a tail slice of it, so the
+    // difference in length IS the offset back into `ss.messages`.
+    const offset = ss.messages.length - searchable.length
+    const found = searchable.findIndex((m) => m.type === 'prompt' && m.requestId === payload.requestId)
+    if (found === -1) return { messages: [...ss.messages, record] } as Partial<S>
+    const idx = found + offset
+    const held = ss.messages[idx]!
+    const reconciled = reconcileHeldPermissionCard(held, record, Date.now())
+    if (reconciled === held) return {} as Partial<S>
+    const next = ss.messages.slice()
+    next[idx] = reconciled
+    return { messages: next } as Partial<S>
+  })
+}
+
 /**
  * `multi_question_intervention` (#5618/#4653) — chroxy's permission-hook denied a
  * multi-question AskUserQuestion; append a {@link SessionIntervention} so the
@@ -2538,6 +2668,8 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     },
     // --- user_question (#5618) — byte-identical append + notify ---
     user_question: dispatchUserQuestion,
+    // --- permission_outcome (#8348) — the durable record of a finished prompt ---
+    permission_outcome: dispatchPermissionOutcome,
     // --- multi_question_intervention (#5618) — byte-identical builder + append ---
     multi_question_intervention: dispatchMultiQuestionIntervention,
     // --- checkpoint cases (#5618 Batch 6) ---
@@ -2634,6 +2766,8 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'thinking_level_changed',
   // --- user_question (#5618) — byte-identical append + notify ---
   'user_question',
+  // --- permission_outcome (#8348) — the durable record of a finished prompt ---
+  'permission_outcome',
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
   'multi_question_intervention',
   // --- checkpoint cases (#5618 Batch 6) ---

@@ -18,7 +18,7 @@
  * unchanged.
  */
 
-import type { ChatMessage } from '../types'
+import type { ChatMessage, PermissionOutcomeKind } from '../types'
 import { nextMessageId } from '../utils'
 import { parseRawStringField, parseStringField, parseUnknownArrayField } from './_shared'
 
@@ -117,6 +117,72 @@ export function handlePermissionResolved(
   return {
     requestId: parseRawStringField(msg, 'requestId'),
     decision: parseRawStringField(msg, 'decision'),
+  }
+}
+
+/**
+ * Parsed payload from a `permission_outcome` message (#8348): the server's
+ * durable record of how a permission prompt ended, delivered inside a history
+ * replay (the live `permission_*` frames are transient and are not replayed).
+ *
+ * `requestId` is the key a held live card is matched on; a payload without one is
+ * malformed and parses to `null` (the caller drops it), as does an unknown
+ * `outcome` — a card must never be built from a value no renderer knows how to
+ * label. `tool` / `description` are what the client was shown when the prompt
+ * was raised, defaulted to `''` when absent.
+ */
+export interface PermissionOutcomePayload {
+  requestId: string
+  tool: string
+  description: string
+  outcome: PermissionOutcomeKind
+  sessionId: string | null
+  timestamp: number | null
+}
+
+const PERMISSION_OUTCOME_KINDS: readonly string[] = ['allowed', 'denied', 'expired']
+
+export function handlePermissionOutcome(
+  msg: Record<string, unknown>,
+): PermissionOutcomePayload | null {
+  const requestId = parseRawStringField(msg, 'requestId')
+  if (!requestId) return null
+  const outcome = msg.outcome
+  if (typeof outcome !== 'string' || !PERMISSION_OUTCOME_KINDS.includes(outcome)) return null
+  return {
+    requestId,
+    tool: parseRawStringField(msg, 'tool') ?? '',
+    description: parseRawStringField(msg, 'description') ?? '',
+    outcome: outcome as PermissionOutcomeKind,
+    sessionId: parseRawStringField(msg, 'sessionId'),
+    timestamp: typeof msg.timestamp === 'number' && Number.isFinite(msg.timestamp) ? msg.timestamp : null,
+  }
+}
+
+/**
+ * The transcript record for a {@link PermissionOutcomePayload}: a `prompt`
+ * message that is never pending (no `options`, no `expiresAt`), shaped like the
+ * live card (`content` is `"<tool>: <description>"`) so the two read the same.
+ * `allowed` / `denied` also stamp `answered` with the decision token, so every
+ * "was this prompt answered?" check (`isPermissionRequestAnswered`) agrees with
+ * a live card that was answered; `expired` made no decision and leaves it unset.
+ */
+export function buildPermissionOutcomeMessage(payload: PermissionOutcomePayload): ChatMessage {
+  const { requestId, tool, description, outcome, sessionId, timestamp } = payload
+  const content = tool
+    ? (description ? `${tool}: ${description}` : tool)
+    : (description || 'Permission required')
+  return {
+    id: nextMessageId('perm'),
+    type: 'prompt',
+    content,
+    ...(tool ? { tool } : {}),
+    requestId,
+    permissionOutcome: outcome,
+    ...(outcome === 'allowed' ? { answered: 'allow' } : {}),
+    ...(outcome === 'denied' ? { answered: 'deny' } : {}),
+    timestamp: timestamp ?? Date.now(),
+    ...(sessionId ? { originSessionId: sessionId } : {}),
   }
 }
 

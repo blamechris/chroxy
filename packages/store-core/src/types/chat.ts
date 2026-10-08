@@ -94,6 +94,14 @@ export interface ChatMessageQuestion {
   multiSelect?: boolean;
 }
 
+/**
+ * #8348 — how a permission prompt ended, as the server records it in history:
+ * answered `allowed` / `denied`, or `expired` (no decision: it timed out, the
+ * turn ended or was stopped, or the session cleared it). Mirrors
+ * `PermissionOutcomeSchema` on the wire (`@chroxy/protocol`).
+ */
+export type PermissionOutcomeKind = 'allowed' | 'denied' | 'expired';
+
 export interface ChatMessage {
   id: string;
   type: 'response' | 'user_input' | 'tool_use' | 'thinking' | 'prompt' | 'error' | 'system';
@@ -277,6 +285,17 @@ export interface ChatMessage {
   /** Timestamp when the user answered a permission prompt */
   answeredAt?: number;
   expiresAt?: number;
+  /**
+   * #8348 — set on a `type: 'prompt'` message that is the DURABLE RECORD of how a
+   * permission prompt ended, rebuilt from a history replay rather than raised
+   * live. Such a message carries the prompt's `requestId`, `tool` and `content`
+   * (`"<tool>: <description>"`, as the live card does) but no `options` and no
+   * `expiresAt`: it is a transcript line, never an actionable or pending card.
+   * `allowed` / `denied` also set `answered` to the matching decision token;
+   * `expired` (no decision was made) leaves it unset. Renderers show the compact
+   * record on this field.
+   */
+  permissionOutcome?: PermissionOutcomeKind;
   timestamp: number;
   /** Attachments on user_input messages (images, documents) */
   attachments?: MessageAttachment[];

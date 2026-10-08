@@ -2949,6 +2949,11 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
   const existingIdx = targetMessages.findIndex(
     (m) => m.requestId === permRequestId && m.type === 'prompt'
   );
+  // #8348: a durable outcome record for this requestId means the prompt is OVER
+  // (the server only records one once it has ended), so a request frame for it
+  // is stale and must not turn the record back into a pending card — or raise a
+  // notification for a prompt nobody can answer.
+  if (existingIdx !== -1 && targetMessages[existingIdx]?.permissionOutcome) return;
 
   if (existingIdx !== -1) {
     const updater = (ss: { messages: ChatMessage[] }) => ({

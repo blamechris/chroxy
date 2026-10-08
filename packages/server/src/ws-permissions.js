@@ -5,7 +5,7 @@ import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 import { settlePush } from './push.js'
 import { createPermissionResolver } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
-import { redactValue, sanitizeToolInput } from './redaction.js'
+import { redactValue, sanitizeToolInput, describeByNamedField } from './redaction.js'
 // #7004: the protected-path / secret-read FLOOR. Imported from permission-floor.js
 // — the leaf module that is the SINGLE source of the floor — so the hook-routed
 // path applies the byte-identical predicate the in-process path
@@ -201,6 +201,25 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     else permissionSessionMap.delete(requestId)
   }
 
+  // #8348: the permission transcript is journaled by the session manager (see
+  // SessionManager#recordPermissionOutcome). Both calls tolerate a manager that
+  // lacks the methods -- unit fixtures hand this factory a stub -- and a failure
+  // to journal must never disturb the permission response itself.
+  function recordPermissionRaised(sessionId, request) {
+    try {
+      getSessionManager?.()?.notePermissionRequest?.(sessionId, request)
+    } catch (err) {
+      log.warn(`Failed to note permission ${request?.requestId} for the transcript: ${err?.message || err}`)
+    }
+  }
+  function recordPermissionEnded(requestId, outcome) {
+    try {
+      getSessionManager?.()?.recordPermissionOutcome?.(requestId, outcome)
+    } catch (err) {
+      log.warn(`Failed to record permission ${requestId} outcome for the transcript: ${err?.message || err}`)
+    }
+  }
+
   // #5373: the session-binding check + SDK-vs-legacy dispatch + audit live in
   // the shared permission-resolver (also used by the WS handler in
   // settings-handlers.js), so the binding rule lives in ONE place. The HTTP
@@ -386,6 +405,15 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         sessionId: ownerSessionId || undefined,
       }), ownerSessionId ? undefined : unboundOnly)
 
+      // #8348: a hook-routed prompt never passes through a session event, so
+      // tell the session manager what was just shown. It is what lets the
+      // prompt's outcome be recorded in the session's transcript when it ends,
+      // so a session switch or reload can still show it. An unattributable
+      // prompt (no owning session) has no transcript to be recorded in.
+      if (ownerSessionId) {
+        recordPermissionRaised(ownerSessionId, { requestId, tool, description, input: sanitizedInput, recordDescription: describeByNamedField(toolInput) })
+      }
+
       if (pushManager) {
         // #5702 (8d): settle the fire-and-forget send so a failed phone
         // notification is logged (named), not silently dropped while the
@@ -427,6 +455,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         closed = true
         log.info(`Permission ${requestId} connection closed by client`)
         cleanup()
+        // #8348: the hook went away with no answer (its turn died or it was
+        // killed): the prompt ended undecided. A session that reported the turn's
+        // death has already recorded this (`permission_expired`); the second call
+        // finds nothing to record.
+        recordPermissionEnded(requestId, 'expired')
       }
 
       req.on('aborted', onClose)
@@ -437,6 +470,9 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         closed = true
         log.info(`Permission ${requestId} timed out, auto-denying`)
         cleanup()
+        // #8348: nobody answered in time. The clients' own countdown shows this
+        // as "Timed out"; record it so the transcript still does after a switch.
+        recordPermissionEnded(requestId, 'expired')
         sendJson(res, 200, { decision: 'deny' })
       }, 300_000)
 

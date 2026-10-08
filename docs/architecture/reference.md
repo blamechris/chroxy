@@ -271,6 +271,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `model_changed` | Active model updated by user |
 | `permission_expired` | Permission request expired or already handled |
 | `permission_mode_changed` | Permission mode changed by user |
+| `permission_outcome` | How a permission prompt ended (`allowed` / `denied` / `expired`), recorded in session history and sent only inside a history replay so a session switch or reload still shows it (#8348) |
 | `permission_request` | Permission prompt from hook/SDK |
 | `permission_resolved` | Permission resolved by another client — dismiss prompt |
 | `permission_rules_updated` | Session permission whitelist updated — broadcast to all session clients |

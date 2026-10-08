@@ -1,9 +1,33 @@
 import { EventEmitter } from 'events'
 import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
+import { redactBounded } from './redaction.js'
 
 const log = createLogger('session-message-history')
 const MAX_PENDING_STREAM_SIZE = 100 * 1024 * 1024 // 100MB
+
+/**
+ * #8348 -- the outcomes a permission prompt can end in, as recorded in history.
+ * `expired` covers every way a prompt ended with NO decision: it timed out, the
+ * turn behind it ended or was stopped, or the session cleared it.
+ */
+export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'])
+// Bounds on the two free-text fields of a `permission_outcome` entry. The
+// description already went to clients capped and redacted; these bound what the
+// ring buffer and the state file keep, so a long hook-path description (the hook
+// route broadcasts it uncapped) cannot bloat either.
+export const PERMISSION_OUTCOME_TOOL_MAX = 100
+export const PERMISSION_OUTCOME_DESCRIPTION_MAX = 500
+
+function clipText(value, max) {
+  const text = typeof value === 'string' ? value : ''
+  return text.length > max ? text.slice(0, max - 1) + '\u2026' : text
+}
+
+/** Pattern-redact (never cutting a token in half), THEN clip: clipping first could leave a partial secret the patterns miss. */
+function clipRedacted(value, max) {
+  return clipText(redactBounded(typeof value === 'string' ? value : ''), max)
+}
 
 /**
  * Manages per-session message history ring buffers, stream delta accumulation,
@@ -577,6 +601,37 @@ export class SessionMessageHistory extends EventEmitter {
         }, sessionId)
         persistNeeded = true
         break
+
+      case 'permission_outcome': {
+        // #8348 -- the durable record of how a permission prompt ended. The live
+        // `permission_request` / `permission_resolved` / `permission_expired`
+        // frames are transient (never in the ring buffer), so a full-rebuild
+        // replay (session switch, reload) cannot show a prompt that already
+        // expired or was answered; this entry is what it replays instead.
+        //
+        // ONE entry per requestId. SessionManager's request registry already
+        // makes a second call a no-op, but the entry must not depend on its
+        // caller for that: a duplicate here would put two records in the
+        // transcript, and the ring buffer is the only place both are visible.
+        if (!data || typeof data.requestId !== 'string' || data.requestId.length === 0) break
+        if (!PERMISSION_OUTCOMES.includes(data.outcome)) break
+        for (let i = history.length - 1; i >= 0; i--) {
+          const prior = history[i]
+          if (prior && prior.type === 'permission_outcome' && prior.requestId === data.requestId) {
+            return { persistNeeded: false }
+          }
+        }
+        this._pushHistory(history, {
+          type: 'permission_outcome',
+          requestId: data.requestId,
+          tool: clipRedacted(data.tool, PERMISSION_OUTCOME_TOOL_MAX),
+          description: clipRedacted(data.description, PERMISSION_OUTCOME_DESCRIPTION_MAX),
+          outcome: data.outcome,
+          timestamp: Date.now(),
+        }, sessionId)
+        persistNeeded = true
+        break
+      }
 
       case 'user_question':
         this._pushHistory(history, {

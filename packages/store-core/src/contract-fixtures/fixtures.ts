@@ -565,6 +565,181 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
 
+  // 4c'. permission_outcome (#8348) — the server's durable record of how a
+  // permission prompt ended, replayed inside a history replay. It becomes a
+  // compact `prompt` record (never pending: no options, no expiresAt), and it
+  // never doubles up with a card the client already holds for the same
+  // requestId. No notification is raised (it is history, not an event), so only
+  // the message list is asserted — byte-identical on both clients.
+  {
+    name: 'permission_outcome appends an expired record to the target session',
+    type: 'permission_outcome',
+    init: { sessions: { s1: {} } },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1',
+      tool: 'Bash', description: 'ls -la', outcome: 'expired', historySeq: 3,
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [{
+            type: 'prompt', content: 'Bash: ls -la', tool: 'Bash',
+            requestId: 'perm-1', permissionOutcome: 'expired',
+          }],
+        },
+      },
+    },
+  },
+  {
+    name: 'permission_outcome records an allowed prompt as answered "allow"',
+    type: 'permission_outcome',
+    init: { sessions: { s1: {} } },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-2',
+      tool: 'Write', description: 'notes.txt', outcome: 'allowed',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [{
+            type: 'prompt', content: 'Write: notes.txt', requestId: 'perm-2',
+            permissionOutcome: 'allowed', answered: 'allow',
+          }],
+        },
+      },
+    },
+  },
+  {
+    name: 'permission_outcome records a denied prompt as answered "deny"',
+    type: 'permission_outcome',
+    init: { sessions: { s1: {} } },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-3',
+      tool: 'Bash', description: 'rm -rf x', outcome: 'denied',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [{
+            type: 'prompt', content: 'Bash: rm -rf x', requestId: 'perm-3',
+            permissionOutcome: 'denied', answered: 'deny',
+          }],
+        },
+      },
+    },
+  },
+  {
+    name: 'permission_outcome collapses onto a record already held (the entry replayed twice)',
+    type: 'permission_outcome',
+    init: {
+      sessions: {
+        s1: {
+          messages: [{
+            id: 'perm-held', type: 'prompt', content: 'Bash: ls', tool: 'Bash',
+            requestId: 'perm-1', permissionOutcome: 'expired', timestamp: 1,
+          }],
+        },
+      },
+    },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1',
+      tool: 'Bash', description: 'ls', outcome: 'expired',
+    },
+    expect: { noop: true },
+  },
+  {
+    name: 'permission_outcome collapses onto a live card the client already answered (no duplicate, stamped)',
+    type: 'permission_outcome',
+    init: {
+      sessions: {
+        s1: {
+          messages: [{
+            id: 'perm-live', type: 'prompt', content: 'Bash: ls', tool: 'Bash',
+            requestId: 'perm-1', answered: 'allow', answeredAt: 5, timestamp: 1,
+          }],
+        },
+      },
+    },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1',
+      tool: 'Bash', description: 'ls', outcome: 'allowed',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'perm-live', type: 'prompt', answered: 'allow', permissionOutcome: 'allowed' }] },
+      },
+    },
+  },
+  {
+    name: 'permission_outcome relabels a card an in-process timeout stamped denied as expired',
+    type: 'permission_outcome',
+    init: {
+      sessions: {
+        s1: {
+          messages: [{
+            id: 'perm-live', type: 'prompt', content: 'Bash: ls', tool: 'Bash',
+            requestId: 'perm-1', answered: 'deny', answeredAt: 5, expiresAt: 1, timestamp: 1,
+          }],
+        },
+      },
+    },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1',
+      tool: 'Bash', description: 'ls', outcome: 'expired',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'perm-live', type: 'prompt', permissionOutcome: 'expired' }] },
+      },
+    },
+  },
+  {
+    name: 'permission_outcome lets a locally expired card accept an authoritative allowed',
+    type: 'permission_outcome',
+    init: {
+      sessions: {
+        s1: {
+          messages: [{
+            id: 'perm-live', type: 'prompt', content: 'Bash: ls', tool: 'Bash',
+            requestId: 'perm-1', expiresAt: 1, timestamp: 1,
+          }],
+        },
+      },
+    },
+    message: {
+      type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1',
+      tool: 'Bash', description: 'ls', outcome: 'allowed',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'perm-live', type: 'prompt', answered: 'allow', permissionOutcome: 'allowed' }] },
+      },
+    },
+  },
+  {
+    name: 'permission_outcome falls back to addMessage when no session resolves',
+    type: 'permission_outcome',
+    message: {
+      type: 'permission_outcome', requestId: 'perm-1',
+      tool: 'Bash', description: 'ls', outcome: 'expired',
+    },
+    expect: { added: [{ type: 'prompt', content: 'Bash: ls', permissionOutcome: 'expired' }] },
+  },
+  {
+    name: 'permission_outcome is a no-op on a malformed payload (no requestId)',
+    type: 'permission_outcome',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'permission_outcome', sessionId: 's1', tool: 'Bash', description: 'ls', outcome: 'expired' },
+    expect: { noop: true },
+  },
+  {
+    name: 'permission_outcome is a no-op on an outcome no renderer can label',
+    type: 'permission_outcome',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'permission_outcome', sessionId: 's1', requestId: 'perm-1', tool: 'Bash', description: 'ls', outcome: 'maybe' },
+    expect: { noop: true },
+  },
+
   // 4d. multi_question_intervention (#5618) — append a dedup'd, ring-capped
   // SessionIntervention to the target session, and on the FIRST one push a
   // one-time system ChatMessage. Builder dedups by toolUseId (a stuck-model
