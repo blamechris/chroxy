@@ -4,8 +4,9 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import {
   SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, redactValue, redactBounded, redactWhole, sanitizeToolInput,
-  scanWindow, MAX_INPUT_CHARS, REDACT_ADMISSION_MAX,
+  scanWindow, describeByNamedField, clipRedacted, MAX_INPUT_CHARS, REDACT_ADMISSION_MAX, REDACT_SCAN_MARGIN,
 } from '../src/redaction.js'
+import { SessionMessageHistory } from '../src/session-message-history.js'
 import { createLogger, addLogListener, removeLogListener, redactSensitivePreservingEscapes } from '../src/logger.js'
 import { redactAndClip, ERROR_TEXT_MAX } from '../src/message-wire.js'
 
@@ -76,12 +77,12 @@ const CHILD_SOURCE = `
  * killed and is reported. A process can be killed in the middle of a long match, which a
  * worker thread cannot reliably be.
  */
-function timeCases(cases, deadlineMs = CASE_DEADLINE_MS) {
+function timeCases(cases, deadlineMs = CASE_DEADLINE_MS, source = CHILD_SOURCE) {
   return new Promise((resolve) => {
     const results = []
-    const child = spawn(process.execPath, ['--input-type=module', '-e', CHILD_SOURCE], { stdio: ['pipe', 'pipe', 'inherit'] })
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['pipe', 'pipe', 'inherit'] })
     let timer
-    let current = null
+    let current = 'startup: no event before the first case began'
     let settled = false
     const finish = (stuck) => {
       if (settled) return
@@ -95,6 +96,7 @@ function timeCases(cases, deadlineMs = CASE_DEADLINE_MS) {
       timer = setTimeout(() => finish(current), deadlineMs)
     }
     arm()
+    child.stdin.on('error', () => {}) // a child that never reads its input
     child.stdin.end(JSON.stringify({
       moduleUrl: new URL('../src/redaction.js', import.meta.url).href,
       loggerUrl: new URL('../src/logger.js', import.meta.url).href,
@@ -113,6 +115,14 @@ function timeCases(cases, deadlineMs = CASE_DEADLINE_MS) {
   })
 }
 
+/** A run counts only when every case reported a time at every size and nothing stalled. */
+function assertAllTimed(cases, { results, stuck }) {
+  assert.equal(stuck, null, `a case did not finish within ${CASE_DEADLINE_MS} ms: ${stuck}`)
+  assert.equal(results.length, cases.length * SIZES.length, 'every case reports a time at every size')
+  const slow = results.filter((r) => r.ms > BUDGET_MS)
+  assert.ok(slow.length === 0, `over ${BUDGET_MS} ms: ${slow.map((r) => `${r.label} @ ${r.size} = ${r.ms.toFixed(0)} ms`).join('; ')}`)
+}
+
 describe('redaction time is linear in the length of the input', () => {
   it('the grammar table covers every pattern, and only patterns that exist', () => {
     const covered = new Set(GRAMMAR.map(([pattern]) => pattern))
@@ -128,17 +138,22 @@ describe('redaction time is linear in the length of the input', () => {
     for (const [, fragments] of GRAMMAR) {
       for (const fragment of fragments) cases.push({ label: JSON.stringify(fragment.length > 40 ? fragment.slice(0, 37) + '...' : fragment), fragment })
     }
-    const { results, stuck } = await timeCases(cases)
-    assert.equal(stuck, null, `a case did not finish within ${CASE_DEADLINE_MS} ms: ${stuck}`)
-    assert.equal(results.length, cases.length * SIZES.length, 'every case reports a time at every size')
-    const slow = results.filter((r) => r.ms > BUDGET_MS)
-    assert.ok(slow.length === 0, `over ${BUDGET_MS} ms: ${slow.map((r) => `${r.label} @ ${r.size} = ${r.ms.toFixed(0)} ms`).join('; ')}`)
+    assertAllTimed(cases, await timeCases(cases))
   })
 
   it('a run of dash-joined headers is read once, however long it is', { timeout: 20_000 }, async () => {
-    const { results, stuck } = await timeCases([{ label: 'dash-joined', fragment: 'eyJ-' }], 3000)
-    assert.equal(stuck, null, `did not finish: ${stuck}`)
-    assert.ok(results.every((r) => r.ms < BUDGET_MS), 'bounded at every size')
+    const cases = [{ label: 'dash-joined', fragment: 'eyJ-' }]
+    assertAllTimed(cases, await timeCases(cases, 3000))
+  })
+
+  it('the harness fails a child that never starts, and one that reports nothing', async () => {
+    const cases = [{ label: 'x', fragment: 'x' }]
+    const stalled = await timeCases(cases, 400, 'setInterval(() => {}, 1000)')
+    assert.ok(typeof stalled.stuck === 'string' && stalled.stuck.startsWith('startup'), `startup stall reported: ${stalled.stuck}`)
+    assert.throws(() => assertAllTimed(cases, stalled))
+    const empty = await timeCases(cases, 2000, "process.stdout.write('{\"done\":true}\\n')")
+    assert.equal(empty.results.length, 0)
+    assert.throws(() => assertAllTimed(cases, empty), /every case reports a time/)
   })
 })
 
@@ -150,10 +165,7 @@ describe('the escape-aware pass is linear too', () => {
 
   it('finishes every 8 KiB, 64 KiB and 256 KiB input in bounded time', { timeout: 120_000 }, async () => {
     const cases = FRAGMENTS.map((fragment) => ({ label: JSON.stringify(fragment.slice(0, 30)), fragment, fn: 'escapes' }))
-    const { results, stuck } = await timeCases(cases)
-    assert.equal(stuck, null, `a case did not finish within ${CASE_DEADLINE_MS} ms: ${stuck}`)
-    const slow = results.filter((r) => r.ms > BUDGET_MS)
-    assert.ok(slow.length === 0, `over ${BUDGET_MS} ms: ${slow.map((r) => `${r.label} @ ${r.size} = ${r.ms.toFixed(0)} ms`).join('; ')}`)
+    assertAllTimed(cases, await timeCases(cases))
   })
 
   // The pass as it was before the escape search became sticky: same output, searches the rest of the text each time.
@@ -320,16 +332,22 @@ describe('redactBounded and scanWindow', () => {
     assert.equal(redactBounded(12345), '12345')
   })
 
-  it('past a ceiling, drops the tail at whitespace so no piece of a key is kept', () => {
+  it('past a ceiling, drops the tail at whitespace and the last 2 KiB, so no piece of a key is kept', () => {
     // The key starts 20 characters before the ceiling: a plain cut would leave "sk-ant-api03-AAAAA".
-    const text = `${'w'.repeat(79)} ${ANT_KEY} tail`
-    const cut = redactBounded(text, 100)
-    assert.ok(!cut.includes('sk-ant'), cut)
-    assert.equal(cut, 'w'.repeat(79))
+    const text = `${'w'.repeat(4979)} ${ANT_KEY} tail`
+    const cut = redactBounded(text, 5000)
+    assert.ok(!cut.includes('sk-ant'), cut.slice(-40))
+    assert.equal(cut, 'w'.repeat(4979 - REDACT_SCAN_MARGIN))
   })
 
   it('past a ceiling, drops a run that has no whitespace rather than half-keeping it', () => {
     assert.equal(redactBounded(`sk-ant-api03-${'A'.repeat(500)}`, 100), '')
+  })
+
+  it('clipRedacted keeps at most max characters less the final 2 KiB, then the marker', () => {
+    assert.equal(clipRedacted('a'.repeat(10_000), 5000, '[m]'), 'a'.repeat(5000 - REDACT_SCAN_MARGIN) + '[m]')
+    assert.equal(clipRedacted('a'.repeat(1000), 5000, '[m]'), '[m]')
+    assert.equal(clipRedacted('abc', 2), '')
   })
 
   it('reports whether the tail was discarded', () => {
@@ -384,7 +402,7 @@ describe('the logger redacts the whole line, then cuts it', () => {
     const ms = Number(process.hrtime.bigint() - started) / 1e6
     assert.ok(out.startsWith('before word word'), 'the start of the line is kept')
     assert.ok(out.endsWith('... [truncated]'), 'marked as cut')
-    assert.equal(out.length, LIMIT + '... [truncated]'.length)
+    assert.equal(out.length, LIMIT - REDACT_SCAN_MARGIN + '... [truncated]'.length)
     assert.ok(ms < BUDGET_MS * 2, `took ${ms.toFixed(0)} ms`)
   })
 
@@ -397,7 +415,7 @@ describe('the logger redacts the whole line, then cuts it', () => {
   it('a long line with no whitespace keeps its beginning', () => {
     const out = capture(`prefix:${'a'.repeat(LIMIT + 100)}`)
     assert.ok(out.startsWith('prefix:aaaa'), out.slice(0, 20))
-    assert.equal(out.length, LIMIT + '... [truncated]'.length)
+    assert.equal(out.length, LIMIT - REDACT_SCAN_MARGIN + '... [truncated]'.length, 'the beginning, less only the final 2 KiB')
   })
 
   it('secrets in the kept part of a long line are redacted', () => {
@@ -415,5 +433,80 @@ describe('the logger redacts the whole line, then cuts it', () => {
     const out = capture(`head ${'word '.repeat(REDACT_ADMISSION_MAX / 5 + 10)}`)
     assert.ok(out.startsWith('head word'))
     assert.ok(out.endsWith('... [truncated]'))
+  })
+})
+
+describe('a fragment at a cut is never shown', () => {
+  const ANT_KEY = 'sk-ant-api03-' + 'A'.repeat(60)
+  const MARKER = '... [truncated]'
+  // One key as long as the admission ceiling allows, then a quoted value that holds a space: the
+  // ceiling cuts inside the value, and what is left of it ends `password="secret`.
+  const OVER_CEILING = `sk-ant-api03-${'A'.repeat(REDACT_ADMISSION_MAX - 40)} password="secret phrase extends past limit" trailing`
+  const shown = (out) => out.command ?? out.summary
+  const logged = (message) => {
+    const entries = []
+    const listener = (entry) => entries.push(entry)
+    const quiet = mock.method(console, 'log', () => {})
+    addLogListener(listener)
+    try {
+      createLogger('redaction-bounded-time').info(message)
+    } finally {
+      removeLogListener(listener)
+      quiet.mock.restore()
+    }
+    return entries[0].message
+  }
+
+  it('a quoted value cut by the admission ceiling does not show, in tool input', () => {
+    const out = shown(sanitizeToolInput({ command: OVER_CEILING }))
+    assert.ok(!out.includes('secret'), out.slice(0, 80))
+    assert.ok(out.endsWith(MARKER))
+  })
+
+  it('a quoted value cut by the admission ceiling does not show, in the logger', () => {
+    const out = logged(OVER_CEILING)
+    assert.ok(!out.includes('secret'), out.slice(0, 80))
+    assert.ok(out.endsWith(MARKER))
+  })
+
+  it('a quoted value cut by the admission ceiling does not show, in error text', () => {
+    const out = redactAndClip(OVER_CEILING, ERROR_TEXT_MAX, '\n[truncated]')
+    assert.ok(!out.includes('secret'), out.slice(0, 80))
+    assert.ok(out.endsWith('\n[truncated]'))
+  })
+
+  it('a quoted value cut by the admission ceiling does not show, in a described field', () => {
+    const out = describeByNamedField({ command: OVER_CEILING })
+    assert.ok(!out.includes('secret'), out.slice(0, 80))
+    assert.ok(out.endsWith(MARKER))
+  })
+
+  it('a quoted value cut by the admission ceiling does not show, in the saved permission description', () => {
+    const history = new SessionMessageHistory()
+    history.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: OVER_CEILING, outcome: 'allowed' })
+    const [entry] = history.getHistory('s1')
+    assert.ok(!entry.description.includes('secret'), entry.description.slice(0, 80))
+  })
+
+  // The key is glued to the text before it, so the key pattern (which wants a word boundary) does
+  // not recognise it; the cut lands inside it.
+  const glued = (budget) => `${'y'.repeat(budget - 20)}${ANT_KEY}${'z'.repeat(100)}`
+
+  it('a key glued to the text before it, cut mid-key, leaves no fragment: tool input', () => {
+    const out = shown(sanitizeToolInput({ command: glued(MAX_INPUT_CHARS) }))
+    assert.ok(!out.includes('sk-ant'), out.slice(-60))
+  })
+
+  it('a key glued to the text before it, cut mid-key, leaves no fragment: logger', () => {
+    assert.ok(!logged(glued(64 * 1024)).includes('sk-ant'))
+  })
+
+  it('a key glued to the text before it, cut mid-key, leaves no fragment: error text and described field', () => {
+    assert.ok(!redactAndClip(glued(ERROR_TEXT_MAX), ERROR_TEXT_MAX, '\n[truncated]').includes('sk-ant'))
+    assert.ok(!describeByNamedField({ command: glued(8192) }).includes('sk-ant'))
+  })
+
+  it('a glued key that is not cut is left as it was (the boundary rule is the pattern\'s, not the cut\'s)', () => {
+    assert.equal(redactValue(`yyyy${ANT_KEY} z`), `yyyy${ANT_KEY} z`)
   })
 })

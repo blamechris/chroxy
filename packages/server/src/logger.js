@@ -20,7 +20,7 @@ import {
   openSync, readSync, closeSync, writeFileSync, truncateSync,
 } from 'fs'
 import { join } from 'path'
-import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue, redactWhole } from './redaction.js'
+import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue, redactWhole, clipRedacted } from './redaction.js'
 import { configPath } from './config-dir.js'
 
 function defaultLogDir() {
@@ -67,7 +67,8 @@ export function redactSensitive(msg) {
 
 // The most of one log line that is kept, in characters. The whole line is redacted
 // first (up to the redactor's admission ceiling) and the redacted text is then cut
-// with a plain slice and a marker, so the cut cannot expose a secret.
+// by `clipRedacted`: a slice that also drops the end of what it kept, so a fragment of
+// a pattern at the cut is not shown.
 // `redactSensitive` itself keeps all of its result: its callers redact first and then
 // keep a tail or a slice of their own.
 const LOG_LINE_MAX = 64 * 1024
@@ -77,7 +78,7 @@ function redactLogMessage(msg) {
   if (typeof msg !== 'string') return redactSensitive(msg)
   const { text, clipped } = redactWhole(msg)
   return clipped || text.length > LOG_LINE_MAX
-    ? text.slice(0, LOG_LINE_MAX) + LOG_TRUNCATION_MARKER
+    ? clipRedacted(text, LOG_LINE_MAX, LOG_TRUNCATION_MARKER)
     : text
 }
 

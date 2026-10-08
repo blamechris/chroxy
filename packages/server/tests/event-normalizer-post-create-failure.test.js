@@ -122,7 +122,7 @@ describe('EventNormalizer error mapping — #5067 post_create_command_failed', (
       stdout: oversized,
     }, ctx)
     const msg = result.messages[0].msg
-    assert.equal(msg.stdout.length, 8192)
+    assert.equal(msg.stdout.length, 8192 - 2048) // within the cap, less the final 2 KiB of a clipped redacted result
   })
 
   it('truncates stderr to 8 KiB (matches wire schema cap)', () => {
@@ -134,7 +134,7 @@ describe('EventNormalizer error mapping — #5067 post_create_command_failed', (
       stderr: oversized,
     }, ctx)
     const msg = result.messages[0].msg
-    assert.equal(msg.stderr.length, 8192)
+    assert.equal(msg.stderr.length, 8192 - 2048)
   })
 
   it('forwards just stdout when stderr is silent', () => {

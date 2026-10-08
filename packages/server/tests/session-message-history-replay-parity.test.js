@@ -597,6 +597,21 @@ describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2
     })
   }
 
+  it('a message past the budget is cut at whitespace-free text too, and a key crossing THAT is gone (delimiter-free, glued to the text before it)', () => {
+    const filler = 'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)
+    const wire = buildErrorWire({ message: `${filler}${ANT_KEY}${'z'.repeat(100)}` })
+    assert.ok(!wire.content.includes('sk-ant'), 'no fragment of the key survives')
+    assert.ok(wire.content.length <= ERROR_TEXT_MAX)
+    assert.ok(wire.content.endsWith('[truncated]'))
+  })
+
+  it('the same glued key through redactAndClip with a budget it crosses: no fragment survives', () => {
+    const text = `${'y'.repeat(ERROR_REDACT_SCAN_MAX - 20)}${ANT_KEY}${'z'.repeat(100)}`
+    const out = redactAndClip(text, ERROR_REDACT_SCAN_MAX, '[cut]')
+    assert.ok(!out.includes('sk-ant'), 'no fragment of the key survives')
+    assert.ok(out.endsWith('[cut]'))
+  })
+
   it('a message is redacted whole before it is cut, so a key crossing the budget is gone', () => {
     const filler = 'y'.repeat(ERROR_TEXT_MAX - 20)
     const wire = buildErrorWire({ message: `${filler} ${ANT_KEY} ${'z'.repeat(100)}` })
@@ -612,17 +627,17 @@ describe('a secret crossing the clip bound is gone, not half-kept (#6630 round 2
     assert.ok(out.endsWith('[REDACTED] tail'))
   })
 
-  it('still slices (rather than drops) a whitespace-free output stream longer than its cap that holds no secret', () => {
-    // 20,000 characters: past the scan bound, but the 8 KiB kept is far enough below it that the cut is harmless.
+  it('slices a whitespace-free output stream longer than its cap that holds no secret, less the final 2 KiB', () => {
     const wire = buildErrorWire({ message: 'm', code: 'post_create_command_failed', stdout: 'b'.repeat(20_000), stderr: 'c'.repeat(8_193) })
-    assert.equal(wire.stdout.length, 8192)
-    assert.equal(wire.stderr.length, 8192)
+    assert.equal(wire.stdout.length, 8192 - 2048)
+    assert.equal(wire.stderr.length, 8192 - 2048)
+    assert.ok(wire.stdout.startsWith('bbbb'))
   })
 
-  it('keeps a whitespace-free message that fits, and the beginning of one that does not', () => {
+  it('keeps a whitespace-free message that fits, and the beginning of one that does not (less the final 2 KiB)', () => {
     assert.equal(buildErrorWire({ message: 'a'.repeat(ERROR_TEXT_MAX) }).content.length, ERROR_TEXT_MAX)
     const long = buildErrorWire({ message: 'a'.repeat(ERROR_TEXT_MAX + 1) }).content
-    assert.equal(long.length, ERROR_TEXT_MAX)
+    assert.equal(long.length, ERROR_TEXT_MAX - 2048)
     assert.ok(long.startsWith('aaaa'))
     assert.ok(long.endsWith('\n[truncated]'))
   })

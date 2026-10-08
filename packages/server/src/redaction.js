@@ -219,11 +219,13 @@ const MAX_SANITIZE_DEPTH = 8
  */
 function redactDeep(value, depth, seen, maxChars = MAX_INPUT_CHARS) {
   if (typeof value === 'string') {
-    // Redact the whole string, then cut the redacted result: a slice of redacted
-    // text cannot expose a secret, a cut of the raw text can.
+    // Redact the whole string, then cut the redacted result (`clipRedacted`).
     const { text: redacted, clipped } = redactWhole(value)
     return clipped || redacted.length > maxChars
-      ? redacted.slice(0, maxChars) + '... [truncated]'
+      // The cap is taken from the text before the unsafe tail, so a value longer than
+      // the cap by more than the margin keeps exactly maxChars (and a whole input
+      // that is still over the cap is summarized, as it always was).
+      ? clipRedacted(redacted, maxChars + REDACT_SCAN_MARGIN, '... [truncated]')
       : redacted
   }
   if (!value || typeof value !== 'object') return value
@@ -302,6 +304,7 @@ const PULL_MAX_INPUT_CHARS = 512 * 1024 // 512K chars
  * The most text of one record's identifying field that is kept, in characters.
  */
 const NAMED_FIELD_MAX_CHARS = 8192
+const NAMED_FIELD_MARKER = '... [truncated]'
 
 /**
  * The most text the pattern redactor is ever handed in one call, in characters. It
@@ -331,10 +334,40 @@ export function scanWindow(text, scanMax) {
 }
 
 /**
+ * How much of the end of a clipped, redacted result is not kept. A pattern fragment
+ * that straddled a cut (the front of a key, an unterminated quoted value) is at most
+ * this far from the end of the kept text: the quoted-value bound is 1024 characters
+ * and every other pattern needs far less, and replacements before the fragment only
+ * shorten the text ahead of it.
+ */
+export const REDACT_SCAN_MARGIN = 2048
+
+/** `text` without the last {@link REDACT_SCAN_MARGIN} characters. */
+export function withoutUnsafeTail(text) {
+  return text.slice(0, Math.max(0, text.length - REDACT_SCAN_MARGIN))
+}
+
+/**
+ * The one rule for every cut of redacted text. Keep at most `max` characters of
+ * `redacted`, drop the last {@link REDACT_SCAN_MARGIN} of those, and append `marker`.
+ * Callers use it whenever the result is clipped, whether by length or because the
+ * tail of the raw text was discarded at the ceiling; unclipped text is returned as it
+ * is, without calling this.
+ *
+ * @param {string} redacted
+ * @param {number} max
+ * @param {string} [marker]
+ * @returns {string}
+ */
+export function clipRedacted(redacted, max, marker = '') {
+  return withoutUnsafeTail(redacted.slice(0, Math.max(0, max))) + marker
+}
+
+/**
  * Redact the whole of `text`, up to the admission ceiling. `clipped` says the text
- * was longer than the ceiling and its tail was discarded (see {@link scanWindow}).
- * Callers that bound what they keep or show cut the REDACTED text afterwards, with a
- * plain slice, never the raw text beforehand.
+ * was longer than the ceiling and its tail was discarded (see {@link scanWindow});
+ * the redacted text can then end in a fragment of a match that the discarded tail
+ * would have completed, and the caller cuts it with {@link clipRedacted}.
  *
  * @param {unknown} text
  * @param {number} [ceiling]
@@ -347,14 +380,17 @@ export function redactWhole(text, ceiling = REDACT_ADMISSION_MAX) {
 }
 
 /**
- * Redact `text` whole (up to the ceiling) and return it. Callers clip AFTER this.
+ * Redact `text` whole (up to the ceiling) and return it, for callers that cut the
+ * result themselves. Past the ceiling the end of the result is dropped as well
+ * ({@link withoutUnsafeTail}).
  *
  * @param {unknown} text
  * @param {number} [ceiling]
  * @returns {string}
  */
 export function redactBounded(text, ceiling = REDACT_ADMISSION_MAX) {
-  return redactWhole(text, ceiling).text
+  const { text: redacted, clipped } = redactWhole(text, ceiling)
+  return clipped ? withoutUnsafeTail(redacted) : redacted
 }
 
 /**
@@ -370,7 +406,11 @@ export function redactBounded(text, ceiling = REDACT_ADMISSION_MAX) {
 export function describeByNamedField(rawInput) {
   if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) return undefined
   const named = rawInput.description || rawInput.command || rawInput.file_path || rawInput.pattern || rawInput.query
-  return named ? redactBounded(String(named)).slice(0, NAMED_FIELD_MAX_CHARS) : undefined
+  if (!named) return undefined
+  const { text, clipped } = redactWhole(String(named))
+  return clipped || text.length > NAMED_FIELD_MAX_CHARS
+    ? clipRedacted(text, NAMED_FIELD_MAX_CHARS - NAMED_FIELD_MARKER.length, NAMED_FIELD_MARKER)
+    : text
 }
 
 export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, JWT_PATTERN, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }

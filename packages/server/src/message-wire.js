@@ -17,7 +17,7 @@
  * (`contract-fixtures/replay-parity-data.ts`) prove it.
  */
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
-import { redactWhole } from './redaction.js'
+import { redactWhole, clipRedacted } from './redaction.js'
 
 /**
  * #6941 review (Copilot) — coerce+bound a footer-stat numeric field
@@ -209,15 +209,11 @@ const ERROR_TRUNCATION_MARKER = '\n[truncated]'
  * use (`redactValue`), here in the shared builder so the live frame and the
  * recorded entry are identical.
  *
- * ORDER matters: redact the COMPLETE text, then cut. Cutting first can leave the
- * front of a key the patterns no longer recognise when the bound falls inside it.
- * After redaction the keys are already gone, so the cut can be a plain slice (the
- * post-create caps have always sliced rather than dropped, and a test pins it).
- *
- * The whole text is redacted (`redactWhole`), so a secret that straddles the budget
- * is gone before the cut. Only text past the redactor's admission ceiling loses its
- * tail first, at the last whitespace (a run with none is discarded, never
- * half-kept); that is the one lossy case.
+ * ORDER matters: redact the COMPLETE text (`redactWhole`), then cut it with
+ * `clipRedacted`, which also drops the last 2 KiB it would have kept, so a fragment of
+ * a pattern at the cut is not shown (a key that sits against the text before it and so
+ * is not recognised, or the front of a quoted value whose end was discarded at the
+ * redactor's admission ceiling). Text that is not clipped is returned as redacted.
  *
  * @param {string} text
  * @param {number} max  character budget for the result, marker included
@@ -227,8 +223,7 @@ const ERROR_TRUNCATION_MARKER = '\n[truncated]'
 export function redactAndClip(text, max, marker = '') {
   const { text: redacted, clipped } = redactWhole(text)
   if (redacted.length <= max && !clipped) return redacted
-  if (redacted.length <= max - marker.length) return redacted + marker
-  return redacted.slice(0, Math.max(0, max - marker.length)) + marker
+  return clipRedacted(redacted, max - marker.length, marker)
 }
 
 /** The error message: redacted, then bounded with a marker that fits inside the budget. */
