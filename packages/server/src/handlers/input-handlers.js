@@ -1349,25 +1349,23 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     const qlog = sessionLogger(questionSessionId)
     qlog.info(`user_question_response received: toolUseId=${msg.toolUseId || '?'} answer.length=${(msg.answer || '').length} answers.keys=${msg.answers ? Object.keys(msg.answers).length : 0} freeform=${hasFreeform ? msg.freeformText.length : 0}`)
     // #4668: forward msg.toolUseId so claude-tui-session can route the
-    // answer to the right pending entry in its Map. Sessions that don't
-    // care about toolUseId (cli-session, sdk-session via permission-
-    // manager) ignore the extra argument — JS positional args make this
-    // a safe addition. ByokSession's respondToQuestion forwards to
-    // _permissions.respondToQuestion which similarly ignores trailing
-    // args it doesn't read.
+    // answer to the right pending entry in its Map. #8460: SDK, BYOK and
+    // codex forward it to the permission manager, which refuses an answer
+    // whose id is not the pending question's. cli-session ignores it.
     // #4651: forward msg.freeformText as a final opts object — claude-tui-
     // session uses it to drive the two-stage Other-path write (digit →
     // text-input prompt → freeform text + Enter). Other providers ignore
     // the trailing arg.
     const opts = hasFreeform ? { freeformText: msg.freeformText } : undefined
-    entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId, opts)
+    const delivered = entry.session.respondToQuestion(msg.answer, msg.answers, msg.toolUseId, opts)
     // #8362: the one place every provider's answer passes through. cli and tui
     // deliver the answer before the tool's result event arrives, so without this
     // record a restart in that window labels an answered question interrupted.
     // Only an actionable answer counts (the TUI driver drops an empty one without
     // an answers map); anything else stays unanswered and is swept as before.
     // "Accepted" means this handler accepted the answer, NOT that the provider
-    // delivered it: respondToQuestion returns nothing, and a provider can still
+    // delivered it: apart from the #8460 refusal below, which returns `false`,
+    // respondToQuestion reports nothing, and a provider can still silently
     // drop the answer -- the claude-tui form driver with no pending entry or no
     // terminal, its multi-select refuse branch, the CLI with `_waitingForAnswer`
     // false, a permission manager with nothing pending (SDK / BYOK). That is
@@ -1377,7 +1375,11 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     // tool, synthetic or the provider's own error result, so marking it
     // answered hides no real interrupted state.
     const hasAnswers = msg.answers && typeof msg.answers === 'object' && Object.keys(msg.answers).length > 0
-    if (msg.answer.length > 0 || hasAnswers) {
+    // #8460: the one drop the provider REPORTS -- an answer the permission manager
+    // (SDK / BYOK / codex) refused because its toolUseId is not the pending
+    // question's -- returns `false`. That answer was for a question that is no
+    // longer the one being asked, so it must not mark anything answered.
+    if (delivered !== false && (msg.answer.length > 0 || hasAnswers)) {
       ctx.sessions.sessionManager.recordQuestionAnswered?.(questionSessionId, msg.toolUseId)
     }
   }

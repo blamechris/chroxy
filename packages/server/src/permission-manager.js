@@ -1087,9 +1087,26 @@ export class PermissionManager extends EventEmitter {
    *
    * @param {string} text - The user's text answer
    * @param {Object} [answersMap] - Per-question answers map
+   * @param {string} [toolUseId] - #8460: the chroxy question id the answer was
+   *   given for (the `ask-...` id on the `user_question` frame). When supplied and
+   *   it is not the pending question's, the answer is for a different question
+   *   (a retry, a second client, a reconnect re-send landing after the first
+   *   question was answered or timed out), so it is dropped rather than resolved
+   *   against whichever question happens to be pending now. Absent, the answer
+   *   goes to the pending question as before. `typeof === 'string'`, not
+   *   truthiness: an empty id is still an id, and still not this question's.
+   * @returns {boolean|undefined} `false` only when the answer was refused for a
+   *   mismatching `toolUseId` (the pending question is untouched, nothing reached
+   *   the agent). `undefined` otherwise, including "nothing was pending".
    */
-  respondToQuestion(text, answersMap) {
+  respondToQuestion(text, answersMap, toolUseId = undefined) {
     if (!this._pendingUserAnswer) return
+    if (typeof toolUseId === 'string' && toolUseId !== this._pendingUserAnswer.toolUseId) {
+      this._logWarn(
+        `Question response dropped: answer is for ${JSON.stringify(toolUseId)} but the pending question is ${JSON.stringify(this._pendingUserAnswer.toolUseId)}`,
+      )
+      return false
+    }
     this._clearQuestionTimer()
     // #3988: include toolUseId on the answered emit for symmetry with the
     // other 3 question-variant emit sites (aborted/timeout/cleared). The
@@ -1105,7 +1122,7 @@ export class PermissionManager extends EventEmitter {
     // (or refactor that drops the eager delete) would silently leak. Read
     // toolUseId BEFORE the null-out below, mirroring the clearAll #3975
     // pattern.
-    const { resolve, input, toolUseId } = this._pendingUserAnswer
+    const { resolve, input, toolUseId: pendingToolUseId } = this._pendingUserAnswer
     this._pendingUserAnswer = null
     this._waitingForAnswer = false
 
@@ -1114,7 +1131,7 @@ export class PermissionManager extends EventEmitter {
     // Emit before resolve() so listeners (e.g. the SdkSession
     // inactivity-timer resumer, #2831) see the state flip before any
     // downstream synchronous work runs.
-    this.emit('permission_resolved', { toolUseId, reason: 'answered' })
+    this.emit('permission_resolved', { toolUseId: pendingToolUseId, reason: 'answered' })
 
     // Build structured answers map: SDK expects { [questionText]: selectedLabel }.
     // Per @anthropic-ai/claude-agent-sdk sdk-tools.d.ts (AskUserQuestionOutput.answers,
