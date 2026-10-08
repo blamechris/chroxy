@@ -49,6 +49,8 @@
  * we silently swallow.
  */
 
+import { getTauriInvoke, getTauriListen } from './tauri-bridge'
+
 /**
  * Permission state, unified across both backends.
  *
@@ -222,27 +224,77 @@ export interface NativeNotificationOptions {
   /** Collapse key — replaces an earlier notification with the same tag. */
   tag?: string
   /**
+   * The session this notification is about. Required for `onClick` to work on
+   * the Tauri backend: the click comes back from the OS as an event carrying
+   * this id (there is no per-notification closure to call), and `onClick` is
+   * looked up by it. Ignored by the web backend, which has a real
+   * `Notification.onclick`.
+   */
+  sessionId?: string
+  /**
    * Invoked when the user clicks the notification, **after** the backend has
    * done whatever raising the window means for it. Use it for what happens
    * *inside* the app (select a session, open a view) — never for the window
    * itself, which differs per backend and is handled below.
    *
-   * ## Web backend only — and that is a real gap, not an oversight
+   * ## Per backend (#7367)
    *
-   * `Notification.onclick` is standard and reliable in a browser, so the web
-   * dashboard gets click-to-focus. **The Tauri backend silently ignores this
-   * callback.** `window.__TAURI__.notification.sendNotification()` returns
-   * `void` and exposes no click handler on desktop; the plugin's `onAction`
-   * surface is built around `registerActionTypes`, which is an Android/iOS
-   * concept. Wiring desktop click-to-focus properly means a Rust-side
-   * notification that can call `window::show_window` — a separate,
-   * platform-specific change (tracked as a follow-on to #7347).
-   *
-   * This is deliberately NOT papered over with a fallback: silently doing
-   * nothing where the caller asked for a click action is the honest state, and
-   * `native-notifications.test.ts` pins it so nobody later assumes it works.
+   * - **web** — `Notification.onclick`: reliable. Raises the window, closes the
+   *   card, then calls back.
+   * - **tauri on macOS (bundled build)** — works. `tauri-plugin-notification`
+   *   has no click callback on desktop, so the notification is delivered by the
+   *   app's own `send_session_notification` command, which owns the
+   *   `NSUserNotificationCenter` delegate. A click raises the window in Rust and
+   *   emits `notification_clicked` with the `sessionId`, which calls back here.
+   *   Requires `sessionId`.
+   * - **tauri on Windows / Linux, and an unbundled macOS dev binary** — the
+   *   notification is shown but **a click does nothing**. There is no callback
+   *   to hook and no honest substitute (a "window gained focus soon after a
+   *   notification" guess cannot tell a click from a Cmd-Tab), so the gap is left
+   *   visible rather than faked. Tracked in #7367.
    */
   onClick?: () => void
+}
+
+/** Tauri event the desktop app emits when a notification is clicked (#7367). */
+export const NOTIFICATION_CLICKED_EVENT = 'notification_clicked'
+
+/**
+ * Click handlers by session id, for the Tauri backend. The OS reports a click as
+ * an event naming the session, not as a call on the notification object, so the
+ * handler has to be findable by that id. A later notification for the same
+ * session replaces the earlier handler; the map is bounded by the number of
+ * sessions.
+ */
+const clickHandlers = new Map<string, () => void>()
+let clickListener: Promise<void> | null = null
+
+/** Test seam — forgets handlers and the listener between cases. */
+export function resetNativeNotificationClickStateForTests(): void {
+  clickHandlers.clear()
+  clickListener = null
+}
+
+/**
+ * Subscribe (once) to the desktop's click event. Never rejects: a missing or
+ * failing listener only costs the click, never the notification itself, and a
+ * failed attempt is retried by the next send.
+ */
+function ensureClickListener(): Promise<void> {
+  if (clickListener) return clickListener
+  const listen = getTauriListen()
+  if (!listen) return Promise.resolve()
+  clickListener = listen<{ session_id?: unknown }>(NOTIFICATION_CLICKED_EVENT, (event) => {
+    const id = event?.payload?.session_id
+    if (typeof id !== 'string') return
+    clickHandlers.get(id)?.()
+  }).then(
+    () => undefined,
+    () => {
+      clickListener = null
+    },
+  )
+  return clickListener
 }
 
 /**
@@ -258,9 +310,42 @@ export function sendNativeNotification(title: string, options: NativeNotificatio
 
   const tauriApi = getTauriNotificationApi()
   if (tauriApi) {
+    // Preferred route (#7367): the app's own command, which can report a click.
+    // Used for EVERY Tauri notification, not just the ones with a click handler:
+    // on macOS the notification centre has a single delegate, and the plugin
+    // installs its own on each send, which would orphan the click handler of a
+    // turn-complete card delivered earlier.
+    const invoke = getTauriInvoke()
+    if (invoke) {
+      if (options.sessionId && options.onClick) {
+        clickHandlers.set(options.sessionId, options.onClick)
+      }
+      const plugin = tauriApi
+      void ensureClickListener()
+        .then(() =>
+          invoke('send_session_notification', {
+            title,
+            body: options.body,
+            sessionId: options.sessionId,
+            tag: options.tag,
+          }),
+        )
+        .catch(() => {
+          // An older desktop binary has no such command (the dashboard is served
+          // by the daemon and can be newer than the app that hosts it), or the
+          // ACL refused it. The notification is still worth showing, without the
+          // click.
+          try {
+            plugin.sendNotification({ title, body: options.body })
+          } catch {
+            // Nothing left to try.
+          }
+        })
+      return true
+    }
     try {
-      // The plugin has no `tag` equivalent; collapsing is the OS's business.
-      // `options.onClick` is dropped here — see its doc comment.
+      // No invoke bridge (e.g. only the plugin namespace was injected): plain
+      // plugin delivery, no click and no `tag` — collapsing is the OS's business.
       tauriApi.sendNotification({ title, body: options.body })
       return true
     } catch {

@@ -104,6 +104,7 @@ describe('useTurnCompleteNotification — the turn-complete edge', () => {
     expect(mockSend).toHaveBeenCalledWith('Chroxy: chroxy', {
       body: 'Finished — awaiting your input.',
       tag: 'chroxy-turn-s1',
+      sessionId: 's1',
       onClick: expect.any(Function),
     })
     unmount()
@@ -370,6 +371,9 @@ describe('useTurnCompleteNotification — click-to-focus', () => {
     const sent = mockSend.mock.calls[0]![1]!
     sent.onClick!()
     expect(onNotificationClick).toHaveBeenCalledWith('s2')
+    // #7367 — the Tauri backend reports a click by session id, so the id the
+    // notification names must be the one the closure routes to.
+    expect(sent.sessionId).toBe('s2')
     unmount()
   })
 

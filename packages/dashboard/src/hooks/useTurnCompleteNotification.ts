@@ -90,8 +90,9 @@ export interface UseTurnCompleteNotificationOptions {
   connected: boolean
   /**
    * Called when the user clicks the notification, so the app can bring the
-   * finished session to the front. Web backend only — the Tauri plugin has no
-   * click callback on desktop (see `NativeNotificationOptions.onClick`).
+   * finished session to the front. Works on the web backend and on bundled
+   * macOS desktop builds; a notification shown on Windows / Linux cannot report
+   * a click (see `NativeNotificationOptions.onClick`, #7367).
    */
   onNotificationClick?: (sessionId: string) => void
 }
@@ -150,6 +151,9 @@ export function useTurnCompleteNotification(
         // Collapse repeat completions of the same session into one card
         // instead of stacking one per turn.
         tag: `chroxy-turn-${session.sessionId}`,
+        // The Tauri backend reports a click by session id (#7367), not through
+        // the closure below, so it needs the id as well as the callback.
+        sessionId: session.sessionId,
         onClick: () => clickRef.current?.(session.sessionId),
       })
     }

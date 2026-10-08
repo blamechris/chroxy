@@ -20,6 +20,8 @@ import {
   requestNativeNotificationPermission,
   sendNativeNotification,
   resetNativeNotificationStateForTests,
+  resetNativeNotificationClickStateForTests,
+  NOTIFICATION_CLICKED_EVENT,
 } from './native-notifications'
 
 const originalNotification = Object.getOwnPropertyDescriptor(globalThis, 'Notification')
@@ -54,6 +56,7 @@ function installTauriBackend(opts: { granted?: boolean; requestResult?: unknown 
 
 beforeEach(() => {
   resetNativeNotificationStateForTests()
+  resetNativeNotificationClickStateForTests()
   // Start every case with NO backend, i.e. jsdom's real state. Each test
   // installs exactly the backend it means to exercise.
   // @ts-expect-error — clearing the global
@@ -286,20 +289,186 @@ describe('sendNativeNotification — onClick (#7347)', () => {
     expect(instances[0]!.onclick).toBeNull()
   })
 
-  it('sends but does NOT invoke onClick on the Tauri backend — the documented desktop gap', async () => {
+  it('plugin-only Tauri (no invoke bridge): sends, but the click cannot be reported — the Windows/Linux gap', async () => {
     const api = installTauriBackend({ granted: true })
     await refreshNotificationPermission()
     const onClick = vi.fn()
 
     // The notification itself still goes out; only the click wiring is absent.
-    expect(sendNativeNotification('Chroxy: api', { body: 'Finished', onClick })).toBe(true)
+    expect(sendNativeNotification('Chroxy: api', { body: 'Finished', sessionId: 's1', onClick })).toBe(true)
     expect(api.sendNotification).toHaveBeenCalledWith({ title: 'Chroxy: api', body: 'Finished' })
     // The plugin's sendNotification returns void and takes no click callback,
-    // so there is nowhere for `onClick` to be attached. If a future plugin
-    // version gains one, THIS assertion is the thing that should be updated —
-    // deliberately, rather than the gap being discovered by a user clicking a
-    // notification and nothing happening.
+    // so there is nowhere for `onClick` to be attached. The desktop app's own
+    // command (below) is the only route that can report a click; this is the
+    // route Windows / Linux and an unbundled macOS binary still take.
     expect(onClick).not.toHaveBeenCalled()
     expect(api.sendNotification.mock.calls[0]![0]).not.toHaveProperty('onClick')
+  })
+})
+
+/**
+ * #7367 — click-to-focus on the Tauri backend.
+ *
+ * The plugin cannot report a click, so a Tauri notification is sent through the
+ * app's own `send_session_notification` command and the click comes back as a
+ * `notification_clicked` event naming the session. The fakes below stand in for
+ * `window.__TAURI_INTERNALS__.invoke` and `window.__TAURI__.event.listen`, so
+ * these pin the dashboard half of the contract: what is invoked, how a click is
+ * routed, and what happens when the command is missing. They cannot witness the
+ * OS delivering a click; the Rust-side delegate test and the owner smoke do.
+ */
+describe('sendNativeNotification — Tauri click routing (#7367)', () => {
+  type Listener = (event: { payload: unknown }) => void
+  let listeners: Map<string, Listener[]>
+  let invoke: ReturnType<typeof vi.fn>
+  const originalInternals = Object.getOwnPropertyDescriptor(window, '__TAURI_INTERNALS__')
+
+  /** Let the listener registration and the invoke (a promise chain) settle. */
+  const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+  function install(opts: { invokeImpl?: () => Promise<unknown>; withListen?: boolean } = {}) {
+    listeners = new Map()
+    invoke = vi.fn(opts.invokeImpl ?? (() => Promise.resolve(true)))
+    const api = {
+      isPermissionGranted: vi.fn().mockResolvedValue(true),
+      requestPermission: vi.fn().mockResolvedValue('granted'),
+      sendNotification: vi.fn(),
+    }
+    const listen =
+      opts.withListen === false
+        ? undefined
+        : vi.fn(async (event: string, handler: Listener) => {
+            if (!listeners.has(event)) listeners.set(event, [])
+            listeners.get(event)!.push(handler)
+            return () => {}
+          })
+    // @ts-expect-error — test double
+    window.__TAURI__ = { notification: api, event: listen ? { listen } : undefined }
+    // @ts-expect-error — test double
+    window.__TAURI_INTERNALS__ = { invoke }
+    return { api, listen }
+  }
+
+  function click(sessionId: unknown) {
+    for (const handler of listeners.get(NOTIFICATION_CLICKED_EVENT) ?? []) {
+      handler({ payload: { session_id: sessionId } })
+    }
+  }
+
+  afterEach(() => {
+    if (originalInternals) Object.defineProperty(window, '__TAURI_INTERNALS__', originalInternals)
+    // @ts-expect-error — clearing the global
+    else delete window.__TAURI_INTERNALS__
+  })
+
+  it('sends through send_session_notification, not the plugin, and passes the session and tag', async () => {
+    const { api } = install()
+    await refreshNotificationPermission()
+
+    expect(
+      sendNativeNotification('Chroxy: api', { body: 'Finished', tag: 'chroxy-turn-s1', sessionId: 's1', onClick: vi.fn() }),
+    ).toBe(true)
+    await settle()
+
+    expect(invoke).toHaveBeenCalledWith('send_session_notification', {
+      title: 'Chroxy: api',
+      body: 'Finished',
+      sessionId: 's1',
+      tag: 'chroxy-turn-s1',
+    })
+    expect(api.sendNotification).not.toHaveBeenCalled()
+  })
+
+  it('calls the handler of the session named by a notification_clicked event', async () => {
+    install()
+    await refreshNotificationPermission()
+    const onClickA = vi.fn()
+    const onClickB = vi.fn()
+    sendNativeNotification('Chroxy: a', { sessionId: 'a', onClick: onClickA })
+    sendNativeNotification('Chroxy: b', { sessionId: 'b', onClick: onClickB })
+    await settle()
+
+    click('a')
+    // Routed by the id in the event, not by whichever was sent last.
+    expect(onClickA).toHaveBeenCalledOnce()
+    expect(onClickB).not.toHaveBeenCalled()
+
+    click('b')
+    expect(onClickB).toHaveBeenCalledOnce()
+  })
+
+  it('ignores a click for a session it has no handler for, and malformed payloads', async () => {
+    install()
+    await refreshNotificationPermission()
+    const onClick = vi.fn()
+    sendNativeNotification('Chroxy: a', { sessionId: 'a', onClick })
+    await settle()
+
+    click('someone-else')
+    click(undefined)
+    click(42)
+    expect(onClick).not.toHaveBeenCalled()
+  })
+
+  it('subscribes to the click event once however many notifications are sent', async () => {
+    const { listen } = install()
+    await refreshNotificationPermission()
+    sendNativeNotification('one', { sessionId: 'a', onClick: vi.fn() })
+    sendNativeNotification('two', { sessionId: 'b', onClick: vi.fn() })
+    await settle()
+    expect(listen).toHaveBeenCalledTimes(1)
+  })
+
+  it('a later notification for the same session replaces the handler', async () => {
+    install()
+    await refreshNotificationPermission()
+    const first = vi.fn()
+    const second = vi.fn()
+    sendNativeNotification('one', { sessionId: 'a', onClick: first })
+    sendNativeNotification('two', { sessionId: 'a', onClick: second })
+    await settle()
+    click('a')
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledOnce()
+  })
+
+  it('still sends a notification without a session (permission requests) through the command', async () => {
+    const { api } = install()
+    await refreshNotificationPermission()
+    expect(sendNativeNotification('Chroxy: Permission Requested', { body: 'Run ls' })).toBe(true)
+    await settle()
+    expect(invoke).toHaveBeenCalledWith(
+      'send_session_notification',
+      expect.objectContaining({ title: 'Chroxy: Permission Requested', sessionId: undefined }),
+    )
+    expect(api.sendNotification).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the plugin when the command is missing (older desktop binary)', async () => {
+    const { api } = install({ invokeImpl: () => Promise.reject(new Error('Command send_session_notification not found')) })
+    await refreshNotificationPermission()
+    expect(sendNativeNotification('Chroxy: api', { body: 'Finished', sessionId: 's1', onClick: vi.fn() })).toBe(true)
+    await settle()
+    expect(api.sendNotification).toHaveBeenCalledWith({ title: 'Chroxy: api', body: 'Finished' })
+  })
+
+  it('still sends when the event bridge is absent — the click is lost, the notification is not', async () => {
+    const { api } = install({ withListen: false })
+    await refreshNotificationPermission()
+    const onClick = vi.fn()
+    expect(sendNativeNotification('Chroxy: api', { sessionId: 's1', onClick })).toBe(true)
+    await settle()
+    expect(invoke).toHaveBeenCalled()
+    expect(api.sendNotification).not.toHaveBeenCalled()
+    expect(onClick).not.toHaveBeenCalled()
+  })
+
+  it('does not send at all when permission is not granted', async () => {
+    install()
+    // No refreshNotificationPermission(): the cache is still the production
+    // default, so the guard must hold on the command route too.
+    expect(sendNativeNotification('Chroxy: api', { sessionId: 's1', onClick: vi.fn() })).toBe(false)
+    await settle()
+    expect(invoke).not.toHaveBeenCalled()
   })
 })
