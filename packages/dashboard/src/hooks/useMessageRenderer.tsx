@@ -263,6 +263,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           isTail={msg.id === chatTailMessageId}
           resultImages={storeMsg.toolResultImages}
           childAgentEvents={storeMsg.childAgentEvents}
+          terminatedReason={storeMsg.toolResultTerminatedReason}
         />
       )
     }

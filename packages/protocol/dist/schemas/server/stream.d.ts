@@ -123,6 +123,7 @@ export declare const ServerToolResultSchema: z.ZodObject<{
     result: z.ZodAny;
     truncated: z.ZodOptional<z.ZodBoolean>;
     isError: z.ZodOptional<z.ZodBoolean>;
+    terminatedReason: z.ZodOptional<z.ZodString>;
     input: z.ZodOptional<z.ZodAny>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;

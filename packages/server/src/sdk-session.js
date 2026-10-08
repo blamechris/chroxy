@@ -136,6 +136,26 @@ export function isSdkToolCancellationText(text) {
 }
 
 /**
+ * #7376: did the Claude CLI process die under the query (a crash or an external
+ * kill) rather than the query ending on its own? Distinct from
+ * {@link isQueryCloseError}, which is a DELIBERATE close.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isProcessExitError(err) {
+  if (!err) return false
+  const text = typeof err.message === 'string' ? err.message : String(err)
+  // The SDK transport's two shapes for a CLI process that died under the query
+  // (sdk.mjs: `Claude Code process exited with code ${code}` and
+  // `Claude Code process terminated by signal ${signal}`), ANCHORED to the start
+  // of the message so an unrelated error that merely mentions a subprocess
+  // exiting ("subprocess exited with code 1", "the Claude Code process exited
+  // with code 1 in the hook") is not read as the CLI dying. A CLI that exits 1
+  // on an API or auth failure is still a process exit, and is labelled one.
+  return /^Claude Code process (?:exited with code -?\d+|terminated by signal SIG[A-Z0-9]+)\b/.test(text)
+}
+
+/**
  * #8300: is this the error the SDK's generator throws after the session
  * itself closed the query (`Query.close()` aborts the transport and kills the
  * CLI)? Only these are swallowed after a deliberate close; anything else is
@@ -911,6 +931,8 @@ export class SdkSession extends BaseSession {
     }
 
     this._isBusy = true
+    // #7376: a turn starts with no Stop requested, whatever the last one did.
+    this._stopRequestedThisTurn = false
     // #8300: a per-session monotonic turn token. `supersededByNewerTurn`
     // compares against it: unlike a handle comparison it never reverts once
     // a follow-up turn has started and ended.
@@ -1536,7 +1558,7 @@ export class SdkSession extends BaseSession {
         // tool_results to the dashboard.
         // A superseded turn emits its result directly: `_emitResult` would
         // sweep the shared in-flight tool_starts, which are the successor's.
-        ;(superseded ? (payload) => this.emit('result', payload) : (payload, reason) => this._emitResult(payload, reason))({
+        ;(superseded ? (payload) => this.emit('result', payload) : (payload, reason, opts) => this._emitResult(payload, reason, opts))({
           sessionId: msg.session_id || this._sdkSessionId,
           cost: msg.total_cost_usd,
           duration: msg.duration_ms,
@@ -1551,7 +1573,7 @@ export class SdkSession extends BaseSession {
           // Wire field is contextOccupancy — NOT contextUsage — so it can
           // never be confused with the billing `usage` aggregate above.
           ...(contextUsageSnapshot ? { contextOccupancy: contextUsageSnapshot } : {}),
-        }, 'turn_ended_with_orphan_tool_start')
+        }, 'turn_ended_with_orphan_tool_start', { completion: 'normal' }) // #7376
 
         // #7340: NOT `{ turnEndedCleanly: true }`, however much this looks
         // like CliSession's `result` branch -- and the difference is the
@@ -1576,7 +1598,7 @@ export class SdkSession extends BaseSession {
         // (the `background_task_ended_with_turn` error above) instead of
         // leaving the loss silent. Exempting on this path needs the query
         // kept alive past `result`, which is a much larger change.
-        if (!superseded) this._clearMessageState()
+        if (!superseded) this._clearMessageState({ completion: 'normal' }) // #7376
 
         // #8300: the prompt is answered — release the streaming input so the
         // SDK closes the CLI's stdin and the process exits once idle. With
@@ -2181,7 +2203,17 @@ export class SdkSession extends BaseSession {
           }
         }
       }
-      if (!supersededByNewerTurn()) this._clearMessageState()
+      // #7376: a Stop that aborted the query leaves its in-flight tools "stopped",
+      // and a CLI process that exited under the query leaves them cut off by the
+      // exit; neither is a failed command. Any other throw has no considered
+      // cause and keeps the generic sweep.
+      if (!supersededByNewerTurn()) {
+        this._clearMessageState(
+          wasIntentionalStop
+            ? { terminatedReason: 'user_stop' }
+            : isProcessExitError(err) ? { terminatedReason: 'process_exit' } : undefined,
+        )
+      }
     } finally {
       // #8300: whatever ended the loop — the prompt's result, a throw, a
       // destroy() break — the streaming input is released here, so the SDK
@@ -3036,6 +3068,7 @@ export class SdkSession extends BaseSession {
     // emit and instead surfaces a quiet `stopped` event. Cleared in the
     // catch/finally (single-use, mirrors CliSession#4602).
     this.markIntentionalStop()
+    this._noteTurnStopRequested() // #7376
 
     // #4828: session-scoped (interrupt() only meaningful with an active query).
     ;(this._log || log).info('Interrupting query')
@@ -3104,7 +3137,9 @@ export class SdkSession extends BaseSession {
     // into a cleared message. Best-effort — the SDK's generator may not
     // support .return()/.throw() uniformly.
     this._abortActiveQuery()
-    this._clearMessageState()
+    // #7376: name the cause so a tool left in flight reads as "the turn was
+    // terminated under it", not as a failed command.
+    this._clearMessageState({ terminatedReason: 'hard_timeout' })
     this.emit('error', { message: `Response timed out after ${friendly} of inactivity` })
   }
 
@@ -3141,7 +3176,7 @@ export class SdkSession extends BaseSession {
     // #4616: snapshot sessionId BEFORE _clearMessageState wipes it so the
     // synthetic `result` event below carries the correct identifier.
     const sessionId = this._sdkSessionId || this._sessionId
-    this._clearMessageState()
+    this._clearMessageState({ terminatedReason: 'stream_stall' }) // #7376
     // #4616: emit a synthetic `result` so event-normalizer fans it to
     // `agent_idle`. Per #4308 handleAgentIdle clears `activeTools: []`
     // as a safety net, which is what stops the dashboard's footer pill

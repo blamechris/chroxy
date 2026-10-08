@@ -137,6 +137,19 @@ export interface ChatMessage {
    */
   toolResultIsError?: boolean;
   /**
+   * #7376: set when the tool was cut off because the TURN it belonged to was
+   * terminated underneath it (a permission-mode switch, Stop, a crash, a
+   * watchdog, a daemon restart) rather than the command running and failing.
+   * Holds the server's `terminatedReason` (a `TURN_TERMINATION_REASONS` value,
+   * though typed `string` so a newer server's reason degrades to the generic
+   * copy). Renderers show a distinct "turn ended before a result" state INSTEAD
+   * of the `toolResultIsError` failure styling when this is present; absent on
+   * a genuine result and from older servers. The patch builder CLEARS it when an
+   * authoritative result without a reason replaces a synthetic one (a stall or
+   * timeout does not kill the child, so the real result can still arrive).
+   */
+  toolResultTerminatedReason?: string;
+  /**
    * #4476: structured error code for `type: 'error'` bubbles. Mirrors the
    * `code` field on `ServerMessageSchema` — populated when the server tags
    * an error with a known machine-readable identifier (e.g. `'stream_stall'`

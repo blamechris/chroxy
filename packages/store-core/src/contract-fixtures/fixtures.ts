@@ -2016,6 +2016,84 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    // #7376 — a tool cut off by a terminated turn (permission-mode switch, Stop,
+    // crash, watchdog) is NOT a failed command. The server tags the synthetic
+    // result with `terminatedReason`; both clients must attach it onto the
+    // tool_use bubble so each renders "cut off by the turn ending" instead of the failure styling.
+    name: 'tool_result carries terminatedReason onto the tool_use bubble',
+    type: 'tool_result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'tool-tu-3', type: 'tool_use', tool: 'Bash', toolUseId: 'tu-3', content: '' } as unknown as ChatMessage,
+          ],
+          activeTools: [{ toolUseId: 'tu-3', tool: 'Bash', startedAt: 1 }],
+        },
+      },
+    },
+    message: {
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'tu-3',
+      result: 'Turn ended (permission-mode switch) before this tool returned a result. Check whether it took effect before retrying.',
+      isError: true,
+      terminatedReason: 'permission_mode_switch',
+      truncated: false,
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { type: 'tool_use', toolUseId: 'tu-3', toolResultIsError: true, toolResultTerminatedReason: 'permission_mode_switch', toolResultTruncated: false },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #7376 (review): a CLI hard-timeout / stall clears local state without
+    // killing the child, so a REAL result can follow the synthetic terminated
+    // one for the same tool id. It must replace it outright -- the termination
+    // marker takes precedence in both renderers, so a stale one would hide the
+    // genuine failure text.
+    name: 'a genuine tool_result replaces a synthetic terminated one and clears the marker',
+    type: 'tool_result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'tool-tu-4', type: 'tool_use', tool: 'Bash', toolUseId: 'tu-4', content: '',
+              toolResult: 'Turn ended (stream stall) before this tool returned a result.',
+              toolResultIsError: true,
+              toolResultTerminatedReason: 'stream_stall',
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'tu-4',
+      result: 'exit 2: boom',
+      isError: true,
+      truncated: false,
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { type: 'tool_use', toolUseId: 'tu-4', toolResult: 'exit 2: boom', toolResultIsError: true, toolResultTerminatedReason: undefined, toolResultTruncated: false },
+          ],
+        },
+      },
+    },
+  },
+  {
     // budget_exceeded is a DOCUMENTED divergence (#5619): both append a
     // "session paused" system note, but the dashboard auto-resumes and tacks
     // ". Budget will auto-resume." onto the same bubble (the app does not — it

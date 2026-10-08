@@ -23,6 +23,7 @@ import { ALLOWED_PERMISSION_MODE_IDS } from './handler-utils.js'
 import { assertProviderPermissionModeSupported, getProviderPermissionModeSupport } from './permission-mode-support.js'
 import { AGENT_DESCRIPTION_MAX } from './claude-stream-parser.js'
 import { sanitizeToolInput } from './redaction.js'
+import { isTurnTerminationReason, describeTurnTermination } from '@chroxy/protocol'
 
 const log = createLogger('base-session')
 
@@ -490,6 +491,14 @@ export class BaseSession extends EventEmitter {
     // `finally` safety-net clear (the interrupt-races-result case), and collapsing
     // them would reopen that race.
     this._intentionalStop = false
+    // #7376: a Stop was requested while THIS turn was running. Unlike
+    // `_intentionalStop` (consumed by the child-close / query-catch handler, and
+    // not armed at all when the provider acknowledges the interrupt with a
+    // normal `result`), this one lives exactly as long as the turn: set by
+    // `_noteTurnStopRequested`, read by the orphan sweep, and reset by
+    // `_clearMessageState`. It is what lets a Stop that COMPLETES normally still
+    // tag the tools it cut off as `user_stop`.
+    this._stopRequestedThisTurn = false
     // #4307/#5177/#5247/#5265: pending background-shell tracking + the reaping
     // sweep live in BackgroundShellTracker (#5376). BaseSession composes one and
     // delegates the public surface (trackBackgroundShell / clearBackgroundShell /
@@ -1488,6 +1497,17 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #7376: record that a Stop was requested during the turn that is running
+   * now. A no-op when idle, so a Stop pressed between turns cannot leak into the
+   * next one. Called by the providers whose `interrupt()` can be acknowledged by
+   * a NORMAL `result` (claude-cli, claude-sdk) rather than only by a child exit
+   * or a thrown abort; the flag is turn-scoped and reset by `_clearMessageState`.
+   */
+  _noteTurnStopRequested() {
+    if (this._isBusy) this._stopRequestedThisTurn = true
+  }
+
+  /**
    * #5375: capture-and-clear the user-initiated-stop flag in one step. The
    * provider's close/error handler calls this at the top to decide the
    * stopped-vs-error branch, disarming the flag so the next natural exit is
@@ -1958,11 +1978,36 @@ export class BaseSession extends EventEmitter {
    * are diagnostic hints — the wire schema strips them on parse but
    * they stay grep-able on disk in the persisted history.
    *
+   * #7376: when `reason` is a turn-TERMINATION reason (a permission-mode
+   * switch, Stop, a crash, a watchdog — see `TURN_TERMINATION_REASONS`), the
+   * tool did not fail, its turn was ended underneath it. The result then also
+   * carries `terminatedReason` (the one diagnostic-adjacent field that IS on
+   * the wire, `ServerToolResultSchema.terminatedReason`) and says so in its
+   * text, so a client can render "cut off by the turn ending; check whether it took effect" instead of
+   * the failure styling. Every other sweep reason (the natural turn end that
+   * simply never saw a result) keeps the original wording and no
+   * `terminatedReason`: those really are indistinguishable from a failure.
+   *
    * @param {string} reason — short identifier for the sweep cause
    * @returns {number} count of sweeps emitted
    */
-  _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result', exempt = null) {
+  _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result', exempt = null, { completion } = {}) {
     if (this._inFlightToolStarts.size === 0) return 0
+    // #7376: a Stop the provider acknowledged with a NORMAL result reaches here
+    // with a generic reason, because the path that ended the turn did not know a
+    // Stop had been requested. The turn-scoped flag does, and the tools still
+    // unresolved were cut off by it.
+    //
+    // ONLY on a normal completion -- the caller says so with
+    // `completion: 'normal'`, and nothing else is inferred. A failure cleanup
+    // (a query that threw, a child that died, a destroy) has already observed
+    // its own outcome, and a Stop that lands while it is still awaiting
+    // something (the SDK's container classification) must not relabel that
+    // outcome as the user's doing. An explicit termination reason is never
+    // overridden either.
+    if (completion === 'normal' && this._stopRequestedThisTurn && !isTurnTerminationReason(reason)) {
+      reason = 'user_stop'
+    }
     let count = 0
     for (const [toolUseId, entry] of [...this._inFlightToolStarts]) {
       // #7340: a confirmed-backgrounded subagent that has not reported back is
@@ -1973,14 +2018,18 @@ export class BaseSession extends EventEmitter {
       if (exempt && exempt.has(toolUseId)) continue
       count++
       this._inFlightToolStarts.delete(toolUseId)
+      const terminated = isTurnTerminationReason(reason)
       this.emit('tool_result', {
         toolUseId,
-        result: `Tool ${entry.tool} did not emit a result before the turn ended (reason: ${reason}). Chroxy synthesized this result to clear the stale activeTools entry.`,
+        result: terminated
+          ? `${describeTurnTermination(reason).summary} (${entry.tool}; Chroxy synthesized this result to clear the stale activeTools entry.)`
+          : `Tool ${entry.tool} did not emit a result before the turn ended (reason: ${reason}). Chroxy synthesized this result to clear the stale activeTools entry.`,
         truncated: false,
         synthetic: true,
         interrupted: true,
         isError: true,
         reason,
+        ...(terminated ? { terminatedReason: reason } : {}),
       })
     }
     return count
@@ -1997,9 +2046,12 @@ export class BaseSession extends EventEmitter {
    *
    * @param {object} payload — the result event payload ({cost, duration, usage, sessionId})
    * @param {string} [sweepReason] — optional override for the sweep reason
+   * @param {{ completion?: 'normal' }} [opts] — #7376: `completion: 'normal'`
+   *   says the turn ended with the provider's own `result`; see
+   *   `_sweepUnresolvedToolStarts` for what that permits.
    */
-  _emitResult(payload, sweepReason = 'stream_completed_without_result') {
-    this._sweepUnresolvedToolStarts(sweepReason)
+  _emitResult(payload, sweepReason = 'stream_completed_without_result', opts = {}) {
+    this._sweepUnresolvedToolStarts(sweepReason, null, opts)
     // queueLength is stamped centrally in the emit() override below (#6627/#6706).
     this.emit('result', payload)
   }
@@ -2318,8 +2370,24 @@ export class BaseSession extends EventEmitter {
    *   Subclasses that override this MUST forward the opts to `super`. One that
    *   drops them fails safe (it sweeps), which is why the forwarding is a
    *   correctness nicety here rather than a hazard.
+   *
+   * @param {{ turnEndedCleanly?: boolean, terminatedReason?: string, completion?: 'normal' }} [opts]
+   *   `completion: 'normal'` (#7376) says the turn ended with the provider's own
+   *   `result`. Only then may a Stop requested during the turn tag the tools it
+   *   left unresolved as `user_stop`: every other caller is a failure or teardown
+   *   path that has already observed its own outcome, and keeps it.
+   *
+   *   `terminatedReason` (#7376) is WHY the turn is being ended underneath
+   *   whatever tool is still in flight -- a `TURN_TERMINATION_REASONS` value
+   *   (`permission_mode_switch`, `user_stop`, `process_exit`, ...). It becomes
+   *   the orphan sweep's reason, so the synthetic `tool_result` of each such
+   *   tool says "the turn was terminated" rather than looking like a failed
+   *   command. The CALLER supplies it, never this method: it is shared by every
+   *   death path (and Stop, where the user already knows why), so inferring it
+   *   here would mislabel. Omitted on the paths that have no considered cause --
+   *   those keep the generic `message_state_cleared` sweep.
    */
-  _clearMessageState({ turnEndedCleanly = false } = {}) {
+  _clearMessageState({ turnEndedCleanly = false, terminatedReason, completion } = {}) {
     // #7382 (review): expire HERE, so inheriting the bookkeeping also inherits
     // the BEHAVIOUR. Hoisting the API alone bought a new provider the methods
     // and none of the wiring — and the roster guard, which only checked that
@@ -2367,7 +2435,13 @@ export class BaseSession extends EventEmitter {
       )
       : null
 
-    this._sweepUnresolvedToolStarts('message_state_cleared', survivingAgents)
+    this._sweepUnresolvedToolStarts(
+      isTurnTerminationReason(terminatedReason) ? terminatedReason : 'message_state_cleared',
+      survivingAgents,
+      { completion },
+    )
+    // #7376: the turn is over; a Stop requested during it must not tag the next.
+    this._stopRequestedThisTurn = false
 
     // #7340: complete the tracked subagents this turn end owns, and no more.
     // A confirmed-backgrounded subagent deliberately outlives its turn, so

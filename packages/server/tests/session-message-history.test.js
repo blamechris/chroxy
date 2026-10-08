@@ -319,6 +319,26 @@ describe('SessionMessageHistory', () => {
       assert.equal(entry.tool, 'read_file')
     })
 
+    it('persists isError and terminatedReason so a replay keeps the failed / terminated state (#7376)', () => {
+      history.recordHistory('s1', 'tool_start', { messageId: 'm', toolUseId: 'tu-t', tool: 'Bash', input: null })
+      history.recordHistory('s1', 'tool_result', {
+        toolUseId: 'tu-t',
+        result: 'cut off',
+        truncated: false,
+        isError: true,
+        terminatedReason: 'permission_mode_switch',
+      })
+      const entry = history.getHistory('s1').find((e) => e.type === 'tool_result')
+      assert.equal(entry.isError, true)
+      assert.equal(entry.terminatedReason, 'permission_mode_switch')
+    })
+
+    it('POSITIVE CONTROL: an ordinary successful tool_result stores neither marker (#7376)', () => {
+      history.recordHistory('s1', 'tool_result', { toolUseId: 'tu-ok', result: 'fine', truncated: false, isError: false })
+      const entry = history.getHistory('s1').find((e) => e.type === 'tool_result')
+      assert.equal('isError' in entry, false)
+      assert.equal('terminatedReason' in entry, false)
+    })
     it('records tool_result events', () => {
       history.recordHistory('s1', 'tool_result', {
         toolUseId: 'tu-1',
@@ -657,6 +677,8 @@ describe('SessionMessageHistory', () => {
       assert.equal(synthetic.interrupted, true)
       assert.equal(synthetic.isError, true)
       assert.equal(synthetic.reason, 'session_restored')
+      // #7376: the restore-time sweep is a distinct, outcome-unknown termination.
+      assert.equal(synthetic.terminatedReason, 'daemon_restart')
       assert.equal(typeof synthetic.result, 'string')
       assert.ok(synthetic.result.length > 0)
     })

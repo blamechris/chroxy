@@ -71,6 +71,12 @@ export type {
   InputDeliveryStatus,
 } from './input-delivery'
 export { buildInputMessage } from '@chroxy/protocol'
+// #7376: the shared wording for a tool cut off by a terminated turn, re-exported
+// so the dashboard and the mobile app import it beside the `toolResultTerminatedReason`
+// field it describes (single source: @chroxy/protocol, also used by the server's
+// fallback result text).
+export { describeTurnTermination, isTurnTerminationReason } from '@chroxy/protocol'
+export type { TurnTerminationReason, TurnTerminationDescription } from '@chroxy/protocol'
 export type { BuildInputMessageOptions } from '@chroxy/protocol'
 
 // #6774 — combined "approve plan + auto-accept edits" action. Shared so both
