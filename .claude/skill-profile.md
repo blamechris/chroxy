@@ -172,14 +172,14 @@ Mindset: "Will this code work reliably over a cellular connection through a tunn
 
 ## smoke-test Customizations
 
-> **2026-10-05:** for a package in `/prime-directive`'s "Smoke the path the owner would take" step, that step supersedes the port probe, the `~/.chroxy` token source and the auto-start below: those target the daily daemon (#8225). The step carries an isolated-daemon recipe until `scripts/preview-daemon.sh` lands (#8305).
+> **2026-10-08 (#8225):** `smoke-test.mjs` no longer probes ports, reads `~/.chroxy` or starts a daemon. It takes an explicit target (`--port`/`--url` with `--token`, or `--preview <preview.json>`), exits 2 with usage when given none, and refuses port 8765 and a `~/.chroxy` config dir (exit 3) unless `--i-mean-production` is passed. The skill starts its own throwaway daemon (step 1) and passes the record. For a package in `/prime-directive`'s "Smoke the path the owner would take" step, that step still supersedes the skill's generic flow and carries the same isolated-daemon recipe until `scripts/preview-daemon.sh` lands (#8305).
 
 ### Application
 - **Type:** Web dashboard served by Node.js server
-- **Start:** `npx chroxy start` (or server may already be running)
-- **Port detection:** Probe 8765, 3131, 8080, 3000 — first responding wins
-- **Auth:** API token from `~/.chroxy/config.json` (`apiToken` field), passed as `?token=` query param
-- **Dashboard URL:** `http://localhost:{port}/dashboard/?token={token}`
+- **Start:** a throwaway daemon the skill starts itself (own `CHROXY_CONFIG_DIR`, free port, allowlisted env); never `npx chroxy start` with the operator's config
+- **Port detection:** none — the target is explicit (`--port`/`--url`/`--preview`); port 8765 is refused
+- **Auth:** the throwaway daemon's own `apiToken` (from `--token`, `SMOKE_TOKEN` or the preview record's `configDir/config.json`), passed as `?token=` query param
+- **Dashboard URL:** `{origin}/dashboard/?token={token}`
 
 ### Connection Readiness
 - Dashboard connects via WebSocket automatically on load
@@ -188,7 +188,7 @@ Mindset: "Will this code work reliably over a cellular connection through a tunn
 
 ### Test Script
 - **Path:** `packages/server/tests/smoke-test.mjs`
-- **Run:** `cd packages/server && node tests/smoke-test.mjs [--headed]`
+- **Run:** `cd packages/server && node tests/smoke-test.mjs --preview <preview.json> [--headed]` (or `--port <n> --token <t>`)
 - **Screenshots:** `packages/server/tests/screenshots/` (gitignored)
 - **Requires:** `playwright` as dev dependency, Chromium installed via `npx playwright install chromium`
 - **Rebuild dashboard before testing:** `npm run build -w @chroxy/dashboard`
@@ -248,11 +248,11 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm run build -w @chroxy/dashboard
 Dashboard serves compiled Vite bundles — source changes are NOT visible without rebuild.
 
 #### Smoke Test Invocation
-Run `/smoke-test` skill — it handles server auto-start/stop, auth token, and screenshot verification.
+Run `/smoke-test` skill — it starts and stops its own throwaway daemon, generates the auth token, and handles screenshot verification.
 
 #### Known Quirks
 - `?` shortcut test fails when textarea has focus (captures keystroke) — test selector issue, not app bug
-- Server must be running for WS connection — smoke test auto-starts one if none found
+- Server must be running for WS connection — the skill starts its own throwaway daemon (the script itself never starts or discovers one)
 - Always rebuild dashboard before testing (provider picker CSS was invisible without rebuild)
 
 ## decompose-issue Customizations

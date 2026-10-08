@@ -2147,7 +2147,7 @@ jobs:
         # A fixed token + externalUrl: the externalUrl makes server-cmd skip the
         # Cloudflare tunnel (so cloudflared isn't needed), while keeping auth on so
         # the dashboard WebSocket actually connects (the --no-auth path leaves the
-        # WS disconnected). The smoke reads this token to build the dashboard URL.
+        # WS disconnected). The smoke is handed this token via SMOKE_TOKEN below.
         # `cwd` pins the auto-created Default session at the tiny IDE fixture
         # workspace (#6500) so the go-to-def smoke's quick-open + resolve_symbol
         # are deterministic. `config.cwd` feeds `defaultCwd` verbatim (server-cli.js);
@@ -2185,7 +2185,8 @@ jobs:
         # CHROXY_ALLOW_UNPINNED_BOOT=1 lets the daemon boot without an identity
         # keychain (a fresh CI HOME has none) instead of refusing to start;
         # --skip-checks drops the preflight (cloudflared isn't installed and isn't
-        # needed without a tunnel). The smoke test then FINDS this server on :8765.
+        # needed without a tunnel). The smoke test is then pointed at this server on
+        # :8765 explicitly (#8225).
         env:
           CHROXY_ALLOW_UNPINNED_BOOT: '1'
           # #6500 — advertise the opt-in IDE surface so the smoke can exercise
@@ -2213,9 +2214,15 @@ jobs:
         # SMOKE_REQUIRE_IDE=1 — the daemon above has features.ide on + the fixture
         # workspace as its cwd, so the go-to-def section must run (not skip): a
         # missing palette/fixture is a hard failure here, catching an IDE regression.
+        #
+        # #8225 — the smoke takes an explicit target and refuses :8765 without the
+        # production flag. This runner is a disposable hosted VM whose HOME holds only
+        # the throwaway config seeded above and a daemon started by this job on :8765,
+        # so the flag is true here and nowhere else.
         env:
           SMOKE_REQUIRE_IDE: '1'
-        run: node tests/smoke-test.mjs
+          SMOKE_TOKEN: ci-smoke-token
+        run: node tests/smoke-test.mjs --port 8765 --i-mean-production
 
       - name: Stop chroxy server
         if: always()

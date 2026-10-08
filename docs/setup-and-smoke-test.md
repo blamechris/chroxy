@@ -231,15 +231,28 @@ curl -s http://localhost:8765/health
 ### 7c. Does the dashboard render? (Playwright smoke test)
 
 Chroxy ships a Playwright-based dashboard smoke test that opens the dashboard in
-a headless browser, screenshots each step, and verifies key UI elements. It
-**auto-detects a running server** (probing ports `8765, 3131, 8080, 3000`) and
-starts a throwaway one if none is found.
+a headless browser, screenshots each step, and verifies key UI elements. It takes
+an **explicit target** and never probes ports, reads `~/.chroxy` or starts a daemon
+(#8225): with no target it prints usage and exits `2`. It **refuses** port `8765`
+and a production config dir (exit `3`), because a smoke run would otherwise drive
+your daily daemon with its real token.
+
+Point it at a throwaway daemon you started with its own config dir (the
+`/smoke-test` skill's step 1 is a complete recipe), by port and token or by the
+preview record that daemon wrote:
 
 ```bash
 cd packages/server
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" node tests/smoke-test.mjs
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" node tests/smoke-test.mjs --port <port> --token <token>
+PATH="/opt/homebrew/opt/node@22/bin:$PATH" node tests/smoke-test.mjs --preview <preview.json>   # {port, configDir, ...}
 #   add --headed to watch the browser drive the dashboard
+#   add --dry-run to print the resolved target (token length only) and exit
 ```
+
+The `SMOKE_URL` / `SMOKE_PORT` / `SMOKE_TOKEN` environment variables work in place
+of the flags. `--i-mean-production` lifts the 8765 and config-dir refusals and is
+only for a deliberate run against your own live daemon; CI passes it because its
+runner and daemon are disposable.
 
 **Expected output** (tail):
 
@@ -251,11 +264,13 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" node tests/smoke-test.mjs
 All checks passed.
 ```
 
-- [ ] `smoke-test.mjs` exits **0** (`echo $?` → `0`). Exit `1` = one or more checks failed.
+- [ ] `smoke-test.mjs` exits **0** (`echo $?` → `0`). Exit `1` = one or more checks failed; `2` = bad arguments or no target; `3` = refused as a production target.
+- A run against a daemon without the IDE feature records 16 cases and exits `1` with `HARNESS BROKEN … expected at least 18` even though every case passed (#8435): that is not a regression.
 
 Screenshots are saved to `packages/server/tests/screenshots/` (gitignored) — read
-them if a check fails to see exactly what rendered. The script stops any server it
-started with `SIGTERM` (8s grace) so the session-state flush isn't lost.
+them if a check fails to see exactly what rendered. The script never starts or
+stops a server; stop the throwaway daemon you started with `SIGTERM` to its PID so
+the session-state flush isn't lost.
 
 ### 7d. Can a client actually connect and start a session?
 
