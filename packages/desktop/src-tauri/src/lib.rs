@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod handoff;
 pub mod health_proof;
 pub mod node;
+pub mod notification_click;
 pub mod owned_server;
 pub mod platform;
 pub mod qrcode;
@@ -488,6 +489,27 @@ fn update_tray_badge(app: tauri::AppHandle, blocked: u32, failed: u32) -> Result
         let _ = (&app, count);
     }
     Ok(())
+}
+
+/// #7367 — raise a native notification that, where the platform can report it,
+/// brings the window forward and selects `session_id` when clicked.
+///
+/// Returns whether the click will be reported (`true` only on the macOS native
+/// route; the plugin route, used on Windows/Linux and unbundled macOS builds,
+/// cannot report one — see `notification_click`). A `false` is not a failure:
+/// the notification was still shown. The dashboard ignores the value and relies
+/// on the `notification_clicked` event.
+#[tauri::command]
+fn send_session_notification(
+    app: tauri::AppHandle,
+    title: String,
+    body: Option<String>,
+    session_id: Option<String>,
+) -> Result<bool, String> {
+    // Sanitized, never rejected: a rejection would send the dashboard to the
+    // plugin fallback, which replaces the app-owned notification delegate.
+    let request = notification_click::sanitize_request(title, body, session_id);
+    Ok(deliver_notification(&app, request))
 }
 
 /// #5356 — current "expose on LAN" setting. False (loopback-only) is the
@@ -1026,6 +1048,7 @@ pub fn run() {
             get_allow_auto_permission_mode,
             set_allow_auto_permission_mode,
             update_tray_badge,
+            send_session_notification,
             #[cfg(target_os = "macos")]
             voice_available,
             #[cfg(target_os = "macos")]
@@ -1149,6 +1172,17 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            // #7367 — own the notification centre's delegate from launch, not from
+            // the first notification, so a click on a card left over from before
+            // a relaunch has a delegate (and the click sink) to land on. Same gate
+            // as the delivery route; idempotent with the per-delivery re-assert.
+            #[cfg(target_os = "macos")]
+            if notification_click::macos::available() {
+                install_notification_click_sink(app.handle());
+                if let Err(e) = notification_click::macos::install_delegate() {
+                    eprintln!("[notifications] could not install the click delegate: {e}");
+                }
+            }
             // App menu bar — required for macOS Sequoia window tiling keyboard shortcuts.
             // macOS routes fn+ctrl+arrow through the Window menu's "Move & Resize" items.
             // Without a Window submenu, those shortcuts silently do nothing.
@@ -2825,8 +2859,73 @@ fn send_notification(app: &tauri::AppHandle, title: &str, body: &str) {
         }
     }
 
+    // Through the same route as dashboard notifications (not the plugin directly)
+    // so that on macOS ONE delegate owns the notification centre: the plugin
+    // installs its own on every send, which would orphan the click handler of a
+    // turn-complete card delivered earlier (#7367).
+    deliver_notification(
+        app,
+        notification_click::SessionNotification {
+            title: title.to_string(),
+            body: Some(body.to_string()),
+            session_id: None,
+        },
+    );
+}
+
+/// Fire-and-forget through `tauri-plugin-notification`: no click report.
+fn show_via_plugin(app: &tauri::AppHandle, n: &notification_click::SessionNotification) {
     use tauri_plugin_notification::NotificationExt;
-    let _ = app.notification().builder().title(title).body(body).show();
+    let mut builder = app.notification().builder().title(&n.title);
+    if let Some(body) = &n.body {
+        builder = builder.body(body);
+    }
+    let _ = builder.show();
+}
+
+/// Show `n`, clickable where the platform allows (#7367). Returns whether a click
+/// will be reported. Never fails: if the native route cannot deliver, the plugin
+/// does, so a notification is never lost to this path.
+fn deliver_notification(app: &tauri::AppHandle, n: notification_click::SessionNotification) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if notification_click::macos::available() {
+            install_notification_click_sink(app);
+            let handle = app.clone();
+            let request = n.clone();
+            // AppKit state (the notification centre's delegate) is main-thread.
+            let scheduled = app.run_on_main_thread(move || {
+                if notification_click::macos::deliver(&request).is_err() {
+                    show_via_plugin(&handle, &request);
+                }
+            });
+            if scheduled.is_ok() {
+                return true;
+            }
+        }
+    }
+    show_via_plugin(app, &n);
+    false
+}
+
+/// What a click on a notification does: raise the window, then tell the dashboard
+/// which session the card was about. Installed once; the sink captures the app
+/// handle, so a repeat install is a harmless replace.
+#[cfg(target_os = "macos")]
+fn install_notification_click_sink(app: &tauri::AppHandle) {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    let app = app.clone();
+    INSTALLED.call_once(move || {
+        notification_click::macos::set_click_sink(move |session_id| {
+            window::show_window(&app);
+            if let Some(session_id) = session_id {
+                let _ = app.emit(
+                    notification_click::NOTIFICATION_CLICKED_EVENT,
+                    notification_click::NotificationClickedPayload { session_id },
+                );
+            }
+        });
+    });
 }
 
 #[cfg(all(test, unix))]

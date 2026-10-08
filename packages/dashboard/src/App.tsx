@@ -1111,9 +1111,10 @@ export function App() {
     // (2) the honest surface already exists and is already reached — clicking a
     // native notification focuses the window, and the widget row and banner for
     // that session are gated by #7516/#7528 and already read "No longer open";
-    // (3) this click path is web-only — `sendNativeNotification` drops
-    // `options.onClick` on Tauri (#7367) — so a toast here would cover half the
-    // surface. If a later change makes a refusal worth SAYING, say it here off
+    // (3) this click path does not exist on every surface — it works on the web
+    // backend and bundled macOS desktop builds, but a Windows / Linux desktop
+    // notification cannot report a click (#7367) — so a toast here would cover
+    // only part of the surface. If a later change makes a refusal worth SAYING, say it here off
     // the boolean; nothing structural is in the way.
     //
     // ONE membership implementation, and it stays the store's (#7475/#7511).
