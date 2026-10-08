@@ -64,11 +64,20 @@
  * membership-checks (#7511), so the worst case is a refusal the operator would
  * have got anyway — never a switch onto a dead id.
  */
-import { useReducer } from 'react'
+import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { isLivePermissionPrompt } from '@chroxy/store-core'
 import type { ChatMessage, SessionNotification } from '../store/types'
 
 const MAX_VISIBLE = 3
+
+/**
+ * #7466 — how long the banner block's footprint is reserved after a banner
+ * retires. Long enough to cover the operator's repeat click on a control that
+ * just vanished (well under a second), short enough that a resting pointer is
+ * not parked over blank space for long. A pointer LEAVING the reserved area
+ * releases it sooner: the shift is only dangerous while the pointer is in it.
+ */
+export const BANNER_RETIRE_HOLD_MS = 1500
 
 const EVENT_LABELS: Record<SessionNotification['eventType'], string> = {
   permission: 'Permission',
@@ -211,13 +220,54 @@ export function NotificationBanners({
 
   // #4890 — render unread only; read history lives in the widget.
   const unread = notifications.filter((n) => n.readAt === undefined)
-  if (unread.length === 0) return null
-
   const visible = unread.slice(0, MAX_VISIBLE)
   const overflow = unread.length - MAX_VISIBLE
 
+  // #7466 — the layout-shift half of the "click lands on Devices" report.
+  //
+  // The banner stack sits in normal flow directly above the view-tab strip, so
+  // retiring a banner (Allow / Deny / Dismiss, or an expiry) pulls the strip up
+  // by exactly the banner's height — into the pointer that just pressed it. The
+  // operator whose click "did nothing" clicks again, in place, and hits
+  // whichever tab slid under the cursor. #7472 / #7511 removed the reasons for a
+  // second click; this removes the consequence: for a moment after the stack
+  // shrinks, the slot keeps its previous height, so nothing moves.
+  //
+  // `heldHeight` is the floor applied to the slot; 0 means no hold. It is set in
+  // a layout effect (before paint) from the height measured on the PREVIOUS
+  // commit, because by the time the shrunken DOM commits the old height is gone.
+  const stackRef = useRef<HTMLDivElement | null>(null)
+  const lastHeightRef = useRef(0)
+  const lastCountRef = useRef(unread.length)
+  const [heldHeight, setHeldHeight] = useState(0)
+  useLayoutEffect(() => {
+    const shrank = unread.length < lastCountRef.current
+    lastCountRef.current = unread.length
+    if (shrank && lastHeightRef.current > 0) {
+      // Keep the LARGEST footprint seen during a run of retirements, so a second
+      // banner going while the first is held does not let the strip creep up.
+      const reserve = lastHeightRef.current
+      setHeldHeight((h) => (h >= reserve ? h : reserve))
+    }
+    lastHeightRef.current = stackRef.current?.getBoundingClientRect().height ?? 0
+  })
+  useEffect(() => {
+    if (heldHeight === 0) return
+    const t = setTimeout(() => setHeldHeight(0), BANNER_RETIRE_HOLD_MS)
+    return () => clearTimeout(t)
+  }, [heldHeight, unread.length])
+
+  if (unread.length === 0 && heldHeight === 0) return null
+
   return (
-    <div className="notification-banners" role="log" aria-label="Background session notifications">
+    <div
+      className="notification-banners-slot"
+      data-testid="notification-banners-slot"
+      style={heldHeight > 0 ? { minHeight: heldHeight } : undefined}
+      onPointerLeave={heldHeight > 0 ? () => setHeldHeight(0) : undefined}
+    >
+    {unread.length > 0 && (
+    <div ref={stackRef} className="notification-banners" role="log" aria-label="Background session notifications">
       {visible.map((n) => {
         const isPermission = n.eventType === 'permission' && !!n.requestId
         // Computed ONCE per row for the render branch; the click handlers call
@@ -380,6 +430,8 @@ export function NotificationBanners({
           +{overflow} more
         </div>
       )}
+    </div>
+    )}
     </div>
   )
 }

@@ -5294,6 +5294,13 @@ button.sidebar-token-view-session-row:hover {
 }
 
 /* Notification banners — cross-session alerts */
+/* #7466 — wraps the stack so it can keep the stack's height for a moment after
+   a banner retires (see NotificationBanners). Same flex behaviour as the stack
+   it wraps: never shrinks, so the reserved floor is honoured. */
+.notification-banners-slot {
+  flex-shrink: 0;
+}
+
 .notification-banners {
   display: flex;
   flex-direction: column;
