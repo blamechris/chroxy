@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   size, and flag a non-2xx fetch. WebSearch results from Claude Agent SDK and
   CLI sessions, and either tool's result cut at the 10KB cap, also render as a
   result list or readable text instead of falling back to raw text.
+
+- **A finished session no longer shows as working in the other tabs and the mobile session list (#8502).**
+  When a turn ended, the server refreshed the session list before the session
+  had finished clearing its busy state, so a dashboard tab or the mobile app
+  that was not looking at that session kept it marked busy. This affected
+  ordinary completed turns on Claude (SDK), Gemini and Codex (exec), and a
+  Stop that Claude (SDK) answered with a result. The list is now refreshed
+  once the turn has fully ended, once per turn end.
+
 - **A session no longer stays busy after you press Stop (#8497).** On ACP,
   Codex app-server and the other providers that end a stopped turn without a
   result, the dashboard and the mobile app kept showing "Agent is working"

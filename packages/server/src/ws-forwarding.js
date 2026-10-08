@@ -157,6 +157,45 @@ function setupSessionForwarding(normalizer, ctx) {
   // session that stays busy forever.
   const idledByResultThisTick = new Set()
 
+  // #8502: sessions whose turn-end `session_list` is already queued for this
+  // synchronous turn end. A `result` and a `stopped` that coincide (claude-sdk's
+  // quiet acknowledgement of a Stop, claude-cli's close handler) share ONE list.
+  const turnEndListQueued = new Set()
+
+  // The `session_list` a turn end refreshes, built AFTER the provider's
+  // synchronous teardown rather than inside the emit. claude-sdk, ACP and Codex
+  // app-server emit `result` / `stopped` and only then clear `_isBusy`
+  // (_clearMessageState), so a list built inside the emit publishes the finished
+  // session as busy. `agent_idle` reaches viewers only, and the clients re-derive
+  // `isIdle` from this list's rows, so a client that is not viewing the session
+  // would end the turn busy. A microtask runs once the emitting call stack
+  // unwinds and before any later await; the providers clear busy synchronously in
+  // that same stack (checked per provider in #8502).
+  //
+  // `afterBusyCleared` marks the list the provider itself asked for once its busy
+  // window really ended (`busy_cleared`). Every other trigger is skipped while the
+  // session reports `busyClearedOwed`: its busy flag outlives the `result` (the
+  // jsonl-subprocess family clears it in the child's close handler, a later
+  // event-loop turn), so a list built now would publish the finished session as
+  // busy AFTER the viewer's agent_idle, and the clients, which re-derive isIdle
+  // from the list row even for the active session, would flip back to Working
+  // until the child exits. The session states this itself; it is not guessed
+  // from `isRunning`, which is also true for a restarted queued turn and for
+  // background shells, where the list is correct and wanted.
+  const queueTurnEndSessionList = (sessionId, { afterBusyCleared = false } = {}) => {
+    if (turnEndListQueued.has(sessionId)) return
+    turnEndListQueued.add(sessionId)
+    queueMicrotask(() => {
+      turnEndListQueued.delete(sessionId)
+      if (!afterBusyCleared && sessionManager.getSession?.(sessionId)?.session?.busyClearedOwed === true) return
+      try {
+        executeSideEffects([{ type: 'session_list' }], sessionId, ctx)
+      } catch (err) {
+        log.error(`deferred session_list after turn end threw for session ${sessionId}: ${err?.message || err}`)
+      }
+    })
+  }
+
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     // #5313 (WP-1.3): this listener runs synchronously inside the
     // SessionManager EventEmitter's emit(). A throw here unwinds emit() and
@@ -263,6 +302,15 @@ function setupSessionForwarding(normalizer, ctx) {
       return
     }
 
+    // #8502: a provider whose `result` precedes the end of its busy window (the
+    // jsonl-subprocess family: the child is still exiting when the result line is
+    // parsed) says so when busy actually clears. Nothing to normalise or relay to
+    // a viewer: it exists to refresh the list the clients re-derive busy from.
+    if (event === 'busy_cleared') {
+      queueTurnEndSessionList(sessionId, { afterBusyCleared: true })
+      return
+    }
+
     // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
     if (event === 'stream_start') {
       broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })
@@ -270,6 +318,7 @@ function setupSessionForwarding(normalizer, ctx) {
       broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: data?.cost ?? null })
       idledByResultThisTick.add(sessionId)
       queueMicrotask(() => idledByResultThisTick.delete(sessionId))
+      queueTurnEndSessionList(sessionId)
     }
 
     // #8497: a requested Stop ends the turn with `stopped` and, on most
@@ -284,22 +333,17 @@ function setupSessionForwarding(normalizer, ctx) {
     if (event === 'stopped' && !idledByResultThisTick.has(sessionId)) {
       announceIdle = true
       broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: null })
-      // The list a `result` refreshes, too, so clients that only see global
-      // frames (not viewing this session) re-derive its busy state. It must be
-      // BUILT after the provider's synchronous teardown: ACP, Codex app-server
-      // and the SDK emit `stopped` and only then clear `_isBusy`
-      // (_clearMessageState), so a list built inside this handler publishes the
-      // stopped session as busy and a non-viewing client, which gets no
-      // agent_idle, ends the Stop busy. A microtask runs once that call stack
-      // unwinds and before any later await.
-      queueMicrotask(() => {
-        try {
-          executeSideEffects([{ type: 'session_list' }], sessionId, ctx)
-        } catch (err) {
-          log.error(`deferred session_list after stop threw for session ${sessionId}: ${err?.message || err}`)
-        }
-      })
     }
+    // Every turn end refreshes the list, including a `stopped` the idle frames
+    // were deduped against: the `result` that deduped it queued the list, and the
+    // queue is idempotent per synchronous turn end.
+    if (event === 'stopped') queueTurnEndSessionList(sessionId)
+    // A turn can also end with only an `error` (an SDK query that threw, a BYOK
+    // `_emitTurnError`, ACP / Codex `_failTurn`): no `result`, no `stopped`, so no
+    // agent_idle or idle ping, and the clients leave busy on nothing else. The
+    // list is the one signal left. An `error` that does not end a turn costs one
+    // list that reports the session's true state, which is still busy.
+    if (event === 'error') queueTurnEndSessionList(sessionId)
 
     // Dev server preview: scan tool_result events for localhost server patterns
     if (event === 'tool_result' && data?.result) {
@@ -324,7 +368,14 @@ function setupSessionForwarding(normalizer, ctx) {
     }
 
     // Execute side effects before messages (flush_deltas must happen before stream_end broadcast)
-    executeSideEffects(result.sideEffects, sessionId, ctx)
+    // #8502: a `result`'s own `session_list` is the queued turn-end one (above),
+    // built after the provider's teardown. Running it here too would publish the
+    // stale busy row first and a second list straight after it.
+    executeSideEffects(
+      event === 'result' ? result.sideEffects?.filter((effect) => effect.type !== 'session_list') : result.sideEffects,
+      sessionId,
+      ctx,
+    )
     executeRegistrations(result.registrations, sessionId, ctx)
 
     // Broadcast messages
