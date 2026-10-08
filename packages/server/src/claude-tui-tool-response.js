@@ -82,7 +82,7 @@ export function normalizeClaudeTuiToolResponse(toolName, resp) {
   const fromArrayContent = flattenArrayContent(resp.content)
   if (fromArrayContent !== null) return fromArrayContent
 
-  // Rule 1c (#8252) — a repeated Read of a file that has not changed. Claude
+  // Rule 4b, checked right after rule 1a (#8252) — a repeated Read of a file that has not changed. Claude
   // Code answers with `{ type: 'file_unchanged', file: { filePath } }` instead of
   // the content, and the model is told to refer to the earlier read. Shape-
   // matched, not tool-matched: the type tag is unambiguous.
