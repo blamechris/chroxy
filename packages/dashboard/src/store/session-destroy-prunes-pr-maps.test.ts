@@ -75,7 +75,7 @@ vi.mock('./crypto', () => ({
 vi.mock('./persistence', () => ({ clearPersistedSession: vi.fn() }))
 
 import { handleMessage, setStore, clearDeltaBuffers, clearPermissionSplits, stopHeartbeat, resetReplayFlags } from './message-handler'
-import { createEmptyConnectionScope, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
+import { createEmptyConnectionScope, createEmptyInFlightMarkers, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
 
 /**
  * The #7559 roster's field names, derived from the ONE factory the fix spreads
@@ -83,6 +83,15 @@ import { createEmptyConnectionScope, createEmptySessionState, pruneSessionKeyedM
  * is the defect class this whole file is about.
  */
 const CONNECTION_SCOPED_RESET_FIELDS: readonly string[] = Object.keys(createEmptyConnectionScope())
+
+/**
+ * #7586 — the in-flight request-marker roster (`utils.ts`), derived the same way.
+ * `forgetSession`, `_resetSessionMemory` and `disconnect()` take it by spread, so
+ * `assigns` has to resolve it exactly as it resolves the connection-scoped one,
+ * or a `reindexingRepoPaths` the stores really do clear reads as "cleared by
+ * nothing".
+ */
+const IN_FLIGHT_MARKER_FIELDS: readonly string[] = Object.keys(createEmptyInFlightMarkers())
 import type { ConnectionState } from './types'
 import { createEmptyActivityState } from '@chroxy/store-core'
 import type { ActivityState } from '@chroxy/store-core'
@@ -2378,6 +2387,9 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
    */
   const SPREAD_ROSTERS: ReadonlyArray<readonly [string, readonly string[]]> = [
     ['createEmptyConnectionScope()', CONNECTION_SCOPED_RESET_FIELDS],
+    // #7586 — the in-flight request markers, spread by BOTH full-reset sites and
+    // by `disconnect()`. Imported, never transcribed, for the same reason.
+    ['createEmptyInFlightMarkers()', IN_FLIGHT_MARKER_FIELDS],
   ]
 
   /**

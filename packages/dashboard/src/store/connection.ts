@@ -83,7 +83,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
-import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyInFlightMarkers, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -478,6 +478,41 @@ function sweepTransientSessionState(get: () => ConnectionState): void {
   for (const sid of Object.keys(get().sessionStates)) {
     updateSession(sid, clearTransientSessionStatePatch);
   }
+}
+
+/**
+ * #7586 — is this in-flight marker already in its empty state? Shapes are the
+ * ones `createEmptyInFlightMarkers()` holds: a `Set`, a plain keyed object, or a
+ * boolean flag. Anything else (a field that has gone `null`/`undefined`) is
+ * treated as empty, so it is never "fixed" into a different shape.
+ */
+function isEmptyInFlightMarker(value: unknown): boolean {
+  if (value instanceof Set) return value.size === 0;
+  if (typeof value === 'boolean') return !value;
+  if (value !== null && typeof value === 'object') return Object.keys(value).length === 0;
+  return true;
+}
+
+/**
+ * #7586 — the store patch that empties every in-flight request marker that is
+ * currently non-empty (`{}` when all already are).
+ *
+ * Shared by `socket.onclose` (transport drop) and, through the same factory,
+ * `disconnect()` — which nulls `socket.onclose` to suppress auto-reconnect, so
+ * the sweep never ran for a user-initiated Disconnect. Derived from
+ * `createEmptyInFlightMarkers()` rather than naming each field, so a marker has
+ * exactly one place to be added; and it returns only the fields that need
+ * clearing so a drop on an idle tab writes nothing (these collections are read
+ * through selectors, and handing every subscriber a fresh empty `Set` for a
+ * value that did not change would re-render them for nothing).
+ */
+function staleInFlightMarkers(get: () => ConnectionState): Partial<ConnectionState> {
+  const state = get() as unknown as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+  for (const [key, empty] of Object.entries(createEmptyInFlightMarkers())) {
+    if (!isEmptyInFlightMarker(state[key])) patch[key] = empty;
+  }
+  return patch as Partial<ConnectionState>;
 }
 
 export const selectShowSession = (s: ConnectionState): boolean =>
@@ -3112,116 +3147,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const wasConnected = get().connectionPhase === 'connected';
       set({ socket: null, sessionStates: cleanedSessionStates });
 
-      // #5277: a dropped socket means any in-flight cancel_activity's ack/failure
-      // will never arrive on this socket — clear the pending set so a node can't
-      // render "Cancelling…" forever across the reconnect (the tree re-seeds from
-      // activity_snapshot on resubscribe).
-      if (get().cancellingActivityIds.size > 0) {
-        set({ cancellingActivityIds: new Set<string>() });
-      }
-      // #5500: same contract for in-flight reindex requests — their ack/failure
-      // is socket-scoped, so clear the pending rows on a drop. (The server-side
-      // index keeps running; the next survey refresh shows its effect.)
-      if (get().reindexingRepoPaths.size > 0) {
-        set({ reindexingRepoPaths: new Set<string>() });
-      }
-      // #5502: ditto for in-flight relay re-runs.
-      if (get().relayRerunningRepoPaths.size > 0) {
-        set({ relayRerunningRepoPaths: new Set<string>() });
-      }
-      // #6134: ditto for in-flight container lifecycle actions — the ack/failure
-      // is socket-scoped, so clear pending rows on a drop. (The server-side
-      // action keeps running; the next survey refresh shows its effect.)
-      if (get().containerActioningIds.size > 0) {
-        set({ containerActioningIds: new Set<string>() });
-      }
-      // #6135: ditto for in-flight BYOK pool actions — the ack/failure is
-      // socket-scoped, so clear pending targets on a drop. (The server-side
-      // action keeps running; the next survey refresh shows its effect.)
-      if (get().byokPoolActioningIds.size > 0) {
-        set({ byokPoolActioningIds: new Set<string>() });
-      }
-      // #6140: ditto for in-flight host prune actions.
-      if (get().hostPruneActioningIds.size > 0) {
-        set({ hostPruneActioningIds: new Set<string>() });
-      }
-      // #6136: ditto for in-flight simulator actions.
-      if (get().simulatorActioningIds.size > 0) {
-        set({ simulatorActioningIds: new Set<string>() });
-      }
-      // #6137: ditto for in-flight emulator actions.
-      if (get().emulatorActioningIds.size > 0) {
-        set({ emulatorActioningIds: new Set<string>() });
-      }
-      // #6138: ditto for in-flight WSL distro actions.
-      if (get().wslActioningIds.size > 0) {
-        set({ wslActioningIds: new Set<string>() });
+      // #7586: every in-flight request marker — cancel_activity, the reindex /
+      // relay re-run / container / BYOK / host prune / simulator / emulator / WSL
+      // actions, restore retries, orchestration detail + pending actions, the
+      // Control Room survey *Loading flags (#6153), the session PR/CI request
+      // markers and their auto-pull window (#7344 / #7430) — is socket-scoped: the
+      // ack/failure that would clear it can never arrive on the dead socket. ONE
+      // roster (`createEmptyInFlightMarkers()`), shared with `disconnect()` and the
+      // two full-reset sites, so the four cannot drift. Stale snapshots are KEPT
+      // (the "generated Nm ago" line signals staleness; clearing would flash
+      // empty), and so are the `*Results` records beside each marker.
+      const staleMarkers = staleInFlightMarkers(get);
+      if (Object.keys(staleMarkers).length > 0) {
+        set(staleMarkers);
       }
       // #8331: the daily-daemon update banner is per connection; a reply to a
       // Restart now / Postpone can never arrive on the dead socket either.
       clearDaemonUpdateWatchdog();
       set({ ...EMPTY_DAEMON_UPDATE });
-      // #6691 (S-3): ditto for in-flight orchestration detail requests + pending
-      // mutating actions — a reply can never arrive on the dead socket.
-      if (get().orchestrationRunDetailLoading.size > 0) {
-        set({ orchestrationRunDetailLoading: new Set<string>() });
-      }
-      if (Object.keys(get().orchestrationPendingActions).length > 0) {
-        set({ orchestrationPendingActions: {} });
-      }
-      // #6153: reset every Control Room survey *Loading flag that's still true on
-      // a socket drop. Each survey section computes refreshDisabled = loading ||
-      // !connected, so a refresh in flight when the socket dies would leave
-      // loading=true forever — the disabled Refresh button can never clear it
-      // post-reconnect (it can't issue the request that would). One DRY sweep
-      // over the survey family avoids per-tab drift. (We intentionally KEEP the
-      // stale snapshots — the "generated Nm ago" line signals staleness, and a
-      // reconnect re-fetches on tab activation; clearing would flash empty.)
-      const surveyLoadingKeys = [
-        'hostStatusLoading', 'runnerStatusLoading', 'containersStatusLoading',
-        'repoRuntimeConfigLoading', 'byokPoolStatusLoading', 'hostPruneStatusLoading',
-        'simulatorStatusLoading', 'emulatorStatusLoading', 'wslStatusLoading', 'integrationStatusLoading',
-        'skillsInventoryLoading', 'mailboxStatusLoading', 'externalSessionsLoading',
-        'repoEventsLoading', 'githubWebhookConfigLoading', 'orchestrationRunsLoading',
-      'failedRestoresLoading',
-      ] as const;
-      // #7625: the retry markers ride the same drop. A pending retry's ack can
-      // never arrive on a dead socket, so leaving the id in the set would show
-      // a permanent "Retrying…" spinner on a button the operator cannot press.
-      if (get().retryingRestoreIds.size > 0) {
-        set({ retryingRestoreIds: new Set<string>() });
-      }
-      const loadingReset: Partial<Record<(typeof surveyLoadingKeys)[number], boolean>> = {};
-      for (const key of surveyLoadingKeys) {
-        if (get()[key]) loadingReset[key] = false;
-      }
-      if (Object.keys(loadingReset).length > 0) {
-        set(loadingReset);
-      }
-
-      // #7344: the sweep above walks a FLAT list of boolean keys, so it cannot
-      // reach `sessionPrStatusLoading`, which is keyed by session id. Reset it
-      // here for the same #6153 reason: a chip whose Refresh was in flight when
-      // the socket dropped would otherwise stay disabled forever, unable to
-      // issue the request that would clear it. Snapshots are KEPT, matching the
-      // survey family — a stale reading is still information, and the chip's
-      // Refresh re-fetches.
-      if (Object.keys(get().sessionPrStatusLoading).length > 0) {
-        set({ sessionPrStatusLoading: {} });
-      }
-      // The auto-pull window is per CONNECTION, so a drop clears it too: after a
-      // reconnect the first tab visit must re-survey rather than be suppressed by
-      // a request made on a socket that no longer exists.
-      if (Object.keys(get().sessionPrStatusRequestedAt).length > 0) {
-        set({ sessionPrStatusRequestedAt: {} });
-      }
-      // #7430: the thread-count loading flag is session-keyed for the same
-      // reason and needs the same reset — a count in flight when the socket
-      // dropped would otherwise leave its control disabled forever.
-      if (Object.keys(get().sessionPrThreadsLoading).length > 0) {
-        set({ sessionPrThreadsLoading: {} });
-      }
-
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
       // #5731 T4 / #8148: clear transient state for EVERY session, not just
@@ -3433,18 +3376,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // state is read against the wrong daemon. Back to `null` (not an empty
       // snapshot) so a reconnected tab reads "not asked yet" and re-requests.
       failedRestores: null,
-      // #7572 — the two #6691 (S-3) orchestration in-flight markers. The socket's
-      // `onclose` handler clears these on a transport drop (see ~L2895) because
-      // the reply can never arrive on the dead socket; but a USER-initiated
-      // disconnect nulls `socket.onclose` above to suppress auto-reconnect, so
-      // onclose never runs. Unlike the other nine #7557 collections (records that
-      // stay TRUE of the same daemon across a Disconnect → Connect), these are
-      // transient request markers — a held detail spinner and a pending mutating
-      // action awaiting an ack — so a same-server reconnect must not inherit them.
-      // They remain cleared at both full-reset sites too; this is an additional
-      // clear, not a move out of that set.
-      orchestrationRunDetailLoading: new Set<string>(),
-      orchestrationPendingActions: {},
+      // #7586 (supersedes #7572's two literals) — EVERY in-flight request marker:
+      // the actioning-id sets, the reindex / relay re-run / retry paths, the
+      // orchestration detail + pending-action markers, the survey *Loading flags,
+      // the PR/CI request markers and `sessionPrStatusRequestedAt`. The socket's
+      // `onclose` handler clears these on a transport drop because the reply can
+      // never arrive on the dead socket; but a USER-initiated disconnect nulls
+      // `socket.onclose` above to suppress auto-reconnect, so onclose never runs,
+      // and a same-server Disconnect → Connect left a row stuck "actioning"
+      // forever. The roster is `createEmptyInFlightMarkers()`, the same one
+      // `socket.onclose` (via `staleInFlightMarkers`) and both full-reset sites
+      // take, so the four cannot drift. Unlike the other nine #7557 collections
+      // (records that stay TRUE of the same daemon across a Disconnect → Connect),
+      // these are transient request markers, and the `*Results` records beside
+      // them are deliberately NOT in it.
+      ...createEmptyInFlightMarkers(),
       pairingRefreshedCount: 0,
       permissionMode: null,
       previousPermissionMode: null,
@@ -3525,6 +3471,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setLastConnectedUrl(null);
     clearPersistedState();
     set({
+      // #7586 — every in-flight request marker, from the ONE roster
+      // `socket.onclose` and `disconnect()` also take. FIRST in the payload on
+      // purpose: the session-keyed members (`sessionPr*Loading`,
+      // `sessionPrStatusRequestedAt`, `cancellingActivityIds`) are ALSO spelled out
+      // inside the #7470 marked block below, because the roster-removal-site guard
+      // reads that block for them literally, and a spread placed after an explicit
+      // key of the same name is a TS2783 error. The later literals win and are
+      // identical, so the overlap is harmless.
+      ...createEmptyInFlightMarkers(),
       // #7555 — `messages` and `terminalRawBuffer` used to be spelled out here.
       // They are two of the twelve FLAT_SESSION_FIELDS, so they now come from
       // the `createEmptyFlatSessionMirror()` spread inside the marked block
@@ -3604,30 +3559,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // shared with `updateSession`'s mirror block, so the two cannot drift.
       ...createEmptyFlatSessionMirror(),
       // #7470 forget-reset-end
-      // #5500: drop reindex pending/result state with the rest of the
-      // connection-scoped Control Room state.
-      reindexingRepoPaths: new Set<string>(),
+      // #5500 / #5502 / #6134-#6138: the reindex / relay re-run / container / BYOK /
+      // host prune / simulator / emulator / WSL RESULT records go with the rest of
+      // the connection-scoped Control Room state. Their pending markers are in the
+      // shared in-flight roster spread below (#7586); the results are spelled out
+      // here because they are records, not markers, and `disconnect()` keeps them.
       reindexResults: {},
-      // #5502: relay re-run pending/result state goes with it.
-      relayRerunningRepoPaths: new Set<string>(),
       relayRerunResults: {},
-      // #6134: container lifecycle action pending/result state goes with it.
-      containerActioningIds: new Set<string>(),
       containerActionResults: {},
-      // #6135: BYOK pool action pending/result state goes with it.
-      byokPoolActioningIds: new Set<string>(),
       byokPoolActionResults: {},
-      // #6140: host prune action pending/result state goes with it.
-      hostPruneActioningIds: new Set<string>(),
       hostPruneActionResults: {},
-      // #6136: simulator action pending/result state goes with it.
-      simulatorActioningIds: new Set<string>(),
       simulatorActionResults: {},
-      // #6137: emulator action pending/result state goes with it.
-      emulatorActioningIds: new Set<string>(),
       emulatorActionResults: {},
-      // #6138: WSL distro action pending/result state goes with it.
-      wslActioningIds: new Set<string>(),
       wslActionResults: {},
       // #7557 — the orchestration / scheduled-task / credential-test family, plus
       // the pair-request queue and the daemon's startup log. Eleven
@@ -3654,12 +3597,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // `scheduledTaskActionResults` with a reason (`failAllSchedulerRequests`),
       // and clearing the results there would erase the explanation the panel is
       // meant to show. #7557
-      orchestrationPendingActions: {},
       orchestrationActionResults: {},
       orchestrationRunDetails: {},
       orchestrationRunDetailErrors: {},
       orchestrationRunDetailStale: {},
-      orchestrationRunDetailLoading: new Set<string>(),
+      // `orchestrationPendingActions` / `orchestrationRunDetailLoading` are the two
+      // of the eleven that are in-flight MARKERS; they come from the shared roster
+      // spread above (#7586).
       scheduledTaskPendingActions: {},
       scheduledTaskActionResults: {},
       credentialTestResults: {},
@@ -3712,10 +3656,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //     reason and this action must mirror it (#7578 review; helper follow-on
     //     #7592).
     // This is the streaming/queue class only. `disconnect()` clears MORE than
-    // these five — the pending-operation revert markers (trust grants, model /
+    // these five — the pending-operation correlations (trust grants, model /
     // permission-mode / thinking reverts, git one-shots, MCP ops, permission
-    // splits) are the broader in-flight-marker class tracked by #7586, NOT this
-    // one; and `clearPersistedState()` is deliberately NOT mirrored here because
+    // splits) belong to the SOCKET teardown (`disconnect()` / onclose / onerror)
+    // and are not mirrored here; the in-flight request marker STORE FIELDS (#7586)
+    // are the `createEmptyInFlightMarkers()` spread below, shared with
+    // `disconnect()` and onclose; and `clearPersistedState()` is deliberately NOT mirrored here because
     // `switchServer` KEEPS the old server's cached data on purpose. (`resetReplay
     // Flags()` in `disconnect()` is subsumed by the cursor reset above.)
     // These do NOT propagate to the reconnect paths — `retryConnection` and a
@@ -3732,6 +3678,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearDeltaBuffers();
     clearTerminalWriteBatching();
     set({
+      // #7586 — every in-flight request marker, from the ONE roster
+      // `socket.onclose` and `disconnect()` also take. FIRST in the payload on
+      // purpose: the session-keyed members (`sessionPr*Loading`,
+      // `sessionPrStatusRequestedAt`, `cancellingActivityIds`) are ALSO spelled out
+      // inside the #7470 marked block below, because the roster-removal-site guard
+      // reads that block for them literally, and a spread placed after an explicit
+      // key of the same name is a TS2783 error. The later literals win and are
+      // identical, so the overlap is harmless.
+      ...createEmptyInFlightMarkers(),
       // #7555 — `messages` and `terminalRawBuffer` used to be spelled out here.
       // They are two of the twelve FLAT_SESSION_FIELDS, so they now come from
       // the `createEmptyFlatSessionMirror()` spread inside the marked block
@@ -3791,30 +3746,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // (ws-history.js — `if (entry)`), so nothing re-syncs the mirror at all.
       ...createEmptyFlatSessionMirror(),
       // #7470 switch-reset-end
-      // #5500: drop reindex pending/result state with the rest of the
-      // connection-scoped Control Room state.
-      reindexingRepoPaths: new Set<string>(),
+      // #5500 / #5502 / #6134-#6138: the reindex / relay re-run / container / BYOK /
+      // host prune / simulator / emulator / WSL RESULT records go with the rest of
+      // the connection-scoped Control Room state. Their pending markers are in the
+      // shared in-flight roster spread below (#7586); the results are spelled out
+      // here because they are records, not markers, and `disconnect()` keeps them.
       reindexResults: {},
-      // #5502: relay re-run pending/result state goes with it.
-      relayRerunningRepoPaths: new Set<string>(),
       relayRerunResults: {},
-      // #6134: container lifecycle action pending/result state goes with it.
-      containerActioningIds: new Set<string>(),
       containerActionResults: {},
-      // #6135: BYOK pool action pending/result state goes with it.
-      byokPoolActioningIds: new Set<string>(),
       byokPoolActionResults: {},
-      // #6140: host prune action pending/result state goes with it.
-      hostPruneActioningIds: new Set<string>(),
       hostPruneActionResults: {},
-      // #6136: simulator action pending/result state goes with it.
-      simulatorActioningIds: new Set<string>(),
       simulatorActionResults: {},
-      // #6137: emulator action pending/result state goes with it.
-      emulatorActioningIds: new Set<string>(),
       emulatorActionResults: {},
-      // #6138: WSL distro action pending/result state goes with it.
-      wslActioningIds: new Set<string>(),
       wslActionResults: {},
       // #7557 — the same eleven, at the SERVER SWITCH, which is where their key
       // spaces bite. See `forgetSession` above for the per-field adjudication.
@@ -3839,12 +3782,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // `scheduledTaskActionResults` with a reason (`failAllSchedulerRequests`),
       // and clearing the results there would erase the explanation the panel is
       // meant to show. #7557
-      orchestrationPendingActions: {},
       orchestrationActionResults: {},
       orchestrationRunDetails: {},
       orchestrationRunDetailErrors: {},
       orchestrationRunDetailStale: {},
-      orchestrationRunDetailLoading: new Set<string>(),
+      // `orchestrationPendingActions` / `orchestrationRunDetailLoading` are the two
+      // of the eleven that are in-flight MARKERS; they come from the shared roster
+      // spread above (#7586).
       scheduledTaskPendingActions: {},
       scheduledTaskActionResults: {},
       credentialTestResults: {},
