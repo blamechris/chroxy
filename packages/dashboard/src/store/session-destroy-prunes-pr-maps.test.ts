@@ -1202,6 +1202,7 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
     relayRerunResults: 'per repo path',
     permissionInputs: 'keyed by requestId',
     resolvedPermissions: 'keyed by requestId',
+    dismissedExpiredPermissions: 'keyed by requestId (#7353)',
     orchestrationPendingActions: 'keyed by requestId',
     orchestrationActionResults: 'keyed by requestId',
     scheduledTaskPendingActions: 'keyed by requestId',
@@ -2555,6 +2556,7 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
   const CLEARED_ON_DISCONNECT: Record<string, string> = {
     permissionInputs: 'disconnect() — a half-typed permission reply is dead with the socket',
     resolvedPermissions: 'disconnect() — the requestIds belong to the dropped connection',
+    dismissedExpiredPermissions: 'disconnect() — #7353, the requestIds belong to the dropped connection',
     serverCapabilities:
       '#3272 review — disconnect() clears it so a reconnect against a different (or older) server ' +
       'cannot have its UI gates left enabled by stale state (empty = fail-closed)',
@@ -2986,8 +2988,9 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     expect(assigns(switchBody, 'serverCapabilities'), '_resetSessionMemory spreads the same roster').toBe(true)
 
     // The roster is the real one, and it is the size the two issues describe:
-    // #7559's sixteen plus #7557's `infoNotifications`.
-    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(17)
+    // #7559's sixteen plus #7557's `infoNotifications` plus #7353's
+    // `dismissedExpiredPermissions`.
+    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(18)
     expect([...CONNECTION_SCOPED_RESET_FIELDS].sort()).toEqual([...Object.keys(CLEARED_ON_DISCONNECT)].sort())
 
     // A field OUTSIDE the roster is not lit up by the spread — otherwise the

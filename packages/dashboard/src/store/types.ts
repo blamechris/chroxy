@@ -1596,6 +1596,13 @@ export interface ConnectionState {
   // unanswered after the session/output tabs were toggled.
   resolvedPermissions: Record<string, PermissionDecision>;
 
+  // #7353: requestIds of EXPIRED permission prompts the operator has dismissed.
+  // Dismiss clears the interactive affordance (countdown, "Permission expired"
+  // line, Dismiss button) but never the record: the prompt message stays in the
+  // transcript and renders as a compact "dropped" line. Lives in the store, not
+  // in the component, so the collapsed state survives a remount (tab switch).
+  dismissedExpiredPermissions: Record<string, true>;
+
   // Claude Code Web (cloud task delegation)
   webFeatures: WebFeatureStatus;
   webTasks: WebTask[];
@@ -1874,6 +1881,8 @@ export interface ConnectionState {
    * state across remounts (#2833). Safe to call for an already-resolved
    * requestId — last write wins. */
   markPermissionResolved: (requestId: string, decision: PermissionDecision) => void;
+  /** #7353: collapse an expired prompt to its compact record. Never deletes the message. */
+  dismissExpiredPermission: (requestId: string) => void;
   /**
    * #6772/#6829 — replace the active session's session-scoped permission rules
    * (the SettingsPanel "Session Rules" viewer's remove / clear-all affordance).

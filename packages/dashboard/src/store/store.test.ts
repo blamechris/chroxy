@@ -1960,6 +1960,23 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(Object.keys(state).length).toBe(RESOLVED_PERMISSIONS_CAP);
   });
 
+  it('dismissExpiredPermission keeps at most the cap, evicting the oldest (#7353)', async () => {
+    const { useConnectionStore, RESOLVED_PERMISSIONS_CAP } = await import('./connection');
+    useConnectionStore.setState({ dismissedExpiredPermissions: {} });
+
+    for (let i = 0; i < RESOLVED_PERMISSIONS_CAP + 2; i++) {
+      useConnectionStore.getState().dismissExpiredPermission(`req-${i}`);
+    }
+
+    const state = useConnectionStore.getState().dismissedExpiredPermissions;
+    expect(Object.keys(state).length).toBe(RESOLVED_PERMISSIONS_CAP);
+    // The two oldest were evicted; the newest survives.
+    expect(state['req-0']).toBeUndefined();
+    expect(state['req-1']).toBeUndefined();
+    expect(state['req-2']).toBe(true);
+    expect(state[`req-${RESOLVED_PERMISSIONS_CAP + 1}`]).toBe(true);
+  });
+
   it('capResolvedPermissions pure helper evicts without mutating input (#2838)', async () => {
     const { capResolvedPermissions } = await import('./connection');
 

@@ -26,6 +26,10 @@ type MockStore = {
   serverCapabilities?: { ide?: boolean }
   permissionInputs?: Record<string, { found: boolean; input?: Record<string, unknown> }>
   requestPermissionInput?: (requestId: string) => void
+  // #7353 — expired-prompt dismissal lives in the store. The mock is not
+  // reactive, so tests that dismiss re-render explicitly after the action.
+  dismissedExpiredPermissions?: Record<string, true>
+  dismissExpiredPermission?: (requestId: string) => void
 }
 const DEFAULT_MOCK_STORE: MockStore = {
   resolvedPermissions: {},
@@ -41,9 +45,17 @@ const DEFAULT_MOCK_STORE: MockStore = {
   connectionPhase: 'connected',
 }
 let mockStoreState: MockStore = { ...DEFAULT_MOCK_STORE }
+const mockDismissExpiredPermission = vi.fn((requestId: string) => {
+  mockStoreState = {
+    ...mockStoreState,
+    dismissedExpiredPermissions: { ...mockStoreState.dismissedExpiredPermissions, [requestId]: true },
+  }
+})
 function resetMockStore() {
+  mockDismissExpiredPermission.mockClear()
   mockStoreState = {
     ...DEFAULT_MOCK_STORE,
+    dismissExpiredPermission: mockDismissExpiredPermission,
     sessions: [...DEFAULT_MOCK_STORE.sessions],
     availableProviders: [...DEFAULT_MOCK_STORE.availableProviders],
   }
@@ -236,20 +248,100 @@ describe('PermissionPrompt', () => {
     expect(screen.getByText('Dismiss')).toBeInTheDocument()
   })
 
-  it('removes prompt entirely when Dismiss is clicked after expiry', () => {
+  // #7353: Dismiss clears the interactive affordance, never the history. The
+  // old behaviour (card removed outright) erased the only record of a dropped
+  // tool call; it now collapses to a compact line with no controls.
+  it('collapses to a compact dropped-tool record when Dismiss is clicked after expiry (#7353)', () => {
     const onRespond = vi.fn()
+    const props = {
+      requestId: 'req-1',
+      tool: 'Bash',
+      description: 'Commit the restructured fix',
+      remainingMs: 2000,
+      onRespond,
+    }
+    const { rerender } = render(<PermissionPrompt {...props} />)
+    act(() => { vi.advanceTimersByTime(3000) })
+    fireEvent.click(screen.getByText('Dismiss'))
+    // The click routes to the store action (and never answers the permission).
+    expect(mockDismissExpiredPermission).toHaveBeenCalledWith('req-1')
+    expect(onRespond).not.toHaveBeenCalled()
+
+    rerender(<PermissionPrompt {...props} />)
+    const record = screen.getByTestId('perm-dropped-record')
+    expect(record).toHaveTextContent('Permission expired')
+    expect(record).toHaveTextContent('Bash')
+    expect(record).toHaveTextContent('Commit the restructured fix')
+    expect(record).toHaveTextContent('dropped')
+    // No interactive affordance survives: no buttons at all, no countdown, no
+    // Dismiss, no expired-info row.
+    expect(record.querySelectorAll('button')).toHaveLength(0)
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('perm-countdown')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('perm-expired-info')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dismiss')).not.toBeInTheDocument()
+  })
+
+  it('keeps the perm-desc anchor on the dropped record so the summary jump link still lands (#7353)', () => {
+    mockStoreState = { ...mockStoreState, dismissedExpiredPermissions: { 'req-1': true } }
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="run it"
+        remainingMs={0}
+        onRespond={vi.fn()}
+      />
+    )
+    const anchor = document.getElementById('perm-desc-req-1')
+    expect(anchor).not.toBeNull()
+    expect(anchor?.getAttribute('tabindex')).toBe('-1')
+  })
+
+  it('shows the dropped record straight away when a dismissed prompt remounts (#7353)', () => {
+    mockStoreState = { ...mockStoreState, dismissedExpiredPermissions: { 'req-1': true } }
     render(
       <PermissionPrompt
         requestId="req-1"
         tool="Write"
-        description="test"
-        remainingMs={2000}
-        onRespond={onRespond}
+        description="write the file"
+        remainingMs={0}
+        onRespond={vi.fn()}
       />
     )
-    act(() => { vi.advanceTimersByTime(3000) })
-    fireEvent.click(screen.getByText('Dismiss'))
+    expect(screen.getByTestId('perm-dropped-record')).toBeInTheDocument()
     expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
+  })
+
+  it('strips the appended "(Expired …)" note from the dropped record (#7353)', () => {
+    mockStoreState = { ...mockStoreState, dismissedExpiredPermissions: { 'req-1': true } }
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description={'git commit -m wip\n(Expired — this permission was already handled or timed out)'}
+        remainingMs={0}
+        onRespond={vi.fn()}
+      />
+    )
+    const record = screen.getByTestId('perm-dropped-record')
+    expect(record).toHaveTextContent('git commit -m wip')
+    expect(record).not.toHaveTextContent('(Expired')
+  })
+
+  it('does not collapse a dismissed id that is not expired (dismissal only applies to the expired state) (#7353)', () => {
+    mockStoreState = { ...mockStoreState, dismissedExpiredPermissions: { 'req-1': true } }
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Write"
+        description="still live"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('perm-dropped-record')).not.toBeInTheDocument()
+    expect(screen.getByText('Allow')).toBeInTheDocument()
   })
 
   it('shows expired immediately when remainingMs is 0', () => {

@@ -4498,6 +4498,30 @@ button.sidebar-token-view-session-row:hover {
   margin-top: 6px;
 }
 
+/* #7353: compact record an expired permission collapses to on Dismiss. A muted
+   line, no controls (so no tap target): tool, description, outcome. A long
+   command wraps and is clamped to 3 lines; the full text is on the title
+   attribute. --text-muted (5.4:1 on --bg-primary) rather than --text-dim
+   (3.3:1, under the 4.5:1 AA floor for small text). */
+.permission-prompt.permission-prompt-dropped {
+  padding: 6px 12px;
+  background: transparent;
+  max-width: 85%;
+}
+
+.perm-dropped-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-style: italic;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 /* ---- Question Prompt (#1193) ---- */
 .question-prompt {
   background: var(--bg-secondary);
@@ -4816,7 +4840,9 @@ button.sidebar-token-view-session-row:hover {
 
 .permission-expired-summary-text {
   font-size: var(--text-sm);
-  color: var(--text-dim);
+  /* #7353 review: --text-dim is 3.3:1 on --bg-primary, below AA for small
+     italic text; --text-muted is 5.4:1, matching the dropped-permission record. */
+  color: var(--text-muted);
   font-style: italic;
 }
 
@@ -7958,6 +7984,8 @@ button.sidebar-token-view-session-row:hover {
   .session-bar { padding: 4px 10px; }
   .chat-messages { padding: 10px; gap: 8px; }
   .msg, .msg-row, .tool-bubble, .permission-prompt, .question-prompt { max-width: 92%; font-size: var(--text-base); }
+  /* The dropped record's own rule (0,2,0) outranks the line above (0,1,0). */
+  .permission-prompt.permission-prompt-dropped { max-width: 92%; }
   .input-bar { padding: 8px 10px; gap: 6px; }
   .input-bar textarea { padding: 8px 10px; font-size: var(--text-base); }
   .btn-send, .btn-interrupt { padding: 8px 12px; font-size: var(--text-base); }
