@@ -14,6 +14,15 @@ import { join } from 'node:path'
  * where a PERSISTENT stream-json child is still alive to deliver the
  * `task_notification` that eventually clears the agent.
  *
+ * #7396 added the second eligible provider, and its own funnel rather than that
+ * method: `ClaudeTuiSession._clearTurnEndState({ turnEndedCleanly: true })`,
+ * reached from exactly one place -- the success path after claude's Stop hook,
+ * which is claude itself reporting its turn over while its persistent PTY is
+ * still alive. Its finalizer is the same `<task-notification>`, read from the
+ * session transcript, and a launch is only confirmed when that transcript is
+ * readable (so a way out is guaranteed). Every other TUI turn end -- error, hard
+ * cap, Ctrl-C, PTY exit, destroy -- sweeps, exactly like the CLI's.
+ *
  * Every other site is a provider that died — Stop/SIGINT, a child crash,
  * `_killAndRespawn`, the SDK hard timeout, stream-stall recovery, `interrupt()`,
  * `destroy()`, a failed stdin write. On any of those `task_notification` can
@@ -174,11 +183,45 @@ describe('#7340 — turn-end exemption opt-in roster', () => {
   //
   // `base-session.js` is expected: it declares the parameter and consumes it.
   // Anything else is a call site.
-  it('exactly ONE provider opts in, and it is the CLI', () => {
+  it('exactly TWO providers opt in: the CLI and claude-tui (#7396)', () => {
     assert.deepEqual(
       sourcesMatching(/\bturnEndedCleanly\b/),
-      ['base-session.js', 'cli-session.js'],
+      ['base-session.js', 'claude-tui-session.js', 'cli-session.js'],
       'a new opt-in site must be justified on #7340 before it is added: the flag is only safe where the provider is still ALIVE and can still deliver task_notification',
+    )
+  })
+
+  // #7396: the TUI passes the flag from ONE call, and that call is the Stop-hook
+  // success path. A second site -- `_finishTurnError`, `_teardownTurn`,
+  // `_onPtyGone` -- would exempt agents on a turn that did NOT end with claude
+  // reporting it, which is the stranded-agent failure this roster exists for.
+  // Counts SITES (the file-level roster above is satisfied by one), and pins the
+  // site by the `_emitResult` reason that only the Stop-hook path uses.
+  it('claude-tui opts in at exactly one site, the Stop-hook success path (#7396)', () => {
+    const src = readSource('claude-tui-session.js')
+    const code = codeOnly(src)
+    assert.equal((code.match(/\bturnEndedCleanly\s*:\s*true\b/g) || []).length, 1, 'one opt-in site')
+    const at = src.search(/_clearTurnEndState\(\{\s*turnEndedCleanly:\s*true\s*\}\)/)
+    assert.ok(at > 0, 'the opt-in is a _clearTurnEndState call')
+    const lastResult = src.lastIndexOf('this._emitResult(', at)
+    assert.ok(lastResult > 0)
+    // Computed boolean, not assert.match against a slice (entry 17).
+    assert.ok(
+      src.slice(lastResult, at).includes("'stop_hook_fired_without_post_hook'"),
+      'the opt-in follows the Stop-hook success path _emitResult, not an error path',
+    )
+  })
+
+  // #7396: the TUI confirms a background launch from the hook's own account
+  // (`AgentOutput.status === "async_launched"`) AND only when a finalizer can
+  // arrive. The other half of "only the provider's own account may confirm",
+  // since the TUI has no `task_started` to claim authority from.
+  it('claude-tui confirms a background launch only when a finalizer can arrive (#7396)', () => {
+    assert.deepEqual(sourcesMatching(/\bauthoritative:\s*confirmable\b/), ['claude-tui-session.js'])
+    const code = codeOnly(readSource('claude-tui-session.js'))
+    assert.ok(
+      /const confirmable = hasRealId && this\._canObserveAgentNotifications\(\)/.test(code),
+      'confirmation needs a real tool_use_id and a readable transcript',
     )
   })
 
