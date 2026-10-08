@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A claude-tui session now reports the subagents it is running (#7396).** The
+  default provider never tracked them, so the agent panel, the "N agents
+  running" badge, the working status on the tab and the Control Room agent nodes
+  were all dark, and a session read idle while a subagent ran. A subagent now
+  shows up when it is launched, a foreground one clears when it returns, and a
+  background one stays until Claude Code reports it finished. It also clears if
+  the turn ends in an error, is stopped, or the session ends.
+
 - **Web fetch and web search results render as cards on the default provider
   (#6987).** A WebFetch on a claude-tui session showed its raw JSON envelope
   (`{"bytes":...,"result":...}`) instead of the page text. The dashboard and the

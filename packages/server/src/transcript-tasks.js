@@ -114,6 +114,14 @@ const SYNTHETIC_MODEL = '<synthetic>'
 // readiness path stays fast.
 export const MAX_SCAN_BYTES = 16 * 1024 * 1024
 
+// #7396: how many task-notification tool-use ids the scanner remembers. The set
+// answers "has this launch been reported finished", which a session asks about
+// the handful of subagents it is tracking right now -- so only recent ids
+// matter -- but a long session can see thousands of notifications, and an
+// unbounded set is a leak with no consumer. Insertion order is age, so eviction
+// drops the oldest first.
+export const NOTIFIED_TOOL_USE_IDS_MAX = 512
+
 // Truncate `description` fallbacks derived from an Agent `prompt` — prompts
 // are unbounded; 80 chars matches the issue's payload sketch.
 const PROMPT_DESCRIPTION_MAX = 80
@@ -195,6 +203,11 @@ export class TranscriptTaskScanner {
     this._discardFirstPartialLine = false
     /** @type {Map<string, {toolUseId:string,kind:string,description:string,startedAt:number}>} */
     this._tasks = new Map()
+    // #7396: every tool-use id a task-notification has named, in arrival order.
+    // Reset with the rest of the state, so a rotated or truncated transcript is
+    // re-derived from its start. See `notifiedToolUseIds`.
+    /** @type {Set<string>} */
+    this._notified = new Set()
     /** @type {{at:number,reason:string,prompt:string}|null} */
     this._wakeup = null
     // Latest user/assistant entry timestamp seen (epoch ms) — used to decide
@@ -214,6 +227,26 @@ export class TranscriptTaskScanner {
     // entries, and the classification of the most recent one.
     this._usageLimitCount = 0
     this._lastUsageLimit = null
+  }
+
+  /**
+   * #7396: the tool-use ids of every `<task-notification>` seen so far, whatever
+   * launched them and whatever their status.
+   *
+   * Deliberately NOT part of the `scan()` snapshot: the snapshot is what rides
+   * the `claude_ready` wire and what the idle poll dedups on, and neither wants
+   * this. And deliberately not derived from `backgroundTasks`: that list only
+   * knows launches that REQUESTED `run_in_background`, while Claude Code also
+   * backgrounds an Agent call that never asked (observed on a live transcript:
+   * `toolUseResult.isAsync` on an Agent whose input has no `run_in_background`).
+   * A caller tracking such an agent has to ask "was this id reported finished",
+   * and this is the one place that answers it.
+   *
+   * Read-only view: callers must not mutate it.
+   * @returns {ReadonlySet<string>}
+   */
+  get notifiedToolUseIds() {
+    return this._notified
   }
 
   /**
@@ -314,6 +347,7 @@ export class TranscriptTaskScanner {
         // raw match is exact. Any status (completed/failed/…) means the
         // task is no longer running.
         this._tasks.delete(m[1])
+        this._noteNotified(m[1])
       }
     }
 
@@ -386,6 +420,18 @@ export class TranscriptTaskScanner {
       // match is brittle against harness-side trimming/wrapping.
       const probe = this._wakeup.prompt.slice(0, 200)
       if (probe && text.includes(probe)) this._wakeup = null
+    }
+  }
+
+  /** @param {string} toolUseId */
+  _noteNotified(toolUseId) {
+    // Re-insert so a repeat notification (the same task-id notifies again each
+    // time the agent stops) refreshes the id's age rather than leaving it to be
+    // evicted ahead of newer ones.
+    this._notified.delete(toolUseId)
+    this._notified.add(toolUseId)
+    if (this._notified.size > NOTIFIED_TOOL_USE_IDS_MAX) {
+      this._notified.delete(this._notified.values().next().value)
     }
   }
 

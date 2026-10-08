@@ -2471,6 +2471,30 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #7340 / #7396: the subagents that outlive a turn end -- `null` (nothing
+   * survives, a total drain) unless the provider itself reported the turn over.
+   *
+   * The ONE implementation of the survival predicate, shared by
+   * `_clearMessageState` and by providers whose turn end does not run through it
+   * (claude-tui's Stop-hook path). A second copy of "backgroundConfirmed and the
+   * turn ended cleanly" is how two providers come to disagree about what
+   * "survives" means. Opt-IN for the same reason `_clearMessageState`'s
+   * `turnEndedCleanly` is: a caller that forgets to pass it gets the sweep.
+   *
+   * @param {boolean} turnEndedCleanly
+   * @returns {Set<string> | null}
+   * @protected
+   */
+  _survivingAgentIds(turnEndedCleanly) {
+    if (turnEndedCleanly !== true) return null
+    return new Set(
+      [...this._activeAgents]
+        .filter(([, agent]) => agent?.backgroundConfirmed === true)
+        .map(([toolUseId]) => toolUseId),
+    )
+  }
+
+  /**
    * Clear per-message state at the end of a turn.
    *
    * @param {{ turnEndedCleanly?: boolean }} [opts]
@@ -2553,13 +2577,7 @@ export class BaseSession extends EventEmitter {
     // reported back yet looks exactly like an orphan. Sweeping it told the
     // client the subagent had failed -- while it was running fine -- and ended
     // its activity node on the way past.
-    const survivingAgents = turnEndedCleanly
-      ? new Set(
-        [...this._activeAgents]
-          .filter(([, agent]) => agent?.backgroundConfirmed === true)
-          .map(([toolUseId]) => toolUseId),
-      )
-      : null
+    const survivingAgents = this._survivingAgentIds(turnEndedCleanly)
 
     this._sweepUnresolvedToolStarts(
       isTurnTerminationReason(terminatedReason) ? terminatedReason : 'message_state_cleared',

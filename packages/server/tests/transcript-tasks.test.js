@@ -18,6 +18,7 @@ import {
   TranscriptTaskScanner,
   transcriptPathForSessionFile,
   MAX_SCAN_BYTES,
+  NOTIFIED_TOOL_USE_IDS_MAX,
 } from '../src/transcript-tasks.js'
 
 let dir
@@ -691,5 +692,65 @@ describe('TranscriptTaskScanner — usageLimitCount (#8400)', () => {
     const p = writeTranscript(['{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[null,1,{"text":5}]}}', '{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":null}'])
     assert.doesNotThrow(() => new TranscriptTaskScanner(p).scan())
     assert.equal(new TranscriptTaskScanner(p).scan().usageLimitCount, 2, 'the structured marker alone counts')
+  })
+})
+
+// #7396 -- claude-tui tracks subagents from the same transcript. The scanner's
+// `backgroundTasks` list only knows launches that REQUESTED
+// `run_in_background`, but Claude Code backgrounds an Agent call that never
+// asked (observed on a live transcript: `toolUseResult.isAsync` on an Agent
+// whose input has no `run_in_background`). The session therefore needs the
+// other half on its own: every tool-use id a task-notification has named.
+describe('TranscriptTaskScanner -- notifiedToolUseIds (#7396)', () => {
+  const attachmentNotice = (id, status = 'completed') => JSON.stringify({
+    type: 'attachment', timestamp: '2026-06-10T02:39:41.000Z',
+    attachment: { type: 'queued_command', prompt: `<task-notification>\n<task-id>a1</task-id>\n<tool-use-id>${id}</tool-use-id>\n<status>${status}</status>\n</task-notification>` },
+  })
+
+  it('collects the id of every task-notification, whatever launched it and whatever the status', () => {
+    const p = writeTranscript([
+      launchLine({ id: 'toolu_bg', name: 'Agent', runInBackground: true, description: 'a' }),
+      completionLine({ id: 'toolu_bg' }),
+      attachmentNotice('toolu_implicit', 'failed'),
+    ])
+    const scanner = new TranscriptTaskScanner(p)
+    scanner.scan()
+    assert.deepEqual([...scanner.notifiedToolUseIds].sort(), ['toolu_bg', 'toolu_implicit'])
+  })
+
+  it('is empty until a notification lands, and incremental across scans', () => {
+    const p = writeTranscript([launchLine({ id: 'toolu_a', name: 'Agent' })])
+    const scanner = new TranscriptTaskScanner(p)
+    scanner.scan()
+    assert.equal(scanner.notifiedToolUseIds.size, 0)
+    appendFileSync(p, completionLine({ id: 'toolu_a' }) + '\n')
+    scanner.scan()
+    assert.deepEqual([...scanner.notifiedToolUseIds], ['toolu_a'])
+  })
+
+  it('is re-derived, not retained, when the transcript is truncated', () => {
+    const p = writeTranscript([completionLine({ id: 'toolu_old' }), launchLine({ id: 'toolu_pad', description: 'x'.repeat(200) })])
+    const scanner = new TranscriptTaskScanner(p)
+    scanner.scan()
+    assert.ok(scanner.notifiedToolUseIds.has('toolu_old'))
+    writeFileSync(p, completionLine({ id: 'toolu_new' }) + '\n')
+    scanner.scan()
+    assert.deepEqual([...scanner.notifiedToolUseIds], ['toolu_new'])
+  })
+
+  it('is bounded, dropping the oldest ids first', () => {
+    const lines = []
+    for (let i = 0; i < NOTIFIED_TOOL_USE_IDS_MAX + 5; i++) lines.push(completionLine({ id: `toolu_${i}` }))
+    const scanner = new TranscriptTaskScanner(writeTranscript(lines))
+    scanner.scan()
+    assert.equal(scanner.notifiedToolUseIds.size, NOTIFIED_TOOL_USE_IDS_MAX)
+    assert.ok(!scanner.notifiedToolUseIds.has('toolu_0'))
+    assert.ok(scanner.notifiedToolUseIds.has(`toolu_${NOTIFIED_TOOL_USE_IDS_MAX + 4}`))
+  })
+
+  it('does not change the snapshot shape the wire and the dedup key are built from', () => {
+    const p = writeTranscript([completionLine({ id: 'toolu_a' })])
+    const snap = new TranscriptTaskScanner(p).scan()
+    assert.ok(!('notifiedToolUseIds' in snap))
   })
 })
