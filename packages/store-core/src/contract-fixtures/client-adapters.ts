@@ -47,6 +47,14 @@ export interface FixtureSession {
 export interface AdapterResult {
   /** Final per-session state (sessionStates equivalent). */
   sessions: Record<string, FixtureSession>
+  /**
+   * A deep snapshot of `sessions` taken BEFORE any handler ran (#8399). It shares
+   * no object with `sessions`, so a handler that mutates a seeded value in place
+   * (`s.activeTools.push(...)`) moves `sessions` and leaves this untouched — the
+   * baseline a `noop` fixture is compared against. It is never exposed to the
+   * adapter, so a handler cannot reach it.
+   */
+  seeded: Record<string, FixtureSession>
   /** Final flat (top-level) connection state. */
   flat: Record<string, unknown>
   /** Messages pushed via `addMessage`, in order. */
@@ -141,8 +149,17 @@ export const DASHBOARD_FLAT_MIRROR_KEYS = [
 export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   const sessions: Record<string, FixtureSession> = {}
   for (const [id, seed] of Object.entries(init?.sessions ?? {})) {
-    sessions[id] = { sessionId: id, messages: [], ...seed } as FixtureSession
+    // Deep-clone the seed (#8399). A shallow spread made every nested seeded value
+    // (`activeTools`, ...) the SAME object as in the fixture, so an in-place
+    // mutation by a handler rewrote the fixture's own seed and any comparison
+    // against it compared the value with itself — and leaked into the second
+    // client's run of the same fixture.
+    sessions[id] = { sessionId: id, messages: [], ...structuredClone(seed) } as FixtureSession
   }
+  // The pre-handler baseline a `noop` fixture is checked against. Cloned from
+  // `sessions` (the shape the adapter really built), not recomputed by the
+  // assertion from the fixture, so the shell defaults are not written twice.
+  const seeded = structuredClone(sessions)
   let activeSessionId = init?.activeSessionId ?? null
   let sessionList: SessionInfo[] = init?.sessionList ?? []
   const myClientId = init?.myClientId ?? null
@@ -313,7 +330,7 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   return {
     adapter,
     get result(): AdapterResult {
-      return { sessions, flat, added, callbacks, serverErrors, infoNotifications, switchedSessions, rotatedTunnelUrls, terminalWrites }
+      return { sessions, seeded, flat, added, callbacks, serverErrors, infoNotifications, switchedSessions, rotatedTunnelUrls, terminalWrites }
     },
     setActive: (id: string | null) => {
       activeSessionId = id

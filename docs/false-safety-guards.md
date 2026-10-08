@@ -2923,7 +2923,33 @@ caught by the old assertion only through the dashboard's flat mirror
 (`expected no flat writes`); the app-side run was green, and under the new
 assertion the app run fails on the overwritten `isIdle` first.
 
+**The fix was half a snapshot (`#8399`).** It compared each seeded value against
+the fixture's `init`, but `makeClientEnv` built the session with a shallow
+spread, so a NESTED seeded value (`activeTools`) was the same object on both
+sides: a handler that pushed into it moved the seed with it and the comparison
+read a value against itself. `toEqual` also treats `{ a: undefined }` as `{}`,
+so a deleted key seeded as `undefined` was invisible. The harness now deep-clones
+each seed into the session and takes a `structuredClone` of the sessions before
+any handler runs (`AdapterResult.seeded`); `noop` compares that snapshot with
+`toStrictEqual` plus an own-key check each way. Replacing a seeded value with an
+equal but distinct object stays green on purpose: value equality is the contract.
+
+The comparison can still go vacuous (41 of the 49 `noop` expectations seed no
+session field, so a loop over nothing is the normal case), so one test sums the
+seeded fields each `noop` row actually compared against a count read off the
+fixtures' own `init`, and fails on any row where they differ or the total is zero.
+
+**Proof (`#8399`).** Driven stubs: an in-place push into a seeded array, an
+in-place delete of a seeded `undefined` key, `undefined` written onto an unseeded
+key, a value differing only by an `undefined` property, a lost snapshot, a
+phantom session; controls: untouched, and an equal-but-distinct replacement.
+Mutants: no seed clone (2 red), snapshot aliasing the live sessions (14 red),
+`toEqual` for `toStrictEqual` (1 red), own-key check removed (1 red), empty
+snapshot (red across the fixture loop), gained-key check removed (3 red).
+
 **Guard against it:** when an assertion's allowlist or baseline is computed
 from the fixture's own inputs, ask what a mutation of those inputs would look
 like to it. A no-op check should compare against a snapshot of the starting
-state, not against the vocabulary of the starting state.
+state, not against the vocabulary of the starting state — and the snapshot must
+share no object with the state the handler can reach, or it is a second name for
+the thing being checked.
