@@ -2591,13 +2591,39 @@ export class DockerByokSession extends ClaudeByokSession {
           await pool.release(this._poolKeyFor(containerId), containerId)
         } catch (err) {
           log.warn(`pool release of ${containerId.slice(0, 12)} failed: ${err.message} — falling back to docker rm -f`)
-          await this._rmContainer(containerId)
+          await this._discardContainer(containerId, pool)
         }
       } else {
         log.info(`removing container ${containerId.slice(0, 12)}${acquiredFromPool ? ' (was pooled)' : ''}`)
-        await this._rmContainer(containerId)
+        await this._discardContainer(containerId, pool)
       }
     }
+  }
+
+  /**
+   * Remove a container this session owns and will NOT release to the pool
+   * (a vanish flips `_containerReady` off, so destroy() lands here instead
+   * of `pool.release()`; so does a session that never went ready).
+   *
+   * #7610: when a pool is attached, go through `pool.forget()` — it runs the
+   * same `docker rm -f` AND drops the id from `_soiledIds` / `_createdAt`,
+   * which `notifyContainerVanished()` / `acquire()` left behind. A bare
+   * `_rmContainer` here leaked one Set entry plus one Map entry per vanished
+   * container for the life of the daemon. `forget()` already ran the removal,
+   * so do not also call `_rmContainer` (a second `docker rm -f`). An id the
+   * pool never tracked (a fresh, never-pooled container) is a no-op delete.
+   * With no pool there is no bookkeeping, so the plain removal stands.
+   */
+  async _discardContainer(containerId, pool) {
+    if (pool && typeof pool.forget === 'function') {
+      try {
+        await pool.forget(containerId)
+        return
+      } catch (err) {
+        log.warn(`pool forget of ${containerId.slice(0, 12)} failed: ${err.message} — falling back to docker rm -f`)
+      }
+    }
+    await this._rmContainer(containerId)
   }
 
   /**
