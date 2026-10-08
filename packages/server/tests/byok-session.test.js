@@ -3439,6 +3439,41 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
+    // #8461: the forced no-tools summary round ends with an ordinary end_turn that
+    // overwrote the loop's stop reason, so a turn cut off by the round cap read as
+    // a clean finish. The cap is its own fact and marks the turn truncated.
+    it('marks a turn that hit MAX_TOOL_ROUNDS as truncated, not completed (#8461)', async () => {
+      const session = new ClaudeByokSession({ cwd: '/tmp' })
+      session.setPermissionMode('auto')
+      session._executeToolBlock = async function ({ block }) {
+        return { type: 'tool_result', tool_use_id: block.id, content: 'x', is_error: false }
+      }
+      session._client = {
+        messages: {
+          stream: ({ tools }) => {
+            if (!tools || tools.length === 0) {
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'end_turn' } }],
+                { stop_reason: 'end_turn', content: [{ type: 'text', text: 'Summary.' }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            }
+            return fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'toolu_x', name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+            )
+          },
+        },
+      }
+      const captured = captureEvents(session)
+      await session.start()
+      await session.sendMessage('infinite loop please')
+      const result = captured.find((e) => e.name === 'result')
+      assert.ok(result, 'result must fire')
+      assert.equal(result.payload.turnOutcome, 'truncated')
+      assert.equal(result.payload.stopReason, 'end_turn', 'the raw provider string still reports what the summary round said')
+      await session.destroy()
+    })
+
     it('emits a non-fatal MAX_TOOL_ROUNDS_REACHED error when the cap fires (#4063)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session.setPermissionMode('auto')

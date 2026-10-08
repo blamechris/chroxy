@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { getSessionStatus, getStatusColor } from '../../components/SessionOverview';
+import { getSessionStatus, getStatusColor, lastPreviewMessage } from '../../components/SessionOverview';
+import type { ChatMessage } from '../../store/types';
 
 describe('SessionOverview visible prop removal (#1072)', () => {
   const source = fs.readFileSync(
@@ -123,5 +124,40 @@ describe('SessionOverview helpers', () => {
       const result = getStatusColor('attention');
       expect(result.fg).toBeDefined();
     });
+  });
+});
+
+// #8461 -- the card previews the reply, not the "Reply cut off" chip that follows it.
+describe('lastPreviewMessage (#8461)', () => {
+  const m = (over: Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'type'>): ChatMessage =>
+    ({ content: '', timestamp: 1, ...over }) as ChatMessage;
+  const reply = m({ id: 'r1', type: 'response', content: 'half an answer' });
+  const chip = m({ id: 'o1', type: 'system', content: 'Reply cut off', turnOutcome: 'truncated' } as Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'type'>);
+
+  it('returns null with nothing to preview', () => {
+    expect(lastPreviewMessage(undefined)).toBeNull();
+    expect(lastPreviewMessage([])).toBeNull();
+  });
+
+  it('is the last message when it is not a turn-outcome chip', () => {
+    expect(lastPreviewMessage([reply])).toBe(reply);
+  });
+
+  it('skips a trailing turn-outcome chip and previews the reply before it', () => {
+    expect(lastPreviewMessage([reply, chip])).toBe(reply);
+  });
+
+  it('skips several chips, and previews the user input when a refusal produced no text', () => {
+    const input = m({ id: 'u1', type: 'user_input', content: 'do the thing' });
+    expect(lastPreviewMessage([input, chip, chip])).toBe(input);
+  });
+
+  it('returns null when only chips exist', () => {
+    expect(lastPreviewMessage([chip])).toBeNull();
+  });
+
+  it('still previews any other system message (only outcome chips are skipped)', () => {
+    const sys = m({ id: 's1', type: 'system', content: 'Connected' });
+    expect(lastPreviewMessage([reply, sys])).toBe(sys);
   });
 });

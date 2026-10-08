@@ -24,10 +24,13 @@
  * INVARIANT 2 — every other `system` message is excluded.
  *
  *   They belong on the System tab, which mobile does have
- *   (SessionScreen's `viewMode === 'system'`). `systemMessages` is derived
- *   separately from the unfiltered list, so markers appear there too.
+ *   (SessionScreen's `viewMode === 'system'`). `selectSystemMessages` derives it
+ *   separately from the unfiltered list, so compaction markers appear there too.
+ *   A turn-outcome chip does NOT (#8461): it describes the turn above it, so it
+ *   lives in the chat only and neither lists on the System tab nor counts toward
+ *   its unread badge.
  */
-import { isTurnOutcomeMarker } from '@chroxy/store-core';
+import { isTurnOutcomeMarker, isSystemTabMessage } from '@chroxy/store-core';
 import type { ChatMessage } from '../store/connection';
 
 export interface SelectChatMessagesOptions {
@@ -59,4 +62,9 @@ export function selectChatMessages(
   options: SelectChatMessagesOptions,
 ): ChatMessage[] {
   return messages.filter((m) => shouldShowInChat(m, options));
+}
+
+/** The System tab's set (and its unread badge's count): `system` rows minus turn-outcome chips. */
+export function selectSystemMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter(isSystemTabMessage);
 }

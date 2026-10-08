@@ -53,7 +53,7 @@ import {
 } from './byok-mcp-trust.js'
 import { getSubagentProfile, SUBAGENT_PROFILE_NAMES } from './byok-subagent-profiles.js'
 import { configPath } from './config-dir.js'
-import { turnOutcomeField, outcomeFromAnthropicStopReason } from './turn-outcome.js'
+import { turnOutcomeField, outcomeFromByokTurn } from './turn-outcome.js'
 
 const log = createLogger('byok-session')
 
@@ -1168,6 +1168,9 @@ export class ClaudeByokSession extends BaseSession {
       log.warn(`no pricing entry for model=${pricingModel}; result.cost will be 0 — update CLAUDE_PRICING_USD_PER_MTOK in models.js`)
     }
     let lastStopReason = null
+    // #8461: set when the loop spends MAX_TOOL_ROUNDS; the forced summary round's
+    // own `end_turn` overwrites lastStopReason, so the cap needs its own flag.
+    let toolRoundCapReached = false
     // Snapshot the pre-turn history length so any stream-init failure (at
     // any round) can rollback the entire turn atomically. We derive it
     // from the current length minus the user message we just pushed at
@@ -1487,6 +1490,7 @@ export class ClaudeByokSession extends BaseSession {
           // content block on the existing tool_result user turn rather
           // than pushing a second user turn back-to-back.
           log.warn(`hit MAX_TOOL_ROUNDS=${MAX_TOOL_ROUNDS} cap; running summary round`)
+          toolRoundCapReached = true
 
           // Emit a non-fatal error so the dashboard can render a warning
           // banner. The session stays alive — the user can keep talking;
@@ -1613,7 +1617,7 @@ export class ClaudeByokSession extends BaseSession {
         stopReason: lastStopReason,
         // #7326: the provider-neutral form of the stop reason above, for the wire.
         // (A different key on purpose: `stopReason` is the raw Anthropic string.)
-        ...turnOutcomeField(outcomeFromAnthropicStopReason(lastStopReason)),
+        ...turnOutcomeField(outcomeFromByokTurn({ stopReason: lastStopReason, toolRoundCapReached })),
         duration: Date.now() - turnStartedAt,
         usage: turnUsage,
         ...(finalRoundOccupancy ? { contextOccupancy: finalRoundOccupancy } : {}),

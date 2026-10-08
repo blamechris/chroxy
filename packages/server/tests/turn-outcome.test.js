@@ -9,6 +9,7 @@ import {
   isTurnOutcome,
   outcomeFromAcpStopReason,
   outcomeFromAnthropicStopReason,
+  outcomeFromByokTurn,
   outcomeFromSdkResult,
   turnOutcomeField,
 } from '../src/turn-outcome.js'
@@ -40,10 +41,25 @@ describe('provider signal -> turn outcome (#7326)', () => {
   })
 
   it('maps the Anthropic stop_reason values; tool_use is not an end of turn', () => {
-    for (const v of ['end_turn', 'stop_sequence', 'pause_turn']) assert.equal(outcomeFromAnthropicStopReason(v), 'completed', v)
-    for (const v of ['max_tokens', 'model_context_window_exceeded']) assert.equal(outcomeFromAnthropicStopReason(v), 'truncated', v)
+    for (const v of ['end_turn', 'stop_sequence']) assert.equal(outcomeFromAnthropicStopReason(v), 'completed', v)
+    // #8461: pause_turn is "we paused a long-running turn, send it back to continue" --
+    // the model has NOT finished, and nothing here resumes it.
+    for (const v of ['max_tokens', 'pause_turn', 'model_context_window_exceeded']) assert.equal(outcomeFromAnthropicStopReason(v), 'truncated', v)
     assert.equal(outcomeFromAnthropicStopReason('refusal'), 'refused')
     assert.equal(outcomeFromAnthropicStopReason('tool_use'), undefined)
+  })
+
+  it('BYOK: a turn that spent the tool-round cap is truncated, whatever its summary round said (#8461)', () => {
+    // The forced no-tools summary ends with an ordinary end_turn that overwrites the loop's stop reason.
+    assert.equal(outcomeFromByokTurn({ stopReason: 'end_turn', toolRoundCapReached: true }), 'truncated')
+    assert.equal(outcomeFromByokTurn({ stopReason: 'end_turn', toolRoundCapReached: false }), 'completed')
+    assert.equal(outcomeFromByokTurn({ stopReason: 'end_turn' }), 'completed')
+    // The cap also marks a turn whose summary round never produced a stop reason.
+    assert.equal(outcomeFromByokTurn({ stopReason: null, toolRoundCapReached: true }), 'truncated')
+    // A more specific fact from the summary round still wins over the cap.
+    assert.equal(outcomeFromByokTurn({ stopReason: 'refusal', toolRoundCapReached: true }), 'refused')
+    assert.equal(outcomeFromByokTurn({ stopReason: 'max_tokens', toolRoundCapReached: true }), 'truncated')
+    assert.equal(outcomeFromByokTurn(), undefined)
   })
 
   it('maps the Agent SDK result: loop-level limits outrank the last API stop_reason', () => {

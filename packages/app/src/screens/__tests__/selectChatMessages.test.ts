@@ -5,7 +5,7 @@
  * booted simulator — which does not survive a refactor, and is exactly how
  * #7186 (the marker never rendering on mobile) went unnoticed for a month.
  */
-import { selectChatMessages, shouldShowInChat } from '../selectChatMessages';
+import { selectChatMessages, selectSystemMessages, shouldShowInChat } from '../selectChatMessages';
 import type { ChatMessage } from '../../store/connection';
 
 // The real shared predicate, not a stand-in: if compact mode ever widens to
@@ -129,5 +129,22 @@ describe('selectChatMessages', () => {
       const messages = [msg({ id: 's1', type: 'system', content: 'connected' }), chip()];
       expect(selectChatMessages(messages, opts(false)).map((m) => m.id)).toEqual(['chip-truncated']);
     });
+  });
+});
+
+// #8461 -- the System tab (and its unread badge, which counts this list) lists
+// `system` rows, but a turn-outcome chip belongs to the chat flow only.
+describe('selectSystemMessages (#8461)', () => {
+  const outcome = msg({ id: 'o1', type: 'system', content: 'Reply cut off', turnOutcome: 'truncated' } as Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'type'>);
+  const plain = msg({ id: 'sys1', type: 'system', content: 'Connected' });
+
+  it('keeps ordinary system events and compaction markers, drops turn-outcome chips', () => {
+    const all = [msg({ id: 'r1', type: 'response', content: 'hi' }), plain, outcome, marker()];
+    expect(selectSystemMessages(all).map((m) => m.id)).toEqual(['sys1', 'compact1']);
+  });
+
+  it('is the exact complement for chips: the chat tab keeps the chip the System tab drops', () => {
+    expect(shouldShowInChat(outcome, opts(false))).toBe(true);
+    expect(selectSystemMessages([outcome])).toEqual([]);
   });
 });

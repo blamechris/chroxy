@@ -12,7 +12,7 @@ import {
   Animated,
   type AlertButton,
 } from 'react-native';
-import { formatCostOverview } from '@chroxy/store-core';
+import { formatCostOverview, isTurnOutcomeMarker } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import type { SessionInfo, SessionHealth, SessionState, SessionNotification } from '../store/types';
 import { Icon, type IconName } from './Icon';
@@ -104,6 +104,24 @@ interface SessionCardProps {
   onLongPress: () => void;
 }
 
+/**
+ * The message the card previews: the last one that is not a turn-outcome chip
+ * (#8461). "Reply cut off" / "Stopped" describe HOW the reply ended, so showing
+ * one in place of the reply hid the only text worth previewing; the card skips
+ * it and shows the reply itself (or, for a refusal with no text, the user's last
+ * input). Exported for tests.
+ */
+export function lastPreviewMessage<T extends Parameters<typeof isTurnOutcomeMarker>[0]>(
+  messages: readonly T[] | undefined,
+): T | null {
+  if (!messages) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (!isTurnOutcomeMarker(m)) return m;
+  }
+  return null;
+}
+
 function SessionCard({ session, sessionState, isActive, hasNotification, notification, onPress, onLongPress }: SessionCardProps) {
   const status = getSessionStatus({
     health: sessionState?.health ?? 'healthy',
@@ -115,9 +133,7 @@ function SessionCard({ session, sessionState, isActive, hasNotification, notific
   });
 
   const colors = getStatusColor(status);
-  const lastMessage = sessionState?.messages?.length
-    ? sessionState.messages[sessionState.messages.length - 1]
-    : null;
+  const lastMessage = lastPreviewMessage(sessionState?.messages);
 
   // Pulsing animation for attention/permission states
   const pulseAnim = useRef(new Animated.Value(1)).current;

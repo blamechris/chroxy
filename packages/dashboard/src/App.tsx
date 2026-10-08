@@ -25,6 +25,8 @@ import {
   selectModelsForProvider,
   // #8224 — the permission-mode roster is keyed by PROVIDER too.
   selectPermissionModesForProvider,
+  // #8461 — the System tab excludes turn-outcome chips (they belong to the chat).
+  isSystemTabMessage,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -1546,9 +1548,10 @@ export function App() {
 
   // System events for the System tab — uses the same toChatViewMessage
   // mapping the chat pipeline does so both surfaces present rows in the
-  // same shape.
+  // same shape. A turn-outcome chip is NOT one: it belongs to the chat flow, so
+  // it neither lists here nor counts toward the unread badge (#8461).
   const systemMessages = useMemo(
-    () => storeMessages.filter(m => m.type === 'system').map(toChatViewMessage),
+    () => storeMessages.filter(isSystemTabMessage).map(toChatViewMessage),
     [storeMessages],
   )
 

@@ -1557,6 +1557,55 @@ describe('App', () => {
       const systemTab = screen.getByRole('button', { name: /system/i })
       expect(systemTab.querySelector('.system-badge')).toBeInTheDocument()
     })
+
+    // #8461 -- a turn-outcome chip ("Reply cut off") belongs to the chat flow. It
+    // is a `system` row, but it neither counts toward the System tab's badge nor
+    // lists in its pane, whether it arrived live or in a replay (both land as the
+    // same store row, so the filter is what keeps them in agreement).
+    describe('turn-outcome markers stay off the System tab (#8461)', () => {
+      const outcomeState = (messages: unknown[], viewMode: 'chat' | 'system') => ({
+        ...connectedState,
+        getActiveSessionState: () => ({
+          messages,
+          streamingMessageId: null,
+          activeModel: null,
+          permissionMode: null,
+          contextUsage: null,
+          sessionCost: null,
+          isIdle: true,
+          activeAgents: [],
+          isPlanPending: false,
+        }),
+        viewMode,
+      })
+      const reply = { id: 'r1', type: 'response', content: 'half an answer', timestamp: 1 }
+      const marker = { id: 'o1', type: 'system', content: 'Reply cut off', timestamp: 2, turnOutcome: 'truncated' }
+
+      it('does not raise the unread badge for a marker alone', () => {
+        stateOverrides = outcomeState([reply, marker], 'chat')
+        render(<App />)
+        const systemTab = screen.getByRole('button', { name: /system/i })
+        expect(systemTab.querySelector('.system-badge')).not.toBeInTheDocument()
+      })
+
+      it('counts only the real system event when both are present', () => {
+        stateOverrides = outcomeState([reply, marker, { id: 'sys-1', type: 'system', content: 'iPhone connected', timestamp: 3 }], 'chat')
+        render(<App />)
+        const badge = screen.getByRole('button', { name: /system/i }).querySelector('.system-badge')
+        expect(badge).toBeInTheDocument()
+        expect(badge?.textContent).toBe('1')
+      })
+
+      it('does not list the marker in the System pane, but keeps it in the chat', () => {
+        stateOverrides = outcomeState([reply, marker, { id: 'sys-1', type: 'system', content: 'iPhone connected', timestamp: 3 }], 'system')
+        render(<App />)
+        expect(screen.getByText('iPhone connected')).toBeInTheDocument()
+        const systemPane = screen.getByTestId('system-pane')
+        expect(within(systemPane).queryByText('Reply cut off')).not.toBeInTheDocument()
+        const chatPane = screen.getByTestId('chat-pane')
+        expect(within(chatPane).getByText('Reply cut off')).toBeInTheDocument()
+      })
+    })
   })
 
   // #4305 — switching between Chat and Output (terminal) tabs must not
