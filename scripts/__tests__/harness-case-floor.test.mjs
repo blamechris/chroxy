@@ -803,7 +803,7 @@ const ran = pass + fail
 const expected = FIXED_CASES + subjects.length
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
 // Printed so the margin is visible in every run's log, not only when it is gone:
-// a harness creeping toward the budget shows up here releases before it flakes.
+// a harness creeping toward the budget shows up here, releases before it flakes.
 if (slowest) {
   process.stdout.write(`slowest harness: ${slowest.path} ${Math.round(slowest.ms / 1000)}s ` +
     `of a ${HARNESS_TIMEOUT_MS / 1000}s budget\n`)
