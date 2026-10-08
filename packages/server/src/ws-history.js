@@ -8,7 +8,7 @@ import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from '.
 import { getPermissionModes } from './handler-utils.js'
 import { listProviders, getProvider, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
-import { streamKindOf } from './session-message-history.js'
+import { streamKindOf, permissionOutcomeDecision } from './session-message-history.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { MAX_SANE_DURATION_MS, REPLAY_BACKPRESSURE_MAX_WAIT_MS } from '@chroxy/protocol'
@@ -432,6 +432,12 @@ export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
   if (wireEntry.type === 'permission_outcome' && 'input' in wireEntry
     && !(wireEntry.input && typeof wireEntry.input === 'object' && !Array.isArray(wireEntry.input))) {
     delete wireEntry.input
+  }
+  // #8503: the decision token an `allowed` outcome carries; a restored entry whose
+  // token is not one the recorder would keep is sent without it.
+  if (wireEntry.type === 'permission_outcome' && 'decision' in wireEntry
+    && permissionOutcomeDecision(wireEntry.outcome, wireEntry.decision) === undefined) {
+    delete wireEntry.decision
   }
   if (wireEntry.type === 'permission_outcome' && wireEntry.outcome === 'stopped'
     && !(client?.clientCapabilities?.has?.(CAPABILITY_PERMISSION_OUTCOME_STOPPED) ?? false)) {

@@ -21,6 +21,28 @@ export const PERMISSION_OUTCOMES = Object.freeze(['allowed', 'denied', 'expired'
 // ring buffer and the state file keep, so a long hook-path description (the hook
 // route broadcasts it uncapped) cannot bloat either.
 export const PERMISSION_OUTCOME_TOOL_MAX = 100
+
+/**
+ * #8503: the decision tokens an `allowed` outcome may name. `allowAlways` writes a
+ * persistent rule and `allowSession` a session one, so a record of either must stay
+ * distinguishable from a one-time `allow` after a rebuild (a replayed group of
+ * "allowed x N" must not fold them together). `deny` is not here: a denial needs no
+ * token, and an outcome with no decision at all (expired, stopped) has none to name.
+ */
+export const PERMISSION_ALLOW_DECISIONS = Object.freeze(['allow', 'allowSession', 'allowAlways'])
+
+/**
+ * The decision token an outcome may keep, or `undefined`: only an `allowed` outcome,
+ * only one of {@link PERMISSION_ALLOW_DECISIONS}. One rule for the recorder and the
+ * replay, so a damaged restored entry cannot send what the recorder would not keep.
+ *
+ * @param {unknown} outcome
+ * @param {unknown} decision
+ * @returns {'allow'|'allowSession'|'allowAlways'|undefined}
+ */
+export function permissionOutcomeDecision(outcome, decision) {
+  return outcome === 'allowed' && PERMISSION_ALLOW_DECISIONS.includes(decision) ? decision : undefined
+}
 export const PERMISSION_OUTCOME_DESCRIPTION_MAX = RECORD_DESCRIPTION_MAX
 
 /**
@@ -106,6 +128,11 @@ export function streamKindOf(entry) {
 /** `{ input }` when there is one, else nothing: an absent input is an absent key. */
 function inputField(input) {
   return input === undefined ? {} : { input }
+}
+
+/** `{ decision }` when there is one, else nothing. */
+function decisionField(decision) {
+  return decision === undefined ? {} : { decision }
 }
 
 function clipText(value, max) {
@@ -794,6 +821,9 @@ export class SessionMessageHistory extends EventEmitter {
           // and group read the same as a live one. Omitted when there is none,
           // which is also every entry from before this field.
           ...inputField(boundPermissionOutcomeInput(data.input)),
+          // #8503: which allow it was (see PERMISSION_ALLOW_DECISIONS). Omitted for
+          // any other outcome and for an entry from before the field.
+          ...decisionField(permissionOutcomeDecision(data.outcome, data.decision)),
           timestamp: Date.now(),
         }, sessionId)
         persistNeeded = true

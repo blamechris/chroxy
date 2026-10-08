@@ -1458,7 +1458,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "outcome": "allowed",
             "input": {
               "command": "rm -rf build"
-            }
+            },
+            "decision": "allow"
           }
         ]
       ],
@@ -1492,6 +1493,7 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "input": {
             "command": "rm -rf build"
           },
+          "decision": "allow",
           "timestamp": 1700000000000,
           "sessionId": "s1",
           "historySeq": 1

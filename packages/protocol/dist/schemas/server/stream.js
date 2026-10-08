@@ -746,6 +746,11 @@ export const ServerPermissionResolvedSchema = z.object({
  *   - `outcome` -- `allowed`, `denied`, `stopped` (the user pressed Stop while it
  *     was open, #8374), or `expired` (no decision was made: it timed out, the
  *     turn ended, or the session cleared it).
+ *   - `decision` -- #8503: on an `allowed` outcome, which allow the user chose:
+ *     `allow` (this once), `allowSession` or `allowAlways` (a persistent rule). It is
+ *     what keeps a record of the last from folding into a group of one-time allows
+ *     after a rebuild. Absent on a `denied` / `expired` / `stopped` outcome and on an
+ *     entry journaled before this field; a client then treats the allow as `allow`.
  *   - `timestamp` -- when the server recorded it (ms since the epoch).
  *   - `sessionId` / `historySeq` -- stamped by the replay, like every entry.
  */
@@ -757,6 +762,7 @@ export const ServerPermissionOutcomeSchema = z.object({
     description: z.string(),
     outcome: PermissionOutcomeSchema,
     input: z.record(z.string(), z.unknown()).optional(),
+    decision: z.enum(['allow', 'allowSession', 'allowAlways']).optional(),
     timestamp: z.number().optional(),
     sessionId: z.string().optional(),
     historySeq: z.number().optional(),

@@ -262,6 +262,23 @@ describe('findResolvedPermissionRuns', () => {
     expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
   })
 
+  it('review: replayed allow, allow, allowAlways with one input group the two one-time allows apart from the persistent rule', () => {
+    const input = { command: 'touch smoke-perm.txt' }
+    const rec = (id: string, answered: string) =>
+      replayedRecord(id, { tool: 'Bash', content: 'Bash: Touch', answered, permissionOutcome: 'allowed', toolInput: input })
+    const msgs = [rec('a', 'allow'), rec('b', 'allow'), rec('c', 'allowAlways')]
+    const runs = findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))
+    expect(runs.map((r) => r.items.map((i) => i.id))).toEqual([['a', 'b']])
+  })
+
+  it('review: a replayed allowSession does not fold with allow', () => {
+    const input = { command: 'ls' }
+    const rec = (id: string, answered: string) =>
+      replayedRecord(id, { tool: 'Bash', content: 'Bash: ls', answered, permissionOutcome: 'allowed', toolInput: input })
+    const msgs = [rec('a', 'allow'), rec('b', 'allowSession'), rec('c', 'allow')]
+    expect(findResolvedPermissionRuns(rowsOf(msgs), lookup(msgs))).toEqual([])
+  })
+
   it('#8503: a replayed record with a journaled input does not group with one that has none', () => {
     const base = { tool: 'Bash', content: 'Bash: Clean up', answered: 'allow', permissionOutcome: 'allowed' } as const
     const msgs = [

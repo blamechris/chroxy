@@ -86,7 +86,7 @@ describe('handlePermissionOutcome / buildPermissionOutcomeMessage (#8348)', () =
   it('parses the wire shape', () => {
     expect(handlePermissionOutcome(outcome({ timestamp: 99 }))).toEqual({
       requestId: 'perm-1', tool: 'Bash', description: 'ls -la', outcome: 'expired',
-      input: null, sessionId: 's1', timestamp: 99,
+      input: null, decision: null, sessionId: 's1', timestamp: 99,
     })
   })
 
@@ -107,6 +107,42 @@ describe('handlePermissionOutcome / buildPermissionOutcomeMessage (#8348)', () =
     expect(withInput.toolInput).toEqual(input)
     const without = buildPermissionOutcomeMessage(handlePermissionOutcome(outcome({ outcome: 'allowed' }))!)
     expect('toolInput' in without).toBe(false)
+  })
+
+  // Review (finding 1): the allow the user chose rides the entry, so `allowAlways` (a
+  // persistent rule) is never read back as a one-time allow.
+  it('parses the decision token of an allowed outcome; anything else is none', () => {
+    for (const decision of ['allow', 'allowSession', 'allowAlways']) {
+      expect(handlePermissionOutcome(outcome({ outcome: 'allowed', decision }))!.decision).toBe(decision)
+    }
+    for (const bad of ['deny', 'sudo', 7, null, undefined, {}]) {
+      expect(handlePermissionOutcome(outcome({ outcome: 'allowed', decision: bad }))!.decision, JSON.stringify(bad)).toBeNull()
+    }
+    // a no-decision outcome never takes one
+    for (const kind of ['denied', 'expired', 'stopped']) {
+      expect(handlePermissionOutcome(outcome({ outcome: kind, decision: 'allowAlways' }))!.decision, kind).toBeNull()
+    }
+  })
+
+  it('rebuilds an allowed record with the token the user chose; an entry without one stays a plain allow', () => {
+    const build = (o: Record<string, unknown>) => buildPermissionOutcomeMessage(handlePermissionOutcome(outcome(o))!)
+    expect(build({ outcome: 'allowed', decision: 'allowAlways' }).answered).toBe('allowAlways')
+    expect(build({ outcome: 'allowed', decision: 'allowSession' }).answered).toBe('allowSession')
+    expect(build({ outcome: 'allowed', decision: 'allow' }).answered).toBe('allow')
+    expect(build({ outcome: 'allowed' }).answered).toBe('allow')
+    expect(build({ outcome: 'denied', decision: 'allowAlways' }).answered).toBe('deny')
+    expect(build({ outcome: 'expired', decision: 'allowAlways' }).answered).toBeUndefined()
+  })
+
+  it('a held card the user answered keeps its own token; one that never learned it takes the recorded one', () => {
+    const answered = livePending({ options: undefined, answered: 'allowSession', answeredAt: 5 })
+    const env = makeEnv([answered])
+    dispatch(env, outcome({ outcome: 'allowed', decision: 'allowAlways' }))
+    expect(prompts(env.sessions.s1!.messages)[0]!.answered).toBe('allowSession')
+    const timedOut = livePending({ options: undefined, answered: 'deny', answeredAt: 5 })
+    const env2 = makeEnv([timedOut])
+    dispatch(env2, outcome({ outcome: 'allowed', decision: 'allowAlways' }))
+    expect(prompts(env2.sessions.s1!.messages)[0]!.answered).toBe('allowAlways')
   })
 
   it('#8503: the dispatched record carries the input into the session transcript', () => {

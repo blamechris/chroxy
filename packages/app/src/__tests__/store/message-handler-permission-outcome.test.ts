@@ -192,6 +192,14 @@ describe('permission_outcome carries the approved tool input on the mobile app (
     expect(record!.permissionOutcome).toBe('allowed');
   });
 
+  it('review: the journaled decision token rebuilds the record as the allow the user chose (allowAlways is not a one-time allow)', () => {
+    const { read, send } = boot([]);
+    fullRebuild(send, [userEntry, outcomeFrame({ outcome: 'allowed', decision: 'allowAlways' })]);
+    const [record] = read().filter((m) => m.type === 'prompt');
+    expect(record!.answered).toBe('allowAlways');
+    expect(record!.permissionOutcome).toBe('allowed');
+  });
+
   it('an entry journaled before the field rebuilds a record with no toolInput', () => {
     const { read, send } = boot([]);
     fullRebuild(send, [userEntry, outcomeFrame({ outcome: 'allowed' })]);

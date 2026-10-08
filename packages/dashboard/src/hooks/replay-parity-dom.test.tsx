@@ -216,21 +216,21 @@ describe('live vs replayed permission group -- rendered DOM incl. the input line
     vi.useRealTimers()
   })
 
-  const liveFrames = (input: Record<string, unknown>): ReplayParityFrame[] =>
+  const liveFrames = (input: Record<string, unknown>, decisions: string[] = ['allow', 'allow', 'allow']): ReplayParityFrame[] =>
     [1, 2, 3].flatMap((n) => [
       { type: 'tool_start', messageId: `tu${n}`, toolUseId: `tu${n}`, tool: 'Bash', input: null, sessionId: SID },
       { type: 'tool_result', toolUseId: `tu${n}`, result: '', truncated: false, input, sessionId: SID },
       { type: 'permission_request', requestId: `req-${n}`, tool: 'Bash', description: DESC, input, remainingMs: 120000, sessionId: SID },
-      { type: 'permission_resolved', requestId: `req-${n}`, decision: 'allow', sessionId: SID },
+      { type: 'permission_resolved', requestId: `req-${n}`, decision: decisions[n - 1]!, sessionId: SID },
     ])
   /** `journaled`: whether the server's `permission_outcome` entries carry the input (false = an entry from before #8503). */
-  const replayFrames = (input: Record<string, unknown>, journaled: boolean): ReplayParityFrame[] =>
+  const replayFrames = (input: Record<string, unknown>, journaled: boolean, decisions: string[] = ['allow', 'allow', 'allow']): ReplayParityFrame[] =>
     [1, 2, 3].flatMap((n) => [
       { type: 'tool_start', messageId: `tu${n}`, toolUseId: `tu${n}`, tool: 'Bash', input, timestamp: 1, sessionId: SID, historySeq: n * 3 - 2 },
       { type: 'tool_result', toolUseId: `tu${n}`, result: '', truncated: false, timestamp: 1, sessionId: SID, historySeq: n * 3 - 1 },
       {
         type: 'permission_outcome', requestId: `req-${n}`, tool: 'Bash', description: DESC, outcome: 'allowed',
-        ...(journaled ? { input } : {}), timestamp: 1, sessionId: SID, historySeq: n * 3,
+        ...(journaled ? { input } : {}), decision: decisions[n - 1], timestamp: 1, sessionId: SID, historySeq: n * 3,
       },
     ])
 
@@ -318,6 +318,43 @@ describe('live vs replayed permission group -- rendered DOM incl. the input line
     expect(expanded!).toContain('data-testid="perm-record-detail"')
     expect(expanded!).not.toContain('data-testid="perm-record-input"')
     expect(expanded!).not.toContain('perm-input-flag')
+  })
+
+  // Review (finding 1): the decision token. `allowAlways` writes a persistent rule, so
+  // live, `allow, allow, allowAlways` is a x2 group plus a separate record; a rebuild
+  // must show the same, not a x3 of "allowed".
+  it('allow, allow, allowAlways reads the same live and rebuilt: a x2 group and a separate always-allowed record', () => {
+    const decisions = ['allow', 'allow', 'allowAlways']
+    const clickRecord = (c: HTMLElement) => fireEvent.click(within(c).getByTestId('perm-record-toggle'))
+    const liveHtml = domSteps(live(liveFrames(INPUT, decisions)), [clickRecord, clickGroup])
+    const replayHtml = domSteps(replayed(replayFrames(INPUT, true, decisions)), [clickRecord, clickGroup])
+    const collapsed = liveHtml[0]!
+    expect(collapsed.match(/data-testid="perm-group"/g)).toHaveLength(1)
+    expect(collapsed).toContain('×2')
+    expect(collapsed).not.toContain('×3')
+    expect(collapsed.match(/data-testid="perm-outcome-record"/g)).toHaveLength(1)
+    expect(liveHtml[1]!).toContain('Always allowed (project)')
+    for (let i = 0; i < liveHtml.length; i++) expect(replayHtml[i], `step ${i}`).toBe(liveHtml[i])
+  })
+
+  it('a replayed allowSession does not fold with allow, live or rebuilt', () => {
+    const decisions = ['allow', 'allowSession', 'allow']
+    const liveHtml = domSteps(live(liveFrames(INPUT, decisions)), [])
+    const replayHtml = domSteps(replayed(replayFrames(INPUT, true, decisions)), [])
+    expect(liveHtml[0]!).not.toContain('data-testid="perm-group"')
+    expect(liveHtml[0]!.match(/data-testid="perm-outcome-record"/g)).toHaveLength(3)
+    expect(replayHtml).toEqual(liveHtml)
+  })
+
+  it('an entry journaled before the decision field reads as a plain allow (older history is unchanged)', () => {
+    const noDecision = replayFrames(INPUT, true).map((f) => {
+      if (f.type !== 'permission_outcome') return f
+      const { decision: _d, ...rest } = f as Record<string, unknown>
+      void _d
+      return rest as ReplayParityFrame
+    })
+    const [html] = domSteps(replayed(noDecision), [])
+    expect(html!).toContain('×3')
   })
 
   // Review follow-up (Codex P2): `_truncated` and `summary` are keys an agent can write

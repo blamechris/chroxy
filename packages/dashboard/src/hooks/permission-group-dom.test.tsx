@@ -58,7 +58,7 @@ function liveAnswered(i: number): ChatMessage {
 function replayedOutcome(i: number, input: Record<string, unknown> | null = null): ChatMessage {
   return {
     ...buildPermissionOutcomeMessage({
-      requestId: `req-${i}`, tool: TOOL, description: DESC, outcome: 'allowed', input, sessionId: null, timestamp: i,
+      requestId: `req-${i}`, tool: TOOL, description: DESC, outcome: 'allowed', input, decision: null, sessionId: null, timestamp: i,
     }),
     id: `replay-${i}`,
   }

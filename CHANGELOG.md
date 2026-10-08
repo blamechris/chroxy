@@ -17,8 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description. The daemon now also keeps the tool input the prompt was shown with:
   the same redacted copy, with the same 10,240-character cap, that the live prompt
   sent, so a replayed record reveals nothing the live one did not. Repeated approvals
-  group again after a rebuild when their input matches. History saved before this
-  change has no input to show and renders as it did.
+  group again after a rebuild when their input matches, and a prompt answered
+  "always allow" or "allow for session" stays apart from one-time allows, as it is
+  live. History saved before this change has no input to show and renders as it did.
 
 - **Web fetch and web search results render as cards on the default provider
   (#6987).** A WebFetch on a claude-tui session showed its raw JSON envelope

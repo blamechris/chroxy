@@ -229,6 +229,42 @@ describe('SessionMessageHistory permission_outcome (#8348)', () => {
     assert.equal(JSON.stringify(e.input).includes('sk-ant-api03-AAAA'), false)
   })
 
+  // Review (finding 1): the decision token. `allowAlways` writes a PERSISTENT rule, so a
+  // record of it must not fold into a group of one-time allows after a rebuild.
+  for (const token of ['allow', 'allowSession', 'allowAlways']) {
+    it(`journals the decision token "${token}" on an allowed outcome, and replays it`, () => {
+      const h = new SessionMessageHistory()
+      h.recordHistory('s1', 'permission_outcome', { requestId: 'p', tool: 'Bash', description: 'x', outcome: 'allowed', decision: token })
+      const [e] = h.getHistory('s1')
+      assert.equal(e.decision, token)
+      const frames = []
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', e)
+      assert.equal(frames[0].decision, token)
+    })
+  }
+
+  it('journals no decision token for a denied, expired or stopped outcome, nor for an unknown or non-string token', () => {
+    const h = new SessionMessageHistory()
+    const rec = (id, outcome, decision) => h.recordHistory('s1', 'permission_outcome', { requestId: id, tool: 'Bash', description: 'x', outcome, decision })
+    rec('a', 'denied', 'deny'); rec('b', 'expired', 'allow'); rec('c', 'stopped', 'allowAlways')
+    rec('d', 'allowed', 'deny'); rec('e', 'allowed', 'sudo'); rec('f', 'allowed', 7); rec('g', 'allowed', { x: 1 }); rec('h', 'allowed', undefined)
+    for (const e of h.getHistory('s1')) assert.equal('decision' in e, false, `${e.requestId} must carry no decision`)
+  })
+
+  it('an entry journaled before the field replays with no `decision` key, and a restored bad token is not sent', () => {
+    const h = new SessionMessageHistory()
+    h.setHistory('s1', [
+      { type: 'permission_outcome', requestId: 'old', tool: 'Bash', description: 'ls', outcome: 'allowed', timestamp: 5 },
+      { type: 'permission_outcome', requestId: 'bad', tool: 'Bash', description: 'ls', outcome: 'allowed', decision: 'sudo', timestamp: 6 },
+      { type: 'permission_outcome', requestId: 'bad2', tool: 'Bash', description: 'ls', outcome: 'denied', decision: 'allowAlways', timestamp: 7 },
+    ])
+    for (const e of h.getHistory('s1')) {
+      const frames = []
+      sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', e)
+      assert.equal('decision' in frames[0], false, e.requestId)
+    }
+  })
+
   // #8503 review (Codex P2): `_truncated` is a key an agent can put in its own tool
   // input. The journal must never read it as "this is the sanitizer's wrapper".
   const CRAFTED = { _truncated: true, summary: 'routine task', command: 'rm -rf /important', dangerouslyDisableSandbox: true }
@@ -450,6 +486,32 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     assert.equal(e.tool, 'Bash')
     assert.equal(e.description, 'ls -la')
     assert.equal(e.outcome, 'allowed')
+  })
+
+  it('journals the decision token the user answered with: allow, allowSession and allowAlways stay apart; a deny has none', async () => {
+    const seen = {}
+    for (const [sid, token] of [['s1', 'allow'], ['s2', 'allowAlways'], ['s3', 'allowSession'], ['s4', 'deny']]) {
+      const r = raise(sid)
+      r.pm.respondToPermission(r.requestId, token)
+      await r.decided
+      seen[token] = outcomes(mgr, sid)[0]
+    }
+    assert.equal(seen.allow.decision, 'allow')
+    assert.equal(seen.allowAlways.decision, 'allowAlways')
+    assert.equal(seen.allowSession.decision, 'allowSession')
+    assert.equal(seen.allowAlways.outcome, 'allowed')
+    assert.equal(seen.deny.outcome, 'denied')
+    assert.equal('decision' in seen.deny, false)
+  })
+
+  it('an auto-mode allow (no user token) and a timeout journal no more than they did before', async () => {
+    const { session } = makeInProcessSession(mgr, 's1')
+    session.emit('permission_request', { requestId: 'p-auto', tool: 'Bash', description: 'x', input: { command: 'ls' } })
+    session.emit('permission_resolved', { requestId: 'p-auto', decision: 'allow', reason: 'auto_mode' })
+    const t = raise('s2', 'Bash', { command: 'sleep' }, { timeoutMs: 15 })
+    await t.decided
+    assert.equal(outcomes(mgr, 's1')[0].decision, 'allow')
+    assert.equal('decision' in outcomes(mgr, 's2')[0], false, 'an expired prompt has no decision')
   })
 
   it('records "allowed" for allowAlways, "denied" for deny', async () => {
@@ -865,6 +927,14 @@ describe('SessionManager records permission outcomes: hook-routed providers (#83
     assert.equal(e.tool, 'Bash')
     assert.equal(e.description, 'git status')
     assert.equal(e.outcome, 'allowed')
+  })
+
+  it('journals the decision token on the hook route too: allow vs allowAlways', async () => {
+    for (const token of ['allow', 'allowAlways', 'allowSession']) {
+      const { requestId } = await raise()
+      resolver.resolve(requestId, token, null, { clientId: 'c1' })
+    }
+    assert.deepEqual(outcomes(mgr, 's1').map((e) => e.decision), ['allow', 'allowAlways', 'allowSession'])
   })
 
   it('records "denied" when the user denies', async () => {

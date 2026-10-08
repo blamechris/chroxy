@@ -4355,10 +4355,12 @@ export class SessionManager extends EventEmitter {
    * take either down.
    *
    * @param {string} requestId
-   * @param {'allowed'|'denied'|'expired'} outcome
+   * @param {'allowed'|'denied'|'expired'|'stopped'} outcome
+   * @param {string} [decision] #8503: the decision token the prompt was answered with
+   *   (`allow` / `allowSession` / `allowAlways`); kept only on an `allowed` outcome
    * @returns {boolean} true when an entry was recorded
    */
-  recordPermissionOutcome(requestId, outcome) {
+  recordPermissionOutcome(requestId, outcome, decision) {
     try {
       if (typeof requestId !== 'string' || !requestId) return false
       const pending = this._permissionRequests.get(requestId)
@@ -4372,6 +4374,7 @@ export class SessionManager extends EventEmitter {
         description: pending.description,
         outcome,
         input: pending.input,
+        decision,
       })
       return true
     } catch (err) {
@@ -4663,7 +4666,7 @@ export class SessionManager extends EventEmitter {
           this.notePermissionRequest(sessionId, data)
         } else if (event === 'permission_resolved' || event === 'permission_expired') {
           const outcome = permissionOutcomeForEvent(event, data)
-          if (outcome) this.recordPermissionOutcome(data.requestId, outcome)
+          if (outcome) this.recordPermissionOutcome(data.requestId, outcome, event === 'permission_resolved' ? data.decision : undefined)
           // #8470: a question a newer one replaced has no requestId, so the outcome
           // journal above never sees it. Its verdict is recorded on the question's
           // own history entry instead.
