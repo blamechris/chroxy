@@ -51,6 +51,7 @@ class MockWebSocket {
 
 const { useConnectionStore } = await import('./connection')
 const mh = await import('./message-handler')
+const { createKeyPair, deriveSharedKey, encrypt, DIRECTION_SERVER } = await import('./crypto')
 
 type Handler = (e: { data: string }) => void
 
@@ -178,18 +179,37 @@ describe('#8485 a superseded socket cannot write to the new connection', () => {
     expect(credentialLabel()).toBe('from-B')
   })
 
-  it('a late encrypted envelope from A does not advance the new connection\'s receive nonce', async () => {
+  it('a late VALID encrypted envelope from A leaves the new connection\'s nonce, state and socket alone', async () => {
     const a = await open(URL_A)
     const lateA = a.onmessage as Handler
     const b = await open(URL_B)
     await authOk(b)
 
-    // Simulate B having completed its key exchange.
-    mh.setEncryptionState({ sharedKey: new Uint8Array(32), sendNonce: 0, recvNonce: 0 } as never)
-    lateA({ data: JSON.stringify({ type: 'encrypted', d: 'AAAA', n: 0 }) })
+    // B completed its key exchange; the "daemon" holds the matching key. The
+    // envelope below is VALID for that key at nonce 0, so decrypting it would
+    // succeed: a guard that sits below decrypt advances recvNonce, and a missing
+    // one dispatches the payload.
+    const clientKp = createKeyPair()
+    const serverKp = createKeyPair()
+    mh.setEncryptionState({
+      sharedKey: deriveSharedKey(serverKp.publicKey, clientKp.secretKey),
+      sendNonce: 0,
+      recvNonce: 0,
+    })
+    const serverShared = deriveSharedKey(clientKp.publicKey, serverKp.secretKey)
+    const errorsBefore = useConnectionStore.getState().serverErrors.length
+    const envelope = encrypt(JSON.stringify({ type: 'server_error', error: 'from-A' }), serverShared, 0, DIRECTION_SERVER)
+
+    lateA({ data: JSON.stringify(envelope) })
+
     expect(mh.getEncryptionState()?.recvNonce).toBe(0)
-    // A's decrypt failure must not have closed B either.
+    expect(useConnectionStore.getState().serverErrors.length).toBe(errorsBefore)
     expect(b.closed).toBe(0)
+
+    // Control: the same envelope on the CURRENT socket decrypts and dispatches.
+    b.onmessage?.({ data: JSON.stringify(envelope) })
+    expect(mh.getEncryptionState()?.recvNonce).toBe(1)
+    expect(useConnectionStore.getState().serverErrors.length).toBeGreaterThan(errorsBefore)
   })
 
   it('disconnect() retires the socket: a late frame afterwards changes nothing', async () => {

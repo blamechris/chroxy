@@ -23,6 +23,8 @@ import {
   HEARTBEAT_INTERVAL_MS,
 } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
+import { setEncryptionState, getEncryptionState } from '../../store/message-handler';
+import { createKeyPair, deriveSharedKey, encrypt, DIRECTION_SERVER } from '../../utils/crypto';
 
 function flushPromises(): Promise<void> {
   return new Promise((resolve) =>
@@ -162,6 +164,41 @@ describe('#8485 a superseded socket cannot write to the new connection (mobile a
     expect(useConnectionLifecycleStore.getState().wsUrl).toBe(URL_B);
     expect(useConnectionStore.getState().socket).toBe(b as unknown);
     expect(a.close).toHaveBeenCalled();
+    ws.restore();
+  });
+
+  it('a late VALID encrypted envelope from A leaves the new connection\'s nonce, state and socket alone', async () => {
+    const ws = installMockWebSocket();
+    const a = await openConnected(ws, URL_A);
+    const lateA = a.onmessage as Handler;
+    const b = await openConnected(ws, URL_B);
+    await authOk(b);
+
+    // B completed its key exchange; the envelope below is VALID for that key at
+    // nonce 0, so a guard below decrypt advances recvNonce and a missing one
+    // dispatches the payload.
+    const clientKp = createKeyPair();
+    const serverKp = createKeyPair();
+    setEncryptionState({
+      sharedKey: deriveSharedKey(serverKp.publicKey, clientKp.secretKey),
+      sendNonce: 0,
+      recvNonce: 0,
+    });
+    const serverShared = deriveSharedKey(clientKp.publicKey, serverKp.secretKey);
+    const errorsBefore = useConnectionStore.getState().serverErrors.length;
+    const envelope = encrypt(JSON.stringify({ type: 'server_error', error: 'from-A' }), serverShared, 0, DIRECTION_SERVER);
+
+    lateA({ data: JSON.stringify(envelope) });
+
+    expect(getEncryptionState()?.recvNonce).toBe(0);
+    expect(useConnectionStore.getState().serverErrors.length).toBe(errorsBefore);
+    expect(b.close).not.toHaveBeenCalled();
+
+    // Control: the same envelope on the CURRENT socket decrypts and dispatches.
+    b.onmessage?.({ data: JSON.stringify(envelope) });
+    expect(getEncryptionState()?.recvNonce).toBe(1);
+    expect(useConnectionStore.getState().serverErrors.length).toBeGreaterThan(errorsBefore);
+    setEncryptionState(null);
     ws.restore();
   });
 
