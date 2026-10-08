@@ -143,12 +143,13 @@ export interface QuestionPromptProps {
 }
 
 export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, allowSingleMultiSelect, pendingPermission, onSelect }: QuestionPromptProps) {
-  // #4685 — gate ALL question content (text, options, multi-question
+  // #4685 — gate ALL interactive question content (text, options, multi-question
   // form, deferred notice, free-text input) behind the `pendingPermission`
-  // flag: nothing of the question renders until the user has clicked Allow on
-  // the AskUserQuestion permission prompt. Without this gate the dashboard
-  // surfaces the model-supplied question and options before the user has
-  // consented to see it — defeating the purpose of the permission prompt.
+  // flag: nothing of the question can be answered until the user has clicked
+  // Allow on the AskUserQuestion permission prompt. The permission card itself
+  // shows the question and its options as read-only text so the user knows what
+  // they are consenting to (#8264); this component adds no question content of
+  // its own while pending.
   //
   // #8264 — the gate renders NOTHING (it used to render a grey "Pending
   // permission to view question…" stub). The permission card is the single

@@ -4225,8 +4225,9 @@ button.sidebar-token-view-session-row:hover {
 }
 
 /* #8264: AskUserQuestion permission card body — the question and its options
- * as text, in place of the tool input printed as JSON. Wraps (never clips) so a
- * long question or option label is read in full. */
+ * as text, in place of the tool input printed as JSON. Text wraps (never clips);
+ * the list is bounded and scrolls so a large payload cannot push Allow/Deny
+ * below the fold. */
 .perm-ask-headline {
   font-weight: 600;
   color: var(--accent-purple);
@@ -4235,6 +4236,8 @@ button.sidebar-token-view-session-row:hover {
 .perm-ask-questions {
   margin: 8px 0 0;
   padding-left: 20px;
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 .perm-ask-question + .perm-ask-question {

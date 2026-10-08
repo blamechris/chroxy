@@ -10,7 +10,7 @@
  * Runs against the REAL dashboard store (like PermissionPrompt.dismiss-record),
  * so the dropped-record path (expire -> Dismiss) is exercised end to end.
  */
-import { describe, it, expect, afterEach, beforeEach } from 'vitest'
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
 import type { ChatMessage } from '@chroxy/store-core'
 import { PermissionPrompt } from './PermissionPrompt'
@@ -105,6 +105,26 @@ describe('AskUserQuestion permission card (#8264)', () => {
     expect(screen.getByTestId('perm-ask-headline')).toHaveTextContent('Claude wants to ask you 2 questions')
     expect(screen.getByTestId('perm-ask-question-0')).toHaveTextContent('First?')
     expect(screen.getByTestId('perm-ask-question-1')).toHaveTextContent('Second?')
+  })
+
+  it('renders every option when two share a label, without a duplicate React key warning', () => {
+    const errors: unknown[][] = []
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args)
+    })
+    try {
+      renderCard({
+        toolInput: {
+          questions: [{ question: 'Pick one', options: [{ label: 'Same' }, { label: 'Same' }, { label: 'Other pick' }] }],
+        },
+      })
+      expect(screen.getAllByText('Same')).toHaveLength(2)
+      expect(screen.getByText('Other pick')).toBeInTheDocument()
+      const keyWarnings = errors.filter((args) => String(args[0]).includes('same key'))
+      expect(keyWarnings).toHaveLength(0)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('falls back to the headline alone, still without JSON, when the input is unusable (server-truncated)', () => {

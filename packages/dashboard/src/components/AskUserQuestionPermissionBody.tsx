@@ -3,8 +3,10 @@
  * permission card (#8264).
  *
  * In Approve mode the AskUserQuestion tool call still passes through the
- * permission gate (#4685: the model-supplied question must not be shown before
- * the user consents). The generic permission card builds its body from the
+ * permission gate, and the user's consent is to running that tool. This card
+ * shows the question text and options so the user knows what they are
+ * consenting to; the interactive question card stays withheld until Allow
+ * (#4685). The generic permission card builds its body from the
  * server-side `description`, which for a tool with no `command` / `file_path` /
  * `pattern` is the tool input as JSON cut at 200 characters — so the consent
  * surface read `AskUserQuestion: {"questions":[{"question":"Which color …` and
@@ -73,8 +75,8 @@ export function AskUserQuestionPermissionBody({ toolInput }: { toolInput?: Recor
               <div className="perm-ask-question-text">{q.question}</div>
               {q.options.length > 0 && (
                 <ul className="perm-ask-options" aria-label={q.multiSelect ? 'Options (choose any)' : 'Options'}>
-                  {q.options.map((o) => (
-                    <li key={o.value} className="perm-ask-option">{o.label}</li>
+                  {q.options.map((o, oi) => (
+                    <li key={`${oi}-${o.value}`} className="perm-ask-option">{o.label}</li>
                   ))}
                 </ul>
               )}
