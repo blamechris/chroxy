@@ -207,22 +207,35 @@ function salvageTitleUrlPairs(text: string): Array<{ title?: string; url?: strin
 
 const JSON_QUERY_HEAD_RE = /^\s*\{\s*"query"\s*:\s*"((?:[^"\\]|\\.)*)"/
 // The text a Claude Agent SDK / CLI session forwards for WebSearch (#6987):
-// a header line, ONE `Links:` line of JSON (JSON.stringify never emits a raw
-// newline), then free-form commentary that is deliberately never scanned.
-const FLAT_QUERY_RE = /^Web search results for query: "(.*)"[ \t]*$/m
-const FLAT_LINKS_RE = /^Links:[ \t]*(\[.*)$/gm
+// `Web search results for query: "<q>"` header line(s), `Links:` line(s) of
+// JSON (JSON.stringify never emits a raw newline), then the model's free-form
+// commentary. Only the leading block of header / `Links:` / blank lines is
+// read; the first line of anything else starts the commentary, and from there
+// on nothing is scanned -- a `Links: [...]` line the model (or a fetched page
+// it quotes) wrote in its commentary must not become a result row.
+const FLAT_QUERY_RE = /^Web search results for query: "(.*)"[ \t]*$/
+const FLAT_LINKS_RE = /^Links:[ \t]*(\[.*)$/
 
 function parseFlatSearchText(text: string): { query?: string; candidates: Array<{ title?: string; url?: string; snippet?: string }> } {
   const candidates: Array<{ title?: string; url?: string; snippet?: string }> = []
-  for (const m of text.matchAll(FLAT_LINKS_RE)) {
-    const line = (m[1] ?? '').trimEnd()
+  let query: string | undefined
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.replace(/\r$/, '')
+    if (line.trim() === '') continue
+    const header = line.match(FLAT_QUERY_RE)
+    if (header) {
+      query ??= coerceString(header[1]?.trim())
+      continue
+    }
+    const links = line.match(FLAT_LINKS_RE)
+    if (!links) break // first commentary line
+    const json = (links[1] ?? '').trimEnd()
     try {
-      candidates.push(...collectResultCandidates(JSON.parse(line)))
+      candidates.push(...collectResultCandidates(JSON.parse(json)))
     } catch {
-      candidates.push(...salvageTitleUrlPairs(line))
+      candidates.push(...salvageTitleUrlPairs(json))
     }
   }
-  const query = coerceString(text.match(FLAT_QUERY_RE)?.[1]?.trim())
   return query ? { query, candidates } : { candidates }
 }
 
