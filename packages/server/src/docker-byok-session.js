@@ -151,6 +151,7 @@ import {
   surfaceContainerVanished,
 } from './docker-session.js'
 import { buildPoolKey, getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
+import { DEFAULT_LIVENESS_INTERVAL_MS } from './container-liveness-monitor.js'
 import { getSharedComposeStateStore } from './byok-compose-state-shared.js'
 import { createLogger } from './logger.js'
 import { writeFileRestricted } from './platform.js'
@@ -165,6 +166,34 @@ import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
 import { configPath } from './config-dir.js'
 
 const log = createLogger('docker-byok')
+
+/**
+ * #7609 — how long a post-failure `docker inspect` that found the container
+ * RUNNING suppresses further inspects for that same container. A failing
+ * container-routed tool is routine (every non-zero exit rejects), so without
+ * this a burst of failures is a burst of inspect spawns, each up to 10s on a
+ * slow daemon, on the error path the model is waiting on.
+ *
+ * It is the #7601 poll's own interval on purpose: the poll already re-checks
+ * every session's container that often, so a vanish the cooldown hides from
+ * the tool path is surfaced by the next poll tick at most that long after the
+ * vanish — the cooldown never makes detection later than the poll would
+ * already make it. Only the NEGATIVE ('running') result is cached; a vanish is
+ * never cached away (see _inspectLiveness).
+ */
+export const INSPECT_ALIVE_COOLDOWN_MS = DEFAULT_LIVENESS_INTERVAL_MS
+
+/**
+ * #7609 — the cooldown after an 'unknown' probe (inspect timed out, the daemon
+ * is down or hung, an unclassified error). 'unknown' proved nothing about the
+ * container, so it must NOT start the long window above: that would let one
+ * hiccup hide a real vanish for 30s. But re-spawning an inspect that already
+ * burned its 10s timeout on every following failure is exactly the cost this
+ * issue exists to bound, so a SHORT window applies. Trade-off: a container
+ * that vanishes in the 5s right after a daemon hiccup is reported by the poll
+ * rather than by the tool failure — a delay, never a miss.
+ */
+export const INSPECT_UNKNOWN_COOLDOWN_MS = 5_000
 
 /**
  * The built-in tools `_dispatchBuiltinTool` routes INTO the container, keyed
@@ -504,6 +533,8 @@ export class DockerByokSession extends ClaudeByokSession {
    *   pooling is skipped entirely (per-session lifecycle only).
    * @param {Record<string,string>} [opts._poolEnv]  Test seam — alternate env
    *   for pool enablement, defaults to `process.env`.
+   * @param {() => number} [opts._now]               Test seam — clock for the
+   *   #7609 post-failure inspect cooldown (defaults to `Date.now`).
    */
   constructor(opts = {}) {
     // Forward every BaseSession/ClaudeByokSession opt verbatim via
@@ -615,6 +646,14 @@ export class DockerByokSession extends ClaudeByokSession {
     // surfaceContainerVanished in docker-session.js; same field the
     // DockerSession / DockerSdkSession surfaces use).
     this._containerVanishedNotified = false
+    // #7609 — post-failure inspect throttle. `_inspectCooldown` is
+    // `{ containerId, status, until }` for the last probe that learned
+    // something non-fatal; `_inspectInFlight` is `{ containerId, promise }`
+    // so concurrent failing tools share one inspect. `_now` is the test seam
+    // for the clock (the cooldown is wall-clock, not timer-driven).
+    this._now = opts._now || Date.now
+    this._inspectCooldown = null
+    this._inspectInFlight = null
     // #5023 snapshot / restore opts. All string opts are trimmed before
     // the length check so callers passing whitespace-only values (e.g.
     // `'   '`) get the same default as no-opt-at-all — matches how
@@ -925,6 +964,7 @@ export class DockerByokSession extends ClaudeByokSession {
    */
   notifyContainerVanished() {
     if (!surfaceContainerVanished(this)) return false
+    this._inspectCooldown = null // #7609 — a vanish is never cached away
     this._containerReady = false
     this.markActiveContainerSoiled()
     return true
@@ -963,6 +1003,7 @@ export class DockerByokSession extends ClaudeByokSession {
   clearContainerVanished() {
     if (!this._containerVanishedNotified) return false
     this._containerVanishedNotified = false
+    this._inspectCooldown = null // #7609 — back from a vanish: judge it afresh
     if (this._containerId && !this._destroying) this._containerReady = true
     return true
   }
@@ -986,16 +1027,67 @@ export class DockerByokSession extends ClaudeByokSession {
    * be reported as every session's container vanishing (the #7601
    * false-safety guard, see inspectContainerLiveness). A backend without an
    * inspect (older test stubs) is 'unknown' too, never a vanish.
+   *
+   * #7609 — the inspect itself goes through `_inspectLiveness`, which bounds
+   * the rate (negative-result cooldown + one shared in-flight probe).
    */
   async _probeContainerVanished() {
     const containerId = this._containerId
     const backend = this._dockerBackend
     if (!containerId || typeof backend?.getEnvironmentStatus !== 'function') return false
-    const status = await inspectContainerLiveness((id) => backend.getEnvironmentStatus(id), containerId)
+    const status = await this._inspectLiveness(containerId, backend)
     if (status !== 'gone') return false
     log.warn(`container ${containerId.slice(0, 12)} is gone (inspect after a failed tool dispatch) — surfacing CONTAINER_VANISHED`)
     this.notifyContainerVanished()
     return true
+  }
+
+  /**
+   * #7609 — the rate-bounded `docker inspect` behind _probeContainerVanished.
+   * Resolves 'running' | 'gone' | 'unknown'.
+   *
+   *   - Within a cooldown armed for THIS container id, the inspect is skipped
+   *     and the remembered verdict returned ('running' for the long window,
+   *     'unknown' for the short one) — both mean "not a confirmed vanish".
+   *   - Only 'running' and 'unknown' arm a cooldown. 'gone' never does: it is
+   *     the positive result, it runs the vanish path (which also clears any
+   *     cooldown), and the readiness flip stops further probes by itself.
+   *   - A cooldown is bound to the container id it was armed for, so a
+   *     respawned / re-acquired container (new id) is never judged by its
+   *     predecessor's verdict; notify/clearContainerVanished drop it too, which
+   *     covers the same-id restart.
+   *   - Concurrent failing tools share one in-flight inspect for the same id
+   *     instead of each spawning their own.
+   *
+   * What the cooldown can hide is bounded: a vanish inside the window is not
+   * seen by the tool path, but the #7601 poll (same period as the long window)
+   * surfaces it, and the tool still returns its plain error meanwhile.
+   */
+  _inspectLiveness(containerId, backend) {
+    const cooldown = this._inspectCooldown
+    if (cooldown && cooldown.containerId === containerId && this._now() < cooldown.until) {
+      return Promise.resolve(cooldown.status)
+    }
+    const inFlight = this._inspectInFlight
+    if (inFlight && inFlight.containerId === containerId) return inFlight.promise
+
+    const entry = { containerId, promise: null }
+    entry.promise = (async () => {
+      try {
+        const status = await inspectContainerLiveness((id) => backend.getEnvironmentStatus(id), containerId)
+        if (status === 'gone') {
+          this._inspectCooldown = null
+        } else {
+          const ms = status === 'running' ? INSPECT_ALIVE_COOLDOWN_MS : INSPECT_UNKNOWN_COOLDOWN_MS
+          this._inspectCooldown = { containerId, status, until: this._now() + ms }
+        }
+        return status
+      } finally {
+        if (this._inspectInFlight === entry) this._inspectInFlight = null
+      }
+    })()
+    this._inspectInFlight = entry
+    return entry.promise
   }
 
   /**
