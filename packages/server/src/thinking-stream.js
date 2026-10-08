@@ -94,15 +94,22 @@ export class ThinkingStreams {
    * returns when summaries are not requested) emits no delta: the client shows
    * "Thought for Xs" with an empty body, and the history keeps that entry.
    *
-   * @param {{ text?: string, redacted?: boolean, durationMs?: number }} block
+   * `late: true` marks a block shown after its turn was already answered (the
+   * transcript is written late). It is an INTERNAL tag on the session event, not a
+   * wire field: the forwarder reads it to keep a finished session idle (a thinking
+   * `stream_start` otherwise pings the sidebar "busy", and nothing pings idle again
+   * until the next `result`), and it never reaches a client.
+   *
+   * @param {{ text?: string, redacted?: boolean, durationMs?: number, late?: boolean }} block
    * @returns {string} the messageId used
    */
-  emitBlock({ text = '', redacted = false, durationMs } = {}) {
+  emitBlock({ text = '', redacted = false, durationMs, late = false } = {}) {
     const messageId = this._nextId()
-    this._emit('stream_start', { messageId, thinking: true })
+    const tag = late ? { late: true } : {}
+    this._emit('stream_start', { messageId, thinking: true, ...tag })
     const body = this._body(text, redacted)
-    if (body) this._emit('stream_delta', { messageId, delta: body, thinking: true })
-    this._emit('stream_end', this._endFrame(messageId, cleanDuration(durationMs)))
+    if (body) this._emit('stream_delta', { messageId, delta: body, thinking: true, ...tag })
+    this._emit('stream_end', { ...this._endFrame(messageId, cleanDuration(durationMs)), ...tag })
     return messageId
   }
 

@@ -5796,7 +5796,8 @@ export class ClaudeTuiSession extends BaseSession {
             if (rec.seen.has(block.uuid)) continue
             rec.seen.add(block.uuid)
           }
-          rec.streams.emitBlock(block)
+          // A record that has been answered is past its `result`: its blocks are late.
+          rec.streams.emitBlock({ ...block, late: rec.untilMs !== null })
         }
       }
     } catch (err) {

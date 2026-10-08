@@ -94,6 +94,17 @@ describe('ThinkingStreams.emitBlock (a block that is already complete)', () => {
   })
 })
 
+describe('ThinkingStreams.emitBlock late flag (a block shown after its turn was answered)', () => {
+  it('tags start, delta and end with late:true, and only when asked', () => {
+    const late = recorder()
+    new ThinkingStreams(late.emit, 'turn-1').emitBlock({ text: 'x', durationMs: 5, late: true })
+    assert.ok(late.frames.length === 3 && late.frames.every((f) => f.late === true && f.thinking === true))
+    const live = recorder()
+    new ThinkingStreams(live.emit, 'turn-1').emitBlock({ text: 'x', durationMs: 5 })
+    assert.ok(live.frames.every((f) => !('late' in f)), 'an in-turn block carries no late field')
+  })
+})
+
 describe('ThinkingStreams streaming API (claude-cli content_block_* events)', () => {
   it('open emits start at once; deltas are held; close emits ONE redacted delta then end with a measured duration', () => {
     const { frames, emit } = recorder()

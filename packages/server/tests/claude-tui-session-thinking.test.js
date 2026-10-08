@@ -556,12 +556,14 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end'), 'the late thinking block')
     const turnId = events.frames[0].messageId
     assert.deepEqual(thinkingFrames(events.frames), [
-      { name: 'stream_start', messageId: `${turnId}-thinking-0`, thinking: true },
-      { name: 'stream_delta', messageId: `${turnId}-thinking-0`, delta: 'Six times seven is forty-two.', thinking: true },
-      { name: 'stream_end', messageId: `${turnId}-thinking-0`, thinking: true, thinkingDurationMs: 900 },
+      { name: 'stream_start', messageId: `${turnId}-thinking-0`, thinking: true, late: true },
+      { name: 'stream_delta', messageId: `${turnId}-thinking-0`, delta: 'Six times seven is forty-two.', thinking: true, late: true },
+      { name: 'stream_end', messageId: `${turnId}-thinking-0`, thinking: true, late: true, thinkingDurationMs: 900 },
     ])
     const respDelta = responseFrames(events.frames).find((f) => f.name === 'stream_delta')
     assert.equal(respDelta.delta, 'The answer is 42.', 'the response text is untouched')
+    // It is tagged late (after the result), so the forwarder can keep the session idle.
+    assert.ok(thinkingFrames(events.frames).every((f) => f.late === true), 'late frames are tagged late:true')
   })
 
   it('attributes late reasoning to the turn it belongs to when the next turn has already started', async () => {
