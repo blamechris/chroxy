@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were all dark, and a session read idle while a subagent ran. A subagent now
   shows up when it is launched, a foreground one clears when it returns, and a
   background one stays until Claude Code reports it finished. It also clears if
-  the turn ends in an error, is stopped, or the session ends.
+  the turn ends in an error, is stopped, or the session ends, and it is given up
+  on if the session's transcript stops being readable for about a minute or the
+  agent has run for 12 hours without a completion notice.
 
 - **Web fetch and web search results render as cards on the default provider
   (#6987).** A WebFetch on a claude-tui session showed its raw JSON envelope

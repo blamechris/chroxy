@@ -797,6 +797,13 @@ export class ClaudeTuiSession extends BaseSession {
     // resolves to a transcript path; replaced if the transcript path
     // changes (new conversation id after /clear or resume).
     this._transcriptTaskScanner = null
+    // #7396 (review): what the poll needs to give up on a confirmed background
+    // subagent whose transcript stopped delivering. `_agentWatch` maps a
+    // confirmed agent's tool-use id to when it was confirmed and the scanner's
+    // discard count then; `_agentBlindTicks` counts consecutive ticks on which
+    // the transcript could not be looked at.
+    this._agentWatch = new Map()
+    this._agentBlindTicks = 0
     // #5431: change-detection poll armed while the last snapshot reported
     // outstanding work. Re-scans the transcript so a task-notification that
     // lands while the session is IDLE still clears the dashboard indicator
@@ -1678,6 +1685,24 @@ export class ClaudeTuiSession extends BaseSession {
   // transcript bytes appended since the last scan).
   static get BACKGROUND_TASK_POLL_MS() { return 15_000 }
 
+  // #7396 (review): a CONFIRMED background subagent is exempt from the turn-end
+  // sweep on the strength of a promise -- the transcript will eventually name it
+  // in a task-notification. These two bound that promise so a transcript that
+  // goes bad cannot pin the session as working (and a daemon restart as blocked)
+  // forever, which is #7340's worse failure.
+  //
+  // Consecutive poll ticks (15s each, so about a minute) on which the transcript
+  // could not be looked at -- removed, unreadable, or no longer the file the
+  // session file resolves to -- before the confirmed agents are drained. Short
+  // enough to be useful, long enough to ride out a file being replaced.
+  static get AGENT_BLIND_TICKS_MAX() { return 4 }
+  // Absolute lifetime of a confirmed agent, the backstop for every failure the
+  // blind-tick check cannot see (a notification that is simply never written).
+  // Hours, not minutes: a legitimate background agent can run a long time, and an
+  // early clear is recoverable (the notification still arrives; completing is
+  // idempotent) where a stuck badge is not.
+  static get AGENT_MAX_LIFETIME_MS() { return 12 * 60 * 60 * 1000 }
+
   /**
    * #5431 — outstanding background work derived from the session transcript:
    * `{ backgroundTasks: [{ toolUseId, kind, description, startedAt }],
@@ -1784,14 +1809,27 @@ export class ClaudeTuiSession extends BaseSession {
    * `getBackgroundTaskSnapshot()`.
    */
   _scanTranscript() {
-    const pid = this._term && this._term.pid
-    if (!Number.isInteger(pid) || pid <= 0) return null
-    const transcriptPath = transcriptPathForSessionFile(ClaudeTuiSession.sessionFilePath(pid))
+    const transcriptPath = this._resolveTranscriptPath()
     if (!transcriptPath) return null
     if (!this._transcriptTaskScanner || this._transcriptTaskScanner.path !== transcriptPath) {
       this._transcriptTaskScanner = new TranscriptTaskScanner(transcriptPath, this._log || log)
+      // #7396 (review): the subagents still being waited on must never be
+      // evicted from the scanner's bounded notified-id set.
+      this._transcriptTaskScanner.pinnedToolUseIds = this._activeAgents
     }
     return this._transcriptTaskScanner.scan()
+  }
+
+  /**
+   * #7396 (review) -- where the session file says the transcript is right now, or
+   * null when it cannot be resolved (no live PTY pid, no per-PID file, a bad
+   * file). Factored out of `_scanTranscript` so the poll can ask the same
+   * question of a scanner it already holds.
+   */
+  _resolveTranscriptPath() {
+    const pid = this._term && this._term.pid
+    if (!Number.isInteger(pid) || pid <= 0) return null
+    return transcriptPathForSessionFile(ClaudeTuiSession.sessionFilePath(pid))
   }
 
   /**
@@ -1912,38 +1950,117 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _armBackgroundTaskPoll() {
     if (this._backgroundTaskPollTimer || this._destroying) return
-    this._backgroundTaskPollTimer = setInterval(() => {
-      try {
-        if (this._destroying || this._ptyExited) {
-          this._stopBackgroundTaskPoll()
-          return
-        }
-        if (!this._transcriptTaskScanner) return
-        const next = this._transcriptTaskScanner.scan()
-        // #7396: runs busy or idle. A subagent that finished in the middle of a
-        // long turn should leave the badge then, not when the turn ends.
-        this._completeNotifiedAgents(this._transcriptTaskScanner.notifiedToolUseIds)
-        // The broadcast (and the decision to stop) stays idle-only, as before:
-        // the turn-end `result` path recomputes the snapshot anyway, and stopping
-        // on a busy tick would swallow a drain nobody has been told about yet.
-        if (this._isBusy) return
-        const key = this._backgroundTaskKey(next)
-        if (key !== this._lastBackgroundTaskKey) {
-          this._lastBackgroundTaskKey = key
-          this.emit('background_tasks_changed', next)
-        }
-        if (next.backgroundTasks.length === 0 && !next.scheduledWakeup && !this._hasConfirmedBackgroundAgents()) {
-          this._stopBackgroundTaskPoll()
-        }
-      } catch (err) {
-        // Never let the poll throw out of a timer tick — stop watching and
-        // degrade to "no live updates until the next readiness edge".
-        ;(this._log || log).debug?.(`background-task poll failed: ${err.message} — stopping poll`)
-        this._stopBackgroundTaskPoll()
-      }
-    }, ClaudeTuiSession.BACKGROUND_TASK_POLL_MS)
+    this._backgroundTaskPollTimer = setInterval(() => this._backgroundTaskPollTick(), ClaudeTuiSession.BACKGROUND_TASK_POLL_MS)
     // Don't keep the event loop alive solely for the background-task watch.
     if (typeof this._backgroundTaskPollTimer.unref === 'function') this._backgroundTaskPollTimer.unref()
+  }
+
+  /** #5431 / #7396 -- one tick of the idle re-scan. See `_armBackgroundTaskPoll`. */
+  _backgroundTaskPollTick() {
+    try {
+      if (this._destroying || this._ptyExited) {
+        this._stopBackgroundTaskPoll()
+        return
+      }
+      const scanner = this._transcriptTaskScanner
+      if (!scanner) {
+        // A confirmed agent implies a scanner existed; its absence is a tick the
+        // transcript could not be looked at.
+        this._watchConfirmedAgents(null)
+        return
+      }
+      const next = scanner.scan()
+      // #7396: runs busy or idle. A subagent that finished in the middle of a
+      // long turn should leave the badge then, not when the turn ends.
+      this._completeNotifiedAgents(scanner.notifiedToolUseIds)
+      this._watchConfirmedAgents(scanner)
+      // The broadcast (and the decision to stop) stays idle-only, as before:
+      // the turn-end `result` path recomputes the snapshot anyway, and stopping
+      // on a busy tick would swallow a drain nobody has been told about yet.
+      if (this._isBusy) return
+      const key = this._backgroundTaskKey(next)
+      if (key !== this._lastBackgroundTaskKey) {
+        this._lastBackgroundTaskKey = key
+        this.emit('background_tasks_changed', next)
+      }
+      if (next.backgroundTasks.length === 0 && !next.scheduledWakeup && !this._hasConfirmedBackgroundAgents()) {
+        this._stopBackgroundTaskPoll()
+      }
+    } catch (err) {
+      // Never let the poll throw out of a timer tick — stop watching and
+      // degrade to "no live updates until the next readiness edge".
+      ;(this._log || log).debug?.(`background-task poll failed: ${err.message} — stopping poll`)
+      this._stopBackgroundTaskPoll()
+    }
+  }
+
+  /**
+   * #7396 (review) -- the way out for a CONFIRMED background subagent whose
+   * transcript stops delivering its notification. Runs on every poll tick.
+   *
+   * Three independent reasons to stop waiting, each ending the agent with
+   * `agent_completed { reason }` (the wire message carries only the id; the
+   * reason is for in-process listeners and the log):
+   *
+   *  - `transcript_unreadable`: the transcript has been impossible to look at
+   *    for `AGENT_BLIND_TICKS_MAX` consecutive ticks -- the last scan failed, or
+   *    the session file now resolves to a different path than the scanner holds
+   *    (or to none), or there is no scanner. `scan()` degrades a read error to
+   *    an empty snapshot, which reads as "nothing new" for ever, so health is
+   *    asked of the scanner (`readable`) rather than inferred.
+   *  - `transcript_gap`: the scanner skipped an over-cap unread tail after the
+   *    agent was confirmed. A notification in that prefix is gone for good.
+   *  - `max_lifetime`: `AGENT_MAX_LIFETIME_MS` since confirmation, the backstop
+   *    for a notification that is simply never written.
+   *
+   * All three fail toward clearing the badge early, which is recoverable (the
+   * notification may still arrive; completing is idempotent), where a stuck
+   * badge pins the session working and blocks daemon restarts.
+   *
+   * @param {TranscriptTaskScanner|null} scanner
+   */
+  _watchConfirmedAgents(scanner) {
+    const confirmed = []
+    for (const [toolUseId, agent] of this._activeAgents) {
+      if (agent?.backgroundConfirmed === true) confirmed.push(toolUseId)
+    }
+    if (confirmed.length === 0) {
+      this._agentBlindTicks = 0
+      this._agentWatch.clear()
+      return
+    }
+    for (const id of this._agentWatch.keys()) {
+      if (!confirmed.includes(id)) this._agentWatch.delete(id)
+    }
+    const now = this._nowMonotonic()
+    const blind = !scanner || scanner.readable !== true || this._resolveTranscriptPath() !== scanner.path
+    if (blind) {
+      this._agentBlindTicks++
+      if (this._agentBlindTicks >= ClaudeTuiSession.AGENT_BLIND_TICKS_MAX) {
+        this._agentBlindTicks = 0
+        this._drainWatchedAgents(confirmed, 'transcript_unreadable')
+        return
+      }
+    } else {
+      this._agentBlindTicks = 0
+    }
+    for (const id of confirmed) {
+      let watch = this._agentWatch.get(id)
+      if (!watch) {
+        watch = { at: now, discards: scanner ? scanner.discardCount : 0 }
+        this._agentWatch.set(id, watch)
+      }
+      if (scanner && scanner.discardCount > watch.discards) this._drainWatchedAgents([id], 'transcript_gap')
+      else if (now - watch.at > ClaudeTuiSession.AGENT_MAX_LIFETIME_MS) this._drainWatchedAgents([id], 'max_lifetime')
+    }
+  }
+
+  _drainWatchedAgents(toolUseIds, reason) {
+    ;(this._log || log).warn(`giving up on ${toolUseIds.length} background subagent(s) (${reason}): ${toolUseIds.join(', ')}`)
+    for (const id of toolUseIds) {
+      this._agentWatch.delete(id)
+      this._completeAgent(id, { reason })
+    }
   }
 
   /** #5431 — idempotent stop for the background-task re-scan poll. */
@@ -2038,6 +2155,9 @@ export class ClaudeTuiSession extends BaseSession {
       authoritative: confirmable,
     })
     if (!confirmable) return
+    if (!this._agentWatch.has(toolUseId)) {
+      this._agentWatch.set(toolUseId, { at: this._nowMonotonic(), discards: this._transcriptTaskScanner?.discardCount ?? 0 })
+    }
     // A notification can already be in the transcript (a very short-lived
     // subagent); read it now rather than after the next poll interval.
     this._reconcileAgentsFromTranscript()
@@ -6150,6 +6270,10 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+    // #7396: the Ctrl-C above ended the turn from the outside, so no subagent
+    // is exempt -- see `_settleAgentsAtTurnEnd`. Before the result, as the SDK's
+    // hard-timeout and stall paths sweep before theirs.
+    this._settleAgentsAtTurnEnd(false)
     // 4. AskUserQuestion-related slot/lock/watchdog symmetry. #4802:
     //    explicit `_pendingUserAnswers_clearAll()` (was an implicit
     //    `_pendingUserAnswer = null` via the back-compat setter). Safe
@@ -6190,9 +6314,6 @@ export class ClaudeTuiSession extends BaseSession {
       emitResult()
       emitError()
     }
-    // #7396: the Ctrl-C above ended the turn from the outside, so no subagent
-    // is exempt -- see `_settleAgentsAtTurnEnd`.
-    this._settleAgentsAtTurnEnd(false)
   }
 
   /**

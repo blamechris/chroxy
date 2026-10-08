@@ -2350,13 +2350,18 @@ export class BaseSession extends EventEmitter {
    * a terminal signal leaves the session claiming to be working forever.
    *
    * @param {unknown} toolUseId
+   * @param {{ reason?: string }} [opts]
    * @protected
    */
-  _completeAgent(toolUseId) {
+  _completeAgent(toolUseId, { reason } = {}) {
     if (typeof toolUseId !== 'string' || !toolUseId) return
     if (!this._activeAgents.has(toolUseId)) return
     this._activeAgents.delete(toolUseId)
-    this.emit('agent_completed', { toolUseId })
+    // #7396: `reason` is present only when the session ENDED the agent itself
+    // (a watchdog gave up waiting for the provider's signal) rather than the
+    // provider reporting it finished. In-process only: the wire message is built
+    // field by field in event-normalizer and carries just the id.
+    this.emit('agent_completed', reason ? { toolUseId, reason } : { toolUseId })
   }
 
   /**

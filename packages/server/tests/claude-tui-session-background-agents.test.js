@@ -47,6 +47,8 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
   let session
   let skillsDir
   let origPollMsDescriptor
+  let origBlindDescriptor
+  let origLifetimeDescriptor
   let transcriptPath
 
   beforeEach(() => {
@@ -66,6 +68,11 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
     // without waiting out the real 15s.
     origPollMsDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'BACKGROUND_TASK_POLL_MS')
     Object.defineProperty(ClaudeTuiSession, 'BACKGROUND_TASK_POLL_MS', { value: 20, configurable: true })
+    // #7396 review: the liveness knobs. Not-yet-defined statics read as
+    // undefined, which restores to "absent" below.
+    origBlindDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'AGENT_BLIND_TICKS_MAX')
+    origLifetimeDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'AGENT_MAX_LIFETIME_MS')
+    Object.defineProperty(ClaudeTuiSession, 'AGENT_BLIND_TICKS_MAX', { value: 3, configurable: true })
   })
 
   afterEach(async () => {
@@ -79,6 +86,10 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
     if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
     if (skillsDir) rmSync(skillsDir, { recursive: true, force: true })
     Object.defineProperty(ClaudeTuiSession, 'BACKGROUND_TASK_POLL_MS', origPollMsDescriptor)
+    for (const [name, d] of [['AGENT_BLIND_TICKS_MAX', origBlindDescriptor], ['AGENT_MAX_LIFETIME_MS', origLifetimeDescriptor]]) {
+      if (d) Object.defineProperty(ClaudeTuiSession, name, d)
+      else delete ClaudeTuiSession[name]
+    }
     if (unpinSinkBase) unpinSinkBase()
     unpinSinkBase = null
   })
@@ -515,6 +526,123 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
       assert.equal(s._activeAgents.size, 1)
       s.removeAllListeners()
       assert.equal(s._activeAgents.size, 0)
+    })
+  })
+
+  // ---- a CONFIRMED agent must have a way out even if the transcript fails ----
+
+  describe('a confirmed background agent whose transcript stops delivering (review of #8511)', () => {
+    async function confirmed() {
+      const s = makeLiveSession()
+      const events = record(s)
+      await runTurn(s, { 'pre-a.json': preAgent('toolu_bg'), 'post-a.json': postAsync('toolu_bg'), 'stop-z.json': stopHook })
+      assert.equal(s._activeAgents.size, 1, 'precondition: confirmed and surviving the turn')
+      assert.ok(s._backgroundTaskPollTimer, 'precondition: poll armed')
+      return { s, events }
+    }
+
+    async function assertDrained(s, events, reason) {
+      await waitFor(() => s._activeAgents.size === 0, `the agent to be drained (${reason})`)
+      const completed = events.filter((e) => e.name === 'agent_completed')
+      assert.equal(completed.length, 1)
+      assert.equal(completed[0].toolUseId, 'toolu_bg')
+      assert.equal(completed[0].reason, reason)
+      assert.deepEqual(s.getRestartBlockers(), [], 'a drained agent must not block a daemon restart')
+      await waitFor(() => s._backgroundTaskPollTimer === null, 'the poll to stop')
+    }
+
+    it('the transcript is removed: drained after K blind ticks', async () => {
+      const { s, events } = await confirmed()
+      rmSync(transcriptPath)
+      await assertDrained(s, events, 'transcript_unreadable')
+    })
+
+    it('the transcript becomes unreadable (a directory in its place): drained', async () => {
+      const { s, events } = await confirmed()
+      rmSync(transcriptPath)
+      mkdirSync(transcriptPath)
+      await assertDrained(s, events, 'transcript_unreadable')
+    })
+
+    it('the session file now points at a different transcript (path swapped): drained', async () => {
+      const { s, events } = await confirmed()
+      const sessFile = join(fakeHome, '.claude', 'sessions', `${fakePid}.json`)
+      writeFileSync(sessFile, JSON.stringify({ pid: fakePid, sessionId: 'uuid-other', cwd: fakeCwd, startedAt: Date.now() }))
+      await assertDrained(s, events, 'transcript_unreadable')
+    })
+
+    it('a unreadable stretch shorter than K ticks does not drain, and a healthy tick resets the count', async () => {
+      const { s, events } = await confirmed()
+      Object.defineProperty(ClaudeTuiSession, 'AGENT_BLIND_TICKS_MAX', { value: 1000, configurable: true })
+      rmSync(transcriptPath)
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(s._activeAgents.size, 1, 'well under K blind ticks: still tracked')
+      writeFileSync(transcriptPath, '')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      appendTranscript([enqueueLine('toolu_bg')])
+      await waitFor(() => s._activeAgents.size === 0, 'the real notification to complete it')
+      assert.equal(events.find((e) => e.name === 'agent_completed').reason, undefined, 'a real completion carries no drain reason')
+    })
+
+    it('blind ticks must be CONSECUTIVE: a healthy tick resets the count', async () => {
+      const { s, events } = await confirmed()
+      s._stopBackgroundTaskPoll() // drive the ticks by hand
+      const healthy = { readable: true, path: s._resolveTranscriptPath(), discardCount: 0 }
+      const blind = { readable: false, path: healthy.path, discardCount: 0 }
+      const K = ClaudeTuiSession.AGENT_BLIND_TICKS_MAX
+      for (let i = 0; i < K - 1; i++) s._watchConfirmedAgents(blind)
+      s._watchConfirmedAgents(healthy)
+      for (let i = 0; i < K - 1; i++) s._watchConfirmedAgents(blind)
+      assert.equal(s._activeAgents.size, 1, 'K-1 blind, a healthy tick, K-1 blind: never K in a row')
+      s._watchConfirmedAgents(blind)
+      assert.equal(s._activeAgents.size, 0, 'K in a row drains')
+      assert.equal(events.find((e) => e.name === 'agent_completed').reason, 'transcript_unreadable')
+    })
+
+    it('the unread tail was skipped (over 16 MiB appended): the notification may be in the gap, so drain', async () => {
+      const { s, events } = await confirmed()
+      const line = JSON.stringify({ type: 'user', timestamp: '2026-10-04T07:00:00.000Z', message: { role: 'user', content: 'x'.repeat(1024 * 1024) } }) + '\n'
+      appendFileSync(transcriptPath, line.repeat(17))
+      await assertDrained(s, events, 'transcript_gap')
+    })
+
+    it('the absolute lifetime ceiling drains an agent whose notification never comes', async () => {
+      Object.defineProperty(ClaudeTuiSession, 'AGENT_MAX_LIFETIME_MS', { value: 120, configurable: true })
+      const { s, events } = await confirmed()
+      await assertDrained(s, events, 'max_lifetime')
+    })
+
+    it('the default ceiling is generous (hours), not minutes', () => {
+      assert.ok(ClaudeTuiSession.AGENT_MAX_LIFETIME_MS >= 4 * 3600 * 1000)
+    })
+  })
+
+  describe('the notified-id cap (review of #8511)', () => {
+    it('more than the cap of later notifications in one scan window cannot strand a tracked agent', async () => {
+      const s = makeLiveSession()
+      const events = record(s)
+      await runTurn(s, { 'pre-a.json': preAgent('toolu_bg'), 'post-a.json': postAsync('toolu_bg'), 'stop-z.json': stopHook })
+      const lines = [enqueueLine('toolu_bg')]
+      for (let i = 0; i < 600; i++) lines.push(enqueueLine(`toolu_other_${i}`))
+      appendTranscript(lines)
+      await waitFor(() => events.some((e) => e.name === 'agent_completed'), 'agent_completed')
+      assert.equal(events.find((e) => e.name === 'agent_completed').reason, undefined, 'completed by its own notification, not drained')
+    })
+  })
+
+  describe('ordering', () => {
+    it('a teardown (hard cap / stall / Ctrl-C) completes its agents BEFORE the result, as the SDK hard-timeout path does', () => {
+      const s = makeLiveSession()
+      const order = []
+      s.on('agent_completed', () => order.push('agent_completed'))
+      s.on('result', () => order.push('result'))
+      s._activeTurn = { uuid: 't', synthSeq: 0 }
+      s._isBusy = true
+      s._currentMessageId = 'msg-1'
+      s._emitToolHookEvent('PreToolUse', preAgent('toolu_bg', { background: true }), 'msg-1')
+      s._emitToolHookEvent('PostToolUse', postAsync('toolu_bg'), 'msg-1')
+      s._teardownTurn('hard_timeout', { duration: 1 })
+      assert.deepEqual(order, ['agent_completed', 'result'])
     })
   })
 

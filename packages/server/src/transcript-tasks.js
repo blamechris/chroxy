@@ -192,6 +192,14 @@ export class TranscriptTaskScanner {
   constructor(transcriptPath, logger = log) {
     this.path = transcriptPath
     this._log = logger
+    // #7396 (review): health of the scanner itself, deliberately OUTSIDE
+    // `_reset()` -- a rotation or a skipped tail is exactly when these must
+    // survive the reset, because they are how a consumer learns the state it is
+    // holding no longer reflects the file.
+    this._readable = null
+    this._discardCount = 0
+    /** @type {{ has(id: string): boolean } | null} */
+    this.pinnedToolUseIds = null
     this._reset()
   }
 
@@ -250,6 +258,29 @@ export class TranscriptTaskScanner {
   }
 
   /**
+   * #7396 (review): did the LAST `scan()` manage to read the transcript?
+   * `null` before any scan. `scan()` itself degrades every failure to an empty
+   * snapshot (its contract), which is indistinguishable from "nothing new" -- a
+   * consumer that waits on a notification forever needs to tell the two apart.
+   * A transcript that does not exist is `false` here, not an empty one.
+   * @returns {boolean|null}
+   */
+  get readable() {
+    return this._readable
+  }
+
+  /**
+   * #7396 (review): how many times an over-cap unread tail made the scanner skip
+   * ahead and drop the prefix it never parsed. A notification in that prefix is
+   * gone for good, so a consumer waiting on one compares this with the value it
+   * saw when it started waiting. Never reset.
+   * @returns {number}
+   */
+  get discardCount() {
+    return this._discardCount
+  }
+
+  /**
    * Read any new transcript bytes, fold them into the tracked state, and
    * return the outstanding-work snapshot. Never throws.
    * @returns {{backgroundTasks: Array<{toolUseId:string,kind:string,description:string,startedAt:number}>, scheduledWakeup: {at:number,reason:string}|null, observedModel: string|null, authFailureCount: number|null, usageLimitCount: number|null, lastUsageLimit: object|null}}
@@ -257,8 +288,10 @@ export class TranscriptTaskScanner {
   scan() {
     try {
       this._readNewBytes()
+      this._readable = true
       return this._snapshot()
     } catch (err) {
+      this._readable = false
       // ENOENT is the common benign case (transcript not written yet) —
       // still debug-logged, but state is preserved so a later scan picks
       // up where it left off if the file appears.
@@ -305,6 +338,7 @@ export class TranscriptTaskScanner {
         // degradation for a pathological file; note it at debug level.
         this._log.debug?.(`transcript ${this.path} unread tail ${size - start}B exceeds cap — scanning final ${MAX_SCAN_BYTES}B only`)
         this._reset()
+        this._discardCount++
         start = size - MAX_SCAN_BYTES
         // Discard the (almost certainly partial) first line of the window.
         this._discardFirstPartialLine = true
@@ -431,7 +465,15 @@ export class TranscriptTaskScanner {
     this._notified.delete(toolUseId)
     this._notified.add(toolUseId)
     if (this._notified.size > NOTIFIED_TOOL_USE_IDS_MAX) {
-      this._notified.delete(this._notified.values().next().value)
+      // Oldest first, but never an id a caller has pinned (the subagents a
+      // session is still waiting on): more than the cap of later notifications
+      // in one scan window would otherwise evict a tracked agent's id before the
+      // caller ever looked. Bounded by the number of pinned ids.
+      for (const id of this._notified) {
+        if (this.pinnedToolUseIds?.has(id)) continue
+        this._notified.delete(id)
+        break
+      }
     }
   }
 

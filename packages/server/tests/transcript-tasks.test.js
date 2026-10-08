@@ -748,6 +748,44 @@ describe('TranscriptTaskScanner -- notifiedToolUseIds (#7396)', () => {
     assert.ok(scanner.notifiedToolUseIds.has(`toolu_${NOTIFIED_TOOL_USE_IDS_MAX + 4}`))
   })
 
+  it('never evicts an id a caller has pinned (a tracked agent), even past the cap', () => {
+    const lines = [completionLine({ id: 'toolu_tracked' })]
+    for (let i = 0; i < NOTIFIED_TOOL_USE_IDS_MAX + 50; i++) lines.push(completionLine({ id: `toolu_${i}` }))
+    const scanner = new TranscriptTaskScanner(writeTranscript(lines))
+    scanner.pinnedToolUseIds = new Set(['toolu_tracked'])
+    scanner.scan()
+    assert.ok(scanner.notifiedToolUseIds.has('toolu_tracked'))
+    assert.equal(scanner.notifiedToolUseIds.size, NOTIFIED_TOOL_USE_IDS_MAX, 'the cap still holds: the oldest UNPINNED ids went')
+    assert.ok(!scanner.notifiedToolUseIds.has('toolu_0'))
+  })
+
+  it('reports whether the last scan could read the transcript', () => {
+    const p = writeTranscript([completionLine({ id: 'toolu_a' })])
+    const scanner = new TranscriptTaskScanner(p)
+    assert.equal(scanner.readable, null, 'never scanned')
+    scanner.scan()
+    assert.equal(scanner.readable, true)
+    rmSync(p)
+    scanner.scan()
+    assert.equal(scanner.readable, false, 'a missing transcript is unreadable, not empty')
+    writeFileSync(p, '')
+    scanner.scan()
+    assert.equal(scanner.readable, true)
+  })
+
+  it('counts every time an over-cap unread tail forced it to skip ahead', () => {
+    const p = writeTranscript([completionLine({ id: 'toolu_a' })])
+    const scanner = new TranscriptTaskScanner(p)
+    scanner.scan()
+    assert.equal(scanner.discardCount, 0)
+    const big = JSON.stringify({ type: 'user', message: { content: 'x'.repeat(1024 * 1024) } }) + '\n'
+    appendFileSync(p, big.repeat(Math.ceil(MAX_SCAN_BYTES / big.length) + 1))
+    scanner.scan()
+    assert.equal(scanner.discardCount, 1)
+    scanner.scan()
+    assert.equal(scanner.discardCount, 1, 'an ordinary scan does not count')
+  })
+
   it('does not change the snapshot shape the wire and the dedup key are built from', () => {
     const p = writeTranscript([completionLine({ id: 'toolu_a' })])
     const snap = new TranscriptTaskScanner(p).scan()
