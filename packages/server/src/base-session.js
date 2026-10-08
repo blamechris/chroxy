@@ -27,6 +27,13 @@ import { isTurnTerminationReason, describeTurnTermination } from '@chroxy/protoc
 
 const log = createLogger('base-session')
 
+// #8252: the text of a synthesized `tool_result` for a tool whose turn ended
+// with no result and no termination reason (see `_sweepUnresolvedToolStarts`).
+// A termination reason gets its own `describeTurnTermination(reason).summary`;
+// this is the protocol's neutral wording for "no reason known", so the two cannot
+// drift and neither claims the tool did not run.
+export const UNFINISHED_TOOL_RESULT_TEXT = describeTurnTermination().summary
+
 // #3805: opt-in Chroxy context paragraph. Prepended to `_buildSystemPrompt()`
 // output when `chroxyContextHint` is true so the model knows it's running
 // inside Chroxy's remote-terminal front-end and can adjust its output for
@@ -2025,8 +2032,9 @@ export class BaseSession extends EventEmitter {
    * the wire, `ServerToolResultSchema.terminatedReason`) and says so in its
    * text, so a client can render "cut off by the turn ending; check whether it took effect" instead of
    * the failure styling. Every other sweep reason (the natural turn end that
-   * simply never saw a result) keeps the original wording and no
-   * `terminatedReason`: those really are indistinguishable from a failure.
+   * simply never saw a result) says only that the tool did not finish
+   * (#8252) and carries no `terminatedReason`: those really are
+   * indistinguishable from a failure.
    *
    * @param {string} reason — short identifier for the sweep cause
    * @returns {number} count of sweeps emitted
@@ -2049,7 +2057,7 @@ export class BaseSession extends EventEmitter {
       reason = 'user_stop'
     }
     let count = 0
-    for (const [toolUseId, entry] of [...this._inFlightToolStarts]) {
+    for (const [toolUseId] of [...this._inFlightToolStarts]) {
       // #7340: a confirmed-backgrounded subagent that has not reported back is
       // NOT an orphan -- it is running. Synthesising an `isError` result for it
       // would report a failure that did not happen and terminate its activity
@@ -2061,9 +2069,17 @@ export class BaseSession extends EventEmitter {
       const terminated = isTurnTerminationReason(reason)
       this.emit('tool_result', {
         toolUseId,
+        // #8252: plain words only. The sweep reason is a slug and the fact that
+        // the daemon fabricated this result is bookkeeping, so neither is in the
+        // text a person reads. They stay on the in-process event as `reason` and
+        // `synthetic` for listeners on the session; the wire
+        // (`event-normalizer.js`) and the persisted history
+        // (`session-message-history.js`) carry only `isError` and
+        // `terminatedReason`, so a non-terminated sweep's slug does not leave the
+        // process. The tool's name is already on the row.
         result: terminated
-          ? `${describeTurnTermination(reason).summary} (${entry.tool}; Chroxy synthesized this result to clear the stale activeTools entry.)`
-          : `Tool ${entry.tool} did not emit a result before the turn ended (reason: ${reason}). Chroxy synthesized this result to clear the stale activeTools entry.`,
+          ? describeTurnTermination(reason).summary
+          : UNFINISHED_TOOL_RESULT_TEXT,
         truncated: false,
         synthetic: true,
         interrupted: true,

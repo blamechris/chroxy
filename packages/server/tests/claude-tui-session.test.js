@@ -1788,7 +1788,7 @@ describe('ClaudeTuiSession', () => {
       s._onPtyGone({ exitCode: 1, signal: null }, 'exit') // no active turn
 
       assert.equal(errors.some((e) => e.code === 'AUTH_REQUIRED'), false)
-      assert.ok(errors.some((e) => /Claude PTY exited/.test(e.message)), 'the generic exit error is surfaced instead')
+      assert.ok(errors.some((e) => e.message === 'Claude exited — restarting.'), 'the generic exit error is surfaced instead')
     })
 
     // #8223: the turn-time scan reads only the bytes THIS turn printed, so the
@@ -3593,8 +3593,8 @@ describe('ClaudeTuiSession', () => {
 
       const result = await session.sendMessage('hello')
 
-      assert.ok(errors.find((e) => /exited before prompt write/.test(e.message)),
-        `expected "exited before prompt write" error, got: ${errors.map((e) => e.message).join(' | ')}`)
+      assert.ok(errors.find((e) => /exited before your message could be sent/.test(e.message)),
+        `expected "exited before your message could be sent" error, got: ${errors.map((e) => e.message).join(' | ')}`)
       assert.equal(session._isBusy, false, 'busy cleared after probe-time PTY death')
       // #5813: the late-failure path returns the typed { ok:false } (like the
       // up-front guards) so callers keying off result.ok — e.g. the reinject
@@ -3644,8 +3644,8 @@ describe('ClaudeTuiSession', () => {
 
       assert.equal(promptWritten, false,
         'prompt MUST NOT be written after interrupt() during probe wait')
-      assert.ok(errors.find((e) => /aborted before prompt write/.test(e.message)),
-        `expected "aborted before prompt write" error, got: ${errors.map((e) => e.message).join(' | ')}`)
+      assert.ok(errors.find((e) => e.message === 'Stopped.'),
+        `expected the plain "Stopped." error, got: ${errors.map((e) => e.message).join(' | ')}`)
       assert.equal(session._isBusy, false, 'busy cleared after probe-time abort')
       assert.equal(session._activeTurn, null, 'active turn cleared after probe-time abort')
     })
@@ -8213,7 +8213,7 @@ describe('ClaudeTuiSession', () => {
       assert.equal(s._isBusy, false, 'clears busy so the next sendMessage isn\'t wedged')
       assert.equal(s._processReady, false)
       assert.equal(errors.length, 1, 'exactly one error')
-      assert.match(errors[0].message, /Claude PTY exited \(code=1\)/)
+      assert.equal(errors[0].message, 'Claude exited — restarting.')
     })
 
     it('renders code=unknown (never "undefined") when failing via close/error with no exit info (#5311)', () => {
@@ -8222,8 +8222,7 @@ describe('ClaudeTuiSession', () => {
       s.on('error', (e) => errors.push(e))
       s._onPtyGone(null, 'close') // socket fault: no exit info
       assert.equal(errors.length, 1)
-      assert.match(errors[0].message, /Claude PTY exited \(code=unknown\)/)
-      assert.doesNotMatch(errors[0].message, /undefined/)
+      assert.equal(errors[0].message, 'Claude exited — restarting.')
     })
 
     it('is idempotent — onExit + close + error collapse to ONE error emit', () => {

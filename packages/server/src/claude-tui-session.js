@@ -59,6 +59,7 @@ import {
   parseBashOutputShellId,
 } from './background-shells.js'
 import { normalizeClaudeTuiToolResponse } from './claude-tui-tool-response.js'
+import { scrubTerminalText } from './claude-tui/diagnostic-tail.js'
 // #5559 — PTY-write / paste-throttle layer + interactive-form driver carved out
 // into focused modules. The empirically-pinned helpers, constants and methods
 // are moved byte-identically; the *Mixin classes carry the write/form methods,
@@ -161,6 +162,21 @@ const log = createLogger('claude-tui-session')
 // a no-op), short enough that a leaked entry can't shadow the most-recent
 // fallback for long. Same recovery-window class as the answer stall.
 const DENIED_QUESTION_REAPER_MS = ASK_USER_QUESTION_WATCHDOG_MS
+
+// #8252: the sentence the chat gets when a turn or the PTY ends abnormally. One
+// plain line each. The terminal tail, the exit code and the signal are
+// diagnostics for the daemon log (`_logPtyDiagnostic`), never part of the
+// message a client renders in a red card.
+
+// #8252: stand-in for a character `redactSensitivePreservingEscapes` redacted,
+// and the run of them that becomes one `[REDACTED]` once escapes are scrubbed.
+const REDACTION_FILL = '\ue000'
+const REDACTION_RUN = /\ue000+(?:[ \n]+\ue000+)*/g
+const TURN_STOPPED_MESSAGE = 'Stopped.'
+const PTY_EXITED_MESSAGE = 'Claude exited — restarting.'
+const PTY_EXITED_BEFORE_PROMPT_MESSAGE = 'Claude exited before your message could be sent.'
+const PTY_EXITED_MID_TURN_MESSAGE = 'Claude exited mid-turn — restarting.'
+const PTY_RESPAWN_EXHAUSTED_MESSAGE = 'Claude kept exiting; stopped restarting it.'
 
 /**
  * ClaudeTuiSession — drives the interactive `claude` TUI under a PTY so the
@@ -575,10 +591,13 @@ export class ClaudeTuiSession extends BaseSession {
     // Cleared by _onPtyGone the moment the process is confirmed gone (which also
     // closes the pid-reuse window — we only force-kill when onExit never fired).
     this._killTimer = null
-    // Ring buffer of recent PTY output bytes — surfaces in error
-    // messages when the TUI renders a diagnostic (rate-limit, auth
-    // failure, "switch back to API mode") that would otherwise be
-    // silently dropped (#3919). Kept small (~4KB) so it doesn't eat
+    // Ring buffer of recent PTY output bytes — what the TUI rendered when it
+    // failed (rate-limit, auth failure, "switch back to API mode"), which would
+    // otherwise be silently dropped (#3919). Since #8252 it is NOT part of any
+    // `error` message the chat renders: it is written, cleaned and redacted, to
+    // the session log (`_logPtyDiagnostic`), and the auth-failure scans classify
+    // it into the dedicated AUTH_REQUIRED error. Quota / rate-limit text has no
+    // detector and so reaches the log only. Kept small (~4KB) so it doesn't eat
     // memory on long sessions.
     this._outputTail = ''
     // #5794: monotonic count of ALL PTY output bytes ever appended. Unlike
@@ -2327,9 +2346,8 @@ export class ClaudeTuiSession extends BaseSession {
       if (this._scanWarmupOutputForAuthFailure()) {
         this.emit('error', { code: AUTH_REQUIRED_CODE, message: AUTH_REQUIRED_MESSAGE })
       } else {
-        const tail = this._outputTailDiagnostic()
-        const base = `Claude PTY exited (code=${codeStr})`
-        this.emit('error', { message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
+        this._logPtyDiagnostic(`Claude PTY exited (code=${codeStr}${this._ptyExitInfo?.signal ? ` signal=${this._ptyExitInfo.signal}` : ''})`)
+        this.emit('error', { message: PTY_EXITED_MESSAGE })
       }
     }
     // #5315 (WP-2.1) — an UNEXPECTED PTY death (we already returned above when
@@ -2362,9 +2380,8 @@ export class ClaudeTuiSession extends BaseSession {
     if (!this._respawnRateLimiter.record()) {
       const { maxPerWindow, windowMs } = this._respawnRateLimiter
       ;(this._log || log).error(`PTY respawn rate cap reached (>${maxPerWindow} respawns in ${Math.round(windowMs / 60000)}min), giving up — session is flapping`)
-      const tail = this._outputTailDiagnostic()
-      const base = `Claude PTY is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes`
-      this.emit('error', { code: 'pty_respawn_exhausted', message: tail ? `${base}\nTUI output tail:\n${tail}` : base })
+      this._logPtyDiagnostic(`Claude PTY is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes`)
+      this.emit('error', { code: 'pty_respawn_exhausted', message: PTY_RESPAWN_EXHAUSTED_MESSAGE })
       this.emit('respawn_exhausted', { reason: 'pty_respawn_rate_capped' })
       return
     }
@@ -2446,7 +2463,6 @@ export class ClaudeTuiSession extends BaseSession {
         ;(this._log || log).error(this._didFallbackFromUnknownResume
           ? `Fresh-conversation retry also died during warmup after the resume id was rejected — giving up (${this._respawnCount - 1} attempt(s))`
           : `Max PTY respawn attempts reached (${this._respawnCount - 1}), giving up`)
-        const tail = this._outputTailDiagnostic()
         // When the retry-FRESH fallback itself failed, escalate with the same
         // terminal code CliSession uses (resume_unknown_exhausted, #5004) —
         // event-normalizer forwards it + attemptedResumeId, and the dashboard/
@@ -2456,10 +2472,13 @@ export class ClaudeTuiSession extends BaseSession {
         // toast.
         const failedFallback = this._didFallbackFromUnknownResume
         const code = failedFallback ? 'resume_unknown_exhausted' : 'pty_respawn_exhausted'
-        const base = failedFallback
+        this._logPtyDiagnostic(failedFallback
+          ? 'Auto-recovery exhausted: every --resume respawn died during warmup and a fresh-conversation retry also failed'
+          : `Claude PTY failed to stay alive after ${this._respawnCount - 1} respawn attempts`)
+        const message = failedFallback
           ? 'Auto-recovery exhausted: every --resume respawn died during warmup and a fresh-conversation retry also failed. Start a new session manually to continue.'
-          : `Claude PTY failed to stay alive after ${this._respawnCount - 1} respawn attempts`
-        const errEnvelope = { code, message: tail ? `${base}\nTUI output tail:\n${tail}` : base }
+          : PTY_RESPAWN_EXHAUSTED_MESSAGE
+        const errEnvelope = { code, message }
         if (failedFallback && this._abandonedResumeId) errEnvelope.attemptedResumeId = this._abandonedResumeId
         this.emit('error', errEnvelope)
         // SessionManager listens for this and calls destroySession() so the
@@ -4079,7 +4098,8 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._ptyExited) {
       const code = this._ptyExitInfo?.exitCode
       const signal = this._ptyExitInfo?.signal
-      this._finishTurnError(`Claude PTY exited before prompt write (code=${code}${signal ? ` signal=${signal}` : ''})`, messageId)
+      this._logPtyDiagnostic(`Claude PTY exited before prompt write (code=${code}${signal ? ` signal=${signal}` : ''})`)
+      this._finishTurnError(PTY_EXITED_BEFORE_PROMPT_MESSAGE, messageId)
       reportInputAdmission(sendOptions, {
         status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
         reason: 'pty_exited', message: 'The provider terminal exited before the prompt was written.',
@@ -4097,7 +4117,8 @@ export class ClaudeTuiSession extends BaseSession {
     // (server clears busy via _finishTurnError below, but the TUI might
     // still process the bytes once it returns to prompt). Bail cleanly.
     if (this._activeTurn?.aborted) {
-      this._finishTurnError('Turn aborted before prompt write', messageId)
+      this._logPtyDiagnostic('turn aborted before prompt write', 'info')
+      this._finishTurnError(TURN_STOPPED_MESSAGE, messageId)
       reportInputAdmission(sendOptions, {
         status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
         reason: 'aborted', message: 'The turn was aborted before the prompt was written.',
@@ -4129,7 +4150,10 @@ export class ClaudeTuiSession extends BaseSession {
       // DOES honor mode 2004; the throttle is what actually fixes the
       // bug. Same helper also serves respondToQuestion() (#4278).
       const completed = await this._writePtyTextThrottled(promptToSend, {
-        onAbort: () => this._finishTurnError('Turn aborted during prompt write', messageId),
+        onAbort: () => {
+          this._logPtyDiagnostic('turn aborted during prompt write', 'info')
+          this._finishTurnError(TURN_STOPPED_MESSAGE, messageId)
+        },
       })
       // #5813: typed failure. _writePtyTextThrottled returns false for BOTH an
       // aborted turn AND a mid-write PTY exit, so report the actual cause (#5848
@@ -4416,22 +4440,39 @@ export class ClaudeTuiSession extends BaseSession {
     log.info(`hookPoll exit (msg=${messageId} iters=${pollIters} elapsedMs=${this._nowMonotonic() - pollStart} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'} aborted=${this._activeTurn?.aborted ? 'yes' : 'no'} ptyExited=${this._ptyExited ? 'yes' : 'no'} stillBusy=${this._isBusy ? 'yes' : 'no'})`)
 
     if (!stopPayload) {
-      let reason
+      // #8252: `message` is what the chat shows; `diagnostic` is what the log
+      // gets alongside the terminal tail.
+      let message
+      let diagnostic
       if (this._activeTurn?.aborted) {
-        reason = 'turn aborted'
+        message = TURN_STOPPED_MESSAGE
+        diagnostic = 'turn aborted'
       } else if (this._ptyExited) {
         const code = this._ptyExitInfo?.exitCode
         const signal = this._ptyExitInfo?.signal
-        reason = `Claude PTY exited mid-turn (code=${code}${signal ? ` signal=${signal}` : ''})`
+        message = PTY_EXITED_MID_TURN_MESSAGE
+        diagnostic = `Claude PTY exited mid-turn (code=${code}${signal ? ` signal=${signal}` : ''})`
       } else if (!this._isBusy) {
         // _handleHardTimeout already cleared state + emitted its own
         // error. Just return without double-firing.
         return
       } else {
-        reason = `Stop hook timeout after ${Math.round((this._nowMonotonic() - pollStart) / 1000)}s`
+        const seconds = Math.round((this._nowMonotonic() - pollStart) / 1000)
+        message = `Claude did not finish responding (gave up after ${seconds}s).`
+        diagnostic = `Stop hook timeout after ${seconds}s`
       }
-      const tail = this._outputTailDiagnostic()
-      this._finishTurnError(tail ? `${reason}\nTUI output tail:\n${tail}` : reason, messageId)
+      this._logPtyDiagnostic(diagnostic, this._activeTurn?.aborted ? 'info' : 'warn')
+      // #8252 review: the tail used to ride in this message, so a login banner the
+      // TUI rendered was visible in the card. It is in the log now, so classify it
+      // here as the stall, first-output and hard-timeout paths do: an auth failure
+      // still gets its dedicated, actionable error. Not on a Stop the user asked
+      // for. The scan reads only what THIS turn printed (#8223).
+      const authFail = !this._activeTurn?.aborted && this._scanTurnOutputForAuthFailure()
+      this._finishTurnError(
+        authFail ? AUTH_REQUIRED_MESSAGE : message,
+        messageId,
+        authFail ? { code: AUTH_REQUIRED_CODE } : undefined,
+      )
       return
     }
 
@@ -4890,7 +4931,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._refreshObservedModel()
   }
 
-  _finishTurnError(message, callerMessageId) {
+  _finishTurnError(message, callerMessageId, errorExtras) {
     this._assertBusyHasMessageId('_finishTurnError')
     this._logSendMessageSummary('error')
     // #4010: balance the early stream_start with stream_end + result so the
@@ -4908,7 +4949,7 @@ export class ClaudeTuiSession extends BaseSession {
     const messageId = callerMessageId || this._currentMessageId
     const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : 0
     if (messageId) this.emit('stream_end', { messageId })
-    this.emit('error', { message })
+    this.emit('error', errorExtras ? { ...errorExtras, message } : { message })
     // #4072: subscription-billed → cost: null so SessionManager skips
     // accumulation. See companion sites above.
     // #4628: sweep orphan tool_starts before result so the dashboard's
@@ -4940,20 +4981,70 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * Return the tail of recent PTY output suitable for inclusion in an
-   * error message, or '' when there's nothing useful. Collapses
-   * whitespace runs so the diagnostic is compact (#3919).
+   * The text `_outputTailDiagnostic` cleans, and whether its START was cut by
+   * the byte cap. The raw tail when the session has one: it still carries the
+   * escape sequences, so a cursor-forward can become the word gap it stood for
+   * and a private-mode sequence is removed whole (#8252). The already-stripped
+   * tail otherwise (a session that never received PTY output, or a test that
+   * sets `_outputTail` directly).
+   *
+   * @returns {{ text: string, truncatedStart: boolean }}
+   */
+  _outputTailText() {
+    if (this._outputTailRaw && this._outputTailRaw.length > 0) {
+      return {
+        text: this._outputTailRaw.toString('utf8'),
+        // `_totalOutputBytes` never shrinks; the buffer stops growing at the cap.
+        truncatedStart: this._totalOutputBytes > this._outputTailRaw.length,
+      }
+    }
+    const text = this._outputTail || ''
+    return { text, truncatedStart: text.length >= ClaudeTuiSession.PTY_TAIL_BYTES }
+  }
+
+  /**
+   * #8252: write an abnormal-end diagnostic to the daemon log, with the
+   * redacted, cleaned terminal tail under it. This is where the tail lives now;
+   * it used to ride in the `error` message and render in the chat's red card.
+   * The session-scoped logger routes it to the System tab / View logs for the
+   * session (and to the daemon log either way).
+   *
+   * @param {string} summary - what happened, with the exit code / signal
+   * @param {'warn'|'info'} [level] - `info` for a Stop the user asked for
+   */
+  _logPtyDiagnostic(summary, level = 'warn') {
+    const tail = this._outputTailDiagnostic()
+    ;(this._log || log)[level](tail ? `${summary}\nTUI output tail:\n${tail}` : summary)
+  }
+
+  /**
+   * Return the tail of recent PTY output for the daemon log, or '' when
+   * there's nothing useful. Cleaned of terminal control debris and collapsed
+   * to compact whitespace (#3919, #8252). Never put this in an `error`
+   * message: those render in the chat.
    */
   _outputTailDiagnostic() {
-    if (!this._outputTail) return ''
-    // #5322 (WP-4.2, security) — this tail rides into `error` events that fan
-    // out to clients and the System tab, so redact any token-shaped run (pasted
+    const { text: source, truncatedStart } = this._outputTailText()
+    if (!source) return ''
+    // #5322 (WP-4.2, security) — this tail is written to the session-scoped log,
+    // which fans out to clients and the System tab, so redact any token-shaped run (pasted
     // or echoed OAuth token / API key) before it leaves the process.
     // #5357 review — redact BEFORE slicing: a token straddling the
     // PTY_TAIL_DIAGNOSTIC_BYTES boundary must be matched in full (and collapse
     // to [REDACTED]) rather than leaving a trailing fragment the regex can't
     // catch. The slice then bounds the already-scrubbed string.
-    return redactSensitive(this._outputTail)
+    //
+    // #8252 review: redact the RAW text first. The scrubber turns a cursor move
+    // into a space or a newline, so a token an escape interleaved (ESC[2C, ESC[5G,
+    // ESC[1A/B) is no longer contiguous once scrubbed. The escape-preserving pass
+    // sees through the escapes and redacts both halves of a split token (it must
+    // run first: redactSensitive alone would replace the leading half and orphan
+    // the rest). redactSensitive after the scrub is the backstop.
+    // The preserving pass fills a redacted character with a private-use sentinel;
+    // after the scrub, a run of them (a split token's halves now sit either side of
+    // the space or newline their escape became) is one `[REDACTED]`.
+    const redactedRaw = redactSensitivePreservingEscapes(source, REDACTION_FILL)
+    return redactSensitive(scrubTerminalText(redactedRaw, { truncatedStart }).replace(REDACTION_RUN, '[REDACTED]'))
       .slice(-ClaudeTuiSession.PTY_TAIL_DIAGNOSTIC_BYTES)
       .replace(/[\r\n]+/g, '\n')
       .replace(/[ \t]{2,}/g, ' ')

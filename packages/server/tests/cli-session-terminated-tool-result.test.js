@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { Readable, Writable } from 'node:stream'
 import { EventEmitter } from 'node:events'
 import { CliSession } from '../src/cli-session.js'
+import { UNFINISHED_TOOL_RESULT_TEXT } from '../src/base-session.js'
+import { describeTurnTermination } from '@chroxy/protocol'
 import { EVENT_MAP } from '../src/event-normalizer.js'
 import { SessionMessageHistory } from '../src/session-message-history.js'
 import { sendHistoryEntry } from '../src/ws-history.js'
@@ -165,7 +167,7 @@ describe('CliSession — a tool cut off by a terminated turn says so (#7376)', (
     session._clearMessageState()
     assert.equal(results.length, 1)
     assert.equal('terminatedReason' in results[0], false)
-    assert.match(results[0].result, /did not emit a result before the turn ended/)
+    assert.equal(results[0].result, UNFINISHED_TOOL_RESULT_TEXT)
   })
 
   it('a Stop does NOT relabel a direct generic sweep (no normal completion declared)', () => {
@@ -228,12 +230,35 @@ describe('CliSession — a tool cut off by a terminated turn says so (#7376)', (
     assert.equal(results.length, 1)
     assert.equal(results[0].isError, true)
     assert.equal('terminatedReason' in results[0], false)
-    assert.match(results[0].result, /did not emit a result before the turn ended/)
+    assert.equal(results[0].result, UNFINISHED_TOOL_RESULT_TEXT)
   })
 
   it('POSITIVE CONTROL: an ordinary turn-end sweep reason is NOT labelled terminated', () => {
     session._sweepUnresolvedToolStarts('stream_completed_without_result')
     assert.equal('terminatedReason' in results[0], false)
+  })
+
+  // #8252: the text is for a person. The sweep reason is a slug and "Chroxy
+  // synthesized this result" is the daemon's bookkeeping; both used to be
+  // printed in the tool row. They are structured metadata on the event now.
+  for (const slug of ['turn_finished_with_error', 'stop_hook_fired_without_post_hook', 'stream_completed_without_result']) {
+    it(`#8252: ${slug} reads plainly and keeps the slug as metadata, not prose`, () => {
+      session._sweepUnresolvedToolStarts(slug)
+      assert.equal(results.length, 1)
+      assert.equal(results[0].result, describeTurnTermination().summary, 'the protocol\'s neutral wording, not a second table')
+      assert.equal(/did not run|didn.t run|didn.t finish/i.test(results[0].result), false, 'never asserts the tool did not run')
+      assert.equal(results[0].reason, slug, 'the slug is kept as structured metadata')
+      assert.equal(results[0].synthetic, true, 'the synthesized flag is kept as structured metadata')
+      assert.equal(results[0].result.includes(slug), false, 'no slug in the prose')
+      assert.equal(/synthesized|activeTools|reason:/i.test(results[0].result), false, 'no daemon bookkeeping in the prose')
+    })
+  }
+
+  it('#8252: a termination reason keeps the shared wording and drops the bookkeeping sentence', () => {
+    session._sweepUnresolvedToolStarts('user_stop')
+    assert.equal(results[0].result, describeTurnTermination('user_stop').summary)
+    assert.equal(results[0].reason, 'user_stop')
+    assert.equal(/synthesized|activeTools|reason:/i.test(results[0].result), false)
   })
 
   it('POSITIVE CONTROL: an unknown reason string never becomes a terminatedReason', () => {
