@@ -508,6 +508,26 @@ describe('ToolGroup', () => {
         expect(detail).toHaveAttribute('data-streaming', 'true')
       })
 
+      // #8251 — a running claude-sdk tool has no structured toolInput until its
+      // result lands, but the single-shot sanitized tool_input_delta is already
+      // in toolInputPartial: the COLLAPSED row must show its preview, as
+      // ToolBubble's collapsed summary does (#4081).
+      it('collapsed row previews a complete toolInputPartial while toolInput is undefined', () => {
+        const messages = [
+          tool('1', 'Bash', { toolInputPartial: '{"command":"sleep 12 && ls ."}' }),
+        ]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('sleep 12 && ls .')
+      })
+
+      it('collapsed row does not leak a half-assembled partial buffer', () => {
+        const messages = [
+          tool('1', 'Bash', { toolInputPartial: '{"command":"sle' }),
+        ]
+        render(<ToolGroup messages={messages} isActive={true} />)
+        expect(screen.getByTestId('tool-group-entry-1')).not.toHaveTextContent('sle')
+      })
+
       it('pretty-prints toolInputPartial when the buffer is already complete JSON', () => {
         const messages = [
           tool('1', 'Task', { toolInputPartial: '{"command":"ls"}' }),

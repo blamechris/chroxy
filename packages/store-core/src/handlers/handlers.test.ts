@@ -7861,6 +7861,88 @@ describe('handleToolStart', () => {
     expect(out.chatMessage!.content).toBe(JSON.stringify({ cmd: 'ls', flag: true }))
   })
 
+  // #8251 — frames below are the shapes the server actually puts on the wire.
+  describe('structured toolInput from tool_start (#8251)', () => {
+    const TUI_INPUT = { command: 'ls .', description: 'List files in current directory' }
+    const toolResult = (msg: Record<string, unknown>, messages: ChatMessage[]) => {
+      const r = handleToolResult(msg, 'sess-1')!
+      return r.applyTo(messages)
+    }
+
+    it('claude-tui live: tool_start carries input and tool_result does not -> toolInput is set and survives the result', () => {
+      // claude-tui-session.js emits { messageId, toolUseId, tool, input } and a
+      // tool_result of { toolUseId, result, truncated } with no `input`.
+      const start = handleToolStart(
+        { type: 'tool_start', messageId: 'toolu_t1', toolUseId: 'toolu_t1', tool: 'Bash', input: TUI_INPUT },
+        'sess-1',
+        false,
+        [],
+      )
+      expect(start.chatMessage!.toolInput).toEqual(TUI_INPUT)
+      const after = toolResult(
+        { type: 'tool_result', toolUseId: 'toolu_t1', result: 'README.md', truncated: false },
+        [start.chatMessage!],
+      )
+      expect(after[0].toolInput).toEqual(TUI_INPUT)
+      expect(after[0].toolResult).toBe('README.md')
+    })
+
+    it('claude-sdk live: tool_start has input:null, the result backfills toolInput (unchanged #7346 path)', () => {
+      const start = handleToolStart(
+        { type: 'tool_start', messageId: 'toolu_s1', toolUseId: 'toolu_s1', tool: 'Read', input: null },
+        'sess-1',
+        false,
+        [],
+      )
+      expect(start.chatMessage!.toolInput).toBeUndefined()
+      const after = toolResult(
+        { type: 'tool_result', toolUseId: 'toolu_s1', result: 'ok', truncated: false, input: { file_path: 'README.md' } },
+        [start.chatMessage!],
+      )
+      expect(after[0].toolInput).toEqual({ file_path: 'README.md' })
+    })
+
+    it('claude-sdk replay (session switch / reload): the replayed tool_start carries the backfilled input and the replayed tool_result does not -> toolInput survives a full rebuild', () => {
+      // History ring buffer: tool_start entry backfilled at tool_result time
+      // (session-message-history.js), tool_result entry without `input`.
+      const replayedStart = { type: 'tool_start', messageId: 'toolu_s1', toolUseId: 'toolu_s1', tool: 'Read', input: { file_path: 'README.md' }, timestamp: 1700000000000 }
+      const replayedResult = { type: 'tool_result', toolUseId: 'toolu_s1', result: 'ok', truncated: false, timestamp: 1700000000500 }
+      const start = handleToolStart(replayedStart, 'sess-1', true, [])
+      expect(start.shouldDispatch).toBe(true)
+      const after = toolResult(replayedResult, [start.chatMessage!])
+      expect(after[0].toolInput).toEqual({ file_path: 'README.md' })
+      expect(after[0].toolResult).toBe('ok')
+    })
+
+    it('a later tool_result.input still wins over the tool_start input', () => {
+      const start = handleToolStart(
+        { messageId: 'toolu_x', toolUseId: 'toolu_x', tool: 'Bash', input: { command: 'early' } },
+        'sess-1',
+        false,
+        [],
+      )
+      const after = toolResult(
+        { toolUseId: 'toolu_x', result: 'ok', input: { command: 'final' } },
+        [start.chatMessage!],
+      )
+      expect(after[0].toolInput).toEqual({ command: 'final' })
+    })
+
+    it('keeps the server-sanitized shape as-is (redacted values and the _truncated summary are plain objects and render)', () => {
+      const redacted = { command: 'export TOKEN=[REDACTED]', api_key: '[REDACTED]' }
+      const capped = { _truncated: true, summary: '{"content":"xxxx... [truncated]' }
+      expect(handleToolStart({ messageId: 'a', tool: 'Bash', input: redacted }, 's', false, []).chatMessage!.toolInput).toEqual(redacted)
+      expect(handleToolStart({ messageId: 'b', tool: 'Write', input: capped }, 's', false, []).chatMessage!.toolInput).toEqual(capped)
+    })
+
+    it('leaves toolInput unset for null, array and primitive inputs', () => {
+      for (const input of [null, undefined, ['a'], 'ls', 42]) {
+        const out = handleToolStart({ messageId: 'm', tool: 'Bash', input }, 's', false, [])
+        expect(out.chatMessage!.toolInput).toBeUndefined()
+      }
+    })
+  })
+
   it('falls back to tool name when input is absent', () => {
     const out = handleToolStart(
       { messageId: 'srv-tool-1', tool: 'Bash' },
