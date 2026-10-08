@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - An ACP agent that reports `cancelled` on its own now ends the turn with a
     `result` marked stopped, instead of a bare error.
 
+- **Turn-outcome chips follow-ups (#8461).**
+  - The "Reply cut off" / "Stopped" chip stays out of the System tab and its unread
+    badge on the dashboard and the mobile app, live and after a session switch alike
+    (it belongs to the chat), and the mobile session card previews the reply instead
+    of the chip.
+  - A BYOK turn that spends its tool-round cap is marked cut off; its closing
+    summary used to read as a clean finish. A `pause_turn` stop is now cut off too
+    (the model had not finished).
+  - A Stop you press on claude-sdk or claude-cli no longer leaves a "Stopped" chip:
+    every provider answers a requested Stop with the quiet stopped confirmation only.
+
 - **A permission prompt's description matches its input (#8384, #8397).**
   - When a prompt has no identifying field (command, file_path, ...), its
     description is now built from the sanitized input, on every provider path

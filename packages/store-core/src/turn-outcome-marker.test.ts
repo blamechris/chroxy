@@ -3,6 +3,7 @@ import {
   appendTurnOutcomeMarker,
   readResultTurnOutcome,
   isTurnOutcomeMarker,
+  isSystemTabMessage,
   TURN_OUTCOME_MARKER_TESTID,
 } from './turn-outcome-marker'
 import { handleResultUsage } from './handlers/stream'
@@ -124,5 +125,15 @@ describe('turn-outcome markers in the shared chat pipeline (#7326)', () => {
 
   it('has a null tail when the only row is a marker', () => {
     expect(buildChatViewMessages([marker], null).chatTailMessageId).toBeNull()
+  })
+})
+
+describe('isSystemTabMessage (#8461)', () => {
+  it('admits a system row, refuses a turn-outcome chip and any non-system row', () => {
+    const chip = appendTurnOutcomeMarker([], { outcome: 'truncated', timestamp: 1 })[0]
+    expect(chip).toBeDefined()
+    expect(isSystemTabMessage(chip!)).toBe(false)
+    expect(isSystemTabMessage(msg({ id: 's', type: 'system', content: 'Connected' }))).toBe(true)
+    expect(isSystemTabMessage(msg({ id: 'r', type: 'response', content: 'x' }))).toBe(false)
   })
 })

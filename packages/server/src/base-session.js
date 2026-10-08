@@ -2161,6 +2161,18 @@ export class BaseSession extends EventEmitter {
         const { turnOutcome: _dropped, ...rest } = payload
         payload = rest
       }
+      // #8461: a Stop the user asked for is acknowledged by `session_stopped` on
+      // every provider whose `interrupt()` ends the turn with a `stopped` event
+      // (ACP, Codex, Gemini, ...). claude-sdk and claude-cli can instead answer
+      // the interrupt with a NORMAL `result` carrying `terminal_reason: aborted_*`,
+      // which maps to `stopped`. Left alone, only those two providers would show a
+      // "Stopped" chip for the very action the user took. The chip is for a turn
+      // that ended UNDER the user, so it is dropped for a requested Stop and
+      // survives for an agent that cancelled on its own (ACP `cancelled`).
+      if (payload && typeof payload === 'object' && payload.turnOutcome === 'stopped' && this._stopRequestedThisTurn) {
+        const { turnOutcome: _userStop, ...rest } = payload
+        payload = rest
+      }
       // #7326: a marked outcome (anything but `completed`) becomes a chip in the
       // transcript, and the chip needs an identity that the live `result` frame
       // and the history entry replayed later AGREE on -- a `result` has no id, and

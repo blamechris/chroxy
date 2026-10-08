@@ -52,19 +52,53 @@ export function outcomeFromAcpStopReason(stopReason) {
  * Anthropic Messages API `stop_reason` — also what the Agent SDK's result
  * message and the BYOK loop carry. `tool_use` is deliberately unmapped: a turn
  * is not over while the model is waiting on a tool.
+ *
+ * Two values are not what their names suggest (checked against
+ * `StopReason` / `Message.stop_reason` in @anthropic-ai/sdk 0.91.1's
+ * resources/messages/messages.d.ts, #8461):
+ *
+ *   pause_turn    — "we paused a long-running turn. You may provide the response
+ *                   back as-is in a subsequent request to let the model continue."
+ *                   The model has NOT finished; a client has to resume it. Neither
+ *                   BYOK's loop nor the SDK result path does, so the user is left
+ *                   holding a half reply: `truncated`, never `completed`.
+ *   stop_sequence — one of the request's own `stop_sequences` was generated, so
+ *                   the model stopped where it was told to: `completed`. We send
+ *                   no `stop_sequences`, so a genuine one does not occur today.
+ *                   The one place it does appear is the OpenAI-compatible shim,
+ *                   which folds `content_filter` into it (anthropic-openai-
+ *                   translate.js `mapFinishReason`); that path reads as
+ *                   `completed` here, a known gap listed in #8461 and left
+ *                   unmapped on purpose because a filter is not a clear refusal.
  * @param {unknown} stopReason
  * @returns {'completed'|'truncated'|'refused'|'stopped'|undefined}
  */
 export function outcomeFromAnthropicStopReason(stopReason) {
   switch (stopReason) {
     case 'end_turn':
-    case 'stop_sequence':
-    case 'pause_turn': return 'completed'
+    case 'stop_sequence': return 'completed'
     case 'max_tokens':
+    case 'pause_turn':
     case 'model_context_window_exceeded': return 'truncated'
     case 'refusal': return 'refused'
     default: return undefined
   }
+}
+
+/**
+ * BYOK turn. Same mapping as {@link outcomeFromAnthropicStopReason}, except a
+ * turn that spent MAX_TOOL_ROUNDS is `truncated` whatever the summary round
+ * said: the forced no-tools summary ends with an ordinary `end_turn`, which
+ * overwrites the loop's own stop reason and read as a clean finish (#8461). The
+ * work was cut off by the round cap; the summary only reports how far it got.
+ * @param {{ stopReason?: unknown, toolRoundCapReached?: boolean }} turn
+ * @returns {'completed'|'truncated'|'refused'|'stopped'|undefined}
+ */
+export function outcomeFromByokTurn({ stopReason, toolRoundCapReached = false } = {}) {
+  // A refusal in the summary round still outranks the cap: it is the more specific fact.
+  const mapped = outcomeFromAnthropicStopReason(stopReason)
+  if (toolRoundCapReached && (mapped === undefined || mapped === 'completed')) return 'truncated'
+  return mapped
 }
 
 /**

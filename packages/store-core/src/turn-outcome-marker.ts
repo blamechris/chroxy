@@ -59,6 +59,19 @@ export function isTurnOutcomeMarker(m: ChatMessage): boolean {
 }
 
 /**
+ * True when `m` belongs on the System tab (and in its unread badge): a `system`
+ * row that is NOT a turn-outcome marker. The chip describes the turn above it, so
+ * it lives in the chat flow only (the shared `buildChatViewMessages` pipeline
+ * lets it through); listing it a second time on the System tab put the same
+ * event on two tabs and bumped a badge for something the user was already
+ * looking at. Both clients derive the System tab from this one predicate, so the
+ * live append and a replay rebuild cannot disagree about it (#8461).
+ */
+export function isSystemTabMessage(m: ChatMessage): boolean {
+  return m.type === 'system' && !isTurnOutcomeMarker(m)
+}
+
+/**
  * Append the marker for `event` to `messages`. Returns `messages` unchanged (same
  * reference) when there is nothing to mark, so a caller can chain it without a
  * needless write.

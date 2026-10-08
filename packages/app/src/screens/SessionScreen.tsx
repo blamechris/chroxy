@@ -70,7 +70,7 @@ import { runQueuedEdit } from '../utils/edit-queued';
 import { formatPasteMarker, expandPasteMarkers, parseMemoryAppend } from '@chroxy/store-core';
 import { PastedTextModal } from '../components/PastedTextModal';
 import { disconnectWithQueueGuard } from '../store/disconnectWithQueueGuard';
-import { selectChatMessages } from './selectChatMessages';
+import { selectChatMessages, selectSystemMessages } from './selectChatMessages';
 import type { PermissionEditedInput } from '@chroxy/store-core';
 
 
@@ -205,7 +205,7 @@ export function SessionScreen() {
     [allMessages, chatFilterCompact, isHiddenInCompactMode],
   );
   const systemMessages = useMemo(
-    () => allMessages.filter((m) => m.type === 'system'),
+    () => selectSystemMessages(allMessages),
     [allMessages],
   );
 
