@@ -76,6 +76,19 @@ export function resolveJsonlPath(cwd, conversationId) {
 }
 
 /**
+ * The directory claude keeps its per-project transcripts in:
+ * `<CLAUDE_CONFIG_DIR or ~/.claude>/projects`. An unset or empty override falls
+ * back to `~/.claude`, matching claude.
+ * @param {Record<string, string|undefined>} [env] - env claude runs with
+ * @returns {string}
+ */
+export function resolveClaudeProjectsDir(env = process.env) {
+  const override = env?.CLAUDE_CONFIG_DIR
+  const root = typeof override === 'string' && override !== '' ? override : join(homedir(), '.claude')
+  return join(root, 'projects')
+}
+
+/**
  * Has Claude Code persisted a transcript for this conversation id? (#8239)
  *
  * Answers `true` / `false` ONLY when it could actually look. `claude` writes
@@ -90,21 +103,27 @@ export function resolveJsonlPath(cwd, conversationId) {
  * conversation.
  *
  * The expected directory (`encodeProjectPath(cwd)`) is tried first; if the
- * file is not there every directory under `~/.claude/projects/` is tried, so a
+ * file is not there every directory under the projects root is tried, so a
  * project-key derivation that differs from Claude Code's cannot read as
  * "never persisted".
  *
+ * The projects root is `<CLAUDE_CONFIG_DIR or ~/.claude>/projects`, taken from
+ * `env` (default `process.env`). Pass the env the claude child is spawned with:
+ * claude honours `CLAUDE_CONFIG_DIR` from ITS environment, so a probe that
+ * looks anywhere else would read a real conversation as "never persisted".
+ *
  * @param {string} cwd - the directory claude was launched in (real path)
  * @param {string} conversationId
+ * @param {Record<string, string|undefined>} [env] - env claude runs with
  * @returns {boolean}
  */
-export function hasPersistedTranscript(cwd, conversationId) {
+export function hasPersistedTranscript(cwd, conversationId, env = process.env) {
   // The id becomes a path segment; real ids are UUIDs. Anything else cannot be
   // looked up safely, so do not claim the transcript is absent.
   if (typeof conversationId !== 'string' || !/^[A-Za-z0-9-]+$/.test(conversationId)) return true
   if (typeof cwd !== 'string') return true
   const fileName = `${conversationId}.jsonl`
-  const projectsDir = join(homedir(), '.claude', 'projects')
+  const projectsDir = resolveClaudeProjectsDir(env)
   try {
     statSync(join(projectsDir, encodeProjectPath(cwd), fileName))
     return true

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, chmodSync 
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
-import { encodeProjectPath, hasPersistedTranscript } from '../src/jsonl-reader.js'
+import { encodeProjectPath, hasPersistedTranscript, resolveClaudeProjectsDir } from '../src/jsonl-reader.js'
 
 /**
  * #8239 — a claude-tui session that never completed a turn has no transcript
@@ -21,12 +21,16 @@ const SESSION_ID = '0f8239aa-0000-4000-8000-000000000001'
 
 let fakeHome
 let realHome
+let realConfigDir
 let cwd
 let cwdReal
 const cleanups = []
 
 beforeEach(() => {
   realHome = process.env.HOME
+  realConfigDir = process.env.CLAUDE_CONFIG_DIR
+  // A developer's own override must not leak into the probe under test.
+  delete process.env.CLAUDE_CONFIG_DIR
   fakeHome = mkdtempSync(join(tmpdir(), 'chroxy-8239-home-'))
   cwd = mkdtempSync(join(tmpdir(), 'chroxy-8239-cwd-'))
   cwdReal = realpathSync(cwd)
@@ -35,6 +39,8 @@ beforeEach(() => {
 
 afterEach(async () => {
   process.env.HOME = realHome
+  if (realConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+  else process.env.CLAUDE_CONFIG_DIR = realConfigDir
   for (const fn of cleanups.splice(0)) await fn()
   rmSync(fakeHome, { recursive: true, force: true })
   rmSync(cwd, { recursive: true, force: true })
@@ -82,6 +88,22 @@ function makeSession(ctorOpts = {}) {
   return { session: s, control, errors }
 }
 
+// Drive one real turn to the Stop-hook success path: the fake PTY drops a
+// `stop-*.json` into the sink dir when the prompt is written, exactly as
+// claude's Stop hook does.
+async function completeTurnViaStopHook(session, control) {
+  session._processReady = true
+  const sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-8239-sink-'))
+  session._sinkDir = sinkDir
+  cleanups.push(() => rmSync(sinkDir, { recursive: true, force: true }))
+  session._hardTimeoutMs = 5000
+  session._resultTimeoutMs = 5000
+  control.terms[0].write = () => {
+    writeFileSync(join(sinkDir, 'stop-8239.json'), JSON.stringify({ last_assistant_message: 'done' }))
+  }
+  await session.sendMessage('hello')
+}
+
 const idArgs = (args) => args.slice(0, 2)
 
 describe('claude-tui respawn without a persisted transcript (#8239)', () => {
@@ -117,6 +139,23 @@ describe('claude-tui respawn without a persisted transcript (#8239)', () => {
     await session._respawnPty()
     assert.deepEqual(idArgs(control.spawns[1]), ['--resume', SESSION_ID])
     assert.equal(control.spawns[1].includes('--session-id'), false)
+  })
+
+  it('a turn completed through the REAL Stop-hook path latches, so the next respawn --resumes', async () => {
+    // No transcript on disk: only the latch can say a conversation exists.
+    const { session, control, errors } = makeSession()
+    session._resumedFromPersisted = false
+    await session._spawnPty(false)
+    assert.equal(session._conversationEverPersisted, false, 'precondition: nothing latched yet')
+    await completeTurnViaStopHook(session, control)
+    assert.equal(session._conversationEverPersisted, true, 'the Stop hook latched the conversation')
+    control.terms[0].exitHandlers[0]({ exitCode: 1 })
+    clearTimeout(session._respawnTimer)
+    session._respawnTimer = null
+    session._respawnScheduled = false
+    await session._respawnPty()
+    assert.deepEqual(idArgs(control.spawns[1]), ['--resume', SESSION_ID])
+    assert.equal(errors.some((e) => e.code === 'resume_unknown'), false)
   })
 
   it('a session whose transcript is on disk (no turn seen in this process) respawns with --resume', async () => {
@@ -172,6 +211,57 @@ describe('claude-tui respawn without a persisted transcript (#8239)', () => {
   })
 })
 
+describe('CLAUDE_CONFIG_DIR (#8239)', () => {
+  let configDir
+  beforeEach(() => { configDir = mkdtempSync(join(tmpdir(), 'chroxy-8239-config-')) })
+  afterEach(() => { rmSync(configDir, { recursive: true, force: true }) })
+
+  function writeTranscriptUnder(root) {
+    const dir = join(root, 'projects', encodeProjectPath(cwdReal))
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${SESSION_ID}.jsonl`), '{"type":"user"}\n')
+  }
+
+  it('resolves the projects root from the override, else ~/.claude', () => {
+    assert.equal(resolveClaudeProjectsDir({ CLAUDE_CONFIG_DIR: configDir }), join(configDir, 'projects'))
+    assert.equal(resolveClaudeProjectsDir({}), join(fakeHome, '.claude', 'projects'))
+    assert.equal(resolveClaudeProjectsDir({ CLAUDE_CONFIG_DIR: '' }), join(fakeHome, '.claude', 'projects'))
+  })
+
+  it('the probe finds a transcript that lives under the override, not ~/.claude', () => {
+    writeTranscriptUnder(configDir)
+    assert.equal(hasPersistedTranscript(cwdReal, SESSION_ID, { CLAUDE_CONFIG_DIR: configDir }), true)
+    assert.equal(hasPersistedTranscript(cwdReal, SESSION_ID, {}), false, 'with no override ~/.claude is searched, and it is empty')
+  })
+
+  it('with the override set, a transcript under ~/.claude is NOT what claude would resume', () => {
+    writeTranscript()
+    assert.equal(hasPersistedTranscript(cwdReal, SESSION_ID, { CLAUDE_CONFIG_DIR: configDir }), false)
+  })
+
+  it('a restored session resumes when the transcript is under the env the child is spawned with', async () => {
+    writeTranscriptUnder(configDir)
+    const { session, control } = makeSession({ resumeSessionId: SESSION_ID, connectionChildEnv: { ...process.env, CLAUDE_CONFIG_DIR: configDir } })
+    await session._spawnPty(false)
+    assert.deepEqual(idArgs(control.spawns[0]), ['--resume', SESSION_ID])
+  })
+
+  it('a restored session resumes when the override comes from the daemon env', async () => {
+    writeTranscriptUnder(configDir)
+    process.env.CLAUDE_CONFIG_DIR = configDir
+    const { session, control } = makeSession({ resumeSessionId: SESSION_ID })
+    await session._spawnPty(false)
+    assert.deepEqual(idArgs(control.spawns[0]), ['--resume', SESSION_ID])
+  })
+
+  it('with the override unset the restored session still probes ~/.claude', async () => {
+    writeTranscript()
+    const { session, control } = makeSession({ resumeSessionId: SESSION_ID })
+    await session._spawnPty(false)
+    assert.deepEqual(idArgs(control.spawns[0]), ['--resume', SESSION_ID])
+  })
+})
+
 describe('hasPersistedTranscript (#8239)', () => {
   it('finds the transcript under the expected project directory', () => {
     writeTranscript()
@@ -202,6 +292,35 @@ describe('hasPersistedTranscript (#8239)', () => {
     // chmod 000 does not restrict root, so there is nothing to assert there.
     if (process.getuid && process.getuid() === 0) return
     const dir = join(fakeHome, '.claude', 'projects', 'locked')
+    mkdirSync(dir, { recursive: true })
+    chmodSync(dir, 0o000)
+    try {
+      assert.equal(hasPersistedTranscript(cwdReal, SESSION_ID), true)
+    } finally {
+      chmodSync(dir, 0o700)
+    }
+  })
+
+  it('fails safe when the projects directory itself cannot be read (a non-ENOENT readdir error is not "never saved")', () => {
+    if (process.getuid && process.getuid() === 0) return
+    // Search (x) permission without read (r): statting the expected child
+    // answers ENOENT, then listing `projects` itself fails with EACCES.
+    const projects = join(fakeHome, '.claude', 'projects')
+    mkdirSync(projects, { recursive: true })
+    chmodSync(projects, 0o100)
+    try {
+      assert.equal(hasPersistedTranscript(cwdReal, SESSION_ID), true)
+    } finally {
+      chmodSync(projects, 0o700)
+    }
+  })
+
+  it('fails safe when the expected project dir cannot be stat-ed (EACCES is not "never saved")', () => {
+    if (process.getuid && process.getuid() === 0) return
+    // x-bit removed on the expected key dir: statSync of <dir>/<id>.jsonl is
+    // EACCES. (The all-directories scan hits the same entry, so this branch and
+    // the scan answer alike; the test pins the answer, not which one gave it.)
+    const dir = join(fakeHome, '.claude', 'projects', encodeProjectPath(cwdReal))
     mkdirSync(dir, { recursive: true })
     chmodSync(dir, 0o000)
     try {

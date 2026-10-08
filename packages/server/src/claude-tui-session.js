@@ -1975,10 +1975,12 @@ export class ClaudeTuiSession extends BaseSession {
    * `false` only when it could look and the file was absent, so an unreadable
    * `~/.claude` keeps today's `--resume`. A test seam: stub this method.
    * @param {string} cwdReal - realpath of the dir claude is launched in
+   * @param {Record<string, string|undefined>} env - the env claude is spawned
+   *   with, so the probe reads the same `CLAUDE_CONFIG_DIR` claude writes to
    */
-  _conversationPersisted(cwdReal) {
+  _conversationPersisted(cwdReal, env) {
     if (this._conversationEverPersisted) return true
-    if (!hasPersistedTranscript(cwdReal, this._sessionId)) return false
+    if (!hasPersistedTranscript(cwdReal, this._sessionId, env)) return false
     this._conversationEverPersisted = true
     return true
   }
@@ -3077,7 +3079,7 @@ export class ClaudeTuiSession extends BaseSession {
     // "claude holds a conversation for the id". Only `--resume` an id claude has
     // actually persisted; otherwise relaunch fresh on the SAME id (nothing was
     // ever saved under it, so claude cannot call it "already in use").
-    const resumeExisting = this._resumedFromPersisted && this._conversationPersisted(cwdReal)
+    const resumeExisting = this._resumedFromPersisted && this._conversationPersisted(cwdReal, env)
     if (this._resumedFromPersisted && !resumeExisting) {
       log.info(`no persisted claude transcript for ${this._sessionId.slice(0, 8)} (no turn completed) — spawning fresh with --session-id instead of --resume (#8239)`)
     }
