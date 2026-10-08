@@ -39,7 +39,7 @@ function harness(body, { abortOnInterrupt = true } = {}) {
   const controller = new AbortController()
   const bodies = Array.isArray(body) ? [...body] : null
   session._callQuery = () => {
-    const gen = (bodies ? bodies.shift() : body)({ session, signal: controller.signal, requests })
+    const gen = (bodies ? bodies.shift() : body)({ session, signal: controller.signal, requests, abort: () => controller.abort() })
     // The real Query has interrupt(); the SDK aborts the canUseTool signal when
     // it is called. `abortOnInterrupt: false` models the other ordering, where
     // the provider's tool_result is read before the abort reaches this session.
@@ -54,6 +54,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     const { session, results } = harness((ctx) => (async function* () {
       yield bashStart
       const decision = ctx.session._handlePermission('Bash', { command: 'rm -rf x' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
       await ctx.session.interrupt() // the user pressed Stop; the prompt is still pending
       assert.equal((await decision).behavior, 'deny')
       yield denialResult()
@@ -73,6 +74,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     const { session, results } = harness((ctx) => (async function* () {
       yield bashStart
       ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
       await ctx.session.interrupt() // no abort: the signal has not fired yet
       yield denialResult()
       yield okResult
@@ -86,6 +88,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     const { session, errors } = harness((ctx) => (async function* () {
       yield bashStart
       ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
       await ctx.session.interrupt()
       yield denialResult("The user doesn't want to take this action right now. STOP what you are doing.")
       yield okResult
@@ -118,6 +121,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
       const decision = ctx.session._handlePermission('Bash', { command: 'false' }, ctx.signal, undefined, 'toolu_p')
       ctx.session.respondToPermission(ctx.requests[0].requestId, 'allow')
       assert.equal((await decision).behavior, 'allow')
+      ctx.session.markUserStopInFlight()
       await ctx.session.interrupt() // Stop comes after the user approved it
       yield denialResult('Exit code 1')
       yield okResult
@@ -134,6 +138,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     const { session, results } = harness((ctx) => (async function* () {
       yield bashStart
       const decision = ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
       const stop = ctx.session.interrupt()
       ctx.session.respondToPermission(ctx.requests[0].requestId, 'allow')
       await stop
@@ -173,6 +178,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
       (ctx) => (async function* () {
         yield bashStart
         ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+        ctx.session.markUserStopInFlight()
         await ctx.session.interrupt()
         yield okResult
       })(),
@@ -195,6 +201,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     const { session, results } = harness((ctx) => (async function* () {
       yield bashStart
       ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
       await ctx.session.interrupt()
       yield denialResult()
       yield denialResult('Exit code 4')
@@ -212,6 +219,7 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     const { session, results } = harness((ctx) => (async function* () {
       yield bashStart
       ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
       await ctx.session.interrupt()
       yield { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_p', content: 'file1\nfile2' }] } }
       yield okResult
@@ -233,5 +241,442 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     session.destroy()
     assert.equal('terminatedReason' in results[0], false)
     assert.equal(results[0].result, 'Exit code 2')
+  })
+})
+
+/**
+ * #8430 -- a prompt raised BETWEEN the user's Stop and the SDK's abort.
+ *
+ * `interrupt()` awaits `query.interrupt()`, and a parallel tool's canUseTool can land in
+ * that window. The prompt that was open at the Stop was marked; this one was not, so the
+ * same Stop's abort resolved it as `aborted` (read: expired). The user's Stop is a
+ * session-level fact that lasts to the end of the turn.
+ */
+describe('SdkSession -- a prompt raised after the user\'s Stop, before the abort (#8430)', () => {
+  // The model of the window: the SDK aborts the canUseTool signal only when the test says so.
+  function lateHarness(afterStop, { userStop = true } = {}) {
+    const { session, results, requests } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'first' }, ctx.signal, undefined, 'toolu_p')
+      const stop = userStop ? (ctx.session.markUserStopInFlight(), ctx.session.interrupt()) : ctx.session.interrupt()
+      // the SDK has not aborted yet: a parallel tool asks now
+      ctx.session._handlePermission('Bash', { command: 'second' }, ctx.signal, undefined, 'toolu_q')
+      await afterStop(ctx)
+      await stop
+      yield denialResult()
+      yield { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_q', is_error: true, content: SDK_DENY_TEXT }] } }
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    const resolved = []
+    session._permissions.on('permission_resolved', (d) => resolved.push(d))
+    return { session, results, requests, resolved }
+  }
+  const abortNow = (ctx) => { ctx.abort() }
+
+  it('both prompts read stopped, and both tool rows read stopped', async () => {
+    const { session, results, resolved } = lateHarness(abortNow)
+    await session.sendMessage('go')
+    session.destroy()
+    assert.deepEqual(resolved.map((r) => r.reason), ['stopped', 'stopped'])
+    assert.deepEqual(results.map((r) => r.terminatedReason), ['user_stop_before_run', 'user_stop_before_run'])
+  })
+
+  it('CONTROL: with no user Stop (the scheduler\'s interrupt, a failed turn) the late prompt reads aborted', async () => {
+    const { session, results, resolved } = lateHarness(abortNow, { userStop: false })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.deepEqual(resolved.map((r) => r.reason), ['aborted', 'aborted'])
+    // the snapshot in interrupt() still covers the prompt open at the interrupt; the
+    // late one was not resolved by a Stop, so its row is not relabelled
+    const lateRow = results.find((r) => r.toolUseId === 'toolu_q')
+    assert.equal('terminatedReason' in lateRow, false)
+  })
+})
+
+describe('SdkSession -- a user Stop does not outlive its turn (#8430)', () => {
+  // Turn 1 is stopped by the user and ends by `endTurn1`; turn 2 then fails a prompt
+  // for a reason that is NOT a Stop (its signal is aborted by something else).
+  async function runTwoTurns(endTurn1) {
+    const { session } = harness([
+      (ctx) => (async function* () {
+        yield bashStart
+        ctx.session._handlePermission('Bash', { command: 'one' }, ctx.signal, undefined, 'toolu_p')
+        ctx.session.markUserStopInFlight()
+        await ctx.session.interrupt()
+        yield* endTurn1()
+      })(),
+      (ctx) => (async function* () {
+        yield bashStart
+        // fresh controller: turn 1's signal was already aborted by its Stop
+        const failed = new AbortController()
+        ctx.session._handlePermission('Bash', { command: 'two' }, failed.signal, undefined, 'toolu_q')
+        failed.abort() // a turn failure, not the user
+        yield okResult
+      })(),
+    ])
+    const resolved = []
+    session._permissions.on('permission_resolved', (d) => { if (d.reason !== 'cleared') resolved.push(d.reason) })
+    session.on('error', () => {})
+    await session.sendMessage('first')
+    const afterFirst = session._permissions.isUserStopInFlight()
+    resolved.length = 0
+    await session.sendMessage('second')
+    session.destroy()
+    return { afterFirst, second: [...resolved] }
+  }
+
+  it('cleared when the stopped turn ends normally', async () => {
+    const r = await runTwoTurns(async function* () { yield okResult })
+    assert.equal(r.afterFirst, false)
+    assert.deepEqual(r.second, ['aborted'])
+  })
+
+  it('cleared when the stopped turn ends on the abort the Stop caused', async () => {
+    const r = await runTwoTurns(async function* () {
+      const e = new Error('The operation was aborted')
+      e.name = 'AbortError'
+      throw e
+    })
+    assert.equal(r.afterFirst, false)
+    assert.deepEqual(r.second, ['aborted'])
+  })
+
+  it('cleared when the stopped turn ends on an error', async () => {
+    const r = await runTwoTurns(async function* () { throw new Error('boom') })
+    assert.equal(r.afterFirst, false)
+    assert.deepEqual(r.second, ['aborted'])
+  })
+
+  it('a new turn starts clear even if the last one never reached its teardown (a superseded turn)', async () => {
+    const { session } = harness((ctx) => (async function* () {
+      yield bashStart
+      const failed = new AbortController()
+      ctx.session._handlePermission('Bash', { command: 'two' }, failed.signal, undefined, 'toolu_q')
+      failed.abort()
+      yield okResult
+    })())
+    const reasons = []
+    session._permissions.on('permission_resolved', (d) => { if (d.reason !== 'cleared') reasons.push(d.reason) })
+    session._permissions.markUserStopInFlight() // left behind by a turn that was superseded
+    await session.sendMessage('go')
+    session.destroy()
+    assert.deepEqual(reasons, ['aborted'])
+  })
+
+  it('a Stop pressed with no turn running records nothing', () => {
+    const session = new SdkSession({ cwd: '/tmp' })
+    session.markUserStopInFlight()
+    assert.equal(session._permissions.isUserStopInFlight(), false)
+    session.destroy()
+  })
+
+  it('CONTROL: an interrupt that is not the user\'s Stop, with a prompt raised in its window, reads aborted', async () => {
+    // acceptance 2 of #8430: no user Stop -> expired, however late the prompt is
+    const { session } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'a' }, ctx.signal, undefined, 'toolu_p')
+      const stop = ctx.session.interrupt() // the scheduler's interrupt: not a user Stop
+      ctx.session._handlePermission('Bash', { command: 'b' }, ctx.signal, undefined, 'toolu_q')
+      ctx.abort()
+      await stop
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    const reasons = []
+    session._permissions.on('permission_resolved', (d) => reasons.push(d.reason))
+    await session.sendMessage('go')
+    session.destroy()
+    assert.deepEqual(reasons, ['aborted', 'aborted'])
+  })
+})
+
+/**
+ * #8430 -- the order a LIVE claude-sdk Stop actually takes.
+ *
+ * The permission manager's abort listener does not run first. The SDK's generator
+ * throws AbortError, the turn ends through `_clearMessageState`, and the prompts
+ * still open are resolved by `PermissionManager.clearAll()` with `reason: 'cleared'`
+ * -- after the base teardown has already cleared the user-Stop flag. The journal
+ * maps `cleared` to `expired` and the live card to a plain deny. No abort event
+ * reaches the listener in this test, exactly as on the real daemon.
+ */
+describe('SdkSession -- a user Stop whose turn ends on the generator\'s AbortError (live order, #8430)', () => {
+  function liveOrder({ userStop }) {
+    const { session } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'one' }, ctx.signal, undefined, 'toolu_p')
+      if (userStop) ctx.session.markUserStopInFlight()
+      await ctx.session.interrupt() // abortOnInterrupt: false -> the signal never fires
+      const e = new Error('The operation was aborted')
+      e.name = 'AbortError'
+      throw e
+    })(), { abortOnInterrupt: false })
+    const resolved = []
+    session.on('permission_resolved', (d) => resolved.push(d))
+    session.on('error', () => {})
+    return { session, resolved }
+  }
+
+  it('the open prompt is resolved as stopped, on the live event too', async () => {
+    const { session, resolved } = liveOrder({ userStop: true })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(resolved.length, 1)
+    assert.equal(resolved[0].reason, 'stopped')
+    assert.equal(resolved[0].decision, 'deny')
+  })
+
+  it('a prompt raised after the Stop still marks its tool row, when the teardown is what resolves it', async () => {
+    const { session } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session.markUserStopInFlight()
+      await ctx.session.interrupt()
+      // raised in the window, after the snapshot in interrupt() was taken
+      ctx.session._handlePermission('Bash', { command: 'late' }, ctx.signal, undefined, 'toolu_q')
+      const e = new Error('The operation was aborted')
+      e.name = 'AbortError'
+      throw e
+    })(), { abortOnInterrupt: false })
+    const seen = []
+    session._permissions.on('permission_resolved', (d) => seen.push(d))
+    session.on('error', () => {})
+    let marked
+    const orig = session._clearMessageState.bind(session)
+    session._clearMessageState = (...a) => { orig(...a); marked = session._stopCancelledToolUseIds.has('toolu_q') }
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(seen[0].reason, 'stopped')
+    assert.equal(marked, true)
+  })
+
+  it('CONTROL: the same teardown with no user Stop (a turn failure) still reads cleared', async () => {
+    const { session, resolved } = liveOrder({ userStop: false })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.deepEqual(resolved.map((r) => r.reason), ['cleared'])
+  })
+
+  it('the flag is gone afterwards, so the next turn\'s teardown reads cleared again', async () => {
+    const { session, resolved } = liveOrder({ userStop: true })
+    await session.sendMessage('go')
+    assert.equal(session._permissions.isUserStopInFlight(), false)
+    resolved.length = 0
+    session._isBusy = true
+    session._handlePermission('Bash', { command: 'two' }, new AbortController().signal, undefined, 'toolu_q')
+    session._clearMessageState()
+    session.destroy()
+    assert.deepEqual(resolved.map((r) => r.reason), ['cleared'])
+  })
+})
+
+describe('SdkSession -- only the Stop\'s own resolution marks a tool row stopped (#8430)', () => {
+  // Prompt p is open at the user's Stop; prompt q is raised in the window, then
+  // `decideQ` settles it by some means other than the Stop.
+  async function windowRun(decideQ, { timeoutMs } = {}) {
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'first' }, ctx.signal, undefined, 'toolu_p')
+      const stop = (ctx.session.markUserStopInFlight(), ctx.session.interrupt())
+      if (timeoutMs) ctx.session._permissions._timeoutMs = timeoutMs
+      const late = ctx.session._handlePermission('Bash', { command: 'second' }, ctx.signal, undefined, 'toolu_q')
+      await decideQ(ctx)
+      await late
+      ctx.abort()
+      await stop
+      yield { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_q', is_error: true, content: SDK_DENY_TEXT }] } }
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    await session.sendMessage('go')
+    session.destroy()
+    return results.find((r) => r.toolUseId === 'toolu_q')
+  }
+
+  it('an explicit Deny raised in the window keeps its denied row', async () => {
+    const row = await windowRun((ctx) => ctx.session.respondToPermission(ctx.requests[1].requestId, 'deny'))
+    assert.equal('terminatedReason' in row, false)
+    assert.equal(row.result, SDK_DENY_TEXT)
+  })
+
+  it('a timeout raised in the window keeps its row', async () => {
+    const row = await windowRun(async () => { await new Promise((r) => setTimeout(r, 40)) }, { timeoutMs: 10 })
+    assert.equal('terminatedReason' in row, false)
+  })
+
+  it('a prompt the Stop itself resolves in the window is marked stopped', async () => {
+    const row = await windowRun(async (ctx) => { ctx.abort() })
+    assert.equal(row.terminatedReason, 'user_stop_before_run')
+  })
+})
+
+describe('SdkSession -- a Stop with a prompt open after the turn already read as idle (#8430)', () => {
+  it('is recorded: a stalled turn clears busy while its query can still raise a prompt', async () => {
+    const session = new SdkSession({ cwd: '/tmp' })
+    const reasons = []
+    session._permissions.on('permission_resolved', (d) => reasons.push(d.reason))
+    const ac = new AbortController()
+    session._isBusy = false // _handleStreamStall has cleared it
+    try {
+      const decided = session._handlePermission('Bash', { command: 'ls' }, ac.signal, undefined, 'toolu_p')
+      session.markUserStopInFlight()
+      assert.equal(session._permissions.isUserStopInFlight(), true)
+      ac.abort()
+      await decided
+      assert.deepEqual(reasons, ['stopped'])
+    } finally {
+      session.destroy() // a failing assertion must not leave the prompt's timer holding the runner open
+    }
+  })
+
+  it('CONTROL: an idle session with nothing open records nothing', () => {
+    const session = new SdkSession({ cwd: '/tmp' })
+    session.markUserStopInFlight()
+    assert.equal(session._permissions.isUserStopInFlight(), false)
+    session.destroy()
+  })
+})
+
+describe('SdkSession -- who may mark a tool row stopped, and when (#8430)', () => {
+  const lateResult = (id, text = SDK_DENY_TEXT) => ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content: text }] } })
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  it('a turn that already failed is not relabelled by a Stop that lands while its failure is classified', async () => {
+    const { session } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      throw new Error('query exploded')
+    })())
+    session._classifyContainerFailure = async () => { await delay(40); return null }
+    session.on('error', () => {})
+    const reasons = []
+    session._permissions.on('permission_resolved', (d) => reasons.push(d.reason))
+    const turn = session.sendMessage('go')
+    await delay(15) // the failure is established and awaiting classification
+    session.markUserStopInFlight()
+    await turn
+    session.destroy()
+    assert.deepEqual(reasons, ['cleared'])
+  })
+
+  it('a late AskUserQuestion that the Stop resolves marks its tool row stopped', async () => {
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'first' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
+      const stop = ctx.session.interrupt()
+      ctx.session._handlePermission('AskUserQuestion', { questions: [{ question: 'which?', options: [{ label: 'a' }] }] }, ctx.signal, undefined, 'toolu_q')
+      ctx.abort()
+      await stop
+      yield lateResult('toolu_q')
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(results.find((r) => r.toolUseId === 'toolu_q').terminatedReason, 'user_stop_before_run')
+  })
+
+  it('an interrupt that is not the user\'s Stop (an orchestration deadline) leaves the open prompt\'s row alone', async () => {
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      const stop = ctx.session.interrupt() // no markUserStopInFlight: not a user Stop
+      ctx.abort()
+      await stop
+      yield denialResult()
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal('terminatedReason' in results[0], false)
+    assert.equal(results[0].result, SDK_DENY_TEXT)
+  })
+
+  it('a non-user interrupt, with the provider\'s denial read before any resolution, leaves the row alone', async () => {
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      await ctx.session.interrupt() // not a user Stop; nothing has resolved the prompt yet
+      yield denialResult() // the SDK's own denial arrives first
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal('terminatedReason' in results[0], false)
+  })
+
+  it('a late AskUserQuestion drained by the turn teardown (live order) marks its row stopped', async () => {
+    const { session } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session.markUserStopInFlight()
+      await ctx.session.interrupt()
+      ctx.session._handlePermission('AskUserQuestion', { questions: [{ question: 'which?', options: [{ label: 'a' }] }] }, ctx.signal, undefined, 'toolu_q')
+      const e = new Error('The operation was aborted')
+      e.name = 'AbortError'
+      throw e
+    })(), { abortOnInterrupt: false })
+    session.on('error', () => {})
+    let marked
+    const orig = session._clearMessageState.bind(session)
+    session._clearMessageState = (...a) => { orig(...a); marked = session._stopCancelledToolUseIds.has('toolu_q') }
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(marked, true)
+  })
+
+  it('a user Stop, then a Deny that wins before the abort, keeps the denied row', async () => {
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      const decision = ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
+      const stop = ctx.session.interrupt() // the prompt is snapshotted as pending
+      ctx.session.respondToPermission(ctx.requests[0].requestId, 'deny') // ...then the user's Deny lands first
+      assert.equal((await decision).behavior, 'deny')
+      await stop
+      ctx.abort()
+      yield denialResult()
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal('terminatedReason' in results[0], false)
+    assert.equal(results[0].result, SDK_DENY_TEXT)
+  })
+
+  it('a user Stop, then a timeout that wins before the abort, keeps its row', async () => {
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._permissions._timeoutMs = 10
+      const decision = ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.markUserStopInFlight()
+      const stop = ctx.session.interrupt()
+      assert.equal((await decision).behavior, 'deny') // timed out
+      await stop
+      yield denialResult('Permission timed out')
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal('terminatedReason' in results[0], false)
+  })
+
+  it('a Stop that interrupt() ignores (no query yet, no prompt open) does not stay armed for the turn', async () => {
+    const session = new SdkSession({ cwd: '/tmp' })
+    session._isBusy = true
+    session.markUserStopInFlight()
+    assert.equal(session._permissions.isUserStopInFlight(), true)
+    await session.interrupt() // no _query
+    assert.equal(session._permissions.isUserStopInFlight(), false)
+    session.destroy()
+  })
+
+  it('CONTROL: with a prompt open the ignored interrupt keeps the Stop recorded', async () => {
+    const session = new SdkSession({ cwd: '/tmp' })
+    session._isBusy = true
+    try {
+      session._handlePermission('Bash', { command: 'ls' }, new AbortController().signal, undefined, 'toolu_p')
+      session.markUserStopInFlight()
+      await session.interrupt()
+      assert.equal(session._permissions.isUserStopInFlight(), true)
+    } finally {
+      session.destroy()
+    }
   })
 })

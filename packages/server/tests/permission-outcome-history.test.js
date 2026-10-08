@@ -275,7 +275,7 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     let requestId
     session.once('permission_request', (d) => { requestId = d.requestId })
     const decided = pm.handlePermission('Bash', { command: 'ls' }, ac.signal, 'approve')
-    pm.markPendingStopped()
+    pm.markUserStopInFlight()
     ac.abort()
     await decided
     assert.equal(outcomes(mgr, 's1')[0].requestId, requestId)

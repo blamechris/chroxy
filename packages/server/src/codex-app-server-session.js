@@ -883,6 +883,7 @@ export class CodexAppServerSession extends BaseSession {
       return
     }
     this._isBusy = true
+    this._permissions.clearUserStopInFlight() // #8430: a new turn starts with no user Stop in flight
     this._messageCounter += 1
     const messageId = `msg-${this._messageIdPrefix}-${this._messageCounter}`
     this._currentMessageId = messageId

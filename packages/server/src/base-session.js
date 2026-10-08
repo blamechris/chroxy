@@ -1521,16 +1521,23 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * #8374: the USER pressed Stop. Mark the permission prompts open at this moment
-   * as cancelled by that Stop, so the abort that follows resolves them as
-   * `stopped` rather than `aborted`. Called by the `interrupt` message handler
-   * only -- never from a provider's `interrupt()`, which the scheduler and
-   * teardown also call -- because a turn failed by a stalled stream or a dead
-   * provider process aborts the same controller and is not a Stop.
-   * A no-op for a session with no in-process permission manager.
+   * #8374/#8430: the USER pressed Stop. Record it on the session's permission
+   * manager for the rest of the turn, so the abort that follows resolves the
+   * prompts open now -- and any raised before the abort lands -- as `stopped`
+   * rather than `aborted`. Called by the `interrupt` message handler only -- never
+   * from a provider's `interrupt()`, which the scheduler and teardown also call --
+   * because a turn failed by a stalled stream or a dead provider process aborts
+   * the same controller and is not a Stop. A Stop pressed with no turn running and no
+   * prompt open records nothing (there is nothing for it to cancel), and a session with no
+   * in-process permission manager has nothing to record on.
+   * Cleared by `_clearMessageState`, which every turn end reaches.
    */
-  markPendingPermissionsStopped() {
-    this._permissions?.markPendingStopped?.()
+  markUserStopInFlight() {
+    // A turn is running, or a prompt is still open (a stalled turn's query can
+    // outlive its busy flag and raise one): either way there is something for
+    // this Stop to cancel. Otherwise there is nothing to label.
+    if (!this._isBusy && !this._permissions?.hasPendingPrompt?.()) return
+    this._permissions?.markUserStopInFlight?.()
   }
 
   /**
@@ -2471,6 +2478,9 @@ export class BaseSession extends EventEmitter {
     // Idempotent (no-op on an empty set), so providers that already expired at
     // an earlier point in their teardown are unaffected.
     this._expirePendingPermissions('Permission request expired (the turn it belonged to ended before it was answered)')
+    // #8430: a user Stop belongs to the turn it was pressed on. Every turn end,
+    // abort and failure included, reaches here, so the next turn starts clear.
+    this._permissions?.clearUserStopInFlight?.()
     this._isBusy = false
     this._currentMessageId = null
 

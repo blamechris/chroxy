@@ -417,6 +417,19 @@ function normalizeStoredRule(rule) {
 }
 
 /**
+ * #8430: a prompt or question the user's Stop resolved carries the provider's id
+ * for the tool call, so the session can mark that tool row stopped. Only for a
+ * `stopped` resolution: a Deny, a timeout or a rule decision made in the same
+ * window must keep its own row. The event normalizer picks its wire fields, so this never
+ * reaches a client.
+ */
+function stoppedToolUseField(reason, toolUseId) {
+  return reason === 'stopped' && typeof toolUseId === 'string' && toolUseId.length > 0
+    ? { sourceToolUseId: toolUseId }
+    : {}
+}
+
+/**
  * Manages in-process permission requests for SDK-style sessions.
  *
  * Handles the lifecycle of permission prompts:
@@ -466,6 +479,11 @@ export class PermissionManager extends EventEmitter {
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
     this._permissionCounter = 0
+    // #8430: the user pressed Stop on the turn that is running. Turn-scoped, set
+    // by `markUserStopInFlight()` and cleared by `clearUserStopInFlight()` at turn
+    // end. The abort listener reads it, so a prompt raised AFTER the Stop but
+    // before the provider's abort lands is a Stop's too.
+    this._userStopInFlight = false
     // Per-instance (per-session) nonce so requestIds are globally unique
     // across sessions. Without it the id was `perm-${counter}-${ms}` with a
     // counter that restarts at 0 every session — two sessions could mint the
@@ -852,19 +870,26 @@ export class PermissionManager extends EventEmitter {
 
       // Auto-deny on abort signal. WHY the signal aborted is not on the signal --
       // a user Stop and a failed turn (a dead app-server, a stalled stream) abort
-      // the same controller -- so the user's Stop entry point marks the prompts
-      // pending at that moment (`markPendingStopped`, #8374) and this reads the
-      // mark: `stopped` for a Stop, `aborted` for everything else.
+      // the same controller -- so the user's Stop entry point sets the turn's
+      // "user Stop in flight" flag (`markUserStopInFlight`, #8374/#8430) and this
+      // reads it when the abort lands: `stopped` for a Stop, `aborted` for
+      // everything else. The flag, not a mark on each prompt, so a prompt raised
+      // in the window between the Stop and the abort is covered too.
       if (signal) {
         signal.addEventListener('abort', () => {
           const pending = this._pendingPermissions.get(requestId)
           if (pending) {
-            const reason = pending.stopRequested ? 'stopped' : 'aborted'
+            const reason = this._userStopInFlight ? 'stopped' : 'aborted'
             this._pendingPermissions.delete(requestId)
             this._lastPermissionData.delete(requestId)
             this._clearPermissionTimer(requestId)
             resolve({ behavior: 'deny', message: 'Request cancelled' })
-            this.emit('permission_resolved', { requestId, decision: 'deny', reason })
+            this.emit('permission_resolved', {
+              requestId,
+              decision: 'deny',
+              reason,
+              ...stoppedToolUseField(reason, pending.toolUseId),
+            })
           }
         }, { once: true })
       }
@@ -885,20 +910,36 @@ export class PermissionManager extends EventEmitter {
   }
 
   /**
-   * #8374: the user pressed Stop. Mark every permission prompt waiting RIGHT NOW
-   * as cancelled by that Stop, so the abort that follows resolves it with
-   * `reason: 'stopped'` instead of `'aborted'`.
+   * #8374/#8430: the user pressed Stop. Record that for the rest of the turn, so
+   * the abort that follows resolves every open prompt -- including one raised
+   * between this call and the abort -- with `reason: 'stopped'` instead of
+   * `'aborted'`.
    *
    * Called only from the user's Stop entry point (the `interrupt` message
    * handler), never from `interrupt()` itself: the scheduler and teardown call
    * that too, and a turn failed by a stalled stream or a dead app-server aborts
    * the same controller. Those are not Stops.
    *
-   * The mark lives on the pending entry, so it dies with the prompt: a prompt
-   * raised after the Stop, or one answered before the abort lands, is unaffected.
+   * Ends with the turn (`clearUserStopInFlight`, called from the session's turn
+   * teardown), so a later turn's failure is not mislabelled.
    */
-  markPendingStopped() {
-    for (const entry of this._pendingPermissions.values()) entry.stopRequested = true
+  markUserStopInFlight() {
+    this._userStopInFlight = true
+  }
+
+  /** #8430: the turn is over; a Stop pressed during it must not label the next. */
+  clearUserStopInFlight() {
+    this._userStopInFlight = false
+  }
+
+  /** #8430: has the user pressed Stop on the turn that is running? */
+  isUserStopInFlight() {
+    return this._userStopInFlight
+  }
+
+  /** #8430: is any permission prompt or question waiting for a decision right now? */
+  hasPendingPrompt() {
+    return this._pendingPermissions.size > 0 || this._pendingUserAnswer != null
   }
 
   /**
@@ -977,11 +1018,13 @@ export class PermissionManager extends EventEmitter {
           // listener stays on the (shared) turn signal; without this it would
           // cancel the question that replaced it.
           if (this._pendingUserAnswer === entry) {
+            // #8430: same cause attribution as a permission prompt's abort.
+            const reason = this._userStopInFlight ? 'stopped' : 'aborted'
             this._clearQuestionTimer()
             this._pendingUserAnswer = null
             this._waitingForAnswer = false
             resolve({ behavior: 'deny', message: 'Cancelled' })
-            this.emit('permission_resolved', { toolUseId, reason: 'aborted' })
+            this.emit('permission_resolved', { toolUseId, reason, ...stoppedToolUseField(reason, sourceToolUseId) })
           }
         }, { once: true })
       }
@@ -1356,11 +1399,20 @@ export class PermissionManager extends EventEmitter {
    * Auto-deny all pending permissions and questions. Called on message
    * completion or session destruction.
    */
-  clearAll() {
+  clearAll({ userStop = this._userStopInFlight } = {}) {
+    // #8430: why the prompts are being drained. On a live claude-sdk Stop this is
+    // the path that resolves them (the generator throws AbortError and the turn
+    // ends through the session's teardown; the abort listener never ran first), so
+    // a user Stop in flight must be read HERE. `userStop` lets a caller that has
+    // already cleared the flag in its own teardown pass the value it captured.
+    const requestReason = userStop === true ? 'stopped' : 'cleared'
     // Collect requestIds first so we can emit permission_resolved AFTER
     // the maps are cleared — the SdkSession timeout-pause listener decrements
     // its counter on each event and should see a consistent final state.
     const pendingIds = Array.from(this._pendingPermissions.keys())
+    // #8430: the provider's tool-use id of each, for a `stopped` resolution.
+    const pendingToolUseIds = new Map()
+    for (const [requestId, pending] of this._pendingPermissions) pendingToolUseIds.set(requestId, pending.toolUseId)
     // #3975: capture the pending-answer entry (not just a boolean) so we
     // can include its toolUseId on the cleared emit. Without toolUseId the
     // sdk-session re-emit gate drops the event and questionSessionMap
@@ -1393,14 +1445,23 @@ export class PermissionManager extends EventEmitter {
 
     // Emit resolved events so listeners reset any paused state (#2831).
     for (const requestId of pendingIds) {
-      this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'cleared' })
+      this.emit('permission_resolved', {
+        requestId,
+        decision: 'deny',
+        reason: requestReason,
+        ...stoppedToolUseField(requestReason, pendingToolUseIds.get(requestId)),
+      })
     }
     if (clearedUserAnswer) {
       // #3975: toolUseId is required for the EventNormalizer to prune
       // questionSessionMap on the cleared path. The SdkSession
       // timeout-pause listener (#2831) ignores fields it doesn't know
       // about, so the extra toolUseId is harmless there.
-      this.emit('permission_resolved', { toolUseId: clearedUserAnswer.toolUseId, reason: 'cleared' })
+      this.emit('permission_resolved', {
+        toolUseId: clearedUserAnswer.toolUseId,
+        reason: requestReason,
+        ...stoppedToolUseField(requestReason, clearedUserAnswer.sourceToolUseId),
+      })
     }
   }
 
