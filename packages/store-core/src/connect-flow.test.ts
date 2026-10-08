@@ -167,9 +167,9 @@ describe('runConnectAttempt — auth_failed path (#8268)', () => {
     const onAuthFailed = vi.fn()
     await runConnectAttempt({
       ...o, onAuthFailed, maxRetries: Infinity,
-      probe: async () => ({ kind: 'auth_failed', reason: 'Server rejected the connection — check your token' }),
+      probe: async () => ({ kind: 'auth_failed', reason: 'The server at this address refused the connection (HTTP 401) — check the address and token' }),
     })
-    expect(onAuthFailed).toHaveBeenCalledWith({ reason: 'Server rejected the connection — check your token' })
+    expect(onAuthFailed).toHaveBeenCalledWith({ reason: 'The server at this address refused the connection (HTTP 401) — check the address and token' })
     expect(o.scheduleRetry).not.toHaveBeenCalled()
     expect(o.openSocket).not.toHaveBeenCalled()
     expect(o.onProbeFailed).not.toHaveBeenCalled()

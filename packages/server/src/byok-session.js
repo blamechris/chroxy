@@ -383,6 +383,9 @@ export class ClaudeByokSession extends BaseSession {
     // index→toolUseId map: tool input is now read off `final.content`, so
     // nothing resolves a streaming index back to a tool_use id any more.)
     this._streamingIndexToThinkingId = new Map()
+    // #6630: the turn the thinking-stream counter below belongs to, and the counter.
+    this._thinkingSeqTurn = null
+    this._thinkingSeq = 0
 
     // #6391 (chat-redesign footer-stat): thinking messageId → performance.now()
     // when the reasoning block opened, so its content_block_stop can stamp the
@@ -1229,7 +1232,18 @@ export class ClaudeByokSession extends BaseSession {
               const idx = typeof t.index === 'number' ? t.index : 0
               let thinkingId = this._streamingIndexToThinkingId.get(idx)
               if (!thinkingId) {
-                thinkingId = `${messageId}-thinking-${idx}`
+                // #6630: unique per thinking STREAM in the turn, not per block
+                // index. The index restarts at 0 every tool round while the turn's
+                // `messageId` does not, so `<turn>-thinking-<idx>` named a round-2
+                // thought the same as the round-1 one: live, the client's accumulator
+                // concatenated the two; the history (keyed by id) kept one. A counter
+                // that runs for the whole turn keeps every stream's id its own, and
+                // still ends in `-thinking-<n>` for the legacy classifier.
+                if (this._thinkingSeqTurn !== messageId) {
+                  this._thinkingSeqTurn = messageId
+                  this._thinkingSeq = 0
+                }
+                thinkingId = `${messageId}-thinking-${this._thinkingSeq++}`
                 this._streamingIndexToThinkingId.set(idx, thinkingId)
                 // #6391 footer-stat: mark the block's start for the
                 // content_block_stop elapsed-time computation. #6943:

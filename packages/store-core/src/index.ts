@@ -654,6 +654,7 @@ export type {
   UserQuestionPayload,
   UserInputPayload,
   MessagePayload,
+  MessageReconcile,
   ToolStartPayload,
   ToolResultPayload,
   ToolInputDeltaPayload,
@@ -754,6 +755,11 @@ export {
   // record for it (never a pending card).
   handlePermissionOutcome,
   buildPermissionOutcomeMessage,
+  // #8374 — a `permission_resolved` applied to its prompt message, the ONE place
+  // both clients decide that a Stop-cancelled prompt is `stopped`, not denied.
+  applyPermissionResolved,
+  PERMISSION_STOPPED_REASON,
+  PERMISSION_ABORTED_REASON,
   // #7380 — the one wording for the #2833 already-answered race, shared because
   // the two clients surface it through different channels (toast vs transcript).
   PERMISSION_ALREADY_ANSWERED_NOTICE,
@@ -825,6 +831,10 @@ export {
   handleToolInputDelta,
   handleStreamStart,
   sharedStreamDelta,
+  // #4297/#6630 — the empty-response-slot reorder, shared so the app moves it too.
+  moveEmptyResponseSlotToEnd,
+  // #6630 — fill a held message in from a fuller replayed copy.
+  applyMessageReconcile,
   handleStreamEnd,
   // #6756 — extended-thinking (reasoning) stream handlers.
   handleThinkingStreamStart,
@@ -1020,6 +1030,24 @@ export type {
 // (it was already one short — `contextOccupancy`).
 export { DASHBOARD_FLAT_MIRROR_KEYS } from './contract-fixtures/client-adapters'
 
+// #6630: live-vs-replay parity. The same session events, as the frames a client
+// receives live and as the frames a full-rebuild replay delivers, driven through
+// each client's REAL message handler (dashboard vitest, app jest) and compared
+// through one projection. The wire half is proven against the real server code by
+// packages/server/tests/replay-parity-wire.test.js.
+export {
+  REPLAY_PARITY_FIXTURES,
+  REPLAY_PARITY_DIVERGENCES,
+  REPLAY_PARITY_SESSION_ID,
+  replayParityModel,
+} from './contract-fixtures/replay-parity-fixtures'
+export type {
+  ReplayParityFixture,
+  ReplayParityFrame,
+  ReplayParityRow,
+  ReplayParityDivergence,
+} from './contract-fixtures/replay-parity-fixtures'
+
 // epic #5556, sub-item 6: the encrypted-handshake fake-WS driver. The real
 // client handshake state machine + a fake server holding real test keypairs;
 // both clients run it against their OWN store via a thin HandshakeStoreAdapter
@@ -1079,10 +1107,15 @@ export {
   // answered; #7410 narrowed that sweep to the replayed session and to prompts
   // with no `requestId`, but it still stamps replayed `user_question` prompts).
   isPermissionDecision,
+  // #6630 — the outcome a user's decision token stands for, so a prompt answered LIVE
+  // renders as the record a replayed permission_outcome does.
+  permissionOutcomeFromDecision,
   PERMISSION_DECISION_TOKENS,
   // #7388 — the ONE "was this permission already answered by a user?" gate,
   // applied by both clients' permission_expired handlers (the #2833 race).
   isPermissionRequestAnswered,
+  // #8374 — the gate for a late permission_expired on a record that already ended.
+  hasPermissionOutcomeRecord,
   firstLivePermissionPrompt,
   livePermissionPrompts,
   countLivePermissionPrompts,

@@ -272,6 +272,10 @@ const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
  * in-process providers resolve a timed-out, stopped or cleared prompt as a deny
  * and say so only in `reason`. Those are `expired` (the tool call was dropped),
  * not `denied` (nobody refused it) -- the distinction #8256 asks the clients for.
+ * A prompt the user cancelled with Stop (`reason: 'stopped'`) is `stopped`, not
+ * `expired`: nothing timed out, the person ended the turn (#8374). `aborted` is
+ * every OTHER abort of the turn's controller (a stalled stream, a dead provider
+ * process, a teardown) and stays `expired`.
  *
  * One system-made deny is recorded as `denied`, not `expired`: switching a session
  * to auto mode while an MCP trust prompt is open resolves that prompt with
@@ -281,11 +285,12 @@ const FAILED_RESTORE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
  *
  * @param {'permission_resolved'|'permission_expired'} event
  * @param {object} data
- * @returns {'allowed'|'denied'|'expired'|null}
+ * @returns {'allowed'|'denied'|'expired'|'stopped'|null}
  */
 function permissionOutcomeForEvent(event, data) {
   if (!data || typeof data.requestId !== 'string' || !data.requestId) return null
   if (event === 'permission_expired') return 'expired'
+  if (data.reason === 'stopped') return 'stopped'
   if (data.reason === 'timeout' || data.reason === 'aborted' || data.reason === 'cleared') return 'expired'
   return data.decision === 'deny' ? 'denied' : 'allowed'
 }
@@ -4467,7 +4472,15 @@ export class SessionManager extends EventEmitter {
     }
 
     for (const event of PROXIED_EVENTS) {
-      session.on(event, (data) => {
+      session.on(event, (emitted) => {
+        // #6630: an `error` carries no time of its own, and its wire frame and its
+        // history entry each used to stamp one. A client that held the live bubble
+        // and then took a cursor replay compares them to dedup (an error has no
+        // message id), and two stamps a millisecond apart read as two errors.
+        // Stamp ONCE, here, and let both consumers read it.
+        const data = event === 'error' && emitted && typeof emitted === 'object' && !Number.isFinite(emitted.timestamp)
+          ? { ...emitted, timestamp: Date.now() }
+          : emitted
         if (ACTIVITY_EVENTS.has(event)) this.touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
@@ -4630,6 +4643,14 @@ export class SessionManager extends EventEmitter {
         this.emit('session_event', { sessionId, event, data })
       })
     }
+
+    // #8371: a tracked tool's sanitised input is known before the tool runs.
+    // Backfill the `tool_start` history entry now so a replay during the
+    // running tool carries the INPUT. History only: nothing is sent to clients
+    // (the live view already got it as `tool_input_delta`).
+    session.on('tool_input_recorded', (data) => {
+      this._history.backfillToolInput(sessionId, data?.toolUseId, data?.input)
+    })
 
     // models_updated is global (not per-session) — forward as transient event
     session.on('models_updated', (data) => {

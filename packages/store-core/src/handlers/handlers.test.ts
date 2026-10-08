@@ -3212,7 +3212,15 @@ describe('handlePermissionResolved', () => {
   it('extracts requestId and decision', () => {
     expect(
       handlePermissionResolved({ requestId: 'req-1', decision: 'allow' }),
-    ).toEqual({ requestId: 'req-1', decision: 'allow' })
+    ).toEqual({ requestId: 'req-1', decision: 'allow', reason: null })
+  })
+
+  it('#8374: extracts the reason when the frame carries one, null otherwise', () => {
+    expect(
+      handlePermissionResolved({ requestId: 'req-1', decision: 'deny', reason: 'aborted' }).reason,
+    ).toBe('aborted')
+    expect(handlePermissionResolved({ requestId: 'req-1', decision: 'deny' }).reason).toBeNull()
+    expect(handlePermissionResolved({ requestId: 'req-1', decision: 'deny', reason: 3 }).reason).toBeNull()
   })
 
   it('returns null requestId when missing or non-string', () => {
@@ -4984,6 +4992,7 @@ describe('handleEnvironmentError', () => {
       error: 'docker daemon down',
       code: null,
       sessions: null,
+      environmentId: null,
     })
   })
 
@@ -4994,17 +5003,18 @@ describe('handleEnvironmentError', () => {
       error: '',
       code: null,
       sessions: null,
+      environmentId: null,
     })
   })
 
   it('returns null when error is missing', () => {
-    expect(handleEnvironmentError({})).toEqual({ error: null, code: null, sessions: null })
+    expect(handleEnvironmentError({})).toEqual({ error: null, code: null, sessions: null, environmentId: null })
   })
 
   it('returns null when error is non-string', () => {
-    expect(handleEnvironmentError({ error: 42 })).toEqual({ error: null, code: null, sessions: null })
-    expect(handleEnvironmentError({ error: { msg: 'x' } })).toEqual({ error: null, code: null, sessions: null })
-    expect(handleEnvironmentError({ error: null })).toEqual({ error: null, code: null, sessions: null })
+    expect(handleEnvironmentError({ error: 42 })).toEqual({ error: null, code: null, sessions: null, environmentId: null })
+    expect(handleEnvironmentError({ error: { msg: 'x' } })).toEqual({ error: null, code: null, sessions: null, environmentId: null })
+    expect(handleEnvironmentError({ error: null })).toEqual({ error: null, code: null, sessions: null, environmentId: null })
   })
 
   it('parses code and sessions for the #7562 live-session destroy refusal', () => {
@@ -5022,25 +5032,26 @@ describe('handleEnvironmentError', () => {
       error: 'Environment "my-project" has 2 live session(s) running in it (sess-a, sess-b). …',
       code: 'ENVIRONMENT_HAS_LIVE_SESSIONS',
       sessions: ['sess-a', 'sess-b'],
+      environmentId: 'env-1',
     })
   })
 
   it('parses a code with no sessions (e.g. DOCKER_IMAGE_NOT_ALLOWED)', () => {
     expect(
       handleEnvironmentError({ error: 'image not allowed', code: 'DOCKER_IMAGE_NOT_ALLOWED' }),
-    ).toEqual({ error: 'image not allowed', code: 'DOCKER_IMAGE_NOT_ALLOWED', sessions: null })
+    ).toEqual({ error: 'image not allowed', code: 'DOCKER_IMAGE_NOT_ALLOWED', sessions: null, environmentId: null })
   })
 
   it('drops non-string session ids but keeps the array', () => {
     expect(
       handleEnvironmentError({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: ['ok', 42, null, 'ok2'] }),
-    ).toEqual({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: ['ok', 'ok2'] })
+    ).toEqual({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: ['ok', 'ok2'], environmentId: null })
   })
 
   it('returns sessions null when the field is a non-array', () => {
     expect(
       handleEnvironmentError({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: 'sess-a' }),
-    ).toEqual({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: null })
+    ).toEqual({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: null, environmentId: null })
   })
 })
 
@@ -7916,6 +7927,14 @@ describe('handleToolStart', () => {
       const after = toolResult(replayedResult, [start.chatMessage!])
       expect(after[0].toolInput).toEqual({ file_path: 'README.md' })
       expect(after[0].toolResult).toBe('ok')
+    })
+
+    it('claude-sdk replay DURING a running tool (#8371): the replayed tool_start carries the input and no tool_result follows -> toolInput is set', () => {
+      const replayedStart = { type: 'tool_start', messageId: 'toolu_r1', toolUseId: 'toolu_r1', tool: 'Bash', input: { command: 'sleep 20' }, timestamp: 1700000000000 }
+      const start = handleToolStart(replayedStart, 'sess-1', true, [])
+      expect(start.shouldDispatch).toBe(true)
+      expect(start.chatMessage!.toolInput).toEqual({ command: 'sleep 20' })
+      expect(start.chatMessage!.toolResult).toBeUndefined()
     })
 
     it('a later tool_result.input still wins over the tool_start input', () => {

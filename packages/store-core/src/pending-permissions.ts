@@ -59,6 +59,22 @@ export function isPermissionDecision(answered: string | undefined | null): boole
 }
 
 /**
+ * The recorded outcome a user's decision token stands for: any of the three
+ * "allow" tokens is `allowed`, `deny` is `denied`, and anything else (no answer,
+ * the `'(resolved)'` placeholder) is `null` -- not a decision, so no outcome.
+ *
+ * It is what lets a prompt a client answered LIVE read as the same transcript
+ * line a replayed `permission_outcome` produces (#6630): the replay says
+ * `allowed` / `denied`, the live card only ever held the token the user chose.
+ */
+export function permissionOutcomeFromDecision(
+  answered: string | undefined | null,
+): 'allowed' | 'denied' | null {
+  if (!isPermissionDecision(answered)) return null
+  return answered === 'deny' ? 'denied' : 'allowed'
+}
+
+/**
  * True iff the permission request `requestId` was ALREADY ANSWERED by a user —
  * the gate both clients apply when a `permission_expired` arrives for it (the
  * #2833 race, which #7375 made routine: `permission_expired` now fires whenever
@@ -112,6 +128,39 @@ export function isPermissionRequestAnswered(
   return false
 }
 
+/**
+ * True iff the permission request `requestId` already has a TERMINAL OUTCOME
+ * RECORD: a prompt message stamped with `permissionOutcome` (#8348/#8374) --
+ * `allowed`, `denied`, `expired` or `stopped`, whether the live frames or a
+ * replayed `permission_outcome` put it there.
+ *
+ * The gate for a late `permission_expired`. `isPermissionRequestAnswered` cannot
+ * serve for the outcomes that carry no decision token (`stopped`, `expired`):
+ * "answered" means a USER decision, and Stop is not one. Mobile sends Allow while
+ * desktop presses Stop; Stop wins, and mobile then receives `permission_expired`
+ * for its stale response. Without this the stopped card gained "(Expired -- this
+ * permission was already handled or timed out)", text a replay then removes.
+ *
+ * Same scan shape as {@link isPermissionRequestAnswered} (every session, plus the
+ * dashboard's flat list).
+ */
+export function hasPermissionOutcomeRecord(
+  sessionStates: Record<string, { messages: ChatMessage[] } | undefined> | undefined | null,
+  requestId: string | null | undefined,
+  flatMessages?: ChatMessage[] | null,
+): boolean {
+  if (!requestId) return false
+  const recordedIn = (messages: ChatMessage[] | undefined | null): boolean =>
+    !!messages?.some(
+      (m) => m.requestId === requestId && m.type === 'prompt' && !!m.permissionOutcome,
+    )
+  if (recordedIn(flatMessages)) return true
+  for (const id in sessionStates ?? {}) {
+    if (recordedIn(sessionStates![id]?.messages)) return true
+  }
+  return false
+}
+
 /** True iff `m` is a live, unanswered permission prompt (not an AskUserQuestion). */
 export function isLivePermissionPrompt(m: ChatMessage, now: number): boolean {
   return (
@@ -158,7 +207,11 @@ export function isExpiredUnansweredPermissionPrompt(m: ChatMessage, now: number)
     !!m.requestId &&
     !!m.expiresAt &&
     m.expiresAt <= now &&
-    !m.answered
+    !m.answered &&
+    // #8374: a prompt the user stopped was not dropped by the clock -- it has its
+    // own record, and counting it as "expired" would tell the user a permission
+    // timed out when they ended the turn themselves.
+    m.permissionOutcome !== 'stopped'
   )
 }
 

@@ -75,7 +75,7 @@ vi.mock('./crypto', () => ({
 vi.mock('./persistence', () => ({ clearPersistedSession: vi.fn() }))
 
 import { handleMessage, setStore, clearDeltaBuffers, clearPermissionSplits, stopHeartbeat, resetReplayFlags } from './message-handler'
-import { createEmptyConnectionScope, createEmptyInFlightMarkers, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
+import { createEmptyConnectionScope, createEmptyDaemonSnapshots, createEmptyFlatSessionMirror, createEmptyInFlightMarkers, createEmptySessionState, pruneSessionKeyedMap, pruneSessionScopedKeySet } from './utils'
 
 /**
  * The #7559 roster's field names, derived from the ONE factory the fix spreads
@@ -92,6 +92,15 @@ const CONNECTION_SCOPED_RESET_FIELDS: readonly string[] = Object.keys(createEmpt
  * nothing".
  */
 const IN_FLIGHT_MARKER_FIELDS: readonly string[] = Object.keys(createEmptyInFlightMarkers())
+
+/**
+ * #7579 — the daemon-SNAPSHOT roster and the flat session mirror, derived from their
+ * factories for the same reason as the two above: both are spread by the full-reset
+ * sites, so `assigns` must resolve them or a snapshot the stores really do clear
+ * reads as "cleared by nothing".
+ */
+const DAEMON_SNAPSHOT_FIELDS: readonly string[] = Object.keys(createEmptyDaemonSnapshots())
+const FLAT_SESSION_MIRROR_FIELDS: readonly string[] = Object.keys(createEmptyFlatSessionMirror())
 import type { ConnectionState } from './types'
 import { createEmptyActivityState } from '@chroxy/store-core'
 import type { ActivityState } from '@chroxy/store-core'
@@ -1389,6 +1398,13 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
       '`environment_sessions_changed`, replacing the whole array — a local prune would race the ' +
       'authoritative replacement and be overwritten by it. The tag is load-bearing, not ' +
       'cosmetic: EnvironmentPanel gates Destroy on `sessions.length > 0`. #7551 / #7552',
+    environmentDestroyRefusals:
+      'Record<environmentId, string[]> — keyed by the environment id a live-session destroy ' +
+      'refusal NAMES (`environment_error.environmentId`); the values are the session ids the ' +
+      'daemon reported, a point-in-time answer rather than an attachment list. Environments are ' +
+      'not session-keyed, so a session-death prune has nothing to match; an entry is dropped when ' +
+      'the operator retries or cancels, or when `environment_list` no longer lists the ' +
+      'environment. #7594',
   }
 
 
@@ -1422,7 +1438,10 @@ describe('#7470 roster coverage: every session-keyed collection is classified an
    * Room survey family sit in exactly that blind spot. So "the deferred bucket is
    * EMPTY" is acceptance for every Record/Set/Array-shaped member — NOT for
    * "every connection-scoped collection", the stronger claim the PR title reads
-   * as. #7579 widens the extraction to reach the object-shaped members.
+   * as. #7579 closes that gap on a SECOND axis rather than by widening this one
+   * (which would force snapshot members into session-keyed buckets they do not
+   * belong to): `snapshotShapedMembers`, below the #7488 lifetime cells, extracts
+   * the object / named-message shape and asks the lifetime question of it.
    */
   /** The `ConnectionState` interface body in `src`, or `''` when it is absent. */
   const sliceInterface = (src: string): string =>
@@ -2390,6 +2409,10 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     // #7586 — the in-flight request markers, spread by BOTH full-reset sites and
     // by `disconnect()`. Imported, never transcribed, for the same reason.
     ['createEmptyInFlightMarkers()', IN_FLIGHT_MARKER_FIELDS],
+    // #7579 — the daemon-snapshot roster (forget + switch, not disconnect) and the
+    // flat session mirror (the roster wipes). Imported for the same reason.
+    ['createEmptyDaemonSnapshots()', DAEMON_SNAPSHOT_FIELDS],
+    ['createEmptyFlatSessionMirror()', FLAT_SESSION_MIRROR_FIELDS],
   ]
 
   /**
@@ -2585,6 +2608,7 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     searchResults: "disconnect() — a search over the OLD daemon's transcripts",
     checkpoints: 'disconnect() — checkpoints belong to a session on the old daemon',
     environments: 'disconnect() — container/worktree environments are per daemon',
+    environmentDestroyRefusals: "disconnect() — a refusal answers the OLD daemon's live-session roster",
     // #7557's twelfth field, adjudicated onto THIS answer rather than onto the
     // two full-reset sites, and it is the one member here whose home was
     // decided against a precedent rather than by its key space. #7528 ruled
@@ -2884,8 +2908,9 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
     // SCOPE (#7573 review, C2 → #7579): "empty" is acceptance for every
     // Record/Set/Array-SHAPED member — the shapes `declaredMembers` extracts —
     // not for every connection-scoped collection. Object-typed daemon snapshots
-    // (`credentialsStatus`, `orchestrationRuns`, …) are never extracted, so this
-    // cell is silent about them until #7579 widens the extraction.
+    // (`credentialsStatus`, `orchestrationRuns`, …) are asked the same question by
+    // the snapshot axis below (#7579); its own deferral bucket,
+    // `SNAPSHOT_LIFETIME_DEFERRED`, is not empty and says why (#8411).
     expect(
       Object.keys(CONNECTION_LIFECYCLE_DEFERRED),
       'a field was deferred again. That is allowed — but say which, cite the issue, and expect ' +
@@ -3001,8 +3026,8 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
 
     // The roster is the real one, and it is the size the two issues describe:
     // #7559's sixteen plus #7557's `infoNotifications` plus #7353's
-    // `dismissedExpiredPermissions`.
-    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(18)
+    // `dismissedExpiredPermissions` plus #7594's `environmentDestroyRefusals`.
+    expect(CONNECTION_SCOPED_RESET_FIELDS.length).toBe(19)
     expect([...CONNECTION_SCOPED_RESET_FIELDS].sort()).toEqual([...Object.keys(CLEARED_ON_DISCONNECT)].sort())
 
     // A field OUTSIDE the roster is not lit up by the spread — otherwise the
@@ -3119,6 +3144,375 @@ describe('#7488 connection lifetime: a NOT_SESSION_KEYED member still needs one'
       assigns(disconnectBody, 'environments'),
       'disconnect() no longer clears environments — the entry pinned above is now a false claim',
     ).toBe(true)
+  })
+
+  // ---------------------------------------------------------------------------
+  // #7579 — the SNAPSHOT axis: object-shaped state needs a connection lifetime too.
+  //
+  // `declaredMembers` extracts three SHAPES (Record / Set / array), and every
+  // answer above is asked of those. A daemon snapshot typed as a named message
+  // (`ServerOrchestrationRunsSnapshot | null`) or an inline object
+  // (`credentialsStatus: { credentials: …; fileError?: … } | null`) is none of the
+  // three, so it was never extracted, never classified and never asked the
+  // lifetime question — while its SATELLITES (`orchestrationRunDetails`,
+  // `credentialTestResults`, …) had been given one in #7557/#7573. The panels
+  // then rendered server A's list beside server B's empty details.
+  //
+  // So this axis extracts a FOURTH shape and asks the same question of it:
+  // where does the member die? The answers are different in kind from the
+  // collection axis, because most snapshots are deliberately KEPT across a
+  // same-server Disconnect → Connect (the "generated Nm ago" line is their
+  // staleness cue) and dropped only when the tab points at a DIFFERENT daemon.
+  //
+  //   1. cleared at BOTH full-reset sites — derived, no list to maintain. If the
+  //      member is in `createEmptyDaemonSnapshots()` it must ALSO be absent from
+  //      `disconnect()` and from `auth_ok`, with a written reason per field: the
+  //      keep-across-reconnect decision is asserted, not just documented.
+  //   2. connection machinery, owned by the connect state machine and nulled by
+  //      `disconnect()` (`SNAPSHOT_CONNECTION_MACHINERY`).
+  //   3. replaced by EVERY `auth_ok`, on both branches (`SNAPSHOT_REPLACED_BY_AUTH_OK`).
+  //   4. outlives the connection on purpose (`SNAPSHOT_OUTLIVES_BY_DESIGN`).
+  //   5. tracked and not yet cleared at the full-reset sites
+  //      (`SNAPSHOT_LIFETIME_DEFERRED`), which expires the moment it is fixed.
+  //
+  // KNOWN BOUNDARY, stated rather than implied: the extraction is by TYPE SHAPE, so
+  // a PLAIN scalar companion (`selectedRunId: string | null`,
+  // `scheduledTasksError: string | null`) is invisible to it — a head of `string`
+  // is also the head of forty unrelated fields. Those are covered because they
+  // are named in `createEmptyDaemonSnapshots()` and `SNAPSHOT_PRESERVED_ON_RECONNECT`
+  // below, and the roster cell asserts every key there is a declared member. A
+  // NEW scalar companion is therefore not red until someone adds it to the
+  // roster; the cell `a scalar companion is outside the extraction` pins that so
+  // widening the extraction flips it rather than leaving the limit unwritten.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Every SNAPSHOT-shaped member declared on `ConnectionState`: its type head is
+   * an inline object literal, an `import('…')` type, or a PascalCase identifier
+   * (a named message or state type), and it is neither function-typed nor one of
+   * the Record / Set / array shapes `declaredMembers` already owns.
+   *
+   * A FUNCTION over an arbitrary source — like `declaredMembers` — so the phantom
+   * cells can run the REAL extraction against a synthetic interface and show a new
+   * snapshot field going red without editing `types.ts`.
+   */
+  function snapshotShapedMembers(src: string): string[] {
+    const body = sliceInterface(src)
+    const owned = new Set(declaredMembers(src).all)
+    const names: string[] = []
+    for (const m of body.matchAll(/^ {2}(\w+)\??: ([^\n]*)$/gm)) {
+      const name = m[1]!
+      // A trailing `// comment` is not part of the type (the same strip
+      // `arrayResidual` makes); letting a `=>` in prose reach the function test
+      // below would excuse a real snapshot member.
+      const head = m[2]!.replace(/\/\/.*$/, '').trim()
+      if (owned.has(name)) continue
+      if (head.startsWith('(')) continue                 // `(a: X) => Y`, a function member
+      if (/=>/.test(head.split(';')[0]!)) continue       // …or one whose head is not a paren
+      if (!/^(?:\{|import\(|[A-Z]\w*)/.test(head)) continue
+      names.push(name)
+    }
+    return names
+  }
+
+  /** Same-server Disconnect → Connect keeps these, per field, and the reason is the contract. */
+  const SNAPSHOT_PRESERVED_ON_RECONNECT: Record<string, string> = {
+    credentialsStatus:
+      'PRIMARY of credentialTestResults (#7557 keeps that across a reconnect): the same daemon\'s file still has these rows, and clearing the primary while its verdicts survive would invert the defect',
+    byokCredentialsStatus:
+      'the same daemon\'s BYOK key is still set or missing after a Disconnect → Connect; the masked preview is re-read on tab activation',
+    orchestrationRuns:
+      'PRIMARY of orchestrationRunDetails / …Errors / …Stale, all kept across a reconnect (#7557): the same daemon still has these runs and the run list is re-requested on activation',
+    selectedRunId:
+      'the operator\'s selection into orchestrationRuns, kept with the list it indexes; dropping it alone would deselect a run that is still there',
+    scheduledTasks:
+      'PRIMARY of scheduledTaskActionResults (kept across a reconnect, #7557); the registry and gate state are re-emitted by the server on subscribe',
+    selectedScheduledTaskId:
+      'the operator\'s selection into scheduledTasks, kept with the registry it indexes',
+    scheduledTasksError:
+      'the last load error of THIS daemon\'s scheduler; the retry that follows a reconnect replaces it, and clearing it on a user Disconnect would erase the explanation the panel shows',
+    hostStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    mailboxStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    runnerStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    containersStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    repoRuntimeConfig: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    byokPoolStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    hostPruneStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    integrationStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    skillsInventory: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    simulatorStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    emulatorStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    wslStatus: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    externalSessionsSnapshot: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    repoEventsSnapshot: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    githubWebhookConfig: 'survey reading: kept so "generated Nm ago" signals staleness; re-fetched on tab activation (#6153)',
+    monthlyBudget:
+      'the same daemon\'s spend tally; it is re-pushed on connect and a stale figure carries its own month',
+    notificationPrefs:
+      'the same daemon\'s notification preferences; re-requested on connect, and the toggles are optimistic against this reading',
+    sessionNotFoundError:
+      'the chip describes a session that is still absent from the same daemon; switchSession and the chip\'s own dismiss clear it',
+    symbols:
+      'the last symbol table for the open file on the same daemon; re-requested when the file is opened. workspaceSymbols (a transient search result) is cleared by disconnect(), this is not',
+  }
+
+  /** Cleared by `disconnect()` and owned by the connect state machine, not by a full reset. */
+  const SNAPSHOT_CONNECTION_MACHINERY: Record<string, string> = {
+    connectionPhase: 'the state machine itself: disconnect() sets it, connect()/auth_ok drive it',
+    socket: 'the live WebSocket handle: disconnect() closes and nulls it, and a failed connect has already nulled it',
+    savedConnection: 'the auto-reconnect credential: disconnect() clears it so the ConnectScreen does not reconnect on its own',
+  }
+
+  /** Overwritten by EVERY `auth_ok`, on both the reconnect and the non-reconnect branch. */
+  const SNAPSHOT_REPLACED_BY_AUTH_OK: Record<string, string> = {
+    staleBundle: '#8268 — the verdict is recomputed from the new daemon\'s dashboardBuildId on every handshake',
+    webFeatures: 'the server\'s advertised web features, set from auth_ok unconditionally',
+    tunnelProgress: 'a tunnel-bring-up banner; auth_ok nulls it on connect',
+    serverExposure: '#5356 — recomputed from auth_ok on every handshake',
+    billingCanary: '#5821 — seeded from auth_ok on every handshake',
+  }
+
+  /** Outlives the connection on purpose. Each entry cites what the state is really about. */
+  const SNAPSHOT_OUTLIVES_BY_DESIGN: Record<string, string> = {
+    pendingApprovalPairHost:
+      'names a saved SERVER REGISTRY entry whose pair attempt was approval-gated (#5513) — the picker\'s own signal, consumed and cleared by ServerPicker. It is not a reading of the connected daemon, and the switch is exactly when the picker acts on it.',
+    inputSettings:
+      'a user preference loaded from localStorage at construction (the composer\'s send-key behaviour); it belongs to the person, not to a daemon.',
+    defaultProviderSource:
+      'where the client-side session defaults came from (localStorage vs server default); a property of the client\'s own settings, not of the connection.',
+    sessionDefaultsNotice:
+      'a notice about the CLIENT\'s stored session defaults (migrated or reset), seeded from localStorage at construction and dismissed by the user.',
+    costBadgeMode:
+      '#5184 — the header cost-badge display mode, a user preference persisted in localStorage.',
+  }
+
+  /**
+   * Tracked, not cleared at the full-reset sites. Each entry is cleared by
+   * `disconnect()`, which a switch made from an already-disconnected tab skips
+   * (#7559) — the same exposure the collection axis closed with
+   * `createEmptyConnectionScope()`, left open here for these seven because their
+   * scalar and array siblings (`memoryStackEntries`, `referencesSymbol`,
+   * `permissionAudit*`, …) need the same decision in the same change.
+   */
+  const SNAPSHOT_LIFETIME_DEFERRED: Record<string, string> = {
+    memoryStackFile: 'cleared by disconnect() only; its memoryStack* siblings share the gap — #8411',
+    pendingPermissionConfirm: 'cleared by disconnect() only — #8411',
+    fileBrowserPendingOpen: 'cleared by disconnect() only — #8411',
+    workspaceSymbols: 'cleared by disconnect() only — #8411',
+    symbolLocation: 'cleared by disconnect() only — #8411',
+    codeSearchResults: 'cleared by disconnect() only — #8411',
+    referencesResult: 'cleared by disconnect() only — #8411',
+  }
+
+  /** `auth_ok`'s unconditional `connectedState` literal — set on BOTH branches. */
+  const authokConnectedState = (() => {
+    const s = handlerSrc.indexOf('const connectedState = {')
+    const e = handlerSrc.indexOf('if (ctx.isReconnect)', s)
+    return s > -1 && e > s ? handlerSrc.slice(s, e) : ''
+  })()
+  /** The marked `auth_ok` non-reconnect reset block — what a same-server reconnect must NOT hit. */
+  const authokResetBlock = handlerSrc.slice(
+    handlerSrc.indexOf('#7470 authok-reset-start'),
+    handlerSrc.indexOf('#7470 authok-reset-end'),
+  )
+
+  /**
+   * The snapshot-shaped members of `src` that have NO lifetime answer. A function
+   * so a phantom member can be shown red without touching the real interface.
+   */
+  function unclassifiedSnapshots(members: string[]): string[] {
+    return members.filter(
+      (f) =>
+        !(assigns(forgetBody, f) && assigns(switchBody, f)) &&
+        !(f in SNAPSHOT_CONNECTION_MACHINERY) &&
+        !(f in SNAPSHOT_REPLACED_BY_AUTH_OK) &&
+        !(f in SNAPSHOT_OUTLIVES_BY_DESIGN) &&
+        !(f in SNAPSHOT_LIFETIME_DEFERRED),
+    )
+  }
+
+  const snapshotMembers = snapshotShapedMembers(typesSrc)
+
+  it('control (#7579): the snapshot extraction is non-vacuous and sees each spelling', () => {
+    expect(authokConnectedState.length, 'the auth_ok connectedState literal must be found').toBeGreaterThan(300)
+    expect(authokResetBlock.length, 'the auth_ok marked block must be found').toBeGreaterThan(0)
+    expect(snapshotMembers.length, 'the snapshot extraction matched (almost) nothing').toBeGreaterThanOrEqual(40)
+    expect(snapshotMembers).toEqual(expect.arrayContaining([
+      'credentialsStatus',      // multi-line inline object, `{` head
+      'byokCredentialsStatus',  // multi-line inline object
+      'orchestrationRuns',      // named `Server*Snapshot | null`
+      'scheduledTasks',         // named `Server*Message | null`
+      'hostStatus',             // a survey snapshot
+      'monthlyBudget',          // a non-`Server*` PascalCase | null
+      'pendingApprovalPairHost',// a one-line inline object
+      'activity',               // an `import('…')` type
+    ]))
+    // Disjoint from the three collection shapes: one member, one axis.
+    expect(
+      snapshotMembers.filter((f) => declaredMembers(typesSrc).all.includes(f)),
+      'a member is on BOTH the collection axis and the snapshot axis',
+    ).toEqual([])
+    // And function members never leak in (the extraction's second exclusion).
+    expect(snapshotMembers).not.toContain('addMcpServer')
+    expect(snapshotMembers).not.toContain('sendUserQuestionResponse')
+  })
+
+  it('every snapshot-shaped member has a lifetime, or is a tracked deferral (#7579)', () => {
+    expect(
+      unclassifiedSnapshots(snapshotMembers),
+      'a snapshot-shaped member of ConnectionState (an inline object, or a named Server*/state type) is ' +
+      'cleared by nothing and classified by nothing. That is the shape #7579 found: the satellites got a ' +
+      'lifetime and the primary they attach to did not, so after a switch the panel rendered server A\'s ' +
+      'reading next to server B\'s empty state. Spread it from createEmptyDaemonSnapshots() (forget + switch, ' +
+      'kept across a same-server reconnect) or clear it at both full-reset sites, or add it to ' +
+      'SNAPSHOT_CONNECTION_MACHINERY / SNAPSHOT_REPLACED_BY_AUTH_OK / SNAPSHOT_OUTLIVES_BY_DESIGN with the ' +
+      'reason, or SNAPSHOT_LIFETIME_DEFERRED with a tracking issue.',
+    ).toEqual([])
+  })
+
+  it('red-proof (#7579): a phantom snapshot-shaped member is extracted and has no lifetime', () => {
+    // The real extraction against a synthetic interface — the same move the
+    // array-shape cells make — so "a future snapshot added without a lifetime goes
+    // red" is a permanent cell, not a mutant someone ran once.
+    const phantom = [
+      'export interface ConnectionState {',
+      '  phantomRunsSnapshot: ServerPhantomRunsSnapshot | null;',
+      '  phantomStatus: {',
+      '    ok: boolean;',
+      '  } | null;',
+      '  phantomBudget: PhantomBudgetState | null; // maps a => b',
+      '  phantomActivity: import(\'@chroxy/store-core\').PhantomState;',
+      '  phantomInline: { name: string; wsUrl: string } | null;',
+      '}',
+    ].join('\n')
+    const found = snapshotShapedMembers(phantom)
+    expect(found).toEqual(['phantomRunsSnapshot', 'phantomStatus', 'phantomBudget', 'phantomActivity', 'phantomInline'])
+    expect(
+      unclassifiedSnapshots(found),
+      'a phantom snapshot with no lifetime must be reported by the real classification',
+    ).toEqual(found)
+  })
+
+  it('the extraction excludes what is not a snapshot (#7579)', () => {
+    const phantom = [
+      'export interface ConnectionState {',
+      '  connectionError: string | null;',
+      '  claudeReady: boolean;',
+      '  retries: number;',
+      "  phase: 'a' | 'b';",
+      '  doIt: (id: string) => void;',
+      '  addServer: (',
+      '    name: string,',
+      '  ) => void;',
+      '  sessionsById: Record<string, X>;',
+      '  seen: Set<string>;',
+      '  items: Item[];',
+      '}',
+    ].join('\n')
+    expect(snapshotShapedMembers(phantom)).toEqual([])
+  })
+
+  it('a scalar companion is outside the extraction — the stated boundary, pinned (#7579)', () => {
+    // `selectedRunId: string | null` is as much a part of the Runs panel's snapshot
+    // as `orchestrationRuns`, and the shape extraction cannot see it. It is covered
+    // by the ROSTER instead (see the next cells). If the extraction is ever widened
+    // to scalars this goes red, which is the prompt to move these into the derived
+    // classification and delete the roster-only path.
+    expect(snapshotMembers).not.toContain('selectedRunId')
+    expect(snapshotMembers).not.toContain('scheduledTasksError')
+    expect(DAEMON_SNAPSHOT_FIELDS).toContain('selectedRunId')
+    expect(DAEMON_SNAPSHOT_FIELDS).toContain('scheduledTasksError')
+  })
+
+  it('every createEmptyDaemonSnapshots() member is a declared field, cleared at both full-reset sites, and carries a written reason', () => {
+    const declaredNames = new Set([...interfaceBody.matchAll(/^ {2}(\w+)\??:/gm)].map((m) => m[1]!))
+    expect(DAEMON_SNAPSHOT_FIELDS.length, 'the daemon-snapshot roster is empty').toBeGreaterThan(20)
+    for (const f of DAEMON_SNAPSHOT_FIELDS) {
+      expect(declaredNames.has(f), `${f} is in createEmptyDaemonSnapshots() but not declared on ConnectionState`).toBe(true)
+      expect(assigns(forgetBody, f), `forgetSession must clear ${f} (#7579)`).toBe(true)
+      expect(assigns(switchBody, f), `_resetSessionMemory must clear ${f} (#7579)`).toBe(true)
+      const reason = SNAPSHOT_PRESERVED_ON_RECONNECT[f]
+      expect(reason, `${f} needs a SNAPSHOT_PRESERVED_ON_RECONNECT reason — the keep-across-reconnect decision is per field`).toBeDefined()
+      expect(reason!.length, `${f}: the reason must say WHY the same daemon\'s reading is still true`).toBeGreaterThan(40)
+    }
+    // …and the table has no entry for a field that left the roster.
+    expect(
+      Object.keys(SNAPSHOT_PRESERVED_ON_RECONNECT).filter((f) => !DAEMON_SNAPSHOT_FIELDS.includes(f)),
+      'stale SNAPSHOT_PRESERVED_ON_RECONNECT entries',
+    ).toEqual([])
+  })
+
+  it('the keep-across-reconnect decision is ENFORCED: disconnect() and auth_ok do not clear a roster member', () => {
+    for (const f of DAEMON_SNAPSHOT_FIELDS) {
+      expect(
+        assigns(disconnectBody, f),
+        `${f} is cleared by disconnect() — but it is documented as KEPT across a same-server reconnect. ` +
+        'Either the clear is a regression, or the field belongs in createEmptyConnectionScope() and out of ' +
+        'SNAPSHOT_PRESERVED_ON_RECONNECT (#7579)',
+      ).toBe(false)
+      expect(
+        assigns(authokResetBlock, f),
+        `${f} is cleared by auth_ok's non-reconnect branch — that branch is also Disconnect → Connect to the SAME server`,
+      ).toBe(false)
+    }
+  })
+
+  it('the explicit snapshot answers are each really true, disjoint, and name real members', () => {
+    const declaredNames = new Set([...interfaceBody.matchAll(/^ {2}(\w+)\??:/gm)].map((m) => m[1]!))
+    const buckets = {
+      SNAPSHOT_CONNECTION_MACHINERY,
+      SNAPSHOT_REPLACED_BY_AUTH_OK,
+      SNAPSHOT_OUTLIVES_BY_DESIGN,
+      SNAPSHOT_LIFETIME_DEFERRED,
+    }
+    const seen = new Map<string, string>()
+    for (const [name, bucket] of Object.entries(buckets)) {
+      for (const [f, reason] of Object.entries(bucket)) {
+        expect(declaredNames.has(f), `${name}.${f} is not a declared ConnectionState member — stale allowlist`).toBe(true)
+        expect(snapshotMembers, `${name}.${f} is not snapshot-shaped — it belongs to another axis`).toContain(f)
+        expect(seen.has(f), `${f} is in two snapshot answers (${seen.get(f)} and ${name})`).toBe(false)
+        seen.set(f, name)
+        expect(reason.length, `${name}.${f} needs a reason`).toBeGreaterThan(20)
+        // Not also a derived answer: cleared at both sites would make the entry a lie.
+        expect(
+          assigns(forgetBody, f) && assigns(switchBody, f),
+          `${name}.${f} IS now cleared at both full-reset sites — drop it from ${name}`,
+        ).toBe(false)
+      }
+    }
+    for (const f of Object.keys(SNAPSHOT_CONNECTION_MACHINERY)) {
+      expect(assigns(disconnectBody, f), `${f} claims disconnect() resets it, and it does not`).toBe(true)
+    }
+    for (const f of Object.keys(SNAPSHOT_REPLACED_BY_AUTH_OK)) {
+      // `assigns` wants `name:` / `name =`; `connectedState` also uses the shorthand
+      // `staleBundle,`, so this accepts `name` followed by `:` or `,` (comments stripped).
+      expect(
+        new RegExp(`(^|[^A-Za-z0-9_$])${f}\\s*[:,]`).test(stripComments(authokConnectedState)),
+        `${f} claims every auth_ok replaces it, and the unconditional connectedState literal does not set it`,
+      ).toBe(true)
+    }
+    for (const [f, reason] of Object.entries(SNAPSHOT_OUTLIVES_BY_DESIGN)) {
+      expect(reason.length, `${f}: a by-design survivor needs the adjudication written down`).toBeGreaterThan(80)
+    }
+    for (const [f, reason] of Object.entries(SNAPSHOT_LIFETIME_DEFERRED)) {
+      expect(reason, `SNAPSHOT_LIFETIME_DEFERRED.${f} must cite a tracking issue (#NNNN)`).toMatch(/#\d{4,}/)
+      expect(assigns(disconnectBody, f), `${f} is deferred as "cleared by disconnect() only", and disconnect() does not`).toBe(true)
+    }
+  })
+
+  it('the snapshot answers PARTITION the extraction — derived, so no tally can go stale', () => {
+    const cleared = snapshotMembers.filter((f) => assigns(forgetBody, f) && assigns(switchBody, f))
+    const explicit = snapshotMembers.filter(
+      (f) =>
+        f in SNAPSHOT_CONNECTION_MACHINERY || f in SNAPSHOT_REPLACED_BY_AUTH_OK ||
+        f in SNAPSHOT_OUTLIVES_BY_DESIGN || f in SNAPSHOT_LIFETIME_DEFERRED,
+    )
+    expect(cleared.length + explicit.length, 'a snapshot is in two answers, or in none').toBe(snapshotMembers.length)
+    expect(cleared.length, 'nothing is cleared at both full-reset sites').toBeGreaterThan(20)
+    expect(
+      DAEMON_SNAPSHOT_FIELDS.filter((f) => snapshotMembers.includes(f) && !cleared.includes(f)),
+      'a roster member the extraction sees is not cleared at both sites',
+    ).toEqual([])
   })
 })
 })

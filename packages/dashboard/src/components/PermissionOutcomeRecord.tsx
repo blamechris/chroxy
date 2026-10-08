@@ -12,6 +12,10 @@
  *     (#8348), so the line survives a session switch or a reload — the live card
  *     does not, because `permission_request` frames are never in history.
  *
+ * `stopped` (#8374) is a prompt the user cancelled with Stop: nothing timed out
+ * and nobody refused it, so it says neither "expired" nor "denied". It is the
+ * record for both a live Stop and a replayed one.
+ *
  * The `expired` wording and test id are #7353's, unchanged. It keeps the
  * `perm-desc-<id>` anchor the end-of-turn expired summary's "Jump to prompt"
  * link lands on. The `title` carries the full text for the 3-line clamp.
@@ -29,6 +33,7 @@ const LEAD: Record<PermissionOutcomeKind, string> = {
   expired: 'Permission expired',
   allowed: 'Permission allowed',
   denied: 'Permission denied',
+  stopped: 'Permission stopped',
 }
 
 export function PermissionOutcomeRecord({ requestId, tool, description, outcome }: PermissionOutcomeRecordProps) {
@@ -45,6 +50,7 @@ export function PermissionOutcomeRecord({ requestId, tool, description, outcome 
       <span className="perm-dropped-text" id={`perm-desc-${requestId}`} tabIndex={-1}>
         {LEAD[outcome]} — <span className="perm-tool">{tool}</span>: {description}
         {expired ? ' — dropped' : ''}
+        {outcome === 'stopped' ? ' — not run' : ''}
       </span>
     </div>
   )

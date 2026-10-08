@@ -34,6 +34,8 @@ import {
   handleToolInputDelta as sharedToolInputDelta,
   handleStreamStart as sharedStreamStart,
   sharedStreamDelta,
+  moveEmptyResponseSlotToEnd,
+  applyMessageReconcile,
   handleStreamEnd as sharedStreamEnd,
   // #6756 — extended-thinking (reasoning) content stream.
   handleThinkingStreamStart as sharedThinkingStart,
@@ -90,11 +92,13 @@ import {
   // #7388 — one predicate for "was this permission already answered?", shared
   // with the app so the #2833 suppression cannot drift between the two clients.
   isPermissionRequestAnswered,
+  hasPermissionOutcomeRecord,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — dashboard adopts the shared permission family + the remaining
   // both-sides duplicates
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
+  applyPermissionResolved,
   handlePermissionTimeout as sharedPermissionTimeout,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
@@ -2632,36 +2636,12 @@ function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
         ? capturedSessionId
         : null;
       if (targetForReorder) {
-        const ss = get().sessionStates[targetForReorder]!;
-        const idx = ss.messages.findIndex((m) => m.id === deltaId);
-        if (idx >= 0 && idx < ss.messages.length - 1) {
-          const slot = ss.messages[idx]!;
-          if (slot.type === 'response' && slot.content === '') {
-            updateSession(targetForReorder, (s) => ({
-              messages: [
-                ...s.messages.slice(0, idx),
-                ...s.messages.slice(idx + 1),
-                slot,
-              ],
-            }));
-          }
-        }
+        const moved = moveEmptyResponseSlotToEnd(get().sessionStates[targetForReorder]!.messages, deltaId);
+        if (moved) updateSession(targetForReorder, () => ({ messages: moved }));
       } else {
         // Flat-messages fallback (pre-session bootstrap)
-        const flat = get().messages;
-        const idx = flat.findIndex((m) => m.id === deltaId);
-        if (idx >= 0 && idx < flat.length - 1) {
-          const slot = flat[idx]!;
-          if (slot.type === 'response' && slot.content === '') {
-            set((state) => ({
-              messages: [
-                ...state.messages.slice(0, idx),
-                ...state.messages.slice(idx + 1),
-                slot,
-              ],
-            }));
-          }
-        }
+        const moved = moveEmptyResponseSlotToEnd(get().messages, deltaId);
+        if (moved) set(() => ({ messages: moved }));
       }
     },
 
@@ -3016,13 +2996,15 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   // #5454: payload parse shared via store-core (same handler the app uses);
   // the flat-messages fallback and #5008 mark-read banner draining below are
   // dashboard-specific.
-  const { requestId: resolvedRequestId, decision: resolvedDecision } =
-    sharedPermissionResolved(msg);
+  const resolved = sharedPermissionResolved(msg);
+  const { requestId: resolvedRequestId } = resolved;
   if (resolvedRequestId) {
+    // #8374: a prompt Stop cancelled becomes a `stopped` record, not an answered
+    // deny. Shared with the app, so the two cannot disagree.
     const updater = (ss: { messages: ChatMessage[] }) => ({
       messages: ss.messages.map((m) =>
         m.requestId === resolvedRequestId && m.type === 'prompt'
-          ? { ...m, answered: resolvedDecision ?? undefined, answeredAt: Date.now(), options: undefined }
+          ? applyPermissionResolved(m, resolved, Date.now())
           : m
       ),
     });
@@ -5952,7 +5934,18 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // #5555.3 — advance this session's cursor as we apply a replayed entry.
       if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
-      if (!result.shouldDispatch) break;
+      if (!result.shouldDispatch) {
+        // #6630: a replayed reasoning entry that is the fuller copy of a bubble the
+        // client holds (its stream was cut off by a disconnect) fills it in.
+        const reconcile = result.reconcile;
+        if (reconcile && targetId && get().sessionStates[targetId]) {
+          updateSession(targetId, (ss) => {
+            const next = applyMessageReconcile(ss.messages, reconcile);
+            return next === ss.messages ? {} : { messages: next };
+          });
+        }
+        break;
+      }
       const newMsg = result.chatMessage;
       if (targetId && get().sessionStates[targetId]) {
         // #7577 — placeholder removal and message append are two different
@@ -6211,6 +6204,21 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           expiredRequestId,
           get().messages,
         );
+        // #8374: a record that already ENDED without a user decision (`stopped`,
+        // `expired`) is as immune to a late expiry as an answered one, but must not
+        // be told "your response was already recorded" -- none was. A Stop that
+        // beat a stale Allow from another device is exactly this race.
+        if (!alreadyAnswered && hasPermissionOutcomeRecord(get().sessionStates, expiredRequestId, get().messages)) {
+          const readStamp = Date.now();
+          set((s) => ({
+            sessionNotifications: s.sessionNotifications.map((n) =>
+              n.requestId === expiredRequestId && n.readAt === undefined
+                ? { ...n, readAt: readStamp }
+                : n
+            ),
+          }));
+          break;
+        }
         if (alreadyAnswered) {
           // #5008 — drain the banner stack without dropping the row from the
           // widget's durable history. See handlePermissionResolved for the
@@ -6959,6 +6967,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
     case 'environment_list': {
       const { environments } = sharedEnvironmentList(msg);
       set({ environments: environments as EnvironmentInfo[] });
+      // #7594: a refusal for an environment that has left the roster (destroyed
+      // by someone else, or by the Force that followed) has nothing left to
+      // escalate. Refusals for environments still listed are kept: this
+      // broadcast says nothing about whether their sessions have gone.
+      const refusals = get().environmentDestroyRefusals;
+      const listed = new Set((environments as EnvironmentInfo[]).map((e) => e?.id));
+      const kept = Object.keys(refusals).filter((id) => listed.has(id));
+      if (kept.length !== Object.keys(refusals).length) {
+        set({ environmentDestroyRefusals: Object.fromEntries(kept.map((id) => [id, refusals[id]!])) });
+      }
       break;
     }
     case 'failed_restores_list': {
@@ -7026,7 +7044,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // environment op that failed (image not allowed, destroy refused, backend
       // error) was invisible in the UI, so the operator saw nothing and could
       // not escalate.
-      const { error, code, sessions } = sharedEnvironmentError(msg);
+      const { error, code, sessions, environmentId } = sharedEnvironmentError(msg);
       const isLiveSessions = code === 'ENVIRONMENT_HAS_LIVE_SESSIONS';
       // #7568 review: the live-sessions destroy refusal is a WARNING — the guard
       // did its job and nothing broke — so log it at warn level to match the UI
@@ -7042,6 +7060,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         // prose; the explicit `sessions` line is a belt-and-braces surface for a
         // future server that trims the prose.
         const ids = sessions ?? [];
+        // #7594: record the refusal against the environment it NAMES. The panel
+        // reveals its Force from this, not from its own `env.sessions` (which
+        // only moves on an `environment_list` broadcast, and a refusal sends
+        // none). Keyed by the payload's id so it works however stale the
+        // panel's roster is. A refusal that names no environment cannot be
+        // attributed to a card, so it stays toast-only.
+        if (environmentId) {
+          set({ environmentDestroyRefusals: { ...get().environmentDestroyRefusals, [environmentId]: ids } });
+        }
         const namedLine =
           ids.length > 0
             ? ` Live session${ids.length === 1 ? '' : 's'}: ${ids.join(', ')}.`

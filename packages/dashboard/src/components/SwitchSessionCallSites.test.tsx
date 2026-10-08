@@ -146,3 +146,58 @@ describe('#7475 cell 3 — ControlRoomView jump-to-intervene', () => {
     expect(switchSessionMock.mock.calls[0]).toHaveLength(1)
   })
 })
+
+// ---------------------------------------------------------------------------
+// #7538 — a Control Room jump goes through the App handler, not the raw store action
+// ---------------------------------------------------------------------------
+/**
+ * Both Control Room controls above used to call the store's `switchSession`
+ * directly. That changes `activeSessionId` and nothing else: the Control Room is
+ * local App state (`useControlRoomState`) the store cannot see, and it occupies
+ * the whole main area, so the operator clicked "Open session" and kept looking at
+ * the Runs tab. App's `handleSwitchSession` is the handler that closes the Control
+ * Room (#5204/#7535) and latches the switching skeleton (#7475).
+ *
+ * These cells prove the WIRING: when a host supplies `onSwitchSession`, the click
+ * goes there and NEVER to the store action. The behaviour (the Control Room
+ * actually closing, the dead node staying gated) is the App-level cell in
+ * `App.test.tsx`, where `controlRoomActive` lives. Red against the previous code,
+ * which ignored the prop and called the store.
+ */
+describe('#7538 — Control Room session jumps use the host\'s onSwitchSession', () => {
+  it('OrchestrationRunsSection: "Open session" calls onSwitchSession and not the store action', () => {
+    const onSwitchSession = vi.fn()
+    render(<OrchestrationRunsSection now={() => T0} onSwitchSession={onSwitchSession} />)
+    fireEvent.click(screen.getByTestId('orch-node-open-session'))
+    expect(onSwitchSession).toHaveBeenCalledWith('sess_gone')
+    expect(onSwitchSession.mock.calls[0]).toHaveLength(1)
+    expect(switchSessionMock, 'the raw store action bypasses the Control Room exit').not.toHaveBeenCalled()
+  })
+
+  it('ControlRoomView, Runs tab: the prop is forwarded to the section', () => {
+    const onSwitchSession = vi.fn()
+    render(<ControlRoomView initialTab="runs" onSwitchSession={onSwitchSession} />)
+    fireEvent.click(screen.getByTestId('orch-node-open-session'))
+    expect(onSwitchSession).toHaveBeenCalledWith('sess_gone')
+    expect(switchSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('ControlRoomView, mission control: jump-to-intervene is the SIBLING with the same shape', () => {
+    // Found while checking the sibling Control Room surfaces for the pattern the
+    // issue names: `MissionControlTab` wired `onJumpToSession` to the store action
+    // too, so jumping to a blocked agent switched the session under a Control
+    // Room that stayed open.
+    const onSwitchSession = vi.fn()
+    render(<ControlRoomView initialTab="mission-control" onSwitchSession={onSwitchSession} />)
+    fireEvent.click(screen.getByTestId('mission-control-session-toggle-sess_gone'))
+    fireEvent.click(screen.getByTestId('control-room-jump-agent1'))
+    expect(onSwitchSession).toHaveBeenCalledWith('sess_gone')
+    expect(switchSessionMock).not.toHaveBeenCalled()
+  })
+
+  it('without a host handler the store door is still the fallback (no behaviour change for bare mounts)', () => {
+    render(<ControlRoomView initialTab="runs" />)
+    fireEvent.click(screen.getByTestId('orch-node-open-session'))
+    expect(switchSessionMock).toHaveBeenCalledWith('sess_gone')
+  })
+})

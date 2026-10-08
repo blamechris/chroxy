@@ -13,6 +13,7 @@ import {
   pathMatchesViewer,
   findPendingWriteForFile,
   isPermissionRequestAnswered,
+  hasPermissionOutcomeRecord,
   PERMISSION_DECISION_TOKENS,
 } from './pending-permissions'
 
@@ -324,5 +325,35 @@ describe('isPermissionRequestAnswered', () => {
     expect(isPermissionRequestAnswered(states({ s1: [prompt({ answered: 'allow' })] }), null)).toBe(false)
     expect(isPermissionRequestAnswered(undefined, 'req-1')).toBe(false)
     expect(isPermissionRequestAnswered(null, 'req-1', null)).toBe(false)
+  })
+})
+
+describe('hasPermissionOutcomeRecord (#8374)', () => {
+  it('is true for a prompt stamped with any terminal outcome, even one that carries no decision token', () => {
+    for (const permissionOutcome of ['allowed', 'denied', 'expired', 'stopped'] as const) {
+      expect(hasPermissionOutcomeRecord(states({ s1: [prompt({ permissionOutcome })] }), 'req-1')).toBe(true)
+    }
+  })
+
+  it('a stopped record is NOT an answered one (Stop is not a user decision) -- the two gates differ', () => {
+    const st = states({ s1: [prompt({ permissionOutcome: 'stopped' })] })
+    expect(isPermissionRequestAnswered(st, 'req-1')).toBe(false)
+    expect(hasPermissionOutcomeRecord(st, 'req-1')).toBe(true)
+  })
+
+  it('is false for a live prompt, another requestId, a non-prompt message, or no id', () => {
+    const st = states({ s1: [prompt(), prompt({ id: 'm2', requestId: 'req-2', permissionOutcome: 'stopped' })] })
+    expect(hasPermissionOutcomeRecord(st, 'req-1')).toBe(false)
+    expect(hasPermissionOutcomeRecord(st, 'req-9')).toBe(false)
+    expect(hasPermissionOutcomeRecord(st, '')).toBe(false)
+    expect(hasPermissionOutcomeRecord(st, null)).toBe(false)
+    expect(hasPermissionOutcomeRecord(states({ s1: [{ id: 'x', type: 'system', content: '', requestId: 'req-1', permissionOutcome: 'stopped', timestamp: NOW } as ChatMessage] }), 'req-1')).toBe(false)
+  })
+
+  it('scans every session and the optional flat list', () => {
+    const st = states({ s1: [prompt()], s2: [prompt({ id: 'm3', permissionOutcome: 'expired' })] })
+    expect(hasPermissionOutcomeRecord(st, 'req-1')).toBe(true)
+    expect(hasPermissionOutcomeRecord(states({ s1: [prompt()] }), 'req-1', [prompt({ permissionOutcome: 'stopped' })])).toBe(true)
+    expect(hasPermissionOutcomeRecord(undefined, 'req-1')).toBe(false)
   })
 })

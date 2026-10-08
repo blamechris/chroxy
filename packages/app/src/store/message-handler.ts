@@ -42,6 +42,8 @@ import {
   handleToolInputDelta as sharedToolInputDelta,
   handleStreamStart as sharedStreamStart,
   sharedStreamDelta,
+  moveEmptyResponseSlotToEnd,
+  applyMessageReconcile,
   handleStreamEnd as sharedStreamEnd,
   // #6756 — extended-thinking (reasoning) content stream.
   handleThinkingStreamStart as sharedThinkingStart,
@@ -90,6 +92,7 @@ import {
   noteReplayMessagesUpdate,
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
+  applyPermissionResolved,
   handlePermissionExpired as sharedPermissionExpired,
   // #7380 — one wording for the #2833 already-answered race, shared with the
   // dashboard (which surfaces the same words as an info toast).
@@ -99,6 +102,7 @@ import {
   // Keys on a REAL user decision, not merely `answered` being set:
   // history_replay_end stamps '(resolved)' on prompts nobody answered (#7380).
   isPermissionRequestAnswered,
+  hasPermissionOutcomeRecord,
   handlePermissionTimeout as sharedPermissionTimeout,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — remaining both-sides duplicates extracted into store-core
@@ -2773,7 +2777,18 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // #5555.3 — advance the cursor for replayed entries.
       if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
-      if (!result.shouldDispatch) break;
+      if (!result.shouldDispatch) {
+        // #6630: a replayed reasoning entry that is the fuller copy of a bubble the
+        // client holds (its stream was cut off by a disconnect) fills it in.
+        const reconcile = result.reconcile;
+        if (reconcile && targetId && get().sessionStates[targetId]) {
+          updateSession(targetId, (ss) => {
+            const next = applyMessageReconcile(ss.messages, reconcile);
+            return next === ss.messages ? {} : { messages: next };
+          });
+        }
+        break;
+      }
       const newMsg = result.chatMessage;
       const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
       if (effectiveId && get().sessionStates[effectiveId]) {
@@ -2899,7 +2914,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // hot path (post-permission split, single-hop defensive remap, post-tool
       // continuation split with the #4999/#5014 sentence gate and #4975
       // mid-word peel, buffered append + 100ms flush) lives in store-core.
-      // The app has no terminal-data write, no #4297 reorder, and no flat-
+      // The app has no terminal-data write and no flat-
       // `messages` fallback (it only operates on `sessionStates`), so those
       // context hooks are no-ops / session-only here.
       sharedStreamDelta(msg, {
@@ -2918,9 +2933,19 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
 
         // No terminal view on the app side.
         appendTerminalDelta: () => {},
-        // The app never reordered the empty response slot (#4297 is dashboard-
-        // only) — no-op.
-        reorderEmptyResponseSlot: () => {},
+        // #4297 / #6630: claude-tui opens its response stream at the START of a
+        // turn and delivers the text in one burst at the end, so the empty slot
+        // sits above every tool the turn ran. Move it to the end on its first
+        // delta, as the dashboard does -- otherwise the wrap-up reads ABOVE the
+        // tools it summarises here, while a session switch or reload (which
+        // records the response when the stream ends) puts it below them. The
+        // shared helper gates on an empty response, so a replayed response is
+        // never shifted. Session-backed targets only (no flat fallback).
+        reorderEmptyResponseSlot: (deltaId, capturedSessionId) => {
+          if (!capturedSessionId || !get().sessionStates[capturedSessionId]) return;
+          const moved = moveEmptyResponseSlotToEnd(get().sessionStates[capturedSessionId].messages, deltaId);
+          if (moved) updateSession(capturedSessionId, () => ({ messages: moved }));
+        },
 
         // Append a fresh response slot + set streamingMessageId. Resolve the
         // effective session the way the app originally did: prefer the passed
@@ -3374,13 +3399,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // Another client resolved this permission — dismiss the prompt on this client.
       // The permission_request may have been stored in ANY session state (whichever tab
       // was active when it arrived), so search all session states for the matching requestId.
-      const { requestId: resolvedRequestId, decision: resolvedDecision } =
-        sharedPermissionResolved(msg);
+      const resolved = sharedPermissionResolved(msg);
+      const { requestId: resolvedRequestId } = resolved;
       if (resolvedRequestId) {
+        // #8374: a prompt Stop cancelled becomes a `stopped` record, not an
+        // answered deny. Shared with the dashboard, so the two cannot disagree.
         const updater = (ss: { messages: ChatMessage[] }) => ({
           messages: ss.messages.map((m) =>
             m.requestId === resolvedRequestId && m.type === 'prompt'
-              ? { ...m, answered: resolvedDecision ?? undefined, answeredAt: Date.now(), options: undefined }
+              ? applyPermissionResolved(m, resolved, Date.now())
               : m
           ),
         });
@@ -3443,7 +3470,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         // the whole universe here. The dashboard, which does have one and stamps
         // `answered` into it, passes it.
         const alreadyAnswered = isPermissionRequestAnswered(get().sessionStates, expiredRequestId);
-        if (!alreadyAnswered) {
+        // #8374: a record that already ENDED without a user decision (`stopped`,
+        // `expired`) is as immune to a late expiry as an answered one, but must not
+        // be told "your response was already recorded" -- none was. A Stop that
+        // beat a stale Allow from another device is exactly this race.
+        const alreadyEnded = !alreadyAnswered && hasPermissionOutcomeRecord(get().sessionStates, expiredRequestId);
+        if (alreadyEnded) {
+          // Nothing to decorate and nothing to say; the shared tail below still
+          // drains the banner and the pulled input.
+        } else if (!alreadyAnswered) {
           console.warn(`[ws] Permission ${expiredRequestId} expired: ${msg.message}`);
           const expTargetId = (msg.sessionId as string) || get().activeSessionId;
           if (expTargetId && get().sessionStates[expTargetId]) {

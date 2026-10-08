@@ -1118,6 +1118,7 @@ describe('EventNormalizer', () => {
         type: 'permission_resolved',
         requestId: 'req-1',
         decision: 'allow',
+        reason: 'user',
         sessionId: 'sess-7',
       })
       // Filter must be undefined so all clients (including the resolver) receive it
@@ -1128,6 +1129,21 @@ describe('EventNormalizer', () => {
       const data = { requestId: 'req-2', decision: 'deny', reason: 'timeout' }
       const result = normalizer.normalize('permission_resolved', data, makeCtx({ sessionId: 'sess-7' }))
       assert.equal(result.messages[0].msg.decision, 'deny')
+    })
+
+    // #8374: Stop resolves a pending prompt as a deny with reason 'stopped'. The
+    // reason is the ONLY thing that tells that apart from a user Deny, so it has
+    // to reach the clients.
+    it('#8374: forwards the reason, so a Stop-cancelled prompt differs from a user Deny', () => {
+      const stopped = normalizer.normalize('permission_resolved', { requestId: 'req-3', decision: 'deny', reason: 'stopped' }, makeCtx({ sessionId: 'sess-7' }))
+      const denied = normalizer.normalize('permission_resolved', { requestId: 'req-4', decision: 'deny', reason: 'user' }, makeCtx({ sessionId: 'sess-7' }))
+      assert.equal(stopped.messages[0].msg.reason, 'stopped')
+      assert.equal(denied.messages[0].msg.reason, 'user')
+    })
+
+    it('#8374: leaves reason off the wire when the event carries none', () => {
+      const result = normalizer.normalize('permission_resolved', { requestId: 'req-5', decision: 'allow' }, makeCtx({ sessionId: 'sess-7' }))
+      assert.equal('reason' in result.messages[0].msg, false)
     })
   })
 

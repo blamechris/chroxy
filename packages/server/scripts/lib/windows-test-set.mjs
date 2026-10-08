@@ -427,7 +427,7 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (19)
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (18)
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
@@ -541,17 +541,10 @@ export const WINDOWS_EXEMPT = [
     issue: 7274,
   },
   {
-    file: 'tests/write-file.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the containment seam is fixed (#7273); what remains is open(O_WRONLY|O_TRUNC) failing EINVAL on Windows, which the Access-denied failure was masking',
-    issue: 7284,
-  },
-  {
     file: 'tests/ws-file-ops-error-paths.test.js',
     reason: 'windows-defect',
     symptom: 'fail',
-    note: 'the containment seam is fixed (#7273); what remains is ENOTDIR surfacing as Directory not found rather than Not a directory',
+    note: 'part 2 of #7284: a path through a file fails ENOENT on Windows, so browseFiles answers Directory not found rather than Not a directory; a race-free classification needs handle-based traversal',
     issue: 7284,
   },
   {

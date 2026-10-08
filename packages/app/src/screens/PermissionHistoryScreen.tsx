@@ -20,13 +20,13 @@ import { COLORS } from '../constants/colors';
 // Types
 // ---------------------------------------------------------------------------
 
-type FilterStatus = 'all' | 'allowed' | 'denied' | 'expired' | 'pending';
+type FilterStatus = 'all' | 'allowed' | 'denied' | 'expired' | 'stopped' | 'pending';
 
 interface PermissionEntry {
   message: ChatMessage;
   sessionId: string | null;
   sessionName: string | null;
-  status: 'allowed' | 'denied' | 'expired' | 'pending';
+  status: 'allowed' | 'denied' | 'expired' | 'stopped' | 'pending';
 }
 
 // ---------------------------------------------------------------------------
@@ -42,6 +42,8 @@ function formatRelativeTime(ts: number): string {
 }
 
 function deriveStatus(msg: ChatMessage): PermissionEntry['status'] {
+  // #8374: a prompt the user cancelled with Stop is neither pending nor expired.
+  if (msg.permissionOutcome === 'stopped') return 'stopped';
   if (!msg.answered) {
     if (msg.expiresAt && msg.expiresAt <= Date.now()) return 'expired';
     return 'pending';
@@ -64,6 +66,7 @@ const STATUS_CONFIG = {
   allowed: { label: 'Allowed', icon: ICON_CHECK, color: COLORS.accentGreen, bg: COLORS.accentGreenLight, border: COLORS.accentGreenBorder },
   denied: { label: 'Denied', icon: ICON_CLOSE, color: COLORS.accentRed, bg: COLORS.accentRedLight, border: COLORS.accentRedBorder },
   expired: { label: 'Expired', icon: ICON_CLOSE, color: COLORS.accentOrange, bg: COLORS.accentOrangeLight, border: COLORS.accentOrangeBorder },
+  stopped: { label: 'Stopped', icon: ICON_CLOSE, color: COLORS.accentOrange, bg: COLORS.accentOrangeLight, border: COLORS.accentOrangeBorder },
   pending: { label: 'Pending', icon: '?', color: COLORS.accentBlue, bg: COLORS.accentBlueLight, border: COLORS.accentBlueBorder },
 } as const;
 
@@ -72,6 +75,7 @@ const FILTER_OPTIONS: { key: FilterStatus; label: string }[] = [
   { key: 'allowed', label: 'Allowed' },
   { key: 'denied', label: 'Denied' },
   { key: 'expired', label: 'Expired' },
+  { key: 'stopped', label: 'Stopped' },
   { key: 'pending', label: 'Pending' },
 ];
 
@@ -179,7 +183,7 @@ export function PermissionHistoryScreen() {
 
   // Counts for summary bar
   const counts = useMemo(() => {
-    const c = { allowed: 0, denied: 0, expired: 0, pending: 0 };
+    const c = { allowed: 0, denied: 0, expired: 0, stopped: 0, pending: 0 };
     for (const e of entries) c[e.status]++;
     return c;
   }, [entries]);
@@ -229,6 +233,11 @@ export function PermissionHistoryScreen() {
         <View style={styles.summaryItem}>
           <Text style={[styles.summaryCount, { color: COLORS.accentOrange }]}>{counts.expired}</Text>
           <Text style={styles.summaryLabel}>Expired</Text>
+        </View>
+        <View style={styles.summaryDivider} />
+        <View style={styles.summaryItem}>
+          <Text style={[styles.summaryCount, { color: COLORS.accentOrange }]}>{counts.stopped}</Text>
+          <Text style={styles.summaryLabel}>Stopped</Text>
         </View>
         <View style={styles.summaryDivider} />
         <View style={styles.summaryItem}>

@@ -8,6 +8,7 @@ import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from '.
 import { getPermissionModes } from './handler-utils.js'
 import { listProviders, getProvider, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
+import { streamKindOf } from './session-message-history.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { MAX_SANE_DURATION_MS, REPLAY_BACKPRESSURE_MAX_WAIT_MS } from '@chroxy/protocol'
@@ -294,6 +295,35 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
 }
 
 /**
+ * #8374: the client capability that says "I can label a `permission_outcome` whose
+ * outcome is `stopped`". Advertised in the auth handshake (CLIENT_CAPABILITIES in
+ * @chroxy/protocol).
+ */
+const CAPABILITY_PERMISSION_OUTCOME_STOPPED = 'permission_outcome_stopped_v1'
+
+/**
+ * #6630: the client capability that says "a replayed `error` entry is safe to
+ * send me". Errors became part of the transcript (they used to be live-only), and
+ * a client build from before that raises its usage-limit alert for a rate-limit
+ * error even when it arrives in a replay, so an old app would pop the modal on
+ * every session switch for a quota that recovered long ago. Only a client that
+ * advertises this (the replay-aware builds) is sent the recorded errors; the rest
+ * get the transcript as it was, errors absent.
+ */
+export const CAPABILITY_HISTORY_ERROR_REPLAY = 'history_error_replay_v1'
+
+/**
+ * #6630: the client capability that says "a replayed reasoning entry with NO text is
+ * safe to send me". Current Claude models send a thinking block with only its
+ * signature, and the server records that as a response entry with `kind: 'thinking'`
+ * and empty content. A client build from before `kind` was understood renders it as
+ * an empty assistant bubble, one per turn, so only a client that advertises this is
+ * sent one. A reasoning entry WITH text is unchanged for everyone (older builds
+ * showed reasoning as an answer already).
+ */
+export const CAPABILITY_HISTORY_THINKING_REPLAY = 'history_thinking_replay_v1'
+
+/**
  * Write ONE history entry to a client, the way BOTH replay paths must.
  *
  * Two things happen per entry, and both were forgotten by the second copy of
@@ -330,8 +360,31 @@ export function sendChunkedWithBackpressure(ws, entries, { startOffset = 0, emit
  * @param {WebSocket} ws
  * @param {string} sessionId
  * @param {object} entry - A ring-buffer entry, possibly carrying `_seq`.
+ * @param {{clientCapabilities?: Set<string>}|null} [client] - The client RECORD
+ *   (`clients.get(ws)`), which is where the auth handshake stores the capabilities
+ *   it advertised. NOT `ws`: that is the raw socket and carries none (#8374).
  */
-export function sendHistoryEntry(send, ws, sessionId, entry) {
+export function sendHistoryEntry(send, ws, sessionId, entry, client = null) {
+  // #6630: a recorded error goes only to a client that said it can take one in a
+  // replay (see CAPABILITY_HISTORY_ERROR_REPLAY). Skipped, not downgraded: there is
+  // no older shape of an error bubble that is safe. Nothing else about the entry
+  // changes, and the stored entry is untouched for the clients that do advertise it.
+  if (
+    entry && entry.type === 'message' && entry.messageType === 'error'
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_ERROR_REPLAY) ?? false)
+  ) {
+    return
+  }
+  // #6630: a text-less reasoning entry goes only to a client that can render it (see
+  // CAPABILITY_HISTORY_THINKING_REPLAY). Skipped for the same reason as the error: an
+  // older build has no safe shape for it.
+  if (
+    entry && streamKindOf(entry) === 'thinking'
+    && (typeof entry.content !== 'string' || entry.content.length === 0)
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_HISTORY_THINKING_REPLAY) ?? false)
+  ) {
+    return
+  }
   // `sourceToolUseId` (#8336) is server-internal: it lets the restore-time sweep
   // pair a recorded question with its tool_start, and no client reads it. Live
   // broadcasts never carry it (the event normalizer picks fields), so the replay
@@ -340,6 +393,20 @@ export function sendHistoryEntry(send, ws, sessionId, entry) {
   // leave an answered question unmarked, and a replayed question reads as resolved
   // on the client already.
   const { _seq, sourceToolUseId: _sourceToolUseId, answered: _answered, ...wireEntry } = entry
+  // #8374: a client build from before `stopped` existed drops a `permission_outcome`
+  // whose outcome it cannot parse, and a full rebuild then loses the record
+  // altogether. Say `expired` to a client that did not advertise it can label the
+  // new value: the record survives, only its label degrades. The stored entry is
+  // untouched (`wireEntry` is a copy), so a capable client still gets `stopped`.
+  // #6630: say on the frame that a recorded response was reasoning, including an
+  // entry an older run wrote without the field (classified by its message id),
+  // so the client rebuilds the thinking bubble the live stream showed rather than
+  // an answer. One classifier; the client reads the field and derives nothing.
+  if (streamKindOf(entry) === 'thinking') wireEntry.kind = 'thinking'
+  if (wireEntry.type === 'permission_outcome' && wireEntry.outcome === 'stopped'
+    && !(client?.clientCapabilities?.has?.(CAPABILITY_PERMISSION_OUTCOME_STOPPED) ?? false)) {
+    wireEntry.outcome = 'expired'
+  }
   send(ws, { ...wireEntry, sessionId, ...(typeof _seq === 'number' ? { historySeq: _seq } : {}) })
   if (entry && entry.type === 'result') {
     send(ws, { type: 'agent_idle', sessionId })
@@ -1714,7 +1781,7 @@ export function replayHistory(ctx, ws, sessionId, opts = {}) {
   // (#7459), and the bufferedAmount gating (#7460) were each missing there.
   sendChunkedWithBackpressure(ws, history, {
     startOffset,
-    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry),
+    emit: (entry) => sendHistoryEntry(send, ws, sessionId, entry, client),
     onDone: finishReplay,
   })
 }

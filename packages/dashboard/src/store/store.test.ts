@@ -852,6 +852,27 @@ describe('useConnectionStore', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('#7594: destroyEnvironment sends a plain destroy and clears the recorded refusal; dismiss forgets one', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({
+      socket: openSocket,
+      environmentDestroyRefusals: { 'env-1': ['sess-a'], 'env-2': ['sess-b'] },
+    });
+
+    useConnectionStore.getState().destroyEnvironment('env-1');
+    expect(JSON.parse(send.mock.calls[0]![0] as string)).toEqual({ type: 'destroy_environment', environmentId: 'env-1' });
+    // The retry supersedes the old refusal; the other environment's is untouched.
+    expect(useConnectionStore.getState().environmentDestroyRefusals).toEqual({ 'env-2': ['sess-b'] });
+
+    useConnectionStore.getState().dismissEnvironmentDestroyRefusal('env-2');
+    expect(useConnectionStore.getState().environmentDestroyRefusals).toEqual({});
+    // Dismissing an environment with no refusal is a no-op.
+    useConnectionStore.getState().dismissEnvironmentDestroyRefusal('env-9');
+    expect(useConnectionStore.getState().environmentDestroyRefusals).toEqual({});
+  });
+
   it('#6139: requestRepoRuntimeConfig sets loading and sends on the wire; no-op + no loading offline', async () => {
     const { useConnectionStore } = await import('./connection');
     const send = vi.fn();

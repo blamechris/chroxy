@@ -45,6 +45,14 @@ export function isReplayDuplicate(
     )
   }
 
+  // #6630: a replayed reasoning stream is rebuilt as a `thinking` bubble at the
+  // stream's own id, so the copy a client already holds (live, or from an earlier
+  // replay) is a thinking bubble at that id. The structural fallback below cannot
+  // see it: the live bubble's timestamp is the client's clock, not the entry's.
+  if (messageId && messageType === 'thinking') {
+    return cached.some((m) => m.id === messageId && m.type === 'thinking')
+  }
+
   if (messageId && messageType === 'user_input') {
     return cached.some((m) => m.id === messageId)
   }

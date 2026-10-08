@@ -24,7 +24,7 @@ jest.mock('expo-secure-store', () => ({
 import * as SecureStore from 'expo-secure-store';
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
-import { resetReconnectAttempt } from '../../store/message-handler';
+import { resetReconnectAttempt, setPendingPairingId } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 // ---------------------------------------------------------------------------
@@ -368,6 +368,58 @@ describe('reconnect dedup guard (#5555 / #3624)', () => {
     await flushPromises();
 
     expect(ws.instances.length).toBe(3);
+    ws.restore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #8374 -- the capabilities the app ACTUALLY puts in its `auth` frame
+// ---------------------------------------------------------------------------
+
+describe('the mobile auth frame advertises the stopped-outcome capability (#8374)', () => {
+  it('sends the stock mobile capability list, which names permission_outcome_stopped_v1', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(200, { status: 'ok' }));
+    global.fetch = fetchMock;
+    const ws = installMockWebSocket();
+
+    useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok', { silent: true });
+    await flushPromises();
+    ws.instances[0].readyState = 1;
+    ws.instances[0].onopen?.();
+    await flushPromises();
+
+    const frame = JSON.parse(ws.instances[0].send.mock.calls[0][0] as string);
+    expect(frame.type).toBe('auth');
+    expect(frame.capabilities).toContain('permission_outcome_stopped_v1');
+    // #6630: without it the server sends this client no recorded errors in a replay.
+    expect(frame.capabilities).toContain('history_error_replay_v1');
+    expect(frame.capabilities).toContain('history_thinking_replay_v1');
+    // The server reads the capability off exactly this list.
+    const { CLIENT_CAPABILITIES } = jest.requireActual('@chroxy/protocol');
+    expect(frame.capabilities).toEqual([...CLIENT_CAPABILITIES.mobile]);
+    ws.restore();
+  });
+
+  // The QR-pairing branch is a SECOND handshake frame. ws-auth.js records an EMPTY
+  // capability set for a `pair` that carries none, so a freshly paired phone would
+  // be sent `expired` for every `stopped` outcome in a replay.
+  it('the pairing frame (a QR scan) carries the same capability list', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(200, { status: 'ok' }));
+    global.fetch = fetchMock;
+    const ws = installMockWebSocket();
+    setPendingPairingId('pair-id-1');
+
+    useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok', { silent: true });
+    await flushPromises();
+    ws.instances[0].readyState = 1;
+    ws.instances[0].onopen?.();
+    await flushPromises();
+
+    const frame = JSON.parse(ws.instances[0].send.mock.calls[0][0] as string);
+    expect(frame.type).toBe('pair');
+    expect(frame.pairingId).toBe('pair-id-1');
+    const { CLIENT_CAPABILITIES } = jest.requireActual('@chroxy/protocol');
+    expect(frame.capabilities).toEqual([...CLIENT_CAPABILITIES.mobile]);
     ws.restore();
   });
 });

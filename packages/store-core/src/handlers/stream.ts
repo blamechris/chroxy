@@ -42,6 +42,13 @@ export type MessagePayload =
   | {
       /** Caller should NOT dispatch a chat message. */
       shouldDispatch: false
+      /**
+       * #6630: set when the message was a replayed entry for a message the client
+       * already holds, but the replay is the FULLER copy (a reasoning bubble whose
+       * stream was cut off by a disconnect). The caller applies it in place with
+       * {@link applyMessageReconcile}; a plain duplicate has none.
+       */
+      reconcile?: MessageReconcile
     }
   | {
       /** Caller should dispatch the chat message. */
@@ -68,6 +75,33 @@ export type MessagePayload =
        */
       containerLostPatch: SessionPatch | null
     }
+
+/** A patch for a message the client already holds, found by id (see {@link applyMessageReconcile}). */
+export interface MessageReconcile {
+  /**
+   * The held message object the patch was COMPUTED against. It is matched by
+   * identity, never by id: during a full-rebuild replay the dedup cache is only the
+   * appended replay tail, while the array the patch lands on still holds the old
+   * prefix (discarded at replay end), and an id match would land on the prefix
+   * copy -- shortening a bubble that is about to be thrown away and leaving the
+   * one that is kept untouched.
+   */
+  target: ChatMessage
+  patch: Partial<ChatMessage>
+}
+
+/**
+ * Apply a {@link MessageReconcile} to a messages array: merge the patch onto the
+ * very message object it was computed against. Returns the SAME array when that
+ * object is not in it, so a caller can skip the state write.
+ */
+export function applyMessageReconcile(messages: ChatMessage[], reconcile: MessageReconcile): ChatMessage[] {
+  const idx = messages.indexOf(reconcile.target)
+  if (idx === -1) return messages
+  const next = [...messages]
+  next[idx] = { ...next[idx]!, ...reconcile.patch }
+  return next
+}
 
 /**
  * Validate, gate, and normalize a generic forwarded `message` event.
@@ -209,7 +243,18 @@ export function handleMessage(
   // and crash render paths.
   const rawType = msg.messageType ?? msg.type
   if (typeof rawType !== 'string' || rawType.length === 0) return empty
-  const msgType = rawType
+  // #6630 / #8282: a REPLAYED reasoning stream arrives as a `response` entry
+  // tagged `kind: 'thinking'` (the history records the stream as one message).
+  // Live, the same text is a `type: 'thinking'` bubble; rebuild that, so a
+  // session switch or a reload does not turn the model's reasoning into an
+  // answer. Only a response can be reasoning, and only under a replay: a live
+  // frame never carries `kind`.
+  const isReplayedThinking = receivingHistoryReplay && rawType === 'response' && msg.kind === 'thinking'
+  // A history entry on the wire always carries its sequence number (`sendHistoryEntry`
+  // stamps `historySeq`); a live frame never does. The replay WINDOW being open says
+  // only that something is replaying, not that THIS frame is part of it.
+  const isReplayedEntry = receivingHistoryReplay && typeof msg.historySeq === 'number'
+  const msgType = isReplayedThinking ? 'thinking' : rawType
   if (typeof msg.content !== 'string') return empty
   if (typeof msg.timestamp !== 'number') return empty
 
@@ -220,6 +265,32 @@ export function handleMessage(
   if (msgType === 'user_input' && !receivingHistoryReplay) return empty
 
   const stableMessageId = typeof msg.messageId === 'string' ? msg.messageId : undefined
+
+  // #6630: a replayed reasoning entry for a bubble the client already holds is
+  // normally a duplicate -- but not when the held copy is the PARTIAL one. A
+  // thought that was streaming when the connection dropped finished on the
+  // server meanwhile; the replay carries its full text and duration, and the
+  // cursor has advanced past the entry, so nothing would ever retry. The replay
+  // is authoritative: fill the held bubble in.
+  if (isReplayedThinking && stableMessageId) {
+    const held = cachedMessages.find((m) => m.id === stableMessageId && m.type === 'thinking')
+    if (held) {
+      const content = msg.content.slice(0, MAX_THINKING_CONTENT_LEN)
+      const durationMs = parseFiniteNonNegIntField(msg, 'thinkingDurationMs', MAX_SANE_DURATION_MS)
+      const patch: Partial<ChatMessage> = {}
+      if (content.length > held.content.length) {
+        patch.content = content
+        if (msg.content.length > MAX_THINKING_CONTENT_LEN) patch.thinkingTruncated = true
+      }
+      if (held.thinkingStreaming !== false) patch.thinkingStreaming = false
+      if (durationMs !== undefined && held.thinkingDurationMs !== durationMs) patch.thinkingDurationMs = durationMs
+      const tokens = parseFiniteNonNegIntField(msg, 'thinkingTokens')
+      if (tokens !== undefined && held.thinkingTokens !== tokens) patch.thinkingTokens = tokens
+      return Object.keys(patch).length > 0
+        ? { shouldDispatch: false, reconcile: { target: held, patch } }
+        : empty
+    }
+  }
 
   // Replay dedup: skip if an equivalent entry already exists in cache.
   if (receivingHistoryReplay) {
@@ -245,10 +316,28 @@ export function handleMessage(
     ? resolveStreamId(cachedMessages.find(message => message.id === messageId), messageId).resolvedId
     : messageId
 
+  const replayedThinkingDurationMs = isReplayedThinking
+    ? parseFiniteNonNegIntField(msg, 'thinkingDurationMs', MAX_SANE_DURATION_MS)
+    : undefined
+  const replayedThinkingTokens = isReplayedThinking ? parseFiniteNonNegIntField(msg, 'thinkingTokens') : undefined
+
   const chatMessage: ChatMessage = {
     id: resolvedMessageId,
     type: msgType as ChatMessage['type'],
-    content: msg.content,
+    content: isReplayedThinking
+      ? msg.content.slice(0, MAX_THINKING_CONTENT_LEN)
+      : msg.content,
+    // The finished bubble a live thinking stream ends as: label settled to
+    // "Thought", plus the elapsed-time footer when the entry kept it. Mirrors
+    // what `handleThinkingStreamEnd` leaves on the live bubble.
+    ...(isReplayedThinking
+      ? {
+          thinkingStreaming: false,
+          ...(msg.content.length > MAX_THINKING_CONTENT_LEN ? { thinkingTruncated: true } : null),
+          ...(replayedThinkingDurationMs !== undefined ? { thinkingDurationMs: replayedThinkingDurationMs } : null),
+          ...(replayedThinkingTokens !== undefined ? { thinkingTokens: replayedThinkingTokens } : null),
+        }
+      : null),
     tool: typeof msg.tool === 'string' ? msg.tool : undefined,
     options: msg.options as ChatMessage['options'],
     timestamp: msg.timestamp,
@@ -339,9 +428,17 @@ export function handleMessage(
 
   // Surface rate-limit / usage-limit / quota / overloaded errors prominently (#616).
   // #3183: isRateLimitMessage now lowercases internally — pass raw content.
+  //
+  // #6630: never from a replay. Errors are part of the recorded transcript now, so
+  // an old usage-limit error rides every session switch and reload; the alert is
+  // for the error that just happened. (The bubble itself is still rebuilt.)
   let isRateLimitError = false
   let errorContent: string | null = null
-  if (msgType === 'error') {
+  //
+  // Only a REPLAYED ENTRY is suppressed -- a frame that carries `historySeq` -- not any
+  // frame that arrives while the session's replay window is open: a live quota error
+  // that lands between two replay chunks is new, and its alert is owed.
+  if (msgType === 'error' && !isReplayedEntry) {
     if (isRateLimitMessage(msg.content)) {
       isRateLimitError = true
       errorContent = msg.content
@@ -414,6 +511,17 @@ export interface ToolStartPayload {
  */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== undefined && value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * The `content` of a `tool_use` bubble: the serialized input when the server
+ * knows it, else the tool name (the placeholder a collapsed card shows until the
+ * input arrives). The ONE rule, used both when the card is built (`tool_start`)
+ * and when its input lands later (`tool_result`), so a card that learned its
+ * input after the fact reads the same as one built with it (#6630).
+ */
+function toolCardContent(input: unknown, tool: string | undefined): string {
+  return input ? JSON.stringify(input) : tool || ''
 }
 
 /**
@@ -502,7 +610,7 @@ export function handleToolStart(
   const chatMessage: ChatMessage = {
     id: toolId,
     type: 'tool_use',
-    content: msg.input ? JSON.stringify(msg.input) : tool || '',
+    content: toolCardContent(msg.input, tool),
     tool,
     toolUseId,
     serverName,
@@ -671,6 +779,18 @@ export function handleToolResult(
       if (idx === -1) return messages
       const updated = [...messages]
       const merged: ChatMessage = { ...updated[idx]!, ...patch }
+      // #6630: SDK/CLI/BYOK start a tool with `input: null`, so the card was built
+      // with the tool NAME as its content and the real input lands here, with the
+      // result. A card that kept the placeholder reads "Read" forever on a surface
+      // that previews `content` (the mobile app), while the same card rebuilt from
+      // history -- whose `tool_start` was backfilled -- reads the file it touched.
+      // Fold the input into the content the way `tool_start` would have.
+      if (
+        patch.toolInput !== undefined
+        && (!merged.content || merged.content === merged.tool)
+      ) {
+        merged.content = toolCardContent(patch.toolInput, merged.tool)
+      }
       // #7376 (review): an authoritative result WITHOUT a termination reason
       // replaces the synthetic "turn ended" one. A CLI hard-timeout / stall
       // clears local state without killing the child, so the real result (a
@@ -1144,6 +1264,34 @@ export function resolveStreamDeltaTarget(
     }
   }
   return { kind: 'passthrough', deltaId: incomingId }
+}
+
+/**
+ * #4297 -- an empty response slot sitting BEFORE later messages moves to the end
+ * of the transcript when its first delta lands.
+ *
+ * claude-tui opens its response stream the moment a turn starts (#4010, the only
+ * busy signal it has), so the empty slot is created ahead of every tool the turn
+ * then runs, and the turn's text arrives in one burst at the end. Left where it
+ * was, the wrap-up would materialise ABOVE the tool groups it summarises. The
+ * dashboard has always moved it; the mobile app did not (its hook was a no-op),
+ * so on the app a claude-tui turn read text-then-tools live and tools-then-text
+ * after a session switch or a reload -- the replay records the response when the
+ * stream ends (#6630). Both clients now call this one function.
+ *
+ * Gated on `content === ''` so a reconnect-replayed response (already populated)
+ * is never shifted. Returns the new array, or `null` when there is nothing to do
+ * (no such slot, already last, or not an empty response).
+ */
+export function moveEmptyResponseSlotToEnd(
+  messages: readonly ChatMessage[],
+  deltaId: string,
+): ChatMessage[] | null {
+  const idx = messages.findIndex((m) => m.id === deltaId)
+  if (idx < 0 || idx >= messages.length - 1) return null
+  const slot = messages[idx]!
+  if (slot.type !== 'response' || slot.content !== '') return null
+  return [...messages.slice(0, idx), ...messages.slice(idx + 1), slot]
 }
 
 /**

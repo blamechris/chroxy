@@ -398,7 +398,7 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
         // `_seq` → `historySeq` map (#7454) and the `result` → `agent_idle`
         // synthesis (#7459 / #4628) — come from ws-history.js's shared emitter
         // rather than a copy that can drift away from it again.
-        sendHistoryEntry(send, ws, targetId, entry)
+        sendHistoryEntry(send, ws, targetId, entry, client)
       }
     },
     onDone: () => {

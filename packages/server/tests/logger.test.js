@@ -587,6 +587,22 @@ describe('redactSensitive (#1849)', () => {
     assert.ok(result.includes('[REDACTED]'))
   })
 
+  // #6630 / #8416: quoted keys and quoted values (a JSON property), including JSON
+  // that sits inside a string with its quotes backslash-escaped.
+  it('redacts quoted keys and quoted values', () => {
+    const rows = [
+      ['{"token":"abcdefgh12345678"}', 'abcdefgh12345678'],
+      ['{"password":"Abcdefgh!Secret"}', 'Abcdefgh!Secret'],
+      [String.raw`body={\"password\":\"x!y z-secret\"}`, 'x!y z-secret'],
+      ["{'secret': 'p@ss w0rd!'}", 'p@ss w0rd!'],
+    ]
+    for (const [text, secret] of rows) {
+      const result = redactSensitive(text)
+      assert.ok(!result.includes(secret), `leaked: ${result}`)
+      assert.ok(result.includes('[REDACTED]'))
+    }
+  })
+
   it('passes through normal messages unchanged', () => {
     const msg = 'Session s1 ready: model claude-sonnet'
     assert.equal(redactSensitive(msg), msg)

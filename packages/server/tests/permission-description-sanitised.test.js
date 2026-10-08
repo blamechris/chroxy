@@ -60,6 +60,10 @@ const ESCAPED_PREFIXES = ['\n', '\t', '\r', '\u0000'].flatMap((c) => [
 // A credential inside a long string VALUE, starting about 85 characters in.
 const VALUE_STRADDLING = { note: `${'a'.repeat(85)} ${HOOK_URL}` }
 const KEY_CASES = [KEYED_SECRET, KEYED_STRADDLING, KEYED_OVERSIZE, VALUE_STRADDLING, ...ESCAPED_PREFIXES]
+// The masked field as the description shows it. The description's final scan
+// (the shared redactor, which now also masks a QUOTED key's quoted value, #8443)
+// may drop the placeholder's own quotes: `"password": [REDACTED]`.
+const MASKED_PASSWORD = /"password":\s*"?\[REDACTED\]"?/
 const OWN_TRUNCATED_FIELD = { _truncated: true, id: 'resource-123' }
 
 function assertNoHookToken(text, label) {
@@ -93,7 +97,7 @@ describe('describeToolInput (#8384)', () => {
   it('serializes the sanitized input, so a masked field reads the same as in `input`', () => {
     const text = describeToolInput(NO_NAMED_FIELD)
     assertNoSecret(text, 'description')
-    assert.ok(text.includes('"password":"[REDACTED]"'), 'the masked field is shown masked')
+    assert.ok(MASKED_PASSWORD.test(text), 'the masked field is shown masked')
   })
 
   it('redacts before it clips', () => {
@@ -120,6 +124,12 @@ describe('describeToolInput (#8384)', () => {
     const text = describeToolInput(KEYED_OVERSIZE)
     assertNoHookToken(text, 'description')
     assert.ok(text.length <= 200)
+  })
+
+  it('masks a short quoted value behind a quoted credential-named key (the shared redactor, #8443)', () => {
+    const text = describeToolInput({ api_token: 'short1', host: 'example.com' })
+    assert.ok(!text.includes('short1'), text)
+    assert.ok(text.includes('example.com'), text)
   })
 
   it('describes an input that carries its own _truncated field by its content', () => {
@@ -181,6 +191,11 @@ describe('in-process producer: PermissionManager.handlePermission (claude-sdk, c
     }
   })
 
+  it('masks a short quoted value behind a quoted credential-named key', () => {
+    const { payload } = raiseOn(pm, 'CustomTool', { api_token: 'short1', host: 'example.com' })
+    assert.ok(!payload.description.includes('short1'), payload.description)
+  })
+
   it('describes an input with its own _truncated field by its content', () => {
     const { payload } = raiseOn(pm, 'CustomTool', OWN_TRUNCATED_FIELD)
     assert.ok(payload.description.includes('resource-123'), payload.description)
@@ -202,7 +217,7 @@ describe('in-process producer: PermissionManager.handlePermission (claude-sdk, c
   it('masks the field in the description exactly as it is masked in `input`', () => {
     const { payload } = raiseOn(pm, 'CustomTool', NO_NAMED_FIELD)
     assert.equal(payload.input.password, '[REDACTED]')
-    assert.ok(payload.description.includes('"password":"[REDACTED]"'), payload.description)
+    assert.ok(MASKED_PASSWORD.test(payload.description), payload.description)
   })
 
   it('still describes a call by its identifying field', () => {
@@ -387,7 +402,7 @@ describe('hook-routed producer: ws-permissions.js (claude-cli, claude-tui) (#838
   it('masks the field in the description exactly as it is masked in `input`', async () => {
     const { message } = await raise('tui', NO_NAMED_FIELD)
     assert.equal(message.input.password, '[REDACTED]')
-    assert.ok(message.description.includes('"password":"[REDACTED]"'), message.description)
+    assert.ok(MASKED_PASSWORD.test(message.description), message.description)
   })
 
   it('still describes a call by its identifying field', async () => {

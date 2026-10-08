@@ -80,6 +80,17 @@ describe('hasUnsavedWork — the DOM scan', () => {
     expect(hasUnsavedWork()).toBe(false)
   })
 
+  // #8385 — an ephemeral query box opts out; nothing else does.
+  it('a filled input marked data-unsaved-ignore does not count', () => {
+    body('<input type="text" value="api" data-unsaved-ignore>')
+    expect(hasUnsavedWork()).toBe(false)
+  })
+
+  it('the opt-out is per field: a filled real form input beside an ignored one still counts', () => {
+    body('<input type="text" value="api" data-unsaved-ignore><form><input type="text" value="half-filled"></form>')
+    expect(hasUnsavedWork()).toBe(true)
+  })
+
   it('a registered probe counts, and unregistering removes it', () => {
     const off = registerUnsavedWorkProbe(() => true)
     expect(hasUnsavedWork()).toBe(true)

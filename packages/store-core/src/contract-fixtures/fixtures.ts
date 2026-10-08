@@ -417,17 +417,14 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
   {
-    // NOTE the explicit `isIdle` assertion rather than `noop: true`. `noop` checks
-    // for keys a handler ADDED to a seeded session; it cannot see a same-key
-    // OVERWRITE, so on a field the fixture itself seeds it is satisfied by the
-    // very mutation these rows exist to catch — measured, not assumed: the
-    // isBusy-coercion mutant left this row green. Harness fix tracked in #7531;
-    // assert the value until then.
+    // `noop` here is load-bearing: the seeded `isIdle` is the very field a
+    // fallback-to-active mutant would overwrite, and `noop` compares seeded VALUES
+    // (#7531), not just added keys, so it goes red on that overwrite.
     name: 'session_activity does NOT fall back to the active session without a sessionId',
     type: 'session_activity',
     init: { activeSessionId: 'active', sessions: { active: { isIdle: true } } },
     message: { type: 'session_activity', isBusy: true, lastCost: null },
-    expect: { sessions: { active: { isIdle: true } }, added: [] },
+    expect: { noop: true },
   },
   {
     // Truthy arm: `!'yes'` is false, so a coercing handler marks an IDLE session
@@ -438,7 +435,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     type: 'session_activity',
     init: { sessions: { s1: { isIdle: true } } },
     message: { type: 'session_activity', sessionId: 's1', isBusy: 'yes', lastCost: null },
-    expect: { sessions: { s1: { isIdle: true } }, added: [] },
+    expect: { noop: true },
   },
   {
     // Falsy arm: `!null` is true, so a coercing handler "heals" a genuinely BUSY
@@ -447,7 +444,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     type: 'session_activity',
     init: { sessions: { s1: { isIdle: false } } },
     message: { type: 'session_activity', sessionId: 's1', isBusy: null, lastCost: null },
-    expect: { sessions: { s1: { isIdle: false } }, added: [] },
+    expect: { noop: true },
   },
 
   // 3b. model_changed (#5618) — set the target session's activeModel. Reconciled
@@ -2751,6 +2748,111 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
         'same shared string (PERMISSION_ALREADY_ANSWERED_NOTICE) to the transcript (#7380). ' +
         'Hence one extra system message on the app side and an infoNotifications entry on the ' +
         'dashboard side.',
+    },
+  },
+  {
+    // #8374 — the stale-response race. Mobile sends Allow while desktop presses Stop; Stop
+    // wins at the server, and mobile then gets permission_expired for its stale
+    // response. A stopped record carries no `answered` token (Stop is not a user
+    // decision), so the answered-gate misses it and the card gained "(Expired — …)"
+    // while the replayed record has no such text.
+    //
+    // MUTATION THAT MUST GO RED: drop `hasPermissionOutcomeRecord` from either
+    // client's permission_expired handler and that client appends the expired
+    // suffix to the finished record -- text a replay then removes.
+    name: 'permission_expired leaves a stopped outcome record untouched, with no reassurance either',
+    type: 'permission_expired',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              permissionOutcome: 'stopped',
+              expiresAt: 1,
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'permission_expired',
+      requestId: 'req-1',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+            },
+          ],
+        },
+      },
+      // No decision was made, so nothing was "already recorded": neither the
+      // dashboard's toast nor the app's transcript line applies.
+      infoNotifications: [],
+    },
+  },
+  {
+    // #8374 — a late permission_expired on a record the replay already ended as
+    // `expired` must not decorate it a second time either.
+    //
+    // MUTATION THAT MUST GO RED: drop `hasPermissionOutcomeRecord` from either
+    // client's permission_expired handler and that client appends the expired
+    // suffix to the finished record -- text a replay then removes.
+    name: 'permission_expired leaves an expired outcome record untouched, with no reassurance either',
+    type: 'permission_expired',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              permissionOutcome: 'expired',
+              expiresAt: 1,
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'permission_expired',
+      requestId: 'req-1',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+            },
+          ],
+        },
+      },
+      // No decision was made, so nothing was "already recorded": neither the
+      // dashboard's toast nor the app's transcript line applies.
+      infoNotifications: [],
     },
   },
   {

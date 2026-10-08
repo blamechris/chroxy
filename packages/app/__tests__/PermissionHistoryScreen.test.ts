@@ -69,6 +69,15 @@ describe('PermissionHistoryScreen component structure', () => {
     expect(src).toMatch(/answered/)
   })
 
+  test('#8374: a Stop-cancelled prompt is its own status, derived before pending/expired', () => {
+    const derive = src.slice(src.indexOf('function deriveStatus'), src.indexOf('function formatDecisionTime'))
+    const stoppedAt = derive.indexOf("permissionOutcome === 'stopped'")
+    expect(stoppedAt).toBeGreaterThan(-1)
+    expect(stoppedAt).toBeLessThan(derive.indexOf('!msg.answered'))
+    expect(src).toMatch(/stopped: \{ label: 'Stopped'/)
+    expect(src).toMatch(/\{ key: 'stopped', label: 'Stopped' \}/)
+  })
+
   test('sorts permissions newest first', () => {
     expect(src).toMatch(/sort.*b\.message\.timestamp - a\.message\.timestamp/)
   })

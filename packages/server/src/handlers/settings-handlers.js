@@ -617,7 +617,14 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // etc.) reflects the new standing grant without a reconnect. The manager
   // updated its in-memory persistent set synchronously during respondToPermission,
   // so getPersistentPermissionRules() already includes it.
-  if (decision === 'allowAlways' && result.sessionId) {
+  //
+  // #8398: gated on `via === 'sdk'`, as POST /permission-response is. A legacy
+  // dispatch (an unmapped HTTP-held prompt, or a hook-routed one) has no
+  // PermissionManager or rule store behind it, so an `allowAlways` there persists
+  // nothing and the rules did not change. For an UNMAPPED prompt `result.sessionId`
+  // is also only the answerer's dispatch fallback (#8359), so the frame would be a
+  // wasted refresh of an unrelated session's unchanged rules.
+  if (decision === 'allowAlways' && result.via === 'sdk' && result.sessionId) {
     const rulesEntry = ctx.sessions.sessionManager?.getSession?.(result.sessionId)
     const rulesSession = rulesEntry?.session
     if (rulesSession && typeof rulesSession.getPersistentPermissionRules === 'function') {

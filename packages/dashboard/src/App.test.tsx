@@ -147,6 +147,17 @@ vi.mock('./utils/native-notifications', async (importOriginal) => ({
     sendNativeNotificationMock(title, options),
 }))
 
+// #8385 — the image-paste path decodes and re-encodes through a canvas, which JSDOM
+// does not implement. Stub only that step; everything downstream (App's
+// appendImageAttachments, the attachment state, the unsaved-work probe) is real.
+vi.mock('./utils/image-utils', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./utils/image-utils')>()),
+  processImageFiles: async () => ({
+    accepted: [{ type: 'image' as const, mediaType: 'image/png', data: 'AAAA', name: 'shot.png' }],
+    rejected: [],
+  }),
+}))
+
 vi.mock('./components/StdinDisabledBanner', () => ({
   StdinDisabledBanner: (props: {
     visible: boolean
@@ -424,6 +435,34 @@ describe('App', () => {
       stateOverrides = { ...two, activeSessionId: 's2' }
       rerender(<App />)
       expect((screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement).value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+
+    // #8385 — App passes `fileAttachments` / `imageAttachments` into
+    // composerHasUnsavedWork. The unit tests cover each clause of that function; these
+    // two pin the WIRING, so replacing either argument with `[]` goes red. The textarea
+    // is empty when checked, so the DOM scan cannot be what answers.
+    it('a staged file attachment counts (and blocks the auto-reload)', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1', filePickerFiles: [{ path: 'src/index.ts', size: 10 }] }
+      render(<App />)
+      const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+      fireEvent.change(box, { target: { value: '@' } })
+      fireEvent.click(await screen.findByRole('option', { name: /src\/index\.ts/ }))
+      fireEvent.change(box, { target: { value: '' } })
+      expect(box.value).toBe('')
+      expect(hasUnsavedWork()).toBe(true)
+    })
+
+    it('a staged image attachment counts (and blocks the auto-reload)', async () => {
+      const { hasUnsavedWork } = await import('./utils/unsaved-work')
+      stateOverrides = { ...two, activeSessionId: 's1' }
+      render(<App />)
+      const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+      const png = new File([new Uint8Array([1, 2, 3])], 'shot.png', { type: 'image/png' })
+      fireEvent.paste(box, { clipboardData: { getData: () => '', items: [], files: [png] } })
+      await screen.findByTestId('image-thumbnails')
+      expect(box.value).toBe('')
       expect(hasUnsavedWork()).toBe(true)
     })
 
@@ -4118,6 +4157,139 @@ describe('#7535 — the OS turn-complete notification click applies no half-swit
     // ...and it must not blank the content area, since activeSessionId never
     // changes and nothing would ever clear the flag (#7475's wedge).
     expect(screen.queryByTestId('session-loading-skeleton')).not.toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #7538 — a Control Room session jump LEAVES the Control Room
+// ---------------------------------------------------------------------------
+/**
+ * The orchestration Runs tab and the mission-control tab render INSIDE the
+ * Control Room, which owns the whole main area (`controlRoomActive` is local App
+ * state). Both used to call the store's `switchSession` directly, so a click on
+ * "Open session" on a live node changed `activeSessionId` underneath and left the
+ * operator on the Runs tab: the button reported success by doing nothing visible.
+ *
+ * They now go through App's `handleSwitchSession`, the handler every other
+ * operator-aimed jump uses, which closes the Control Room on a successful switch
+ * (#5204/#7535). These are App-level cells because nothing below App can see
+ * `controlRoomActive`; the wiring is pinned separately in
+ * `components/SwitchSessionCallSites.test.tsx`.
+ */
+describe('#7538 — an orchestration node\'s "Open session" leaves the Control Room', () => {
+  const SESSION = (id: string, name: string) => ({
+    sessionId: id, name, cwd: '/tmp/work', type: 'cli' as const, hasTerminal: true,
+    model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null,
+  })
+  const ALPHA = SESSION('s1', 'Alpha')
+  const BETA = SESSION('s2', 'Beta')
+  const USAGE = {
+    inputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheCreationTokens: 0,
+    costUsd: 0.1, pricedCostUsd: 0, effectiveUsd: 0.1234, unknownCostTurns: 0,
+  }
+  const node = (nodeId: string, sessionId: string | null) => ({
+    nodeId, runId: 'run_1', title: `Audit ${nodeId}`, role: 'worker.audit',
+    provider: 'codex', model: 'm', status: 'done', attempt: 0, committeeIterations: 0,
+    sessionId, worktreePath: null, branch: null, planSummary: null,
+    resultSummary: null, usage: USAGE, createdAt: 1000, updatedAt: 1500,
+  })
+  const runDetail = (nodes: ReturnType<typeof node>[]) => ({
+    runId: 'run_1', title: 'Repo audit', preset: 'repo-audit', status: 'done', cwd: '/repo',
+    epicPromptPreview: 'Audit', epicPrompt: 'Audit the repo thoroughly',
+    architect: { provider: 'claude-sdk', model: 'fable' },
+    budget: { capUsd: 5, spentUsd: 0.1234, state: 'ok' }, usage: USAGE,
+    nodeCounts: { total: nodes.length, running: 0, done: nodes.length, failed: 0 },
+    pendingUserGates: 0, createdAt: 1000, updatedAt: 2000,
+    nodes, gates: [], timeline: [],
+    usageRollup: { total: USAGE, byRole: {}, byModel: {} },
+    meteringGaps: [],
+  })
+
+  /** The store door's contract: the already-active id is accepted, anything else must be listed. */
+  function realisticSwitchSession() {
+    return vi.fn((sessionId: string) => {
+      const s = stateOverrides as { sessions?: { sessionId: string }[]; activeSessionId?: string | null }
+      if (sessionId === s.activeSessionId) return true
+      return (s.sessions ?? []).some((x) => x.sessionId === sessionId)
+    })
+  }
+
+  function runsStore(nodes: ReturnType<typeof node>[], over: Record<string, unknown> = {}) {
+    const detail = runDetail(nodes)
+    return {
+      connectionPhase: 'connected',
+      sessions: [ALPHA, BETA],
+      activeSessionId: 's2',
+      serverCapabilities: { orchestration: true },
+      orchestrationRuns: { generatedAt: new Date(1_800_000_000_000).toISOString(), runs: [detail], error: null },
+      orchestrationRunsLoading: false,
+      orchestrationRunDetails: { run_1: { detail, seq: 3 } },
+      orchestrationRunDetailLoading: new Set<string>(),
+      orchestrationRunDetailErrors: {},
+      orchestrationRunDetailStale: {},
+      orchestrationPendingActions: {},
+      orchestrationActionResults: {},
+      selectedRunId: 'run_1',
+      requestOrchestrationRuns: vi.fn(() => true),
+      requestOrchestrationRunDetail: vi.fn(() => true),
+      selectRun: vi.fn(),
+      switchSession: realisticSwitchSession(),
+      ...over,
+    }
+  }
+
+  beforeEach(() => {
+    // The Control Room restores its last tab from localStorage; landing on Runs
+    // directly keeps this cell about the jump rather than about tab navigation.
+    try { localStorage.setItem('chroxy_cr_tab', 'runs') } catch { /* jsdom always provides localStorage */ }
+  })
+  afterEach(() => {
+    try { localStorage.removeItem('chroxy_cr_tab') } catch { /* jsdom always provides localStorage */ }
+  })
+
+  function openControlRoom() {
+    fireEvent.click(screen.getByTestId('sidebar-panel-slot-launcher-control-room'))
+    expect(screen.getByTestId('control-room-main')).toBeInTheDocument()
+  }
+
+  it('a LIVE node: the click switches the session AND closes the Control Room', () => {
+    stateOverrides = runsStore([node('st_a', 's1')])
+    render(<App />)
+    openControlRoom()
+    // Positive control: the Runs tab really rendered the live node's button, so
+    // the cell cannot pass by never finding anything to click.
+    const button = screen.getByTestId('orch-node-open-session')
+    fireEvent.click(button)
+    expect((stateOverrides as { switchSession: ReturnType<typeof vi.fn> }).switchSession)
+      .toHaveBeenCalledWith('s1')
+    expect(
+      screen.queryByTestId('control-room-main'),
+      'the session switched underneath and the operator is still looking at the Runs tab (#7538)',
+    ).not.toBeInTheDocument()
+  })
+
+  it('the #7536 membership gate still holds: a dead node offers no button and the Control Room stays', () => {
+    stateOverrides = runsStore([node('st_a', 's_gone')])
+    render(<App />)
+    openControlRoom()
+    expect(screen.queryByTestId('orch-node-open-session')).toBeNull()
+    expect(screen.getByTestId('orch-node-session-gone')).toBeInTheDocument()
+    expect(screen.getByTestId('control-room-main')).toBeInTheDocument()
+    expect((stateOverrides as { switchSession: ReturnType<typeof vi.fn> }).switchSession).not.toHaveBeenCalled()
+  })
+
+  it('a node whose session closes between render and click does not half-apply (#7535 still holds)', () => {
+    const switchSession = realisticSwitchSession()
+    stateOverrides = runsStore([node('st_a', 's1')], { switchSession })
+    render(<App />)
+    openControlRoom()
+    const button = screen.getByTestId('orch-node-open-session')
+    // The roster moves on after the render the button came from; the handler's
+    // boolean is what decides, so a refused jump leaves the Control Room open.
+    stateOverrides = { ...stateOverrides, sessions: [BETA] }
+    fireEvent.click(button)
+    expect(switchSession).toHaveReturnedWith(false)
+    expect(screen.getByTestId('control-room-main')).toBeInTheDocument()
   })
 })
 

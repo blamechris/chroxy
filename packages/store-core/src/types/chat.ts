@@ -96,11 +96,13 @@ export interface ChatMessageQuestion {
 
 /**
  * #8348 — how a permission prompt ended, as the server records it in history:
- * answered `allowed` / `denied`, or `expired` (no decision: it timed out, the
- * turn ended or was stopped, or the session cleared it). Mirrors
- * `PermissionOutcomeSchema` on the wire (`@chroxy/protocol`).
+ * answered `allowed` / `denied`, `stopped` (#8374: the user pressed Stop while it
+ * was open), or `expired` (no decision: it timed out, the turn ended, or the
+ * session cleared it). `stopped` and `expired` are both decision-less: neither
+ * carries an `answered` token. Mirrors `PermissionOutcomeSchema` on the wire
+ * (`@chroxy/protocol`).
  */
-export type PermissionOutcomeKind = 'allowed' | 'denied' | 'expired';
+export type PermissionOutcomeKind = 'allowed' | 'denied' | 'expired' | 'stopped';
 
 export interface ChatMessage {
   id: string;

@@ -336,6 +336,76 @@ describe('ContainersStatusSection — lifecycle actions (#6134)', () => {
       expect(screen.queryByTestId('confirm-dialog')).toBeNull()
     })
 
+    describe('driven by the refusal, not the snapshot row (#7594)', () => {
+      const goneRefusal = {
+        'env-gone': {
+          action: 'destroy',
+          status: null,
+          error: 'Environment "gone" has 1 live session(s) running (sess-a).',
+          liveSessions: true,
+          at: 1,
+        },
+      }
+
+      it('a refusal whose container has left the survey still offers Force, with feedback', () => {
+        // The survey (env-1..env-3) no longer lists env-gone, so no row — and no
+        // row-level Force — exists for it. The refusal is keyed by id, so the
+        // section surfaces it on its own instead of going silent.
+        const onAction = renderWith({ actionResults: goneRefusal })
+        const notice = screen.getByTestId('container-gone-env-gone')
+        expect(notice.textContent).toContain('no longer in the latest survey')
+        expect(notice.textContent).toContain('live session')
+
+        fireEvent.click(screen.getByTestId('container-force-destroy-env-gone'))
+        expect(screen.getByTestId('confirm-dialog')).toBeTruthy()
+        expect(screen.getByTestId('confirm-dialog').textContent).toContain('no longer in the latest survey')
+        expect(onAction).not.toHaveBeenCalled()
+        fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+        expect(onAction).toHaveBeenCalledWith('env-gone', 'destroy', true)
+      })
+
+      it('the open Force confirm survives a refresh that drops the row, and still escalates', () => {
+        const onAction = vi.fn()
+        const props = {
+          loading: false,
+          connected: true,
+          onRefresh: () => {},
+          actioningIds: new Set<string>(),
+          actionResults: refusal,
+          onAction,
+        }
+        const { rerender } = render(<ContainersStatusSection snapshot={snapshot()} {...props} />)
+        fireEvent.click(screen.getByTestId('container-force-destroy-env-1'))
+        expect(screen.getByTestId('confirm-dialog').textContent).toContain('web')
+
+        // A survey refresh lands while the dialog is open and drops env-1.
+        const without = snapshot()
+        rerender(
+          <ContainersStatusSection
+            {...props}
+            snapshot={{ ...without, containers: without.containers.filter((c) => c.id !== 'env-1') }}
+          />,
+        )
+        const dialog = screen.getByTestId('confirm-dialog')
+        expect(dialog.textContent).toContain('no longer in the latest survey')
+        fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+        expect(onAction).toHaveBeenCalledWith('env-1', 'destroy', true)
+      })
+
+      it('shows no gone-notice for a refusal whose container is still listed (negative control)', () => {
+        renderWith({ actionResults: refusal })
+        expect(screen.queryByTestId('container-gone-env-1')).toBeNull()
+      })
+
+      it('an ordinary failure for a departed container raises no Force notice (negative control)', () => {
+        renderWith({
+          actionResults: { 'env-gone': { action: 'destroy', status: null, error: 'boom', liveSessions: false, at: 1 } },
+        })
+        expect(screen.queryByTestId('container-gone-env-gone')).toBeNull()
+        expect(screen.queryByTestId('container-force-destroy-env-gone')).toBeNull()
+      })
+    })
+
     it('the plain Destroy confirm still dispatches WITHOUT force (negative control)', () => {
       const onAction = renderWith()
       fireEvent.click(screen.getByTestId('container-destroy-env-1'))

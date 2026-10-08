@@ -389,3 +389,39 @@ describe('parity — claude-tui vs SDK/CLI (tool-result.js) wire shape', () => {
     assert.equal(bashResult, 'ok\n')
   })
 })
+
+// #8252: a repeated Read of an unchanged file. Claude Code answers with a marker
+// instead of the content, and the normaliser used to fall through to the
+// JSON.stringify floor and print the envelope.
+describe('normalizeClaudeTuiToolResponse — file_unchanged (#8252)', () => {
+  const FIXTURE = { type: 'file_unchanged', file: { filePath: '/Users/blamechris/Projects/chroxy/README.md' } }
+
+  it('Read: says the file is unchanged, with its path, not the JSON envelope', () => {
+    const result = normalizeClaudeTuiToolResponse('Read', FIXTURE)
+    assert.equal(result, 'File unchanged since it was last read (/Users/blamechris/Projects/chroxy/README.md)')
+    assert.equal(result.startsWith('{'), false)
+    assert.equal(result.includes('file_unchanged'), false)
+  })
+
+  it('is recognised by shape, whatever the tool name', () => {
+    assert.equal(
+      normalizeClaudeTuiToolResponse('mcp__fs__read', FIXTURE),
+      'File unchanged since it was last read (/Users/blamechris/Projects/chroxy/README.md)',
+    )
+  })
+
+  it('drops the parenthetical when there is no path rather than printing an empty one', () => {
+    assert.equal(normalizeClaudeTuiToolResponse('Read', { type: 'file_unchanged' }), 'File unchanged since it was last read')
+    assert.equal(normalizeClaudeTuiToolResponse('Read', { type: 'file_unchanged', file: {} }), 'File unchanged since it was last read')
+    assert.equal(normalizeClaudeTuiToolResponse('Read', { type: 'file_unchanged', file: { filePath: 7 } }), 'File unchanged since it was last read')
+  })
+
+  it('POSITIVE CONTROL: an ordinary Read still returns the file body', () => {
+    const body = normalizeClaudeTuiToolResponse('Read', { type: 'text', file: { filePath: '/a', content: 'hello' } })
+    assert.equal(body, 'hello')
+  })
+
+  it('POSITIVE CONTROL: some other unknown type still falls to the JSON floor', () => {
+    assert.equal(normalizeClaudeTuiToolResponse('Read', { type: 'something_else' }), '{"type":"something_else"}')
+  })
+})

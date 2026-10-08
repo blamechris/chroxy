@@ -2643,7 +2643,11 @@ rounding up to "all six", because the distinction is the point of this
 catalogue: those two were not *defended*, they were *unreachable*, and the
 accident that made them safe disappears the moment #7284 is fixed by adding a
 create disposition. A guard whose current safety is supplied by a neighbouring
-bug is the same false safety one layer over.
+bug is the same false safety one layer over. (#7284 part 1 has since landed, and it
+did not add a create disposition: the win32 branch of `openNoFollow` opens
+without `O_TRUNC` and truncates the fd it has just identity-checked, so the two
+write sites are now defended rather than unreachable, and a refused open
+truncates nothing.)
 
 **Why no test could go red.** Each site's refusal is observed through its ELOOP
 branch. With the flag gone the open SUCCEEDS, so the ELOOP branch is
@@ -2872,3 +2876,54 @@ neither is followed by `#`. Not live-exploitable against the catalogue this
 PR shipped (the only site-scoped entries, `claude-tui-session.js`'s
 `_spawnPty` trio, have no second callee in scope to collide with) — a defect
 in the matching primitive itself, caught before anything relied on it.
+
+### 37. The no-op assertion that allowed every key it had seeded — `#7531`
+
+The store-core contract harness (`packages/store-core/src/contract-fixtures/`)
+drives each wire message through both clients' adapters and checks the result
+against a fixture's `expect`. A fixture that declares `noop: true` asserts the
+handler changed nothing. The assertion was: no flat writes, no added messages,
+and, per session, no key outside `{ sessionId, messages, ...Object.keys(seeded) }`.
+
+That last allowlist is built from the keys the fixture itself seeded. So the
+check answered "did the handler ADD a field?" and never "did the handler CHANGE
+a field?" — and a fixture can only exercise a handler through state it has
+seeded, which is exactly the state a mutated handler overwrites. The two
+outcomes, "left untouched" and "rewrote the seeded value", were the same
+observable result: green.
+
+Found while hardening `#7518`: a mutant relaxing `typeof msg.isBusy !==
+'boolean'` to `msg.isBusy === undefined` made `session_activity` write
+`isIdle: !'yes'` onto a session seeded with `isIdle: true`. The handler's unit
+test went red. The `noop` fixture written to kill that mutant stayed green. The
+`#7518` fixtures were switched to explicit value assertions, which killed both
+mutants but left the harness hole open for every other `noop` row. That is
+entry 11's relative one step along: not a check broken enough to satisfy its own
+adversarial tests, but a check whose allowlist was derived from the thing it
+was checking (entry 21's shape, at the scale of one assertion).
+
+The fix (`assertExpectation`, `contract.test.ts`) builds the session baseline
+the adapter built — `{ sessionId, messages: [], ...seed }` — and asserts every
+baseline key still deep-equals its seeded value, keeping the added-key check
+for the opposite miss. It also asserts a seeded session still EXISTS: the loop
+over `result.sessions` could never visit one a handler had removed.
+
+Run against every existing `noop` expectation (plain and per-client `divergent`) it found none resting on the hole, so no
+fixture changed meaning. The three `#7518` rows that were workarounds went back
+to `noop: true`.
+
+**Proof.** Driven mutation stubs in `contract.test.ts` ("noop fixtures see a
+same-key overwrite") cover an overwrite to a different value, to a falsy
+value, of a deep value, an added key, a removed session and a rewritten shell,
+each paired with a control that passes (a `noop` that denied everything would
+satisfy every `toThrow`). On the real handler: the isBusy-coercion mutant left
+the contract suite green under the old assertion (130/130) and reds the truthy
+and falsy rows under the new one. The active-session-fallback mutant was
+caught by the old assertion only through the dashboard's flat mirror
+(`expected no flat writes`); the app-side run was green, and under the new
+assertion the app run fails on the overwritten `isIdle` first.
+
+**Guard against it:** when an assertion's allowlist or baseline is computed
+from the fixture's own inputs, ask what a mutation of those inputs would look
+like to it. A no-op check should compare against a snapshot of the starting
+state, not against the vocabulary of the starting state.

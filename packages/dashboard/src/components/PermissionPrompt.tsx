@@ -38,6 +38,7 @@ import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
 import { PermissionCommandEdit, isEditableCommandTool } from './PermissionCommandEdit'
 import { ASK_USER_QUESTION_TOOL, AskUserQuestionPermissionBody, askUserQuestionSummary } from './AskUserQuestionPermissionBody'
 import { PermissionOutcomeRecord } from './PermissionOutcomeRecord'
+import { stripExpiredNote } from '../utils/stripExpiredNote'
 
 // #7939: which of the three MCP config scopes a spawn-trust server came from
 // (mirrors MCP_SERVER_SOURCE in packages/server/src/byok-mcp-config.js and
@@ -84,16 +85,6 @@ export interface PermissionPromptProps {
    * already has on the message, not a second network round trip).
    */
   toolInput?: Record<string, unknown>
-}
-
-/**
- * #7353 — the expired-permission handler appends its own
- * `\n(Expired — …)` note to the prompt's stored content (message-handler.ts,
- * `permission_expired`). The compact "dropped" record states the outcome
- * itself, so that trailing note is stripped rather than shown twice.
- */
-function stripExpiredNote(description: string): string {
-  return description.replace(/\n\(Expired[^\n]*\)\s*$/, '')
 }
 
 function formatCountdown(ms: number): string {

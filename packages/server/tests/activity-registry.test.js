@@ -267,6 +267,7 @@ describe('ActivityRegistry — blocked (permission / question)', () => {
       { requestId: 'r', decision: 'deny' },
       { requestId: 'r', reason: 'timeout' },
       { requestId: 'r', reason: 'aborted' },
+      { requestId: 'r', reason: 'stopped' }, // #8374: a user Stop is a failed node too
     ]) {
       const { r, deltas } = makeRegistry()
       r.onPermissionRequest({ requestId: 'r', tool: 'Bash' })

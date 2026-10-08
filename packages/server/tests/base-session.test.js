@@ -1960,6 +1960,17 @@ describe('BaseSession', () => {
         assert.deepEqual(s._getTrackedToolInput('toolu_2'), {})
       })
 
+      // #8371: the history owner is told as soon as the input is known.
+      it('emits tool_input_recorded with the SANITIZED input for a tracked id only (#8371)', () => {
+        const seen = []
+        s.on('tool_input_recorded', (d) => seen.push(d))
+        s._trackToolStart('toolu_1', 'Bash')
+        s._recordToolInput('toolu_1', { token: 'sk-ant-api03-' + 'a'.repeat(48), command: 'ls' })
+        s._recordToolInput('toolu_untracked', { command: 'ls' })
+        s._recordToolInput('toolu_1', null)
+        assert.deepEqual(seen, [{ toolUseId: 'toolu_1', input: { token: '[REDACTED]', command: 'ls' } }])
+      })
+
       it('returns the sanitized value directly (so callers do not need a redundant _getTrackedToolInput round-trip)', () => {
         s._trackToolStart('toolu_1', 'Bash')
         const returned = s._recordToolInput('toolu_1', { token: 'sk-ant-api03-' + 'a'.repeat(48) })

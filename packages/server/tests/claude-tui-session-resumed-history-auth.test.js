@@ -264,7 +264,7 @@ describe('ClaudeTuiSession — resumed history is not a login failure (#8223)', 
     s._appendToOutputTail(HISTORY_QUOTING_FOOTER)
     s._onPtyGone({ exitCode: 1, signal: null }, 'exit') // no active turn
     assert.equal(events.errors.some((e) => e.code === 'AUTH_REQUIRED'), false)
-    assert.ok(events.errors.some((e) => /Claude PTY exited/.test(e.message)))
+    assert.ok(events.errors.some((e) => e.message === 'Claude exited — restarting.'))
   })
 
   it('the gate leaves the TURN-time scans alone: a live footer printed during a turn still reads as logged out', () => {

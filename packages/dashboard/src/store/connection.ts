@@ -83,7 +83,7 @@ import {
   markServerConnected,
 } from './server-registry';
 import { armDaemonUpdateWatchdog, clearDaemonUpdateWatchdog } from './daemon-update-watchdog';
-import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyInFlightMarkers, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
+import { stripAnsi, filterThinking, nextMessageId, createEmptyConnectionScope, createEmptyDaemonSnapshots, createEmptyInFlightMarkers, createEmptyFlatSessionMirror, createEmptySessionState, isSessionListed } from './utils';
 import { registerSummarizeRequest, cancelSummarizeRequest, rejectAllSummarizeRequests } from './summarizeRequests';
 import { armSchedulerRequest, failAllSchedulerRequests, SCHEDULER_DISCONNECT_ERROR } from './scheduledTaskRequests';
 import { formatQuestionAnswerSummary } from '../utils/questionAnswerSummary';
@@ -516,6 +516,37 @@ function staleInFlightMarkers(get: () => ConnectionState): Partial<ConnectionSta
     if (!isEmptyInFlightMarker(state[key])) patch[key] = empty;
   }
   return patch as Partial<ConnectionState>;
+}
+
+/**
+ * #7592 — the module-level, connection-scoped trackers that live OUTSIDE the
+ * store (in `message-handler.ts` / store-core) and so are not reached by any
+ * `set({ … })` roster spread: the outgoing message queue, the replay baseline
+ * AND history cursors, the in-flight transcript fetch (and its watchdog), the
+ * un-flushed streaming delta buffers, and the batched terminal writes.
+ *
+ * Called by exactly the two entry points that END a connection to this server
+ * for good: `disconnect()` and `_resetSessionMemory()` (the server-switch
+ * path, which runs `disconnect()` only when the phase is not already
+ * 'disconnected'). They were two hand-copied call lists that had already
+ * drifted once (#7578's review caught `clearDeltaBuffers` /
+ * `clearTerminalWriteBatching` missing from the second), so the set is one
+ * function now. A tracker added here is torn down on both; nothing else may
+ * name one of these calls inside either entry point
+ * (`connection-scoped-trackers.test.ts` enforces that, and that a new
+ * clear-/reset- call in `disconnect()` is classified rather than forgotten).
+ *
+ * Deliberately NOT called by `socket.onclose` / `onerror`: a transport drop
+ * KEEPS the history cursors (that is what makes a tunnel-blip reconnect a delta
+ * replay, #5555.3) and the queue (it drains on reconnect); `onclose` clears the
+ * replay window alone via `resetReplayReconcile()` without `clearCursors`.
+ */
+function clearConnectionScopedTrackers(): void {
+  clearMessageQueue();
+  resetReplayReconcile({ clearCursors: true });
+  resetTranscriptFetchTracking();
+  clearDeltaBuffers();
+  clearTerminalWriteBatching();
 }
 
 export const selectShowSession = (s: ConnectionState): boolean =>
@@ -1065,6 +1096,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   activeModel: null,
   availableProviders: [],
   environments: [],
+  environmentDestroyRefusals: {},
   // #7625: null = never asked; a snapshot with restores: [] = asked, nothing failed.
   failedRestores: null,
   failedRestoresLoading: false,
@@ -2900,12 +2932,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         console.warn(`[chroxy] Connection Failed: The server is still restarting. Try again later.`);
       },
       onAuthFailed: ({ reason }) => {
-        // The same end state the capped ladder reached (disconnected, saved
-        // connection cleared), but with the auth error rather than "Could not
-        // reach server", and after one probe instead of six.
+        // Stop and show the error, after one probe instead of six, but KEEP the saved
+        // connection (#8385). /health is unauthenticated, so a 401/403 is a proxy or
+        // an access gate that a sign-in or a config change on the user's side can
+        // lift — not proof the server is gone. The capped ladder's give-up still
+        // clears it, because six refusals in a row is the stronger signal.
         set({ connectionPhase: 'disconnected', connectionError: reason, reconnectRetryAt: null });
         console.warn(`[chroxy] Connection Failed: ${reason}`);
-        void get().clearSavedConnection();
       },
       onProbeGaveUp: () => {
         set({ connectionPhase: 'disconnected', connectionError: 'Could not reach server' });
@@ -3344,27 +3377,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
-    // #6863 — drop any in-flight transcript fetch tracking (and its watchdog)
-    // so a stale conversationId from before the disconnect can't intercept
-    // frames on a later, unrelated connection.
-    resetTranscriptFetchTracking();
-    // #5555.3/.4 — explicit disconnect is a hard reset: drop the replay
-    // baseline AND the history cursors so a later connect (possibly to a
-    // different server) starts from a full replay rather than presenting a
-    // stale cursor. (Tunnel-blip RECONNECTS keep cursors — they don't run
-    // disconnect(); auth_ok clears only the baseline.)
-    resetReplayReconcile({ clearCursors: true });
-    // Flush and clear any pending delta buffer
-    clearDeltaBuffers();
+    // #7592 — the module-level connection-scoped trackers, ONE helper shared
+    // with `_resetSessionMemory()`: the in-flight transcript fetch + watchdog
+    // (#6863: a stale conversationId must not intercept a later connection's
+    // frames), the replay baseline AND history cursors (#5555.3/.4: an explicit
+    // disconnect is a hard reset, so a later connect to a possibly different
+    // server starts from a full replay; tunnel-blip RECONNECTS keep cursors —
+    // they don't run disconnect(); auth_ok clears only the baseline), the
+    // pending delta buffers, the batched terminal writes, and the outgoing
+    // message queue.
+    clearConnectionScopedTrackers();
     // Clear permission boundary split tracking
     clearPermissionSplits();
-    // Clear terminal write batching
-    clearTerminalWriteBatching();
     // Clear encryption state (new connection = new keys = forward secrecy)
     setEncryptionState(null);
     setPendingKeyPair(null);
-    // Clear message queue on explicit disconnect
-    clearMessageQueue();
     // #8148: same sweep as socket.onclose (see `sweepTransientSessionState`'s
     // docstring). `disconnect()` nulls `socket.onclose` above to suppress
     // auto-reconnect, so onclose's sweep never runs on a user-initiated
@@ -3466,16 +3493,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       pendingPermissionConfirm: null,
   fileBrowserPendingOpen: null,
   workspaceSymbols: null,
-  workspaceSymbolsLoading: false,
   symbolLocation: null,
   codeSearchResults: null,
-  codeSearchLoading: false,
   referencesResult: null,
   referencesSymbol: '',
   referencesOpen: false,
-  referencesLoading: false,
   permissionAudit: null,
-  permissionAuditLoading: false,
   permissionAuditError: false,
   // #6996 review — mirror permissionAudit: memory_read is a FLAT,
   // per-session-cwd pull, so a reconnect must not leave a stale memory stack
@@ -3486,7 +3509,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   memoryStackEntries: null,
   memoryStackFile: null,
   memoryStackError: null,
-  memoryStackLoading: false,
   lastMemoryStackRequestId: null,
       _directoryListingCallback: null,
       _terminalWriteCallback: null,
@@ -3502,9 +3524,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       savedConnection: null,
       userDisconnected: true,
       viewingCachedSession: false,
-      conversationHistoryLoading: false,
       transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
-      searchLoading: false,
       searchQuery: '',
     });
   },
@@ -3651,6 +3671,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       credentialTestResults: {},
       pendingPairRequests: [],
       serverStartupLogs: null,
+      // #7579 — the daemon-SNAPSHOT roster: the primaries (`orchestrationRuns`,
+      // `scheduledTasks`, `credentialsStatus`, `byokCredentialsStatus`, their
+      // selections and error) whose satellites are cleared just above, and the
+      // Control Room survey readings. Without it a different-daemon `connect()`
+      // (this action is all it reaches, #8207) showed server A's run list and
+      // A's masked key previews beside B's empty satellites. Spread rather than
+      // spelled out so this site and `_resetSessionMemory` cannot drift. NOT in
+      // `disconnect()` and NOT in `auth_ok`'s non-reconnect branch — each member
+      // is still true of the same daemon across a Disconnect → Connect; see
+      // `createEmptyDaemonSnapshots()` for the per-field decisions.
+      ...createEmptyDaemonSnapshots(),
+      // #7625 — the failed-restore roster carries absolute host `cwd`s and
+      // session ids from the old daemon. `disconnect()` and `_resetSessionMemory`
+      // already null it; this site did not, though its own comment on the
+      // `disconnect()` literal calls the pair "BOTH full-reset sites". The
+      // transcript viewer is the same shape of omission: an overlay of a
+      // conversation pulled from the old daemon, nulled by the other two.
+      failedRestores: null,
+      transcriptViewer: EMPTY_TRANSCRIPT_VIEWER,
       // #8331: the queued update describes ONE daemon; never carry it to the next.
       daemonUpdate: null,
       daemonUpdateAction: null,
@@ -3677,7 +3716,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     setLastConnectedUrl(null);
     // #7578 — the module-level connection-scoped trackers that live in
     // message-handler.ts / store-core, not in the store roster spread below.
-    // `disconnect()` clears ALL FIVE (~L3120-3141), but `switchServer` /
+    // `disconnect()` clears ALL FIVE (via `clearConnectionScopedTrackers()`), but `switchServer` /
     // `connectLocal` run `disconnect()` only `if (connectionPhase !==
     // 'disconnected')`, and a FAILED CONNECT rests at exactly that phase with the
     // previous server's values intact — so a switch made from there reached
@@ -3695,10 +3734,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     //     and the batched TERMINAL WRITES: server A's partial bytes, held on a
     //     ~tens-of-ms coalescing timer, would otherwise flush into server B's
     //     session. Narrow, but `disconnect()` tears them down for this exact
-    //     reason and this action must mirror it (#7578 review; helper follow-on
-    //     #7592).
+    //     reason and this action must mirror it (#7578 review).
     // This is the streaming/queue class only. `disconnect()` clears MORE than
-    // these five — the pending-operation correlations (trust grants, model /
+    // the helper's five — the pending-operation correlations (trust grants, model /
     // permission-mode / thinking reverts, git one-shots, MCP ops, permission
     // splits) belong to the SOCKET teardown (`disconnect()` / onclose / onerror)
     // and are not mirrored here; the in-flight request marker STORE FIELDS (#7586)
@@ -3711,14 +3749,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // this action — so cursors stay retained and tunnel-blip delta replay is
     // unaffected; only the context-SWITCH paths reach here, all through
     // `retargetToServer`: `switchServer`, `connectLocal`, and (#7570) a
-    // `connectToServer` whose `wsUrl` differs from the store's. Keeping this set
-    // in lockstep with `disconnect()`'s teardown by hand is what #7592 (extract a
-    // shared helper) exists to remove.
-    clearMessageQueue();
-    resetReplayReconcile({ clearCursors: true });
-    resetTranscriptFetchTracking();
-    clearDeltaBuffers();
-    clearTerminalWriteBatching();
+    // `connectToServer` whose `wsUrl` differs from the store's. The set is ONE
+    // function shared with `disconnect()` (#7592), so it cannot drift from it.
+    clearConnectionScopedTrackers();
     set({
       // #7586 — every in-flight request marker, from the ONE roster
       // `socket.onclose` and `disconnect()` also take. FIRST in the payload on
@@ -3836,6 +3869,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       credentialTestResults: {},
       pendingPairRequests: [],
       serverStartupLogs: null,
+      // #7579 — the daemon-SNAPSHOT roster: the primaries (`orchestrationRuns`,
+      // `scheduledTasks`, `credentialsStatus`, `byokCredentialsStatus`, their
+      // selections and error) whose satellites are cleared just above, and the
+      // Control Room survey readings. Without it a different-daemon `connect()`
+      // (see `forgetSession`) showed server A's run list and
+      // A's masked key previews beside B's empty satellites. Spread rather than
+      // spelled out so this site and `_resetSessionMemory` cannot drift. NOT in
+      // `disconnect()` and NOT in `auth_ok`'s non-reconnect branch — each member
+      // is still true of the same daemon across a Disconnect → Connect; see
+      // `createEmptyDaemonSnapshots()` for the per-field decisions.
+      ...createEmptyDaemonSnapshots(),
       // #8331: the queued update describes ONE daemon; never carry it to the next.
       daemonUpdate: null,
       daemonUpdateAction: null,
@@ -5702,8 +5746,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'destroy_environment', environmentId };
       if (force) msg.force = true;
+      // #7594: a fresh attempt supersedes the last refusal — the daemon's next
+      // answer (a refusal again, or the destroy) is the one to act on.
+      get().dismissEnvironmentDestroyRefusal(environmentId);
       wsSend(socket, msg);
     }
+  },
+
+  dismissEnvironmentDestroyRefusal: (environmentId: string) => {
+    const refusals = get().environmentDestroyRefusals;
+    if (!(environmentId in refusals)) return;
+    const next = { ...refusals };
+    delete next[environmentId];
+    set({ environmentDestroyRefusals: next });
   },
 
   fetchConversationHistory: () => {

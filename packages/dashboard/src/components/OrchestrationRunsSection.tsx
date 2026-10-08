@@ -546,9 +546,19 @@ function NewRunModal({ onClose }: { onClose: () => void }) {
 export interface OrchestrationRunsSectionProps {
   /** Injectable clock for the "generated Nm ago" line. */
   now?: () => number
+  /**
+   * #7538 — the jump a node's "Open session" button performs. App passes its
+   * `handleSwitchSession`, which is the only thing that can LEAVE the Control Room
+   * (local App state) and latch the switching skeleton on a successful switch.
+   * The raw store `switchSession` is the fallback for a host that mounts the
+   * section without App; with it alone the session changes underneath and the
+   * operator is left on the Runs tab, so the button reports success by doing
+   * nothing visible.
+   */
+  onSwitchSession?: (sessionId: string) => void
 }
 
-export function OrchestrationRunsSection({ now = Date.now }: OrchestrationRunsSectionProps = {}) {
+export function OrchestrationRunsSection({ now = Date.now, onSwitchSession }: OrchestrationRunsSectionProps = {}) {
   const snapshot = useConnectionStore((s) => s.orchestrationRuns)
   const loading = useConnectionStore((s) => s.orchestrationRunsLoading)
   const connected = useConnectionStore((s) => s.connectionPhase === 'connected')
@@ -626,7 +636,7 @@ export function OrchestrationRunsSection({ now = Date.now }: OrchestrationRunsSe
               <RunRow key={r.runId} run={r} selected={r.runId === selectedRunId} onSelect={(id) => selectRun(id)} />
             ))}
           </ul>
-          {selectedRunId && <DetailPanel runId={selectedRunId} onOpenSession={(sessionId) => switchSession(sessionId)} isSessionListed={sessionIsListed} />}
+          {selectedRunId && <DetailPanel runId={selectedRunId} onOpenSession={(sessionId) => { (onSwitchSession ?? switchSession)(sessionId) }} isSessionListed={sessionIsListed} />}
         </div>
       )}
     </section>

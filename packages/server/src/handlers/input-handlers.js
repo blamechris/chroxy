@@ -927,6 +927,9 @@ function handleInterrupt(ws, client, msg, ctx) {
     log.info(`Interrupt from ${client.id} to session ${interruptSessionId}`)
     // #8301: a user Stop ends daemon wakes for this session until they next type.
     ctx.sessions.sessionManager?.recordUserInterrupt?.(interruptSessionId)
+    // #8374: tell any open permission prompt it was the USER who stopped it, before
+    // the abort resolves it (a failed turn aborts the same controller).
+    entry.session.markPendingPermissionsStopped?.()
     entry.session.interrupt()
     return
   }

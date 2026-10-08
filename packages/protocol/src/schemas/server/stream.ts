@@ -208,6 +208,19 @@ export const ServerMessageSchema = z.object({
   // zod strips unknown keys, so a schema that omits it would drop it silently.
   // Optional so older servers' envelopes stay valid.
   timeoutMs: z.number().int().positive().optional(),
+  // #6630 / #8282: present on a REPLAYED `messageType: 'response'` frame that was a
+  // reasoning (extended-thinking) stream rather than a reply. A live reasoning
+  // stream is its own `thinking: true` stream_start/_delta/_end, which the
+  // clients render as a thinking bubble; the history records it as one message,
+  // and this field is how the replay says what it was so the client rebuilds the
+  // same bubble. Absent on a reply and on every live frame. A plain string-literal
+  // so a kind a newer server adds does not make an older client reject the frame.
+  kind: z.string().max(32).optional(),
+  // #6630: on a replayed reasoning frame, the elapsed time the live stream_end
+  // carried (`thought for Xs`). Same bound as the stream_end field.
+  thinkingDurationMs: ThinkingDurationMsSchema,
+  // #6630: and the token count the live stream_end carried (` · N tokens`).
+  thinkingTokens: ThinkingTokensSchema,
   // #7454/#7458: present on REPLAYED frames only (both replay paths map the
   // server-internal `_seq` onto the wire; absent on live broadcasts). The
   // #5555.3 delta-replay cursor — and for user_question the #7420
@@ -695,12 +708,20 @@ export const ServerPermissionExpiredSchema = z.object({
 //     present in the requestId variant.
 //   - `sessionId` — the owning chroxy session (stamped from `ctx.sessionId`;
 //     absent in single-session mode → OPTIONAL).
-//   The normalizer does NOT forward the internal `reason` field to the wire, so
-//   it is intentionally absent from this schema.
+//   - `reason` (#8374) — WHY it was resolved, when the server knows: `'user'`
+//     (someone answered), `'timeout'`, `'stopped'` (the user pressed Stop), `'aborted'` (the
+//     turn's controller was aborted for any other reason),
+//     `'cleared'`, `'auto_mode'`, ... A PLAIN string, like `decision`, so a new
+//     reason can't fail the parse; OPTIONAL because the hook-route and
+//     other-client broadcasts carry none. Clients read exactly one value:
+//     `'stopped'` marks the prompt Stopped rather than Denied, because Stop
+//     resolves the prompt as `decision: 'deny'` and nothing else tells the two
+//     apart.
 export const ServerPermissionResolvedSchema = z.object({
   type: z.literal('permission_resolved'),
   requestId: z.string(),
   decision: z.string(),
+  reason: z.string().optional(),
   sessionId: z.string().optional(),
 })
 
@@ -718,12 +739,13 @@ export const ServerPermissionResolvedSchema = z.object({
  *   - `tool` / `description` -- what the client was shown when the prompt was
  *     raised (the description was redacted and capped then; the server clips it
  *     again, to 100 / 500 characters). No raw tool input is recorded.
- *   - `outcome` -- `allowed`, `denied`, or `expired` (no decision was made: it
- *     timed out, the turn ended or was stopped, or the session cleared it).
+ *   - `outcome` -- `allowed`, `denied`, `stopped` (the user pressed Stop while it
+ *     was open, #8374), or `expired` (no decision was made: it timed out, the
+ *     turn ended, or the session cleared it).
  *   - `timestamp` -- when the server recorded it (ms since the epoch).
  *   - `sessionId` / `historySeq` -- stamped by the replay, like every entry.
  */
-export const PermissionOutcomeSchema = z.enum(['allowed', 'denied', 'expired'])
+export const PermissionOutcomeSchema = z.enum(['allowed', 'denied', 'expired', 'stopped'])
 
 export const ServerPermissionOutcomeSchema = z.object({
   type: z.literal('permission_outcome'),

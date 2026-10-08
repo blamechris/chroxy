@@ -408,7 +408,7 @@ describe('useMessageRenderer — pending AskUserQuestion permission (#8264)', ()
 // `permission_outcome` history entry on a session switch or reload; it renders as
 // the compact record, never as an actionable card.
 describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
-  function outcomeMsg(outcome: 'allowed' | 'denied' | 'expired', over: Partial<ChatMessage> = {}): ChatMessage {
+  function outcomeMsg(outcome: 'allowed' | 'denied' | 'expired' | 'stopped', over: Partial<ChatMessage> = {}): ChatMessage {
     return {
       id: 'o1',
       type: 'prompt',
@@ -437,6 +437,18 @@ describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
     expect(record).toHaveTextContent('Commit the restructured fix')
     expect(record).toHaveTextContent('dropped')
     expect(record.getAttribute('role')).toBe('status')
+    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
+  })
+
+  it('#8374: renders a stopped outcome as its own record: not "denied", not "expired", no controls', () => {
+    renderOutcome(outcomeMsg('stopped'))
+    const record = screen.getByTestId('perm-outcome-record')
+    expect(record).toHaveTextContent('Permission stopped')
+    expect(record).toHaveTextContent('Commit the restructured fix')
+    expect(record).toHaveTextContent('not run')
+    expect(record).not.toHaveTextContent(/denied|expired|dropped/i)
+    expect(record.getAttribute('data-outcome')).toBe('stopped')
     expect(screen.queryAllByRole('button')).toHaveLength(0)
     expect(screen.queryByTestId('permission-prompt')).not.toBeInTheDocument()
   })
@@ -470,5 +482,48 @@ describe('useMessageRenderer — replayed permission outcome (#8348)', () => {
     render(<>{result.current({ id: 'p1', type: 'response', content: live.content, timestamp: 0 } as ChatViewMessage)}</>)
     expect(screen.getByTestId('permission-prompt')).toBeInTheDocument()
     expect(screen.queryByTestId('perm-dropped-record')).not.toBeInTheDocument()
+  })
+})
+
+// #6630: a permission prompt the user answered while it was live renders as the
+// same compact record a replayed outcome does.
+describe('useMessageRenderer — a prompt answered live (#6630)', () => {
+  const answered = (answeredToken: string, content: string): ChatMessage => ({
+    id: 'a1',
+    type: 'prompt',
+    content,
+    tool: 'Bash',
+    requestId: 'req-a1',
+    answered: answeredToken,
+    answeredAt: 5,
+    timestamp: 0,
+  } as ChatMessage)
+
+  function renderAnswered(msg: ChatMessage) {
+    const args = makeArgs({ storeMsgMap: new Map([[msg.id, msg]]), storeMessages: [msg] })
+    const { result } = renderHook(() => useMessageRenderer(args))
+    return render(<>{result.current({ id: msg.id, type: 'response', content: msg.content, timestamp: 0 } as ChatViewMessage)}</>)
+  }
+
+  it('renders the compact "Permission allowed" record, not an assistant bubble', () => {
+    renderAnswered(answered('allow', 'Bash: rm -rf build'))
+    const record = screen.getByTestId('perm-outcome-record')
+    expect(record).toHaveTextContent('Permission allowed')
+    expect(record).toHaveTextContent('rm -rf build')
+  })
+
+  it('a prompt answered AFTER it expired (the #2833 race) drops the "(Expired ...)" note the record would repeat', () => {
+    renderAnswered(answered('allow', 'Bash: rm -rf build\n(Expired — this permission was already handled or timed out)'))
+    const record = screen.getByTestId('perm-outcome-record')
+    expect(record).toHaveTextContent('Permission allowed — Bash: rm -rf build')
+    expect(record.textContent).not.toMatch(/Expired/)
+  })
+
+  it('a denied prompt reads denied, and the "(resolved)" placeholder is not a decision', () => {
+    const { unmount } = renderAnswered(answered('deny', 'Bash: ls'))
+    expect(screen.getByTestId('perm-outcome-record')).toHaveTextContent('Permission denied')
+    unmount()
+    renderAnswered(answered('(resolved)', 'Bash: ls'))
+    expect(screen.queryByTestId('perm-outcome-record')).not.toBeInTheDocument()
   })
 })

@@ -113,6 +113,7 @@ export function ConversationSearch({
         type="text"
         className="conversation-search-input"
         placeholder="Search conversations..."
+        data-unsaved-ignore
         value={inputValue}
         onChange={handleChange}
         onKeyDown={handleInputKeyDown}
