@@ -34,6 +34,8 @@
  *  - `stream_stall`           -- the provider went silent past the stall window.
  *  - `first_output_timeout`   -- the provider never produced output.
  *  - `auth_required`          -- the provider demanded a sign-in mid-turn.
+ *  - `usage_limit`            -- the account hit a usage limit, rate limit or
+ *                                overload mid-turn (#8400).
  *  - `sink_base_compromised`  -- the hook sink was tampered with; turn aborted.
  *  - `daemon_restart`         -- the daemon restarted with the tool in flight
  *                                (restore-time history sweep). Unlike the
@@ -49,6 +51,7 @@ export const TURN_TERMINATION_REASONS = [
   'stream_stall',
   'first_output_timeout',
   'auth_required',
+  'usage_limit',
   'sink_base_compromised',
   'daemon_restart',
 ] as const
@@ -86,6 +89,7 @@ const CAUSE: Record<TurnTerminationReason, string> = {
   stream_stall: 'stream stall',
   first_output_timeout: 'no response from the provider',
   auth_required: 'sign-in required',
+  usage_limit: 'usage limit',
   sink_base_compromised: 'hook sink integrity check',
   daemon_restart: 'daemon restart',
 }

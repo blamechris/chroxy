@@ -33,12 +33,14 @@
  *  - `stream_stall`           -- the provider went silent past the stall window.
  *  - `first_output_timeout`   -- the provider never produced output.
  *  - `auth_required`          -- the provider demanded a sign-in mid-turn.
+ *  - `usage_limit`            -- the account hit a usage limit, rate limit or
+ *                                overload mid-turn (#8400).
  *  - `sink_base_compromised`  -- the hook sink was tampered with; turn aborted.
  *  - `daemon_restart`         -- the daemon restarted with the tool in flight
  *                                (restore-time history sweep). Unlike the
  *                                others the outcome is genuinely unknown.
  */
-export declare const TURN_TERMINATION_REASONS: readonly ["permission_mode_switch", "model_switch", "user_stop", "user_stop_before_run", "process_exit", "hard_timeout", "stream_stall", "first_output_timeout", "auth_required", "sink_base_compromised", "daemon_restart"];
+export declare const TURN_TERMINATION_REASONS: readonly ["permission_mode_switch", "model_switch", "user_stop", "user_stop_before_run", "process_exit", "hard_timeout", "stream_stall", "first_output_timeout", "auth_required", "usage_limit", "sink_base_compromised", "daemon_restart"];
 export type TurnTerminationReason = (typeof TURN_TERMINATION_REASONS)[number];
 /** Narrow an arbitrary value to a known {@link TurnTerminationReason}. */
 export declare function isTurnTerminationReason(value: unknown): value is TurnTerminationReason;
