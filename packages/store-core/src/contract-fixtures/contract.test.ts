@@ -113,6 +113,53 @@ function assertField(actual: unknown, expected: unknown, label: string) {
   expect(actual, label).toEqual(expected)
 }
 
+/**
+ * The session half of `noop`: every session must hold EXACTLY what it was seeded
+ * with. Returns how many fields the FIXTURE SEEDED it compared (not the
+ * `sessionId` / `messages` shell defaults), so a caller can prove the comparison was not vacuous.
+ *
+ * The baseline is `result.seeded`, the deep snapshot `makeClientEnv` took before
+ * any handler ran (#8399) — not the fixture's own `init`, and not the live
+ * session. Comparing against a shallow copy meant a nested seeded value was the
+ * same object on both sides, so a handler that pushed into a seeded array
+ * rewrote the seed and the comparison still passed.
+ *
+ * - KEYS: `Object.hasOwn` both ways. A key the handler added is caught by the
+ *   gained-key check (own keys only: `in` would match an inherited
+ *   `Object.prototype` name such as `constructor`). A key the handler DELETED is
+ *   caught by the own-key check — a value compare cannot see it when the seeded
+ *   value was `undefined` (`{ a: undefined }` vs `{}`).
+ * - VALUES: `toStrictEqual`, so `undefined` properties, sparse arrays and class
+ *   instances count (#8399); `toEqual` ignores all three.
+ *
+ * The expected set of sessions comes from the fixture's `init`, an input the
+ * snapshot is derived from rather than the other way round: a snapshot that
+ * silently lost a session would otherwise shrink its own expectation.
+ */
+function assertNoopSessions(result: AdapterResult, fx: ContractFixture): number {
+  let seededFieldsCompared = 0
+  for (const id of Object.keys(fx.init?.sessions ?? {})) {
+    expect(result.seeded[id], `${fx.name}: no snapshot for seeded session ${id}`).toBeDefined()
+    expect(result.sessions[id], `${fx.name}: seeded session ${id} removed on a no-op`).toBeDefined()
+  }
+  for (const [id, session] of Object.entries(result.sessions)) {
+    const baseline = result.seeded[id] as Record<string, unknown> | undefined
+    expect(baseline, `${fx.name}: session ${id} appeared on a no-op`).toBeDefined()
+    const live = session as Record<string, unknown>
+    const extraKeys = Object.keys(live).filter((k) => !Object.hasOwn(baseline!, k))
+    expect(extraKeys, `${fx.name}: session ${id} gained keys on a no-op`).toEqual([])
+    for (const [key, value] of Object.entries(baseline!)) {
+      expect(Object.hasOwn(live, key), `${fx.name}: session ${id}.${key} removed on a no-op`).toBe(true)
+      expect(live[key], `${fx.name}: session ${id}.${key} overwritten on a no-op`).toStrictEqual(value)
+      // Counted off the BASELINE entries the loop visited, filtered by what the
+      // fixture seeded: a fixture may seed `messages` itself, so the shell names
+      // cannot be excluded by name.
+      if (Object.hasOwn(fx.init?.sessions?.[id] ?? {}, key)) seededFieldsCompared++
+    }
+  }
+  return seededFieldsCompared
+}
+
 function assertExpectation(result: AdapterResult, exp: FixtureExpectation, fx: ContractFixture) {
   if (exp.noop) {
     // No flat writes, no added messages, and no surfaced error / info toast…
@@ -123,33 +170,8 @@ function assertExpectation(result: AdapterResult, exp: FixtureExpectation, fx: C
     expect(result.switchedSessions, `${fx.name}: expected no switchSession`).toHaveLength(0)
     expect(result.rotatedTunnelUrls, `${fx.name}: expected no applyRotatedTunnelUrl`).toHaveLength(0)
     expect(result.terminalWrites, `${fx.name}: expected no appendTerminalData`).toHaveLength(0)
-    // …and every session is untouched: it must hold EXACTLY what it was seeded
-    // with — the `{ sessionId, messages: [] }` shell the adapter builds, overlaid
-    // by the fixture's own `init.sessions[id]` — in both KEYS and VALUES.
-    //
-    // The key check alone (#7531) allowed every seeded key, so a handler that
-    // OVERWROTE a seeded field with a different value satisfied `noop` — the
-    // exact mutation the flag exists to catch, and invisible because success and
-    // not-checking were the same observable outcome. The value check below closes
-    // that: each baseline key must still deep-equal its seeded value. The key
-    // check stays for the opposite miss, a NEW field a handler added.
-    //
-    // A seeded session must also still EXIST — a handler that deleted one is a
-    // mutation the loop over `result.sessions` alone would never visit.
-    const seeded = fx.init?.sessions ?? {}
-    for (const id of Object.keys(seeded)) {
-      expect(result.sessions[id], `${fx.name}: seeded session ${id} removed on a no-op`).toBeDefined()
-    }
-    for (const [id, session] of Object.entries(result.sessions)) {
-      const baseline: Record<string, unknown> = { sessionId: id, messages: [], ...(seeded[id] ?? {}) }
-      // Own keys only: `in` would also match an inherited Object.prototype name
-      // (`constructor`, `toString`, ...), so such a gained key would slip through.
-      const extraKeys = Object.keys(session).filter((k) => !Object.hasOwn(baseline, k))
-      expect(extraKeys, `${fx.name}: session ${id} gained keys on a no-op`).toEqual([])
-      for (const [key, value] of Object.entries(baseline)) {
-        expect(session[key], `${fx.name}: session ${id}.${key} overwritten on a no-op`).toEqual(value)
-      }
-    }
+    // …and every session is untouched (see `assertNoopSessions`).
+    assertNoopSessions(result, fx)
     return
   }
   if (exp.sessions) {
@@ -424,6 +446,153 @@ describe('noop fixtures see a same-key overwrite (#7531)', () => {
     const result = run('app', subject)
     result.sessions.s1.messages = [{ id: 'x', type: 'system', content: 'x', timestamp: 1 }] as never
     expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/messages overwritten/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8399 red-proof — `noop` compares a PRE-HANDLER SNAPSHOT, strictly.
+//
+// #7531 compared each seeded value against `fx.init`, but `makeClientEnv` handed
+// the handler a shallow copy, so a nested seeded value was the same object on
+// both sides and an in-place mutation moved the seed with it. And `toEqual`
+// treats `{ a: undefined }` as `{}`, so a deleted key whose seeded value was
+// `undefined` was unobservable. Both are DRIVEN here through handler stubs.
+//
+// Every rejection has a paired CONTROL that passes, so a check that denied
+// everything cannot satisfy the `toThrow`s (#7273); and every proof first asserts
+// the mutant actually fired, so a stub that did nothing cannot pass for the wrong
+// reason.
+// ---------------------------------------------------------------------------
+
+describe('noop compares a snapshot of the seeds, strictly (#8399)', () => {
+  const TOOLS = [{ toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 }]
+  const subject: ContractFixture = {
+    name: '#8399 subject — noop over nested + undefined seeds',
+    type: 'session_activity',
+    init: { sessions: { s1: { isIdle: true, activeTools: TOOLS, note: undefined } } },
+    message: { type: 'session_activity', sessionId: 's1' },
+    expect: { noop: true },
+  }
+
+  type Updater = (s: FixtureSession) => Partial<FixtureSession>
+  /** Drive `subject` through a `session_activity` handler that runs `updater` on s1. */
+  function runWithUpdater(updater: Updater, kind: ClientKind = 'app'): AdapterResult {
+    const env = makeClientEnv(kind, subject.init)
+    const table = createDispatchTable<FixtureSession>()
+    ;(table as Record<string, unknown>).session_activity = (
+      _msg: unknown,
+      adapter: { updateSession(id: string, u: Updater): void },
+    ) => adapter.updateSession('s1', updater)
+    runDispatch(table, subject.message, env.adapter)
+    return env.result
+  }
+
+  it('CONTROL: the un-mutated subject passes, with its seeded fields actually compared', () => {
+    for (const kind of ['app', 'dashboard'] as const) {
+      const result = runWithUpdater(() => ({}), kind)
+      // isIdle, activeTools and note — three, so the compare is not over zero fields.
+      expect(assertNoopSessions(result, subject)).toBe(3)
+    }
+  })
+
+  it('CONTROL: replacing a seeded value with an EQUAL but distinct object still passes', () => {
+    // Value equality is the contract; object identity is not (#8399 asks for a
+    // snapshot compare, not an identity compare).
+    const result = runWithUpdater(() => ({ activeTools: [{ ...TOOLS[0] }] }))
+    expect(result.sessions.s1.activeTools).not.toBe(TOOLS)
+    expect(() => assertExpectation(result, subject.expect!, subject)).not.toThrow()
+  })
+
+  for (const kind of ['app', 'dashboard'] as const) {
+    it(`DRIVEN (${kind}): an in-place push into a nested seeded array fails noop`, () => {
+      const result = runWithUpdater((s) => {
+        ;(s.activeTools as unknown[]).push({ toolUseId: 'tu-2', tool: 'Read', startedAt: 2 })
+        return {} // a patch-free mutation: nothing for `updateSession` to merge
+      }, kind)
+      expect(result.sessions.s1.activeTools, 'the mutant really fired').toHaveLength(2)
+      expect(result.seeded.s1.activeTools, 'the snapshot is untouched').toHaveLength(1)
+      expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/activeTools overwritten/)
+    })
+  }
+
+  it('the fixture seed is isolated from the run: a mutating handler leaves it, and the next run, pristine', () => {
+    runWithUpdater((s) => {
+      ;(s.activeTools as unknown[]).length = 0
+      return {}
+    })
+    expect(subject.init!.sessions!.s1.activeTools, 'fixture seed rewritten by a run').toHaveLength(1)
+    const next = runWithUpdater(() => ({}), 'dashboard')
+    expect(next.sessions.s1.activeTools, 'the second client saw the first one\'s mutation').toHaveLength(1)
+  })
+
+  it('DRIVEN: deleting a seeded key whose seeded value is undefined fails noop', () => {
+    const result = runWithUpdater((s) => {
+      delete (s as Record<string, unknown>).note
+      return {}
+    })
+    expect(Object.hasOwn(result.sessions.s1, 'note'), 'the mutant really fired').toBe(false)
+    // The old value compare saw `undefined` on both sides.
+    expect(result.sessions.s1.note).toBeUndefined()
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/note removed/)
+  })
+
+  it('DRIVEN: writing undefined onto a key the fixture never seeded fails noop', () => {
+    const result = runWithUpdater(() => ({ extra: undefined }) as never)
+    expect(Object.hasOwn(result.sessions.s1, 'extra'), 'the mutant really fired').toBe(true)
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/gained keys/)
+  })
+
+  it('DRIVEN: a value that differs only by an undefined property fails noop (strict, not toEqual)', () => {
+    const seeded: ContractFixture = {
+      ...subject,
+      init: { sessions: { s1: { meta: { a: 1 } } } },
+    }
+    const env = makeClientEnv('app', seeded.init)
+    env.adapter.updateSession('s1', () => ({ meta: { a: 1, b: undefined } }))
+    expect(() => assertExpectation(env.result, seeded.expect!, seeded)).toThrow(/meta overwritten/)
+  })
+
+  it('a snapshot that lost a seeded session fails, rather than shrinking its own expectation', () => {
+    const result = run('app', subject)
+    delete result.seeded.s1
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/no snapshot for seeded session s1/)
+  })
+
+  it('a session that was not seeded at all fails noop', () => {
+    const result = run('app', subject)
+    result.sessions.ghost = { sessionId: 'ghost', messages: [] } as unknown as FixtureSession
+    expect(() => assertExpectation(result, subject.expect!, subject)).toThrow(/ghost appeared/)
+  })
+
+  it('the comparison is not vacuous across the real fixtures', () => {
+    // The expected count is read off each fixture's own `init`, NOT off the
+    // snapshot or the helper, so a snapshot that dropped seeds (or a loop that
+    // visited none) cannot lower the number it is checked against.
+    let expected = 0
+    let compared = 0
+    const mismatches: string[] = []
+    const visit = (fx: ContractFixture, exp: FixtureExpectation | undefined) => {
+      if (!exp?.noop) return
+      const want = Object.values(fx.init?.sessions ?? {}).reduce((n, seed) => n + Object.keys(seed).length, 0)
+      for (const kind of ['app', 'dashboard'] as const) {
+        const got = assertNoopSessions(run(kind, fx), fx)
+        expected += want
+        compared += got
+        if (got !== want) mismatches.push(`${fx.name} (${kind}): compared ${got} of ${want} seeded fields`)
+      }
+    }
+    for (const fx of DISPATCH_FIXTURES) {
+      visit(fx, fx.expect)
+      if (fx.divergent) {
+        visit(fx, fx.divergent.app)
+        visit(fx, fx.divergent.dashboard)
+      }
+    }
+    expect(mismatches).toEqual([])
+    // At least one noop fixture seeds a field at all — else this whole block, and
+    // the check it proves, would be running over nothing.
+    expect(expected, 'no noop fixture seeds a session field').toBeGreaterThan(0)
+    expect(compared).toBe(expected)
   })
 })
 
