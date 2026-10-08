@@ -4984,6 +4984,7 @@ describe('handleEnvironmentError', () => {
       error: 'docker daemon down',
       code: null,
       sessions: null,
+      environmentId: null,
     })
   })
 
@@ -4994,17 +4995,18 @@ describe('handleEnvironmentError', () => {
       error: '',
       code: null,
       sessions: null,
+      environmentId: null,
     })
   })
 
   it('returns null when error is missing', () => {
-    expect(handleEnvironmentError({})).toEqual({ error: null, code: null, sessions: null })
+    expect(handleEnvironmentError({})).toEqual({ error: null, code: null, sessions: null, environmentId: null })
   })
 
   it('returns null when error is non-string', () => {
-    expect(handleEnvironmentError({ error: 42 })).toEqual({ error: null, code: null, sessions: null })
-    expect(handleEnvironmentError({ error: { msg: 'x' } })).toEqual({ error: null, code: null, sessions: null })
-    expect(handleEnvironmentError({ error: null })).toEqual({ error: null, code: null, sessions: null })
+    expect(handleEnvironmentError({ error: 42 })).toEqual({ error: null, code: null, sessions: null, environmentId: null })
+    expect(handleEnvironmentError({ error: { msg: 'x' } })).toEqual({ error: null, code: null, sessions: null, environmentId: null })
+    expect(handleEnvironmentError({ error: null })).toEqual({ error: null, code: null, sessions: null, environmentId: null })
   })
 
   it('parses code and sessions for the #7562 live-session destroy refusal', () => {
@@ -5022,25 +5024,26 @@ describe('handleEnvironmentError', () => {
       error: 'Environment "my-project" has 2 live session(s) running in it (sess-a, sess-b). …',
       code: 'ENVIRONMENT_HAS_LIVE_SESSIONS',
       sessions: ['sess-a', 'sess-b'],
+      environmentId: 'env-1',
     })
   })
 
   it('parses a code with no sessions (e.g. DOCKER_IMAGE_NOT_ALLOWED)', () => {
     expect(
       handleEnvironmentError({ error: 'image not allowed', code: 'DOCKER_IMAGE_NOT_ALLOWED' }),
-    ).toEqual({ error: 'image not allowed', code: 'DOCKER_IMAGE_NOT_ALLOWED', sessions: null })
+    ).toEqual({ error: 'image not allowed', code: 'DOCKER_IMAGE_NOT_ALLOWED', sessions: null, environmentId: null })
   })
 
   it('drops non-string session ids but keeps the array', () => {
     expect(
       handleEnvironmentError({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: ['ok', 42, null, 'ok2'] }),
-    ).toEqual({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: ['ok', 'ok2'] })
+    ).toEqual({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: ['ok', 'ok2'], environmentId: null })
   })
 
   it('returns sessions null when the field is a non-array', () => {
     expect(
       handleEnvironmentError({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: 'sess-a' }),
-    ).toEqual({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: null })
+    ).toEqual({ error: 'x', code: 'ENVIRONMENT_HAS_LIVE_SESSIONS', sessions: null, environmentId: null })
   })
 })
 

@@ -45,7 +45,7 @@ export function handleEnvironmentList(
 }
 
 /**
- * Parse an `environment_error` message into an `{ error, code, sessions }`
+ * Parse an `environment_error` message into an `{ error, code, sessions, environmentId }`
  * payload.
  *
  * `error` is the human message (passed through verbatim when a string,
@@ -64,7 +64,12 @@ export function handleEnvironmentList(
  */
 export function handleEnvironmentError(
   msg: Record<string, unknown>,
-): { error: string | null; code: string | null; sessions: string[] | null } {
+): {
+  error: string | null
+  code: string | null
+  sessions: string[] | null
+  environmentId: string | null
+} {
   const sessions = Array.isArray(msg.sessions)
     ? parseUnknownArrayField(msg, 'sessions').filter(
         (id): id is string => typeof id === 'string',
@@ -74,5 +79,10 @@ export function handleEnvironmentError(
     error: parseRawStringField(msg, 'error'),
     code: parseRawStringField(msg, 'code'),
     sessions,
+    // #7594: the refusal names the environment it is about, so a client can key
+    // the force escalation on the payload instead of on its own (possibly stale)
+    // view of which environments have live sessions. Absent on failures that are
+    // not about one environment (create-side validation, the bound-client gate).
+    environmentId: parseRawStringField(msg, 'environmentId'),
   }
 }

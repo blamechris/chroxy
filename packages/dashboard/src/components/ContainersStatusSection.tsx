@@ -399,7 +399,14 @@ export function ContainersStatusSection({
   // button; clicking it opens THIS confirm (separate from the plain one so the
   // heavier cascade gets its own explicit acknowledgement). onConfirm sends
   // destroy with force:true.
-  const [confirmForceDestroy, setConfirmForceDestroy] = useState<ContainerEntry | null>(null)
+  //
+  // #7594: held as the container ID, not a snapshot entry. The escalation is
+  // driven by the refusal the daemon answered (`actionResults[id].liveSessions`),
+  // which is keyed by id and independent of the survey; resolving the id back to
+  // a snapshot row at click time meant a refresh that dropped the row in between
+  // left the click a silent no-op. The dialog resolves the row at RENDER time and
+  // says so when it has gone.
+  const [confirmForceDestroyId, setConfirmForceDestroyId] = useState<string | null>(null)
   // #6141 (epic #5530): the converged deep-management view. The standalone
   // "Envs" view-tab is gone — environment create/list/destroy now lives here,
   // behind a disclosure so the read-only survey above stays the overview.
@@ -413,9 +420,20 @@ export function ContainersStatusSection({
     onAction(environmentId, action)
   }
   const handleForceDestroy = (environmentId: string) => {
-    const target = snapshot?.containers.find((c) => c.id === environmentId) ?? null
-    setConfirmForceDestroy(target)
+    setConfirmForceDestroyId(environmentId)
   }
+  const confirmForceDestroy = confirmForceDestroyId
+    ? (snapshot?.containers.find((c) => c.id === confirmForceDestroyId) ?? null)
+    : null
+  // #7594: live-session refusals whose container is no longer in the survey (a
+  // refresh dropped the row after the refusal landed). The row — and so its
+  // Force button — is gone, but the refusal still stands, so surface it here
+  // with its own Force instead of leaving the operator with nothing.
+  const goneRefusals = snapshot
+    ? Object.entries(actionResults).filter(
+        ([id, r]) => r.liveSessions && r.error && !snapshot.containers.some((c) => c.id === id),
+      )
+    : []
 
   const refreshDisabled = loading || !connected
   const handleRefresh = () => {
@@ -539,6 +557,23 @@ export function ContainersStatusSection({
               </tbody>
             </table>
           </section>
+
+          {goneRefusals.map(([id, result]) => (
+            <p className="cr-callout cr-callout-bad" key={id} data-testid={`container-gone-${id}`} role="alert">
+              <b className="cr-mono">{id}</b> is no longer in the latest survey, but the daemon refused to
+              destroy it: {result.error}{' '}
+              <button
+                type="button"
+                className="cr-action cr-action-danger cr-action-force"
+                data-testid={`container-force-destroy-${id}`}
+                disabled={!connected || actioningIds.has(id)}
+                onClick={() => handleForceDestroy(id)}
+                title="Destroy the live sessions too, then the environment if it still exists"
+              >
+                Force destroy
+              </button>
+            </p>
+          ))}
         </>
       )}
 
@@ -585,12 +620,12 @@ export function ContainersStatusSection({
       {/* #7568: the live-session force-destroy escalation dialog. Distinct from
           the plain confirm above; only this path passes force:true (cascade). */}
       <ConfirmDialog
-        open={confirmForceDestroy !== null}
+        open={confirmForceDestroyId !== null}
         title="Force destroy environment?"
         danger
         confirmLabel="Force destroy"
         message={
-          confirmForceDestroy ? (
+          confirmForceDestroyId === null ? null : confirmForceDestroy ? (
             <>
               <b>{confirmForceDestroy.name || confirmForceDestroy.id}</b> still has{' '}
               {confirmForceDestroy.sessionCount > 0
@@ -599,13 +634,21 @@ export function ContainersStatusSection({
               running inside it. Force destroy ends {confirmForceDestroy.sessionCount === 1 ? 'it' : 'them'} first, then
               removes the container. Any unsaved work in {confirmForceDestroy.sessionCount === 1 ? 'that session' : 'those sessions'} is lost.
             </>
-          ) : null
+          ) : (
+            // #7594: the survey no longer lists it. The refusal still stands, so
+            // the escalation stays available — and says why the details are thin.
+            <>
+              <b>{confirmForceDestroyId}</b> is no longer in the latest survey, but the daemon refused to
+              destroy it because sessions are live. Force destroy ends them first, then removes the environment if
+              it still exists. Any unsaved work in those sessions is lost.
+            </>
+          )
         }
         onConfirm={() => {
-          if (confirmForceDestroy) onAction(confirmForceDestroy.id, 'destroy', true)
-          setConfirmForceDestroy(null)
+          if (confirmForceDestroyId) onAction(confirmForceDestroyId, 'destroy', true)
+          setConfirmForceDestroyId(null)
         }}
-        onCancel={() => setConfirmForceDestroy(null)}
+        onCancel={() => setConfirmForceDestroyId(null)}
       />
     </div>
   )

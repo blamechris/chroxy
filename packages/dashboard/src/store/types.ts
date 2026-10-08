@@ -1779,6 +1779,18 @@ export interface ConnectionState {
   // Environments
   environments: EnvironmentInfo[];
   /**
+   * #7594: the live-session destroy refusals the daemon has answered, keyed by
+   * the environment id the refusal NAMES, each holding the session ids the
+   * refusal reported (`environment_error.sessions`). The EnvironmentPanel
+   * reveals its Force escalation from this record rather than from the card's
+   * own `env.sessions`, which only moves on an `environment_list` broadcast —
+   * and a refusal does not trigger one, so a session that attached after the
+   * last broadcast left the operator looping on refusals with no way forward.
+   * An entry is cleared when the operator retries, cancels, or the environment
+   * leaves the roster.
+   */
+  environmentDestroyRefusals: Record<string, string[]>;
+  /**
    * #7625: the parked failed-restore roster, as the daemon sent it.
    *
    * The WHOLE reply message is stored, exactly like every other Control Room
@@ -2738,6 +2750,9 @@ export interface ConnectionState {
   // EnvironmentPanel's live-session confirm passes it; the plain destroy omits
   // it so an accidental caller cannot wipe out running sessions.
   destroyEnvironment: (environmentId: string, force?: boolean) => void;
+  // #7594: forget a recorded destroy refusal (the operator cancelled the Force
+  // escalation). A new destroy attempt clears it too.
+  dismissEnvironmentDestroyRefusal: (environmentId: string) => void;
 
   // Convenience accessor
   getActiveSessionState: () => SessionState;

@@ -244,6 +244,10 @@ export function createEmptyConnectionScope() {
     // `EnvironmentInfo.sessions` carries LIVE session ids from one daemon, which
     // the panel renders ("{n} connected") and gates its Destroy button on.
     environments: [],
+    // #7594: a destroy refusal answers the OLD daemon's live-session roster; on
+    // another daemon (or after a reconnect) it would offer a Force for sessions
+    // that are no longer there.
+    environmentDestroyRefusals: {},
     // #7557 — the twelfth never-cleared field, adjudicated onto THIS roster
     // rather than onto the two full-reset sites. Its two siblings in the same
     // banner list, `serverErrors` and `sessionNotifications`, are both cleared

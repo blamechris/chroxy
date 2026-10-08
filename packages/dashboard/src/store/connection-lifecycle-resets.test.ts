@@ -181,6 +181,10 @@ const ROSTER_EXPECTED = [
   // #7353 — requestIds of dismissed expired permission prompts; same lifetime
   // as `resolvedPermissions` (the ids belong to the dropped connection).
   'dismissedExpiredPermissions',
+  // #7594 — the live-session destroy refusals the OLD daemon answered, keyed by
+  // environment id; on another daemon they would offer a Force for sessions that
+  // are not there.
+  'environmentDestroyRefusals',
 ] as const
 
 /** Server A's values, one distinguishable marker per field. */
@@ -219,6 +223,7 @@ function serverAState(): Record<string, unknown> {
     checkpoints: [{ id: 'ckpt-a', label: 'A' }],
     environments: [{ id: 'env-a', name: 'A', sessions: ['sess-a'] }],
     dismissedExpiredPermissions: { 'req-a3': true },
+    environmentDestroyRefusals: { 'env-a': ['sess-a'] },
     infoNotifications: [{ id: 'info-a', category: 'general', message: 'server A: update available', recoverable: true, timestamp: 1 }],
   }
 }
@@ -502,7 +507,7 @@ describe('#7557 infoNotifications — the twelfth field, adjudicated against #75
 // ---------------------------------------------------------------------------
 
 describe('#7559 the shared roster is the one both issues describe', () => {
-  it('createEmptyConnectionScope() holds exactly the sixteen plus infoNotifications and dismissedExpiredPermissions (#7353)', () => {
+  it('createEmptyConnectionScope() holds exactly the sixteen plus infoNotifications, dismissedExpiredPermissions (#7353) and environmentDestroyRefusals (#7594)', () => {
     expect([...CONNECTION_SCOPED_RESET_FIELDS].sort()).toEqual([...ROSTER_EXPECTED].sort())
   })
 

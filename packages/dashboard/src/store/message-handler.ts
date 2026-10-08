@@ -6923,6 +6923,16 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
     case 'environment_list': {
       const { environments } = sharedEnvironmentList(msg);
       set({ environments: environments as EnvironmentInfo[] });
+      // #7594: a refusal for an environment that has left the roster (destroyed
+      // by someone else, or by the Force that followed) has nothing left to
+      // escalate. Refusals for environments still listed are kept: this
+      // broadcast says nothing about whether their sessions have gone.
+      const refusals = get().environmentDestroyRefusals;
+      const listed = new Set((environments as EnvironmentInfo[]).map((e) => e?.id));
+      const kept = Object.keys(refusals).filter((id) => listed.has(id));
+      if (kept.length !== Object.keys(refusals).length) {
+        set({ environmentDestroyRefusals: Object.fromEntries(kept.map((id) => [id, refusals[id]!])) });
+      }
       break;
     }
     case 'failed_restores_list': {
@@ -6990,7 +7000,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // environment op that failed (image not allowed, destroy refused, backend
       // error) was invisible in the UI, so the operator saw nothing and could
       // not escalate.
-      const { error, code, sessions } = sharedEnvironmentError(msg);
+      const { error, code, sessions, environmentId } = sharedEnvironmentError(msg);
       const isLiveSessions = code === 'ENVIRONMENT_HAS_LIVE_SESSIONS';
       // #7568 review: the live-sessions destroy refusal is a WARNING — the guard
       // did its job and nothing broke — so log it at warn level to match the UI
@@ -7006,6 +7016,15 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         // prose; the explicit `sessions` line is a belt-and-braces surface for a
         // future server that trims the prose.
         const ids = sessions ?? [];
+        // #7594: record the refusal against the environment it NAMES. The panel
+        // reveals its Force from this, not from its own `env.sessions` (which
+        // only moves on an `environment_list` broadcast, and a refusal sends
+        // none). Keyed by the payload's id so it works however stale the
+        // panel's roster is. A refusal that names no environment cannot be
+        // attributed to a card, so it stays toast-only.
+        if (environmentId) {
+          set({ environmentDestroyRefusals: { ...get().environmentDestroyRefusals, [environmentId]: ids } });
+        }
         const namedLine =
           ids.length > 0
             ? ` Live session${ids.length === 1 ? '' : 's'}: ${ids.join(', ')}.`
