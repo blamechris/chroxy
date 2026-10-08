@@ -347,12 +347,12 @@ describe('TranscriptTaskScanner — ScheduleWakeup', () => {
 describe('TranscriptTaskScanner — robustness', () => {
   it('returns the empty snapshot for a missing file (never throws)', () => {
     const scanner = new TranscriptTaskScanner(join(dir, 'does-not-exist.jsonl'))
-    assert.deepEqual(scanner.scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null, authFailureCount: 0 })
+    assert.deepEqual(scanner.scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null, authFailureCount: 0, usageLimitCount: 0, lastUsageLimit: null })
   })
 
   it('returns the empty snapshot for an empty file', () => {
     const p = writeTranscript([])
-    assert.deepEqual(new TranscriptTaskScanner(p).scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null, authFailureCount: 0 })
+    assert.deepEqual(new TranscriptTaskScanner(p).scan(), { backgroundTasks: [], scheduledWakeup: null, observedModel: null, authFailureCount: 0, usageLimitCount: 0, lastUsageLimit: null })
   })
 
   it('skips malformed lines without losing surrounding entries', () => {
@@ -613,5 +613,83 @@ describe('TranscriptTaskScanner — authFailureCount (#8223)', () => {
     const p = writeTranscript(['{"type":"assistant","isApiErrorMessage":true,"error":', 'null', '[]', '{"type":"assistant","isApiErrorMessage":true,"error":{"x":1}}'])
     assert.doesNotThrow(() => new TranscriptTaskScanner(p).scan())
     assert.equal(new TranscriptTaskScanner(p).scan().authFailureCount, 0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8400 — usageLimitCount / lastUsageLimit: structured rate_limit / 529 entries
+// ---------------------------------------------------------------------------
+
+// Real claude wording (a live transcript's `isApiErrorMessage` entry).
+function limitLine({ error = 'rate_limit', status = 429, text = "You've hit your session limit · resets 11:30pm (America/Los_Angeles)", sidechain = false, ts = '2026-06-10T02:40:00.000Z' } = {}) {
+  const e = {
+    isSidechain: sidechain,
+    type: 'assistant',
+    isApiErrorMessage: true,
+    error,
+    timestamp: ts,
+    message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text }], usage: { output_tokens: 0 } },
+  }
+  if (status) e.apiErrorStatus = status
+  return JSON.stringify(e)
+}
+
+describe('TranscriptTaskScanner — usageLimitCount (#8400)', () => {
+  it('counts a rate_limit entry and keeps its classification', () => {
+    const snap = new TranscriptTaskScanner(writeTranscript([userLine({ text: 'hi' }), limitLine()])).scan()
+    assert.equal(snap.usageLimitCount, 1)
+    assert.equal(snap.lastUsageLimit.kind, 'session')
+    assert.equal(snap.lastUsageLimit.resetsAt, '11:30pm (America/Los_Angeles)')
+    assert.equal(snap.authFailureCount, 0, 'a limit is not an auth failure')
+  })
+
+  it('counts a 529 overload, and not a 500', () => {
+    const p = writeTranscript([
+      limitLine({ error: 'server_error', status: 529, text: 'API Error: 529 Overloaded. This is a server-side issue.' }),
+      limitLine({ error: 'server_error', status: 500, text: 'API Error: 500 Internal server error.' }),
+    ])
+    const snap = new TranscriptTaskScanner(p).scan()
+    assert.equal(snap.usageLimitCount, 1)
+    assert.equal(snap.lastUsageLimit.kind, 'overloaded')
+  })
+
+  it('does not count an auth failure, a plain reply that quotes the words, or a subagent (sidechain) entry', () => {
+    const p = writeTranscript([
+      authErrorLine(),
+      assistantTextLine({ text: "You've hit your session limit · resets 3pm" }),
+      limitLine({ sidechain: true }),
+    ])
+    const snap = new TranscriptTaskScanner(p).scan()
+    assert.equal(snap.usageLimitCount, 0)
+    assert.equal(snap.lastUsageLimit, null)
+  })
+
+  it('needs the isApiErrorMessage marker: a stray `error` field on an ordinary entry is not a limit', () => {
+    const stray = JSON.stringify({ type: 'assistant', error: 'rate_limit', apiErrorStatus: 429, timestamp: '2026-06-10T02:40:00.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } })
+    assert.equal(new TranscriptTaskScanner(writeTranscript([stray])).scan().usageLimitCount, 0)
+  })
+
+  it('is cumulative and incremental: a rescan with no new bytes does not recount', () => {
+    const p = writeTranscript([limitLine()])
+    const scanner = new TranscriptTaskScanner(p)
+    assert.equal(scanner.scan().usageLimitCount, 1)
+    assert.equal(scanner.scan().usageLimitCount, 1)
+    appendFileSync(p, limitLine({ text: "You've hit your weekly limit · resets Jul 22 at 4pm (America/Los_Angeles)" }) + '\n')
+    const snap = scanner.scan()
+    assert.equal(snap.usageLimitCount, 2)
+    assert.equal(snap.lastUsageLimit.kind, 'weekly', 'the latest entry wins')
+  })
+
+  it('reports a KNOWN 0 for a transcript that does not exist yet, and null when it cannot be read', () => {
+    const missing = new TranscriptTaskScanner(join(dir, 'not-yet.jsonl')).scan()
+    assert.equal(missing.usageLimitCount, 0)
+    assert.equal(missing.lastUsageLimit, null)
+    assert.equal(new TranscriptTaskScanner(dir).scan().usageLimitCount, null)
+  })
+
+  it('never throws on a malformed entry', () => {
+    const p = writeTranscript(['{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[null,1,{"text":5}]}}', '{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":null}'])
+    assert.doesNotThrow(() => new TranscriptTaskScanner(p).scan())
+    assert.equal(new TranscriptTaskScanner(p).scan().usageLimitCount, 2, 'the structured marker alone counts')
   })
 })
