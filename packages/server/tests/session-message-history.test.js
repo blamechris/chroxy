@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { SessionMessageHistory } from '../src/session-message-history.js'
+import { resolveReplayPlan, sendHistoryEntry } from '../src/ws-history.js'
 
 describe('SessionMessageHistory', () => {
   let history
@@ -714,6 +715,97 @@ describe('SessionMessageHistory', () => {
       const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
       const synthetics = out.filter(e => e.type === 'tool_result' && e.synthetic === true)
       assert.equal(synthetics.length, 1)
+    })
+  })
+
+  // #8336 — a question cut off by a restart must not replay as an ordinary one.
+  describe('sweepUnresolvedToolStarts marks the question it cut off (#8336)', () => {
+    it('stamps interrupted on the user_question of a swept AskUserQuestion, on a copy', () => {
+      const question = { type: 'user_question', toolUseId: 'Q', questions: [{ question: 'Which shape?' }], timestamp: 1500 }
+      const input = [
+        { type: 'tool_start', toolUseId: 'Q', tool: 'AskUserQuestion', timestamp: 1000 },
+        question,
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+
+      assert.deepEqual(out.map(e => e.type), ['tool_start', 'tool_result', 'user_question'])
+      assert.equal(out[2].interrupted, true)
+      assert.equal(out[2].toolUseId, 'Q')
+      assert.deepEqual(out[2].questions, question.questions)
+      assert.equal(question.interrupted, undefined, 'the caller\'s entry is copied, never mutated')
+      assert.notStrictEqual(out[2], question)
+    })
+
+    it('leaves an ANSWERED question alone (its tool_result exists)', () => {
+      const input = [
+        { type: 'tool_start', toolUseId: 'Q', tool: 'AskUserQuestion', timestamp: 1000 },
+        { type: 'user_question', toolUseId: 'Q', questions: [{ question: 'Which shape?' }], timestamp: 1500 },
+        { type: 'tool_result', toolUseId: 'Q', result: 'Round', timestamp: 1800 },
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      assert.equal(out.length, 3)
+      assert.equal(out[1].interrupted, undefined)
+      assert.strictEqual(out[1], input[1], 'untouched entries pass through by reference')
+    })
+
+    it('does not mark a question whose own tool is not the one swept', () => {
+      const input = [
+        { type: 'tool_start', toolUseId: 'Bash1', tool: 'Bash', timestamp: 1000 },
+        { type: 'user_question', toolUseId: 'Q', questions: [{ question: 'Which shape?' }], timestamp: 1500 },
+        { type: 'tool_start', toolUseId: 'Q', tool: 'AskUserQuestion', timestamp: 1400 },
+        { type: 'tool_result', toolUseId: 'Q', result: 'Round', timestamp: 1800 },
+      ]
+      const out = SessionMessageHistory.sweepUnresolvedToolStarts(input)
+      assert.equal(out.find(e => e.type === 'user_question').interrupted, undefined)
+    })
+
+    // The sequence the daemon really sends: the client connected earlier and
+    // holds the question LIVE, its cursor is the end of the first replay, then
+    // the daemon restarts. The cursor is honoured (delta replay), so the replay
+    // re-delivers the tool_start, the synthetic result and the question.
+    it('replays the cut-off question over the wire with interrupted: true after a restart', () => {
+      const sid = 's1'
+      const before = new SessionMessageHistory({ maxHistory: 50 })
+      before.recordHistory(sid, 'message', { type: 'message', content: 'hi', timestamp: 1 })
+      before.recordHistory(sid, 'result', { cost: 0, duration: 1, usage: null })
+      const cursor = before.getLatestSeq(sid)
+      before.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: 'Q', tool: 'AskUserQuestion', input: null })
+      before.recordHistory(sid, 'user_question', { toolUseId: 'Q', questions: [{ question: 'Which shape?', options: [{ label: 'Round' }] }] })
+
+      // Persist and restore exactly as the state file does (session-manager.js).
+      const persisted = JSON.parse(JSON.stringify(before.getHistory(sid).map(e => before.truncateEntry(e))))
+      const after = new SessionMessageHistory({ maxHistory: 50 })
+      after.setHistory(sid, SessionMessageHistory.sweepUnresolvedToolStarts(persisted))
+
+      const restored = after.getHistory(sid)
+      const plan = resolveReplayPlan(
+        { getLatestHistorySeq: (id) => after.getLatestSeq(id), getOldestHistorySeq: (id) => after.getOldestSeq(id) },
+        restored, sid, cursor, after.getLatestSeq(sid),
+      )
+      assert.equal(plan.fullHistory, false, 'the restart does not invalidate the cursor, so this is a delta replay')
+
+      const frames = []
+      for (const entry of restored.slice(plan.startOffset)) {
+        sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+      }
+      assert.deepEqual(frames.map(f => f.type), ['tool_start', 'tool_result', 'user_question'])
+      const q = frames[2]
+      assert.equal(q.interrupted, true)
+      assert.equal(q.toolUseId, 'Q')
+      assert.equal(typeof q.historySeq, 'number')
+      assert.equal(frames[1].interrupted, true, 'the tool row already said so')
+    })
+
+    it('a pending question replayed without a restart carries no interrupted flag', () => {
+      const sid = 's1'
+      const h = new SessionMessageHistory({ maxHistory: 50 })
+      h.recordHistory(sid, 'tool_start', { messageId: 'm1', toolUseId: 'Q', tool: 'AskUserQuestion', input: null })
+      h.recordHistory(sid, 'user_question', { toolUseId: 'Q', questions: [{ question: 'Which shape?' }] })
+      const frames = []
+      for (const entry of h.getHistory(sid)) {
+        sendHistoryEntry((_ws, payload) => frames.push(payload), null, sid, entry)
+      }
+      assert.equal(frames.find(f => f.type === 'user_question').interrupted, undefined)
     })
   })
 

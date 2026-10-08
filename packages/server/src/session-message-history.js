@@ -196,6 +196,11 @@ export class SessionMessageHistory extends EventEmitter {
    * downstream consumers that sort by timestamp stay monotonic without
    * pretending the tool completed "now".
    *
+   * #8336: a `user_question` entry whose toolUseId is one of the swept
+   * `tool_start`s is returned as a COPY carrying `interrupted: true` (the
+   * question was cut off, not answered), so a replaying client can say so
+   * instead of stamping it "(resolved)". Other entries are passed through.
+   *
    * Safe to call on:
    *   - empty / non-array input (returns the input unchanged)
    *   - history with no tool_start entries (returns a shallow copy)
@@ -213,7 +218,35 @@ export class SessionMessageHistory extends EventEmitter {
       }
     }
     const out = []
+    // #8336: the toolUseIds this sweep cuts off. A `user_question` entry for
+    // one of them was never answered (an answer would have produced the
+    // tool_result), so it is marked `interrupted` below rather than left
+    // looking like every other replayed question, which the client's
+    // history_replay_end sweep stamps "(resolved)".
+    const interruptedIds = new Set()
     for (const entry of history) {
+      if (
+        entry
+        && entry.type === 'tool_start'
+        && typeof entry.toolUseId === 'string'
+        && !resolved.has(entry.toolUseId)
+      ) {
+        interruptedIds.add(entry.toolUseId)
+      }
+    }
+    for (const rawEntry of history) {
+      // `user_question` is copied, never mutated: the input array is the
+      // caller's, and the contract above says it is not modified. The set was
+      // collected up front, so the question is marked whichever side of its
+      // tool_start it was recorded on.
+      const entry = (
+        rawEntry
+        && rawEntry.type === 'user_question'
+        && typeof rawEntry.toolUseId === 'string'
+        && interruptedIds.has(rawEntry.toolUseId)
+      )
+        ? { ...rawEntry, interrupted: true }
+        : rawEntry
       out.push(entry)
       if (
         entry

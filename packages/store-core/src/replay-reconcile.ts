@@ -1181,6 +1181,18 @@ export function reconcileReplayEnd(
  */
 export const REPLAY_RESOLVED_PLACEHOLDER = '(resolved)'
 
+/**
+ * The `answered` value of a question the daemon cut off (#8336).
+ *
+ * The second non-decision `answered` may hold. It is set from the wire
+ * (`user_question.interrupted`, stamped by the server's restore-time sweep for a
+ * question whose tool was in flight at shutdown), never by the replay-end sweep,
+ * and it is what stops that sweep stamping {@link REPLAY_RESOLVED_PLACEHOLDER}
+ * on a question nobody answered. Like the placeholder it is not a decision:
+ * renderers show it as "interrupted", not as an answer.
+ */
+export const QUESTION_INTERRUPTED_PLACEHOLDER = '(interrupted)'
+
 /** The subset of `ChatMessage` the replay-end sweep reads. */
 interface SweepablePrompt {
   id: string

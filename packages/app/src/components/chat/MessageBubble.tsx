@@ -8,7 +8,7 @@ import {
   Image,
   LayoutAnimation,
 } from 'react-native';
-import { OTHER_OPTION_VALUE, bumpRenderCount, formatThinkingFooter, getErrorPresentation, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
+import { OTHER_OPTION_VALUE, QUESTION_INTERRUPTED_PLACEHOLDER, bumpRenderCount, formatThinkingFooter, getErrorPresentation, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
 // #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
 // so the mobile store, the mobile screen, and (eventually) the dashboard
 // can converge on a single declaration paired with the shared
@@ -325,10 +325,16 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
     useMultiForm &&
     message.answered != null &&
     message.answeredAnswers != null;
+  // #8336 — a question the daemon was cut off before anyone answered. Not an
+  // answer: no check icon, and the status line below says so instead of echoing
+  // the '(interrupted)' token.
+  const answeredInterrupted =
+    isPrompt && message.answered === QUESTION_INTERRUPTED_PLACEHOLDER;
   const showMultiQuestionFallbackSummary =
     useMultiForm &&
     message.answered != null &&
-    message.answeredAnswers == null;
+    message.answeredAnswers == null &&
+    !answeredInterrupted;
   const showMultiQuestionSummary =
     useMultiForm && message.answered != null;
   // #4973 — per-question display labels for the post-answer summary chip.
@@ -819,7 +825,11 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
           </TouchableOpacity>
         </View>
       )}
-      {answeredIsFreeText && (
+      {answeredInterrupted ? (
+        <Text style={styles.promptFreetextAnswered} testID="question-interrupted">
+          Interrupted — chroxy restarted before this was answered
+        </Text>
+      ) : answeredIsFreeText && (
         <Text style={styles.promptFreetextAnswered}>{message.answered}</Text>
       )}
       {isPrompt && message.requestId && message.answered && permissionExpanded && (

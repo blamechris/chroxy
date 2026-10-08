@@ -4811,6 +4811,24 @@ button.sidebar-token-view-session-row:hover {
   flex-shrink: 0;
 }
 
+/* #8336 — a question cut off by a daemon restart: not answered, so no green
+   check; the same muted-italic row as .question-answered with a warning mark. */
+.question-interrupted {
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.question-interrupted-marker {
+  color: var(--accent-orange);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
 .perm-countdown {
   font-size: var(--text-sm);
   color: var(--text-muted);

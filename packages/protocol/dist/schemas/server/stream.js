@@ -832,6 +832,12 @@ export const ServerUserQuestionSchema = z.object({
     // live-vs-replayed discriminator keys on this field's PRESENCE — a
     // strip-on-parse schema without it would silently disarm that guard.
     historySeq: z.number().optional(),
+    // #8336: the question was cut off by a daemon restart -- its tool was in
+    // flight at shutdown and nobody answered it. Set only on a REPLAYED entry
+    // (the restore-time sweep in session-message-history.js stamps it); absent
+    // on live frames and on every question that was answered or is still
+    // pending. Clients render it as interrupted rather than "(resolved)".
+    interrupted: z.boolean().optional(),
 });
 export const ServerAgentBusySchema = z.object({
     type: z.literal('agent_busy'),
