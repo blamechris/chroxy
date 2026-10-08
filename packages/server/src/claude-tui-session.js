@@ -51,7 +51,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { buildClaudeNativeRouteEnv } from './utils/claude-native-route.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
-import { hasPersistedTranscript } from './jsonl-reader.js'
+import { hasPersistedTranscript, resolveClaudeProjectsDir } from './jsonl-reader.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { BILLING_CLASSES } from './billing-class.js'
@@ -422,7 +422,7 @@ export class ClaudeTuiSession extends BaseSession {
   constructor(opts = {}) {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-tui' }))
     // ClaudeTuiSession-local opts (not BaseSession opts — see buildBaseSessionOpts).
-    const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId, conversationPersisted, monotonicNow } = opts
+    const { port, firstOutputTimeoutMs, skipPermissions, resumeSessionId, conversationPersisted, conversationTranscriptRoot, monotonicNow } = opts
     this._connectionChildEnv = opts.connectionChildEnv && typeof opts.connectionChildEnv === 'object'
       ? { ...opts.connectionChildEnv }
       : null
@@ -529,9 +529,25 @@ export class ClaudeTuiSession extends BaseSession {
     // seed over a transcript that may since have been removed.
     this._conversationEverPersisted = this._sessionId !== null && conversationPersisted === true
     this._restoredConversationUnverified = this._conversationEverPersisted
-    // #8418 — the visible "starting fresh" notice, decided in `_spawnPty` and
-    // delivered by start() once the session is ready (see there for why not sooner).
-    this._pendingWipedConversationNotice = null
+    // #8418 — the transcript root (`<CLAUDE_CONFIG_DIR or ~/.claude>/projects`)
+    // the saved bit was observed under. Absence of a transcript proves a wipe
+    // only under the SAME root: a different `CLAUDE_CONFIG_DIR` or HOME at restore
+    // looks at another tree, and the conversation may be intact in the first.
+    this._carriedTranscriptRoot = this._conversationEverPersisted
+      && typeof conversationTranscriptRoot === 'string' && conversationTranscriptRoot.length > 0
+      ? conversationTranscriptRoot
+      : null
+    // The root of the spawn in flight / last spawned (see `conversationTranscriptRoot`).
+    this._transcriptRootInUse = null
+    // The saved claim ("a conversation was saved") is still believed but could
+    // not be checked here (root changed or unknown): reported on serialize so the
+    // next save does not erase what the first save knew, while the latch stays
+    // false so a respawn never `--resume`s an id this root has not seen.
+    this._claimCarried = false
+    // #8418 — a wipe decided in `_spawnPty` but not yet committed (see
+    // `_beginWipedTransition`). Null except between the decision and start()
+    // reaching a live PTY.
+    this._wipedTransition = null
     // #5348 — one-shot latch for the retry-FRESH fallback (mirrors
     // cli-session.js's `_didFallbackFromUnknownResume`). Re-armed by a respawn
     // that survives warmup, so a FUTURE doomed-resume window can fall back
@@ -2061,7 +2077,10 @@ export class ClaudeTuiSession extends BaseSession {
   // claude conversation while the dashboard replayed stale history (the silent
   // context-amnesia bug, audit TUI-AUDIT-001). Mirrors cli-session.js:386.
   get resumeSessionId() {
-    return this._sessionId
+    // #8418: until a wipe transition commits, the persisted view stays on the
+    // ORIGINAL conversation, so a save in that window (or a failed-restore
+    // snapshot) never names an id the user has not been told about.
+    return this._wipedTransition ? this._wipedTransition.lostId : this._sessionId
   }
 
   /**
@@ -2071,49 +2090,124 @@ export class ClaudeTuiSession extends BaseSession {
    * since been removed (the model is about to forget everything).
    */
   get conversationPersisted() {
-    return this._conversationEverPersisted
+    return this._wipedTransition ? true : (this._conversationEverPersisted || this._claimCarried)
+  }
+
+  /**
+   * #8418 — the transcript root the `conversationPersisted` claim was made
+   * under, persisted beside the bit. A live claim is made under the root the
+   * current PTY runs with; a carried one keeps the root it came with; null when
+   * there is no claim or nothing is known about where it was made.
+   * @returns {string|null}
+   */
+  get conversationTranscriptRoot() {
+    if (this._wipedTransition) return this._carriedTranscriptRoot
+    if (this._conversationEverPersisted) return this._transcriptRootInUse || this._carriedTranscriptRoot
+    return this._claimCarried ? this._carriedTranscriptRoot : null
   }
 
   /**
    * #8418 — saved state says claude held a conversation for this session, and
-   * the transcript is no longer on disk (wiped or moved ~/.claude/projects, a
-   * state file carried to another machine). Spawning `--resume` would only be
-   * rejected, and spawning fresh in silence would leave the user believing the
-   * model remembers. Start a NEW conversation under a NEW id and queue a visible
-   * notice (the existing `resume_unknown` frame) that names the id that was lost.
+   * the transcript is absent from the SAME transcript root it was saved under
+   * (wiped, or moved out of ~/.claude/projects). Spawning `--resume` would only
+   * be rejected, and spawning fresh in silence would leave the user believing
+   * the model remembers. Start a NEW conversation under a NEW id and, once it is
+   * up, tell the user with the existing `resume_unknown` frame.
    *
    * A new id, not the old one reused: the notice's `attemptedResumeId` must name
    * the conversation that is gone, `conversationId` / the persisted
    * `sdkSessionId` must stop pointing at it (any trace of it left under
    * ~/.claude/projects would make `--session-id <old>` a reuse claude refuses),
-   * and it matches what the #5348 fallback already does for the same loss. The
-   * latch describes one id, so it is reset with it: the new conversation has
-   * saved nothing, and a later respawn before its first turn must start fresh,
-   * not `--resume` it.
+   * and it matches what the #5348 fallback already does for the same loss.
+   *
+   * This only BEGINS the transition: the spawn needs the new id (the warmup
+   * matches claude's per-PID session file against `_sessionId`), but everything
+   * observable from outside — `resumeSessionId`, `conversationPersisted`, hence
+   * every save and every failed-restore snapshot — keeps describing the original
+   * conversation until `_commitWipedTransition`. A start that fails in between
+   * `_abortWipedTransition`s and leaves the restore state exactly as it was.
    */
-  _startFreshAfterWipedTranscript() {
-    const lostId = this._sessionId
+  _beginWipedTransition() {
+    this._wipedTransition = {
+      lostId: this._sessionId,
+      prior: {
+        log: this._log,
+        resumedFromPersisted: this._resumedFromPersisted,
+        seededFromPersisted: this._seededFromPersisted,
+      },
+    }
     this._sessionId = randomUUID()
     this._log = loggerForSession('claude-tui-session', this._sessionId)
+    // The latch describes one id: the new conversation has saved nothing, and a
+    // later respawn before its first turn must start fresh, not `--resume` it.
     this._conversationEverPersisted = false
     this._resumedFromPersisted = false
     // The new conversation was never persisted-then-restored, so any later
     // resume_unknown wording must be the "may never have been persisted" one.
     this._seededFromPersisted = false
     ;(this._log || log).warn(
-      `restored conversation ${lostId} was persisted but its transcript is gone from disk — ` +
-      `starting a fresh conversation (new id ${this._sessionId.slice(0, 8)}) and telling the user (#8418)`,
+      `restored conversation ${this._wipedTransition.lostId} was persisted but its transcript is gone from disk — ` +
+      `starting a fresh conversation (new id ${this._sessionId.slice(0, 8)}), to be announced once it is up (#8418)`,
     )
-    this._pendingWipedConversationNotice = {
+  }
+
+  /**
+   * #8418 — the fresh conversation is live: make the transition visible and
+   * durable. The notice is emitted first (SessionManager records it in history),
+   * then `conversation_replaced`, on which SessionManager flushes the state file
+   * synchronously — all before `ready` and so before any input is accepted. A
+   * crash after that point restarts on the new id with the notice already told;
+   * a crash before it restarts on the original id and tells it then.
+   */
+  _commitWipedTransition() {
+    const transition = this._wipedTransition
+    if (!transition) return
+    this._wipedTransition = null
+    this.emit('error', {
       code: 'resume_unknown',
       message: 'Previous Claude conversation could not be resumed (its transcript is no longer on this machine — ' +
         'it may have been removed from ~/.claude/projects/). Started a fresh conversation; the model will not ' +
         'see the earlier transcript.',
-      attemptedResumeId: lostId,
-    }
+      attemptedResumeId: transition.lostId,
+    })
+    this.emit('conversation_replaced', { from: transition.lostId, to: this._sessionId })
+  }
+
+  /**
+   * #8418 — start() failed (or was destroyed) after a wipe was decided: put the
+   * original conversation back, so the failed-restore snapshot and the retry see
+   * the state the restore started from and the loss is announced by the attempt
+   * that succeeds.
+   */
+  _abortWipedTransition() {
+    const transition = this._wipedTransition
+    if (!transition) return
+    this._wipedTransition = null
+    this._sessionId = transition.lostId
+    this._log = transition.prior.log
+    this._conversationEverPersisted = true
+    this._resumedFromPersisted = transition.prior.resumedFromPersisted
+    this._seededFromPersisted = transition.prior.seededFromPersisted
+    this._restoredConversationUnverified = true
   }
 
   async start() {
+    try {
+      const result = await this._startSession()
+      // An early `return` inside start (destroyed during the spawn, or a
+      // retry-fresh already armed) skips the commit point: settle it here.
+      if (this._wipedTransition) {
+        if (this._destroying) this._abortWipedTransition()
+        else this._commitWipedTransition()
+      }
+      return result
+    } catch (err) {
+      this._abortWipedTransition()
+      throw err
+    }
+  }
+
+  async _startSession() {
     // Pre-flight: ensure cwd is trusted so the dialog doesn't block PTY spawns.
     try {
       ensureCwdTrusted(this.cwd)
@@ -2285,19 +2379,13 @@ export class ClaudeTuiSession extends BaseSession {
       throw new Error('claude PTY failed to spawn (no live process after _spawnPty)')
     }
 
-    // #8418 — the restored conversation's transcript was gone, so this session
-    // is a new conversation. Told here, once the fresh conversation has actually
-    // started, and not from `_spawnPty` where it is decided: a spawn that fails
-    // after the decision must not announce a conversation that never began (the
-    // re-parked restore is retried from the same saved state and would announce
-    // it again). It is also past SessionManager's seeding of the restored history,
-    // so the notice is recorded after the history it explains and a client that
-    // connects later, or replays, still sees it.
-    if (this._pendingWipedConversationNotice) {
-      const notice = this._pendingWipedConversationNotice
-      this._pendingWipedConversationNotice = null
-      this.emit('error', notice)
-    }
+    // #8418 — a wipe decided in `_spawnPty` takes effect here, once the fresh
+    // conversation has actually started: a spawn that fails after the decision
+    // must not announce a conversation that never began (the re-parked restore is
+    // retried from the original state and would announce it again). Past
+    // SessionManager's seeding of the restored history, so the notice is recorded
+    // after the history it explains; durable before `ready` (see the method).
+    this._commitWipedTransition()
     this._processReady = true
     this.emit('ready', { sessionId: this._sessionId, model: this.model, tools: [] })
     this._emitConfiguredMcpServers()
@@ -3254,11 +3342,24 @@ export class ClaudeTuiSession extends BaseSession {
     // set, because the latch came from a file and the transcript may be gone.
     const verifySeed = this._restoredConversationUnverified
     this._restoredConversationUnverified = false
+    const transcriptRoot = resolveClaudeProjectsDir(env)
+    this._transcriptRootInUse = transcriptRoot
     const resumeExisting = this._resumedFromPersisted
       && this._conversationPersisted(cwdReal, env, { verifyDisk: verifySeed })
     if (this._resumedFromPersisted && !resumeExisting) {
-      if (verifySeed) {
-        this._startFreshAfterWipedTranscript()
+      if (verifySeed && this._carriedTranscriptRoot === transcriptRoot) {
+        // Looked in the very tree the bit was saved under, and it is not there.
+        this._beginWipedTransition()
+      } else if (verifySeed) {
+        // The tree is not the one the bit was saved under (a changed
+        // CLAUDE_CONFIG_DIR or HOME), or the save did not say. Absence here
+        // proves nothing, so keep the original id: fresh on it, as before this
+        // change, and a corrected environment recovers the conversation. The
+        // latch is dropped for this process (a respawn must not `--resume` an id
+        // this tree has never seen) but the claim is carried into the next save.
+        this._conversationEverPersisted = false
+        this._claimCarried = true
+        log.warn(`restored conversation ${this._sessionId.slice(0, 8)} is not under ${transcriptRoot}, and ${this._carriedTranscriptRoot ? `it was saved under ${this._carriedTranscriptRoot}` : 'the save did not record where'} — not treating it as removed; starting fresh on the same id (#8418)`)
       } else {
         log.info(`no persisted claude transcript for ${this._sessionId.slice(0, 8)} (no turn completed) — spawning fresh with --session-id instead of --resume (#8239)`)
       }
