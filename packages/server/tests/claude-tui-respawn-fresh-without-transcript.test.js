@@ -304,7 +304,7 @@ describe('hasPersistedTranscript (#8239)', () => {
     assert.equal(hasPersistedTranscript(cwdReal, null), true)
   })
 
-  it('fails safe when a project dir cannot be searched (EACCES is not "never saved")', () => {
+  it('fails safe when a project dir cannot be searched (EACCES is not "never saved")', { skip: process.platform === 'win32' ? 'chmod does not restrict access on win32' : false }, () => {
     // chmod 000 does not restrict root, so there is nothing to assert there.
     if (process.getuid && process.getuid() === 0) return
     const dir = join(fakeHome, '.claude', 'projects', 'locked')
@@ -317,7 +317,7 @@ describe('hasPersistedTranscript (#8239)', () => {
     }
   })
 
-  it('fails safe when the projects directory itself cannot be read (a non-ENOENT readdir error is not "never saved")', () => {
+  it('fails safe when the projects directory itself cannot be read (a non-ENOENT readdir error is not "never saved")', { skip: process.platform === 'win32' ? 'chmod does not restrict access on win32' : false }, () => {
     if (process.getuid && process.getuid() === 0) return
     // Search (x) permission without read (r): statting the expected child
     // answers ENOENT, then listing `projects` itself fails with EACCES.
@@ -331,7 +331,7 @@ describe('hasPersistedTranscript (#8239)', () => {
     }
   })
 
-  it('fails safe when the expected project key is too long to stat (ENAMETOOLONG is not "never saved")', () => {
+  it('fails safe when the expected project key is too long to stat (ENAMETOOLONG is not "never saved")', { skip: process.platform === 'win32' ? 'win32 long-path handling does not raise ENAMETOOLONG here' : false }, () => {
     // claude shortens long project keys itself, so the file sits under a name
     // this probe cannot derive; the first stat throws ENAMETOOLONG, which must
     // read as "could not look", not "absent".
@@ -339,7 +339,7 @@ describe('hasPersistedTranscript (#8239)', () => {
     assert.equal(hasPersistedTranscript('/' + 'a'.repeat(300), SESSION_ID), true)
   })
 
-  it('fails safe when the expected project dir cannot be stat-ed (EACCES is not "never saved")', () => {
+  it('fails safe when the expected project dir cannot be stat-ed (EACCES is not "never saved")', { skip: process.platform === 'win32' ? 'chmod does not restrict access on win32' : false }, () => {
     if (process.getuid && process.getuid() === 0) return
     // x-bit removed on the expected key dir: statSync of <dir>/<id>.jsonl is
     // EACCES. (The all-directories scan hits the same entry, so this branch and
