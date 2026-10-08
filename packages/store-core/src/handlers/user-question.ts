@@ -11,7 +11,7 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
-import type { ChatMessage } from '../types'
+import type { ChatMessage, ChatMessageQuestion } from '../types'
 import { nextMessageId } from '../utils'
 import { parseUserInputMessage } from '../user-input-handler'
 
@@ -60,6 +60,56 @@ export interface UserQuestionPayload {
 }
 
 /**
+ * #4604 Chunk B — shared per-question normalization. Same dedup +
+ * Other-sentinel logic the original single-question path applied,
+ * pulled out to module level so every entry in the multi-question payload
+ * gets it, and so a client can normalize a raw AskUserQuestion `tool_input`
+ * (e.g. the dashboard's permission card, #8264) with exactly the rules the
+ * question card itself uses. Returns `null` for malformed entries so the
+ * caller can skip them without poisoning the rest of the form.
+ */
+export function normalizeUserQuestion(rawQ: unknown): ChatMessageQuestion | null {
+  if (!rawQ || typeof rawQ !== 'object') return null
+  const qq = rawQ as Record<string, unknown>
+  if (typeof qq.question !== 'string') return null
+  const rawOptions = Array.isArray(qq.options)
+    ? (qq.options as unknown[])
+        .filter(
+          (o: unknown): o is { label: string } =>
+            !!o &&
+            typeof o === 'object' &&
+            typeof (o as Record<string, unknown>).label === 'string',
+        )
+        .map((o: { label: string }) => ({ label: o.label, value: o.label }))
+    : []
+  // #3752: dedup against the synthetic sentinel BEFORE appending it.
+  const baseOptions = rawOptions.filter(
+    (o) => o.label !== OTHER_OPTION_LABEL && o.value !== OTHER_OPTION_VALUE,
+  )
+  const modelSuppliedOther = rawOptions.find((o) => o.label === OTHER_OPTION_LABEL)
+  const hasUsableOptions = baseOptions.length > 0 || modelSuppliedOther != null
+  // #4604 Chunk B: only append the Other sentinel for single-select
+  // questions. Multi-select questions render as checkboxes and the
+  // free-text escape hatch doesn't compose cleanly with that UI;
+  // multi-select forms produced by claude SDK never include a
+  // free-text fallback anyway.
+  const isMultiSelect = qq.multiSelect === true
+  const options = !hasUsableOptions
+    ? []
+    : isMultiSelect
+      ? baseOptions
+      : modelSuppliedOther
+        ? [...baseOptions, modelSuppliedOther]
+        : [...baseOptions, { label: OTHER_OPTION_LABEL, value: OTHER_OPTION_VALUE }]
+  const out: { question: string; options: { label: string; value: string }[]; multiSelect?: boolean } = {
+    question: qq.question as string,
+    options,
+  }
+  if (isMultiSelect) out.multiSelect = true
+  return out
+}
+
+/**
  * Validate and normalize a `user_question` message.
  *
  * Returns `null` when the message is malformed:
@@ -89,63 +139,11 @@ export function handleUserQuestion(
   const q = questions[0] as Record<string, unknown>
   if (!q || typeof q !== 'object' || typeof q.question !== 'string') return null
 
-  /**
-   * #4604 Chunk B — shared per-question normalization. Same dedup +
-   * Other-sentinel logic the original single-question path applied,
-   * pulled into a closure so every entry in the multi-question payload
-   * gets it. Returns `null` for malformed entries so the caller can
-   * skip them without poisoning the rest of the form.
-   */
-  const normalizeQuestion = (rawQ: unknown): {
-    question: string
-    options: { label: string; value: string }[]
-    multiSelect?: boolean
-  } | null => {
-    if (!rawQ || typeof rawQ !== 'object') return null
-    const qq = rawQ as Record<string, unknown>
-    if (typeof qq.question !== 'string') return null
-    const rawOptions = Array.isArray(qq.options)
-      ? (qq.options as unknown[])
-          .filter(
-            (o: unknown): o is { label: string } =>
-              !!o &&
-              typeof o === 'object' &&
-              typeof (o as Record<string, unknown>).label === 'string',
-          )
-          .map((o: { label: string }) => ({ label: o.label, value: o.label }))
-      : []
-    // #3752: dedup against the synthetic sentinel BEFORE appending it.
-    const baseOptions = rawOptions.filter(
-      (o) => o.label !== OTHER_OPTION_LABEL && o.value !== OTHER_OPTION_VALUE,
-    )
-    const modelSuppliedOther = rawOptions.find((o) => o.label === OTHER_OPTION_LABEL)
-    const hasUsableOptions = baseOptions.length > 0 || modelSuppliedOther != null
-    // #4604 Chunk B: only append the Other sentinel for single-select
-    // questions. Multi-select questions render as checkboxes and the
-    // free-text escape hatch doesn't compose cleanly with that UI;
-    // multi-select forms produced by claude SDK never include a
-    // free-text fallback anyway.
-    const isMultiSelect = qq.multiSelect === true
-    const options = !hasUsableOptions
-      ? []
-      : isMultiSelect
-        ? baseOptions
-        : modelSuppliedOther
-          ? [...baseOptions, modelSuppliedOther]
-          : [...baseOptions, { label: OTHER_OPTION_LABEL, value: OTHER_OPTION_VALUE }]
-    const out: { question: string; options: { label: string; value: string }[]; multiSelect?: boolean } = {
-      question: qq.question as string,
-      options,
-    }
-    if (isMultiSelect) out.multiSelect = true
-    return out
-  }
-
   // Normalize every question. Drop malformed entries (return null from
-  // normalizeQuestion); if the first question is dropped, fail closed
+  // normalizeUserQuestion); if the first question is dropped, fail closed
   // — that's the legacy null-return shape the call site already handles.
-  const normalizedAll = (questions as unknown[]).map(normalizeQuestion).filter(
-    (v): v is { question: string; options: { label: string; value: string }[]; multiSelect?: boolean } => v != null,
+  const normalizedAll = (questions as unknown[]).map(normalizeUserQuestion).filter(
+    (v): v is ChatMessageQuestion => v != null,
   )
   // The top-level `options` mirrors q[0].options exactly (legacy
   // contract — every existing test pin still applies). Multi-question
