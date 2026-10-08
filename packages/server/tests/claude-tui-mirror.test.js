@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
+import { CLAUDE_TUI_PTY_SIZE, CLAUDE_TUI_PTY_MIN_SIZE } from '@chroxy/protocol'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 
 // Track the temp skillsDirs makeSession() mints so they don't accumulate under
@@ -175,7 +175,11 @@ test('resizeTerminal drives a live PTY via _term.resize', () => {
 
 test('resizeTerminal clamps out-of-range / non-integer dimensions', () => {
   const s = makeSession()
-  assert.deepEqual(s.resizeTerminal(0, 0), { cols: 1, rows: 1 }, 'floor clamps to 1')
+  assert.deepEqual(
+    s.resizeTerminal(0, 0),
+    { cols: CLAUDE_TUI_PTY_MIN_SIZE.cols, rows: CLAUDE_TUI_PTY_MIN_SIZE.rows },
+    'floor clamps to the CLAUDE_TUI_PTY_MIN_SIZE minimum (#8254)',
+  )
   assert.deepEqual(s.resizeTerminal(9999, 9999), { cols: 1000, rows: 1000 }, 'ceiling clamps to 1000')
   assert.deepEqual(s.resizeTerminal(80.9, 24.9), { cols: 80, rows: 24 }, 'floored to ints')
 })
@@ -205,6 +209,85 @@ test('a _term.resize throw is swallowed (no crash) and the size is still recorde
   const applied = s.resizeTerminal(90, 30)
   assert.deepEqual(applied, { cols: 90, rows: 30 })
   assert.deepEqual(s.getTerminalSize(), { cols: 90, rows: 30 })
+})
+
+// #8254: the dashboard's Chat tab measured a collapsed pane and asked for 10x6.
+// At that grid claude wraps its output a few characters per line, which blinds the
+// screen-reading recovery classifiers (#7847, #8223). The server must not follow.
+
+test('a degenerate resize (the 10x6 the Chat tab sent) is clamped to the minimum grid, never applied', () => {
+  const s = makeSession()
+  const calls = []
+  s._term = { resize: (c, r) => calls.push([c, r]) }
+  s._ptyExited = false
+  const events = []
+  s.on('terminal_resize', (e) => events.push(e))
+  const min = { cols: CLAUDE_TUI_PTY_MIN_SIZE.cols, rows: CLAUDE_TUI_PTY_MIN_SIZE.rows }
+  assert.deepEqual(s.resizeTerminal(10, 6), min)
+  assert.deepEqual(s.getTerminalSize(), min)
+  assert.deepEqual(calls, [[min.cols, min.rows]], 'the live PTY never saw a grid below the minimum')
+  assert.deepEqual(events, [min], 'viewers are told the clamped size, not the requested one')
+  // Each axis is floored independently.
+  assert.deepEqual(s.resizeTerminal(200, 3), { cols: 200, rows: min.rows })
+  assert.deepEqual(s.resizeTerminal(5, 60), { cols: min.cols, rows: 60 })
+})
+
+test('the minimum grid is a sane grid: at least 80x24', () => {
+  assert.ok(CLAUDE_TUI_PTY_MIN_SIZE.cols >= 80 && CLAUDE_TUI_PTY_MIN_SIZE.rows >= 24)
+  assert.ok(CLAUDE_TUI_PTY_MIN_SIZE.cols <= CLAUDE_TUI_PTY_SIZE.cols && CLAUDE_TUI_PTY_MIN_SIZE.rows <= CLAUDE_TUI_PTY_SIZE.rows, 'the default is not below the floor')
+})
+
+test('the size a viewer chose is reset to the default when the last viewer leaves', () => {
+  const s = makeSession()
+  const calls = []
+  s._term = { resize: (c, r) => calls.push([c, r]) }
+  s._ptyExited = false
+  s.setTerminalMirrorActive(true) // a viewer subscribes
+  s.resizeTerminal(198, 48) // ...and sizes the PTY to its pane
+  assert.deepEqual(s.getTerminalSize(), { cols: 198, rows: 48 })
+  const events = []
+  s.on('terminal_resize', (e) => events.push(e))
+  s.setTerminalMirrorActive(false) // the last viewer leaves
+  const def = { cols: CLAUDE_TUI_PTY_SIZE.cols, rows: CLAUDE_TUI_PTY_SIZE.rows }
+  assert.deepEqual(s.getTerminalSize(), def, 'the size did not outlive its viewer')
+  assert.deepEqual(calls.at(-1), [def.cols, def.rows], 'the live PTY was put back at the default')
+  assert.deepEqual(events, [def])
+})
+
+test('a reset with the PTY already at the default is silent', () => {
+  const s = makeSession()
+  s.setTerminalMirrorActive(true)
+  const events = []
+  s.on('terminal_resize', (e) => events.push(e))
+  s.setTerminalMirrorActive(false)
+  assert.deepEqual(events, [], 'nothing changed, so nothing is broadcast')
+})
+
+test('forceTerminalRepaint still toggles and restores the grid when it is at the minimum width', () => {
+  const s = makeSession()
+  const calls = []
+  s._term = { resize: (c, r) => calls.push([c, r]) }
+  s._ptyExited = false
+  s.resizeTerminal(CLAUDE_TUI_PTY_MIN_SIZE.cols, CLAUDE_TUI_PTY_MIN_SIZE.rows)
+  calls.length = 0
+  assert.equal(s.forceTerminalRepaint(), true)
+  assert.equal(calls.length, 2, 'a width toggle and the restore both reach the PTY (SIGWINCH twice)')
+  assert.notEqual(calls[0][0], CLAUDE_TUI_PTY_MIN_SIZE.cols, 'the toggle really changes the width')
+  assert.deepEqual(s.getTerminalSize(), { cols: CLAUDE_TUI_PTY_MIN_SIZE.cols, rows: CLAUDE_TUI_PTY_MIN_SIZE.rows })
+})
+
+test('a respawn never carries a degenerate tracked size into the new PTY', () => {
+  const s = makeSession()
+  // Not reachable through resizeTerminal (it clamps); this is the backstop for any
+  // other writer of the tracked size.
+  s._ptyCols = 10
+  s._ptyRows = 6
+  s._applySpawnSizeFloor()
+  assert.deepEqual(s.getTerminalSize(), { cols: CLAUDE_TUI_PTY_SIZE.cols, rows: CLAUDE_TUI_PTY_SIZE.rows })
+  // ...and a legitimate size survives a respawn.
+  s.resizeTerminal(160, 48)
+  s._applySpawnSizeFloor()
+  assert.deepEqual(s.getTerminalSize(), { cols: 160, rows: 48 })
 })
 
 // #5835 Phase 3: writeTerminalInput forwards raw bytes to the live PTY as-is.

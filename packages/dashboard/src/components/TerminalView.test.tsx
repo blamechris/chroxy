@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, act, cleanup } from '@testing-library/react'
-import { TerminalView, BATCH_INTERVAL } from './TerminalView'
+import { TerminalView, BATCH_INTERVAL, MIN_MEASURE_COLS, MIN_MEASURE_ROWS } from './TerminalView'
 
 // Module-level spies for mock internals
 const writeSpy = vi.fn()
@@ -238,6 +238,93 @@ describe('TerminalView', () => {
       const onMeasure = vi.fn()
       render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} />)
       expect(onMeasure).not.toHaveBeenCalled()
+    })
+
+    // #8254: the Chat tab keeps the terminal pane mounted under display:none. For
+    // an element in a display:none subtree the computed width/height are the
+    // specified `100%`, which FitAddon reads as 100px — a plausible-looking 10x6
+    // that was applied to the real claude PTY.
+    describe('hidden / degenerate panes never size the PTY (#8254)', () => {
+      it('a hidden pane reports nothing on mount, even when proposeDimensions returns a grid', () => {
+        proposeDimensionsResult = { cols: 10, rows: 6 }
+        const onMeasure = vi.fn()
+        render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible={false} />)
+        expect(onMeasure).not.toHaveBeenCalled()
+      })
+
+      it('a hidden pane reports nothing from a debounced window resize either', () => {
+        vi.useFakeTimers()
+        try {
+          proposeDimensionsResult = { cols: 200, rows: 50 }
+          const onMeasure = vi.fn()
+          render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible={false} />)
+          act(() => { window.dispatchEvent(new Event('resize')) })
+          act(() => { vi.advanceTimersByTime(500) })
+          expect(onMeasure).not.toHaveBeenCalled()
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('a visible pane still reports a window resize', () => {
+        vi.useFakeTimers()
+        try {
+          proposeDimensionsResult = { cols: 200, rows: 50 }
+          const onMeasure = vi.fn()
+          render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible />)
+          onMeasure.mockClear()
+          proposeDimensionsResult = { cols: 180, rows: 44 }
+          act(() => { window.dispatchEvent(new Event('resize')) })
+          act(() => { vi.advanceTimersByTime(500) })
+          expect(onMeasure).toHaveBeenCalledWith(180, 44)
+        } finally {
+          vi.useRealTimers()
+        }
+      })
+
+      it('measures when a hidden pane becomes visible (ResizeObserver alone would not be relied on)', () => {
+        proposeDimensionsResult = { cols: 198, rows: 48 }
+        const onMeasure = vi.fn()
+        const { rerender } = render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible={false} />)
+        expect(onMeasure).not.toHaveBeenCalled()
+        rerender(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible />)
+        expect(onMeasure).toHaveBeenCalledTimes(1)
+        expect(onMeasure).toHaveBeenCalledWith(198, 48)
+      })
+
+      it('does not measure on becoming hidden', () => {
+        proposeDimensionsResult = { cols: 198, rows: 48 }
+        const onMeasure = vi.fn()
+        const { rerender } = render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible />)
+        onMeasure.mockClear()
+        rerender(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible={false} />)
+        expect(onMeasure).not.toHaveBeenCalled()
+      })
+
+      it('re-measures while visible when remeasureKey changes (e.g. after a reconnect)', () => {
+        proposeDimensionsResult = { cols: 198, rows: 48 }
+        const onMeasure = vi.fn()
+        const { rerender } = render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} remeasureKey="connected" />)
+        expect(onMeasure).toHaveBeenCalledTimes(1)
+        rerender(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} remeasureKey="reconnecting" />)
+        rerender(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} remeasureKey="connected" />)
+        expect(onMeasure).toHaveBeenCalledTimes(3)
+      })
+
+      it('drops a degenerate measurement (the 10x6 seen in the field) even from a visible pane', () => {
+        proposeDimensionsResult = { cols: 10, rows: 6 }
+        const onMeasure = vi.fn()
+        render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible />)
+        expect(onMeasure).not.toHaveBeenCalled()
+        expect(MIN_MEASURE_COLS).toBeGreaterThan(10)
+      })
+
+      it('still reports a genuinely small but usable pane', () => {
+        proposeDimensionsResult = { cols: MIN_MEASURE_COLS, rows: MIN_MEASURE_ROWS }
+        const onMeasure = vi.fn()
+        render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} visible />)
+        expect(onMeasure).toHaveBeenCalledWith(MIN_MEASURE_COLS, MIN_MEASURE_ROWS)
+      })
     })
 
     it('resizes the live terminal in place when fixedSize changes (preserves scrollback)', () => {

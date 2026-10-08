@@ -42,6 +42,21 @@ export interface TerminalViewProps {
    */
   onMeasure?: (cols: number, rows: number) => void
   /**
+   * #8254: whether the pane is actually on screen. A pane hidden with
+   * `display: none` (the Terminal tab while the Chat tab is showing) must NOT
+   * measure: FitAddon reads the container's COMPUTED width/height, and for an
+   * element in a `display: none` subtree those are the specified `100%`, which
+   * `parseInt` reads as 100px — a plausible-looking 10x6 grid that the server then
+   * applied to the real PTY. Defaults to true; the owner of the show/hide flips it.
+   * Becoming visible (or a change of `remeasureKey`) takes a fresh measurement.
+   */
+  visible?: boolean
+  /**
+   * #8254: change this to force a fresh measurement while visible — e.g. after a
+   * reconnect, when the server has put the PTY back at its default size.
+   */
+  remeasureKey?: unknown
+  /**
    * #5835 Phase 3: when true (mirror mode only), the terminal accepts keystrokes
    * and forwards them via `onInput` — true remote control. When false the mirror
    * stays read-only (an observer, or a non-claude-tui pane). Toggled at runtime
@@ -60,12 +75,21 @@ export interface TerminalViewProps {
 export const BATCH_INTERVAL = 50 // ms — coalesce rapid writes
 const RESIZE_DEBOUNCE = 150 // ms — debounce resize/fit calls
 
+/**
+ * #8254: backstop floor for a pane measurement. The real guard is `visible`; this
+ * stops any other collapsed/degenerate measurement from becoming a resize request.
+ * Deliberately far below a usable terminal (the server clamps to 80x24 for
+ * claude-tui) so a genuinely narrow pane is still reported and the server decides.
+ */
+export const MIN_MEASURE_COLS = 20
+export const MIN_MEASURE_ROWS = 5
+
 /** Safely call fit() — can throw when container is hidden or has zero size */
 function safeFit(fit: FitAddon) {
   try { fit.fit() } catch { /* container not visible */ }
 }
 
-export function TerminalView({ className, initialData, onReady, fixedSize, onMeasure, interactive = false, onInput }: TerminalViewProps) {
+export function TerminalView({ className, initialData, onReady, fixedSize, onMeasure, visible = true, remeasureKey, interactive = false, onInput }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -79,6 +103,11 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
   onMeasureRef.current = onMeasure
   const onInputRef = useRef(onInput)
   onInputRef.current = onInput
+  // #8254: the latest `visible`, readable from the mount-once handlers, and the
+  // mount-once effect's measurement routine, callable from the visibility effect.
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
+  const measureRef = useRef<(() => void) | null>(null)
   // Whether this terminal is a fixed-size letterboxed mirror. Mode is fixed at
   // MOUNT — the xterm is constructed with mode-specific options (convertEol,
   // initial cols/rows) and the mount-once onResize handler closes over this — so
@@ -189,6 +218,16 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
     // the authoritative size comes back (the fixedSize effect below).
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     let resizeObserver: ResizeObserver | undefined
+    // #8254: report the pane's fitting grid to the parent, but only from a pane that
+    // is on screen and only when the grid is not degenerate (see `visible`).
+    const measureAndReport = () => {
+      if (disposedRef.current || !visibleRef.current) return
+      const dims = fitAddon.proposeDimensions()
+      if (dims && dims.cols >= MIN_MEASURE_COLS && dims.rows >= MIN_MEASURE_ROWS) {
+        onMeasureRef.current?.(dims.cols, dims.rows)
+      }
+    }
+    measureRef.current = isMirror ? measureAndReport : null
     const onResize = () => {
       if (disposedRef.current) return
       if (resizeTimer) clearTimeout(resizeTimer)
@@ -196,10 +235,7 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
         if (disposedRef.current) return
         if (isMirror) {
           // Measure only — proposeDimensions returns the grid that fits the pane.
-          const dims = fitAddon.proposeDimensions()
-          if (dims && dims.cols > 0 && dims.rows > 0) {
-            onMeasureRef.current?.(dims.cols, dims.rows)
-          }
+          measureAndReport()
         } else {
           safeFit(fitAddon)
         }
@@ -214,10 +250,7 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
     // Mirror mode: take an initial measurement so the server can size the PTY to
     // the pane on first view (the ResizeObserver also fires on mount in most
     // browsers, but don't rely on it). Normal mode already fit() above.
-    if (isMirror) {
-      const dims = fitAddon.proposeDimensions()
-      if (dims && dims.cols > 0 && dims.rows > 0) onMeasureRef.current?.(dims.cols, dims.rows)
-    }
+    if (isMirror) measureAndReport()
 
     return () => {
       disposedRef.current = true
@@ -232,6 +265,7 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
       term.dispose()
       termRef.current = null
       fitRef.current = null
+      measureRef.current = null
     }
     // Mount-once: onReady/initialData/write/clear are stable refs captured at
     // mount time. The terminal lifecycle is tied to the DOM container, not to
@@ -250,6 +284,20 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
       termRef.current.resize(fixedSize.cols, fixedSize.rows)
     } catch { /* terminal not ready / disposed */ }
   }, [fixedSize?.cols, fixedSize?.rows]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // #8254: a pane that was hidden when it last measured has nothing to report
+  // until it is shown, and ResizeObserver only fires when the box actually changes
+  // size. Take a fresh measurement when the pane becomes visible, and again when
+  // the owner bumps `remeasureKey`. The first run is the mount, which the
+  // mount-once effect already measured.
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true
+      return
+    }
+    if (visible) measureRef.current?.()
+  }, [visible, remeasureKey])
 
   // #5835 Phase 3: toggle interactivity at runtime so a role change (primary↔
   // observer) flips the mirror between remote-control and read-only WITHOUT

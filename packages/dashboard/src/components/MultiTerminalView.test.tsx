@@ -15,10 +15,11 @@ const capturedOnMeasure: Array<(cols: number, rows: number) => void> = []
 const capturedOnInput: Array<((data: string) => void) | undefined> = []
 const capturedFixedSize: Array<{ cols: number; rows: number } | undefined> = []
 const capturedInteractive: Array<boolean | undefined> = []
+const capturedVisible: Array<boolean | undefined> = []
 
 // Mock TerminalView — we don't want real xterm.js in unit tests
 vi.mock('./TerminalView', () => ({
-  TerminalView: ({ className, initialData, onReady, fixedSize, onMeasure, interactive, onInput }: {
+  TerminalView: ({ className, initialData, onReady, fixedSize, onMeasure, interactive, onInput, visible }: {
     className?: string
     initialData?: string
     onReady?: (handle: { write: (d: string) => void; clear: () => void; fit: () => void }) => void
@@ -26,6 +27,7 @@ vi.mock('./TerminalView', () => ({
     onMeasure?: (cols: number, rows: number) => void
     interactive?: boolean
     onInput?: (data: string) => void
+    visible?: boolean
   }) => {
     // Auto-fire onReady on mount (simulates terminal initialization)
     if (onReady) {
@@ -39,6 +41,7 @@ vi.mock('./TerminalView', () => ({
     capturedOnInput.push(onInput)
     capturedFixedSize.push(fixedSize)
     capturedInteractive.push(interactive)
+    capturedVisible.push(visible)
     return (
       <div
         data-testid="mock-terminal"
@@ -68,6 +71,7 @@ vi.mock('../store/connection', () => ({
         sendTerminalInput: mockSendTerminalInput,
         sessionStates: mockStoreState.sessionStates ?? {},
         terminalRawBuffer: mockStoreState.terminalRawBuffer ?? '',
+        connectionPhase: mockStoreState.connectionPhase ?? 'connected',
       }
       return selector(state)
     },
@@ -84,6 +88,7 @@ afterEach(() => {
   capturedOnInput.length = 0
   capturedFixedSize.length = 0
   capturedInteractive.length = 0
+  capturedVisible.length = 0
 })
 
 function makeSessions(count: number): SessionInfo[] {
@@ -307,6 +312,58 @@ describe('MultiTerminalView', () => {
       // takes effect without needing a pane-size change
       mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: { s1: { sessionRole: 'primary' } } })
       capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  // #8254: the Chat tab keeps this component mounted under display:none; a hidden
+  // terminal measured a collapsed box (10x6) and the server applied it to the real
+  // claude PTY, blinding the recovery classifiers.
+  describe('a hidden terminal never sizes the PTY (#8254)', () => {
+    it('drops a measurement from the active session while the terminal tab is not showing', () => {
+      renderMultiTerminal({ activeSessionId: 's1', visible: false })
+      capturedOnMeasure[0]!(10, 6)
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).not.toHaveBeenCalled()
+    })
+
+    it('still sizes the PTY once the terminal tab is showing', () => {
+      const { rerender } = renderMultiTerminal({ activeSessionId: 's1', visible: false })
+      rerender(<MultiTerminalView sessions={makeSessions(2)} activeSessionId="s1" visible />)
+      capturedOnMeasure[capturedOnMeasure.length - 2]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledWith('s1', 200, 50)
+    })
+
+    it('tells each TerminalView whether its pane is on screen: only the active session of a visible tab', () => {
+      renderMultiTerminal({ activeSessionId: 's1', visible: true })
+      expect(capturedVisible).toEqual([true, false])
+      cleanup()
+      capturedVisible.length = 0
+      renderMultiTerminal({ activeSessionId: 's1', visible: false })
+      expect(capturedVisible).toEqual([false, false])
+    })
+
+    it('forgets the last sent size when the tab is hidden, so the same pane size is sent again on return', () => {
+      // The server puts the PTY back at its default when the last viewer leaves; a
+      // deduped re-measure of the same pane would leave it there.
+      const { rerender } = renderMultiTerminal({ activeSessionId: 's1', visible: true })
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(1)
+      rerender(<MultiTerminalView sessions={makeSessions(2)} activeSessionId="s1" visible={false} />)
+      rerender(<MultiTerminalView sessions={makeSessions(2)} activeSessionId="s1" visible />)
+      capturedOnMeasure[capturedOnMeasure.length - 2]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(2)
+    })
+
+    it('forgets the last sent size when the connection drops, so a reconnect re-sends it', () => {
+      const { rerender } = renderMultiTerminal({ activeSessionId: 's1' })
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(1)
+      mockStoreState = { ...mockStoreState, connectionPhase: 'reconnecting' }
+      rerender(<MultiTerminalView sessions={makeSessions(2)} activeSessionId="s1" />)
+      mockStoreState = { ...mockStoreState, connectionPhase: 'connected' }
+      rerender(<MultiTerminalView sessions={makeSessions(2)} activeSessionId="s1" />)
+      capturedOnMeasure[capturedOnMeasure.length - 2]!(200, 50)
       expect(mockRequestTerminalResize).toHaveBeenCalledTimes(2)
     })
   })

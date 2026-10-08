@@ -28,9 +28,16 @@ export interface MultiTerminalViewProps {
   sessions: { sessionId: string }[]
   activeSessionId: string | null
   className?: string
+  /**
+   * #8254: whether the terminal view is the tab on screen. The parent keeps this
+   * component mounted (display: none) while another tab such as Chat is showing,
+   * and a hidden pane must never ask the server to resize the real PTY — it
+   * measures a collapsed box. Defaults to true.
+   */
+  visible?: boolean
 }
 
-export function MultiTerminalView({ sessions, activeSessionId, className }: MultiTerminalViewProps) {
+export function MultiTerminalView({ sessions, activeSessionId, className, visible = true }: MultiTerminalViewProps) {
   const handlesRef = useRef(new Map<string, TerminalHandle>())
   const setTerminalWriteCallback = useConnectionStore(s => s.setTerminalWriteCallback)
   const requestTerminalResize = useConnectionStore(s => s.requestTerminalResize)
@@ -57,7 +64,29 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
   // unchanged size, but this saves the round trip). TerminalView already debounces
   // the measurement itself.
   const lastSentRef = useRef(new Map<string, string>())
+  // #8254: the latest `visible`, for the stable measure callback.
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
+  const connectionPhase = useConnectionStore(s => s.connectionPhase)
+  // #8254: the server puts the PTY back at its default size when the last viewer
+  // of its terminal leaves (leaving this tab, or the socket dropping). The size we
+  // sent before is then stale, so forget it: otherwise coming back with the same
+  // pane size would be deduped away and the PTY would stay at the default.
+  useEffect(() => {
+    if (!visible || connectionPhase !== 'connected') lastSentRef.current.clear()
+  }, [visible, connectionPhase])
+  // #8254: the same goes for a session that stops being the active one. Switching
+  // A -> B on the Output tab unsubscribes A's mirror, and the server puts A's PTY
+  // back at the default; coming back to A measures the same pane size, which the
+  // dedupe would drop. Keep only the active session's entry.
+  useEffect(() => {
+    for (const id of [...lastSentRef.current.keys()]) {
+      if (id !== activeSessionId) lastSentRef.current.delete(id)
+    }
+  }, [activeSessionId])
   const handleMeasure = useCallback((sessionId: string, cols: number, rows: number) => {
+    // #8254: only the terminal tab that is actually on screen sizes the PTY.
+    if (!visibleRef.current) return
     const state = useConnectionStore.getState()
     if (state.activeSessionId !== sessionId) return
     // Include the session's authority role in the dedupe key (Copilot review): if
@@ -147,6 +176,8 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
             onReady={(handle) => handleReady(session.sessionId, handle)}
             fixedSize={sessionStates[session.sessionId]?.terminalSize ?? MIRROR_DEFAULT}
             onMeasure={(cols, rows) => handleMeasure(session.sessionId, cols, rows)}
+            visible={visible && session.sessionId === activeSessionId}
+            remeasureKey={connectionPhase}
             // #5835 Phase 3: interactive (keystrokes → PTY) unless this client is
             // an OBSERVER of the session — another device holds primary. The
             // server is the final authority; this keeps an observer's keys from
