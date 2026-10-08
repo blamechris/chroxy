@@ -22,7 +22,10 @@ const CAP = ClaudeTuiSession.PTY_TAIL_BYTES
 
 function makeSession() {
   const skillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-tail-trunc-skills-'))
-  const s = new ClaudeTuiSession({ cwd: tmpdir(), skillsDir, repoSkillsDir: null })
+  // The respawn runs the login probe; stub it so the test never runs the real
+  // `claude auth status` (a logged-out claude on PATH would otherwise fail it).
+  const loginProbeRunner = async () => ({ status: 0, stdout: '{"loggedIn":true}', stderr: '' })
+  const s = new ClaudeTuiSession({ cwd: tmpdir(), skillsDir, repoSkillsDir: null, loginProbeRunner })
   s._waitForPrompt = async () => true
   s._sessionId = '0f8401aa-0000-4000-8000-000000000001'
   s._settingsPath = join(tmpdir(), 'fixture-settings-8401.json')
