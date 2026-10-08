@@ -23,10 +23,10 @@ import { z } from 'zod';
  *                        the service was removed).
  */
 export declare const RunnerVerdictSchema: z.ZodEnum<{
+    stopped: "stopped";
     busy: "busy";
     idle: "idle";
     offline: "offline";
-    stopped: "stopped";
     unregistered: "unregistered";
 }>;
 /**
@@ -77,10 +77,10 @@ export declare const RunnerInfoSchema: z.ZodObject<{
     name: z.ZodString;
     dir: z.ZodString;
     verdict: z.ZodEnum<{
+        stopped: "stopped";
         busy: "busy";
         idle: "idle";
         offline: "offline";
-        stopped: "stopped";
         unregistered: "unregistered";
     }>;
     service: z.ZodObject<{
@@ -129,10 +129,10 @@ export declare const RepoRunnersSchema: z.ZodObject<{
         name: z.ZodString;
         dir: z.ZodString;
         verdict: z.ZodEnum<{
+            stopped: "stopped";
             busy: "busy";
             idle: "idle";
             offline: "offline";
-            stopped: "stopped";
             unregistered: "unregistered";
         }>;
         service: z.ZodObject<{
@@ -198,10 +198,10 @@ export declare const ServerRunnerStatusSnapshotSchema: z.ZodObject<{
             name: z.ZodString;
             dir: z.ZodString;
             verdict: z.ZodEnum<{
+                stopped: "stopped";
                 busy: "busy";
                 idle: "idle";
                 offline: "offline";
-                stopped: "stopped";
                 unregistered: "unregistered";
             }>;
             service: z.ZodObject<{

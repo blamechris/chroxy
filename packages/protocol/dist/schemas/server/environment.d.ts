@@ -17,8 +17,8 @@ export declare const ServerEnvironmentCreatedSchema: z.ZodObject<{
     name: z.ZodString;
     status: z.ZodEnum<{
         error: "error";
-        running: "running";
         stopped: "stopped";
+        running: "running";
     }>;
 }, z.core.$strip>;
 export declare const ServerEnvironmentDestroyedSchema: z.ZodObject<{
@@ -44,8 +44,8 @@ export declare const ServerEnvironmentInfoSchema: z.ZodObject<{
         containerCliPath: z.ZodString;
         status: z.ZodEnum<{
             error: "error";
-            running: "running";
             stopped: "stopped";
+            running: "running";
         }>;
         sessions: z.ZodArray<z.ZodString>;
         createdAt: z.ZodString;
@@ -79,8 +79,8 @@ export declare const ServerEnvironmentListSchema: z.ZodObject<{
         containerCliPath: z.ZodString;
         status: z.ZodEnum<{
             error: "error";
-            running: "running";
             stopped: "stopped";
+            running: "running";
         }>;
         sessions: z.ZodArray<z.ZodString>;
         createdAt: z.ZodString;
