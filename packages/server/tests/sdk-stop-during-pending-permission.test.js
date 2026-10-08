@@ -37,8 +37,9 @@ function harness(body, { abortOnInterrupt = true } = {}) {
   session.on('permission_request', (d) => requests.push(d))
   session.on('error', (d) => errors.push(d))
   const controller = new AbortController()
+  const bodies = Array.isArray(body) ? [...body] : null
   session._callQuery = () => {
-    const gen = body({ session, signal: controller.signal, requests })
+    const gen = (bodies ? bodies.shift() : body)({ session, signal: controller.signal, requests })
     // The real Query has interrupt(); the SDK aborts the canUseTool signal when
     // it is called. `abortOnInterrupt: false` models the other ordering, where
     // the provider's tool_result is read before the abort reaches this session.
@@ -144,6 +145,82 @@ describe('SdkSession -- Stop during a pending permission (#8363)', () => {
     session.destroy()
     assert.equal('terminatedReason' in results[0], false)
     assert.equal(results[0].result, 'boom')
+  })
+
+  it('CONTROL: a Deny followed by Stop in the same synchronous tick stays a deny (the scheduler does this)', async () => {
+    // respondToPermission settles the prompt at once; the id leaves the tracking
+    // set a microtask later. A Stop in that window must not claim the call.
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      const decision = ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      ctx.session.respondToPermission(ctx.requests[0].requestId, 'deny')
+      const stop = ctx.session.interrupt() // same tick: no await in between
+      await stop
+      assert.equal((await decision).behavior, 'deny')
+      yield denialResult()
+      yield okResult
+    })(), { abortOnInterrupt: false })
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal('terminatedReason' in results[0], false)
+    assert.equal(results[0].result, SDK_DENY_TEXT)
+  })
+
+  it('a Stop-cancelled id left over from an earlier turn does not tag a later turn\'s error', async () => {
+    // Turn 1: Stop cancels the prompt but the provider never writes a result for
+    // it, so the id is never consumed. Turn 2 reuses the id with a genuine error.
+    const { session, results } = harness([
+      (ctx) => (async function* () {
+        yield bashStart
+        ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+        await ctx.session.interrupt()
+        yield okResult
+      })(),
+      () => (async function* () {
+        yield bashStart
+        yield denialResult('Exit code 3')
+        yield okResult
+      })(),
+    ])
+    await session.sendMessage('first')
+    results.length = 0
+    await session.sendMessage('second')
+    session.destroy()
+    assert.equal(results.length, 1)
+    assert.equal('terminatedReason' in results[0], false)
+    assert.equal(results[0].result, 'Exit code 3')
+  })
+
+  it('tags the Stop-cancelled call once: a second error result for the same id is left alone', async () => {
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      await ctx.session.interrupt()
+      yield denialResult()
+      yield denialResult('Exit code 4')
+      yield okResult
+    })())
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal(results.length, 2)
+    assert.equal(results[0].terminatedReason, 'user_stop_before_run')
+    assert.equal('terminatedReason' in results[1], false)
+    assert.equal(results[1].result, 'Exit code 4')
+  })
+
+  it('only an ERROR result for a Stop-cancelled call is relabelled; a normal result is left alone', async () => {
+    const { session, results } = harness((ctx) => (async function* () {
+      yield bashStart
+      ctx.session._handlePermission('Bash', { command: 'ls' }, ctx.signal, undefined, 'toolu_p')
+      await ctx.session.interrupt()
+      yield { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_p', content: 'file1\nfile2' }] } }
+      yield okResult
+    })())
+    await session.sendMessage('go')
+    session.destroy()
+    assert.equal('terminatedReason' in results[0], false)
+    assert.equal(results[0].result, 'file1\nfile2')
+    assert.notEqual(results[0].isError, true)
   })
 
   it('CONTROL: an error result with no Stop at all is untouched', async () => {

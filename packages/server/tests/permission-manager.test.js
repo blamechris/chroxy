@@ -31,6 +31,34 @@ describe('PermissionManager', () => {
   // parent-level subagent routing table (byok-session.js) can never alias
   // a parent's own pending requestId against a child's. Each manager mints
   // a per-instance nonce; the id is opaque to all consumers.
+  // #8363: whether a provider tool call's prompt is STILL waiting. The answer
+  // must change in the same tick the prompt is answered, not a microtask later.
+  describe('hasPendingForToolUse (#8363)', () => {
+    it('is true while the prompt waits and false the moment it is answered', () => {
+      let requestId
+      pm.on('permission_request', (d) => { requestId = d.requestId })
+      const decision = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve', undefined, 'toolu_a')
+      assert.equal(pm.hasPendingForToolUse('toolu_a'), true)
+      assert.equal(pm.hasPendingForToolUse('toolu_other'), false)
+      pm.respondToPermission(requestId, 'deny')
+      assert.equal(pm.hasPendingForToolUse('toolu_a'), false)
+      return decision
+    })
+
+    it('covers a pending AskUserQuestion by the provider id', () => {
+      const answered = pm.handlePermission('AskUserQuestion', { questions: [] }, null, 'approve', undefined, 'toolu_q')
+      assert.equal(pm.hasPendingForToolUse('toolu_q'), true)
+      pm.respondToQuestion('yes')
+      assert.equal(pm.hasPendingForToolUse('toolu_q'), false)
+      return answered
+    })
+
+    it('is false for a missing or empty id', () => {
+      assert.equal(pm.hasPendingForToolUse(undefined), false)
+      assert.equal(pm.hasPendingForToolUse(''), false)
+    })
+  })
+
   describe('requestId global uniqueness (#5121)', () => {
     it('two managers do not mint the same requestId even with identical counters', () => {
       const a = createManager()

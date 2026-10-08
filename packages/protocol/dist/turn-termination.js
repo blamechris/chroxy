@@ -75,7 +75,10 @@ const CAUSE = {
  * hard timeout, a stream stall), so a real result can still follow, and even a
  * confirmed kill does not undo a side effect that completed before the result
  * was delivered. So the wording never asserts "did not run" and never tells
- * the user to blindly retry -- it says no result arrived and to check first.
+ * the user to blindly retry (the one exception is `user_stop_before_run`: a
+ * prompt still pending when Stop was pressed means the tool was never approved,
+ * so that reason alone says it did not run). Everywhere else it says no result
+ * arrived and to check first.
  */
 const CHECK = 'Check whether it took effect before retrying.';
 /**
@@ -103,7 +106,7 @@ export function describeTurnTermination(reason) {
         return {
             cause,
             label: 'stopped',
-            summary: 'Stopped before this tool ran — you pressed Stop while it was waiting for approval, so it was never approved.',
+            summary: 'Stopped before this tool ran — the turn was stopped while it was waiting for approval, so it was never approved.',
         };
     }
     if (reason === 'daemon_restart') {

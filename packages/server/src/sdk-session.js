@@ -3132,7 +3132,15 @@ export class SdkSession extends BaseSession {
     // abort, not by the user. Snapshot them BEFORE the abort -- the SDK writes the
     // tool_result for each as soon as it sees the interrupt, which can be before
     // this session's abort listeners have run.
-    for (const id of this._pendingPermissionToolUseIds) this._stopCancelledToolUseIds.add(id)
+    //
+    // Only a prompt that is STILL waiting. A decision delivered in this same
+    // synchronous tick (the scheduler denies, then interrupts, back to back) has
+    // already left the permission manager's pending state, though its id leaves
+    // `_pendingPermissionToolUseIds` a microtask later; that call was refused,
+    // not stopped.
+    for (const id of this._pendingPermissionToolUseIds) {
+      if (this._permissions.hasPendingForToolUse(id)) this._stopCancelledToolUseIds.add(id)
+    }
 
     // #4828: session-scoped (interrupt() only meaningful with an active query).
     ;(this._log || log).info('Interrupting query')

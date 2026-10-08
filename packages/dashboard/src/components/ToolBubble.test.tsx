@@ -56,7 +56,7 @@ describe('ToolBubble', () => {
       <ToolBubble
         {...baseProps}
         toolName="Bash"
-        result="Stopped before this tool ran -- you pressed Stop while it was waiting for approval, so it was never approved."
+        result="Stopped before this tool ran -- the turn was stopped while it was waiting for approval, so it was never approved."
         terminatedReason="user_stop_before_run"
         isTail
       />,
