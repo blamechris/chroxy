@@ -155,7 +155,7 @@ describe('CheckpointView', () => {
 
   it('shows restore confirmation alert on restore press', () => {
     const alertSpy = jest.spyOn(Alert, 'alert');
-    setupStore(sampleCheckpoints);
+    setupStore(sampleCheckpoints, { canFork: true });
     let root: renderer.ReactTestRenderer;
     act(() => {
       root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
@@ -174,6 +174,26 @@ describe('CheckpointView', () => {
         expect.objectContaining({ text: 'Cancel', style: 'cancel' }),
         expect.objectContaining({ text: 'Restore' }),
       ]),
+    );
+  });
+
+  // #6808 — a provider that cannot fork a transcript still opens a new session in
+  // 'both' mode, but it resumes the FULL conversation. The confirm must not promise
+  // a branch it cannot deliver.
+  it("'both' confirm does not promise a conversation branch when the provider cannot fork", () => {
+    const alertSpy = jest.spyOn(Alert, 'alert');
+    setupStore(sampleCheckpoints, { canFork: false });
+    let root: renderer.ReactTestRenderer;
+    act(() => {
+      root = renderer.create(<CheckpointView visible={true} onClose={onClose} />);
+    });
+    act(() => {
+      findByLabel(root!.root, 'Restore checkpoint Initial setup').props.onPress();
+    });
+    expect(alertSpy).toHaveBeenCalledWith(
+      'Restore Checkpoint',
+      'Revert your working files to "Initial setup" and open a new session? This provider can\'t branch the conversation, so the new session continues the full conversation.',
+      expect.anything(),
     );
   });
 

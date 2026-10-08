@@ -139,6 +139,26 @@ describe('CheckpointTimeline', () => {
       expect(conv.disabled).toBe(true)
     })
 
+    // #6808 — Both on a provider that cannot fork still opens a new session, but
+    // it continues the FULL conversation; the tooltips must not promise a branch.
+    it("'Both' tooltips do not promise a conversation branch when the provider cannot fork", () => {
+      Object.assign(storeState, NON_FORK, { checkpoints: [CHECKPOINTS[0]!] })
+      render(<CheckpointTimeline />)
+      const both = screen.getByTestId('checkpoint-mode-both')
+      expect(both.getAttribute('title')).not.toMatch(/branch the conversation into/i)
+      expect(both.getAttribute('title')).toMatch(/can't branch the conversation/i)
+      const restore = screen.getByText('Restore')
+      expect(restore.getAttribute('title')).not.toMatch(/branch the conversation \(/i)
+      expect(restore.getAttribute('title')).toMatch(/can't branch the conversation/i)
+    })
+
+    it("'Both' tooltips promise the branch when the provider can fork", () => {
+      Object.assign(storeState, FORK_CAPABLE, { checkpoints: [CHECKPOINTS[0]!] })
+      render(<CheckpointTimeline />)
+      expect(screen.getByTestId('checkpoint-mode-both').getAttribute('title')).toMatch(/branch the conversation into a new session/i)
+      expect(screen.getByText('Restore').getAttribute('title')).toMatch(/branch the conversation \(opens a new session\)/i)
+    })
+
     it('enables Conversation and restores with it when the provider can fork', () => {
       Object.assign(storeState, FORK_CAPABLE, { checkpoints: [CHECKPOINTS[0]!] })
       render(<CheckpointTimeline />)

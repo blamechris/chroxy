@@ -10,6 +10,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { Checkpoint, RestoreCheckpointMode } from '../store/types'
+import { restoreCanBranchConversation } from '@chroxy/store-core'
 import { isImeComposing } from '../utils/ime'
 
 // #6767: selective restore-mode picker. Order = display order (default first).
@@ -19,16 +20,32 @@ const RESTORE_MODE_LABEL: Record<RestoreCheckpointMode, string> = {
   files: 'Files',
   conversation: 'Conversation',
 }
-const RESTORE_MODE_TITLE: Record<RestoreCheckpointMode, string> = {
-  both: 'Revert the working files and branch the conversation into a new session',
-  files: 'Revert only the working files — this conversation and session continue',
-  conversation: 'Branch the conversation into a new session — the working files are left as they are',
+function restoreModeTitle(mode: RestoreCheckpointMode, canFork: boolean): string {
+  switch (mode) {
+    case 'files':
+      return 'Revert only the working files — this conversation and session continue'
+    case 'conversation':
+      return 'Branch the conversation into a new session — the working files are left as they are'
+    default:
+      // #6808: on a provider that can't fork, 'both' still opens a new session but
+      // it resumes the full conversation — don't promise a branch it can't deliver.
+      return restoreCanBranchConversation(mode, canFork)
+        ? 'Revert the working files and branch the conversation into a new session'
+        : "Revert the working files and open a new session — this provider can't branch the conversation, so it continues the full conversation"
+  }
 }
 // Honest per-mode Restore-button tooltip (only 'files' keeps the current session).
-const RESTORE_BUTTON_TITLE: Record<RestoreCheckpointMode, string> = {
-  both: 'Restore files and branch the conversation (opens a new session)',
-  files: 'Restore files only (keeps this conversation and session)',
-  conversation: 'Branch the conversation to this checkpoint (opens a new session)',
+function restoreButtonTitle(mode: RestoreCheckpointMode, canFork: boolean): string {
+  switch (mode) {
+    case 'files':
+      return 'Restore files only (keeps this conversation and session)'
+    case 'conversation':
+      return 'Branch the conversation to this checkpoint (opens a new session)'
+    default:
+      return restoreCanBranchConversation(mode, canFork)
+        ? 'Restore files and branch the conversation (opens a new session)'
+        : "Restore files and open a new session (this provider can't branch the conversation)"
+  }
 }
 
 function formatTimestamp(ms: number): string {
@@ -240,7 +257,7 @@ export function CheckpointTimeline() {
               disabled={disabled}
               title={disabled
                 ? "This session's provider can't branch the conversation — use Files or Both"
-                : RESTORE_MODE_TITLE[m]}
+                : restoreModeTitle(m, canForkConversation)}
               onClick={() => setRestoreMode(m)}
             >
               {RESTORE_MODE_LABEL[m]}
@@ -304,7 +321,7 @@ export function CheckpointTimeline() {
               onDelete={handleDelete}
               confirmingDelete={confirmingDelete}
               setConfirmingDelete={setConfirmingDelete}
-              restoreButtonTitle={RESTORE_BUTTON_TITLE[restoreMode]}
+              restoreButtonTitle={restoreButtonTitle(restoreMode, canForkConversation)}
             />
           ))}
         </div>

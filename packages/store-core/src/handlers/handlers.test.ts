@@ -34,6 +34,12 @@ import {
   handleCheckpointList,
   handleCheckpointRestored,
   handleCheckpointFilesRestored,
+  buildCheckpointRestoreNotice,
+  restoreCanBranchConversation,
+  findCheckpointName,
+  stashPendingRestoreNotice,
+  takePendingRestoreNotice,
+  clearPendingRestoreNotices,
   handleError,
   handleSessionError,
   handleSessionStopped,
@@ -10334,5 +10340,128 @@ describe('handleMessage — container-health codes (#7603)', () => {
     )
     if (!result.shouldDispatch) throw new Error('unreachable')
     expect(result.containerLostPatch).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildCheckpointRestoreNotice (#6808)
+// ---------------------------------------------------------------------------
+describe('buildCheckpointRestoreNotice', () => {
+  const branched = (mode?: 'both' | 'conversation') => ({
+    newSessionId: 's2',
+    filesOnly: false,
+    ...(mode ? { mode } : {}),
+  })
+  const filesOnly = (mode?: 'both' | 'conversation') => ({
+    newSessionId: 's2',
+    filesOnly: true,
+    ...(mode ? { mode } : {}),
+  })
+
+  it("filesOnly:false + 'both' says files were restored AND the conversation was branched", () => {
+    const m = buildCheckpointRestoreNotice(branched('both'), 'Before refactor')
+    expect(m.type).toBe('system')
+    expect(m.content).toBe(
+      'Rewound to checkpoint "Before refactor": files restored and the conversation branched into this new session',
+    )
+    expect(typeof m.id).toBe('string')
+    expect(typeof m.timestamp).toBe('number')
+  })
+
+  it("filesOnly:true + 'both' says the conversation was NOT rewound (provider cannot branch)", () => {
+    const m = buildCheckpointRestoreNotice(filesOnly('both'), 'Before refactor')
+    expect(m.content).toBe(
+      'Files restored to checkpoint "Before refactor". This provider can\'t branch the conversation, so this new session continues the full conversation (not rewound).',
+    )
+    // The two branches must never read alike: only the branched one claims a rewind.
+    expect(m.content).not.toContain('Rewound')
+    expect(m.content).not.toContain('branched into')
+  })
+
+  it("'conversation' mode says files were NOT changed", () => {
+    expect(buildCheckpointRestoreNotice(branched('conversation'), 'Cp').content).toBe(
+      'Conversation branched from checkpoint "Cp" into this new session. Files were not changed.',
+    )
+  })
+
+  it("'conversation' + filesOnly:true never claims a rewind or a file revert", () => {
+    const c = buildCheckpointRestoreNotice(filesOnly('conversation'), 'Cp').content
+    expect(c).toBe(
+      'Opened a new session at checkpoint "Cp", but the conversation was not rewound and files were not changed.',
+    )
+  })
+
+  it('treats an absent mode (pre-#6767 server) as "both"', () => {
+    expect(buildCheckpointRestoreNotice(branched(), 'Cp').content).toBe(
+      buildCheckpointRestoreNotice(branched('both'), 'Cp').content,
+    )
+    // legacy payload with no filesOnly is parsed to filesOnly:true: never over-claim
+    expect(buildCheckpointRestoreNotice(filesOnly(), 'Cp').content).toBe(
+      buildCheckpointRestoreNotice(filesOnly('both'), 'Cp').content,
+    )
+  })
+
+  it('falls back to "the checkpoint" when the name is unknown, blank or non-string', () => {
+    expect(buildCheckpointRestoreNotice(branched('both'), null).content).toBe(
+      'Rewound to the checkpoint: files restored and the conversation branched into this new session',
+    )
+    expect(buildCheckpointRestoreNotice(branched('both'), undefined).content).toContain('the checkpoint')
+    expect(buildCheckpointRestoreNotice(branched('both'), '   ').content).toContain('the checkpoint')
+  })
+})
+
+describe('findCheckpointName', () => {
+  const cps = [
+    { id: 'cp-1', name: 'First' },
+    { id: 'cp-2', name: '  Second  ' },
+    { id: 'cp-3', name: '' },
+  ] as any[]
+  it('returns the trimmed name of the matching checkpoint', () => {
+    expect(findCheckpointName(cps, 'cp-1')).toBe('First')
+    expect(findCheckpointName(cps, 'cp-2')).toBe('Second')
+  })
+  it('returns null for an unknown id, a blank name or a non-string id', () => {
+    expect(findCheckpointName(cps, 'nope')).toBeNull()
+    expect(findCheckpointName(cps, 'cp-3')).toBeNull()
+    expect(findCheckpointName(cps, undefined)).toBeNull()
+    expect(findCheckpointName(cps, 42)).toBeNull()
+  })
+})
+
+describe('pending restore notice (#6808)', () => {
+  const msg = { id: 'm1', type: 'system', content: 'x', timestamp: 1 } as any
+  beforeEach(() => clearPendingRestoreNotices())
+
+  it('is keyed by session id and consumed exactly once', () => {
+    stashPendingRestoreNotice('s2', msg, 1000)
+    expect(takePendingRestoreNotice('other', 1001)).toBeNull()
+    expect(takePendingRestoreNotice('s2', 1001)).toBe(msg)
+    expect(takePendingRestoreNotice('s2', 1002)).toBeNull()
+  })
+
+  it('expires, so a stale notice cannot surface on a much later replay', () => {
+    stashPendingRestoreNotice('s2', msg, 1000)
+    expect(takePendingRestoreNotice('s2', 1000 + 5 * 60_000)).toBeNull()
+  })
+
+  it('a null session id never matches', () => {
+    stashPendingRestoreNotice('s2', msg, 1000)
+    expect(takePendingRestoreNotice(null, 1001)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// restoreCanBranchConversation (#6808) — what the picker may promise BEFORE a restore
+// ---------------------------------------------------------------------------
+describe('restoreCanBranchConversation', () => {
+  it("'files' never branches the conversation", () => {
+    expect(restoreCanBranchConversation('files', true)).toBe(false)
+    expect(restoreCanBranchConversation('files', false)).toBe(false)
+  })
+  it("'both' and 'conversation' branch only when the provider can fork", () => {
+    expect(restoreCanBranchConversation('both', true)).toBe(true)
+    expect(restoreCanBranchConversation('both', false)).toBe(false)
+    expect(restoreCanBranchConversation('conversation', true)).toBe(true)
+    expect(restoreCanBranchConversation('conversation', false)).toBe(false)
   })
 })

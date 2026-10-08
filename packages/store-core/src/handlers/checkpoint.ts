@@ -150,3 +150,116 @@ export function handleCheckpointFilesRestored(
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// checkpoint_restored — session-creating confirmation (#6808)
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up a checkpoint's display name by id in a local checkpoint list.
+ *
+ * For the session-creating modes the wire `name` is the NEW session's name
+ * ("Rewind: <checkpoint>"), not the checkpoint's, so the notice resolves the
+ * checkpoint name from the client's own list instead of parsing that string.
+ * Returns null when the id is unknown or the name blank, so callers fall back to
+ * generic wording rather than naming the wrong thing.
+ */
+export function findCheckpointName(
+  checkpoints: readonly Checkpoint[],
+  checkpointId: unknown,
+): string | null {
+  if (typeof checkpointId !== 'string') return null
+  const cp = checkpoints.find((c) => c.id === checkpointId)
+  const name = typeof cp?.name === 'string' ? cp.name.trim() : ''
+  return name.length > 0 ? name : null
+}
+
+/**
+ * Build the `system` transcript notice for a session-creating `checkpoint_restored`
+ * ('conversation' / 'both' / a pre-#6767 payload with no mode), saying truthfully
+ * what the restore did (#6808).
+ *
+ * `filesOnly` is the server's report of whether the conversation was branched:
+ * `false` means it was forked and truncated to the checkpoint; `true` (also the
+ * parsed default for a legacy server) means it was NOT, so the new session simply
+ * resumes the full conversation. The wording never claims a rewind that did not
+ * happen. A missing `mode` is a pre-#6767 server, which always reverted the files
+ * as well, so it reads as 'both'. The 'files' mode keeps its own wording in
+ * {@link handleCheckpointFilesRestored} (it never reaches here: no `newSessionId`).
+ */
+export function buildCheckpointRestoreNotice(
+  restored: Pick<CheckpointRestoredPayload, 'filesOnly' | 'mode'>,
+  checkpointName?: string | null,
+): ChatMessage {
+  const name = typeof checkpointName === 'string' ? checkpointName.trim() : ''
+  const cp = name.length > 0 ? `checkpoint "${name}"` : 'the checkpoint'
+  const mode: RestoreMode = restored.mode ?? 'both'
+  let content: string
+  if (mode === 'conversation') {
+    content = restored.filesOnly
+      ? `Opened a new session at ${cp}, but the conversation was not rewound and files were not changed.`
+      : `Conversation branched from ${cp} into this new session. Files were not changed.`
+  } else {
+    content = restored.filesOnly
+      ? `Files restored to ${cp}. This provider can't branch the conversation, so this new session continues the full conversation (not rewound).`
+      : `Rewound to ${cp}: files restored and the conversation branched into this new session`
+  }
+  return { id: nextMessageId('system'), type: 'system', content, timestamp: Date.now() }
+}
+
+/**
+ * Whether a restore in `mode` can branch the conversation, given whether the
+ * active session's provider can fork a resumed transcript (#6808).
+ *
+ * The pre-restore picker copy uses this so it only promises a branch the server
+ * can deliver: 'files' never branches; 'both' and 'conversation' branch only on a
+ * fork-capable provider. ('both' on any other provider still opens a new session,
+ * but it resumes the full conversation, and the post-restore notice says so.) A
+ * fork-capable provider can still fall back to files-only at restore time (a
+ * checkpoint with no recorded branch point), which is why the notice, not this
+ * prediction, is the authority on what happened.
+ */
+export function restoreCanBranchConversation(mode: RestoreMode, providerCanFork: boolean): boolean {
+  return mode !== 'files' && providerCanFork
+}
+
+// The notice must land AFTER the new session's history replay. The restore
+// switches to a session this client has no transcript for; the switch asks the
+// server to replay it, and a full-history replay drops everything that was in the
+// transcript before `history_replay_start` (reconcileReplayEnd). So a notice
+// appended at `checkpoint_restored` time is wiped moments later. It is parked here,
+// keyed by the new session id, and the clients append it right after that
+// session's `history_replay_end` swap. Module state, like the replay window it
+// pairs with; bounded by a TTL so one that never meets a replay (socket dropped
+// mid-switch) cannot surface on a much later one.
+const PENDING_RESTORE_NOTICE_TTL_MS = 60_000
+const pendingRestoreNotices = new Map<string, { message: ChatMessage; at: number }>()
+
+/** Park a restore notice for `sessionId` until its history replay ends (#6808). */
+export function stashPendingRestoreNotice(
+  sessionId: string,
+  message: ChatMessage,
+  now: number = Date.now(),
+): void {
+  pendingRestoreNotices.set(sessionId, { message, at: now })
+}
+
+/**
+ * Take (and clear) the parked restore notice for `sessionId`, or null when there
+ * is none or it has expired (#6808). Call after the session's replay-end swap.
+ */
+export function takePendingRestoreNotice(
+  sessionId: string | null | undefined,
+  now: number = Date.now(),
+): ChatMessage | null {
+  if (!sessionId) return null
+  const entry = pendingRestoreNotices.get(sessionId)
+  if (!entry) return null
+  pendingRestoreNotices.delete(sessionId)
+  return now - entry.at <= PENDING_RESTORE_NOTICE_TTL_MS ? entry.message : null
+}
+
+/** Drop every parked restore notice (test isolation, and a full store reset). */
+export function clearPendingRestoreNotices(): void {
+  pendingRestoreNotices.clear()
+}

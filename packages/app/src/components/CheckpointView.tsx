@@ -13,6 +13,7 @@ import {
 import { useConnectionStore } from '../store/connection';
 import type { Checkpoint, RestoreCheckpointMode } from '../store/types';
 import { COLORS } from '../constants/colors';
+import { restoreCanBranchConversation } from '@chroxy/store-core';
 import { Icon } from './Icon';
 
 interface CheckpointViewProps {
@@ -28,8 +29,14 @@ const RESTORE_MODE_LABEL: Record<RestoreCheckpointMode, string> = {
   conversation: 'Conversation',
 };
 
-// Honest per-mode confirm copy — only 'files' keeps the current session.
-function restoreConfirmCopy(mode: RestoreCheckpointMode, name?: string): { title: string; message: string } {
+// Honest per-mode confirm copy — only 'files' keeps the current session. #6808:
+// on a provider that can't fork, 'both' still opens a new session but resumes the
+// FULL conversation, so the copy must not promise a branch.
+function restoreConfirmCopy(
+  mode: RestoreCheckpointMode,
+  name: string | undefined,
+  canFork: boolean,
+): { title: string; message: string } {
   const cp = name || 'checkpoint';
   switch (mode) {
     case 'files':
@@ -45,7 +52,9 @@ function restoreConfirmCopy(mode: RestoreCheckpointMode, name?: string): { title
     default:
       return {
         title: 'Restore Checkpoint',
-        message: `Revert your working files to "${cp}" and branch the conversation into a new session?`,
+        message: restoreCanBranchConversation(mode, canFork)
+          ? `Revert your working files to "${cp}" and branch the conversation into a new session?`
+          : `Revert your working files to "${cp}" and open a new session? This provider can't branch the conversation, so the new session continues the full conversation.`,
       };
   }
 }
@@ -251,7 +260,7 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   const handleRestore = useCallback(
     (id: string) => {
       const cp = checkpoints.find((c) => c.id === id);
-      const { title, message } = restoreConfirmCopy(restoreMode, cp?.name);
+      const { title, message } = restoreConfirmCopy(restoreMode, cp?.name, canForkConversation);
       Alert.alert(title, message, [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -263,7 +272,7 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
         },
       ]);
     },
-    [checkpoints, restoreCheckpoint, restoreMode, onClose],
+    [checkpoints, restoreCheckpoint, restoreMode, onClose, canForkConversation],
   );
 
   const renderItem = useCallback(

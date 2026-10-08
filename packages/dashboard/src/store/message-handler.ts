@@ -65,6 +65,7 @@ import {
   recordHistorySeq,
   reconcileReplayStart,
   reconcileReplayEnd,
+  takePendingRestoreNotice,
   // #7456 — per-session teardown for the two paths that drop a session's store
   // state wholesale; without it this module's per-session entries outlive
   // everything they correspond to.
@@ -5911,6 +5912,17 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         } else {
           // Session vanished mid-replay — still settle the cursor.
           reconcileReplayEnd(endTargetId, [], endLatestSeq);
+        }
+        // #6808 — a checkpoint restore parks "what this restore did" for the NEW
+        // session; it is appended here, AFTER the swap, because a full-history
+        // replay drops everything that was in the transcript before it started.
+        {
+          const restoreNotice = takePendingRestoreNotice(endTargetId);
+          if (restoreNotice) {
+            updateSession(endTargetId!, (ss) => ({
+              messages: [...ss.messages, restoreNotice] as SessionState['messages'],
+            }));
+          }
         }
         // Mark replayed prompts as answered — the premise being that any prompt
         // in history has already been resolved by the server.

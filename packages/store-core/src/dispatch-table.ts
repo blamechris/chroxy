@@ -148,6 +148,9 @@ import {
   handleCheckpointCreated,
   handleCheckpointRestored,
   handleCheckpointFilesRestored,
+  buildCheckpointRestoreNotice,
+  findCheckpointName,
+  stashPendingRestoreNotice,
   handleConversationsList,
   handleSearchResults,
   handleCheckpointList,
@@ -714,6 +717,9 @@ export interface DispatchMessageMap {
   }
   checkpoint_restored: {
     type: 'checkpoint_restored'
+    // #6808: names the checkpoint in the post-restore notice (looked up in the
+    // client's own checkpoint list; the wire `name` is the new session's name).
+    checkpointId?: string
     newSessionId?: string
     // #6766: true when only files were restored (conversation NOT branched).
     filesOnly?: boolean
@@ -1385,6 +1391,18 @@ function dispatchCheckpointRestored<S extends DispatchSessionBase>(
 ): void {
   const restored = handleCheckpointRestored(msg as Record<string, unknown>)
   if (restored) {
+    // #6808: say what the restore actually did. The notice is parked for the NEW
+    // session and appended by each client after that session's history replay ends
+    // (a full-history replay would wipe anything appended now). Built before the
+    // switch because the checkpoint list it names the checkpoint from belongs to
+    // the session being left.
+    stashPendingRestoreNotice(
+      restored.newSessionId,
+      buildCheckpointRestoreNotice(
+        restored,
+        findCheckpointName(adapter.getCheckpoints(), msg.checkpointId),
+      ),
+    )
     adapter.switchToRestoredSession(restored.newSessionId)
     return
   }
