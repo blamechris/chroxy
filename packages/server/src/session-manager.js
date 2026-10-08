@@ -4310,8 +4310,9 @@ export class SessionManager extends EventEmitter {
    * Two feeders, one per pipeline: the session's own `permission_request` event
    * (the in-process providers, via `_wireSessionEvents`) and ws-permissions.js
    * (the hook-routed providers, whose prompts never pass through a session
-   * event). Only what the clients were already shown is kept: the tool, and the
-   * description they received (clipped by the history layer on recording).
+   * event). Only what the clients were already shown is kept: the tool, the
+   * description they received (clipped by the history layer on recording) and, since
+   * #8503, the sanitized `input` the `permission_request` carried.
    *
    * @param {string} sessionId
    * @param {{ requestId?: string, tool?: string, description?: string, input?: object }} request
@@ -4326,6 +4327,10 @@ export class SessionManager extends EventEmitter {
       sessionId,
       tool: typeof request.tool === 'string' ? request.tool : '',
       description: describePermissionForOutcome(request.tool, request.description, request.input, request.recordDescription),
+      // #8503: the input the clients were shown, held by reference (it is the
+      // sanitized copy the broadcast carries, never the raw one) so the outcome
+      // can journal it. The history layer bounds and re-checks it on recording.
+      input: request.input,
     })
     while (this._permissionRequests.size > MAX_TRACKED_PERMISSION_REQUESTS) {
       const oldest = this._permissionRequests.keys().next().value
@@ -4350,10 +4355,12 @@ export class SessionManager extends EventEmitter {
    * take either down.
    *
    * @param {string} requestId
-   * @param {'allowed'|'denied'|'expired'} outcome
+   * @param {'allowed'|'denied'|'expired'|'stopped'} outcome
+   * @param {string} [decision] #8503: the decision token the prompt was answered with
+   *   (`allow` / `allowSession` / `allowAlways`); kept only on an `allowed` outcome
    * @returns {boolean} true when an entry was recorded
    */
-  recordPermissionOutcome(requestId, outcome) {
+  recordPermissionOutcome(requestId, outcome, decision) {
     try {
       if (typeof requestId !== 'string' || !requestId) return false
       const pending = this._permissionRequests.get(requestId)
@@ -4366,6 +4373,8 @@ export class SessionManager extends EventEmitter {
         tool: pending.tool,
         description: pending.description,
         outcome,
+        input: pending.input,
+        decision,
       })
       return true
     } catch (err) {
@@ -4657,7 +4666,7 @@ export class SessionManager extends EventEmitter {
           this.notePermissionRequest(sessionId, data)
         } else if (event === 'permission_resolved' || event === 'permission_expired') {
           const outcome = permissionOutcomeForEvent(event, data)
-          if (outcome) this.recordPermissionOutcome(data.requestId, outcome)
+          if (outcome) this.recordPermissionOutcome(data.requestId, outcome, event === 'permission_resolved' ? data.decision : undefined)
           // #8470: a question a newer one replaced has no requestId, so the outcome
           // journal above never sees it. Its verdict is recorded on the question's
           // own history entry instead.

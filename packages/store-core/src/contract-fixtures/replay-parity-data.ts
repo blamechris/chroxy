@@ -1455,7 +1455,11 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "requestId": "req-1",
             "tool": "Bash",
             "description": "rm -rf build",
-            "outcome": "allowed"
+            "outcome": "allowed",
+            "input": {
+              "command": "rm -rf build"
+            },
+            "decision": "allow"
           }
         ]
       ],
@@ -1486,6 +1490,10 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "tool": "Bash",
           "description": "rm -rf build",
           "outcome": "allowed",
+          "input": {
+            "command": "rm -rf build"
+          },
+          "decision": "allow",
           "timestamp": 1700000000000,
           "sessionId": "s1",
           "historySeq": 1
@@ -1525,7 +1533,10 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "requestId": "req-1",
             "tool": "Bash",
             "description": "rm -rf build",
-            "outcome": "denied"
+            "outcome": "denied",
+            "input": {
+              "command": "rm -rf build"
+            }
           }
         ]
       ],
@@ -1556,6 +1567,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "tool": "Bash",
           "description": "rm -rf build",
           "outcome": "denied",
+          "input": {
+            "command": "rm -rf build"
+          },
           "timestamp": 1700000000000,
           "sessionId": "s1",
           "historySeq": 1
@@ -1595,7 +1609,10 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "requestId": "req-1",
             "tool": "Bash",
             "description": "rm -rf build",
-            "outcome": "expired"
+            "outcome": "expired",
+            "input": {
+              "command": "rm -rf build"
+            }
           }
         ]
       ],
@@ -1626,6 +1643,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "tool": "Bash",
           "description": "rm -rf build",
           "outcome": "expired",
+          "input": {
+            "command": "rm -rf build"
+          },
           "timestamp": 1700000000000,
           "sessionId": "s1",
           "historySeq": 1

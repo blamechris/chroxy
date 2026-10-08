@@ -247,19 +247,24 @@ const livePrompt = (over: ReplayParityRow): ReplayParityRow => ({
   ...over,
 })
 
-/** The compact record a replay rebuilds: no input to re-review, no countdown. */
+/**
+ * The compact record a replay rebuilds: the tool input the prompt was shown with
+ * (journaled since #8503), no countdown.
+ */
 const replayedPrompt = (over: ReplayParityRow): ReplayParityRow => ({
   id: 'perm-#',
   type: 'prompt',
   content: 'Bash: rm -rf build',
   tool: 'Bash',
   requestId: 'req-1',
+  toolInput: { command: 'rm -rf build' },
   ...over,
 })
 
 const PERMISSION_DESIGN_REASON =
-  'A replayed permission prompt is a compact transcript record (#8348): the tool, the description and how it ended. ' +
-  'The live card also holds the tool input for review. The rendered line is the same for an answered prompt ' +
+  'A replayed permission prompt is a compact transcript record (#8348): the tool, the description, the tool input ' +
+  'it was shown with (#8503) and how it ended, which it carries as a recorded `permissionOutcome`. ' +
+  'The live card reached the same end by an `answered` decision alone. The rendered line is the same for an answered prompt ' +
   '(dashboard: replay-parity.test.ts renders both); the model is not.'
 
 export const REPLAY_PARITY_DIVERGENCES: Record<string, ReplayParityDivergence> = {
