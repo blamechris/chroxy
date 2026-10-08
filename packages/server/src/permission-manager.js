@@ -1103,7 +1103,7 @@ export class PermissionManager extends EventEmitter {
     if (!this._pendingUserAnswer) return
     if (typeof toolUseId === 'string' && toolUseId !== this._pendingUserAnswer.toolUseId) {
       this._logWarn(
-        `Question response dropped: answer is for ${toolUseId || '(empty id)'} but the pending question is ${this._pendingUserAnswer.toolUseId}`,
+        `Question response dropped: answer is for ${JSON.stringify(toolUseId)} but the pending question is ${JSON.stringify(this._pendingUserAnswer.toolUseId)}`,
       )
       return false
     }
