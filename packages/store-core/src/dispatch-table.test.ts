@@ -2759,14 +2759,14 @@ describe('shared dispatch table', () => {
         filesOnly: true,
         mode: 'both',
       })
-      expect(settlePendingRestoreNotice('new-sid', [])?.[0]?.content).toContain('(not rewound)')
+      expect(settlePendingRestoreNotice('new-sid', [])?.[0]?.content).toContain('was not rewound')
     })
 
     it('a legacy payload (no mode, no filesOnly) never claims a rewind', () => {
       const env = makeAdapter({ activeSessionId: 'old', checkpoints: cps })
       dispatch(env, { type: 'checkpoint_restored', checkpointId: 'cp-1', newSessionId: 'new-sid' })
       const c = settlePendingRestoreNotice('new-sid', [])?.[0]?.content ?? ''
-      expect(c).toContain('(not rewound)')
+      expect(c).toContain('was not rewound')
       expect(c).not.toContain('branched into')
     })
 

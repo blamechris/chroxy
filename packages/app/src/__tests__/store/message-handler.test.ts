@@ -7537,7 +7537,7 @@ describe('checkpoint_restored (session-creating) post-restore notice (#6808)', (
   it('filesOnly:true tells the user the conversation was NOT rewound', () => {
     const { messages } = restoreAndSwitch({ mode: 'both', filesOnly: true }, 'rw-2');
     expect(messages).toHaveLength(1);
-    expect(String(messages[0].content)).toContain('(not rewound)');
+    expect(String(messages[0].content)).toContain('was not rewound');
     expect(String(messages[0].content)).not.toContain('branched into');
   });
 
@@ -7566,7 +7566,7 @@ describe('checkpoint_restored (session-creating) post-restore notice (#6808)', (
 
   it('a legacy payload (no mode, no filesOnly) never claims a rewind', () => {
     const { messages } = restoreAndSwitch({}, 'rw-3');
-    expect(String(messages[0].content)).toContain('(not rewound)');
+    expect(String(messages[0].content)).toContain('was not rewound');
   });
 
   it('shows the notice once: a later replay of the same session does not re-add it', () => {

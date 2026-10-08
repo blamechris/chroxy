@@ -73,6 +73,8 @@
  * prefix shrinks underneath it.
  */
 
+import { dropPendingRestoreNotice, clearPendingRestoreNotices } from './handlers/checkpoint'
+
 /**
  * Per-session full-rebuild state. Absent key ⇒ no rebuild in progress for that
  * session (delta replay or no replay). The value is the {@link RebuildBaseline}
@@ -682,6 +684,9 @@ export function resetReplayReconcile(opts: { clearCursors?: boolean } = {}): voi
   // `finally` is the normal clear; this covers a teardown that lands with a
   // dispatch still on the stack.
   _currentFrameSeq = null
+  // #6808 — a parked checkpoint-restore notice is per-connection state: a fresh
+  // auth must not inherit one.
+  clearPendingRestoreNotices()
   if (opts.clearCursors) _historyCursors.clear()
 }
 
@@ -1352,6 +1357,8 @@ export function dropReplaySessionState(sessionId: string | null | undefined): vo
   _liveDuringReplay.delete(sessionId)
   _historyCursors.delete(sessionId)
   if (_sweepableLedger?.sessionId === sessionId) _sweepableLedger = null
+  // #6808 — a parked checkpoint-restore notice is per-session state too.
+  dropPendingRestoreNotice(sessionId)
 }
 
 /** Was this prompt recorded as a live arrival during the current window? */

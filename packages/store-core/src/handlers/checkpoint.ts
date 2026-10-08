@@ -182,7 +182,9 @@ export function findCheckpointName(
  * `filesOnly` is the server's report of whether the conversation was branched:
  * `false` means it was forked and truncated to the checkpoint; `true` (also the
  * parsed default for a legacy server) means it was NOT, so the new session simply
- * resumes the full conversation. The wording never claims a rewind that did not
+ * resumes the full conversation. The wording never says WHY: the server reports
+ * `filesOnly:true` for a provider that can't fork, but also on a fork-capable one
+ * (a checkpoint with no recorded branch point, or a fork that threw or returned no id). The wording never claims a rewind that did not
  * happen. A missing `mode` is a pre-#6767 server, which always reverted the files
  * as well, so it reads as 'both'. The 'files' mode keeps its own wording in
  * {@link handleCheckpointFilesRestored} (it never reaches here: no `newSessionId`).
@@ -201,26 +203,54 @@ export function buildCheckpointRestoreNotice(
       : `Conversation branched from ${cp} into this new session. Files were not changed.`
   } else {
     content = restored.filesOnly
-      ? `Files restored to ${cp}. This provider can't branch the conversation, so this new session continues the full conversation (not rewound).`
+      ? `Files restored to ${cp}. The conversation was not rewound: this new session continues the full conversation.`
       : `Rewound to ${cp}: files restored and the conversation branched into this new session`
   }
   return { id: nextMessageId('system'), type: 'system', content, timestamp: Date.now() }
 }
 
+/** The slice of a provider-list entry the fork lookup reads. */
+export interface ProviderForkInfo {
+  name: string
+  capabilities?: { conversationFork?: boolean } | null
+}
+
+/**
+ * Can the active session's provider fork a resumed transcript? `true` / `false`
+ * when the provider list says so, `null` when it is not KNOWN yet (#6808): the
+ * provider list has not loaded, does not contain the provider, or lists it before
+ * its capabilities arrived. "Unknown" is not "no", and the picker copy must not
+ * treat it as either.
+ */
+export function conversationForkSupport(
+  provider: string | null | undefined,
+  availableProviders: readonly ProviderForkInfo[],
+): boolean | null {
+  if (!provider) return null
+  const entry = availableProviders.find((p) => p.name === provider)
+  if (!entry || !entry.capabilities || typeof entry.capabilities !== 'object') return null
+  return entry.capabilities.conversationFork === true
+}
+
 /**
  * Whether a restore in `mode` can branch the conversation, given whether the
- * active session's provider can fork a resumed transcript (#6808).
+ * active session's provider can fork a resumed transcript (#6808): `true` / `false`
+ * when that is known, `null` when it is not (see {@link conversationForkSupport}).
  *
  * The pre-restore picker copy uses this so it only promises a branch the server
- * can deliver: 'files' never branches; 'both' and 'conversation' branch only on a
- * fork-capable provider. ('both' on any other provider still opens a new session,
- * but it resumes the full conversation, and the post-restore notice says so.) A
- * fork-capable provider can still fall back to files-only at restore time (a
- * checkpoint with no recorded branch point), which is why the notice, not this
- * prediction, is the authority on what happened.
+ * can deliver, and promises nothing at all while it is unknown. 'files' never
+ * branches whatever the provider. ('both' on a provider that can't fork still opens
+ * a new session, but it resumes the full conversation.) A fork-capable provider can
+ * still fall back to files-only at restore time (a checkpoint with no recorded
+ * branch point), which is why the post-restore notice, not this prediction, is the
+ * authority on what happened.
  */
-export function restoreCanBranchConversation(mode: RestoreMode, providerCanFork: boolean): boolean {
-  return mode !== 'files' && providerCanFork
+export function restoreCanBranchConversation(
+  mode: RestoreMode,
+  providerCanFork: boolean | null,
+): boolean | null {
+  if (mode === 'files') return false
+  return providerCanFork
 }
 
 // When the notice lands. The restore switches to a session this client has no
@@ -298,6 +328,17 @@ export function settlePendingRestoreNotice(
   pendingRestoreNotices.delete(sessionId)
   if (messages.some((m) => m.id === entry.message.id)) return null
   return [...messages, entry.message]
+}
+
+/**
+ * Forget one session's parked restore notice (#6808). Wired into
+ * `dropReplaySessionState`, so every path that drops a session wholesale (the
+ * `session_list` prune, `session_timeout`) clears it with the rest of that
+ * session's per-session state.
+ */
+export function dropPendingRestoreNotice(sessionId: string | null | undefined): void {
+  if (!sessionId) return
+  pendingRestoreNotices.delete(sessionId)
 }
 
 /** Drop every parked restore notice (test isolation, and a full store reset). */

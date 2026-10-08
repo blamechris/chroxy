@@ -36,6 +36,8 @@ import {
   handleCheckpointFilesRestored,
   buildCheckpointRestoreNotice,
   restoreCanBranchConversation,
+  conversationForkSupport,
+  dropPendingRestoreNotice,
   findCheckpointName,
   stashPendingRestoreNotice,
   applyPendingRestoreNotice,
@@ -10369,11 +10371,14 @@ describe('buildCheckpointRestoreNotice', () => {
     expect(typeof m.timestamp).toBe('number')
   })
 
-  it("filesOnly:true + 'both' says the conversation was NOT rewound (provider cannot branch)", () => {
+  it("filesOnly:true + 'both' says the conversation was NOT rewound, without guessing why", () => {
+    // The server also reports filesOnly:true on a FORK-CAPABLE provider (no recorded
+    // branch point, fork threw, fork returned no id), so the cause is never stated.
     const m = buildCheckpointRestoreNotice(filesOnly('both'), 'Before refactor')
     expect(m.content).toBe(
-      'Files restored to checkpoint "Before refactor". This provider can\'t branch the conversation, so this new session continues the full conversation (not rewound).',
+      'Files restored to checkpoint "Before refactor". The conversation was not rewound: this new session continues the full conversation.',
     )
+    expect(m.content).not.toMatch(/provider/i)
     // The two branches must never read alike: only the branched one claims a rewind.
     expect(m.content).not.toContain('Rewound')
     expect(m.content).not.toContain('branched into')
@@ -10508,14 +10513,59 @@ describe('pending restore notice (#6808)', () => {
 // restoreCanBranchConversation (#6808) — what the picker may promise BEFORE a restore
 // ---------------------------------------------------------------------------
 describe('restoreCanBranchConversation', () => {
-  it("'files' never branches the conversation", () => {
+  it("'files' never branches the conversation, whatever is known about the provider", () => {
     expect(restoreCanBranchConversation('files', true)).toBe(false)
     expect(restoreCanBranchConversation('files', false)).toBe(false)
+    expect(restoreCanBranchConversation('files', null)).toBe(false)
   })
-  it("'both' and 'conversation' branch only when the provider can fork", () => {
+  it("'both' and 'conversation' branch only when the provider is KNOWN to fork", () => {
     expect(restoreCanBranchConversation('both', true)).toBe(true)
     expect(restoreCanBranchConversation('both', false)).toBe(false)
     expect(restoreCanBranchConversation('conversation', true)).toBe(true)
     expect(restoreCanBranchConversation('conversation', false)).toBe(false)
+  })
+  it('answers null (unknown) when fork support has not loaded, so copy can promise nothing', () => {
+    expect(restoreCanBranchConversation('both', null)).toBeNull()
+    expect(restoreCanBranchConversation('conversation', null)).toBeNull()
+  })
+})
+
+describe('conversationForkSupport', () => {
+  const providers = [
+    { name: 'claude-sdk', capabilities: { conversationFork: true } },
+    { name: 'claude-tui', capabilities: {} },
+    { name: 'codex', capabilities: { conversationFork: false } },
+    { name: 'half-loaded' },
+  ]
+  it('is true only when the named provider advertises conversationFork', () => {
+    expect(conversationForkSupport('claude-sdk', providers)).toBe(true)
+  })
+  it('is false when the provider is listed with capabilities that do not fork', () => {
+    expect(conversationForkSupport('claude-tui', providers)).toBe(false)
+    expect(conversationForkSupport('codex', providers)).toBe(false)
+  })
+  it('is null (unknown) when the provider list has not loaded or lacks the provider', () => {
+    expect(conversationForkSupport('claude-sdk', [])).toBeNull()
+    expect(conversationForkSupport('missing', providers)).toBeNull()
+    expect(conversationForkSupport(null, providers)).toBeNull()
+    expect(conversationForkSupport(undefined, providers)).toBeNull()
+  })
+  it('is null when the provider is listed but its capabilities have not arrived', () => {
+    expect(conversationForkSupport('half-loaded', providers)).toBeNull()
+  })
+})
+
+describe('dropPendingRestoreNotice (#6808 teardown)', () => {
+  const msg = { id: 'm1', type: 'system', content: 'x', timestamp: 1 } as any
+  beforeEach(() => clearPendingRestoreNotices())
+  it('forgets one session\'s parked notice and leaves the others', () => {
+    stashPendingRestoreNotice('s1', msg, 1000)
+    stashPendingRestoreNotice('s2', { ...msg, id: 'm2' }, 1000)
+    dropPendingRestoreNotice('s1')
+    expect(settlePendingRestoreNotice('s1', [], 1001)).toBeNull()
+    expect(settlePendingRestoreNotice('s2', [], 1001)).toEqual([{ ...msg, id: 'm2' }])
+  })
+  it('tolerates a null id', () => {
+    expect(() => dropPendingRestoreNotice(null)).not.toThrow()
   })
 })

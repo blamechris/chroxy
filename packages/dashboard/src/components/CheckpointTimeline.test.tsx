@@ -152,6 +152,28 @@ describe('CheckpointTimeline', () => {
       expect(restore.getAttribute('title')).toMatch(/can't branch the conversation/i)
     })
 
+    // #6808 — before provider capabilities load, fork support is UNKNOWN, not "no".
+    it("'Both' tooltips promise nothing while provider capabilities are not loaded", () => {
+      Object.assign(storeState, {
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', provider: 'claude-sdk' }],
+        availableProviders: [],
+        checkpoints: [CHECKPOINTS[0]!],
+      })
+      render(<CheckpointTimeline />)
+      const both = screen.getByTestId('checkpoint-mode-both').getAttribute('title')!
+      const restore = screen.getByText('Restore').getAttribute('title')!
+      for (const t of [both, restore]) {
+        expect(t).not.toMatch(/branch the conversation (into|\()/i)
+        expect(t).not.toMatch(/can't branch/i)
+        expect(t).toMatch(/new session/i)
+      }
+      // The Conversation option stays disabled, and says why without blaming the provider.
+      const conv = screen.getByTestId('checkpoint-mode-conversation') as HTMLButtonElement
+      expect(conv.disabled).toBe(true)
+      expect(conv.getAttribute('title')).not.toMatch(/can't branch/i)
+    })
+
     it("'Both' tooltips promise the branch when the provider can fork", () => {
       Object.assign(storeState, FORK_CAPABLE, { checkpoints: [CHECKPOINTS[0]!] })
       render(<CheckpointTimeline />)

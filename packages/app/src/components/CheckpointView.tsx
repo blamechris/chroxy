@@ -13,7 +13,7 @@ import {
 import { useConnectionStore } from '../store/connection';
 import type { Checkpoint, RestoreCheckpointMode } from '../store/types';
 import { COLORS } from '../constants/colors';
-import { restoreCanBranchConversation } from '@chroxy/store-core';
+import { restoreCanBranchConversation, conversationForkSupport } from '@chroxy/store-core';
 import { Icon } from './Icon';
 
 interface CheckpointViewProps {
@@ -35,7 +35,7 @@ const RESTORE_MODE_LABEL: Record<RestoreCheckpointMode, string> = {
 function restoreConfirmCopy(
   mode: RestoreCheckpointMode,
   name: string | undefined,
-  canFork: boolean,
+  canFork: boolean | null,
 ): { title: string; message: string } {
   const cp = name || 'checkpoint';
   switch (mode) {
@@ -49,13 +49,19 @@ function restoreConfirmCopy(
         title: 'Restore Conversation',
         message: `Branch the conversation from "${cp}" into a new session? Your working files stay as they are.`,
       };
-    default:
+    default: {
+      // Unknown (provider capabilities not loaded yet) promises nothing either way.
+      const branches = restoreCanBranchConversation(mode, canFork);
       return {
         title: 'Restore Checkpoint',
-        message: restoreCanBranchConversation(mode, canFork)
-          ? `Revert your working files to "${cp}" and branch the conversation into a new session?`
-          : `Revert your working files to "${cp}" and open a new session? This provider can't branch the conversation, so the new session continues the full conversation.`,
+        message:
+          branches === true
+            ? `Revert your working files to "${cp}" and branch the conversation into a new session?`
+            : branches === false
+              ? `Revert your working files to "${cp}" and open a new session? This provider can't branch the conversation, so the new session continues the full conversation.`
+              : `Revert your working files to "${cp}" and open a new session? Whether the conversation is branched depends on the provider; the new session will say what happened.`,
       };
+    }
   }
 }
 
@@ -208,11 +214,13 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
     }
   }, [visible, listCheckpoints]);
 
-  const canForkConversation = React.useMemo(() => {
+  // #6808: tri-state. null = not KNOWN yet (provider list not loaded / capabilities
+  // not arrived), which is not the same as "can't fork" and must not read as it.
+  const forkSupport = React.useMemo(() => {
     const active = activeSessionId ? sessions.find((s) => s.sessionId === activeSessionId) : undefined;
-    const provider = active?.provider ?? null;
-    return availableProviders.find((p) => p.name === provider)?.capabilities?.conversationFork === true;
+    return conversationForkSupport(active?.provider ?? null, availableProviders);
   }, [activeSessionId, sessions, availableProviders]);
+  const canForkConversation = forkSupport === true;
 
   // #6767: if the picker is on 'conversation' but the active session can't fork
   // (session switch, provider changed), fall back to the always-available 'both'.
@@ -260,7 +268,7 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
   const handleRestore = useCallback(
     (id: string) => {
       const cp = checkpoints.find((c) => c.id === id);
-      const { title, message } = restoreConfirmCopy(restoreMode, cp?.name, canForkConversation);
+      const { title, message } = restoreConfirmCopy(restoreMode, cp?.name, forkSupport);
       Alert.alert(title, message, [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -272,7 +280,7 @@ export function CheckpointView({ visible, onClose }: CheckpointViewProps) {
         },
       ]);
     },
-    [checkpoints, restoreCheckpoint, restoreMode, onClose, canForkConversation],
+    [checkpoints, restoreCheckpoint, restoreMode, onClose, forkSupport],
   );
 
   const renderItem = useCallback(

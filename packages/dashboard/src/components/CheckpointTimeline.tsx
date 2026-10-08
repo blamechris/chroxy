@@ -10,7 +10,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { Checkpoint, RestoreCheckpointMode } from '../store/types'
-import { restoreCanBranchConversation } from '@chroxy/store-core'
+import { restoreCanBranchConversation, conversationForkSupport } from '@chroxy/store-core'
 import { isImeComposing } from '../utils/ime'
 
 // #6767: selective restore-mode picker. Order = display order (default first).
@@ -20,7 +20,7 @@ const RESTORE_MODE_LABEL: Record<RestoreCheckpointMode, string> = {
   files: 'Files',
   conversation: 'Conversation',
 }
-function restoreModeTitle(mode: RestoreCheckpointMode, canFork: boolean): string {
+function restoreModeTitle(mode: RestoreCheckpointMode, canFork: boolean | null): string {
   switch (mode) {
     case 'files':
       return 'Revert only the working files — this conversation and session continue'
@@ -29,22 +29,34 @@ function restoreModeTitle(mode: RestoreCheckpointMode, canFork: boolean): string
     default:
       // #6808: on a provider that can't fork, 'both' still opens a new session but
       // it resumes the full conversation — don't promise a branch it can't deliver.
-      return restoreCanBranchConversation(mode, canFork)
-        ? 'Revert the working files and branch the conversation into a new session'
-        : "Revert the working files and open a new session — this provider can't branch the conversation, so it continues the full conversation"
+      // While fork support is not known yet (provider capabilities not loaded),
+      // promise nothing either way.
+      switch (restoreCanBranchConversation(mode, canFork)) {
+        case true:
+          return 'Revert the working files and branch the conversation into a new session'
+        case false:
+          return "Revert the working files and open a new session — this provider can't branch the conversation, so it continues the full conversation"
+        default:
+          return 'Revert the working files and open a new session — whether the conversation is branched depends on the provider'
+      }
   }
 }
 // Honest per-mode Restore-button tooltip (only 'files' keeps the current session).
-function restoreButtonTitle(mode: RestoreCheckpointMode, canFork: boolean): string {
+function restoreButtonTitle(mode: RestoreCheckpointMode, canFork: boolean | null): string {
   switch (mode) {
     case 'files':
       return 'Restore files only (keeps this conversation and session)'
     case 'conversation':
       return 'Branch the conversation to this checkpoint (opens a new session)'
     default:
-      return restoreCanBranchConversation(mode, canFork)
-        ? 'Restore files and branch the conversation (opens a new session)'
-        : "Restore files and open a new session (this provider can't branch the conversation)"
+      switch (restoreCanBranchConversation(mode, canFork)) {
+        case true:
+          return 'Restore files and branch the conversation (opens a new session)'
+        case false:
+          return "Restore files and open a new session (this provider can't branch the conversation)"
+        default:
+          return 'Restore files and open a new session (the conversation may or may not be branched)'
+      }
   }
 }
 
@@ -197,11 +209,13 @@ export function CheckpointTimeline() {
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null)
   const [restoreMode, setRestoreMode] = useState<RestoreCheckpointMode>('both')
 
-  const canForkConversation = useMemo(() => {
+  // #6808: tri-state. null = not KNOWN yet (provider list not loaded / capabilities
+  // not arrived), which is not the same as "can't fork" and must not read as it.
+  const forkSupport = useMemo(() => {
     const active = activeSessionId ? sessions.find(s => s.sessionId === activeSessionId) : undefined
-    const provider = active?.provider ?? null
-    return availableProviders.find(p => p.name === provider)?.capabilities?.conversationFork === true
+    return conversationForkSupport(active?.provider ?? null, availableProviders)
   }, [activeSessionId, sessions, availableProviders])
+  const canForkConversation = forkSupport === true
 
   // #6767: if the picker lands on 'conversation' but the active session can't
   // fork (session switch, or a fork-capable provider that just went away), fall
@@ -256,8 +270,10 @@ export function CheckpointTimeline() {
               aria-pressed={restoreMode === m}
               disabled={disabled}
               title={disabled
-                ? "This session's provider can't branch the conversation — use Files or Both"
-                : restoreModeTitle(m, canForkConversation)}
+                ? (forkSupport === null
+                  ? "Waiting for this session's provider capabilities — use Files or Both"
+                  : "This session's provider can't branch the conversation — use Files or Both")
+                : restoreModeTitle(m, forkSupport)}
               onClick={() => setRestoreMode(m)}
             >
               {RESTORE_MODE_LABEL[m]}
@@ -321,7 +337,7 @@ export function CheckpointTimeline() {
               onDelete={handleDelete}
               confirmingDelete={confirmingDelete}
               setConfirmingDelete={setConfirmingDelete}
-              restoreButtonTitle={restoreButtonTitle(restoreMode, canForkConversation)}
+              restoreButtonTitle={restoreButtonTitle(restoreMode, forkSupport)}
             />
           ))}
         </div>

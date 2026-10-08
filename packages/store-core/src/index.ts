@@ -740,6 +740,8 @@ export {
   handleCheckpointFilesRestored,
   buildCheckpointRestoreNotice,
   restoreCanBranchConversation,
+  conversationForkSupport,
+  dropPendingRestoreNotice,
   findCheckpointName,
   stashPendingRestoreNotice,
   applyPendingRestoreNotice,
