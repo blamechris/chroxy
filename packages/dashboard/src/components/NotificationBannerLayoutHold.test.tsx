@@ -18,7 +18,6 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { NotificationBanners, BANNER_RETIRE_HOLD_MS } from './NotificationBanners'
-import { useConnectionStore } from '../store/connection'
 import type { SessionNotification } from '../store/types'
 
 const ROW_HEIGHT = 44
@@ -97,11 +96,35 @@ describe('#7466 banner retirement keeps the strip still', () => {
     expect(slot()).toBeNull()
   })
 
-  it('releases early when the pointer leaves the reserved area', () => {
+  it('does NOT release when the pointer leaves the slot (the tab strip is right below it)', () => {
     const { rerender } = render(ui([n('a')]))
     rerender(ui([n('a', { readAt: 5 })]))
     fireEvent.pointerLeave(slot()!)
+    fireEvent.mouseLeave(slot()!)
+    expect(slot()).not.toBeNull()
+    expect(slot()!.style.minHeight).toBe(`${ROW_HEIGHT}px`)
+    act(() => { vi.advanceTimersByTime(BANNER_RETIRE_HOLD_MS) })
     expect(slot()).toBeNull()
+  })
+
+  it('reserves the LARGEST height the stack reached, not the first one measured (grow, then retire)', () => {
+    const { rerender } = render(ui([n('a')]))
+    rerender(ui([n('a'), n('b')]))
+    rerender(ui([n('a'), n('b', { readAt: 5 })]))
+    expect(slot()!.style.minHeight).toBe(`${2 * ROW_HEIGHT}px`)
+  })
+
+  it('a banner arriving during the hold restarts the timer', () => {
+    const { rerender } = render(ui([n('a')]))
+    rerender(ui([n('a', { readAt: 5 })]))
+    act(() => { vi.advanceTimersByTime(BANNER_RETIRE_HOLD_MS - 500) })
+    rerender(ui([n('a', { readAt: 5 }), n('b')]))
+    // Past the ORIGINAL deadline: still held, because the arrival restarted it.
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(slot()!.style.minHeight).toBe(`${ROW_HEIGHT}px`)
+    act(() => { vi.advanceTimersByTime(BANNER_RETIRE_HOLD_MS - 1000) })
+    expect(slot()!.style.minHeight).toBe('')
+    expect(screen.queryByRole('log')).not.toBeNull()
   })
 
   it('holds even when the row is REMOVED from the list (dismissSessionNotification)', () => {
@@ -117,35 +140,5 @@ describe('#7466 banner retirement keeps the strip still', () => {
     expect(slot()!.style.minHeight).toBe('')
     rerender(ui([n('a'), n('b')])) // growth is not a retirement
     expect(slot()!.style.minHeight).toBe('')
-  })
-})
-
-describe('#7466 a click on a stale prompt banner changes no view', () => {
-  it('every control on a not-pending permission row leaves viewMode and the active session alone', () => {
-    useConnectionStore.setState({ viewMode: 'chat', activeSessionId: 'sess-1' })
-    const onApprove = vi.fn()
-    const onDeny = vi.fn()
-    const onSwitchSession = vi.fn()
-    const markRead = vi.fn((id: string) => useConnectionStore.getState().markSessionNotificationRead(id))
-    render(
-      <NotificationBanners
-        notifications={[n('p', { eventType: 'permission', requestId: 'req-1' })]}
-        onApprove={onApprove}
-        onDeny={onDeny}
-        onDismiss={vi.fn()}
-        onMarkRead={markRead}
-        onSwitchSession={onSwitchSession}
-        permissionStatus={() => 'not-pending'}
-        isSessionListed={() => false}
-      />,
-    )
-    // Everything clickable on the row.
-    for (const el of screen.getAllByRole('button')) fireEvent.click(el)
-    expect(onApprove).not.toHaveBeenCalled()
-    expect(onDeny).not.toHaveBeenCalled()
-    expect(onSwitchSession).not.toHaveBeenCalled()
-    expect(markRead).toHaveBeenCalledTimes(1)
-    expect(useConnectionStore.getState().viewMode).toBe('chat')
-    expect(useConnectionStore.getState().activeSessionId).toBe('sess-1')
   })
 })

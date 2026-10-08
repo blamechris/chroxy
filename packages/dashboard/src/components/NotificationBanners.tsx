@@ -236,6 +236,18 @@ export function NotificationBanners({
   // `heldHeight` is the floor applied to the slot; 0 means no hold. It is set in
   // a layout effect (before paint) from the height measured on the PREVIOUS
   // commit, because by the time the shrunken DOM commits the old height is gone.
+  //
+  // The hold ends ONLY on its timer (or unmount) — deliberately not on
+  // `pointerleave`. The tab strip sits directly below this slot, so a pointer
+  // heading for a tab leaves the blank block by crossing into the strip; a
+  // release there collapses the slot at the instant the pointer arrives and
+  // moves the strip up and away from it, the very shift the hold prevents.
+  // Any "release when the pointer is not heading for the strip" rule would need
+  // a heading heuristic that cannot be verified without a real browser, so the
+  // timer is the whole mechanism. The timer restarts on every change in the
+  // unread count (a further retirement keeps the operator's pointer parked here
+  // just as the first did; an arrival means the stack is live under it), so a
+  // burst keeps the floor up, bounded by the burst itself.
   const stackRef = useRef<HTMLDivElement | null>(null)
   const lastHeightRef = useRef(0)
   const lastCountRef = useRef(unread.length)
@@ -264,7 +276,6 @@ export function NotificationBanners({
       className="notification-banners-slot"
       data-testid="notification-banners-slot"
       style={heldHeight > 0 ? { minHeight: heldHeight } : undefined}
-      onPointerLeave={heldHeight > 0 ? () => setHeldHeight(0) : undefined}
     >
     {unread.length > 0 && (
     <div ref={stackRef} className="notification-banners" role="log" aria-label="Background session notifications">
