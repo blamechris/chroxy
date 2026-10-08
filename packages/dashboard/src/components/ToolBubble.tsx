@@ -42,6 +42,7 @@ import { TodoList, parseTodoList } from './TodoList'
 import { WebSearchResultList, WebFetchResult } from './WebToolResult'
 import { ChildAgentEventList } from './ChildAgentEventList'
 import { ImageLightbox } from './ImageLightbox'
+import { ToolResultImageGrid } from './ToolResultImageGrid'
 import { useInitialExpanded } from './chatExpandRegistry'
 
 export interface ToolBubbleProps {
@@ -279,6 +280,11 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result: r
   })
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // The result panel holds its own buttons (image thumbnails, "Show more",
+    // line-collapse pill). Their Enter/Space activate THEM; only a key pressed
+    // on the bubble itself toggles it. Keys are deliberately not
+    // stopPropagation'd, so global shortcuts still see them.
+    if (e.target !== e.currentTarget) return
     if (e.key === 'Enter') {
       e.preventDefault()
       toggle()
@@ -384,31 +390,12 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result: r
               a blank panel. Click a thumbnail to open the full-resolution
               lightbox. Mirrors the mobile ToolDetailModal image grid. */}
           {hasImages && (
-            <div className="tool-result-images" data-testid={`tool-result-images-${toolUseId}`}>
-              {resultImages!.map((img, i) => (
-                <button
-                  key={i}
-                  type="button"
-                  className="tool-result-image-btn"
-                  data-testid={`tool-result-image-${toolUseId}-${i}`}
-                  onClick={() => setLightboxIndex(i)}
-                  aria-haspopup="dialog"
-                  aria-label={
-                    resultImages!.length > 1
-                      ? `View image ${i + 1} of ${resultImages!.length}`
-                      : 'View image'
-                  }
-                >
-                  <img
-                    src={`data:${img.mediaType};base64,${img.data}`}
-                    alt=""
-                    className="tool-result-image-thumb"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </button>
-              ))}
-            </div>
+            <ToolResultImageGrid
+              images={resultImages!}
+              containerTestId={`tool-result-images-${toolUseId}`}
+              itemTestIdPrefix={`tool-result-image-${toolUseId}`}
+              onOpen={setLightboxIndex}
+            />
           )}
         </div>
       )}

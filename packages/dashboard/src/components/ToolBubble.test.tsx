@@ -4,9 +4,11 @@
  * Tests keyboard accessibility, ARIA attributes, and expand/collapse behavior.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import type { ToolResultImage } from '@chroxy/store-core'
 import { ToolBubble } from './ToolBubble'
+import { INITIAL_THUMBNAIL_LIMIT } from './ToolResultImageGrid'
+import { installThumbnailStubs, type ThumbnailStubs } from '../utils/tool-image-thumbnail-stubs'
 
 afterEach(() => {
   cleanup()
@@ -987,5 +989,100 @@ describe('ToolBubble — WebSearch/WebFetch structured render (#6757)', () => {
     const result = JSON.stringify([{ title: 'X', url: 'https://example.com/' }])
     render(<ToolBubble toolName="web_search_results" toolUseId="wsr-1" result={result} isTail />)
     expect(screen.queryByTestId('web-search-results')).not.toBeInTheDocument()
+  })
+
+  // ---------------------------------------------------------------------------
+  // #6810 -- thumbnails are downscaled; the lightbox keeps the full-res image;
+  // a long run of screenshots is capped behind "Show N more".
+  // ---------------------------------------------------------------------------
+  describe('downscaled tool-result thumbnails (#6810)', () => {
+    let stubs: ThumbnailStubs
+    afterEach(() => { stubs?.restore() })
+    const mk = (n: number): ToolResultImage[] =>
+      Array.from({ length: n }, (_, i) => ({ mediaType: 'image/png', data: btoa(`shot-${i}`) }))
+
+    it('thumbnail src is the downscaled URL once available; the lightbox gets the full data URI', async () => {
+      stubs = installThumbnailStubs()
+      const images = mk(2)
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-d1" resultImages={images} />)
+      fireEvent.click(screen.getByRole('button'))
+      const thumb = screen.getByTestId('tool-result-image-tu-d1-1').querySelector('img')!
+      await waitFor(() => expect(thumb).toHaveAttribute('src', 'data:image/webp;base64,THUMB2'))
+      expect(thumb.getAttribute('src')).not.toBe(`data:${images[1]!.mediaType};base64,${images[1]!.data}`)
+      expect(thumb.getAttribute('src')!.startsWith('blob:')).toBe(false)
+      fireEvent.click(screen.getByTestId('tool-result-image-tu-d1-1'))
+      expect(screen.getByTestId('image-lightbox-img')).toHaveAttribute(
+        'src',
+        `data:${images[1]!.mediaType};base64,${images[1]!.data}`,
+      )
+    })
+
+    it('does not decode every image up front: only the first N are handed to the decoder', async () => {
+      stubs = installThumbnailStubs()
+      const total = INITIAL_THUMBNAIL_LIMIT + 5
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-d2" resultImages={mk(total)} />)
+      fireEvent.click(screen.getByRole('button'))
+      await waitFor(() => expect(stubs.created).toHaveLength(INITIAL_THUMBNAIL_LIMIT))
+      expect(stubs.createImageBitmap).toHaveBeenCalledTimes(INITIAL_THUMBNAIL_LIMIT)
+      expect(screen.queryByTestId(`tool-result-image-tu-d2-${INITIAL_THUMBNAIL_LIMIT}`)).not.toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('tool-result-images-tu-d2-more'))
+      expect(screen.getByTestId(`tool-result-image-tu-d2-${total - 1}`)).toBeInTheDocument()
+      await waitFor(() => expect(stubs.created).toHaveLength(total))
+    })
+
+    it('Enter/Space on a thumbnail or the "Show more" button does not toggle the bubble', () => {
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-d3" resultImages={mk(INITIAL_THUMBNAIL_LIMIT + 2)} />)
+      const root = screen.getByTestId('tool-bubble-tu-d3')
+      fireEvent.click(root)
+      for (const id of ['tool-result-images-tu-d3-more', 'tool-result-image-tu-d3-0']) {
+        for (const key of ['Enter', ' ']) {
+          fireEvent.keyDown(screen.getByTestId(id), { key })
+          expect(root).toHaveAttribute('aria-expanded', 'true')
+        }
+      }
+      fireEvent.click(screen.getByTestId('tool-result-images-tu-d3-more'))
+      expect(root).toHaveAttribute('aria-expanded', 'true')
+    })
+
+    it('Enter/Space on the bubble itself still toggles it', () => {
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-d3b" resultImages={mk(1)} />)
+      const root = screen.getByTestId('tool-bubble-tu-d3b')
+      fireEvent.keyDown(root, { key: 'Enter' })
+      expect(root).toHaveAttribute('aria-expanded', 'true')
+      fireEvent.keyDown(root, { key: ' ' })
+      expect(root).toHaveAttribute('aria-expanded', 'false')
+    })
+
+    it('other keys typed on a thumbnail still reach document and window listeners', () => {
+      const onDoc = vi.fn()
+      const onWin = vi.fn()
+      document.addEventListener('keydown', onDoc)
+      window.addEventListener('keydown', onWin)
+      try {
+        render(<ToolBubble toolName="screenshot" toolUseId="tu-d3c" resultImages={mk(1)} />)
+        fireEvent.click(screen.getByTestId('tool-bubble-tu-d3c'))
+        const thumb = screen.getByTestId('tool-result-image-tu-d3c-0')
+        fireEvent.keyDown(thumb, { key: 'k', metaKey: true })
+        fireEvent.keyDown(thumb, { key: 'Escape' })
+        expect(onDoc).toHaveBeenCalledTimes(2)
+        expect(onWin).toHaveBeenCalledTimes(2)
+      } finally {
+        document.removeEventListener('keydown', onDoc)
+        window.removeEventListener('keydown', onWin)
+      }
+    })
+
+    it('collapsing drops the thumbnails; re-expanding renders them again', async () => {
+      stubs = installThumbnailStubs()
+      render(<ToolBubble toolName="screenshot" toolUseId="tu-d4" resultImages={mk(2)} />)
+      const root = screen.getByTestId('tool-bubble-tu-d4')
+      fireEvent.click(root)
+      await waitFor(() => expect(stubs.created).toHaveLength(2))
+      fireEvent.click(root)
+      expect(screen.queryByTestId('tool-result-images-tu-d4')).not.toBeInTheDocument()
+      fireEvent.click(root)
+      const thumb = screen.getByTestId('tool-result-image-tu-d4-0').querySelector('img')!
+      await waitFor(() => expect(thumb).toHaveAttribute('data-thumb-state', 'downscaled'))
+    })
   })
 })

@@ -22,6 +22,7 @@ import {
 } from '@chroxy/store-core'
 import { ChildAgentEventList } from './ChildAgentEventList'
 import { ImageLightbox } from './ImageLightbox'
+import { ToolResultImageGrid } from './ToolResultImageGrid'
 import { ChatExpandContext, useInitialExpanded } from './chatExpandRegistry'
 
 export interface ToolGroupProps {
@@ -302,31 +303,12 @@ function ToolGroupEntry({
               <div className="tool-group-entry-detail-label">
                 {message.toolResultImages!.length === 1 ? 'Image' : `Images (${message.toolResultImages!.length})`}
               </div>
-              <div className="tool-result-images" data-testid={`tool-group-entry-images-${message.id}`}>
-                {message.toolResultImages!.map((img, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    className="tool-result-image-btn"
-                    data-testid={`tool-group-entry-image-${message.id}-${i}`}
-                    onClick={() => setLightboxIndex(i)}
-                    aria-haspopup="dialog"
-                    aria-label={
-                      message.toolResultImages!.length > 1
-                        ? `View image ${i + 1} of ${message.toolResultImages!.length}`
-                        : 'View image'
-                    }
-                  >
-                    <img
-                      src={`data:${img.mediaType};base64,${img.data}`}
-                      alt=""
-                      className="tool-result-image-thumb"
-                      loading="lazy"
-                      decoding="async"
-                    />
-                  </button>
-                ))}
-              </div>
+              <ToolResultImageGrid
+                images={message.toolResultImages!}
+                containerTestId={`tool-group-entry-images-${message.id}`}
+                itemTestIdPrefix={`tool-group-entry-image-${message.id}`}
+                onOpen={setLightboxIndex}
+              />
             </div>
           )}
           {/* #5016 — Task subagent nested progress in grouped-entry view.

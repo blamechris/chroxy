@@ -3977,6 +3977,29 @@ button.sidebar-token-view-session-row:hover {
   background: var(--bg-elevated, var(--bg-input));
 }
 
+/* #6810 — "Show N more images" past the eager-render cap. 44px minimum tap
+   target (CLAUDE.md); sized to sit in the thumbnail row. */
+.tool-result-images-more {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
+  border-radius: var(--radius-sm, 6px);
+  background: none;
+  color: var(--accent-blue);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.tool-result-images-more:hover {
+  text-decoration: underline;
+}
+
+.tool-result-images-more:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 1px;
+}
+
 /* #6755 — ImageLightbox: the full-resolution click-to-zoom overlay,
    composed from the generic `.modal-overlay`/`.modal-content` (above). */
 .image-lightbox-close {
