@@ -6022,10 +6022,14 @@ button.sidebar-token-view-session-row:hover {
    covered the ActivityIndicator / CheckInChip row. `.input-bar--with-lozenge`
    (set by InputBar only while the lozenge is mounted) reserves that overhang
    as margin-top on the composer. The trade-off: this is a one-off ~10px shift
-   when a turn starts. It lands in the same frame the ActivityIndicator row
-   mounts above the composer (they share the busy gate), so it is absorbed
-   into a shift that already happens rather than adding a second one, and it
-   does not change while the turn runs or the lozenge text changes. The
+   when a turn starts. Usually it lands in the same frame the
+   ActivityIndicator row mounts above the composer, so it is absorbed into a
+   shift that already happens rather than adding a second one. The gates are
+   close but not identical: the lozenge follows deriveChatActivity, where a
+   pending permission or plan reads as `waiting` even while the session is
+   idle, and the indicator follows !isIdle. In that case the 10px shift
+   happens on its own. It never changes while the turn runs or the lozenge
+   text changes. The
    lozenge itself stays out of flow, so the text swap is still jitter-free. */
 .input-bar {
   --input-bar-lozenge-height: calc(var(--text-xs) * 1.4 + 4px); /* line-height 1.4 + 2x 1px padding + 2x 1px border */

@@ -115,7 +115,11 @@ describe('InputBar composer state lozenge (chat redesign #6391)', () => {
       const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf8')
       const rule = css.match(/\.input-bar--with-lozenge\s*\{([^}]+)\}/)
       expect(rule, 'the reservation rule exists').toBeTruthy()
-      expect(/margin-top:\s*calc\(var\(--input-bar-lozenge-height\)\s*\/\s*2/.test(rule?.[1] ?? '')).toBe(true)
+      expect(/margin-top:\s*calc\(var\(--input-bar-lozenge-height\)\s*\/\s*2\s*[+)]/.test(rule?.[1] ?? ''), 'margin-top is exactly half the lozenge height (plus the border)').toBe(true)
+      // The height the reservation halves must be the lozenge's own box: its
+      // line-height and its 1px padding + 1px border on each side.
+      const height = css.match(/--input-bar-lozenge-height:\s*([^;]+);/)?.[1]?.trim()
+      expect(height).toBe('calc(var(--text-xs) * 1.4 + 4px)')
     })
   })
 })
