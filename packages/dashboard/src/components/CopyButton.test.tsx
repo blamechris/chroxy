@@ -76,4 +76,37 @@ describe('CopyButton (#6631)', () => {
     expect(btn).not.toHaveClass('msg-copy-btn')
     expect(screen.queryByTestId('msg-copy-button')).toBeNull()
   })
+
+  // #7338 — the control's hover chrome used to paint over the bubble's own text
+  // with a see-through background. jsdom has no layout, so assert the
+  // stylesheet declarations that keep it clear of the text and opaque.
+  describe('chrome vs message text (#7338)', () => {
+    const readCss = async () => {
+      const { readFileSync } = await import('node:fs')
+      const { resolve } = await import('node:path')
+      return readFileSync(resolve(__dirname, '../theme/components.css'), 'utf8')
+    }
+    const decl = (rule: string, prop: string) =>
+      rule.match(new RegExp(`(?:^|[\\s;{])${prop}:\\s*([^;]+);`))?.[1]?.trim()
+
+    it('paints an opaque, defined surface (no see-through fallback)', async () => {
+      const css = await readCss()
+      const rule = css.match(/\n\.msg-copy-btn\s*\{([^}]+)\}/)?.[1] ?? ''
+      expect(rule.length > 0, 'the .msg-copy-btn rule exists').toBe(true)
+      expect(decl(rule, 'background')).toBe('var(--bg-card)')
+    })
+
+    it('assistant bubbles reserve a right gutter at least as wide as the control footprint', async () => {
+      const css = await readCss()
+      const btn = css.match(/\n\.msg-copy-btn\s*\{([^}]+)\}/)?.[1] ?? ''
+      const bubble = css.match(/\n\.msg\.assistant\s*\{([^}]+)\}/)?.[1] ?? ''
+      const width = parseFloat(decl(btn, 'width') ?? 'NaN')
+      const right = parseFloat(decl(btn, 'right') ?? 'NaN')
+      // `padding: <top> <right> <bottom> <left>` — the second value is the right.
+      const padding = (decl(bubble, 'padding') ?? '').split(/\s+/).map(parseFloat)
+      expect(Number.isFinite(width) && Number.isFinite(right), 'control footprint is parseable').toBe(true)
+      expect(padding.length, 'bubble padding is the 4-value form').toBe(4)
+      expect(padding[1]! >= width + right).toBe(true)
+    })
+  })
 })

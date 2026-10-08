@@ -3150,7 +3150,13 @@ button.sidebar-token-view-session-row:hover {
      `.msg` descendants, not the bubble background. */
   background: transparent;
   align-self: flex-start;
-  padding: 2px 0;
+  /* #7338: the right padding is a gutter for the absolutely-positioned copy
+     control (`.msg-copy-btn`: 22px wide + 8px from the edge = 30px, plus 4px of
+     air). Without it the control painted over the last words of the first
+     line, and its see-through chrome read as a stray box around that text. It
+     applies to every assistant row, streaming or not, so the text does not
+     re-wrap when the control mounts at the end of the turn. */
+  padding: 2px 34px 2px 0;
   border-radius: 0;
 }
 
@@ -3546,9 +3552,11 @@ button.sidebar-token-view-session-row:hover {
   font-size: 12px;
   line-height: 1;
   color: var(--text-muted);
-  /* theme-neutral fallbacks (match the repo's --surface-raised fallback at
-     .cr-* usage) so the control reads correctly in BOTH light and dark. */
-  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  /* #7338: an OPAQUE themed surface. `--surface-raised` is not defined by any
+     theme, so the old `var(--surface-raised, rgba(127, 127, 127, 0.12))` always
+     resolved to its 12% grey fallback: text showed straight through the control
+     and the hover chrome looked like a corrupted box over the message. */
+  background: var(--bg-card);
   border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.22));
   border-radius: var(--radius-sm, 6px);
   cursor: pointer;
