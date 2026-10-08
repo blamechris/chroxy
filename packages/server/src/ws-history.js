@@ -1214,7 +1214,7 @@ export function scheduleProviderModelsRefresh(ctx, ws, providerName) {
  *   re-tags the dashboard's provider.
  */
 export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
-  const { sessionManager, send, billingCanary } = ctx
+  const { sessionManager, send, billingCanary, clients } = ctx
   const entry = sessionManager?.getSession(sessionId)
   if (!entry) return
   const session = entry.session
@@ -1249,19 +1249,26 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
     // #8224 — and the permission-mode roster for that same provider. Plan,
     // Auto and the mode copy differ per provider (claude-tui cannot plan,
     // claude-sdk can), and this is the one call every path that makes a session
-    // visible to a client already makes — create, switch, destroy re-home,
-    // conversation resume, checkpoint rewind — where `switch_session` used to be
-    // the only one that sent it, so a create-and-auto-switch left the PREVIOUS
-    // session's roster in place ("Plan (unavailable)" on a fresh claude-sdk
-    // session beside an active claude-tui one). Tagged with the provider, so
-    // the client stores it under that provider and a session that is not the
-    // one being viewed (`subscribe_sessions`) cannot displace the active
-    // session's picker.
-    send(ws, {
-      type: 'available_permission_modes',
-      modes: getPermissionModes(rosterProvider, session.constructor),
-      provider: rosterProvider,
-    })
+    // the client's ACTIVE one already makes — create, switch, destroy re-home,
+    // conversation resume, checkpoint rewind of another client — where
+    // `switch_session` used to be the only one that sent it, so a
+    // create-and-auto-switch left the PREVIOUS session's roster in place
+    // ("Plan (unavailable)" on a fresh claude-sdk session beside an active
+    // claude-tui one). Tagged with the provider, so a client keys it by provider.
+    //
+    // Sent ONLY for the client's active session. `handleSubscribeSessions` calls
+    // this for every background session on every `session_list`; a client older
+    // than #8224 keeps one flat roster slot and would end each connect on a
+    // BACKGROUND session's roster. Clients that key by provider lose nothing: the
+    // connect burst, create and switch each cover the active session. (The
+    // connect burst passes `skipModels` and sends its own tagged roster.)
+    if (clients?.get(ws)?.activeSessionId === sessionId) {
+      send(ws, {
+        type: 'available_permission_modes',
+        modes: getPermissionModes(rosterProvider, session.constructor),
+        provider: rosterProvider,
+      })
+    }
     // #5421: background dynamic-discovery refresh (ollama /api/tags); a
     // changed list is re-pushed to this client when the probe lands. Keyed on
     // the session's OWN provider, not the roster tag — a session that reports

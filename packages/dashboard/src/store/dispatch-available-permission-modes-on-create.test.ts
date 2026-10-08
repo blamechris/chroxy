@@ -186,4 +186,16 @@ describe('dashboard store — permission-mode roster follows the active session 
     expect(store.getState().activeSessionId).toBe('tui-1')
     expect(planOf()?.supported).toBe(false)
   })
+
+  it('a daemon from before #8224 (untagged roster, provider named in session_list) still gets its picker', () => {
+    // Reset to a fresh client, then speak the OLD daemon's dialect: the roster
+    // frame carries no provider, session_list does.
+    store.setState({ permissionModesByProvider: {} } as never)
+    send({ type: 'session_list', sessions: [TUI_SESSION, SDK_SESSION] })
+    send({ type: 'session_switched', sessionId: 'sdk-1', name: 'sdk', cwd: '/w' })
+    send({ type: 'available_permission_modes', modes: SDK_ROSTER })
+
+    expect(store.getState().activeSessionId).toBe('sdk-1')
+    expect(planOf()?.supported).toBe(true)
+  })
 })

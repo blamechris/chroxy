@@ -28,7 +28,7 @@
  */
 
 import type { PermissionMode } from './handlers/permission'
-import { bucketKey, canonicalProviderTag } from './models-by-provider'
+import { UNTAGGED_MODELS_PROVIDER, bucketKey, canonicalProviderTag } from './models-by-provider'
 
 /** Every permission-mode roster this client has heard, keyed by provider tag. */
 export type PermissionModesByProvider = Record<string, PermissionMode[]>
@@ -57,15 +57,23 @@ export function mergePermissionModesByProvider(
  * The roster the ACTIVE session's provider offers.
  *
  * 1. The provider's own roster.
- * 2. Provider UNKNOWN (no active session, or the session list has not arrived)
- *    and exactly one roster known: that one. With no other provider in play
- *    there is nothing to leak from, and a pre-provider daemon (which tags
- *    nothing) keeps working as it always did.
- * 3. Otherwise empty. A KNOWN provider with no roster of its own gets nothing,
- *    NOT another provider's — the picker hides until the server's roster for
- *    this provider lands (the server sends it with the session info, right
- *    behind the `session_switched`), which is better than offering Plan on a
- *    provider that cannot plan or hiding it on one that can.
+ * 2. A KNOWN provider with no roster of its own: the UNTAGGED roster, if any.
+ *    A daemon from before #8224 (v0.11.4 and earlier) sends every roster
+ *    untagged while its `session_list` does name each session's provider, so
+ *    without this a new client against an installed daemon would hide the
+ *    picker entirely. It cannot leak across providers: a daemon that carries
+ *    #8224 tags every roster send, so it never writes the untagged bucket, and
+ *    an untagged roster only ever comes from the old daemon whose single roster
+ *    is the only one in play. (`available_models` dropped this fallback in
+ *    #7759 only AFTER tagging every send; the compatibility window here is the
+ *    whole installed daemon base.) A TAGGED roster for a different provider is
+ *    never served.
+ * 3. Provider UNKNOWN (no active session, or the session list has not arrived)
+ *    and exactly one roster known: that one.
+ * 4. Otherwise empty — the picker hides until the server's roster for this
+ *    provider lands (the server sends it with the session info), which is
+ *    better than offering Plan on a provider that cannot plan or hiding it on
+ *    one that can.
  */
 export function selectPermissionModesForProvider(
   byProvider: PermissionModesByProvider | undefined | null,
@@ -73,7 +81,7 @@ export function selectPermissionModesForProvider(
 ): PermissionMode[] {
   const map = byProvider ?? {}
   const key = canonicalProviderTag(provider)
-  if (key !== null) return map[key] ?? EMPTY_PERMISSION_MODES
+  if (key !== null) return map[key] ?? map[UNTAGGED_MODELS_PROVIDER] ?? EMPTY_PERMISSION_MODES
   const [only, ...rest] = Object.values(map)
   if (only && rest.length === 0) return only
   return EMPTY_PERMISSION_MODES

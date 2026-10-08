@@ -166,4 +166,14 @@ describe('mobile permission-mode roster follows the active session (#8224)', () 
     send({ type: 'session_switched', sessionId: 'tui-1', name: 'tui', cwd: '/w' });
     expect(planOf()?.supported).toBe(false);
   });
+
+  it('a daemon from before #8224 (untagged roster, provider named in session_list) still gets its picker', () => {
+    store.setState({ permissionModesByProvider: {}, sessions: [], activeSessionId: null } as never);
+    send({ type: 'session_list', sessions: [SDK_SESSION] });
+    send({ type: 'session_switched', sessionId: 'sdk-1', name: 'sdk', cwd: '/w' });
+    send({ type: 'available_permission_modes', modes: SDK_ROSTER });
+
+    expect(store.getState().activeSessionId).toBe('sdk-1');
+    expect(planOf()?.supported).toBe(true);
+  });
 });

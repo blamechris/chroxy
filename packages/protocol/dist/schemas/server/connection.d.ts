@@ -111,6 +111,7 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
             chroxy: "chroxy";
         }>>;
     }, z.core.$strip>>>;
+    availablePermissionModesProvider: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const ServerAuthFailSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_fail">;

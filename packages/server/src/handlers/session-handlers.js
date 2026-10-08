@@ -7,7 +7,7 @@
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { isBoundClient } from '../environments/authority.js'
 import { auditShellCreate } from '../shell-audit.js'
-import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS, getPermissionModes } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
 import { getRegistryForProvider, resolveRosterProvider } from '../models.js'
 import { resolveDaemonDefaultProvider } from '../providers.js'
 import { CODEX_SANDBOX_MODES } from '../codex-session.js'
@@ -99,12 +99,9 @@ function handleSwitchSession(ws, client, msg, ctx) {
   const switchRosterProvider = resolveRosterProvider(switchProvider, resolveDaemonDefaultProvider(ctx.services.config))
   const switchRegistry = getRegistryForProvider(switchRosterProvider)
   ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchRosterProvider })
-  // #6638: also re-send the permission-mode copy so switching to/from a Codex
-  // session updates the mode descriptions (Codex has different tools + no plan mode).
-  // #8224: tagged with the provider so the client files it under that provider.
-  // (`sendSessionInfo` above sends the same frame for every path that surfaces a
-  // session; this one stays so a switch is self-contained.)
-  ctx.transport.send(ws, { type: 'available_permission_modes', modes: getPermissionModes(switchRosterProvider, entry.session.constructor), provider: switchRosterProvider })
+  // #6638/#8224: the permission-mode roster (provider-tuned copy, Plan support)
+  // is sent by `sendSessionInfo` above, tagged with the session's provider,
+  // because `setActiveSession` made this session the client's active one.
   broadcastFocusChanged(client, targetId, ctx)
 }
 
