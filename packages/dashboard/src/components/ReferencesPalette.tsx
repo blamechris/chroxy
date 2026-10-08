@@ -12,6 +12,7 @@
  */
 import { useState, useEffect, useMemo, useRef, useCallback, type KeyboardEvent } from 'react'
 import { useConnectionStore } from '../store/connection'
+import { useIdeRequestStatus } from '../hooks/useIdeRequestStatus'
 import type { SearchResultEntry } from '@chroxy/protocol'
 
 export interface ReferencesPaletteProps {
@@ -26,6 +27,7 @@ export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
   const loading = useConnectionStore(s => s.referencesLoading)
   const symbol = useConnectionStore(s => s.referencesSymbol)
   const openFileInBrowser = useConnectionStore(s => s.openFileInBrowser)
+  const requestFindReferences = useConnectionStore(s => s.requestFindReferences)
   const [selectedIndex, setSelectedIndex] = useState(0)
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -40,6 +42,17 @@ export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
   // for a previous click is ignored until the new one lands).
   const isCurrent = !!snapshot && snapshot.symbol === symbol
   const results = useMemo<SearchResultEntry[]>(() => (isCurrent ? snapshot!.results : []), [snapshot, isCurrent])
+
+  // #8404 — a reply that was in flight when the socket dropped never arrives, so
+  // `!isCurrent` alone must not mean "Searching…". The shared hook settles to
+  // 'offline' while disconnected and re-asks once on reconnect. (The originating
+  // file is not retained, so the re-ask loses only the same-file ranking tie-break.)
+  const status = useIdeRequestStatus({
+    active: isOpen,
+    loading,
+    isCurrent,
+    reissue: () => { if (symbol) requestFindReferences(symbol) },
+  })
 
   useEffect(() => {
     setSelectedIndex(i => (results.length === 0 ? 0 : Math.min(i, Math.min(results.length, DISPLAY_CAP) - 1)))
@@ -70,7 +83,8 @@ export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
 
   const overflow = results.length > DISPLAY_CAP ? results.length - DISPLAY_CAP : 0
   const display = overflow > 0 ? results.slice(0, DISPLAY_CAP) : results
-  const searching = loading || !isCurrent
+  const searching = status === 'searching'
+  const offline = status === 'offline'
 
   return (
     <div
@@ -93,7 +107,12 @@ export function ReferencesPalette({ isOpen, onClose }: ReferencesPaletteProps) {
           onKeyDown={handleKeyDown}
         >
           {searching && <div className="file-open-palette-status">Searching…</div>}
-          {!searching && results.length === 0 && (
+          {offline && (
+            <div className="file-open-palette-status" data-testid="references-offline">
+              Unavailable — references will reload when the connection is back
+            </div>
+          )}
+          {status === 'ready' && results.length === 0 && (
             <div className="file-open-palette-status" data-testid="references-empty">No references found</div>
           )}
           {!searching && display.map((r, i) => (
