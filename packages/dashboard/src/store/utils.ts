@@ -435,8 +435,11 @@ export function createEmptyConnectionReadings() {
  *     defect this roster fixes.
  *   - a server-side PREFERENCE or tally (`monthlyBudget`, `notificationPrefs`)
  *     and the last IDE symbol table (`symbols`) / dead-session chip
- *     (`sessionNotFoundError`): still true of the same daemon, re-pushed or
- *     re-requested on connect.
+ *     (`sessionNotFoundError`): still true of the same daemon. `monthlyBudget` is
+ *     re-pushed on connect (the server sends `monthly_budget` once per
+ *     handshake); `notificationPrefs` is NOT — the server only broadcasts it
+ *     after a `notification_prefs_set`, so Settings re-REQUESTS it
+ *     (`notification_prefs_get`, keyed on the completed handshake, #8485).
  *
  * `pendingApprovalPairHost` is deliberately NOT here: it names a saved SERVER
  * REGISTRY entry (the picker's own list), not a reading of the connected daemon.

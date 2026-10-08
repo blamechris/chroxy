@@ -1026,7 +1026,15 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   // #4542: Pull the latest notification prefs on open. Out-of-band changes
   // (other dashboard / mobile client setting a category) are pushed via the
   // server's broadcast after every `notification_prefs_set`, so once
-  // connected we stay in sync without polling.
+  // connected we stay in sync without polling. The server never pushes a
+  // snapshot on connect, so a fresh handshake has to ask.
+  //
+  // #8485: keyed on `connected` like the credentials effects above. This effect
+  // used to refire on a server switch only by accident (`serverCapabilities` is
+  // cleared and set again, flipping `notificationPrefsSupported`); a switch
+  // between two daemons that both advertise the capability would not have asked
+  // the new one. It now requests once per completed handshake and never while
+  // the connection is down.
   //
   // #4560: skip the refresh entirely when the server doesn't advertise the
   // `notificationPrefs` capability — pre-#4541 servers have no handler for
@@ -1036,10 +1044,10 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   // Skipping the WS write keeps the server logs clean and makes the gated
   // render decisions self-consistent.
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || !connected) return
     if (!notificationPrefsSupported) return
     refreshNotificationPrefs()
-  }, [isOpen, notificationPrefsSupported, refreshNotificationPrefs])
+  }, [isOpen, connected, notificationPrefsSupported, refreshNotificationPrefs])
 
   // #4559: clear the inline "server disconnected" banners when the panel
   // closes so re-opening Settings starts from a clean slate. A stale
