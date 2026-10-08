@@ -39,6 +39,7 @@ import { PermissionCommandEdit, isEditableCommandTool } from './PermissionComman
 import { ASK_USER_QUESTION_TOOL, AskUserQuestionPermissionBody, askUserQuestionSummary } from './AskUserQuestionPermissionBody'
 import { PermissionOutcomeRecord } from './PermissionOutcomeRecord'
 import { stripExpiredNote } from '../utils/stripExpiredNote'
+import type { PermissionEditedInput } from '@chroxy/store-core'
 
 // #7939: which of the three MCP config scopes a spawn-trust server came from
 // (mirrors MCP_SERVER_SOURCE in packages/server/src/byok-mcp-config.js and
@@ -66,7 +67,7 @@ export interface PermissionPromptProps {
    * #6773: `reason` carries the operator's free-text deny note (only on a Deny) —
    * the server feeds it back to the agent as the denial message.
    */
-  onRespond: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null, reason?: string) => void
+  onRespond: (requestId: string, decision: PermissionDecision, editedInput?: PermissionEditedInput | null, reason?: string) => void
   /**
    * #5667 — human label for the session that asked (e.g. "ltl · CLI"),
    * derived by the renderer from the message's `originSessionId`. Rendered as
@@ -171,7 +172,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // #6773 — Bash command edit reuses the same features.ide gate + full-input pull
   // as the Write/Edit review (the broadcast command is truncated to 200 chars).
   const commandEditEligible = ideEnabled && isEditableCommandTool(tool)
-  const [editedInput, setEditedInput] = useState<Record<string, string> | null>(null)
+  const [editedInput, setEditedInput] = useState<PermissionEditedInput | null>(null)
   // #6773 — free-text deny reason (tool-agnostic, NOT ide-gated). Sent only on Deny.
   const [denyReason, setDenyReason] = useState('')
 

@@ -361,6 +361,51 @@ those; `floored` only guarantees it never approves one the floor reserved for a 
 3. **Keep the parity matrix honest.** `tests/permission-hook-floor.test.js` runs a
    `(tool, target)` matrix through both pipelines and asserts they agree.
 
+## 4a. An approved edit never changes where a write lands, or what it is made of (#8446)
+
+The pre-write review (`features.ide`) lets the operator drop hunks of a `Write`/`Edit`
+before approving it. The floor decides *whether* the prompt appears; this decides what
+an approve with edits can do, and it lives in `edited-input.js` and
+`mergeEditedInput` (`permission-manager.js`).
+
+- **Only the content field changes.** `EDITABLE_INPUT_FIELDS` (`Write` content, `Edit`
+  `new_string`, `Bash` command) is the whole whitelist; `file_path` and `old_string`
+  always come from the original input, so an edit cannot move a write off a floored
+  path. A guard test fails if a path field is ever added.
+- **The client sends decisions, never content.** The review is drawn over the REDACTED
+  tool input (`get_permission_input`), so text built from it carries `[REDACTED]` where
+  a secret was. The client sends `editedInput.droppedHunks` and `keptHunks`, the `@@`
+  ranges of every hunk it was shown, and the server rebuilds the written text from the
+  RAW input it holds: the proposed text with each dropped hunk's lines replaced by the
+  original's. The server computes the diff itself over the same redacted copy, with the
+  same differ the clients use (`computeHunks`, one implementation in `@chroxy/protocol`),
+  and requires `droppedHunks` plus `keptHunks` to be exactly that list of hunks: the same
+  headers, each once, none missing, none extra. That is what stops a range landing off
+  its hunk, a zero-count side inventing an insertion or a deletion, or a partition that
+  covers the right lines in the wrong pieces and deletes a line both sides share. A
+  `droppedHunks` key, an empty list included, puts the field in hunk mode, and any text
+  the client also sends for that field is ignored.
+- **A change redaction hid can only be approved or denied whole.** If the raw original
+  and proposal differ at a line the shown copy reads as unchanged (a rotated key, in a gap
+  or in a hunk's context) and the client dropped any hunk, the edit is refused: writing it
+  would apply a change the operator never saw. With no hunk dropped a plain approve is
+  unchanged.
+- **Text from a client is a base only where redaction changed nothing.** An older
+  client's narrowed text, or an edited Bash command, is refused outright when redaction
+  changed the copy it was drawn from (the field, and for an Edit the text it replaces),
+  whatever the text contains: counting placeholders cannot say where one came from.
+  Where redaction changed nothing, a literal `[REDACTED]` in the text is just text.
+- **Refusal is a deny.** Ranges that are malformed, out of range, overlapping, not a real
+  diff, or that cannot be mapped back because redaction changed the line count are
+  refused, as is any unexpected failure while applying an edit. The request is DENIED
+  (nothing runs, the agent's tool result says why), in the manager that holds it (a BYOK
+  subagent's prompt lives in its child), and the answering client gets a
+  `PERMISSION_EDIT_REFUSED` error. It is not left pending: a client marks a prompt
+  answered the moment it sends.
+- **Only the in-process pipeline applies edits.** Hook-routed prompts (claude-tui,
+  claude-cli) have no `PermissionManager`; their resolver path passes only the
+  decision, and they have no pending input to pull, so no review is offered.
+
 ## 5. Known limits
 
 - **TOCTOU (#6922).** Resolution happens at permission-check time and is not atomic

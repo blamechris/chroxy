@@ -30,6 +30,7 @@ import { ResumeUnknownChip } from '../ResumeUnknownChip';
 import { AuthRequiredChip } from '../AuthRequiredChip';
 import { MultiQuestionForm } from './MultiQuestionForm';
 import type { MultiQuestionAnswersMap } from './MultiQuestionForm';
+import type { PermissionEditedInput } from '@chroxy/store-core';
 
 /**
  * #4755 — single-question Other / freeform answer payload (mobile parity
@@ -142,7 +143,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
   // from a Write/Edit pre-write-diff review — sent on an Approve so the server
   // writes only the kept hunks. `null`/omitted = no narrowing (a plain response);
   // the store's sendPermissionResponse drops it for a deny regardless.
-  onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string, editedInput?: Record<string, string> | null) => void;
+  onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string, editedInput?: PermissionEditedInput | null) => void;
   /**
    * #4973 — submit handler for the multi-question form. Fires with the
    * per-question answers map (`Record<string, string | string[]>`) plus
@@ -270,7 +271,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onEditQueued, onSe
     message.requestId ? s.permissionInputs?.[message.requestId] : undefined,
   );
   const reviewEligible = isPrompt && ideEnabled && isReviewableTool(message.tool);
-  const [editedInput, setEditedInput] = useState<Record<string, string> | null>(null);
+  const [editedInput, setEditedInput] = useState<PermissionEditedInput | null>(null);
 
   // Pull the full tool input once per eligible, unanswered prompt (idempotent —
   // gated on `pulledInput === undefined` so a re-render doesn't re-request).

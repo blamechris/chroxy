@@ -552,6 +552,14 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     return
   }
 
+  if (result.kind === 'edit_refused') {
+    // #8446: the resolver denied the request (fail closed: nothing was written) and
+    // the answering client is told why. The other clients learn of the denial from
+    // the unified pipeline's permission_resolved.
+    sendError(ws, requestId, 'PERMISSION_EDIT_REFUSED', result.message, undefined, ctx)
+    return
+  }
+
   if (result.kind === 'expired' || result.kind === 'not_found') {
     // #7096: OMIT sessionId when it is not a real id. `originSessionId` resolves to
     // `client.activeSessionId`, which defaults to null (ws-server.js), so the

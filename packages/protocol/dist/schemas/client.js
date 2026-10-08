@@ -626,14 +626,23 @@ export const PermissionResponseSchema = z.object({
     requestId: z.string().min(1).max(256),
     decision: z.enum(['allow', 'allowAlways', 'deny']),
     // #6543 (IDE P3 feature B) / #6773: optional per-hunk-review or command edits
-    // for an `allow` — a client that reviewed the agent's proposed Write/Edit and
-    // dropped some hunks sends the reduced CONTENT here; a client that tweaked a
-    // Bash command before approving sends the edited `command`. The server merges
-    // ONLY the whitelisted content field(s) per tool (Write→content, Edit→new_string,
-    // Bash→command) and NEVER the path/anchor fields, so an edit can narrow the
-    // write (or change what runs) but can't redirect where a write lands. Ignored
-    // on deny, and for tools with no editable content field. A loose object — the
-    // server-side whitelist (permission-manager.js) is the enforcement point.
+    // for an `allow`. A client that reviewed the agent's proposed Write/Edit and
+    // dropped some hunks sends WHICH hunks as `droppedHunks` and `keptHunks` (arrays
+    // of { oldStart, oldCount, newStart, newCount }, the `@@` header numbers of EVERY
+    // hunk it was shown) and never content (#8446): the diff it drew is over the
+    // REDACTED tool input, so the server rebuilds the narrowed content from the raw
+    // input it holds (edited-input.js), after recomputing the diff itself over the same
+    // redacted copy and requiring the two lists to be exactly its hunks. A change the
+    // redaction hid (a rotated key) can only be approved or denied whole. A
+    // `droppedHunks` key, an empty list included,
+    // puts the field in hunk mode and any text sent for it is ignored. A client that
+    // tweaked a Bash command before approving sends the edited `command`. The server
+    // merges ONLY the whitelisted content field(s) per tool (Write→content,
+    // Edit→new_string, Bash→command) and NEVER the path/anchor fields, so an edit can
+    // narrow the write (or change what runs) but can't redirect where a write lands;
+    // text for a field whose shown copy redaction changed is refused. Ignored on deny,
+    // and for tools with no editable content field. A loose object — the server-side
+    // whitelist (permission-manager.js) is the enforcement point.
     editedInput: z.record(z.string(), z.unknown()).optional(),
     // #6773: optional free-text DENY REASON. Fed back to the agent as the tool
     // result's denial message (permission-manager.js buildDenyMessage) instead of

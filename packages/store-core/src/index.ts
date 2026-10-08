@@ -1160,9 +1160,11 @@ export { getExpiredPermissionTurnSummaries } from './permission-turn-summary'
 export {
   computeHunks,
   applyHunks,
+  hunkDecisions,
   DEFAULT_CONTEXT_LINES,
   MAX_DIFF_LINES,
 } from './hunk-diff'
+export type { HunkRange, HunkDecisions, PermissionEditedInput } from './hunk-diff'
 
 // #8181 (hoisted from the dashboard's #7328/#8123 `utils/repoLabel.ts`):
 // worktree-aware repo display label, shared by the dashboard's cwd badges

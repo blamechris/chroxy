@@ -15,6 +15,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { ViewerPreWriteReview } from './ViewerPreWriteReview'
 import type { ChatMessage, PermissionDecision } from '../store/types'
+import type { PermissionEditedInput } from '@chroxy/store-core'
 
 // ---- store mock (only the connection store is mocked; PreWriteDiffReview and
 // the store-core helpers run for real so the diff/hunk mechanics are exercised).
@@ -28,7 +29,7 @@ type MockStore = {
   sendPermissionResponse: (
     requestId: string,
     decision: PermissionDecision,
-    editedInput?: Record<string, string> | null,
+    editedInput?: PermissionEditedInput | null,
   ) => unknown
   connectionPhase: string
 }
@@ -112,13 +113,13 @@ describe('ViewerPreWriteReview', () => {
     expect(mockSendPermissionResponse).toHaveBeenCalledWith('req-1', 'allow', null)
   })
 
-  it('dropping a hunk routes the narrowed content through editedInput on Approve', () => {
+  it('dropping a hunk routes the drop decision through editedInput on Approve (#8446)', () => {
     resetStore({ sessionStates: { s1: { messages: [editPrompt()] } }, permissionInputs: pulledEdit() })
     render(<ViewerPreWriteReview filePath={FILE} />)
-    // Edit diffs old→new; dropping the only hunk reverts new_string to old_string.
+    // Edit diffs old→new; dropping the only hunk is sent as its range, never as text.
     fireEvent.click(screen.getAllByTestId('hunk-toggle')[0]!)
     fireEvent.click(screen.getByTestId('viewer-prewrite-approve'))
-    expect(mockSendPermissionResponse).toHaveBeenCalledWith('req-1', 'allow', { new_string: 'a\nb\nc' })
+    expect(mockSendPermissionResponse).toHaveBeenCalledWith('req-1', 'allow', { droppedHunks: [{ oldStart: 1, oldCount: 3, newStart: 1, newCount: 3 }], keptHunks: [] })
   })
 
   it('Deny never carries an editedInput even after dropping a hunk', () => {
