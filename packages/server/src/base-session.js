@@ -1527,13 +1527,16 @@ export class BaseSession extends EventEmitter {
    * rather than `aborted`. Called by the `interrupt` message handler only -- never
    * from a provider's `interrupt()`, which the scheduler and teardown also call --
    * because a turn failed by a stalled stream or a dead provider process aborts
-   * the same controller and is not a Stop. A Stop pressed while no turn is running
-   * records nothing (there is no turn for it to end with), and a session with no
+   * the same controller and is not a Stop. A Stop pressed with no turn running and no
+   * prompt open records nothing (there is nothing for it to cancel), and a session with no
    * in-process permission manager has nothing to record on.
    * Cleared by `_clearMessageState`, which every turn end reaches.
    */
   markUserStopInFlight() {
-    if (!this._isBusy) return
+    // A turn is running, or a prompt is still open (a stalled turn's query can
+    // outlive its busy flag and raise one): either way there is something for
+    // this Stop to cancel. Otherwise there is nothing to label.
+    if (!this._isBusy && !this._permissions?.hasPendingPrompt?.()) return
     this._permissions?.markUserStopInFlight?.()
   }
 

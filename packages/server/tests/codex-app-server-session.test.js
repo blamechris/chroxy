@@ -1451,6 +1451,18 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
       cleanup()
     })
 
+    it('a new turn starts with no user Stop in flight, whatever an earlier one left (#8430)', async () => {
+      const { s, cleanup } = mkApprovalSession()
+      s._isBusy = true
+      s.markUserStopInFlight()
+      assert.equal(s.isUserStopInFlight(), true)
+      s._isBusy = false
+      s._client.request = async () => ({ turn: { id: 't1' } })
+      await s.sendMessage('next turn')
+      assert.equal(s.isUserStopInFlight(), false)
+      cleanup()
+    })
+
     it('interrupt() alone (scheduler, teardown) is not a user Stop: "aborted"', async () => {
       const { s, cleanup } = mkApprovalSession()
       const reasons = resolvedReasons(s)

@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PermissionManager, wirePermissionManager } from '../src/permission-manager.js'
 import { BaseSession } from '../src/base-session.js'
+import { ClaudeByokSession } from '../src/byok-session.js'
 import { SessionManager } from '../src/session-manager.js'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
 import { sendHistoryEntry } from '../src/ws-history.js'
@@ -283,5 +284,91 @@ describe('a client that cannot label a stopped outcome is sent expired (#8374)',
     const { CLIENT_CAPABILITIES } = await import('@chroxy/protocol')
     assert.ok(CLIENT_CAPABILITIES.desktop.includes('permission_outcome_stopped_v1'))
     assert.ok(CLIENT_CAPABILITIES.mobile.includes('permission_outcome_stopped_v1'))
+  })
+})
+
+describe('PermissionManager.clearAll reads the user Stop (#8430)', () => {
+  async function drain(opts, { stop }) {
+    const { pm, resolved } = makePm()
+    pm.handlePermission('Bash', { command: 'ls' }, new AbortController().signal, 'approve')
+    if (stop) pm.markUserStopInFlight()
+    pm.clearAll(opts)
+    pm.destroy()
+    return resolved.map((r) => r.reason)
+  }
+  it('drains an open prompt as stopped while a user Stop is in flight', async () => {
+    assert.deepEqual(await drain(undefined, { stop: true }), ['stopped'])
+  })
+  it('CONTROL: drains it as cleared when there is no Stop', async () => {
+    assert.deepEqual(await drain(undefined, { stop: false }), ['cleared'])
+  })
+  it('a caller that already cleared the flag passes the value it captured', async () => {
+    assert.deepEqual(await drain({ userStop: true }, { stop: false }), ['stopped'])
+    assert.deepEqual(await drain({ userStop: false }, { stop: true }), ['cleared'])
+  })
+})
+
+describe('ClaudeByokSession and the user Stop (#8430)', () => {
+  it('a user Stop aborts the open prompt as stopped, and the turn end clears the flag', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    const reasons = []
+    session._permissions.on('permission_resolved', (d) => reasons.push(d.reason))
+    session._isBusy = true
+    session._abortController = new AbortController()
+    const decided = session._permissions.handlePermission('Bash', { command: 'ls' }, session._abortController.signal, 'approve')
+    session.markUserStopInFlight()
+    session.interrupt()
+    await decided
+    assert.deepEqual(reasons, ['stopped'])
+    session._finishTurn()
+    assert.equal(session.isUserStopInFlight(), false)
+    session.destroy()
+  })
+
+  it('a Stop does not outlive a turn that ends before it starts (the MCP prompt-expansion failure path)', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    session.on('error', () => {})
+    session._isBusy = true
+    session._permissions.markUserStopInFlight() // pressed on turn A
+    session._finishTurn()
+    assert.equal(session.isUserStopInFlight(), false, 'A\'s own teardown')
+    // A leaked flag, as if a path had skipped teardown: the next turn starts clear, and
+    // a turn that fails before it starts clears it again on the way out.
+    session._permissions.markUserStopInFlight()
+    session._processReady = true
+    session._client = {}
+    let seenAtStart
+    session._matchMcpPromptCommand = () => ({ prefixedName: 'mcp__x__y' })
+    session._resolveMcpPromptToText = async () => {
+      seenAtStart = session.isUserStopInFlight()
+      session._permissions.markUserStopInFlight() // pressed while the expansion is awaited
+      throw new Error('dead server')
+    }
+    await session.sendMessage('/mcp__x__y')
+    assert.equal(seenAtStart, false, 'the new turn started clear')
+    assert.equal(session.isUserStopInFlight(), false, 'the failed expansion cleared it')
+    // ...so turn C's interrupt is not a Stop
+    const reasons = []
+    session._permissions.on('permission_resolved', (d) => reasons.push(d.reason))
+    session._isBusy = true
+    session._abortController = new AbortController()
+    const decided = session._permissions.handlePermission('Bash', { command: 'ls' }, session._abortController.signal, 'approve')
+    session.interrupt()
+    await decided
+    assert.deepEqual(reasons, ['aborted'])
+    session.destroy()
+  })
+
+  it('CONTROL: an abort with no user Stop reads aborted', async () => {
+    const session = new ClaudeByokSession({ cwd: '/tmp' })
+    const reasons = []
+    session._permissions.on('permission_resolved', (d) => reasons.push(d.reason))
+    session._isBusy = true
+    session._abortController = new AbortController()
+    const decided = session._permissions.handlePermission('Bash', { command: 'ls' }, session._abortController.signal, 'approve')
+    session.interrupt()
+    await decided
+    assert.deepEqual(reasons, ['aborted'])
+    session.destroy()
   })
 })

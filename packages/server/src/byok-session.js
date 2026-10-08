@@ -1049,6 +1049,8 @@ export class ClaudeByokSession extends BaseSession {
     // Claim busy up front so the async MCP-prompt resolution below can't race a
     // second concurrent send (isRunning stays true across the await window).
     this._isBusy = true
+    // #8430: a new turn starts with no user Stop in flight, whatever the last one left.
+    this._permissions.clearUserStopInFlight()
 
     // #6823: MCP prompt-as-slash-command interception. A leading
     // `/mcp__<server>__<prompt>` that matches a connected MCP server's prompt
@@ -1063,6 +1065,7 @@ export class ClaudeByokSession extends BaseSession {
         promptText = await this._resolveMcpPromptToText(mcpPromptMatch)
       } catch (err) {
         this._isBusy = false
+        this._permissions.clearUserStopInFlight() // #8430: this turn ends here, off the _finishTurn path
         this.emit('error', {
           message: `MCP prompt /${mcpPromptMatch.prefixedName} failed: ${err?.message || String(err)}`,
         })
@@ -2756,6 +2759,9 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   _finishTurn() {
+    // #8430: a user Stop belongs to the turn it was pressed on; BYOK's teardown
+    // does not go through BaseSession._clearMessageState, so clear it here.
+    this._permissions.clearUserStopInFlight()
     this._isBusy = false
     this._currentMessageId = null
     this._abortController = null

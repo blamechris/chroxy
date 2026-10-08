@@ -431,6 +431,19 @@ function normalizeStoredRule(rule) {
  *   permission_request  { requestId, tool, description, input, remainingMs, createdAt }
  *   user_question       { toolUseId, questions }
  */
+/**
+ * #8430: a prompt the user's Stop resolved carries the provider's id for the tool
+ * call, so the session can mark that tool row stopped. Only for a `stopped`
+ * resolution: a Deny, a timeout or a rule decision made in the same window must
+ * keep its own row. The event normalizer picks its wire fields, so this never
+ * reaches a client.
+ */
+function stoppedToolUseField(reason, toolUseId) {
+  return reason === 'stopped' && typeof toolUseId === 'string' && toolUseId.length > 0
+    ? { sourceToolUseId: toolUseId }
+    : {}
+}
+
 export class PermissionManager extends EventEmitter {
   constructor({ timeoutMs, log, maxPendingPermissions, cwd, ruleStore, mcpTrustLookup } = {}) {
     super()
@@ -871,7 +884,12 @@ export class PermissionManager extends EventEmitter {
             this._lastPermissionData.delete(requestId)
             this._clearPermissionTimer(requestId)
             resolve({ behavior: 'deny', message: 'Request cancelled' })
-            this.emit('permission_resolved', { requestId, decision: 'deny', reason })
+            this.emit('permission_resolved', {
+              requestId,
+              decision: 'deny',
+              reason,
+              ...stoppedToolUseField(reason, pending.toolUseId),
+            })
           }
         }, { once: true })
       }
@@ -917,6 +935,11 @@ export class PermissionManager extends EventEmitter {
   /** #8430: has the user pressed Stop on the turn that is running? */
   isUserStopInFlight() {
     return this._userStopInFlight
+  }
+
+  /** #8430: is any permission prompt or question waiting for a decision right now? */
+  hasPendingPrompt() {
+    return this._pendingPermissions.size > 0 || this._pendingUserAnswer != null
   }
 
   /**
@@ -1345,11 +1368,20 @@ export class PermissionManager extends EventEmitter {
    * Auto-deny all pending permissions and questions. Called on message
    * completion or session destruction.
    */
-  clearAll() {
+  clearAll({ userStop = this._userStopInFlight } = {}) {
+    // #8430: why the prompts are being drained. On a live claude-sdk Stop this is
+    // the path that resolves them (the generator throws AbortError and the turn
+    // ends through the session's teardown; the abort listener never ran first), so
+    // a user Stop in flight must be read HERE. `userStop` lets a caller that has
+    // already cleared the flag in its own teardown pass the value it captured.
+    const requestReason = userStop === true ? 'stopped' : 'cleared'
     // Collect requestIds first so we can emit permission_resolved AFTER
     // the maps are cleared — the SdkSession timeout-pause listener decrements
     // its counter on each event and should see a consistent final state.
     const pendingIds = Array.from(this._pendingPermissions.keys())
+    // #8430: the provider's tool-use id of each, for a `stopped` resolution.
+    const pendingToolUseIds = new Map()
+    for (const [requestId, pending] of this._pendingPermissions) pendingToolUseIds.set(requestId, pending.toolUseId)
     // #3975: capture the pending-answer entry (not just a boolean) so we
     // can include its toolUseId on the cleared emit. Without toolUseId the
     // sdk-session re-emit gate drops the event and questionSessionMap
@@ -1382,7 +1414,12 @@ export class PermissionManager extends EventEmitter {
 
     // Emit resolved events so listeners reset any paused state (#2831).
     for (const requestId of pendingIds) {
-      this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'cleared' })
+      this.emit('permission_resolved', {
+        requestId,
+        decision: 'deny',
+        reason: requestReason,
+        ...stoppedToolUseField(requestReason, pendingToolUseIds.get(requestId)),
+      })
     }
     if (clearedUserAnswer) {
       // #3975: toolUseId is required for the EventNormalizer to prune

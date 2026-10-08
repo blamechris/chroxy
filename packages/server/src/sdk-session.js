@@ -690,6 +690,14 @@ export class SdkSession extends BaseSession {
     // #6771 — pass the durable rule store so an `allowAlways` decision persists
     // a project-scoped rule and this session seeds from prior grants for its cwd.
     this._permissions = new PermissionManager({ log, cwd: this.cwd, ruleStore: this._permissionRuleStore })
+    // #8430: a prompt the user's Stop resolved -- including one raised between the
+    // Stop and the abort, which the snapshot in `interrupt()` could not see -- marks
+    // its tool row stopped. Driven by the `stopped` resolution itself -- the manager
+    // attaches `sourceToolUseId` to that resolution only -- so a Deny, a timeout or a
+    // rule decision made in the same window keeps its own row.
+    this._permissions.on('permission_resolved', (d) => {
+      if (typeof d?.sourceToolUseId === 'string') this._stopCancelledToolUseIds.add(d.sourceToolUseId)
+    })
     wirePermissionManager(this, this._permissions, {
       onRequest: () => this._pauseResultTimeoutForPermission(),
       onResolved: () => this._resumeResultTimeoutForPermission(),
@@ -2817,11 +2825,6 @@ export class SdkSession extends BaseSession {
   _trackPermissionDecision(toolUseId, decision) {
     if (typeof toolUseId !== 'string' || toolUseId.length === 0) return decision
     this._pendingPermissionToolUseIds.add(toolUseId)
-    // #8430: asked AFTER the user's Stop but before the SDK's abort landed. The
-    // snapshot in `interrupt()` could not see it; the abort that is coming will
-    // cancel it all the same, so it joins the set here. One flag serves this and
-    // the permission manager's `stopped` reason.
-    if (this._permissions.isUserStopInFlight()) this._stopCancelledToolUseIds.add(toolUseId)
     const settled = (result) => {
       this._pendingPermissionToolUseIds.delete(toolUseId)
       if (result?.behavior === 'allow') this._stopCancelledToolUseIds.delete(toolUseId)
@@ -3350,8 +3353,12 @@ export class SdkSession extends BaseSession {
   // confirmed-backgrounded subagent survives BaseSession's turn-end sweep;
   // an override that drops it silently disables the exemption.
   _clearMessageState(opts) {
+    // #8430: read the user Stop BEFORE the base teardown clears it. A live Stop
+    // ends the turn on the generator's AbortError, so the prompts still open are
+    // resolved by `clearAll()` below, not by the abort listener.
+    const userStop = this._permissions.isUserStopInFlight()
     super._clearMessageState(opts)
-    this._permissions.clearAll()
+    this._permissions.clearAll({ userStop })
     // Pause counter is tied to the previous message — reset so the next
     // message starts with a fresh counter.
     this._permissionPauseCount = 0
