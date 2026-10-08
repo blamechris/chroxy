@@ -7,7 +7,8 @@ import { inputHandlers } from '../src/handlers/input-handlers.js'
 import { QuestionRouteMap } from '../src/question-route-map.js'
 import { SessionManager } from '../src/session-manager.js'
 import { buildToolStartData } from '../src/claude-stream-parser.js'
-import { resolveReplayPlan, sendHistoryEntry } from '../src/ws-history.js'
+import { resolveReplayPlan, sendHistoryEntry, CAPABILITY_HISTORY_QUESTION_SUPERSEDED } from '../src/ws-history.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -20,6 +21,7 @@ import { join } from 'node:path'
  * without a word to the client that sent it.
  */
 
+const CAPABLE = { clientCapabilities: new Set([CAPABILITY_HISTORY_QUESTION_SUPERSEDED]) }
 const Q1 = { questions: [{ question: 'First?', options: [{ label: 'A1' }, { label: 'B1' }] }] }
 const Q2 = { questions: [{ question: 'Second?', options: [{ label: 'A2' }, { label: 'B2' }] }] }
 
@@ -443,7 +445,7 @@ describe('a superseded question is durable in the history (#8470 review)', () =>
     const history = mgr.getHistory('s1')
     const plan = resolveReplayPlan(mgr, history, 's1', cursor, mgr.getLatestHistorySeq('s1'))
     const out = []
-    for (const entry of history.slice(plan.startOffset)) sendHistoryEntry((_ws, f) => out.push(f), null, 's1', entry)
+    for (const entry of history.slice(plan.startOffset)) sendHistoryEntry((_ws, f) => out.push(f), null, 's1', entry, CAPABLE)
     return { plan, frames: out }
   }
 
@@ -504,7 +506,7 @@ describe('a superseded question is durable in the history (#8470 review)', () =>
       restored, 's1', 0, after2.getLatestSeq('s1'),
     )
     const out = []
-    for (const entry of restored.slice(plan.startOffset)) sendHistoryEntry((_ws, f) => out.push(f), null, 's1', entry)
+    for (const entry of restored.slice(plan.startOffset)) sendHistoryEntry((_ws, f) => out.push(f), null, 's1', entry, CAPABLE)
     const first = out.filter((f) => f.type === 'user_question' && f.questions[0].question === 'First?')
     assert.ok(first.length >= 1)
     assert.ok(first.every((f) => f.superseded === true), 'still superseded after the restart')
@@ -518,5 +520,144 @@ describe('a superseded question is durable in the history (#8470 review)', () =>
     mgr._schedulePersist = () => { persists++; orig() }
     await supersede()
     assert.ok(persists >= 1)
+  })
+})
+
+
+describe('the log feed is not an oracle either (#8470 round 3)', () => {
+  const entries = []
+  const listener = (entry) => entries.push(entry)
+  afterEach(() => { removeLogListener(listener); entries.length = 0 })
+
+  function setup() {
+    const map = new QuestionRouteMap()
+    const sent = []
+    const ctx = {
+      permissions: { questionSessionMap: map },
+      sessions: { sessionManager: { getSession: () => null, recordQuestionAnswered() {} } },
+      transport: { send: (ws, frame) => sent.push(frame) },
+    }
+    const answer = (client, id) => inputHandlers.user_question_response({ readyState: 1 }, client, { type: 'user_question_response', toolUseId: id, answer: 'X' }, ctx)
+    addLogListener(listener)
+    return { map, sent, answer }
+  }
+  const mentions = (id) => entries.filter((e) => String(e.message).includes(id))
+  const boundA = { id: 'a', boundSessionId: 'A', activeSessionId: 'A' }
+  const boundB = { id: 'b', boundSessionId: 'B', activeSessionId: 'B' }
+
+  it('a client bound to A probing B\'s id sees no log_entry about it, while live, after B resolves it, or for an unknown id', () => {
+    const { map, sent, answer } = setup()
+    map.set('ask-secret-B1', 'B')
+    answer(boundA, 'ask-secret-B1')
+    map.delete('ask-secret-B1')
+    answer(boundA, 'ask-secret-B1')
+    answer(boundA, 'ask-secret-never')
+    assert.deepEqual(mentions('ask-secret'), [], 'nothing is logged for an id the client may not ask about')
+    assert.deepEqual(sent, [])
+  })
+
+  it('the entitled client\'s stale answer is logged, scoped to the OWNING session', () => {
+    const { map, answer } = setup()
+    map.set('ask-secret-B2', 'B')
+    map.delete('ask-secret-B2')
+    answer(boundB, 'ask-secret-B2')
+    const logged = mentions('ask-secret-B2')
+    assert.equal(logged.length, 1)
+    assert.equal(logged[0].sessionId, 'B', 'a log_entry for this goes to B\'s viewers, never to A\'s')
+  })
+
+  it('an unbound viewer of B whose ACTIVE session is another is still logged to B, not to the session it happens to have open', () => {
+    const { map, answer } = setup()
+    map.set('ask-secret-B3', 'B')
+    map.delete('ask-secret-B3')
+    answer({ id: 'v', activeSessionId: 'A', subscribedSessionIds: new Set(['B']) }, 'ask-secret-B3')
+    const logged = mentions('ask-secret-B3')
+    assert.equal(logged.length, 1)
+    assert.equal(logged[0].sessionId, 'B')
+  })
+})
+
+describe('recent-owner records are budgeted per session (#8470 round 3)', () => {
+  it('filling session A\'s budget never evicts session B\'s record', () => {
+    const map = new QuestionRouteMap({ maxPerOwner: 4, maxRecent: 100 })
+    map.set('b1', 'B'); map.delete('b1')
+    for (let i = 0; i < 50; i++) { map.set(`a${i}`, 'A'); map.delete(`a${i}`) }
+    assert.equal(map.recentOwner('b1')?.sessionId, 'B', 'B untouched by A\'s churn')
+    assert.equal(map.recentOwner('a49')?.sessionId, 'A')
+    assert.equal(map.recentOwner('a0'), undefined, 'A paid for its own churn')
+    assert.equal(map.recentOwner('a45'), undefined, 'A keeps only its newest four')
+    assert.equal(map.recentOwner('a46')?.sessionId, 'A')
+  })
+
+  it('the global hard cap evicts from the session holding the most records, not the oldest record', () => {
+    const map = new QuestionRouteMap({ maxPerOwner: 10, maxRecent: 5 })
+    map.set('b1', 'B'); map.delete('b1') // oldest overall, but B holds just one
+    for (let i = 0; i < 5; i++) { map.set(`a${i}`, 'A'); map.delete(`a${i}`) }
+    assert.equal(map.recentOwner('b1')?.sessionId, 'B', 'the small owner keeps its only record')
+    assert.equal(map.recentOwner('a0'), undefined, 'the big owner lost its oldest')
+  })
+
+  it('records of an owner whose id is re-removed stay counted once', () => {
+    const map = new QuestionRouteMap({ maxPerOwner: 2, maxRecent: 10 })
+    for (const id of ['x1', 'x2', 'x3']) { map.set(id, 'A'); map.delete(id) }
+    assert.equal(map.recentOwner('x1'), undefined)
+    assert.equal(map.recentOwner('x2')?.sessionId, 'A')
+    assert.equal(map.recentOwner('x3')?.sessionId, 'A')
+  })
+
+  it('expired records are swept when another is recorded, not only when their own id is queried', () => {
+    let now = 0
+    const map = new QuestionRouteMap({ ttlMs: 100, now: () => now })
+    map.set('old', 'A'); map.delete('old')
+    now = 500
+    map.set('new', 'A'); map.delete('new')
+    assert.equal(map._recent.has('old'), false, 'the idle record (and its digest) is gone from memory')
+    assert.equal(map.recentOwner('new')?.sessionId, 'A')
+  })
+
+  it('clear() (server stop) forgets the recent owners too', () => {
+    const map = new QuestionRouteMap()
+    map.set('q', 'A'); map.delete('q')
+    map.set('live', 'A')
+    map.clear()
+    assert.equal(map.size, 0)
+    assert.equal(map.recentOwner('q'), undefined)
+  })
+})
+
+describe('the superseded flag is sent only to a client that can read it (#8470 round 3)', () => {
+  const entry = (extra) => ({ type: 'user_question', toolUseId: 'ask-1', questions: [{ question: 'First?' }], timestamp: 1, _seq: 3, ...extra })
+  const send = (client, e) => {
+    const out = []
+    sendHistoryEntry((_ws, f) => out.push(f), null, 's1', e, client)
+    return out
+  }
+
+  it('a capable client receives the superseded question with the flag', () => {
+    const out = send(CAPABLE, entry({ superseded: true }))
+    assert.equal(out.length, 1)
+    assert.equal(out[0].superseded, true)
+  })
+
+  it('a client without the capability, or no client record, is not sent the superseded question at all', () => {
+    // An old client has no safe shape for it: it would build a live, answerable
+    // card and stamp it "(resolved)" at replay end. Omitted, like the other
+    // replay-only entries it cannot render.
+    assert.deepEqual(send({ clientCapabilities: new Set() }, entry({ superseded: true })), [])
+    assert.deepEqual(send({ clientCapabilities: new Set(['history_error_replay_v1']) }, entry({ superseded: true })), [])
+    assert.deepEqual(send(null, entry({ superseded: true })), [])
+  })
+
+  it('control: an ordinary, an interrupted and an answered question still reach a client with no capabilities', () => {
+    const none = { clientCapabilities: new Set() }
+    assert.equal(send(none, entry({})).length, 1)
+    assert.equal(send(none, entry({ interrupted: true })).length, 1)
+    assert.equal(send(none, entry({ answered: true })).length, 1)
+  })
+
+  it('both stock clients advertise it', async () => {
+    const { CLIENT_CAPABILITIES } = await import('@chroxy/protocol')
+    assert.ok(CLIENT_CAPABILITIES.desktop.includes(CAPABILITY_HISTORY_QUESTION_SUPERSEDED))
+    assert.ok(CLIENT_CAPABILITIES.mobile.includes(CAPABILITY_HISTORY_QUESTION_SUPERSEDED))
   })
 })

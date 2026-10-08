@@ -12,11 +12,16 @@ import { createHash } from 'node:crypto'
  * an answer that was delivered is not reported as lost). Both are recorded when a
  * route is deleted.
  *
- * Bounded twice, because a client can mint ids: at most `maxRecent` entries (oldest
- * evicted first) and `ttlMs` each. An id that was never routed has no entry, so
- * "unknown" and "evicted" are the same silence.
+ * Bounded three ways, because a client can mint questions (by superseding its own):
+ * `ttlMs` each; at most `maxPerOwner` per owning session, so one session's churn
+ * can only evict its OWN records (a shared FIFO would let session A's activity
+ * decide whether session B's late answer is reported: an activity oracle, and a
+ * silenced notice for the other user); and a global hard cap of `maxRecent` that
+ * evicts from the session holding the most records. An id that was never routed has
+ * no entry, so "unknown" and "evicted" are the same silence.
  */
 const DEFAULT_MAX_RECENT = 512
+const DEFAULT_MAX_PER_OWNER = 64
 const DEFAULT_TTL_MS = 15 * 60 * 1000
 
 /** Key-order-independent JSON, so two clients' equal answers hash equal. */
@@ -40,24 +45,67 @@ export function answerDigest(msg) {
 
 export class QuestionRouteMap extends Map {
   /**
-   * @param {{ maxRecent?: number, ttlMs?: number, now?: () => number }} [opts]
+   * @param {{ maxRecent?: number, maxPerOwner?: number, ttlMs?: number, now?: () => number }} [opts]
    */
-  constructor({ maxRecent = DEFAULT_MAX_RECENT, ttlMs = DEFAULT_TTL_MS, now = Date.now } = {}) {
+  constructor({ maxRecent = DEFAULT_MAX_RECENT, maxPerOwner = DEFAULT_MAX_PER_OWNER, ttlMs = DEFAULT_TTL_MS, now = Date.now } = {}) {
     super()
     this._maxRecent = maxRecent
+    this._maxPerOwner = maxPerOwner
     this._ttlMs = ttlMs
     this._now = now
     /** @type {Map<string, { sessionId: string|null, at: number, answerDigest?: string }>} */
     this._recent = new Map()
+    /** owner -> its record keys, oldest first @type {Map<string|null, Set<string>>} */
+    this._byOwner = new Map()
+  }
+
+  _forget(key) {
+    const entry = this._recent.get(key)
+    if (!entry) return
+    this._recent.delete(key)
+    const keys = this._byOwner.get(entry.sessionId)
+    if (keys) {
+      keys.delete(key)
+      if (keys.size === 0) this._byOwner.delete(entry.sessionId)
+    }
+  }
+
+  /** Drop every record past its TTL. Oldest first: records are inserted in time order. */
+  _expire() {
+    const now = this._now()
+    for (const [key, entry] of this._recent) {
+      if (now - entry.at <= this._ttlMs) break
+      this._forget(key)
+    }
   }
 
   /** Remove a route and remember who owned it. */
   delete(key) {
     if (!super.has(key)) return false
-    this._recent.delete(key)
-    this._recent.set(key, { sessionId: super.get(key), at: this._now() })
-    while (this._recent.size > this._maxRecent) this._recent.delete(this._recent.keys().next().value)
+    const sessionId = super.get(key)
+    this._expire()
+    this._forget(key)
+    this._recent.set(key, { sessionId, at: this._now() })
+    let keys = this._byOwner.get(sessionId)
+    if (!keys) this._byOwner.set(sessionId, (keys = new Set()))
+    keys.add(key)
+    // This owner pays for its own churn first.
+    while (keys.size > this._maxPerOwner) this._forget(keys.values().next().value)
+    // The hard cap takes from whoever holds the most, never from the oldest record
+    // overall (which may be a quiet session's only one).
+    while (this._recent.size > this._maxRecent) {
+      let biggest = null
+      for (const set of this._byOwner.values()) if (!biggest || set.size > biggest.size) biggest = set
+      this._forget(biggest.values().next().value)
+    }
     return super.delete(key)
+  }
+
+  /** Server stop: forget the live routes AND the recent owners. */
+  clear() {
+    this._recent.clear()
+    this._byOwner.clear()
+    super.clear()
   }
 
   /** The delivered answer's digest, attached to the route just removed for it. */
@@ -74,7 +122,7 @@ export class QuestionRouteMap extends Map {
     const entry = this._recent.get(key)
     if (!entry) return undefined
     if (this._now() - entry.at > this._ttlMs) {
-      this._recent.delete(key)
+      this._forget(key)
       return undefined
     }
     return entry

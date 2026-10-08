@@ -1326,11 +1326,12 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
     if (routes.has(msg.toolUseId)) {
       questionSessionId = routes.get(msg.toolUseId)
     } else {
-      sessionLogger(client.activeSessionId || undefined).info(
-        `user_question_response dropped: stale/unknown toolUseId=${msg.toolUseId} (question already resolved or its session is gone)`,
-      )
       // An id nobody routed (never existed, or older than the memory) is silent:
-      // answering it would tell a client which ids exist.
+      // answering it would tell a client which ids exist. And NOT logged either: a
+      // log line goes out as a `log_entry` to the sender's own session's viewers
+      // (ws-server fans logs out), and a line that appears only for a resolved or
+      // unknown id is the oracle by another route. The log is written below, after
+      // the entitlement checks, to the OWNING session.
       const recent = routes.recentOwner?.(msg.toolUseId)
       if (!recent) return
       questionSessionId = recent.sessionId
@@ -1361,6 +1362,9 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   }
 
   if (!routeLive) {
+    sessionLogger(questionSessionId || undefined).info(
+      `user_question_response dropped: stale toolUseId=${msg.toolUseId} (question already resolved or its session is gone)`,
+    )
     // #8470: the sender marked its card answered when it sent; say it was not,
     // unless the answer that landed IS this one (a duplicate or a second tab that
     // chose the same thing): then the card is right and retracting it would be
