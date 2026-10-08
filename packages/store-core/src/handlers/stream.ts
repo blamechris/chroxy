@@ -12,8 +12,9 @@
 
 import type { ActiveTool, ChatMessage, ContextOccupancy, ContextUsage, ToolResultImage } from '../types'
 import { nextMessageId } from '../utils'
-import { isReplayDuplicate } from '../replay-dedup'
+import { isReplayDuplicate, completeHeldResponseStream } from '../replay-dedup'
 import { getReplayWindowDepth } from '../replay-reconcile'
+import { endsAtSentenceBoundary } from '../sentence-boundary'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { parseRawStringField } from './_shared'
@@ -43,10 +44,11 @@ export type MessagePayload =
       /** Caller should NOT dispatch a chat message. */
       shouldDispatch: false
       /**
-       * #6630: set when the message was a replayed entry for a message the client
-       * already holds, but the replay is the FULLER copy (a reasoning bubble whose
-       * stream was cut off by a disconnect). The caller applies it in place with
-       * {@link applyMessageReconcile}; a plain duplicate has none.
+       * #6630 / #8444: set when the message was a replayed entry for a message the
+       * client already holds, but the replay is the FULLER copy (a reasoning bubble
+       * or a reply whose stream was cut off by a disconnect). The caller applies it
+       * in place with {@link applyMessageReconcileToSession}; a plain duplicate has
+       * none.
        */
       reconcile?: MessageReconcile
     }
@@ -88,6 +90,22 @@ export interface MessageReconcile {
    */
   target: ChatMessage
   patch: Partial<ChatMessage>
+  /**
+   * #8444: move the patched message to the end of the transcript (an empty reply
+   * slot that sits above the tools it ran, see {@link HeldResponseCompletion}).
+   */
+  moveToEnd?: boolean
+  /**
+   * #8444: messages to add at the end of the transcript, after `target` is patched
+   * (the continuation bubble of a reply completed after a tool).
+   */
+  append?: readonly ChatMessage[]
+  /**
+   * #8444: ids of the held bubbles of the response stream the entry finished. The
+   * history records a reply only when its stream ENDS, so a session still marked as
+   * streaming one of them is holding a stale marker; it is cleared with the patch.
+   */
+  endedStreamBubbleIds?: readonly string[]
 }
 
 /**
@@ -98,9 +116,31 @@ export interface MessageReconcile {
 export function applyMessageReconcile(messages: ChatMessage[], reconcile: MessageReconcile): ChatMessage[] {
   const idx = messages.indexOf(reconcile.target)
   if (idx === -1) return messages
-  const next = [...messages]
-  next[idx] = { ...next[idx]!, ...reconcile.patch }
-  return next
+  const held = messages[idx]!
+  const patched = Object.keys(reconcile.patch).length > 0 ? { ...held, ...reconcile.patch } : held
+  const moves = reconcile.moveToEnd && idx < messages.length - 1
+  const next = moves
+    ? [...messages.slice(0, idx), ...messages.slice(idx + 1), patched]
+    : messages.map((m, i) => (i === idx ? patched : m))
+  return reconcile.append?.length ? [...next, ...reconcile.append] : next
+}
+
+/**
+ * Apply a {@link MessageReconcile} to a session: the patched messages, and a
+ * cleared `streamingMessageId` when it still names a bubble of the stream the
+ * entry finished. Returns `{}` when the held object is no longer there, so a
+ * client can hand this straight to its session updater. Both clients call it, so
+ * neither can apply a reconcile half way.
+ */
+export function applyMessageReconcileToSession(
+  session: { messages: ChatMessage[]; streamingMessageId: string | null },
+  reconcile: MessageReconcile,
+): { messages?: ChatMessage[]; streamingMessageId?: null } {
+  const messages = applyMessageReconcile(session.messages, reconcile)
+  if (messages === session.messages) return {}
+  const stale = session.streamingMessageId !== null
+    && (reconcile.endedStreamBubbleIds?.includes(session.streamingMessageId) ?? false)
+  return stale ? { messages, streamingMessageId: null } : { messages }
 }
 
 /**
@@ -289,6 +329,30 @@ export function handleMessage(
       return Object.keys(patch).length > 0
         ? { shouldDispatch: false, reconcile: { target: held, patch } }
         : empty
+    }
+  }
+
+  // #8444: the same for a reply. The history records ONE response entry per stream,
+  // the whole finished text, and the client may hold only the start of it as one or
+  // several bubbles (a continuation split lays a turn out as `m1` and `m1-cont-<ts>`).
+  // The entry completes the held stream when it extends it; see
+  // `completeHeldResponseStream` for what keeps two distinct responses apart.
+  if (receivingHistoryReplay && msgType === 'response' && stableMessageId) {
+    const completion = completeHeldResponseStream(cachedMessages, stableMessageId, msg.content)
+    if (completion) {
+      const continuation: ChatMessage | null = completion.continuationId
+        ? { id: completion.continuationId, type: 'response', content: completion.content, timestamp: msg.timestamp }
+        : null
+      return {
+        shouldDispatch: false,
+        reconcile: {
+          target: completion.target,
+          patch: continuation ? {} : { content: completion.content },
+          ...(completion.moveToEnd ? { moveToEnd: true } : null),
+          ...(continuation ? { append: [continuation] } : null),
+          endedStreamBubbleIds: completion.streamBubbleIds,
+        },
+      }
     }
   }
 
@@ -1501,29 +1565,9 @@ export function sharedStreamDelta(
         // sentence renders as one contiguous bubble (followed by the tool).
         if (toolAfter) {
           const priorFullForGate = slot.type === 'response' ? slot.content + bufferedContent : ''
-          // Trim trailing whitespace before inspecting the last char so e.g.
-          // `"...sentence.   "` still reads as sentence-complete.
-          const lastNonWs = priorFullForGate.replace(/\s+$/, '')
-          // Strip trailing closing punctuation/quotes that commonly follow a
-          // sentence terminator (`.")`, `."`, `!'`, `?)`, etc.) so the gate
-          // looks at the terminator itself, not the wrapper. #5014 — also
-          // strip CJK closing brackets (`」』）`) so a fullwidth-terminated
-          // sentence wrapped in CJK quotes still reads as sentence-complete.
-          const stripped = lastNonWs.replace(/[)\]}"'’”»›」』）]+$/, '')
-          const lastChar = stripped.charAt(stripped.length - 1)
-          // #5014 — recognize CJK fullwidth sentence terminators
-          // (`．` U+FF0E, `！` U+FF01, `？` U+FF1F) and the ideographic
-          // full stop (`。` U+3002) alongside ASCII.
-          const endsSentence =
-            lastChar === '.' ||
-            lastChar === '!' ||
-            lastChar === '?' ||
-            lastChar === '．' ||
-            lastChar === '！' ||
-            lastChar === '？' ||
-            lastChar === '。'
-          const endsHardBreak = /\n\s*$/.test(priorFullForGate)
-          if (!endsSentence && !endsHardBreak) {
+          // The rule itself lives in `endsAtSentenceBoundary` (shared with the
+          // replay completion of a held reply, #8444).
+          if (!endsAtSentenceBoundary(priorFullForGate)) {
             toolAfter = false
           }
         }

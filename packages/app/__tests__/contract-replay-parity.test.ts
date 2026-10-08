@@ -131,6 +131,7 @@ import {
   setStore,
   setConnectionContext,
   clearDeltaBuffers,
+  clearPermissionSplits,
   resetReplayFlags,
 } from '../src/store/message-handler';
 import { createEmptySessionState } from '../src/store/utils';
@@ -139,6 +140,7 @@ import {
   REPLAY_PARITY_FIXTURES,
   REPLAY_PARITY_DIVERGENCES,
   REPLAY_PARITY_SESSION_ID as SID,
+  CURSOR_REPLAY_SCENARIOS,
   replayParityModel,
   type ReplayParityFrame,
 } from '@chroxy/store-core';
@@ -225,6 +227,30 @@ function runLiveThenCursorReplay(live: ReplayParityFrame[], replay: ReplayParity
   return replayParityModel(messagesOf(store));
 }
 
+/** Like {@link runLiveThenCursorReplay}, but also reports the streaming marker (#8444). */
+function runCutThenCursorReplay(live: ReplayParityFrame[], replay: ReplayParityFrame[]) {
+  const store = freshStore();
+  clearPermissionSplits(); // a cut run never reaches the `result` that clears the id remaps
+  for (const frame of live) handleMessage({ ...frame });
+  jest.runAllTimers();
+  const sessionOf = () => (store.getState() as unknown as { sessionStates: Record<string, SessionState> }).sessionStates[SID];
+  const heldStreaming = sessionOf().streamingMessageId;
+  const latestSeq = replay.reduce((max, f) => Math.max(max, typeof f.historySeq === 'number' ? f.historySeq : 0), 0);
+  handleMessage({ type: 'history_replay_start', sessionId: SID, fullHistory: false, truncated: false, latestSeq });
+  for (const frame of replay) handleMessage({ ...frame });
+  handleMessage({ type: 'history_replay_end', sessionId: SID, latestSeq });
+  jest.runAllTimers();
+  const { messages, streamingMessageId } = sessionOf();
+  return { model: replayParityModel(messages), messages, heldStreaming, streamingMessageId };
+}
+
+const isResponseEnd = (f: ReplayParityFrame) => f.type === 'stream_end' && f.thinking !== true;
+const replyText = (model: ReturnType<typeof replayParityModel>) =>
+  model.filter((r) => r.type === 'response').map((r) => r.content).join('');
+/** Tool cards reduced to id and type (see the note on the reply-cut suite). */
+const shape = (model: ReturnType<typeof replayParityModel>) =>
+  model.map((r) => (r.type === 'tool_use' ? { id: r.id, type: r.type } : r));
+
 describe('live vs replayed transcript -- app (#6630)', () => {
   beforeEach(() => {
     jest.useFakeTimers();
@@ -305,4 +331,56 @@ describe('live vs replayed transcript -- app (#6630)', () => {
       });
     }
   }
+
+  // #8444: the same drop MID-REPLY. The client holds the start of a response as one
+  // bubble (or, after a tool, several), the server finishes the turn and records ONE
+  // response entry under the stream id, and the cursor replay delivers it. Dedup by id
+  // used to drop it, leaving the partial reply for good. Cutting after every frame up
+  // to the reply's stream_end covers every point inside it.
+  //
+  // Wherever the cut falls the whole reply must show exactly once and no bubble id may
+  // repeat. The transcript must also equal the one a connected client has, except for
+  // a reply a tool splits in two when the client had not yet seen all the tools: the
+  // history keeps one entry per stream and no boundary inside it (#8438), so the replay
+  // cannot say where those tools fell in the text.
+  const replyScenarios: Array<{ name: string; live: ReplayParityFrame[]; replay: ReplayParityFrame[] }> = [
+    ...REPLAY_PARITY_FIXTURES.filter((f) => !f.name.startsWith('permission-')),
+    ...CURSOR_REPLAY_SCENARIOS,
+  ].filter((f) => f.live.some(isResponseEnd));
+
+  it('has reply scenarios to interrupt', () => {
+    expect(replyScenarios.map((f) => f.name)).toEqual(
+      expect.arrayContaining(['plain-reply', 'text-around-a-tool', 'tools-then-summary-tui', 'long-reply', 'two-tool-rounds']),
+    );
+  });
+
+  for (const fx of replyScenarios) {
+    const endIdx = fx.live.findIndex(isResponseEnd);
+    for (let cut = 1; cut <= endIdx; cut++) {
+      it(`${fx.name}: delivery cut after live frame ${cut} of ${endIdx} ends with the transcript a connected client has`, () => {
+        const full = runLive(fx.live);
+        clearDeltaBuffers();
+        resetReplayFlags();
+        clearPermissionSplits();
+        const atCut = runLive(fx.live.slice(0, cut));
+        const { model, messages } = runCutThenCursorReplay(fx.live.slice(0, cut), fx.replay);
+        expect(replyText(model)).toBe(replyText(full));
+        expect(new Set(messages.map((m) => m.id)).size).toBe(messages.length);
+        const tools = (rows: typeof full) => rows.filter((r) => r.type === 'tool_use').length;
+        const splitByATool = full.filter((r) => r.type === 'response').length > 1;
+        if (!splitByATool || tools(atCut) === tools(full)) expect(shape(model)).toEqual(shape(full));
+      });
+    }
+  }
+
+  it('a reply completed by the cursor replay no longer reads as streaming', () => {
+    const sc = CURSOR_REPLAY_SCENARIOS.find((s) => s.name === 'long-reply')!;
+    const cut = sc.live.findIndex((f) => f.type === 'stream_delta') + 2;
+    // Only the reply entry replays: the frames after it (result, idle) settle the
+    // session on their own and would hide a marker the completion left behind.
+    const out = runCutThenCursorReplay(sc.live.slice(0, cut), sc.replay.filter((f) => f.type === 'message'));
+    expect(out.heldStreaming).toBe('m1');
+    expect(replyText(out.model)).toBe('The build passed on every platform, so it can ship.');
+    expect(out.streamingMessageId).toBeNull();
+  });
 });

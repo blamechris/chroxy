@@ -43,7 +43,7 @@ import {
   handleStreamStart as sharedStreamStart,
   sharedStreamDelta,
   moveEmptyResponseSlotToEnd,
-  applyMessageReconcile,
+  applyMessageReconcileToSession,
   handleStreamEnd as sharedStreamEnd,
   // #6756 — extended-thinking (reasoning) content stream.
   handleThinkingStreamStart as sharedThinkingStart,
@@ -2778,14 +2778,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
       const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
       if (!result.shouldDispatch) {
-        // #6630: a replayed reasoning entry that is the fuller copy of a bubble the
-        // client holds (its stream was cut off by a disconnect) fills it in.
+        // #6630 / #8444: a replayed reasoning or response entry that is the fuller
+        // copy of a bubble the client holds (its stream was cut off by a disconnect)
+        // fills it in.
         const reconcile = result.reconcile;
         if (reconcile && targetId && get().sessionStates[targetId]) {
-          updateSession(targetId, (ss) => {
-            const next = applyMessageReconcile(ss.messages, reconcile);
-            return next === ss.messages ? {} : { messages: next };
-          });
+          updateSession(targetId, (ss) => applyMessageReconcileToSession(ss, reconcile));
         }
         break;
       }

@@ -9,11 +9,13 @@ import {
   handleToolResult,
   handleToolStart,
   applyMessageReconcile,
+  applyMessageReconcileToSession,
   moveEmptyResponseSlotToEnd,
   MAX_THINKING_CONTENT_LEN,
 } from './stream'
 import { permissionOutcomeFromDecision } from '../pending-permissions'
-import { isReplayDuplicate } from '../replay-dedup'
+import { isReplayDuplicate, isResponseStreamBubbleId, completeHeldResponseStream } from '../replay-dedup'
+import { endsAtSentenceBoundary } from '../sentence-boundary'
 import { reconcileReplayStart, reconcileReplayEnd, replayDedupCache, resetReplayReconcile } from '../replay-reconcile'
 import type { ChatMessage } from '../types'
 
@@ -271,3 +273,209 @@ describe('permissionOutcomeFromDecision (#6630)', () => {
     expect(permissionOutcomeFromDecision(null)).toBeNull()
   })
 })
+
+describe('a replayed reply the client holds only in part (#8444)', () => {
+  const entry = (content: string, over: Record<string, unknown> = {}) => ({
+    type: 'message', messageType: 'response', content, messageId: 'm1', timestamp: 2000, historySeq: 7, ...over,
+  })
+  const bubble = (id: string, content: string, over: Partial<ChatMessage> = {}): ChatMessage => ({
+    id, type: 'response', content, timestamp: 5, ...over,
+  })
+  const tool = (id = 'tu1'): ChatMessage => ({ id, type: 'tool_use', content: 'Read', tool: 'Read', toolUseId: id, timestamp: 6 })
+  const reconcileOf = (cached: ChatMessage[], msg: Record<string, unknown>) => {
+    const out = handleMessage(msg, 's1', true, cached)
+    expect(out.shouldDispatch).toBe(false)
+    return 'reconcile' in out ? out.reconcile : undefined
+  }
+
+  describe('which bubbles are one stream', () => {
+    it('is the stream id, its tool-collision suffix, and the continuation and permission splits (chained)', () => {
+      for (const id of ['m1', 'm1-response', 'm1-cont-1791466230078', 'm1-post-1791466230078', 'm1-cont-1-cont-2', 'm1-response-cont-5']) {
+        expect(isResponseStreamBubbleId(id, 'm1'), id).toBe(true)
+      }
+    })
+
+    it('is never a bare prefix: m1 does not claim m10, a lookalike suffix, or another stream', () => {
+      for (const id of ['m10', 'm1-', 'm1-cont', 'm1-cont-', 'm1-cont-x', 'm1-thinking-0', 'm1-cont-1x', 'xm1', 'm2', 'm1-response2']) {
+        expect(isResponseStreamBubbleId(id, 'm1'), id).toBe(false)
+      }
+    })
+  })
+
+  describe('a reply held as ONE partial bubble', () => {
+    it('is completed in place from the entry, and the entry names the bubbles that stream ended', () => {
+      const held = bubble('m1', 'Hello, ')
+      expect(reconcileOf([held], entry('Hello, world.'))).toEqual({
+        target: held,
+        patch: { content: 'Hello, world.' },
+        endedStreamBubbleIds: ['m1'],
+      })
+    })
+
+    it('an empty held bubble (the stream opened, no text arrived) is completed the same way', () => {
+      const held = bubble('m1', '')
+      expect(reconcileOf([held], entry('Hello.'))?.patch).toEqual({ content: 'Hello.' })
+    })
+
+    it('a reply the tool collision put at the -response id is the same stream', () => {
+      const held = bubble('m1-response', 'Found ')
+      expect(reconcileOf([tool('m1'), held], entry('Found it.'))?.patch).toEqual({ content: 'Found it.' })
+    })
+
+    it('applyMessageReconcile lands it on the very object, and not on a lookalike', () => {
+      const held = bubble('m1', 'Hello, ')
+      const reconcile = reconcileOf([held], entry('Hello, world.'))!
+      const other = bubble('x', 'r')
+      expect(applyMessageReconcile([other, held], reconcile).map((m) => m.content)).toEqual(['r', 'Hello, world.'])
+      const lookalike = [{ ...held }]
+      expect(applyMessageReconcile(lookalike, reconcile)).toBe(lookalike)
+    })
+  })
+
+  describe('what is NOT completed', () => {
+    it('a copy that is already whole is an ordinary duplicate', () => {
+      const out = handleMessage(entry('Hello, world.'), 's1', true, [bubble('m1', 'Hello, world.')])
+      expect(out).toEqual({ shouldDispatch: false })
+    })
+
+    it('never shortens: a held reply longer than the entry (a clipped history) is left alone', () => {
+      const out = handleMessage(entry('Hello'), 's1', true, [bubble('m1', 'Hello, world.')])
+      expect(out).toEqual({ shouldDispatch: false })
+    })
+
+    it('an entry that does not begin with what is held is a different response: not merged, and still deduped by id', () => {
+      const out = handleMessage(entry('Goodbye, world.'), 's1', true, [bubble('m1', 'Hello, ')])
+      expect(out).toEqual({ shouldDispatch: false })
+    })
+
+    it('a stream id that merely starts the same (m10 vs m1) is not the same stream', () => {
+      const out = handleMessage(entry('abc'), 's1', true, [bubble('m10', 'a')])
+      expect(out.shouldDispatch).toBe(true)
+    })
+
+    it('a live frame is never completed: only a replayed entry is', () => {
+      const out = handleMessage(entry('Hello, world.'), 's1', false, [bubble('m1', 'Hello, ')])
+      expect(out.shouldDispatch).toBe(true)
+    })
+
+    it('a thinking bubble at the id is not a held reply', () => {
+      const thought: ChatMessage = { id: 'm1', type: 'thinking', content: 'Hello, ', timestamp: 5 }
+      expect(completeHeldResponseStream([thought], 'm1', 'Hello, world.')).toBeUndefined()
+    })
+  })
+
+  describe('a reply a live client laid out as several bubbles', () => {
+    it('is completed on the LAST one, and the earlier bubbles stay as they were', () => {
+      const first = bubble('m1', 'First block. ')
+      const cont = bubble('m1-cont-1791466230078', 'Second ')
+      const reconcile = reconcileOf([first, tool(), cont], entry('First block. Second block.'))!
+      expect(reconcile.target).toBe(cont)
+      expect(reconcile.patch).toEqual({ content: 'Second block.' })
+      expect(reconcile.endedStreamBubbleIds).toEqual(['m1', 'm1-cont-1791466230078'])
+    })
+
+    it('the held bubbles together must be a prefix: one bubble being shorter than the entry proves nothing', () => {
+      const first = bubble('m1', 'First block. ')
+      const cont = bubble('m1-cont-1791466230078', 'Second block.')
+      // The entry is longer than either bubble alone, and is the whole of both: nothing to add.
+      expect(handleMessage(entry('First block. Second block.'), 's1', true, [first, tool(), cont])).toEqual({ shouldDispatch: false })
+    })
+
+    it('whose parts do not add up to the start of the entry is not completed', () => {
+      const first = bubble('m1', 'First block. ')
+      const cont = bubble('m1-cont-1791466230078', 'Other ')
+      expect(handleMessage(entry('First block. Second block.'), 's1', true, [first, tool(), cont])).toEqual({ shouldDispatch: false })
+    })
+
+    it('opens a continuation bubble after a tool the transcript shows below a finished sentence, as a connected client does', () => {
+      const held = bubble('m1', 'Let me read the file. ')
+      const reconcile = reconcileOf([held, tool()], entry('Let me read the file. It exports one constant.'))!
+      expect(reconcile.patch).toEqual({})
+      expect(reconcile.append).toHaveLength(1)
+      const [cont] = reconcile.append!
+      expect(cont).toMatchObject({ type: 'response', content: 'It exports one constant.', timestamp: 2000 })
+      expect(/^m1-cont-\d+$/.test(cont!.id)).toBe(true)
+      const next = applyMessageReconcile([held, tool()], reconcile)
+      expect(next.map((m) => m.type)).toEqual(['response', 'tool_use', 'response'])
+      expect(next[0]).toBe(held) // the earlier bubble is untouched
+    })
+
+    it('...but a sentence the tool interrupted continues in the same bubble', () => {
+      const held = bubble('m1', 'Let me read the fi')
+      expect(reconcileOf([held, tool()], entry('Let me read the file.'))?.patch).toEqual({ content: 'Let me read the file.' })
+    })
+
+    it('no tool below: the text goes on the end of the bubble that was writing', () => {
+      const held = bubble('m1', 'Let me read the file. ')
+      expect(reconcileOf([held], entry('Let me read the file. Done.'))?.append).toBeUndefined()
+    })
+  })
+
+  describe('an empty reply slot the turn opened first (claude-tui)', () => {
+    it('moves below the tools it sat above when the text lands, as a connected client moves it', () => {
+      const slot = bubble('m1', '')
+      const t = tool()
+      const reconcile = reconcileOf([slot, t], entry('Tests pass.'))!
+      expect(reconcile.moveToEnd).toBe(true)
+      expect(applyMessageReconcile([slot, t], reconcile).map((m) => [m.type, m.content])).toEqual([['tool_use', 'Read'], ['response', 'Tests pass.']])
+    })
+
+    it('a continuation slot is not moved', () => {
+      const first = bubble('m1', 'Done. ')
+      const cont = bubble('m1-cont-1791466230078', '')
+      expect(reconcileOf([first, cont, tool()], entry('Done. More.'))?.moveToEnd).toBeUndefined()
+    })
+  })
+
+  describe('applyMessageReconcileToSession', () => {
+    const held = bubble('m1', 'Hello, ')
+    const reconcile = () => reconcileOf([held], entry('Hello, world.'))!
+
+    it('clears a streaming marker that names a bubble of the stream the entry finished', () => {
+      expect(applyMessageReconcileToSession({ messages: [held], streamingMessageId: 'm1' }, reconcile()))
+        .toMatchObject({ streamingMessageId: null, messages: [{ content: 'Hello, world.' }] })
+    })
+
+    it('leaves the marker alone when it names something else (the pending sentinel, a later stream)', () => {
+      for (const marker of ['pending', 'm2', null]) {
+        const out = applyMessageReconcileToSession({ messages: [held], streamingMessageId: marker }, reconcile())
+        expect(out.streamingMessageId, String(marker)).toBeUndefined()
+        expect(out.messages?.[0]?.content).toBe('Hello, world.')
+      }
+    })
+
+    it('does nothing when the held object is no longer in the session', () => {
+      expect(applyMessageReconcileToSession({ messages: [bubble('m1', 'Hello, ')], streamingMessageId: 'm1' }, reconcile())).toEqual({})
+    })
+  })
+
+  describe('a full-rebuild replay (the dedup cache is the replay tail)', () => {
+    afterEach(() => resetReplayReconcile({ clearCursors: true }))
+
+    it('completes only a bubble the replay itself appended, never the old prefix copy', () => {
+      const prefix = bubble('m1', 'old partial ')
+      let messages: ChatMessage[] = [prefix]
+      reconcileReplayStart('s1', true, messages)
+      const apply = (e: Record<string, unknown>) => {
+        const out = handleMessage(e, 's1', true, replayDedupCache('s1', messages))
+        if (out.shouldDispatch) messages = [...messages, out.chatMessage]
+        else if (out.reconcile) messages = applyMessageReconcile(messages, out.reconcile)
+      }
+      apply(entry('old partial reply', { historySeq: 1 }))
+      expect(messages.map((m) => m.content)).toEqual(['old partial ', 'old partial reply'])
+      expect(messages[0]).toBe(prefix)
+    })
+  })
+
+  describe('endsAtSentenceBoundary', () => {
+    it('is the rule the live post-tool split uses', () => {
+      for (const t of ['Done.', 'Done!  ', 'Really?', 'He said "ok."', 'Fine.)', 'ok\n', '完了。', '終わり」。']) {
+        expect(endsAtSentenceBoundary(t), t).toBe(true)
+      }
+      for (const t of ['Let me read the fi', 'Then,', 'a:', '', 'x (see']) {
+        expect(endsAtSentenceBoundary(t), t).toBe(false)
+      }
+    })
+  })
+})
+
