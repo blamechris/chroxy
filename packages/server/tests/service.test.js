@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync, writeFileSync, symlinkSync } from 'fs'
 import { join } from 'path'
 import { tmpdir, homedir } from 'os'
 import { execFileSync } from 'child_process'
@@ -26,6 +26,11 @@ import {
   stopService,
   getServiceStatus,
   getFullServiceStatus,
+  parseWrapperExecTarget,
+  inspectInstalledService,
+  assertReinstallAllowed,
+  checkChroxyTree,
+  assertChroxyTreeReady,
 } from '../src/service.js'
 import { statSync } from 'fs'
 
@@ -1334,6 +1339,218 @@ describe('service', () => {
       const state = loadServiceState(stateDir)
       assert.equal(state.claudeBin, '/Users/me/.local/bin/claude')
       assert.equal(state.wrapperPath, wrapperPath)
+    })
+  })
+
+  describe('service install pinning (#7161)', () => {
+    const NODE = '/opt/homebrew/opt/node@22/bin/node'
+    const BIN_A = '/work/chroxy-daemon/packages/server/src/cli.js'
+    const BIN_B = '/work/chroxy-wt-feature/packages/server/src/cli.js'
+
+    function dirs() {
+      const serviceDir = join(tmpDir, 'LaunchAgents')
+      mkdirSync(serviceDir, { recursive: true })
+      return {
+        _servicePath: join(serviceDir, 'com.chroxy.server.plist'),
+        _logDir: join(tmpDir, 'logs'),
+        _stateDir: join(tmpDir, 'state'),
+        _skipRegister: true,
+        _platform: 'darwin',
+      }
+    }
+    const install = (chroxyBin, extra = {}) =>
+      installService({ nodePath: NODE, chroxyBin, cwd: '/Users/me', ...dirs(), ...extra })
+
+    describe('parseWrapperExecTarget()', () => {
+      it('reads back the target generateServiceWrapper bakes in, including quote-escaped paths', () => {
+        for (const bin of [BIN_A, "/work/o'brien tree/cli.js"]) {
+          const wrapper = generateServiceWrapper({ nodePath: NODE, chroxyBin: bin, pathValue: '/usr/bin' })
+          const t = parseWrapperExecTarget(wrapper)
+          assert.equal(t?.chroxyBin, bin)
+          assert.equal(t?.nodePath, NODE)
+        }
+      })
+
+      it('returns null for text with no exec line, never a guess', () => {
+        assert.equal(parseWrapperExecTarget('#!/bin/sh\necho hi\n'), null)
+        assert.equal(parseWrapperExecTarget('exec node cli.js serve\n'), null)
+      })
+    })
+
+    describe('install refuses to re-point an existing service', () => {
+      it('throws SERVICE_ALREADY_INSTALLED naming both trees, and writes nothing', () => {
+        install(BIN_A)
+        const stateDir = dirs()._stateDir
+        const wrapperBefore = readFileSync(join(stateDir, 'service-wrapper.sh'), 'utf-8')
+        const stateBefore = readFileSync(join(stateDir, 'service.json'), 'utf-8')
+
+        let err
+        try { install(BIN_B) } catch (e) { err = e }
+        assert.ok(err, 'a second install from another tree must throw')
+        assert.equal(err.code, 'SERVICE_ALREADY_INSTALLED')
+        assert.ok(err.message.includes(BIN_A), 'names the tree it is pinned to')
+        assert.ok(err.message.includes(BIN_B), 'names the tree it would move to')
+        assert.ok(err.message.includes('--force'))
+
+        assert.equal(readFileSync(join(stateDir, 'service-wrapper.sh'), 'utf-8'), wrapperBefore)
+        assert.equal(readFileSync(join(stateDir, 'service.json'), 'utf-8'), stateBefore)
+      })
+
+      it('refuses even for the same tree without --force', () => {
+        install(BIN_A)
+        assert.throws(() => install(BIN_A), (e) => e.code === 'SERVICE_ALREADY_INSTALLED')
+      })
+
+      it('still refuses when service.json is gone but the wrapper remains', () => {
+        install(BIN_A)
+        rmSync(join(dirs()._stateDir, 'service.json'))
+        rmSync(dirs()._servicePath) // leave ONLY the wrapper, so it is the sole signal
+        assert.throws(() => install(BIN_B), (e) => e.code === 'SERVICE_ALREADY_INSTALLED' && e.message.includes(BIN_A))
+      })
+
+      it('still refuses when only the launchd plist remains', () => {
+        const d = dirs()
+        writeFileSync(d._servicePath, '<plist/>')
+        assert.throws(() => install(BIN_B), (e) => e.code === 'SERVICE_ALREADY_INSTALLED')
+      })
+
+      it('--force re-points wrapper, plist and service.json together, booting out the old job first', () => {
+        install(BIN_A)
+        const calls = []
+        install(BIN_B, { force: true, _skipRegister: false, _exec: (cmd, args) => { calls.push([cmd, ...args]) } })
+
+        const stateDir = dirs()._stateDir
+        assert.equal(parseWrapperExecTarget(readFileSync(join(stateDir, 'service-wrapper.sh'), 'utf-8'))?.chroxyBin, BIN_B)
+        assert.equal(loadServiceState(stateDir).chroxyBin, BIN_B)
+        const verbs = calls.map((c) => c[1])
+        assert.deepEqual(verbs, ['bootout', 'bootstrap'], 'bootout must precede bootstrap on a forced reinstall')
+      })
+
+      it('a fresh install does not bootout anything', () => {
+        const calls = []
+        install(BIN_A, { _skipRegister: false, _exec: (cmd, args) => { calls.push([cmd, ...args]) } })
+        assert.deepEqual(calls.map((c) => c[1]), ['bootstrap'])
+      })
+    })
+
+    describe('service.json records what the wrapper execs', () => {
+      it('the recorded chroxyBin equals the wrapper exec target after install', () => {
+        install(BIN_A)
+        const stateDir = dirs()._stateDir
+        const onDisk = parseWrapperExecTarget(readFileSync(join(stateDir, 'service-wrapper.sh'), 'utf-8'))
+        assert.equal(loadServiceState(stateDir).chroxyBin, onDisk.chroxyBin)
+      })
+
+      it('inspectInstalledService reports drift when the two records disagree', () => {
+        install(BIN_A)
+        const stateDir = dirs()._stateDir
+        saveServiceState({ ...loadServiceState(stateDir), chroxyBin: BIN_B }, stateDir)
+        const found = inspectInstalledService({ _stateDir: stateDir })
+        assert.equal(found.recordedBin, BIN_B)
+        assert.equal(found.wrapperBin, BIN_A)
+        assert.equal(found.drift, true)
+        assert.throws(
+          () => assertReinstallAllowed({ chroxyBin: BIN_B, inspect: { _stateDir: stateDir } }),
+          (e) => e.message.includes('disagree') && e.message.includes(BIN_A) && e.message.includes(BIN_B),
+        )
+      })
+
+      it('reports no drift for a consistent install and none for a fresh state dir', () => {
+        install(BIN_A)
+        assert.equal(inspectInstalledService({ _stateDir: dirs()._stateDir }).drift, false)
+        const empty = inspectInstalledService({ _stateDir: join(tmpDir, 'nowhere') })
+        assert.equal(empty.installed, false)
+        assert.equal(empty.drift, false)
+      })
+    })
+
+    describe('checkChroxyTree() / assertChroxyTreeReady() preflight', () => {
+      function makeTree(root, deps, opts = {}) {
+        mkdirSync(join(root, 'src'), { recursive: true })
+        writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'srv', dependencies: deps }))
+        writeFileSync(join(root, 'src', 'cli.js'), '')
+        for (const [name, pkg] of Object.entries(opts.installed || {})) {
+          const dir = join(opts.nodeModules || join(root, 'node_modules'), name)
+          mkdirSync(dir, { recursive: true })
+          writeFileSync(join(dir, 'package.json'), JSON.stringify({ name, ...pkg }))
+        }
+        return join(root, 'src', 'cli.js')
+      }
+
+      it('passes a complete tree', () => {
+        const bin = makeTree(join(tmpDir, 'ok'), { a: '1', b: '1' }, { installed: { a: {}, b: {} } })
+        assert.deepEqual(checkChroxyTree(bin).problems, [])
+        assert.doesNotThrow(() => assertChroxyTreeReady(bin))
+      })
+
+      it('fails when node_modules is absent altogether', () => {
+        const bin = makeTree(join(tmpDir, 'bare'), { a: '1' })
+        assert.throws(() => assertChroxyTreeReady(bin), (e) =>
+          e.code === 'SERVICE_TREE_NOT_READY' && e.message.includes('a is not installed') && e.message.includes('npm install'))
+      })
+
+      it('names the one missing dependency (the openai crash loop from the issue)', () => {
+        const bin = makeTree(join(tmpDir, 'stale'), { a: '1', openai: '1' }, { installed: { a: {} } })
+        const { problems } = checkChroxyTree(bin)
+        assert.deepEqual(problems, ['openai is not installed'])
+      })
+
+      it('accepts a dependency hoisted into a parent node_modules', () => {
+        const root = join(tmpDir, 'mono', 'packages', 'server')
+        const bin = makeTree(root, { a: '1' }, { installed: { a: {} }, nodeModules: join(tmpDir, 'mono', 'node_modules') })
+        assert.deepEqual(checkChroxyTree(bin).problems, [])
+      })
+
+      it('flags a linked workspace package whose built entry is missing', () => {
+        const bin = makeTree(join(tmpDir, 'unbuilt'), { w: '1' }, { installed: { w: { main: './dist/index.js' } } })
+        const { problems } = checkChroxyTree(bin)
+        assert.equal(problems.length, 1)
+        assert.ok(problems[0].includes('./dist/index.js'))
+      })
+
+      it('follows a symlinked bin to the real tree', { skip: posixOnly }, () => {
+        const bin = makeTree(join(tmpDir, 'real'), { a: '1' })
+        const link = join(tmpDir, 'bin-link.js')
+        symlinkSync(bin, link)
+        assert.deepEqual(checkChroxyTree(link).problems, ['a is not installed'])
+      })
+
+      it('treats an unlocatable package.json as a failure, not a pass', () => {
+        const lone = join(tmpDir, 'lone')
+        mkdirSync(lone, { recursive: true })
+        writeFileSync(join(lone, 'cli.js'), '')
+        // Only meaningful when no ancestor of the temp dir carries a package.json.
+        let hasAncestor = false
+        for (let d = tmpDir, prev = null; d !== prev; prev = d, d = join(d, '..')) {
+          if (existsSync(join(d, 'package.json'))) { hasAncestor = true; break }
+        }
+        if (hasAncestor) return
+        const { problems, root } = checkChroxyTree(join(lone, 'cli.js'))
+        assert.equal(root, null)
+        assert.equal(problems.length, 1)
+        assert.throws(() => assertChroxyTreeReady(join(lone, 'cli.js')), (e) => e.code === 'SERVICE_TREE_NOT_READY')
+      })
+
+      it('fails for a bin that does not exist', () => {
+        assert.equal(checkChroxyTree(join(tmpDir, 'missing.js')).problems.length, 1)
+      })
+
+      it('passes against this repo\'s real server tree (offline, fast)', () => {
+        const here = fileURLToPath(new URL('../src/cli.js', import.meta.url))
+        const t0 = Date.now()
+        assert.deepEqual(checkChroxyTree(here).problems, [])
+        assert.ok(Date.now() - t0 < 1000, 'preflight must be fast')
+      })
+    })
+
+    describe('CLI wiring', () => {
+      const cmdSrc = readFileSync(fileURLToPath(new URL('../src/cli/service-cmd.js', import.meta.url)), 'utf-8')
+      it('install calls the reinstall guard, the preflight, and passes --force through', () => {
+        assert.ok(/assertReinstallAllowed\(\{ chroxyBin, force: options\.force === true \}\)/.test(cmdSrc), 'guard wired')
+        assert.ok(/assertChroxyTreeReady\(chroxyBin\)/.test(cmdSrc), 'preflight wired')
+        assert.ok(/\.option\('--force'/.test(cmdSrc), '--force declared')
+        assert.ok(/force: options\.force === true,\s*\n\s*\}\)/.test(cmdSrc), 'force forwarded to installService')
+      })
     })
   })
 

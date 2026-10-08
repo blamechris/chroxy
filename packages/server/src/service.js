@@ -1,6 +1,6 @@
 import { homedir, platform } from 'os'
 import { join, dirname, win32 as pathWin32 } from 'path'
-import { existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, writeFileSync, chmodSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync, unlinkSync, readdirSync, writeFileSync, chmodSync, realpathSync } from 'fs'
 import { writeFileRestricted, isWindows } from './platform.js'
 import { execFileSync } from 'child_process'
 import { fileURLToPath } from 'url'
@@ -565,6 +565,229 @@ export function saveServiceState(state, configDir = defaultConfigDir()) {
 }
 
 /**
+ * Reverse the single-quote escaping `generateServiceWrapper` applies (`sh()`):
+ * split a shell line into words, honouring `'...'` and the `'\''` escape.
+ * Handles only what the wrapper emits; anything else yields null so a caller
+ * treats "cannot read it back" as a failure, never as a match.
+ */
+function splitShWords(line) {
+  const words = []
+  let i = 0
+  while (i < line.length) {
+    if (line[i] === ' ') { i++; continue }
+    let word = ''
+    while (i < line.length && line[i] !== ' ') {
+      if (line[i] === "'") {
+        const end = line.indexOf("'", i + 1)
+        if (end === -1) return null
+        word += line.slice(i + 1, end)
+        i = end + 1
+      } else if (line[i] === '\\' && line[i + 1] === "'") {
+        word += "'"
+        i += 2
+      } else {
+        word += line[i]
+        i++
+      }
+    }
+    words.push(word)
+  }
+  return words
+}
+
+/**
+ * Read back what a POSIX service wrapper actually execs (#7161): the last
+ * `exec <node> <chroxyBin> start` line. This is the ground truth for "which
+ * working copy does launchd run" — service.json is only a record of it.
+ *
+ * @param {string} content - Wrapper script text.
+ * @returns {{ nodePath: string, chroxyBin: string } | null} null when no
+ *   recognisable exec line is present (including a Windows .cmd wrapper).
+ */
+export function parseWrapperExecTarget(content) {
+  const lines = String(content).split(/\r?\n/)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].startsWith('exec ')) continue
+    const words = splitShWords(lines[i].slice(5))
+    if (words && words.length === 3 && words[2] === 'start') {
+      return { nodePath: words[0], chroxyBin: words[1] }
+    }
+    return null
+  }
+  return null
+}
+
+/**
+ * Report which tree an installed service points at, from both records.
+ * `installed` is true when ANY artifact exists (state, wrapper, or the
+ * launchd/systemd file) so a deleted service.json cannot make an existing
+ * service look absent (#7161).
+ *
+ * @param {object} [options]
+ * @param {string} [options._stateDir]
+ * @param {string} [options._wrapperPath]
+ * @param {string} [options._servicePath] - launchd plist / systemd unit
+ * @returns {{ installed: boolean, recordedBin: string|null, wrapperBin: string|null,
+ *   wrapperPath: string, drift: boolean }}
+ */
+export function inspectInstalledService(options = {}) {
+  const stateDir = options._stateDir || defaultConfigDir()
+  const state = loadServiceState(stateDir)
+  const wrapperPath = options._wrapperPath || state?.wrapperPath || join(stateDir, WRAPPER_NAME)
+  let wrapperBin = null
+  let wrapperPresent = false
+  if (existsSync(wrapperPath)) {
+    wrapperPresent = true
+    try {
+      wrapperBin = parseWrapperExecTarget(readFileSync(wrapperPath, 'utf-8'))?.chroxyBin ?? null
+    } catch {
+      wrapperBin = null
+    }
+  }
+  const recordedBin = state?.chroxyBin ?? null
+  const servicePresent = !!options._servicePath && existsSync(options._servicePath)
+  return {
+    installed: !!state || wrapperPresent || servicePresent,
+    recordedBin,
+    wrapperBin,
+    wrapperPath,
+    // Only a disagreement between two values we could actually read counts.
+    drift: recordedBin !== null && wrapperBin !== null && recordedBin !== wrapperBin,
+  }
+}
+
+/**
+ * Refuse to silently re-point an existing service at another working copy
+ * (#7161). `resolveChroxyBin()` resolves relative to the invoking file, so
+ * running `chroxy service install` from any checkout would otherwise move the
+ * launchd job to that checkout. Reinstalling needs an explicit `force`, and
+ * the message names both trees.
+ *
+ * @param {object} args
+ * @param {string} args.chroxyBin - The target this invocation would install.
+ * @param {boolean} [args.force]
+ * @param {object} [args.inspect] - Options for inspectInstalledService.
+ * @returns {{ reinstall: boolean }} reinstall=true when force overrode an existing install.
+ * @throws {Error} code SERVICE_ALREADY_INSTALLED when installed and not forced.
+ */
+export function assertReinstallAllowed({ chroxyBin, force = false, inspect = {} }) {
+  const found = inspectInstalledService(inspect)
+  if (!found.installed) return { reinstall: false }
+  if (force) return { reinstall: true }
+
+  const lines = ['Chroxy service is already installed.']
+  if (found.drift) {
+    lines.push(
+      'Its two records disagree:',
+      `  service.json records:  ${found.recordedBin}`,
+      `  wrapper actually execs: ${found.wrapperBin}`,
+    )
+  }
+  const current = found.wrapperBin || found.recordedBin
+  if (current && current !== chroxyBin) {
+    lines.push(
+      'It is pinned to:',
+      `  ${current}`,
+      'This install would re-point it at:',
+      `  ${chroxyBin}`,
+    )
+  } else if (current) {
+    lines.push(`It is pinned to this same tree: ${current}`)
+  } else {
+    lines.push('Its target tree could not be read from service.json or the wrapper.')
+  }
+  lines.push(
+    'Re-run with --force to rewrite it (use it deliberately: the running daemon switches to the new tree),',
+    'or run "chroxy service uninstall" first.',
+  )
+  const err = new Error(lines.join('\n'))
+  err.code = 'SERVICE_ALREADY_INSTALLED'
+  throw err
+}
+
+/**
+ * Offline check that the tree `chroxyBin` lives in can actually start (#7161).
+ * KeepAlive turns one missing dependency into an infinite respawn loop under
+ * launchd, so this fails the install instead. Reads package.json and stats
+ * files only — no network, no `npm`, a few milliseconds.
+ *
+ * For each runtime `dependencies` entry it requires `node_modules/<name>/package.json`
+ * to resolve by Node's walk-up rule (hoisting is honoured), and, when that
+ * package declares a relative `main`, that file to exist (an unbuilt workspace
+ * package has a link but no `dist/`). A tree whose package.json cannot be found
+ * is a failure, never a pass: "cannot check" must not read as "nothing to check".
+ *
+ * @param {string} chroxyBin
+ * @returns {{ root: string|null, problems: string[] }}
+ */
+export function checkChroxyTree(chroxyBin) {
+  let real
+  try {
+    real = realpathSync(chroxyBin)
+  } catch {
+    return { root: null, problems: [`${chroxyBin} does not exist`] }
+  }
+  let root = dirname(real)
+  while (!existsSync(join(root, 'package.json'))) {
+    const parent = dirname(root)
+    if (parent === root) {
+      return { root: null, problems: [`no package.json found above ${real}, so its dependencies cannot be verified`] }
+    }
+    root = parent
+  }
+  let pkg
+  try {
+    pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'))
+  } catch (err) {
+    return { root, problems: [`${join(root, 'package.json')} is unreadable: ${err.message}`] }
+  }
+  const deps = Object.keys(pkg.dependencies || {})
+  const problems = []
+  for (const name of deps) {
+    let dir = root
+    let found = null
+    for (;;) {
+      const candidate = join(dir, 'node_modules', name)
+      if (existsSync(join(candidate, 'package.json'))) { found = candidate; break }
+      const parent = dirname(dir)
+      if (parent === dir) break
+      dir = parent
+    }
+    if (!found) {
+      problems.push(`${name} is not installed`)
+      continue
+    }
+    try {
+      const main = JSON.parse(readFileSync(join(found, 'package.json'), 'utf-8')).main
+      if (typeof main === 'string' && /^\.\.?\//.test(main) && !existsSync(join(found, main))) {
+        problems.push(`${name} is linked but its entry ${main} is missing (not built?)`)
+      }
+    } catch (err) {
+      problems.push(`${name} has an unreadable package.json: ${err.message}`)
+    }
+  }
+  return { root, problems }
+}
+
+/**
+ * Throw an actionable error when the target tree cannot start (see checkChroxyTree).
+ * @param {string} chroxyBin
+ */
+export function assertChroxyTreeReady(chroxyBin) {
+  const { root, problems } = checkChroxyTree(chroxyBin)
+  if (problems.length === 0) return
+  const shown = problems.slice(0, 10).map((p) => `  - ${p}`)
+  if (problems.length > 10) shown.push(`  - ...and ${problems.length - 10} more`)
+  const err = new Error(
+    `The chroxy tree at ${root || chroxyBin} cannot start, so installing the service would make launchd/systemd crash-loop:\n` +
+    `${shown.join('\n')}\n` +
+    `Run "npm install" in ${root || 'that tree'} (and build any workspace packages), then re-run "chroxy service install".`
+  )
+  err.code = 'SERVICE_TREE_NOT_READY'
+  throw err
+}
+
+/**
  * Write the service wrapper script to disk with 0700 perms (owner rwx only).
  *
  * The wrapper resolves keychain secrets at spawn time (#5491); it is owner-only
@@ -602,11 +825,31 @@ export function writeServiceWrapper(wrapperPath, content) {
  * @param {string} [config._stateDir] - Override state directory (testing)
  * @param {string} [config._wrapperPath] - Override wrapper script path (testing)
  * @param {boolean} [config._skipRegister] - Skip launchctl/systemctl registration (testing)
+ * @param {boolean} [config.force] - Re-point an already-installed service (#7161).
+ *   Without it an existing install is never touched.
+ * @param {(cmd: string, args: string[], opts: object) => void} [config._exec]
+ *   Injectable exec for testing (defaults to execFileSync).
  * @param {string} [config._platform] - Override platform (testing)
  */
 export function installService(config) {
   const plat = config._platform || platform()
   const paths = getServicePaths(plat)
+
+  // #7161: refuse to silently re-point an existing service at the invoking tree.
+  // Runs before anything is written so a refusal leaves the install untouched.
+  const stateDirForGuard = config._stateDir || defaultConfigDir()
+  const { reinstall } = assertReinstallAllowed({
+    chroxyBin: config.chroxyBin,
+    force: config.force === true,
+    inspect: {
+      _stateDir: stateDirForGuard,
+      _wrapperPath: config._wrapperPath
+        || (plat === 'win32' ? join(stateDirForGuard, WINDOWS_WRAPPER_NAME) : undefined),
+      _servicePath: plat === 'win32'
+        ? undefined
+        : config._servicePath || (plat === 'darwin' ? paths.plistPath : paths.unitPath),
+    },
+  })
 
   if (plat === 'win32') {
     return installWindowsService(config, paths)
@@ -614,8 +857,9 @@ export function installService(config) {
 
   const servicePath = config._servicePath || (plat === 'darwin' ? paths.plistPath : paths.unitPath)
   const logDir = config._logDir || paths.logDir
-  const stateDir = config._stateDir || defaultConfigDir()
+  const stateDir = stateDirForGuard
   const wrapperPath = config._wrapperPath || join(stateDir, WRAPPER_NAME)
+  const exec = config._exec || execFileSync
 
   // Bake the resolved binary locations into the service PATH so the daemon's
   // preflight finds node + claude under the bare launchd/systemd PATH (#5491).
@@ -632,6 +876,17 @@ export function installService(config) {
     cwd: config.cwd || homedir(),
   })
   writeServiceWrapper(wrapperPath, wrapperContent)
+
+  // #7161: service.json must record what the wrapper ACTUALLY execs. Read it back
+  // from the file just written rather than trusting the value we passed in, so the
+  // two records cannot disagree (and a wrapper we cannot parse fails the install).
+  const execTarget = parseWrapperExecTarget(readFileSync(wrapperPath, 'utf-8'))
+  if (!execTarget || execTarget.chroxyBin !== config.chroxyBin) {
+    throw new Error(
+      `The service wrapper at ${wrapperPath} does not exec ${config.chroxyBin} ` +
+      `(read back: ${execTarget ? execTarget.chroxyBin : 'unparseable'}); refusing to record a target it does not run.`
+    )
+  }
 
   // Generate service file content
   const genConfig = {
@@ -668,9 +923,19 @@ export function installService(config) {
   // Register with system (unless testing)
   if (!config._skipRegister) {
     if (plat === 'darwin') {
-      execFileSync('launchctl', ['bootstrap', `gui/${process.getuid()}`, servicePath])
+      if (reinstall) {
+        // launchd refuses to bootstrap a label that is already loaded; a forced
+        // re-point must unload the old definition first. Not loaded is fine.
+        try {
+          exec('launchctl', ['bootout', `gui/${process.getuid()}/${SERVICE_LABEL}`], { stdio: 'ignore' })
+        } catch {
+          // not currently loaded
+        }
+      }
+      exec('launchctl', ['bootstrap', `gui/${process.getuid()}`, servicePath])
     } else {
-      execFileSync('systemctl', ['--user', 'enable', '--now', 'chroxy.service'])
+      if (reinstall) exec('systemctl', ['--user', 'daemon-reload'])
+      exec('systemctl', ['--user', 'enable', '--now', 'chroxy.service'])
     }
   }
 
@@ -680,7 +945,7 @@ export function installService(config) {
     platform: plat,
     servicePath,
     nodePath: config.nodePath,
-    chroxyBin: config.chroxyBin,
+    chroxyBin: execTarget.chroxyBin,
     claudeBin: config.claudeBin,
     wrapperPath,
     cwd: genConfig.cwd,
