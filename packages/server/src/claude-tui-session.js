@@ -2235,6 +2235,22 @@ export class ClaudeTuiSession extends BaseSession {
     // it (matches _clearTurnEndState / base _clearMessageState). On respawn the
     // next turn starts clean; on destroy _clearMessageState would clear it anyway.
     this._pendingBackgroundCommands.clear()
+    // #8379: the cross-turn BackgroundShellTracker is deliberately NOT cleared
+    // here (contrast CliSession._killAndRespawn, #7611, which calls
+    // _clearPendingBackgroundShells()). That clear is right only where chroxy
+    // itself signals the shells' whole process tree. Here it does not, and the
+    // shells do not die with the PTY: claude starts every Bash-tool shell in its
+    // OWN process group (observed: each `zsh -c` child of a live claude has
+    // pgid == its own pid, != claude's), so a PTY teardown — the SIGHUP the
+    // kernel sends the foreground group, a master close, or SIGTERM/SIGKILL of
+    // claude — never reaches them; and destroy()'s SIGKILL escalation targets
+    // only claude's group (-pid). Probed with node-pty on macOS: a shell in the
+    // PTY child's own group died on SIGKILL, SIGTERM and master close, but one
+    // in its own group (spawn `detached`) or run under `nohup` survived all
+    // three. So a pending shell here may really still be running, and
+    // `isRunning` staying true is truthful. The tracker's own backstops release
+    // one that has finished: the output-mtime sweep (advisory banner clear) and
+    // the BACKGROUND_SHELL_HARD_QUIESCE_MS reap.
     // #5777 (#5788): cancel a pending first-turn submit nudge directly here.
     // _onPtyGone is the one teardown path that does NOT route through
     // _clearFirstOutputWatchdog, so without this an armed nudge would only be
