@@ -1336,6 +1336,15 @@ impl ServerManager {
     /// then monitor continuously. Signals auto-restart on crash detection.
     /// Uses a generation counter to ensure old threads exit when a new poll starts.
     fn start_health_poll(&self) {
+        self.start_health_poll_with(Arc::new(|port| {
+            tray_state::probe_port(port, Duration::from_secs(2))
+        }));
+    }
+
+    /// [`Self::start_health_poll`] with the probe passed in: what a challenge to
+    /// `port` found. The real one ([`tray_state::probe_port`]) reads the token fresh
+    /// on every call and retries once with a freshly loaded token.
+    fn start_health_poll_with(&self, probe: Arc<dyn Fn(u16) -> PortState + Send + Sync>) {
         let status = self.status.clone();
         let port = self.config.port;
         let generation = self.health_generation.clone();
@@ -1345,9 +1354,6 @@ impl ServerManager {
         // its own events (attempt counts, timeouts, connect errors) to
         // the dashboard via get_startup_logs (issue #2846).
         let log_buf = self.log_buffer.clone();
-        // The token the daemon must prove it holds. A server that generated its
-        // own token on first run is not in this copy of the config: read it back.
-        let config_token = self.config.api_token.clone();
 
         // Advance generation so any existing poll thread sees a mismatch and exits
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1358,10 +1364,10 @@ impl ServerManager {
             // challenge with a proof bound to the token and to this port (loopback
             // 127.0.0.1, not localhost, to avoid IPv6 resolution issues in a macOS
             // GUI app context). A foreign process that answers 200 is not a start.
-            let probe = || {
-                let token = config_token.clone().or_else(|| config::load_config().api_token);
-                tray_state::probe_port_with_token(port, Duration::from_secs(2), token.as_deref())
-            };
+            // `probe` reads the token fresh on every call (the config file, then the
+            // credential store) and retries once with a freshly loaded token when a
+            // proof does not verify: a token rotated while the server runs is the
+            // server's own, not a foreign answer.
 
             // Counters used for the timeout summary (issue #2835 sub-fix B).
             let mut attempts: u32 = 0;
@@ -1392,7 +1398,7 @@ impl ServerManager {
 
                 attempts += 1;
                 let attempt_start = Instant::now();
-                let observed = probe();
+                let observed = probe(port);
                 let msg = format!(
                     "[health] attempt #{} port {} -> {} ({}ms)",
                     attempts,
@@ -1435,7 +1441,7 @@ impl ServerManager {
                     return;
                 }
 
-                match probe() {
+                match probe(port) {
                     PortState::Chroxy(_) => {
                         // Same in-flight guard as the startup loop: an answer
                         // that raced a generation bump must not resurrect a
@@ -1847,9 +1853,15 @@ mod tests {
 
     // --- readiness needs a proof, not just an answer -----------------------
 
+    type SharedToken = std::sync::Arc<Mutex<String>>;
+
+    fn shared(t: &str) -> SharedToken {
+        std::sync::Arc::new(Mutex::new(t.to_string()))
+    }
+
     /// A server on a free port that answers `/health` as chroxy and, while `proving`
-    /// is set, proves a challenge with `token`.
-    fn serve_switchable(token: &'static str, proving: std::sync::Arc<std::sync::atomic::AtomicBool>) -> u16 {
+    /// is set, proves a challenge with whatever `token` holds at that moment.
+    fn serve_switchable(token: SharedToken, proving: std::sync::Arc<std::sync::atomic::AtomicBool>) -> u16 {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1867,7 +1879,7 @@ mod tests {
                 let body = match nonce {
                     Some(n) if proving.load(Ordering::SeqCst) => format!(
                         r#"{{"status":"ok","mode":"cli","version":"1","proof":"{}"}}"#,
-                        crate::health_proof::compute_proof_hex(token, port, &n)
+                        crate::health_proof::compute_proof_hex(&token.lock().unwrap(), port, &n)
                     ),
                     _ => r#"{"status":"ok","mode":"cli","version":"1"}"#.to_string(),
                 };
@@ -1882,6 +1894,29 @@ mod tests {
         port
     }
 
+    /// What the app has on file: the token its cache holds and the one a fresh
+    /// load returns. A rotation changes the second and leaves the first stale.
+    type AppView = std::sync::Arc<Mutex<(String, String)>>;
+
+    fn app_view(cached: &str, fresh: &str) -> AppView {
+        std::sync::Arc::new(Mutex::new((cached.to_string(), fresh.to_string())))
+    }
+
+    /// The probe the real poll uses, with the token sources taken from `view`.
+    fn probe_from(view: AppView) -> Arc<dyn Fn(u16) -> PortState + Send + Sync> {
+        Arc::new(move |port| {
+            let (cached, fresh) = view.lock().unwrap().clone();
+            tray_state::probe_with_retry(
+                port,
+                Duration::from_secs(2),
+                Some(cached),
+                move || Some(fresh),
+                tray_state::probe_port_with_token,
+            )
+            .0
+        })
+    }
+
     fn wait_for(mgr: &ServerManager, want: impl Fn(&ServerStatus) -> bool, secs: u64) -> bool {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(secs) {
@@ -1894,26 +1929,28 @@ mod tests {
     }
 
     fn polling_manager(port: u16) -> ServerManager {
-        let mut mgr = manager_on(port);
-        mgr.config.api_token = Some("tok-for-readiness".to_string());
+        let mgr = manager_on(port);
         *lock_or_recover(&mgr.status) = ServerStatus::Starting;
         mgr
     }
 
+    fn flag(on: bool) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(on))
+    }
+
     #[test]
     fn a_responder_that_proves_itself_makes_the_server_running() {
-        let proving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut mgr = polling_manager(serve_switchable("tok-for-readiness", proving));
-        mgr.start_health_poll();
+        let mgr = polling_manager(serve_switchable(shared("tok"), flag(true)));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
         assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10), "status {:?}", mgr.status());
+        let mut mgr = mgr;
         mgr.kill_child(); // stops the poll
     }
 
     #[test]
     fn a_responder_that_answers_200_without_a_proof_does_not_make_the_server_running() {
-        let proving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut mgr = polling_manager(serve_switchable("tok-for-readiness", proving));
-        mgr.start_health_poll();
+        let mut mgr = polling_manager(serve_switchable(shared("tok"), flag(false)));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
         assert!(
             !wait_for(&mgr, |s| *s == ServerStatus::Running, 3),
             "a bare 200 must not start the server"
@@ -1924,18 +1961,17 @@ mod tests {
 
     #[test]
     fn a_proof_made_with_another_token_does_not_make_the_server_running() {
-        let proving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut mgr = polling_manager(serve_switchable("someone-elses-token", proving));
-        mgr.start_health_poll();
+        let mut mgr = polling_manager(serve_switchable(shared("someone-elses-token"), flag(true)));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
         assert!(!wait_for(&mgr, |s| *s == ServerStatus::Running, 3));
         mgr.kill_child();
     }
 
     #[test]
     fn a_running_server_whose_port_is_taken_by_a_responder_without_a_proof_is_an_error() {
-        let proving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let mut mgr = polling_manager(serve_switchable("tok-for-readiness", proving.clone()));
-        mgr.start_health_poll();
+        let proving = flag(true);
+        let mut mgr = polling_manager(serve_switchable(shared("tok"), proving.clone()));
+        mgr.start_health_poll_with(probe_from(app_view("tok", "tok")));
         assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
         // The proving server is replaced: the same port now answers without a proof.
         proving.store(false, Ordering::SeqCst);
@@ -1944,6 +1980,28 @@ mod tests {
             "status {:?}",
             mgr.status()
         );
+        mgr.kill_child();
+    }
+
+    #[test]
+    fn a_token_rotated_while_the_server_runs_keeps_it_running_and_is_not_restarted() {
+        let daemon_token = shared("before");
+        let view = app_view("before", "before");
+        let mut mgr = polling_manager(serve_switchable(daemon_token.clone(), flag(true)));
+        mgr.start_health_poll_with(probe_from(view.clone()));
+        assert!(wait_for(&mgr, |s| *s == ServerStatus::Running, 10));
+        // Scheduled rotation: the daemon proves with the new token, the app's cache
+        // still holds the old one, and a fresh load returns the new one.
+        *daemon_token.lock().unwrap() = "after".to_string();
+        *view.lock().unwrap() = ("before".to_string(), "after".to_string());
+        // Longer than one monitor interval (5 s): at least one probe runs.
+        assert!(
+            !wait_for(&mgr, |s| matches!(s, ServerStatus::Error(_)), 7),
+            "a rotated token must not read as a crash; status {:?}",
+            mgr.status()
+        );
+        assert_eq!(mgr.status(), ServerStatus::Running);
+        assert!(!mgr.is_auto_restart_pending(), "no restart is queued for a healthy server");
         mgr.kill_child();
     }
 

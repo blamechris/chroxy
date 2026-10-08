@@ -1,3 +1,4 @@
+use crate::handoff;
 use tauri::{AppHandle, Emitter, Manager};
 use serde::Serialize;
 
@@ -54,75 +55,109 @@ pub struct ServerRestartingPayload {
 /// How long one handoff challenge may take.
 const HANDOFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// The daemon on `port` did not answer a fresh health challenge with a valid
-/// proof for `token`: show that, and drop the cached claim that it is a chroxy
-/// daemon so no later menu item acts on it.
+/// The token that makes the daemon on `port` prove itself now (see
+/// [`crate::tray_state::prove_daemon`]); this is the prover every handoff asks.
+fn prove_for_handoff(port: u16) -> Option<String> {
+    crate::tray_state::prove_daemon(port, HANDOFF_TIMEOUT)
+}
+
+/// Show that the daemon on `port` could not be verified. The tray's port state
+/// takes the observation through its two-observation rule, so one missed
+/// challenge does not by itself flip a daemon the tray was showing.
 fn refuse_handoff(app: &AppHandle, port: u16) {
-    crate::update_port_state(app, crate::tray_state::PortState::Foreign(port));
+    crate::observe_port(app, crate::tray_state::PortState::Foreign(port));
     emit_server_error(
         app,
         &format!(
-            "The server on port {} did not prove it is the Chroxy daemon for this app, so the dashboard was not opened.",
+            "The server on port {} could not be verified as the Chroxy daemon for this app (no matching access token, or no valid proof), so the dashboard was not opened.",
             port
         ),
     );
 }
 
-/// Update the loading page status text, then navigate to the dashboard after a brief delay.
-/// Tauri v2's CSP nonce blocks both inline and external scripts in the embedded frontend,
-/// so we inject status updates via eval() (which is nonce-aware) and navigate from Rust.
-///
-/// The access token goes to the daemon only after it answers a fresh health
-/// challenge with a proof bound to `token` and `port`: checked before the
-/// `server_ready` event (whose payload carries the token and URL) and again in the
-/// delayed task, immediately before the navigation. Returns `false`, having shown
-/// the refusal, when the daemon does not prove itself; the cached tray state is
-/// never consulted. Blocking (up to two network round trips): call it off the main
-/// thread.
-pub fn emit_server_ready(app: &AppHandle, port: u16, token: Option<&str>) -> bool {
-    if !crate::tray_state::daemon_proves_itself(port, token, HANDOFF_TIMEOUT) {
-        refuse_handoff(app, port);
-        return false;
-    }
-    let url = dashboard_url(port, token);
-    let payload = ServerReadyPayload {
-        port,
-        token: token.unwrap_or("").to_string(),
-        url: url.clone(),
-    };
-    let _ = app.emit("server_ready", payload);
-    show_window(app);
+/// Show that the daemon on `port` could not be verified (see [`refuse_handoff`]).
+pub fn show_handoff_refusal(app: &AppHandle, port: u16) {
+    refuse_handoff(app, port);
+}
 
-    // Update loading page status to "Connected!" then navigate after 800ms
-    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
-        let _ = window.eval(
-            "try { \
-                var s = document.getElementById('status'); \
-                if (s) { s.textContent = 'Connected!'; s.className = 'status'; } \
-                var sp = document.getElementById('spinner'); \
-                if (sp) sp.style.display = 'none'; \
-            } catch(e) {}"
-        );
-    }
+/// The real [`handoff::Sink`]: the `server_ready` event, the loading page and the
+/// main window.
+struct AppSink(AppHandle);
 
-    // Navigate to dashboard after a brief pause so user sees "Connected!"
-    let app_handle = app.clone();
-    let token = token.map(str::to_string);
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(800));
-        // The port may have changed hands during the pause: ask again, now.
-        if !crate::tray_state::daemon_proves_itself(port, token.as_deref(), HANDOFF_TIMEOUT) {
-            refuse_handoff(&app_handle, port);
-            return;
+impl handoff::Sink for AppSink {
+    fn announce(&self, port: u16, token: &str, url: &str) {
+        let payload = ServerReadyPayload {
+            port,
+            token: token.to_string(),
+            url: url.to_string(),
+        };
+        let _ = self.0.emit("server_ready", payload);
+        show_window(&self.0);
+
+        // Update loading page status to "Connected!"
+        if let Some(window) = self.0.get_webview_window(MAIN_LABEL) {
+            let _ = window.eval(
+                "try { \
+                    var s = document.getElementById('status'); \
+                    if (s) { s.textContent = 'Connected!'; s.className = 'status'; } \
+                    var sp = document.getElementById('spinner'); \
+                    if (sp) sp.style.display = 'none'; \
+                } catch(e) {}"
+            );
         }
-        if let Some(window) = app_handle.get_webview_window(MAIN_LABEL) {
+    }
+
+    fn navigate(&self, url: &str) {
+        if let Some(window) = self.0.get_webview_window(MAIN_LABEL) {
             // Use eval to navigate — window.navigate() from tauri:// to http://
             // may be blocked by same-origin policy in the embedded webview.
             let escaped = url.replace('\\', "\\\\").replace('\'', "\\'");
             let _ = window.eval(&format!("window.location.href = '{}'", escaped));
         }
+    }
+
+    fn refuse(&self, port: u16) {
+        refuse_handoff(&self.0, port);
+    }
+}
+
+/// Hand the dashboard to the daemon on `port`, silently refusing: returns `false`
+/// when it does not prove itself, without showing anything.
+///
+/// The access token goes only to a daemon that has just answered a fresh health
+/// challenge ([`handoff::begin`], before the `server_ready` event whose payload
+/// carries the token and URL) and again after the pause, immediately before the
+/// navigation ([`handoff::finish`]). Blocking (up to two network round trips):
+/// call it off the main thread.
+pub fn try_server_ready(app: &AppHandle, port: u16) -> bool {
+    let sink = AppSink(app.clone());
+    if !handoff::begin(&prove_for_handoff, &sink, port) {
+        return false;
+    }
+    // Navigate to dashboard after a brief pause so user sees "Connected!"
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        handoff::finish(&prove_for_handoff, &sink, port);
     });
     true
+}
+
+/// [`try_server_ready`], showing the refusal when the daemon does not prove itself.
+/// Tauri v2's CSP nonce blocks both inline and external scripts in the embedded
+/// frontend, so status updates go in via eval() (which is nonce-aware) and the
+/// navigation happens from Rust.
+pub fn emit_server_ready(app: &AppHandle, port: u16) -> bool {
+    let ok = try_server_ready(app, port);
+    if !ok {
+        refuse_handoff(app, port);
+    }
+    ok
+}
+
+/// Open the dashboard's settings panel on the daemon at `port`, after it proves
+/// itself; otherwise show the refusal.
+pub fn open_settings(app: &AppHandle, port: u16) -> bool {
+    handoff::open_settings(&prove_for_handoff, &AppSink(app.clone()), port)
 }
 
 /// Emit `server_stopped` event and update loading page if visible.
@@ -178,26 +213,6 @@ pub fn emit_server_restarting(app: &AppHandle, attempt: u32, max_attempts: u32, 
 pub fn emit_navigate_console(app: &AppHandle) {
     let _ = app.emit("navigate_console", ());
     show_window(app);
-}
-
-/// Inject click handler for the settings button on the loading page.
-/// Navigates directly to the dashboard settings panel when clicked. The URL
-/// carries no access token: the token is handed over only by
-/// [`emit_server_ready`], after the daemon has proved itself.
-pub fn inject_settings_button_handler(app: &AppHandle, port: u16) {
-    let settings_url = format!("{}?settings=1", dashboard_url(port, None));
-    let escaped = settings_url.replace('\\', "\\\\").replace('\'', "\\'");
-    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
-        let _ = window.eval(&format!(
-            "try {{ \
-                var btn = document.getElementById('settings-btn'); \
-                if (btn) btn.addEventListener('click', function() {{ \
-                    window.location.href = '{}'; \
-                }}); \
-            }} catch(e) {{}}",
-            escaped
-        ));
-    }
 }
 
 // -- Window management (no eval) --

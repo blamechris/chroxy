@@ -306,8 +306,10 @@ export function createHttpHandler(server, { dashboardDist } = {}) {
       })
       const body = { status: 'ok', mode: server.serverMode, version: SERVER_VERSION }
       // A valid challenge adds a proof keyed by the primary API token and bound
-      // to the port this server listens on. Any other value is ignored.
-      const challenge = challengeFromUrl(req.url)
+      // to the port this server listens on. Any other value is ignored. Only a
+      // loopback peer that carries no tunnel or proxy header gets one: a tunnel
+      // client connects from loopback too, but adds those headers.
+      const challenge = isLoopbackPeer(req) ? challengeFromUrl(req.url) : null
       if (challenge && typeof server.apiToken === 'string' && server.apiToken) {
         const port = server.httpServer?.address?.()?.port ?? server.port
         body.proof = computeHealthProof(server.apiToken, port, challenge)

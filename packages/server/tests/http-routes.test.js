@@ -273,6 +273,53 @@ describe('http-routes', () => {
         assert.equal(text, JSON.stringify(body))
       })
 
+      it('a request that carries a tunnel or proxy header gets no proof', async () => {
+        for (const header of ['cf-connecting-ip', 'x-forwarded-for', 'forwarded', 'cf-ray']) {
+          const mock = createMockServer()
+          await startWith(mock)
+          mock.port = 4242
+          const res = await globalThis.fetch(`http://127.0.0.1:${port}/health?challenge=${NONCE_A}`, {
+            headers: { [header]: 'for=203.0.113.9' },
+          })
+          assert.equal(res.status, 200, header)
+          const body = await res.json()
+          assert.equal(body.status, 'ok')
+          assert.equal('proof' in body, false, `no proof when ${header} is present`)
+          await closeServer()
+        }
+      })
+
+      it('a request from a non-loopback peer gets no proof', async () => {
+        const handler = createHttpHandler(createMockServer({ port: 4242 }))
+        for (const remoteAddress of ['192.168.1.20', '203.0.113.9', '::ffff:192.168.1.20', '2001:db8::1']) {
+          const chunks = []
+          const res = {
+            writeHead() {},
+            end(chunk) { chunks.push(chunk) },
+          }
+          const req = {
+            method: 'GET',
+            url: `/health?challenge=${NONCE_A}`,
+            headers: {},
+            socket: { remoteAddress },
+          }
+          await handler(req, res)
+          const body = JSON.parse(chunks.join(''))
+          assert.equal(body.status, 'ok')
+          assert.equal('proof' in body, false, `no proof for ${remoteAddress}`)
+        }
+      })
+
+      it('a loopback peer without proxy headers still gets the proof', async () => {
+        const handler = createHttpHandler(createMockServer({ port: 4242 }))
+        for (const remoteAddress of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+          const chunks = []
+          const res = { writeHead() {}, end(chunk) { chunks.push(chunk) } }
+          await handler({ method: 'GET', url: `/health?challenge=${NONCE_A}`, headers: {}, socket: { remoteAddress } }, res)
+          assert.equal(JSON.parse(chunks.join('')).proof, PROOF_4242_A, remoteAddress)
+        }
+      })
+
       it('no proof is given when the daemon has no API token', async () => {
         const { text } = await healthBody(`?challenge=${NONCE_A}`, { apiToken: null })
         assert.equal('proof' in JSON.parse(text), false)

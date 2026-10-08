@@ -359,8 +359,11 @@ pub fn pick_then_act<T, U>(mutex: &std::sync::Mutex<T>, pick: impl FnOnce(&T) ->
     act(picked)
 }
 
-/// Probe `/health` on loopback once and classify what holds `port`, challenging
-/// it with the access token the app holds for it ([`crate::config::proof_token`]).
+/// Probe `/health` on loopback and classify what holds `port`, challenging it with
+/// the access token the app holds for it ([`crate::config::proof_token`]). A proof
+/// that does not verify is tried once more with a freshly loaded token, so a daemon
+/// whose token was rotated since the app last read it is not mistaken for a
+/// foreign holder.
 ///
 /// This is the one place a holder is classified as an adoptable chroxy daemon:
 /// every route that adopts a daemon (the launch-time start, the crash restart, the
@@ -368,11 +371,61 @@ pub fn pick_then_act<T, U>(mutex: &std::sync::Mutex<T>, pick: impl FnOnce(&T) ->
 /// that answers like chroxy is adoptable only when a fresh challenge returns a
 /// proof bound to the API token and to this port; any other answer is foreign.
 pub fn probe_port(port: u16, timeout: Duration) -> PortState {
-    probe_port_with_token(port, timeout, crate::config::proof_token().as_deref())
+    probe_with_retry(
+        port,
+        timeout,
+        crate::config::proof_token(),
+        crate::config::fresh_token,
+        probe_port_with_token,
+    )
+    .0
 }
 
-/// [`probe_port`] with the token passed in. With no token, or if the OS RNG fails,
-/// no proof can be checked and a chroxy-shaped holder is foreign.
+/// The token that makes the daemon on `port` prove itself now, or `None`.
+///
+/// Call this immediately before every handoff of the access token to a daemon
+/// (navigating the window to it, opening the dashboard, asking it for the QR
+/// connection info, returning the token over IPC), and hand over the token it
+/// returns: the one that proved, not a copy read earlier. The state the tray
+/// cached from an earlier probe never authorises a handoff.
+pub fn prove_daemon(port: u16, timeout: Duration) -> Option<String> {
+    match probe_with_retry(
+        port,
+        timeout,
+        crate::config::proof_token(),
+        crate::config::fresh_token,
+        probe_port_with_token,
+    ) {
+        (PortState::Chroxy(_), token) => token,
+        _ => None,
+    }
+}
+
+/// Probe with `first`; if the holder answers but its proof does not verify, probe
+/// once more with the token `fresh` loads (when that is a different token).
+/// Returns the state and, for `Chroxy`, the token that proved it.
+pub fn probe_with_retry(
+    port: u16,
+    timeout: Duration,
+    first: Option<String>,
+    fresh: impl FnOnce() -> Option<String>,
+    probe: impl Fn(u16, Duration, Option<&str>) -> PortState,
+) -> (PortState, Option<String>) {
+    let state = probe(port, timeout, first.as_deref());
+    if !matches!(state, PortState::Foreign(_)) {
+        return (state, first);
+    }
+    if let Some(retry) = fresh().filter(|t| !t.is_empty() && Some(t) != first.as_ref()) {
+        let second = probe(port, timeout, Some(&retry));
+        if second == PortState::Chroxy(port) {
+            return (second, Some(retry));
+        }
+    }
+    (state, None)
+}
+
+/// [`probe_port`] with the token passed in and no retry. With no token, or if the
+/// OS RNG fails, no proof can be checked and a chroxy-shaped holder is foreign.
 pub fn probe_port_with_token(port: u16, timeout: Duration, token: Option<&str>) -> PortState {
     let nonce = health_proof::fresh_nonce();
     let path = match &nonce {
@@ -384,16 +437,6 @@ pub fn probe_port_with_token(port: u16, timeout: Duration, token: Option<&str>) 
         (Some(t), Some(n)) => health_proof::body_proves_daemon(body, t, port, n),
         _ => false,
     })
-}
-
-/// True only if a fresh challenge to `port` returns a valid proof for `token`.
-///
-/// Call this immediately before every handoff of the access token to a daemon
-/// (navigating the window to it, opening the dashboard, asking it for the QR
-/// connection info). The state the tray cached from an earlier probe never
-/// authorises a handoff.
-pub fn daemon_proves_itself(port: u16, token: Option<&str>, timeout: Duration) -> bool {
-    probe_port_with_token(port, timeout, token) == PortState::Chroxy(port)
 }
 
 fn request_health(port: u16, path: &str, timeout: Duration) -> HealthOutcome {
@@ -876,14 +919,68 @@ mod tests {
     fn a_daemon_that_answers_the_challenge_with_a_valid_proof_is_chroxy() {
         let port = serve_daemon(TOKEN, same_port);
         assert_eq!(probe(port, Some(TOKEN)), PortState::Chroxy(port));
-        assert!(daemon_proves_itself(port, Some(TOKEN), T));
+    }
+
+    // --- a rotated token: one retry with a freshly loaded token -----------
+
+    fn chroxy_only_for(good: &'static str) -> impl Fn(u16, Duration, Option<&str>) -> PortState {
+        move |port, _, token| if token == Some(good) { PortState::Chroxy(port) } else { PortState::Foreign(port) }
+    }
+
+    #[test]
+    fn a_proof_that_fails_with_the_cached_token_is_retried_once_with_a_fresh_one() {
+        let (state, token) = probe_with_retry(9000, T, Some("old".into()), || Some("new".into()), chroxy_only_for("new"));
+        assert_eq!(state, PortState::Chroxy(9000));
+        assert_eq!(token.as_deref(), Some("new"), "the token that proved is the one handed back");
+    }
+
+    #[test]
+    fn a_proof_that_verifies_the_first_time_does_not_read_a_fresh_token() {
+        let (state, token) = probe_with_retry(9000, T, Some("cur".into()), || panic!("read again"), chroxy_only_for("cur"));
+        assert_eq!((state, token.as_deref()), (PortState::Chroxy(9000), Some("cur")));
+    }
+
+    #[test]
+    fn no_retry_is_made_for_an_unchanged_missing_or_empty_fresh_token_or_a_free_port() {
+        let always_foreign = |p: u16, _: Duration, _: Option<&str>| PortState::Foreign(p);
+        let calls = std::cell::Cell::new(0);
+        let counting = |p: u16, _: Duration, _: Option<&str>| {
+            calls.set(calls.get() + 1);
+            PortState::Foreign(p)
+        };
+        for fresh in [Some("same".to_string()), None, Some(String::new())] {
+            calls.set(0);
+            let (state, token) = probe_with_retry(9000, T, Some("same".into()), || fresh.clone(), counting);
+            assert_eq!((state, token), (PortState::Foreign(9000), None));
+            assert_eq!(calls.get(), 1, "{:?}", fresh);
+        }
+        let free = |p: u16, _: Duration, _: Option<&str>| { let _ = p; PortState::Free };
+        assert_eq!(probe_with_retry(9000, T, None, || panic!("free port"), free).0, PortState::Free);
+        assert_eq!(probe_with_retry(9000, T, Some("a".into()), || Some("b".into()), always_foreign).0, PortState::Foreign(9000));
+    }
+
+    #[test]
+    fn a_daemon_whose_token_was_rotated_is_recognised_through_a_real_probe() {
+        let port = serve_daemon("rotated-token", same_port);
+        let (state, token) = probe_with_retry(
+            port,
+            T,
+            Some("token-before-the-rotation".into()),
+            || Some("rotated-token".into()),
+            probe_port_with_token,
+        );
+        assert_eq!(state, PortState::Chroxy(port));
+        assert_eq!(token.as_deref(), Some("rotated-token"));
+        // A holder that cannot prove with either token stays foreign.
+        let port = serve_daemon("a-third-token", same_port);
+        let (state, token) = probe_with_retry(port, T, Some("x".into()), || Some("y".into()), probe_port_with_token);
+        assert_eq!((state, token), (PortState::Foreign(port), None));
     }
 
     #[test]
     fn a_chroxy_shaped_holder_without_a_proof_is_foreign() {
         let port = serve_with(|_, _| http_200(GOOD));
         assert_eq!(probe(port, Some(TOKEN)), PortState::Foreign(port));
-        assert!(!daemon_proves_itself(port, Some(TOKEN), T));
     }
 
     #[test]
@@ -916,7 +1013,6 @@ mod tests {
         let port = serve_daemon(TOKEN, same_port);
         assert_eq!(probe(port, None), PortState::Foreign(port));
         assert_eq!(probe(port, Some("")), PortState::Foreign(port));
-        assert!(!daemon_proves_itself(port, None, T));
     }
 
     #[test]

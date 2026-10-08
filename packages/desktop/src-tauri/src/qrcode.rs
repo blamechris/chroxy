@@ -176,13 +176,18 @@ fn parse_connection_info(json: &serde_json::Value) -> Result<(String, String), S
 /// is the live source: it requires the PRIMARY token, which is the one the
 /// desktop already holds (config.json, or the OS keychain). The token goes in the
 /// `Authorization` header only: never in the URL and never logged.
-pub fn fetch_daemon_connection_info(port: u16, token: &str) -> Result<(String, String), String> {
-    // The token is sent only to a daemon that has just answered a fresh challenge
-    // with a proof bound to this token and this port.
-    if !crate::tray_state::daemon_proves_itself(port, Some(token), std::time::Duration::from_secs(2)) {
+pub fn fetch_daemon_connection_info(port: u16) -> Result<(String, String), String> {
+    fetch_with(port, &|p| crate::tray_state::prove_daemon(p, std::time::Duration::from_secs(2)))
+}
+
+/// Prove, then ask: the `/connect` request is made only with the token `prove`
+/// returns for a daemon that has just answered a fresh challenge with a proof
+/// bound to this port.
+fn fetch_with(port: u16, prove: &dyn Fn(u16) -> Option<String>) -> Result<(String, String), String> {
+    let Some(token) = prove(port) else {
         return Err(DAEMON_NOT_PROVEN.to_string());
-    }
-    request_connection_info(port, token)
+    };
+    request_connection_info(port, &token)
 }
 
 /// What a refused handoff reports: the daemon on the port did not answer the
@@ -218,17 +223,11 @@ fn request_connection_info(port: u16, token: &str) -> Result<(String, String), S
 }
 
 /// Connection info for a daemon the app did not start: ask it directly. A daemon
-/// that does not prove its identity is refused outright, and so is a missing token;
-/// only a failure of `/connect` on a proven daemon falls back to the on-disk files
-/// the same way [`get_connection_info`] does.
-pub fn get_external_connection_info(
-    port: u16,
-    token: Option<&str>,
-) -> Result<(String, String), String> {
-    let Some(t) = token else {
-        return Err("no access token to prove the daemon with".to_string());
-    };
-    match fetch_daemon_connection_info(port, t) {
+/// that does not prove its identity is refused outright (no token to prove it
+/// with included); only a failure of `/connect` on a proven daemon falls back to
+/// the on-disk files the same way [`get_connection_info`] does.
+pub fn get_external_connection_info(port: u16) -> Result<(String, String), String> {
+    match fetch_daemon_connection_info(port) {
         Ok(info) => Ok(info),
         Err(e) if e == DAEMON_NOT_PROVEN => Err(e),
         Err(_) => get_connection_info(),
@@ -406,10 +405,19 @@ mod tests {
         (port, seen)
     }
 
+    /// A prover that holds `token`: it answers with the token only for a daemon
+    /// that proves itself for it (a real probe against the test daemon).
+    fn prover_with(token: &'static str) -> impl Fn(u16) -> Option<String> {
+        move |port| {
+            let state = crate::tray_state::probe_port_with_token(port, std::time::Duration::from_millis(500), Some(token));
+            (state == crate::tray_state::PortState::Chroxy(port)).then(|| token.to_string())
+        }
+    }
+
     #[test]
     fn the_connect_request_goes_only_to_a_daemon_that_proves_itself() {
         let (port, seen) = serve_daemon("tok123", true);
-        let info = fetch_daemon_connection_info(port, "tok123").unwrap();
+        let info = fetch_with(port, &prover_with("tok123")).unwrap();
         assert_eq!(info.0, "abc.example.com");
         let seen = seen.lock().unwrap();
         assert!(seen.iter().any(|r| r.starts_with("GET /health?challenge=")), "challenged first");
@@ -418,9 +426,9 @@ mod tests {
 
     #[test]
     fn a_daemon_without_a_valid_proof_never_receives_the_connect_request() {
-        for (token, proves) in [("tok123", false), ("another-token", true)] {
-            let (port, seen) = serve_daemon(token, proves);
-            let err = fetch_daemon_connection_info(port, "tok123").unwrap_err();
+        for (daemon_token, proves) in [("tok123", false), ("another-token", true)] {
+            let (port, seen) = serve_daemon(daemon_token, proves);
+            let err = fetch_with(port, &prover_with("tok123")).unwrap_err();
             assert_eq!(err, DAEMON_NOT_PROVEN);
             let seen = seen.lock().unwrap();
             assert!(
@@ -431,11 +439,13 @@ mod tests {
     }
 
     #[test]
-    fn an_external_qr_refuses_an_unproven_daemon_and_a_missing_token_without_falling_back() {
-        let (port, seen) = serve_daemon("tok123", false);
-        assert_eq!(get_external_connection_info(port, Some("tok123")), Err(DAEMON_NOT_PROVEN.to_string()));
-        assert!(get_external_connection_info(port, None).is_err());
-        assert!(seen.lock().unwrap().iter().all(|r| !r.starts_with("GET /connect")));
+    fn the_connect_request_carries_the_token_that_proved_not_another() {
+        let (port, seen) = serve_daemon("rotated", true);
+        // A prover that learned the rotated token: that is the one sent.
+        fetch_with(port, &prover_with("rotated")).unwrap();
+        let seen = seen.lock().unwrap();
+        let connect = seen.iter().find(|r| r.starts_with("GET /connect")).expect("a /connect request");
+        assert!(connect.to_lowercase().contains("authorization: bearer rotated"));
     }
 
     #[test]
