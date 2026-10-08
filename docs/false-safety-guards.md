@@ -2643,7 +2643,11 @@ rounding up to "all six", because the distinction is the point of this
 catalogue: those two were not *defended*, they were *unreachable*, and the
 accident that made them safe disappears the moment #7284 is fixed by adding a
 create disposition. A guard whose current safety is supplied by a neighbouring
-bug is the same false safety one layer over.
+bug is the same false safety one layer over. (#7284 has since landed, and it
+did not add a create disposition: the win32 branch of `openNoFollow` opens
+without `O_TRUNC` and truncates the fd it has just identity-checked, so the two
+write sites are now defended rather than unreachable, and a refused open
+truncates nothing.)
 
 **Why no test could go red.** Each site's refusal is observed through its ELOOP
 branch. With the flag gone the open SUCCEEDS, so the ELOOP branch is

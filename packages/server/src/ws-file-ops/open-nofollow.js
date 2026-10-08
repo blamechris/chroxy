@@ -63,16 +63,37 @@ const log = createLogger('open-nofollow')
  * between 1 and 2, then restore the original inode before 3) is not detected.
  * Detecting that requires an OS primitive Windows does not expose here.
  *
- * ONE win32-only SIDE EFFECT of check-open-recheck, stated because a refusal
- * that is not free is exactly the kind of thing a comment quietly omits: the
- * open happens BEFORE the verification, so a caller passing `O_TRUNC` has
- * already truncated the file by the time step 3 refuses. POSIX `O_NOFOLLOW`
- * decides before anything is touched. Today the difference is unreachable —
- * win32 rejects `O_WRONLY | O_TRUNC` with EINVAL outright, for an unrelated
- * reason (#7284, measured in docs/records/windows-path-containment-7273.md) —
- * but it goes live the moment #7284 is fixed by adding a create disposition.
- * A truncating win32 caller must then read a refusal as "the file may already
- * be empty", not as "nothing happened".
+ * ── #7284 — win32 never passes O_TRUNC to open(); it truncates the verified fd
+ *
+ * Measured on the chroxy-win host (Win 11, Node 22.23.1): `open(existing,
+ * O_WRONLY | O_TRUNC)` fails EINVAL — with or without O_NOFOLLOW, so it is not
+ * an artifact of the missing flag above. Node's Windows layer will not
+ * truncate without a create disposition. The two ways out were to add O_CREAT
+ * (rejected: every overwrite caller deliberately does NOT create, and
+ * O_CREAT would turn a file deleted between the caller's existence check and
+ * this open into a silently created one) or to leave O_TRUNC out of the open
+ * and `ftruncate` afterwards. This does the second:
+ *
+ *   1. the caller's `O_TRUNC` bit is stripped from the flags handed to `open`
+ *      (an existing-file-only open, so a missing file is still `ENOENT`, as
+ *      on POSIX);
+ *   2. step 3's fd-identity check runs exactly as above;
+ *   3. only then `fh.truncate(0)` runs, on the handle step 3 verified.
+ *
+ * The race considered: truncation is the one DESTRUCTIVE act in the call, and
+ * it now happens after the verification instead of inside the open. Under the
+ * old check-open-recheck order with O_TRUNC in the open, an attacker who swapped
+ * a symlink or another file in between step 1 and the open had that file
+ * truncated BEFORE step 3 refused. Now a refused open touches nothing, which
+ * is the same guarantee POSIX `O_NOFOLLOW` gives (the kernel decides before
+ * anything is touched), so the win32 branch is strictly stronger here than the
+ * code it replaces. A swap AFTER step 3 cannot redirect the truncate:
+ * `ftruncate` acts on the fd, which stays pinned to the file whose identity
+ * was verified, not on the path. The one thing left is the both-races case
+ * already described above (swap in, then restore the original inode before
+ * step 3), where the fd is the original file and the truncate is correct.
+ * Truncating then writing through the same handle replaces the content exactly
+ * as `O_TRUNC` does: the fresh handle's position is 0.
  *
  * NEITHER PLATFORM closes the non-final components: `O_NOFOLLOW` checks only
  * the FINAL path component, and so does this — a symlinked PARENT directory is
@@ -136,6 +157,13 @@ const log = createLogger('open-nofollow')
 
 /** True when this platform's Node exports a usable `O_NOFOLLOW`. */
 const HAS_O_NOFOLLOW = typeof fsConstants.O_NOFOLLOW === 'number' && fsConstants.O_NOFOLLOW !== 0
+
+/**
+ * #7284 — the caller's truncate request, which the win32 branch honours with
+ * `ftruncate` after verification instead of passing it to `open`. `0` if the
+ * platform exports no `O_TRUNC`, making the strip below a no-op.
+ */
+const O_TRUNC = typeof fsConstants.O_TRUNC === 'number' ? fsConstants.O_TRUNC : 0
 
 /** True when this platform's Node exports a usable `O_NONBLOCK` (#7938). */
 const HAS_O_NONBLOCK = typeof fsConstants.O_NONBLOCK === 'number' && fsConstants.O_NONBLOCK !== 0
@@ -252,7 +280,9 @@ export async function _openNoFollowImpl(path, flags, mode, deps) {
   // in 0), but nothing about the win32 emulation branch's own reasoning
   // depends on blocking-open semantics, so there is no reason to special-case
   // it out.
-  const fh = await open(path, flags | O_NONBLOCK, mode)
+  // #7284 — O_TRUNC is stripped here and honoured after step 3 (see header).
+  const truncate = (flags & O_TRUNC) !== 0
+  const fh = await open(path, (flags & ~O_TRUNC) | O_NONBLOCK, mode)
 
   // Step 3 — prove the fd we hold is the file the path names. `{ bigint: true }`
   // because a Windows file index does not fit in a Number.
@@ -289,6 +319,18 @@ export async function _openNoFollowImpl(path, flags, mode, deps) {
     throw eloop(path, `identity check failed (${err.code || err.message})`)
   } finally {
     if (!ok) await fh.close().catch(() => {})
+  }
+
+  // #7284 — the destructive step, on the handle step 3 just verified. A failure
+  // here (a locked file, say) closes the handle and surfaces as itself: it is
+  // not a symlink refusal and must not be reported as one.
+  if (truncate) {
+    try {
+      await fh.truncate(0)
+    } catch (err) {
+      await fh.close().catch(() => {})
+      throw err
+    }
   }
 
   return fh

@@ -427,7 +427,7 @@ export const WINDOWS_EXEMPT = [
     note: 'the #1931 CWD realpath TTL cache test is time-based and is cancelled before it finishes on the runner',
     issue: 7276,
   },
-  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (19)
+  // ── TRACKED DEBT — not a POSIX mechanism; should pass on Windows (17)
   {
     file: 'tests/control-room-integrations.test.js',
     reason: 'windows-defect',
@@ -539,20 +539,6 @@ export const WINDOWS_EXEMPT = [
     symptom: 'fail',
     note: 'a relative gitdir pointer is not resolved against the worktree dir, and a dirty-dead worktree is dropped',
     issue: 7274,
-  },
-  {
-    file: 'tests/write-file.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the containment seam is fixed (#7273); what remains is open(O_WRONLY|O_TRUNC) failing EINVAL on Windows, which the Access-denied failure was masking',
-    issue: 7284,
-  },
-  {
-    file: 'tests/ws-file-ops-error-paths.test.js',
-    reason: 'windows-defect',
-    symptom: 'fail',
-    note: 'the containment seam is fixed (#7273); what remains is ENOTDIR surfacing as Directory not found rather than Not a directory',
-    issue: 7284,
   },
   {
     file: 'tests/ws-git-result-schemas.test.js',

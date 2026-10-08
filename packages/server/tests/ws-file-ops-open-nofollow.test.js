@@ -390,6 +390,154 @@ describe('#7280 openNoFollow — forced win32 branch (runs on every platform)', 
   })
 })
 
+/**
+ * #7284 — `open(O_WRONLY | O_TRUNC)` fails EINVAL on Windows (measured on the
+ * chroxy-win host, with and without O_NOFOLLOW). The win32 branch therefore
+ * never hands O_TRUNC to `open`: it opens WITHOUT it (an existing-file-only
+ * open, so it still never creates), runs the fd-identity check, and only then
+ * truncates THROUGH THE VERIFIED HANDLE. These cases force that branch on every
+ * platform; the injected `open` throws the Windows EINVAL for any O_TRUNC it is
+ * handed, so a regression reds here rather than only on the Windows runner.
+ */
+describe('#7284 openNoFollow — win32 truncates through the verified handle, never via O_TRUNC', () => {
+  const O_TRUNC = fsConstants.O_TRUNC
+  const WRITE_TRUNC = fsConstants.O_WRONLY | O_TRUNC
+
+  const winEinval = () => Object.assign(new Error('EINVAL: invalid argument, open'), { code: 'EINVAL' })
+
+  /** Real fs, forced onto the win32 branch, with Windows' O_TRUNC rejection. */
+  function windowsLikeDeps(events) {
+    return {
+      ...defaultOpenNoFollowDeps,
+      hasONoFollow: false,
+      oNofollow: undefined,
+      platform: 'win32',
+      open: async (p, flags, mode) => {
+        events?.push('open')
+        if (flags & O_TRUNC && !(flags & fsConstants.O_CREAT)) throw winEinval()
+        return defaultOpenNoFollowDeps.open(p, flags, mode)
+      },
+      fstat: async (fh) => { events?.push('fstat'); return defaultOpenNoFollowDeps.fstat(fh) },
+    }
+  }
+
+  it('overwrites an existing file: content replaced, not appended, no O_TRUNC reaches open', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-nofollow-trunc-'))
+    try {
+      const target = join(dir, 'overwrite.txt')
+      await writeFile(target, 'a much longer original body')
+      const fh = await _openNoFollowImpl(target, WRITE_TRUNC, 0o666, windowsLikeDeps())
+      try { await fh.writeFile(Buffer.from('short')) } finally { await fh.close() }
+      assert.equal(readFileSync(target, 'utf-8'), 'short')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not CREATE: a missing file is still ENOENT and nothing appears on disk', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-nofollow-trunc-'))
+    try {
+      const target = join(dir, 'missing.txt')
+      await assert.rejects(
+        () => _openNoFollowImpl(target, WRITE_TRUNC, 0o666, windowsLikeDeps()),
+        (err) => err.code === 'ENOENT'
+      )
+      assert.throws(() => readFileSync(target), (err) => err.code === 'ENOENT',
+        'the overwrite path created a file it must only ever overwrite')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('truncates only AFTER the identity check, on the handle it verified', async () => {
+    const events = []
+    const fh = {
+      ...fakeHandle(statLike()),
+      async truncate(len) { events.push(`truncate(${len})`) },
+    }
+    const got = await _openNoFollowImpl('C:\\ws\\f.txt', WRITE_TRUNC, 0o666, {
+      hasONoFollow: false,
+      oNofollow: undefined,
+      platform: 'win32',
+      lstat: async () => { events.push('lstat'); return statLike() },
+      open: async (p, flags) => { events.push(`open:${(flags & O_TRUNC) ? 'O_TRUNC' : 'plain'}`); return fh },
+      fstat: async (h) => { events.push('fstat'); return h.stat() },
+    })
+    assert.equal(got, fh)
+    assert.deepEqual(events.filter((e) => e !== 'lstat' && e !== 'fstat'), ['open:plain', 'truncate(0)'])
+    assert.ok(events.lastIndexOf('fstat') < events.indexOf('truncate(0)'),
+      'truncate ran before the fd-identity check finished')
+  })
+
+  it('a refused identity check truncates NOTHING (the swapped-in file keeps its content)', async () => {
+    let truncated = 0
+    const fh = {
+      ...fakeHandle(statLike({ ino: 999n })),
+      async truncate() { truncated++ },
+    }
+    let lstatCalls = 0
+    await assert.rejects(
+      () => _openNoFollowImpl('C:\\ws\\swapped.txt', WRITE_TRUNC, 0o666, {
+        hasONoFollow: false,
+        oNofollow: undefined,
+        platform: 'win32',
+        lstat: async () => { lstatCalls++; return statLike({ ino: lstatCalls === 1 ? 999n : 1234n }) },
+        open: async () => fh,
+        fstat: async (h) => h.stat(),
+      }),
+      (err) => err.code === 'ELOOP'
+    )
+    assert.equal(truncated, 0, 'the file was truncated before the open was proven to be the right file')
+    assert.equal(fh.closed, true)
+  })
+
+  it('a truncate that fails closes the handle and surfaces the error', async () => {
+    const fh = {
+      ...fakeHandle(statLike()),
+      async truncate() { throw Object.assign(new Error('locked'), { code: 'EBUSY' }) },
+    }
+    await assert.rejects(
+      () => _openNoFollowImpl('C:\\ws\\locked.txt', WRITE_TRUNC, 0o666, {
+        hasONoFollow: false,
+        oNofollow: undefined,
+        platform: 'win32',
+        lstat: async () => statLike(),
+        open: async () => fh,
+        fstat: async (h) => h.stat(),
+      }),
+      (err) => err.code === 'EBUSY'
+    )
+    assert.equal(fh.closed, true, 'a handle whose truncate failed was leaked')
+  })
+
+  it('a read-only open never calls truncate', async () => {
+    const fh = { ...fakeHandle(statLike()), async truncate() { throw new Error('truncate must not run') } }
+    await _openNoFollowImpl('C:\\ws\\r.txt', fsConstants.O_RDONLY, undefined, {
+      hasONoFollow: false,
+      oNofollow: undefined,
+      platform: 'win32',
+      lstat: async () => statLike(),
+      open: async () => fh,
+      fstat: async (h) => h.stat(),
+    })
+  })
+
+  it('the POSIX branch is unchanged: O_TRUNC goes to open, and truncate is never called', async () => {
+    const calls = []
+    const fh = { ...fakeHandle(statLike()), async truncate() { throw new Error('truncate must not run on POSIX') } }
+    await _openNoFollowImpl('/some/path', WRITE_TRUNC, 0o666, {
+      hasONoFollow: true,
+      oNofollow: SENTINEL_NOFOLLOW,
+      platform: 'linux',
+      open: async (p, flags, mode) => { calls.push({ flags, mode }); return fh },
+      lstat: async () => { throw new Error('lstat must not be used on the POSIX branch') },
+      fstat: async () => { throw new Error('fstat must not be used on the POSIX branch') },
+    })
+    assert.equal(calls[0].flags, WRITE_TRUNC | SENTINEL_NOFOLLOW | REAL_O_NONBLOCK)
+    assert.equal(calls[0].mode, 0o666)
+  })
+})
+
 /** A log sink that records every call, for the #7874 assertions. */
 function recordingLog() {
   const calls = []

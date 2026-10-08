@@ -1,4 +1,4 @@
-import { realpath, lstat, readlink } from 'fs/promises'
+import { realpath, lstat, readlink, stat } from 'fs/promises'
 import { resolve, dirname, basename, join, isAbsolute } from 'path'
 import { resolveTargetComponentwiseAsync, COMPONENTWISE_MAX_SYMLINKS } from '../utils/componentwise-resolver.js'
 import { isPathWithin } from '../utils/path-containment.js'
@@ -224,6 +224,70 @@ export async function isUnresolvablePathWithin(absPath, rootReal) {
   } catch {
     return false
   }
+}
+
+/**
+ * #7284 — did `absPath` fail ENOENT only because a component above it is a
+ * regular file (a path THROUGH a file, `afile.txt/subdir`)?
+ *
+ * POSIX reports ENOTDIR for that; Windows reports ENOENT from `realpath`,
+ * `readdir` and `lstat` alike, so a handler keyed on `err.code === 'ENOTDIR'`
+ * answered "Directory not found" for a path whose parent exists and is a file.
+ * A handler that has just seen ENOENT on a path it has ALREADY contained asks
+ * this to tell the two apart. It walks up to the deepest ancestor `stat()` can
+ * see and answers whether that ancestor is not a directory.
+ *
+ * FOR CHOOSING AN ERROR MESSAGE ONLY, like {@link isUnresolvablePathWithin}.
+ * It never probes above `rootReal`: an ancestor outside the boundary is not
+ * the caller's to describe, so the walk stops at `rootReal` and an unknown
+ * root (`null`) answers `false`. Any error it cannot
+ * get past (EACCES, a cycle, the depth ceiling) answers `false`, leaving the
+ * caller's ENOENT message as it was. On POSIX the ENOENT it is asked about is
+ * a real "missing", so the answer is `false` there and nothing changes.
+ *
+ * @param {string} absPath - Absolute, already-contained path that failed ENOENT
+ * @param {string|null} rootReal - The handler's boundary, already a real path
+ * @returns {Promise<boolean>}
+ */
+export async function notADirectoryError(absPath, rootReal) {
+  if (!rootReal || !isAbsolute(absPath)) return false
+  try {
+    let cursor = dirname(absPath)
+    for (let i = 0; i < 256 && cursor !== dirname(cursor); i++) {
+      if (!isPathWithin(cursor, rootReal)) return false
+      let st
+      try {
+        st = await stat(cursor)
+      } catch (err) {
+        if (err.code === 'ENOENT' || err.code === 'ENOTDIR') {
+          cursor = dirname(cursor)
+          continue
+        }
+        return false
+      }
+      return !st.isDirectory()
+    }
+  } catch {
+    return false
+  }
+  return false
+}
+
+/**
+ * #7284 — the error a listing handler should treat `err` as. `err` itself,
+ * except an ENOENT for a path through a file, which becomes an ENOTDIR (the
+ * code POSIX gives it) so the handler's existing ENOTDIR message is taken on
+ * every platform. See {@link notADirectoryError}.
+ *
+ * @param {NodeJS.ErrnoException} err - The failure from the directory read
+ * @param {string} absPath - The contained path that was read
+ * @param {string|null} rootReal - The handler's boundary, already a real path
+ * @returns {Promise<NodeJS.ErrnoException>}
+ */
+export async function withPosixNotADirectory(err, absPath, rootReal) {
+  if (err?.code !== 'ENOENT') return err
+  if (!(await notADirectoryError(absPath, rootReal))) return err
+  return Object.assign(new Error(`ENOTDIR: not a directory, scandir '${absPath}'`), { code: 'ENOTDIR', path: absPath })
 }
 
 /**
