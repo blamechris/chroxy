@@ -1,5 +1,5 @@
 import fs from 'fs'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { dirname, resolve } from 'path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
@@ -17,6 +17,9 @@ const STORE_VERSION = 1
 // schedules; this only bites a hand-edited or runaway file. Extra entries beyond
 // the cap are dropped on load (oldest kept) and refused on add.
 const MAX_TASKS = 500
+
+/** Exported so the wire-cap parity test can pin the snapshot's `tasks` bound to it. */
+export const MAX_STORED_TASKS = MAX_TASKS
 
 const CADENCE_KINDS = new Set(['once', 'interval', 'cron'])
 
@@ -60,11 +63,12 @@ const MAX_CRON_EXPRESSION_LENGTH = 256
  * omits it. The reachable path is therefore a hand-edited registry file.
  *
  * Since #7050 a refused entry is PRESERVED on disk rather than erased, so
- * refusing here does not destroy the operator's task. It does NOT yet mean they
- * can repair it in-product: an over-cap id is unaddressable at the wire
- * (`ScheduledTaskActionSchema.taskId` is capped too) and absent from
- * `store.list()`, so today the only remediation is hand-editing the same file.
- * Closing that loop is #7079.
+ * refusing here does not destroy the operator's task. An over-cap id is
+ * unaddressable at the wire (`ScheduledTaskActionSchema.taskId` is capped too)
+ * and absent from `store.list()`, so since #7079 the operator reaches such an
+ * entry through an opaque server-derived HANDLE (`listUnreadable()` /
+ * `discardUnreadable()`), not through its id; hand-editing the file remains a
+ * supported recovery path (#7077) — see the class docblock.
  */
 const MAX_WIRE_ID_LENGTH = 256
 
@@ -288,6 +292,97 @@ function normalizeLastRun(lastRun) {
 }
 
 /**
+ * Canonical JSON: object keys sorted recursively, so two structurally-equal
+ * values serialise identically regardless of key order. Used for two things that
+ * must agree on "is this the same raw entry?": reconciling a preserved entry
+ * against the file (#7077) and deriving its wire handle (#7079). A raw entry may
+ * be any JSON value, not only an object — a hand-edited file can hold anything.
+ */
+function canonicalJson(value) {
+  // ITERATIVE on purpose. A hand-edited registry can hold an entry nested
+  // thousands of levels deep; a recursive walk threw RangeError out of load() and
+  // crashed the daemon at boot, where the pre-#7077 loader read the same file
+  // fine. Work items are `[isLiteral, payload]` so a value that happens to look
+  // like a literal can never be mistaken for one.
+  const out = []
+  const work = [[false, value]]
+  while (work.length > 0) {
+    const [isLiteral, item] = work.pop()
+    if (isLiteral) { out.push(item); continue }
+    if (item === null || typeof item !== 'object') { out.push(String(JSON.stringify(item))); continue }
+    if (Array.isArray(item)) {
+      out.push('[')
+      work.push([true, ']'])
+      for (let i = item.length - 1; i >= 0; i--) {
+        work.push([false, item[i]])
+        if (i > 0) work.push([true, ','])
+      }
+      continue
+    }
+    const keys = Object.keys(item).sort()
+    out.push('{')
+    work.push([true, '}'])
+    for (let i = keys.length - 1; i >= 0; i--) {
+      work.push([false, item[keys[i]]])
+      work.push([true, `${JSON.stringify(keys[i])}:`])
+      if (i > 0) work.push([true, ','])
+    }
+  }
+  return out.join('')
+}
+
+/**
+ * A persist that did not reach disk, for the callers that must report it
+ * (`remove()`, `discardUnreadable()`). Deliberately generic: the cause (a path,
+ * an errno) is logged server-side, not sent to a client.
+ */
+function persistFailure() {
+  return new Error('Could not write the scheduled-task registry; nothing was changed')
+}
+
+/**
+ * A preserved entry that is a well-formed task whose id a live task already
+ * owns. `duplicateOf` marks it so deleting that live task drops it too: left
+ * behind, a restart would load it as the task the operator just deleted.
+ */
+function duplicateOfLive(entry, id) {
+  return {
+    raw: entry,
+    id: usableId(entry),
+    duplicateOf: id,
+    reason: `duplicates the id of a live task (${id}) — edit that task through the panel, or discard this entry`,
+  }
+}
+
+/** Multiset (canonical JSON -> count) of a list of raw entries. */
+function countCanonical(entries) {
+  const counts = new Map()
+  for (const entry of entries) {
+    const key = canonicalJson(entry)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
+}
+
+/** The trimmed string id of a raw entry, or null when it has no usable one. */
+function usableId(raw) {
+  return typeof raw?.id === 'string' && raw.id.trim().length > 0 ? raw.id.trim() : null
+}
+
+/**
+ * #7079 — the opaque wire handle of an unreadable entry: the first 16 hex chars
+ * (64 bits) of the sha256 of its canonical JSON. It is the ONLY way a client
+ * names a preserved entry, because the entry's own id may be absent, a non-string,
+ * or longer than the wire's 256-char task-id cap (which is correct and must not
+ * be widened to carry a malformed record). Derived server-side from content, so a
+ * client can neither forge a handle for a live task nor address anything the
+ * server did not itself derive. Never contains raw contents.
+ */
+function handleOf(canonical) {
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 16)
+}
+
+/**
  * The scheduled-task data model (#6862). A standing, persisted schedule for a
  * future/recurring agent run — explicitly SEPARATE from live session state and
  * from `ScheduleWakeup` (transcript-tasks.js), which is an intra-session,
@@ -317,6 +412,48 @@ function normalizeLastRun(lastRun) {
  * atomically (temp + rename via writeFileRestricted, mode 0600), version-gated,
  * and fail-open-empty on a corrupt/unknown-version file. Loaded once on daemon
  * start; keyed by task id.
+ *
+ * ── Unreadable (load-refused) entries (#7050, #7077, #7079, #8523) ────────────
+ * An entry the loader cannot read is never served as a task and never erased: it
+ * is kept verbatim and written back by every persist. Two ways to resolve one:
+ *
+ *   1. DISCARD (preferred) — the dashboard shows each entry with the reason it
+ *      was refused and a Discard control; `discardUnreadable(handle)` removes it
+ *      through the store, atomically, with no file editing.
+ *   2. HAND-EDIT — supported WHILE THE DAEMON RUNS.
+ *
+ * ── The hand-editing contract: the daemon only ever rewrites entries it wrote ──
+ * The store remembers exactly what it last wrote to the file (`_lastWritten`, a
+ * multiset of the canonical JSON of every entry, seeded from the raw entries as
+ * read at `load()`, and replaced only after an atomic write SUCCEEDS). At every
+ * persist it re-reads the file, and anything on disk that is not in that multiset
+ * is the OPERATOR's — an edit or an addition — and is never overwritten:
+ *
+ *   | an entry on disk that is…                    | result                              |
+ *   |----------------------------------------------|-------------------------------------|
+ *   | one the daemon wrote (live or preserved)     | the daemon's in-memory copy wins    |
+ *   | one the daemon wrote, now neither live nor preserved | gone on purpose (a delete or discard): NOT resurrected |
+ *   | new, and it normalises, its id is free, cap allows | ADOPTED as a task              |
+ *   | new, and its id is a live task's (or was just adopted) | preserved as unreadable, "duplicates the id of …"; never armed |
+ *   | new, and it does not normalise / cap reached | preserved as unreadable (reason re-derived) |
+ *   | a preserved entry the operator edited or removed | the old capture is dropped; an edit is picked up as a new entry |
+ *   | file missing / unparsable / wrong version or shape | no reconciliation: the in-memory set is written as before (nothing dropped) |
+ *
+ * New entries are processed in DISK ORDER, so when two share an id the first
+ * wins — exactly what `load()` of the same file would do. There is no identity
+ * inference (matching an edited entry to "the one it was" by id or position):
+ * each such guess had a hole that could resurrect a deleted task, arm a duplicate
+ * a restart would reject, or overwrite a live task. Editing a LIVE task's entry
+ * by hand therefore does not change the task; the edit is kept as an unreadable
+ * duplicate to discard or copy from. Such a duplicate is kept across restarts
+ * (`load()` preserves a duplicate id rather than dropping it; the first in file
+ * order is the task) and is dropped together with its task when that task is
+ * deleted, so deleting a task cannot leave a copy that a restart would arm. Edits are noticed only at a persist (any
+ * add/update/remove/discard or an engine run result), and an edit saved between
+ * that persist's read and its atomic rename is lost — the window any two writers
+ * of one file have. A persist that FAILS commits nothing (neither the adoption
+ * nor the new `_lastWritten`), and `remove()`/`discardUnreadable()` restore their
+ * in-memory change and throw so the caller reports the failure.
  */
 export class ScheduledTaskStore {
   /**
@@ -337,6 +474,9 @@ export class ScheduledTaskStore {
     // tasks; they exist so an operator's unreadable task survives the next
     // unrelated mutation instead of being silently deleted from disk.
     this._unreadable = []
+    // #7077: canonical JSON -> count of every entry in the last SUCCESSFUL write
+    // (seeded at load()). What is on disk and NOT in here is the operator's.
+    this._lastWritten = new Map()
     this._loaded = false
   }
 
@@ -365,6 +505,7 @@ export class ScheduledTaskStore {
     // and `_persist()` would write them back into a file that no longer has them,
     // resurrecting records the operator deleted.
     this._unreadable = []
+    this._lastWritten = new Map()
     let raw
     try {
       raw = fs.readFileSync(this._filePath, 'utf-8')
@@ -390,6 +531,10 @@ export class ScheduledTaskStore {
     }
     const tasks = parsed.tasks
     if (!Array.isArray(tasks)) return this
+    // #7077: everything in the file as read is, by definition, already known — the
+    // daemon is about to own it. Seeded BEFORE the loop so a refused or dropped
+    // entry is known too.
+    this._lastWritten = countCanonical(tasks)
     for (const [i, entry] of tasks.entries()) {
       if (this._tasks.size >= MAX_TASKS) {
         // #7050: the remainder is never even examined, so it would be erased on
@@ -409,7 +554,11 @@ export class ScheduledTaskStore {
         continue
       }
       if (this._tasks.has(record.id)) {
-        this._log.warn(`Dropping duplicate scheduled-task id ${record.id} on load`)
+        // Kept, not dropped: a duplicate may be an operator's edit that a running
+        // daemon preserved (see `_reconcile`), and dropping it here would erase
+        // it at the next write after a restart. First in file order wins, as ever.
+        this._log.warn(`Scheduled-task id ${record.id} appears more than once — keeping the first, preserving the duplicate (not scheduled)`)
+        this._unreadable.push(duplicateOfLive(entry, record.id))
         continue
       }
       this._tasks.set(record.id, record)
@@ -522,8 +671,17 @@ export class ScheduledTaskStore {
    */
   remove(id) {
     if (this._tasks.has(id)) {
+      const before = new Map(this._tasks)
+      const beforeUnreadable = this._unreadable
       this._tasks.delete(id)
-      this._persist()
+      // The duplicates kept for this id go with it: otherwise a restart loads one
+      // as the very task that was just deleted.
+      this._unreadable = beforeUnreadable.filter((u) => u.duplicateOf !== id)
+      if (!this._persist()) {
+        this._tasks = before
+        this._unreadable = beforeUnreadable
+        throw persistFailure()
+      }
       return true
     }
     // #7050: a preserved (unreadable) entry must stay deletable — otherwise
@@ -535,10 +693,13 @@ export class ScheduledTaskStore {
     // once and report success. `listUnreadable()` publicly emits those null rows,
     // so this is reachable the moment a caller forwards one back.
     if (typeof id !== 'string' || id.length === 0) return false
-    const before = this._unreadable.length
-    this._unreadable = this._unreadable.filter((u) => u.id !== id)
-    if (this._unreadable.length === before) return false
-    this._persist()
+    const before = this._unreadable
+    this._unreadable = before.filter((u) => u.id !== id)
+    if (this._unreadable.length === before.length) return false
+    if (!this._persist()) {
+      this._unreadable = before
+      throw persistFailure()
+    }
     return true
   }
 
@@ -553,17 +714,125 @@ export class ScheduledTaskStore {
   }
 
   /**
-   * #7050 — the refused entries' ids and reasons (never their raw contents, which
-   * may be any shape). `id` is null when the entry had no usable string id.
-   * @returns {{ id: string|null, reason: string }[]}
+   * #7050 / #7079 — the refused entries' handles, ids and reasons (never their
+   * raw contents, which may be any shape). `id` is null when the entry had no
+   * usable string id. `handle` is the opaque, wire-legal token a client uses to
+   * name the entry (see {@link handleOf}); byte-identical entries get a `-<n>`
+   * suffix so each stays individually addressable.
+   *
+   * This reflects the daemon's view as of the last load or persist; it does not
+   * re-read the file (a read must not change what is armed to fire).
+   * @returns {{ handle: string, id: string|null, reason: string }[]}
    */
   listUnreadable() {
-    return this._unreadable.map(({ id, reason }) => ({ id, reason }))
+    const seen = new Map()
+    return this._unreadable.map(({ raw, id, reason }) => {
+      const base = handleOf(canonicalJson(raw))
+      const n = (seen.get(base) ?? 0) + 1
+      seen.set(base, n)
+      return { handle: n === 1 ? base : `${base}-${n}`, id, reason }
+    })
+  }
+
+  /**
+   * #7079 — discard ONE unreadable entry by the handle `listUnreadable()` derived
+   * for it, and persist. Returns false (changing nothing) for an unknown, stale or
+   * non-string handle. Re-derives handles server-side after refreshing the
+   * preserved set from disk, so a handle the operator saw before hand-editing the
+   * file no longer matches: their newer edit is never discarded blind.
+   * @param {string} handle
+   * @returns {boolean}
+   */
+  discardUnreadable(handle) {
+    if (typeof handle !== 'string' || handle.length === 0) return false
+    const index = this.listUnreadable().findIndex((u) => u.handle === handle)
+    if (index === -1) return false
+    // A handle derives from the daemon's in-memory capture. If the operator has
+    // since edited or removed that entry in the file, the capture is stale and
+    // the handle no longer names what is on disk: refuse, and refresh (a persist
+    // reconciles) so the next listing carries the entry as it is now.
+    const disk = this._readDiskEntries()
+    const key = canonicalJson(this._unreadable[index].raw)
+    if (disk !== null && !disk.some((entry) => canonicalJson(entry) === key)) {
+      this._persist()
+      return false
+    }
+    const before = this._unreadable
+    this._unreadable = before.filter((_, i) => i !== index)
+    if (!this._persist()) {
+      this._unreadable = before
+      throw persistFailure()
+    }
+    return true
+  }
+
+  /**
+   * @private — #7077: read the file's task entries for reconciliation, or null
+   * when they cannot be trusted (missing / unreadable / unparsable / wrong
+   * version / `tasks` not an array). Null means "fall back to the captured raw
+   * entries", never "there are none".
+   */
+  _readDiskEntries() {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this._filePath, 'utf-8'))
+      if (!parsed || typeof parsed !== 'object' || parsed.version !== STORE_VERSION) return null
+      return Array.isArray(parsed.tasks) ? parsed.tasks : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * @private — #7077/#8523: classify what is on disk against what the daemon last
+   * wrote. PURE — returns the result; `_persist()` commits it only if the write
+   * succeeds. See the class docblock for the table. `disk` is trusted.
+   * @returns {{ adopted: object[], unreadable: object[] }}
+   */
+  _reconcile(disk) {
+    const diskKeys = disk.map(canonicalJson)
+    // A preserved entry the file still holds verbatim stays; one it does not was
+    // edited or removed by the operator, so the capture is dropped (an edit
+    // reappears below as a new entry).
+    const onDisk = countCanonical(disk)
+    const unreadable = []
+    for (const p of this._unreadable) {
+      const key = canonicalJson(p.raw)
+      const n = onDisk.get(key) ?? 0
+      if (n > 0) {
+        onDisk.set(key, n - 1)
+        unreadable.push(p)
+      } else {
+        this._log.info('A preserved unreadable scheduled-task entry was edited or removed in the registry file — dropping the stale copy')
+      }
+    }
+    // Everything the daemon did not write is the operator's, in DISK ORDER.
+    const known = new Map(this._lastWritten)
+    const taken = new Set(this._tasks.keys())
+    const adopted = []
+    disk.forEach((entry, i) => {
+      const n = known.get(diskKeys[i]) ?? 0
+      if (n > 0) { known.set(diskKeys[i], n - 1); return }
+      try {
+        const record = this._normalizeStoredTask(entry)
+        if (taken.has(record.id)) {
+          unreadable.push(duplicateOfLive(entry, record.id))
+        } else if (taken.size >= MAX_TASKS) {
+          unreadable.push({ raw: entry, id: usableId(entry), reason: `store cap (${MAX_TASKS}) reached` })
+        } else {
+          taken.add(record.id)
+          adopted.push(record)
+          this._log.info(`Adopted scheduled task ${record.id}: it was added or repaired in the registry file`)
+        }
+      } catch (err) {
+        unreadable.push({ raw: entry, id: usableId(entry), reason: String(err.message) })
+      }
+    })
+    return { adopted, unreadable }
   }
 
   /** @private — keep a refused raw entry so `_persist()` cannot erase it (#7050). */
   _preserveUnreadable(raw, reason) {
-    const id = typeof raw?.id === 'string' && raw.id.trim().length > 0 ? raw.id.trim() : null
+    const id = usableId(raw)
     this._unreadable.push({ raw, id, reason: String(reason) })
   }
 
@@ -618,25 +887,48 @@ export class ScheduledTaskStore {
     }
   }
 
-  /** @private — atomic write of the whole store. */
+  /**
+   * @private — atomic write of the whole store. Returns true when the file was
+   * written, false when it was not (the failure is logged; nothing is committed).
+   * add()/update() keep their long-standing best-effort contract and ignore it;
+   * remove()/discardUnreadable() report it.
+   */
   _persist() {
     try {
       const dir = dirname(this._filePath)
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-      // #7050: the preserved raw entries ride along so an unrelated mutation
-      // cannot erase a task the loader merely could not READ. They are appended
-      // (never re-serialized from a normalized record) so nothing is lost in a
-      // round trip through a shape this version does not understand.
-      const state = {
-        version: STORE_VERSION,
-        tasks: [...this._tasks.values(), ...this._unreadable.map((u) => u.raw)],
+      // #7077/#8523: pick up the operator's edits and additions BEFORE writing, so
+      // the daemon only ever rewrites entries it wrote itself. A store that never
+      // loaded has no baseline to compare against and writes as before; so does a
+      // file that is missing / unparsable / the wrong shape (nothing is dropped).
+      let adopted = []
+      let unreadable = this._unreadable
+      if (this._loaded) {
+        const disk = this._readDiskEntries()
+        if (disk !== null) ({ adopted, unreadable } = this._reconcile(disk))
       }
-      writeFileRestricted(this._filePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
+      // The preserved raw entries ride along so an unrelated mutation cannot erase
+      // a task the loader merely could not READ. They are appended (never
+      // re-serialized from a normalized record) so nothing is lost in a round trip
+      // through a shape this version does not understand.
+      const text = JSON.stringify({
+        version: STORE_VERSION,
+        tasks: [...this._tasks.values(), ...adopted, ...unreadable.map((u) => u.raw)],
+      }, null, 2)
+      writeFileRestricted(this._filePath, text, { tmpSuffix: `.tmp-${process.pid}` })
+      // Committed only now that the file really holds it. A failed write leaves the
+      // baseline and the preserved set as they were, so the next persist reconciles
+      // against the truth instead of against something that never reached disk.
+      for (const record of adopted) this._tasks.set(record.id, record)
+      this._unreadable = unreadable
+      this._lastWritten = countCanonical(JSON.parse(text).tasks)
+      return true
     } catch (err) {
       // Best-effort: a failed persist leaves the in-memory set intact for this
       // process; the prior good file (if any) survives (atomic write). Surface
       // it so an operator can see the schedule won't survive a restart.
       this._log.error(`Failed to persist scheduled tasks to ${this._filePath}: ${err?.stack || err}`)
+      return false
     }
   }
 }

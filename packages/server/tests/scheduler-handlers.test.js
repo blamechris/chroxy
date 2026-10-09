@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { schedulerHandlers } from '../src/handlers/scheduler-handlers.js'
@@ -71,6 +71,7 @@ describe('scheduler handlers — authority gates', () => {
       action({ action: 'pause', taskId: 't1' }),
       action({ action: 'resume', taskId: 't1' }),
       action({ action: 'delete', taskId: 't1' }),
+      action({ action: 'discard_unreadable', handle: '0123456789abcdef' }),
       { type: 'set_scheduler_enabled', enabled: true, requestId: 'g-1' },
     ]) {
       const { ctx, sent } = mkCtx()
@@ -110,7 +111,7 @@ describe('scheduler handlers — authority gates', () => {
   // permitted every mutation, because the write gate returned early on
   // `isPrimaryToken === true` without ever looking at `boundSessionId`.
   it('a bound client is refused EVERY mutation even when it holds the primary token', () => {
-    // The six mutations enumerated from the handler map: the five
+    // The seven mutations enumerated from the handler map: the six
     // `scheduled_task_action` verbs plus the persisted global gate flip.
     const mutations = [
       action({ action: 'create', task: goodTask() }),
@@ -118,9 +119,10 @@ describe('scheduler handlers — authority gates', () => {
       action({ action: 'pause', taskId: 't1' }),
       action({ action: 'resume', taskId: 't1' }),
       action({ action: 'delete', taskId: 't1' }),
+      action({ action: 'discard_unreadable', handle: '0123456789abcdef' }),
       { type: 'set_scheduler_enabled', enabled: true, requestId: 'g-1' },
     ]
-    assert.equal(mutations.length, 6, 'all six scheduler mutations must be covered')
+    assert.equal(mutations.length, 7, 'all seven scheduler mutations must be covered')
 
     for (const msg of mutations) {
       const label = `${msg.type}${msg.action ? `/${msg.action}` : ''}`
@@ -156,10 +158,12 @@ describe('scheduler handlers — authority gates', () => {
       action({ action: 'pause', taskId: 't1' }),
       action({ action: 'resume', taskId: 't1' }),
       action({ action: 'delete', taskId: 't1' }),
+      action({ action: 'discard_unreadable', handle: '0123456789abcdef' }),
     ]) {
       const { ctx, sent } = mkCtx()
       schedulerHandlers.scheduled_task_action(WS, primaryClient, msg, ctx)
-      assert.equal(sent.length, 1, `scheduled_task_action/${msg.action} should send exactly one reply`)
+      // A refused discard (an unknown handle) is followed by a refreshing snapshot.
+      assert.equal(sent.length, msg.action === 'discard_unreadable' ? 2 : 1, `scheduled_task_action/${msg.action} reply count`)
       assert.notEqual(
         sent[0].code, 'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT',
         `scheduled_task_action/${msg.action} must pass the authority gate for an unbound primary`,
@@ -513,5 +517,207 @@ describe('scheduler handlers — the enable gate', () => {
       if (prev === undefined) delete process.env.CHROXY_ENABLE_SCHEDULER
       else process.env.CHROXY_ENABLE_SCHEDULER = prev
     }
+  })
+})
+
+// #7079 — load-refused ("unreadable") stored entries: visible on the snapshot,
+// discardable by an opaque handle. The wire cap on a task id is NOT widened.
+describe('scheduler handlers — unreadable stored entries (#7079)', () => {
+  const TYPO_EPOCH = 1795000000000000000
+  const storePath = () => join(TMP, `unreadable-${++storeSeq}.json`)
+
+  /** A store whose file holds one good task and `bad` refused entries, loaded. */
+  function mkStoreWith(bad) {
+    const filePath = storePath()
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      tasks: [
+        { id: 'good', prompt: 'keep me', cadence: { kind: 'cron', expression: '*/5 * * * *' }, createdAt: 1, updatedAt: 1 },
+        ...bad,
+      ],
+    }))
+    return { store: new ScheduledTaskStore({ filePath, logger: { info() {}, warn() {}, error() {} } }).load(), filePath }
+  }
+  const badEntry = (over = {}) => ({
+    id: 'typo', prompt: 'SECRET PROMPT TEXT', cadence: { kind: 'once', at: TYPO_EPOCH }, createdAt: 1, updatedAt: 1, ...over,
+  })
+
+  it('the snapshot reports the unreadable count and per-entry { handle, reason }, never raw contents', () => {
+    const { store } = mkStoreWith([badEntry()])
+    const { ctx, sent } = mkCtx({ store })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+
+    const parsed = ServerScheduledTasksSchema.safeParse(sent[0])
+    assert.equal(parsed.success, true, parsed.error?.message)
+    assert.equal(sent[0].unreadableCount, 1)
+    assert.equal(sent[0].unreadable.length, 1)
+    assert.match(sent[0].unreadable[0].handle, /^[0-9a-f]{16}$/)
+    assert.match(sent[0].unreadable[0].reason, /epoch|representable/i)
+    assert.deepEqual(Object.keys(sent[0].unreadable[0]).sort(), ['handle', 'reason'], 'no id, no raw entry')
+    assert.ok(!JSON.stringify(sent[0]).includes('SECRET PROMPT TEXT'), 'the raw contents never travel')
+    assert.ok(!sent[0].tasks.some((t) => t.id === 'typo'), 'and it is still not served as a live task')
+  })
+
+  it('a registry with nothing unreadable reports a zero count and an empty list', () => {
+    const { ctx, sent } = mkCtx()
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    assert.equal(sent[0].unreadableCount, 0)
+    assert.deepEqual(sent[0].unreadable, [])
+  })
+
+  it('an over-cap id entry is surfaced and the snapshot STILL parses (the id never reaches the wire)', () => {
+    const { store } = mkStoreWith([badEntry({ id: 'x'.repeat(300) })])
+    const { ctx, sent } = mkCtx({ store })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    assert.equal(ServerScheduledTasksSchema.safeParse(sent[0]).success, true)
+    assert.equal(sent[0].unreadableCount, 1)
+    assert.ok(!JSON.stringify(sent[0]).includes('x'.repeat(300)))
+  })
+
+  it('lists at most 100 rows but reports the TRUE count, and a 130-entry file still parses', () => {
+    const many = Array.from({ length: 130 }, (_, i) => badEntry({ id: `bad${i}` }))
+    const { store } = mkStoreWith(many)
+    const { ctx, sent } = mkCtx({ store })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    assert.equal(ServerScheduledTasksSchema.safeParse(sent[0]).success, true, 'a 130-entry file must not brick the snapshot')
+    assert.equal(sent[0].unreadableCount, 130)
+    assert.equal(sent[0].unreadable.length, 100)
+  })
+
+  it('clamps a reason longer than the wire cap (a loader message that echoes operator input)', () => {
+    // No refusal message the loader produces today is this long, so drive the
+    // clamp with a store that returns one — the snapshot is safeParsed WHOLE by
+    // the dashboard, and one over-cap reason would blank the panel.
+    const stub = {
+      list: () => [],
+      unreadableCount: () => 1,
+      listUnreadable: () => [{ handle: '0123456789abcdef', id: null, reason: 'r'.repeat(5000) }],
+    }
+    const { ctx, sent } = mkCtx({ store: stub })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    assert.equal(sent[0].unreadable[0].reason.length, 512)
+    assert.equal(ServerScheduledTasksSchema.safeParse(sent[0]).success, true)
+  })
+
+  it('FULL LOOP: present -> reported -> discard_unreadable -> gone from disk AND from the next snapshot', () => {
+    const { store, filePath } = mkStoreWith([badEntry()])
+    const { ctx, sent } = mkCtx({ store })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    const handle = sent[0].unreadable[0].handle
+
+    schedulerHandlers.scheduled_task_action(WS, primaryClient, action({ action: 'discard_unreadable', handle }), ctx)
+
+    const ack = sent.at(-1)
+    assert.equal(ack.type, 'scheduled_tasks', 'the ack is the re-emitted snapshot')
+    assert.equal(ack.requestId, 'a-1')
+    assert.equal(ack.unreadableCount, 0)
+    assert.deepEqual(ack.unreadable, [])
+    assert.deepEqual(JSON.parse(readFileSync(filePath, 'utf-8')).tasks.map((t) => t.id), ['good'], 'gone from disk')
+    assert.ok(store.get('good'), 'the live task is untouched')
+  })
+
+  it('a registry write that FAILS is answered with an error, never an ack (discard and delete)', () => {
+    for (const act of ['discard_unreadable', 'delete']) {
+      const { store, filePath } = mkStoreWith([badEntry()])
+      const { ctx, sent } = mkCtx({ store })
+      const msg = act === 'delete' ? { taskId: 'good' } : { handle: store.listUnreadable()[0].handle }
+      mkdirSync(`${filePath}.tmp-${process.pid}`) // the atomic write cannot succeed
+      schedulerHandlers.scheduled_task_action(WS, primaryClient, action({ action: act, ...msg }), ctx)
+      assert.equal(sent.length, 1, act)
+      assert.equal(sent[0].type, 'session_error', `${act}: a failed write must not ack`)
+      assert.equal(sent[0].code, 'SCHEDULED_TASK_ACTION_FAILED', act)
+      assert.match(sent[0].message, /could not write/i)
+      assert.ok(store.get('good'), `${act}: nothing was removed in memory`)
+      assert.equal(store.unreadableCount(), 1, act)
+    }
+  })
+
+  it('a stale handle (the operator edited the file) is refused AND answered with a fresh snapshot, so the row is not a dead end', () => {
+    const { store, filePath } = mkStoreWith([badEntry()])
+    const { ctx, sent } = mkCtx({ store })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    const stale = sent.at(-1).unreadable[0].handle
+    sent.length = 0
+
+    // The operator rewrites the entry (still unreadable) behind the daemon.
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      tasks: [
+        { id: 'good', prompt: 'keep me', cadence: { kind: 'cron', expression: '*/5 * * * *' }, createdAt: 1, updatedAt: 1 },
+        badEntry({ prompt: 'operator rewrote this' }),
+      ],
+    }))
+    schedulerHandlers.scheduled_task_action(WS, primaryClient, action({ action: 'discard_unreadable', handle: stale }), ctx)
+
+    assert.equal(sent.length, 2)
+    assert.equal(sent[0].type, 'session_error')
+    assert.equal(sent[0].code, 'SCHEDULED_TASK_NOT_FOUND')
+    assert.equal(sent[0].requestId, 'a-1', 'the refusal still releases the pending action')
+    assert.equal(sent[1].type, 'scheduled_tasks', 'then a snapshot follows')
+    assert.equal(sent[1].requestId, null, 'it is NOT an ack, so it cannot overwrite the refusal')
+    assert.equal(sent[1].unreadable.length, 1)
+    assert.notEqual(sent[1].unreadable[0].handle, stale, 'carrying the entry as it is now')
+    assert.equal(ServerScheduledTasksSchema.safeParse(sent[1]).success, true)
+    assert.ok(JSON.parse(readFileSync(filePath, 'utf-8')).tasks.some((t) => t.prompt === 'operator rewrote this'), 'their edit is untouched')
+  })
+
+  it('a stale / unknown handle is NOT_FOUND and discards nothing', () => {
+    const { store, filePath } = mkStoreWith([badEntry()])
+    const { ctx, sent } = mkCtx({ store })
+    schedulerHandlers.scheduled_task_action(WS, primaryClient, action({ action: 'discard_unreadable', handle: 'ffffffffffffffff' }), ctx)
+    assert.equal(sent[0].type, 'session_error')
+    assert.equal(sent[0].code, 'SCHEDULED_TASK_NOT_FOUND')
+    assert.equal(sent[0].requestId, 'a-1')
+    assert.equal(store.unreadableCount(), 1)
+    assert.ok(JSON.parse(readFileSync(filePath, 'utf-8')).tasks.some((t) => t.id === 'typo'))
+  })
+
+  it('requires a handle, and a taskId is never accepted in its place', () => {
+    const { store } = mkStoreWith([badEntry()])
+    for (const c of [{}, { handle: '' }, { handle: 7 }, { taskId: 'typo' }, { taskId: 'good' }]) {
+      const { ctx, sent } = mkCtx({ store })
+      schedulerHandlers.scheduled_task_action(WS, primaryClient, action({ action: 'discard_unreadable', ...c }), ctx)
+      assert.equal(sent[0].type, 'session_error', JSON.stringify(c))
+      assert.equal(sent[0].code, 'SCHEDULED_TASK_ACTION_FAILED', JSON.stringify(c))
+    }
+    assert.equal(store.unreadableCount(), 1, 'nothing was discarded')
+    assert.ok(store.get('good'), 'and a live task id passed as a taskId is not deleted by this action')
+  })
+
+  it('a non-primary client cannot discard (same authority as delete)', () => {
+    const { store } = mkStoreWith([badEntry()])
+    const { ctx, sent } = mkCtx({ store })
+    const [{ handle }] = store.listUnreadable()
+    schedulerHandlers.scheduled_task_action(WS, nonPrimaryClient, action({ action: 'discard_unreadable', handle }), ctx)
+    assert.equal(sent[0].code, 'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT')
+    assert.equal(store.unreadableCount(), 1)
+  })
+
+  it('a running engine is refreshed after a discard, like any other mutation', () => {
+    let refreshed = 0
+    const engine = { armed: true, quarantinedTaskIds: new Set(), refresh: () => { refreshed++ } }
+    const { store } = mkStoreWith([badEntry()])
+    const { ctx } = mkCtx({ store, enabled: true, engine })
+    const [{ handle }] = store.listUnreadable()
+    schedulerHandlers.scheduled_task_action(WS, primaryClient, action({ action: 'discard_unreadable', handle }), ctx)
+    assert.equal(refreshed, 1)
+  })
+
+  it('a degraded snapshot (registry missing) clamps its error and reports no unreadable rows', () => {
+    const ctx = {
+      transport: { send: (_w, m) => { ctx.sent.push(m) } },
+      sent: [],
+      sessions: { sessionManager: { scheduledTaskStore: null, providerType: SCHEDULABLE } },
+      services: { config: { features: { scheduler: false } }, schedulerEngine: null },
+    }
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    assert.equal(ctx.sent[0].unreadableCount, 0)
+    assert.equal(ServerScheduledTasksSchema.safeParse(ctx.sent[0]).success, true)
+  })
+
+  it('the store cap and the snapshot `tasks` bound agree (drift guard)', async () => {
+    const { MAX_STORED_TASKS } = await import('../src/scheduled-task-store.js')
+    const { SCHEDULED_TASKS_MAX } = await import('@chroxy/protocol')
+    assert.equal(SCHEDULED_TASKS_MAX, MAX_STORED_TASKS)
   })
 })

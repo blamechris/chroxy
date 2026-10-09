@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A scheduled task the daemon could not read no longer hides, and your hand-edits to the registry file are no longer undone (#7077, #7079, #8523).** When a stored scheduled task can't be read (for example a mistyped timestamp), the daemon keeps it in `scheduled-tasks.json` but doesn't run it. The Scheduled tasks panel now says "N stored tasks could not be read", shows why for each one, and has a Discard button, so you no longer have to edit the file by hand. If you do edit the file while the daemon is running, the daemon now only ever rewrites entries it wrote itself: your repair of an unreadable task is picked up the next time it saves and the task starts running, and a task you add by hand survives too (it runs if it is valid, otherwise it is listed as unreadable). An entry that reuses the id of a task that is already running is kept and listed as unreadable rather than run twice. Before, the daemon quietly wrote its old copy back over your edit or erased your addition. Deleting a task or discarding an entry now reports an error if the registry file could not be written, instead of saying it worked. `chroxy schedule list` reports the unreadable entries too.
 - **"Allow for Session" now stays apart from one-time allows (#8517).** Answering
   a prompt "Allow for Session" showed it as such for a moment; when the daemon
   confirmed the answer, the dashboard and the mobile app reset it to a plain

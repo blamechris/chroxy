@@ -96,6 +96,21 @@ describe('scheduled_tasks dispatch (#6871)', () => {
     expect(s.scheduledTasks!.scheduler.enabled).toBe(false)
   })
 
+  it('holds the unreadable-entry count and rows (#7079)', () => {
+    const unreadable = [{ handle: '0123456789abcdef', reason: 'task id must be a non-empty string' }]
+    handleMessage(snapshot({ unreadableCount: 1, unreadable }) as never, ctx() as never)
+    const held = store.getState().scheduledTasks!
+    expect(held.unreadableCount).toBe(1)
+    expect(held.unreadable).toEqual(unreadable)
+  })
+
+  it('DROPS a snapshot whose unreadable rows break the wire caps, keeping the good one', () => {
+    handleMessage(snapshot({ tasks: [mkTask()] }) as never, ctx() as never)
+    handleMessage(snapshot({ unreadableCount: 1, unreadable: [{ handle: 'h'.repeat(65), reason: 'r' }] }) as never, ctx() as never)
+    expect(store.getState().scheduledTasks!.tasks).toHaveLength(1)
+    expect(store.getState().scheduledTasks!.unreadableCount).toBeUndefined()
+  })
+
   it('holds the task list and the engine verdicts VERBATIM', () => {
     const task = mkTask({
       lastRun: { at: 1, status: 'refused', error: 'quarantined until daemon restart: disk full' },

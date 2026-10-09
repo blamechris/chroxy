@@ -2418,14 +2418,15 @@ export interface ConnectionState {
   /** #6871 — select a task in the Scheduled tasks tab (detail panel target). */
   selectScheduledTask: (taskId: string | null) => void;
   /**
-   * #6871 — create/update/pause/resume/delete a scheduled task. Returns the
-   * requestId (or null if it did not go on the wire). STRICT-PRIMARY gated
-   * server-side: a pairing-issued token is rejected with
-   * SCHEDULED_TASK_ACTION_FAILED's sibling code SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT.
+   * #6871 — create/update/pause/resume/delete a scheduled task, or (#7079)
+   * `discard_unreadable` a load-refused stored entry by its opaque `handle`
+   * (never a taskId). Returns the requestId (or null if it did not go on the
+   * wire). STRICT-PRIMARY gated server-side: a pairing-issued token is rejected
+   * with SCHEDULED_TASK_ACTION_FAILED's sibling code SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT.
    */
   sendScheduledTaskAction: (
-    action: 'create' | 'update' | 'pause' | 'resume' | 'delete',
-    opts?: { taskId?: string; task?: ScheduledTaskInput },
+    action: 'create' | 'update' | 'pause' | 'resume' | 'delete' | 'discard_unreadable',
+    opts?: { taskId?: string; task?: ScheduledTaskInput; handle?: string },
   ) => string | null;
   /**
    * #6871 — flip the PERSISTED global scheduled-execution gate. Returns the

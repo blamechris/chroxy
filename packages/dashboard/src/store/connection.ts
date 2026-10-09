@@ -1827,19 +1827,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // only after a confirmed send, so a mutation that never left the browser is
   // never rendered as in-flight.
   sendScheduledTaskAction: (
-    action: 'create' | 'update' | 'pause' | 'resume' | 'delete',
-    opts: { taskId?: string; task?: ScheduledTaskInput } = {},
+    action: 'create' | 'update' | 'pause' | 'resume' | 'delete' | 'discard_unreadable',
+    opts: { taskId?: string; task?: ScheduledTaskInput; handle?: string } = {},
   ): string | null => {
     const { socket } = get();
     if (!socket || socket.readyState !== WebSocket.OPEN) return null;
     const taskId = opts.taskId ?? null;
-    // Guard the same pairings the server enforces, so an incomplete request is
-    // not put on the wire just to come back as an error.
-    if (action !== 'create' && !taskId) return null;
+    // #7079: a stored entry the loader refused is named by the opaque handle the
+    // snapshot carried, never by an id (its own may be absent or over the wire
+    // cap). The cap mirrors ScheduledTaskActionSchema.handle — an over-cap frame
+    // would come back as an INVALID_MESSAGE carrying no requestId.
+    const handle = opts.handle ?? null;
+    if (action === 'discard_unreadable') {
+      if (!handle || handle.length > 64) return null;
+    } else if (action !== 'create' && !taskId) {
+      // Guard the same pairings the server enforces, so an incomplete request is
+      // not put on the wire just to come back as an error.
+      return null;
+    }
     if ((action === 'create' || action === 'update') && !opts.task) return null;
     const requestId = `sched-action-${nextMessageId()}`;
     const payload: Record<string, unknown> = { type: 'scheduled_task_action', action, requestId };
-    if (taskId) payload.taskId = taskId;
+    if (action === 'discard_unreadable') payload.handle = handle;
+    else if (taskId) payload.taskId = taskId;
     if (opts.task) payload.task = opts.task;
     if (!wsSend(socket, payload)) return null;
     set({
