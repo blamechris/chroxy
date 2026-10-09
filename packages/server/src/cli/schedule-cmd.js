@@ -629,7 +629,14 @@ export function runScheduleDelete(idOrPrefix, options = {}, depsOverride = {}) {
     return { deleted: false, confirmed: false, task }
   }
 
-  const removed = deps.store.remove(task.id)
+  let removed
+  try {
+    removed = deps.store.remove(task.id)
+  } catch (err) {
+    // #7077: a registry write that failed is reported, never shown as a delete.
+    out(`Could not delete scheduled task ${task.id}: ${err.message}`)
+    return { deleted: false, error: 'write-failed', message: err.message }
+  }
   if (!removed) {
     out(`No scheduled task with id ${task.id} (it may have already been deleted).`)
     return { deleted: false, error: 'not-found' }

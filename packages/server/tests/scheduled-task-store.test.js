@@ -498,6 +498,164 @@ describe('#6862 ScheduledTaskStore', () => {
     })
   })
 
+  // #7077 round 2 — NO identity inference. Reconciliation used to guess which
+  // on-disk entry "was" a preserved one (by id, then by file order), and each guess
+  // had a hole: it could resurrect a deleted task, arm a duplicate a restart
+  // would reject, overwrite a live task's copy, or restore a discarded entry over
+  // another's repair. It now compares against a multiset of exactly what the
+  // daemon last wrote: an entry it wrote is its own; anything else on disk is the
+  // operator's, adopted or preserved, never guessed about.
+  describe('#7077 reconciliation is driven by what the daemon last wrote', () => {
+    const TYPO_EPOCH = 1795000000000000000
+    const cron = (expression = '*/5 * * * *') => ({ kind: 'cron', expression })
+    const live = (id, over = {}) => ({ id, prompt: `live ${id}`, cadence: cron(), createdAt: 1, updatedAt: 1, ...over })
+    const bad = (id, over = {}) => ({ id, prompt: `bad ${id}`, cadence: { kind: 'once', at: TYPO_EPOCH }, createdAt: 1, updatedAt: 1, ...over })
+    const writeFile = (tasks) => writeFileSync(filePath, JSON.stringify({ version: 1, tasks }))
+    const readTasks = () => JSON.parse(readFileSync(filePath, 'utf-8')).tasks
+    const unrelated = (store) => store.add({ prompt: 'unrelated', cadence: cron('0 9 * * *') })
+    /** Make the next atomic write fail (the tmp path is a directory) while the file stays readable. */
+    const breakWrites = () => mkdirSync(`${filePath}.tmp-${process.pid}`)
+    const fixWrites = () => rmSync(`${filePath}.tmp-${process.pid}`, { recursive: true, force: true })
+
+    it('Codex 1: deleting a live task does not resurrect it when the operator removed an unreadable one', () => {
+      writeFile([live('A'), bad('B')])
+      const store = newStore(() => 1000).load()
+      writeFile(readTasks().filter((t) => t.id !== 'B')) // operator deletes B by hand
+
+      assert.equal(store.remove('A'), true)
+
+      assert.equal(store.get('A'), null, 'A stays deleted in memory')
+      assert.deepEqual(readTasks().map((t) => t.id), [], 'and on disk: neither A nor B comes back')
+      assert.equal(store.unreadableCount(), 0)
+    })
+
+    it('Codex 2: two repaired entries sharing an id adopt the FIRST in file order, exactly as load() would', () => {
+      writeFile([bad('old-id'), bad('same')])
+      const store = newStore(() => 1000).load()
+      // Operator repairs both; 'old-id' is renamed to 'same'. The disabled one is first on disk.
+      writeFile([
+        live('same', { prompt: 'disabled copy', enabled: false }),
+        live('same', { prompt: 'enabled copy', enabled: true }),
+      ])
+      unrelated(store)
+
+      assert.equal(store.get('same').prompt, 'disabled copy', 'the first wins')
+      assert.equal(store.unreadableCount(), 1, 'the second is kept, not armed')
+      assert.match(store.listUnreadable()[0].reason, /duplicate/i)
+      const reloaded = newStore(() => 1000).load()
+      assert.equal(reloaded.get('same').prompt, 'disabled copy', 'a restart agrees with the running daemon')
+      assert.equal(reloaded.get('same').enabled, false)
+    })
+
+    it('Codex 3: an engine save does not overwrite a repaired entry that shares a live task\'s id', () => {
+      writeFile([bad('same', { prompt: 'unreadable copy' }), live('same', { prompt: 'live copy' })])
+      const store = newStore(() => 1000).load()
+      assert.equal(store.unreadableCount(), 1)
+      // Operator repairs the unreadable copy on disk...
+      writeFile(readTasks().map((t) => (t.prompt === 'unreadable copy' ? live('same', { prompt: 'repaired copy' }) : t)))
+      // ...and the engine saves a run result for the live task.
+      store.update('same', { lastRun: { at: 5, status: 'success' } })
+
+      const onDisk = readTasks()
+      assert.equal(onDisk.filter((t) => t.prompt === 'live copy').length, 1, 'the live task is written exactly once')
+      assert.equal(onDisk.filter((t) => t.prompt === 'repaired copy').length, 1, 'the operator\'s repair is not lost')
+      assert.equal(store.get('same').prompt, 'live copy', 'and it is not armed over the live task')
+      assert.equal(store.get('same').lastRun.status, 'success')
+    })
+
+    it('Codex 4: a FAILED discard leaves the entry in memory, so it cannot erase another entry\'s repair', () => {
+      const idless = (prompt) => ({ prompt, cadence: { kind: 'once', at: TYPO_EPOCH } })
+      writeFile([idless('first'), idless('second')])
+      const store = newStore(() => 1000).load()
+      const [first] = store.listUnreadable()
+
+      breakWrites()
+      assert.throws(() => store.discardUnreadable(first.handle), /could not|failed|write/i, 'the failure is reported, not swallowed')
+      assert.equal(store.unreadableCount(), 2, 'the entry is back in memory')
+      fixWrites()
+
+      writeFile(readTasks().map((t) => (t.prompt === 'second' ? { ...t, prompt: 'second, edited' } : t)))
+      unrelated(store)
+
+      const prompts = readTasks().map((t) => t.prompt).filter((p) => p !== 'unrelated').sort()
+      assert.deepEqual(prompts, ['first', 'second, edited'], 'the repair of the other entry survives')
+    })
+
+    it('a failed remove() of a live task is reported and the task is restored', () => {
+      writeFile([live('A')])
+      const store = newStore(() => 1000).load()
+      breakWrites()
+      assert.throws(() => store.remove('A'))
+      assert.ok(store.get('A'), 'still scheduled in memory')
+      fixWrites()
+      assert.equal(store.remove('A'), true)
+    })
+
+    it('a failed remove() of a preserved entry is reported and the entry is restored', () => {
+      writeFile([bad('B')])
+      const store = newStore(() => 1000).load()
+      breakWrites()
+      assert.throws(() => store.remove('B'))
+      assert.equal(store.unreadableCount(), 1)
+    })
+
+    it('#8523: a READABLE task hand-added while the daemon runs survives the next save', () => {
+      writeFile([live('A')])
+      const store = newStore(() => 1000).load()
+      writeFile([...readTasks(), live('hand-added', { prompt: 'added by hand' })])
+      unrelated(store)
+
+      assert.equal(store.get('hand-added').prompt, 'added by hand', 'adopted')
+      assert.ok(readTasks().some((t) => t.id === 'hand-added'))
+    })
+
+    it('#8523: an UNREADABLE entry hand-added while the daemon runs is preserved, and visible', () => {
+      writeFile([live('A')])
+      const store = newStore(() => 1000).load()
+      writeFile([...readTasks(), bad('hand-bad')])
+      unrelated(store)
+
+      assert.equal(store.get('hand-bad'), null)
+      assert.equal(store.unreadableCount(), 1)
+      assert.ok(readTasks().some((t) => t.id === 'hand-bad'), 'still on disk')
+    })
+
+    it('an operator edit of a LIVE task is kept as an unreadable duplicate; the live task is never overwritten', () => {
+      writeFile([live('A')])
+      const store = newStore(() => 1000).load()
+      writeFile(readTasks().map((t) => ({ ...t, prompt: 'edited behind the daemon' })))
+      unrelated(store)
+
+      assert.equal(store.get('A').prompt, 'live A')
+      assert.equal(store.unreadableCount(), 1)
+      assert.match(store.listUnreadable()[0].reason, /duplicate/i)
+      assert.ok(readTasks().some((t) => t.prompt === 'edited behind the daemon'), 'their content is not lost')
+    })
+
+    it('a write that FAILS leaves reconciliation consistent: a hand-added entry is not forgotten as "known"', () => {
+      writeFile([live('A')])
+      const store = newStore(() => 1000).load()
+      writeFile([...readTasks(), live('hand-added')])
+
+      breakWrites()
+      unrelated(store) // reconciles, then the write fails (add() logs it)
+      fixWrites()
+      unrelated(store) // a retry must still see 'hand-added' as the operator\'s
+
+      assert.ok(readTasks().some((t) => t.id === 'hand-added'), 'not erased by the retry')
+      assert.ok(store.get('hand-added'), 'and adopted exactly once')
+      assert.equal(readTasks().filter((t) => t.id === 'hand-added').length, 1)
+    })
+
+    it('an operator deleting a LIVE task\'s entry by hand does not delete the task (the daemon owns it)', () => {
+      writeFile([live('A'), live('B')])
+      const store = newStore(() => 1000).load()
+      writeFile(readTasks().filter((t) => t.id !== 'B'))
+      unrelated(store)
+      assert.ok(store.get('B'), 'a live task is the daemon\'s: its file entry is rewritten from memory')
+    })
+  })
+
   // #7079 — a preserved entry must be visible and discardable without hand-editing.
   // The wire cap on a task id is correct and is NOT widened, so the operator
   // addresses an unreadable entry by a server-derived opaque HANDLE instead.

@@ -361,6 +361,20 @@ describe('chroxy schedule list — unreadable stored entries (#7079)', () => {
   })
 })
 
+describe('chroxy schedule delete — a failed registry write (#7077)', () => {
+  it('is reported as a failure, not as a delete', () => {
+    const store = makeStore()
+    const created = runScheduleCreate({ prompt: 'x', cron: '0 9 * * *' }, baseDeps(store, cap().write))
+    store.remove = () => { throw new Error('Could not write the scheduled-task registry; nothing was changed') }
+    const w = cap()
+    const res = runScheduleDelete(created.task.id, { yes: true }, baseDeps(store, w.write))
+    assert.equal(res.deleted, false)
+    assert.equal(res.error, 'write-failed')
+    assert.match(w.text(), /Could not delete/)
+    assert.ok(!/Deleted scheduled task/.test(w.text()))
+  })
+})
+
 describe('chroxy schedule edit (#6868)', () => {
   it('updates the prompt in place', () => {
     const store = makeStore()

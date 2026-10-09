@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { schedulerHandlers } from '../src/handlers/scheduler-handlers.js'
@@ -613,6 +613,22 @@ describe('scheduler handlers — unreadable stored entries (#7079)', () => {
     assert.deepEqual(ack.unreadable, [])
     assert.deepEqual(JSON.parse(readFileSync(filePath, 'utf-8')).tasks.map((t) => t.id), ['good'], 'gone from disk')
     assert.ok(store.get('good'), 'the live task is untouched')
+  })
+
+  it('a registry write that FAILS is answered with an error, never an ack (discard and delete)', () => {
+    for (const act of ['discard_unreadable', 'delete']) {
+      const { store, filePath } = mkStoreWith([badEntry()])
+      const { ctx, sent } = mkCtx({ store })
+      const msg = act === 'delete' ? { taskId: 'good' } : { handle: store.listUnreadable()[0].handle }
+      mkdirSync(`${filePath}.tmp-${process.pid}`) // the atomic write cannot succeed
+      schedulerHandlers.scheduled_task_action(WS, primaryClient, action({ action: act, ...msg }), ctx)
+      assert.equal(sent.length, 1, act)
+      assert.equal(sent[0].type, 'session_error', `${act}: a failed write must not ack`)
+      assert.equal(sent[0].code, 'SCHEDULED_TASK_ACTION_FAILED', act)
+      assert.match(sent[0].message, /could not write/i)
+      assert.ok(store.get('good'), `${act}: nothing was removed in memory`)
+      assert.equal(store.unreadableCount(), 1, act)
+    }
   })
 
   it('a stale / unknown handle is NOT_FOUND and discards nothing', () => {
