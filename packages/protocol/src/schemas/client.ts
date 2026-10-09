@@ -694,10 +694,26 @@ export const SkillTrustGrantSchema = z.object({
   requestId: z.string().max(256).optional(),
 })
 
+/**
+ * #8517: the scope a client says an `allow` was chosen at. Today only `session`
+ * ("Allow for Session"). A LABEL, never an authority: it is carried so the daemon's
+ * `permission_resolved` broadcast and its permission journal can say which allow the
+ * user chose, while the rule itself still comes from `set_permission_rules`. The wire
+ * `decision` for such an answer stays `allow`, so nothing that keys on the decision
+ * changes. Also the type of `scope` on the server's `permission_resolved`.
+ */
+export const PermissionScopeSchema = z.enum(['session'])
+
 export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
   requestId: z.string().min(1).max(256),
   decision: z.enum(['allow', 'allowAlways', 'deny']),
+  // #8517: `session` when the user chose "Allow for Session" (the decision is then
+  // `allow`; the session rule rides a separate `set_permission_rules`). A label
+  // only: it grants, widens and skips nothing. The server honours it ONLY beside
+  // `allow` and ignores it beside `deny` / `allowAlways`; an unknown value fails the
+  // parse like any other bad enum. Older daemons strip the key.
+  scope: PermissionScopeSchema.optional(),
   // #6543 (IDE P3 feature B) / #6773: optional per-hunk-review or command edits
   // for an `allow`. A client that reviewed the agent's proposed Write/Edit and
   // dropped some hunks sends WHICH hunks as `droppedHunks` and `keptHunks` (arrays

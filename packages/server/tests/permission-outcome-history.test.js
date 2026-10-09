@@ -504,6 +504,30 @@ describe('SessionManager records permission outcomes: in-process providers (#834
     assert.equal('decision' in seen.deny, false)
   })
 
+  it('#8517: a session-scoped allow (wire decision allow + scope session) journals allowSession; a one-time allow stays allow', async () => {
+    const a = raise('s1'); a.pm.respondToPermission(a.requestId, 'allow', undefined, undefined, 'session'); await a.decided
+    const b = raise('s2'); b.pm.respondToPermission(b.requestId, 'allow'); await b.decided
+    assert.equal(outcomes(mgr, 's1')[0].decision, 'allowSession')
+    assert.equal(outcomes(mgr, 's1')[0].outcome, 'allowed')
+    assert.equal(outcomes(mgr, 's2')[0].decision, 'allow')
+  })
+
+  it('#8517: a scope beside a deny or an allowAlways journals what the decision says', async () => {
+    const d = raise('s1'); d.pm.respondToPermission(d.requestId, 'deny', undefined, undefined, 'session'); await d.decided
+    const e = raise('s2'); e.pm.respondToPermission(e.requestId, 'allowAlways', undefined, undefined, 'session'); await e.decided
+    assert.equal(outcomes(mgr, 's1')[0].outcome, 'denied')
+    assert.equal('decision' in outcomes(mgr, 's1')[0], false, 'a deny keeps no token')
+    assert.equal(outcomes(mgr, 's2')[0].decision, 'allowAlways')
+  })
+
+  it('#8517: a replayed session-scoped allow carries the allowSession token on the wire', async () => {
+    const a = raise('s1'); a.pm.respondToPermission(a.requestId, 'allow', undefined, undefined, 'session'); await a.decided
+    const frames = []
+    sendHistoryEntry((_ws, payload) => frames.push(payload), null, 's1', outcomes(mgr, 's1')[0])
+    assert.equal(frames[0].decision, 'allowSession')
+    assert.equal(frames[0].outcome, 'allowed')
+  })
+
   it('an auto-mode allow (no user token) and a timeout journal no more than they did before', async () => {
     const { session } = makeInProcessSession(mgr, 's1')
     session.emit('permission_request', { requestId: 'p-auto', tool: 'Bash', description: 'x', input: { command: 'ls' } })
@@ -935,6 +959,27 @@ describe('SessionManager records permission outcomes: hook-routed providers (#83
       resolver.resolve(requestId, token, null, { clientId: 'c1' })
     }
     assert.deepEqual(outcomes(mgr, 's1').map((e) => e.decision), ['allow', 'allowAlways', 'allowSession'])
+  })
+
+  it('#8517: the hook route journals a session-scoped allow as allowSession; the held hook request is released as a plain allow', async () => {
+    const one = await raise()
+    resolver.resolve(one.requestId, 'allow', null, { clientId: 'c1' })
+    const two = await raise()
+    resolver.resolve(two.requestId, 'allow', null, { clientId: 'c1', scope: 'session' })
+    assert.deepEqual(outcomes(mgr, 's1').map((e) => e.decision), ['allow', 'allowSession'])
+    assert.equal(one.res.statusCode, two.res.statusCode, 'the hook caller saw the same answer')
+    assert.equal(one.res.body, two.res.body)
+  })
+
+  it('#8517: the hook route ignores a scope beside deny and allowAlways', async () => {
+    const d = await raise()
+    resolver.resolve(d.requestId, 'deny', null, { clientId: 'c1', scope: 'session' })
+    const e = await raise()
+    resolver.resolve(e.requestId, 'allowAlways', null, { clientId: 'c1', scope: 'session' })
+    const [first, second] = outcomes(mgr, 's1')
+    assert.equal(first.outcome, 'denied')
+    assert.equal('decision' in first, false)
+    assert.equal(second.decision, 'allowAlways')
   })
 
   it('records "denied" when the user denies', async () => {

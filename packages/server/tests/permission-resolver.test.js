@@ -138,6 +138,51 @@ describe('permission-resolver — SDK-before-legacy (F) + dispatch states', () =
     )
   })
 
+  describe('session scope (#8517)', () => {
+    it('forwards the scope to the in-process respondToPermission, beside allow', () => {
+      const owner = makeSdkSession({ pending: ['perm-s'] })
+      const { resolver } = build({ map: [['perm-s', OWNER]], ownerSession: owner })
+      const r = resolver.resolve('perm-s', 'allow', OWNER, { clientId: 'c1', scope: 'session' })
+      assert.equal(r.kind, 'resolved')
+      assert.deepStrictEqual(owner.respondToPermission.mock.calls[0].arguments, ['perm-s', 'allow', undefined, undefined, 'session'])
+      assert.equal(r.scope, 'session', 'the result names the scope, for a caller that broadcasts')
+    })
+
+    it('adds no argument when there is no scope (the call shape every provider and mock already has)', () => {
+      const owner = makeSdkSession({ pending: ['perm-n'] })
+      const { resolver } = build({ map: [['perm-n', OWNER]], ownerSession: owner })
+      const r = resolver.resolve('perm-n', 'allow', OWNER, { clientId: 'c1' })
+      assert.equal(owner.respondToPermission.mock.calls[0].arguments.length, 4)
+      assert.equal('scope' in r, false)
+    })
+
+    it('drops the scope beside deny, allowAlways and an unknown value, before any session sees it', () => {
+      for (const [decision, scope] of [['deny', 'session'], ['allowAlways', 'session'], ['allow', 'forever'], ['allow', 1]]) {
+        const owner = makeSdkSession({ pending: ['perm-d'] })
+        const { resolver } = build({ map: [['perm-d', OWNER]], ownerSession: owner })
+        const r = resolver.resolve('perm-d', decision, OWNER, { clientId: 'c1', scope })
+        assert.equal(r.kind, 'resolved')
+        assert.equal(owner.respondToPermission.mock.calls[0].arguments.length, 4, `${decision}+${scope}`)
+        assert.equal('scope' in r, false, `${decision}+${scope}`)
+      }
+    })
+
+    it('does not change what the audit records: the decision stays allow', () => {
+      const owner = makeSdkSession({ pending: ['perm-a'] })
+      const { resolver, audited } = build({ map: [['perm-a', OWNER]], ownerSession: owner })
+      resolver.resolve('perm-a', 'allow', OWNER, { clientId: 'c1', scope: 'session' })
+      assert.equal(audited[0].decision, 'allow')
+    })
+
+    it('hands the legacy store the plain decision and names the scope in the result', () => {
+      const { resolver, legacyResolved } = build({ map: [], legacy: ['perm-l'] })
+      const r = resolver.resolve('perm-l', 'allow', null, { clientId: 'c1', scope: 'session' })
+      assert.deepEqual(legacyResolved, [{ requestId: 'perm-l', decision: 'allow' }], 'the held hook request is released exactly as before')
+      assert.equal(r.via, 'legacy')
+      assert.equal(r.scope, 'session')
+    })
+  })
+
   it('an unmapped request that exists in the legacy store resolves via legacy', () => {
     const { resolver, legacyResolved } = build({ map: [], legacy: ['perm-5'] })
     const r = resolver.resolve('perm-5', 'allow', null, { clientId: 'c1' })

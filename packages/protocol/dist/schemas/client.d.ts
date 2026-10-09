@@ -680,6 +680,17 @@ export declare const SkillTrustGrantSchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+/**
+ * #8517: the scope a client says an `allow` was chosen at. Today only `session`
+ * ("Allow for Session"). A LABEL, never an authority: it is carried so the daemon's
+ * `permission_resolved` broadcast and its permission journal can say which allow the
+ * user chose, while the rule itself still comes from `set_permission_rules`. The wire
+ * `decision` for such an answer stays `allow`, so nothing that keys on the decision
+ * changes. Also the type of `scope` on the server's `permission_resolved`.
+ */
+export declare const PermissionScopeSchema: z.ZodEnum<{
+    session: "session";
+}>;
 export declare const PermissionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"permission_response">;
     requestId: z.ZodString;
@@ -688,6 +699,9 @@ export declare const PermissionResponseSchema: z.ZodObject<{
         deny: "deny";
         allowAlways: "allowAlways";
     }>;
+    scope: z.ZodOptional<z.ZodEnum<{
+        session: "session";
+    }>>;
     editedInput: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     reason: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
@@ -1666,6 +1680,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         deny: "deny";
         allowAlways: "allowAlways";
     }>;
+    scope: z.ZodOptional<z.ZodEnum<{
+        session: "session";
+    }>>;
     editedInput: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     reason: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{

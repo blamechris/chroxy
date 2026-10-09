@@ -851,6 +851,33 @@ describe('createPermissionHandler', () => {
       assert.equal(respondToPermission.mock.calls[0].arguments[1], 'allowAlways')
     })
 
+    it('#8517: an allow with scope session reaches the in-process session as a labelled plain allow', async () => {
+      const permissionSessionMap = new Map([['sdk-req', 'sess-sdk']])
+      const respondToPermission = mock.fn(() => true)
+      const sm = { getSession: mock.fn(() => ({ session: { respondToPermission } })) }
+      const opts = makeHandlerOpts({ permissionSessionMap, getSessionManager: mock.fn(() => sm) })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const res = makeRes()
+      handlePermissionResponseHttp(makeReq(JSON.stringify({ requestId: 'sdk-req', decision: 'allow', scope: 'session' })), res)
+      await new Promise(r => setImmediate(r))
+      assert.equal(res.statusCode, 200)
+      assert.deepEqual(respondToPermission.mock.calls[0].arguments, ['sdk-req', 'allow', undefined, undefined, 'session'])
+    })
+
+    it('#8517: a legacy allow with scope session broadcasts permission_resolved carrying it; a deny does not', async () => {
+      for (const [decision, expectScope] of [['allow', 'session'], ['deny', undefined]]) {
+        const pendingPermissions = new Map([['leg-req', { resolve: mock.fn(), timer: null }]])
+        const opts = makeHandlerOpts({ pendingPermissions, permissionSessionMap: new Map() })
+        const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+        const res = makeRes()
+        handlePermissionResponseHttp(makeReq(JSON.stringify({ requestId: 'leg-req', decision, scope: 'session' })), res)
+        await new Promise(r => setImmediate(r))
+        const frame = opts.broadcastFn.mock.calls.map((c) => c.arguments[0]).find((m) => m?.type === 'permission_resolved')
+        assert.equal(frame.decision, decision)
+        assert.equal(frame.scope, expectScope, decision)
+      }
+    })
+
     it('rejects cross-session response when Bearer token is bound to a different session (2026-04-11 audit blocker 5)', async () => {
       // Scenario: attacker has a session-bound pairing token for session A
       // and tries to approve a permission request belonging to session B via

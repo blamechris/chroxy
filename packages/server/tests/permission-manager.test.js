@@ -130,6 +130,62 @@ describe('PermissionManager', () => {
       assert.deepEqual(result.updatedInput, { command: 'ls' })
     })
 
+    // #8517: "Allow for Session" arrives as decision `allow` + scope `session`. The
+    // scope is a LABEL on the permission_resolved event: the approval itself must be
+    // the same with and without it, in every field the agent sees.
+    describe('session scope (#8517)', () => {
+      async function answer(tool, input, decision, scope) {
+        const requested = []
+        const resolved = []
+        pm.on('permission_request', (d) => requested.push(d))
+        pm.on('permission_resolved', (d) => resolved.push(d))
+        const promise = pm.handlePermission(tool, input, null, 'approve')
+        const ok = pm.respondToPermission(requested[0].requestId, decision, undefined, undefined, scope)
+        return { ok, result: await promise, resolved, pm }
+      }
+
+      it('approval behaviour is identical with and without the scope', async () => {
+        const without = await answer('Write', { file_path: '/a.txt', content: 'x' }, 'allow', undefined)
+        pm.destroy()
+        pm = createManager()
+        const withScope = await answer('Write', { file_path: '/a.txt', content: 'x' }, 'allow', 'session')
+        assert.deepEqual(withScope.result, without.result, 'the agent sees the same result')
+        assert.equal(withScope.ok, without.ok)
+        assert.equal(withScope.pm._pendingPermissions.size, 0)
+        assert.equal(withScope.pm._permissionTimers.size, 0)
+        assert.deepEqual(withScope.pm.getRules(), without.pm.getRules(), 'the scope adds no rule')
+      })
+
+      it('labels the permission_resolved event with the scope, beside a plain allow decision', async () => {
+        const { resolved } = await answer('Bash', { command: 'ls' }, 'allow', 'session')
+        assert.deepEqual(resolved, [{ requestId: resolved[0].requestId, decision: 'allow', reason: 'user', scope: 'session' }])
+      })
+
+      it('adds no scope key when none is sent', async () => {
+        const { resolved } = await answer('Bash', { command: 'ls' }, 'allow', undefined)
+        assert.equal('scope' in resolved[0], false)
+      })
+
+      it('ignores the scope beside a deny: still a deny, no scope on the event', async () => {
+        const { result, resolved } = await answer('Bash', { command: 'ls' }, 'deny', 'session')
+        assert.equal(result.behavior, 'deny')
+        assert.equal(resolved[0].decision, 'deny')
+        assert.equal('scope' in resolved[0], false)
+      })
+
+      it('ignores the scope beside allowAlways: it keeps its own decision, no scope on the event', async () => {
+        const { result, resolved } = await answer('Bash', { command: 'ls' }, 'allowAlways', 'session')
+        assert.equal(result.behavior, 'allow')
+        assert.equal(resolved[0].decision, 'allowAlways')
+        assert.equal('scope' in resolved[0], false)
+      })
+
+      it('drops an unknown scope', async () => {
+        const { resolved } = await answer('Bash', { command: 'ls' }, 'allow', 'forever')
+        assert.equal('scope' in resolved[0], false)
+      })
+    })
+
     it('resolves with deny on respondToPermission', async () => {
       const events = []
       pm.on('permission_request', (data) => events.push(data))

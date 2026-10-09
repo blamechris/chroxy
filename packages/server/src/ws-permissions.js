@@ -736,7 +736,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // #6773: forward an optional free-text deny reason (the WS path's msg.reason
       // analog) so an HTTP caller can also steer a denial. buildDenyMessage bounds
       // + redacts it and ignores it on a non-deny; a missing field is a no-op.
-      const result = permissionResolver.resolve(requestId, decision, callerBoundSessionId, { clientId: 'http', reason: parsed.reason })
+      const result = permissionResolver.resolve(requestId, decision, callerBoundSessionId, { clientId: 'http', reason: parsed.reason, scope: parsed.scope })
       switch (result.kind) {
         case 'binding_mismatch': {
           // For a bound caller the requestId MUST be explicitly mapped to that
@@ -764,6 +764,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               type: 'permission_resolved',
               requestId,
               decision,
+              // #8517: the "Allow for Session" label, when the caller sent it beside an allow.
+              ...(result.scope ? { scope: result.scope } : {}),
               ...(result.sessionId ? { sessionId: result.sessionId } : {}),
             }, result.sessionId ? undefined : unboundOnly)
           }

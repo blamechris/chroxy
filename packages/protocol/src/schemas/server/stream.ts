@@ -9,6 +9,7 @@ import { z } from 'zod'
 
 import { MAX_SANE_DURATION_MS } from './connection.ts'
 import { TURN_OUTCOMES } from '../../turn-outcome.ts'
+import { PermissionScopeSchema } from '../client.ts'
 import type { ServerPermissionRequestMessage } from './messages.ts'
 
 // #5515 (epic #5514): optional, additive wall-clock (ms epoch) timestamp
@@ -727,6 +728,9 @@ export const ServerPermissionExpiredSchema = z.object({
 //     path/provider ('allow' / 'deny' / the user's raw choice); a PLAIN string,
 //     NOT a closed enum, so a new decision value can't fail the parse. Always
 //     present in the requestId variant.
+//   - `scope` (#8517) — `session` when the answer was "Allow for Session": the
+//     `decision` stays `allow` (so nothing keyed on it changes) and this says which
+//     allow the user chose. Absent on any other resolution.
 //   - `sessionId` — the owning chroxy session (stamped from `ctx.sessionId`;
 //     absent in single-session mode → OPTIONAL).
 //   - `reason` (#8374) — WHY it was resolved, when the server knows: `'user'`
@@ -744,6 +748,10 @@ export const ServerPermissionResolvedSchema = z.object({
   toolUseId: z.string().optional(),
   decision: z.string(),
   reason: z.string().optional(),
+  // #8517: `session` when the answer was "Allow for Session" (the `decision` is then
+  // `allow`). Absent otherwise, and from a daemon older than this field; a client
+  // then reads the decision alone. A label: it changes nothing the server did.
+  scope: PermissionScopeSchema.optional(),
   sessionId: z.string().optional(),
 }).superRefine((m, ctx) => {
   // Exactly one non-empty id: a permission prompt names a `requestId`, a

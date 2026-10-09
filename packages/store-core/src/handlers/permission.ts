@@ -130,6 +130,12 @@ export interface PermissionResolvedPayload {
    * {@link PERMISSION_ABORTED_REASON} are acted on.
    */
   reason: string | null
+  /**
+   * #8517: `'session'` when the answer was "Allow for Session" (the `decision` is then
+   * the plain `allow`), or null when the frame carried none: any other resolution,
+   * and a daemon older than the field. Only `'session'` is acted on.
+   */
+  scope: string | null
 }
 
 export function handlePermissionResolved(
@@ -140,7 +146,33 @@ export function handlePermissionResolved(
     toolUseId: parseRawStringField(msg, 'toolUseId'),
     decision: parseRawStringField(msg, 'decision'),
     reason: parseRawStringField(msg, 'reason'),
+    scope: parseRawStringField(msg, 'scope'),
   }
+}
+
+/** The scope a `permission_resolved` carries for "Allow for Session" (#8517). */
+export const PERMISSION_SESSION_SCOPE = 'session'
+
+/**
+ * #8517: the token a resolved prompt is stamped with. The wire `decision` of an
+ * "Allow for Session" answer is a plain `allow`, so the echo of a client's own answer
+ * used to overwrite the `allowSession` it had just set, and the record then grouped
+ * with one-time allows and read "Allowed".
+ *
+ *   - an `allow` with `scope: 'session'` is `allowSession`;
+ *   - an `allow` with no scope (a daemon older than the field) keeps a more specific
+ *     allow this client already recorded for the prompt (`allowSession`,
+ *     `allowAlways`) instead of downgrading it. Polarity is what the echo decides,
+ *     scope is only ever narrowed from what this client knew;
+ *   - anything else is the decision, exactly as before.
+ */
+function resolvedAnswer(current: string | undefined, resolved: PermissionResolvedPayload): string | undefined {
+  const decision = resolved.decision
+  if (decision === 'allow') {
+    if (resolved.scope === PERMISSION_SESSION_SCOPE) return 'allowSession'
+    if (current === 'allowSession' || current === 'allowAlways') return current
+  }
+  return decision ?? undefined
 }
 
 /**
@@ -181,7 +213,9 @@ export const QUESTION_SUPERSEDED_REASON = 'superseded'
  *     no-decision shape, as an `expired` record -- what history journals for it,
  *     so the live card and its replay agree. Before this it was stamped as an
  *     answered deny and read "Denied" live but "expired" after a switch.
- *   - anything else: the decision is the answer, exactly as before.
+ *   - anything else: the decision is the answer, exactly as before -- except that an
+ *     `allow` never overwrites the `allowSession` / `allowAlways` this client already
+ *     recorded, and one carrying `scope: 'session'` is `allowSession` (#8517).
  *
  * Returns a new message; the caller owns finding it.
  */
@@ -204,7 +238,7 @@ export function applyPermissionResolved(
       ...(m.expiresAt !== undefined ? { expiresAt: Math.min(m.expiresAt, now) } : {}),
     }
   }
-  return { ...m, answered: resolved.decision ?? undefined, answeredAt: now, options: undefined }
+  return { ...m, answered: resolvedAnswer(m.answered, resolved), answeredAt: now, options: undefined }
 }
 
 /**

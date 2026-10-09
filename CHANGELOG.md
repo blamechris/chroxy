@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A scheduled task the daemon could not read no longer hides, and your hand-edits to the registry file are no longer undone (#7077, #7079, #8523).** When a stored scheduled task can't be read (for example a mistyped timestamp), the daemon keeps it in `scheduled-tasks.json` but doesn't run it. The Scheduled tasks panel now says "N stored tasks could not be read", shows why for each one, and has a Discard button, so you no longer have to edit the file by hand. If you do edit the file while the daemon is running, the daemon now only ever rewrites entries it wrote itself: your repair of an unreadable task is picked up the next time it saves and the task starts running, and a task you add by hand survives too (it runs if it is valid, otherwise it is listed as unreadable). An entry that reuses the id of a task that is already running is kept and listed as unreadable rather than run twice. Before, the daemon quietly wrote its old copy back over your edit or erased your addition. Deleting a task or discarding an entry now reports an error if the registry file could not be written, instead of saying it worked. `chroxy schedule list` reports the unreadable entries too.
+- **"Allow for Session" now stays apart from one-time allows (#8517).** Answering
+  a prompt "Allow for Session" showed it as such for a moment; when the daemon
+  confirmed the answer, the dashboard and the mobile app reset it to a plain
+  "Allowed", so it folded into a group of one-time allows ("Permission allowed
+  ×3") and its details read "Allowed". The daemon's permission history kept the
+  same plain allow, so a rebuild after a session switch or reload grouped it the
+  same way. The answer now carries a label saying it was the session choice, and
+  the daemon puts it on its confirmation and in its history, so the card, the
+  grouped line and the details say "allowed for the session" live and after a
+  rebuild. A client that gets a confirmation from an older daemon keeps the
+  session or "always" choice it already recorded. The label changes only what is
+  shown: it never approves, widens or skips anything, and the session rule is set
+  exactly as before. History saved before this change keeps the plain allow it
+  recorded.
 
 - **A claude-tui session now reports the subagents it is running (#7396).** The
   default provider never tracked them, so the agent panel, the "N agents
@@ -45,8 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same redacted copy, with the same 10,240-character cap, that the live prompt
   sent, so a replayed record reveals nothing the live one did not. Repeated approvals
   group again after a rebuild when their input matches, and a prompt answered
-  "always allow" or "allow for session" stays apart from one-time allows, as it is
-  live. History saved before this change has no input to show and renders as it did.
+  "always allow" stays apart from one-time allows, live and after a rebuild.
+  "Allow for session" stayed apart only until the daemon confirmed the answer;
+  that is #8517, below. History saved before this change has no input to show and
+  renders as it did.
 
 - **Web fetch and web search results render as cards on the default provider
   (#6987).** A WebFetch on a claude-tui session showed its raw JSON envelope

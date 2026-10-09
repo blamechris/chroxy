@@ -174,6 +174,16 @@ describe('PermissionResponseSchema', () => {
     }
   })
 
+  it('#8517: accepts the session scope label and rejects any other value', () => {
+    const base = { type: 'permission_response', requestId: 'req-1', decision: 'allow' }
+    assert.equal(PermissionResponseSchema.safeParse({ ...base, scope: 'session' }).data.scope, 'session')
+    assert.ok(PermissionResponseSchema.safeParse(base).success, 'scope is optional')
+    for (const bad of ['forever', 'always', 1, null]) {
+      assert.ok(!PermissionResponseSchema.safeParse({ ...base, scope: bad }).success, JSON.stringify(bad))
+    }
+    assert.equal(ClientMessageSchema.safeParse({ ...base, scope: 'session' }).data.scope, 'session', 'the union keeps it too')
+  })
+
   it('rejects empty requestId and invalid decision', () => {
     assert.ok(!PermissionResponseSchema.safeParse({ type: 'permission_response', requestId: '', decision: 'allow' }).success)
     assert.ok(!PermissionResponseSchema.safeParse({ type: 'permission_response', requestId: 'req-1', decision: 'maybe' }).success)
