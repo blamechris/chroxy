@@ -1194,11 +1194,22 @@ describe('ScheduledTasksSection — unreadable stored entries (#7079)', () => {
   })
 
   it('CONTROL: nothing is rendered when the count is zero, absent, or malformed', () => {
-    for (const over of [{ unreadableCount: 0, unreadable: [] }, {}, { unreadableCount: 3, unreadable: 'garbage' }]) {
+    for (const over of [{ unreadableCount: 0, unreadable: [] }, {}, { unreadableCount: 'three' }, { unreadableCount: -1 }, { unreadableCount: 1.5 }]) {
       cleanup()
       resetStore({ scheduledTasks: mkSnapshot(over) })
       render(<ScheduledTasksSection now={() => 1900000000000} />)
       expect(screen.queryByTestId('sched-unreadable'), JSON.stringify(over)).toBeNull()
+    }
+  })
+
+  it('a positive count with NO rows still says so (the count is the fact, the rows are detail)', () => {
+    for (const rows of [[], undefined, 'garbage']) {
+      cleanup()
+      resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 3, ...(rows === undefined ? {} : { unreadable: rows }) }) })
+      render(<ScheduledTasksSection now={() => 1900000000000} />)
+      expect(screen.getByTestId('sched-unreadable-headline').textContent, JSON.stringify(rows)).toBe('3 stored tasks could not be read')
+      expect(screen.queryAllByRole('listitem').filter((li) => li.getAttribute('data-testid')?.startsWith('sched-unreadable-row-'))).toHaveLength(0)
+      expect(screen.getByTestId('sched-unreadable-more').textContent).toMatch(/refresh/i)
     }
   })
 

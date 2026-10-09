@@ -162,7 +162,8 @@ describe('scheduler handlers — authority gates', () => {
     ]) {
       const { ctx, sent } = mkCtx()
       schedulerHandlers.scheduled_task_action(WS, primaryClient, msg, ctx)
-      assert.equal(sent.length, 1, `scheduled_task_action/${msg.action} should send exactly one reply`)
+      // A refused discard (an unknown handle) is followed by a refreshing snapshot.
+      assert.equal(sent.length, msg.action === 'discard_unreadable' ? 2 : 1, `scheduled_task_action/${msg.action} reply count`)
       assert.notEqual(
         sent[0].code, 'SCHEDULER_FORBIDDEN_NON_PRIMARY_CLIENT',
         `scheduled_task_action/${msg.action} must pass the authority gate for an unbound primary`,
@@ -629,6 +630,35 @@ describe('scheduler handlers — unreadable stored entries (#7079)', () => {
       assert.ok(store.get('good'), `${act}: nothing was removed in memory`)
       assert.equal(store.unreadableCount(), 1, act)
     }
+  })
+
+  it('a stale handle (the operator edited the file) is refused AND answered with a fresh snapshot, so the row is not a dead end', () => {
+    const { store, filePath } = mkStoreWith([badEntry()])
+    const { ctx, sent } = mkCtx({ store })
+    schedulerHandlers.scheduled_tasks_request(WS, primaryClient, req(), ctx)
+    const stale = sent.at(-1).unreadable[0].handle
+    sent.length = 0
+
+    // The operator rewrites the entry (still unreadable) behind the daemon.
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      tasks: [
+        { id: 'good', prompt: 'keep me', cadence: { kind: 'cron', expression: '*/5 * * * *' }, createdAt: 1, updatedAt: 1 },
+        badEntry({ prompt: 'operator rewrote this' }),
+      ],
+    }))
+    schedulerHandlers.scheduled_task_action(WS, primaryClient, action({ action: 'discard_unreadable', handle: stale }), ctx)
+
+    assert.equal(sent.length, 2)
+    assert.equal(sent[0].type, 'session_error')
+    assert.equal(sent[0].code, 'SCHEDULED_TASK_NOT_FOUND')
+    assert.equal(sent[0].requestId, 'a-1', 'the refusal still releases the pending action')
+    assert.equal(sent[1].type, 'scheduled_tasks', 'then a snapshot follows')
+    assert.equal(sent[1].requestId, null, 'it is NOT an ack, so it cannot overwrite the refusal')
+    assert.equal(sent[1].unreadable.length, 1)
+    assert.notEqual(sent[1].unreadable[0].handle, stale, 'carrying the entry as it is now')
+    assert.equal(ServerScheduledTasksSchema.safeParse(sent[1]).success, true)
+    assert.ok(JSON.parse(readFileSync(filePath, 'utf-8')).tasks.some((t) => t.prompt === 'operator rewrote this'), 'their edit is untouched')
   })
 
   it('a stale / unknown handle is NOT_FOUND and discards nothing', () => {

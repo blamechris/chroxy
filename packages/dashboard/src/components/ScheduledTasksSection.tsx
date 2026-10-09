@@ -911,13 +911,14 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
  * sends that handle back; there is deliberately no edit/run affordance here.
  *
  * `count` is the server's TRUE total and `rows` is capped on the wire, so the
- * headline is never derived from `rows.length`. A malformed value renders nothing
- * rather than a wrong number.
+ * headline is never derived from `rows.length`, and a positive count is shown even
+ * when the rows are missing (the count is the fact, the rows are detail). A
+ * malformed count renders nothing rather than a wrong number.
  */
 function UnreadableNotice({ count, rows }: { count: unknown; rows: unknown }) {
   const total = typeof count === 'number' && Number.isInteger(count) && count > 0 ? count : 0
   const list = Array.isArray(rows) ? (rows as ScheduledTaskUnreadable[]) : []
-  if (total === 0 || list.length === 0) return null
+  if (total === 0) return null
   const hidden = Math.max(0, total - list.length)
   return (
     <div className="cr-sched-unreadable" data-testid="sched-unreadable" role="region" aria-label="Unreadable stored tasks">
@@ -929,14 +930,18 @@ function UnreadableNotice({ count, rows }: { count: unknown; rows: unknown }) {
         scheduled and will never fire. Discard {total === 1 ? 'it' : 'an entry'} here, or fix the entry in
         the registry file (the daemon picks the edit up the next time it saves).
       </p>
-      <ul className="cr-sched-unreadable-list">
-        {list.map((u) => (
-          <UnreadableRow key={u.handle} entry={u} />
-        ))}
-      </ul>
+      {list.length > 0 && (
+        <ul className="cr-sched-unreadable-list">
+          {list.map((u) => (
+            <UnreadableRow key={u.handle} entry={u} />
+          ))}
+        </ul>
+      )}
       {hidden > 0 && (
         <p className="cr-dim" data-testid="sched-unreadable-more">
-          …and {hidden} more not listed. Discarding an entry reveals the next.
+          {list.length === 0
+            ? 'The details of these entries were not received. Refresh to load them.'
+            : `…and ${hidden} more not listed. Discarding an entry reveals the next.`}
         </p>
       )}
     </div>

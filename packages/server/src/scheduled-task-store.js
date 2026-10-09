@@ -299,10 +299,36 @@ function normalizeLastRun(lastRun) {
  * be any JSON value, not only an object — a hand-edited file can hold anything.
  */
 function canonicalJson(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  const keys = Object.keys(value).sort()
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`
+  // ITERATIVE on purpose. A hand-edited registry can hold an entry nested
+  // thousands of levels deep; a recursive walk threw RangeError out of load() and
+  // crashed the daemon at boot, where the pre-#7077 loader read the same file
+  // fine. Work items are `[isLiteral, payload]` so a value that happens to look
+  // like a literal can never be mistaken for one.
+  const out = []
+  const work = [[false, value]]
+  while (work.length > 0) {
+    const [isLiteral, item] = work.pop()
+    if (isLiteral) { out.push(item); continue }
+    if (item === null || typeof item !== 'object') { out.push(String(JSON.stringify(item))); continue }
+    if (Array.isArray(item)) {
+      out.push('[')
+      work.push([true, ']'])
+      for (let i = item.length - 1; i >= 0; i--) {
+        work.push([false, item[i]])
+        if (i > 0) work.push([true, ','])
+      }
+      continue
+    }
+    const keys = Object.keys(item).sort()
+    out.push('{')
+    work.push([true, '}'])
+    for (let i = keys.length - 1; i >= 0; i--) {
+      work.push([false, item[keys[i]]])
+      work.push([true, `${JSON.stringify(keys[i])}:`])
+      if (i > 0) work.push([true, ','])
+    }
+  }
+  return out.join('')
 }
 
 /**
@@ -312,6 +338,20 @@ function canonicalJson(value) {
  */
 function persistFailure() {
   return new Error('Could not write the scheduled-task registry; nothing was changed')
+}
+
+/**
+ * A preserved entry that is a well-formed task whose id a live task already
+ * owns. `duplicateOf` marks it so deleting that live task drops it too: left
+ * behind, a restart would load it as the task the operator just deleted.
+ */
+function duplicateOfLive(entry, id) {
+  return {
+    raw: entry,
+    id: usableId(entry),
+    duplicateOf: id,
+    reason: `duplicates the id of a live task (${id}) — edit that task through the panel, or discard this entry`,
+  }
 }
 
 /** Multiset (canonical JSON -> count) of a list of raw entries. */
@@ -405,7 +445,10 @@ function handleOf(canonical) {
  * each such guess had a hole that could resurrect a deleted task, arm a duplicate
  * a restart would reject, or overwrite a live task. Editing a LIVE task's entry
  * by hand therefore does not change the task; the edit is kept as an unreadable
- * duplicate to discard or copy from. Edits are noticed only at a persist (any
+ * duplicate to discard or copy from. Such a duplicate is kept across restarts
+ * (`load()` preserves a duplicate id rather than dropping it; the first in file
+ * order is the task) and is dropped together with its task when that task is
+ * deleted, so deleting a task cannot leave a copy that a restart would arm. Edits are noticed only at a persist (any
  * add/update/remove/discard or an engine run result), and an edit saved between
  * that persist's read and its atomic rename is lost — the window any two writers
  * of one file have. A persist that FAILS commits nothing (neither the adoption
@@ -511,7 +554,11 @@ export class ScheduledTaskStore {
         continue
       }
       if (this._tasks.has(record.id)) {
-        this._log.warn(`Dropping duplicate scheduled-task id ${record.id} on load`)
+        // Kept, not dropped: a duplicate may be an operator's edit that a running
+        // daemon preserved (see `_reconcile`), and dropping it here would erase
+        // it at the next write after a restart. First in file order wins, as ever.
+        this._log.warn(`Scheduled-task id ${record.id} appears more than once — keeping the first, preserving the duplicate (not scheduled)`)
+        this._unreadable.push(duplicateOfLive(entry, record.id))
         continue
       }
       this._tasks.set(record.id, record)
@@ -625,9 +672,14 @@ export class ScheduledTaskStore {
   remove(id) {
     if (this._tasks.has(id)) {
       const before = new Map(this._tasks)
+      const beforeUnreadable = this._unreadable
       this._tasks.delete(id)
+      // The duplicates kept for this id go with it: otherwise a restart loads one
+      // as the very task that was just deleted.
+      this._unreadable = beforeUnreadable.filter((u) => u.duplicateOf !== id)
       if (!this._persist()) {
         this._tasks = before
+        this._unreadable = beforeUnreadable
         throw persistFailure()
       }
       return true
@@ -763,11 +815,7 @@ export class ScheduledTaskStore {
       try {
         const record = this._normalizeStoredTask(entry)
         if (taken.has(record.id)) {
-          unreadable.push({
-            raw: entry,
-            id: usableId(entry),
-            reason: `duplicates the id of a live task (${record.id}) — edit that task through the panel, or discard this entry`,
-          })
+          unreadable.push(duplicateOfLive(entry, record.id))
         } else if (taken.size >= MAX_TASKS) {
           unreadable.push({ raw: entry, id: usableId(entry), reason: `store cap (${MAX_TASKS}) reached` })
         } else {

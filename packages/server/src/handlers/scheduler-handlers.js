@@ -439,6 +439,11 @@ function handleScheduledTaskAction(ws, client, msg, ctx) {
           'No unreadable scheduled-task entry matches that handle — it may already have been discarded, or the registry file was edited. Refresh to see the current list.',
           'SCHEDULED_TASK_NOT_FOUND',
         )
+        // The row that sent this handle is stale, and a refusal alone leaves it on
+        // screen as a dead end. Follow with the current snapshot (the store has
+        // already refreshed itself). `requestId: null` on purpose: a snapshot that
+        // echoed it would be read as the ACK and mask the refusal.
+        replySnapshot(ws, ctx, null)
         return
       }
       // The handle is a hash, safe to log; the entry's contents never are.

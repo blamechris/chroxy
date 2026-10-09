@@ -656,6 +656,93 @@ describe('#6862 ScheduledTaskStore', () => {
     })
   })
 
+  // Fold round after the panel review of #8521.
+  describe('#7077 fold: depth-safety, restart parity, and delete parity', () => {
+    const cron = (expression = '*/5 * * * *') => ({ kind: 'cron', expression })
+    const live = (id, over = {}) => ({ id, prompt: `live ${id}`, cadence: cron(), createdAt: 1, updatedAt: 1, ...over })
+    const writeFile = (tasks) => writeFileSync(filePath, JSON.stringify({ version: 1, tasks }))
+    const readTasks = () => JSON.parse(readFileSync(filePath, 'utf-8')).tasks
+    const unrelated = (store) => store.add({ prompt: 'unrelated', cadence: cron('0 9 * * *') })
+
+    it('an absurdly deep entry cannot crash load(), list, persist or discard (regression vs main: load() threw RangeError)', () => {
+      const DEPTH = 5000
+      const deep = '['.repeat(DEPTH) + ']'.repeat(DEPTH)
+      writeFileSync(filePath, `{"version":1,"tasks":[${JSON.stringify(live('ok'))},${deep}]}`)
+
+      let store
+      assert.doesNotThrow(() => { store = newStore(() => 1000).load() }, 'load() must not throw on a deep entry')
+      assert.ok(store.get('ok'))
+      assert.equal(store.unreadableCount(), 1, 'the deep entry is preserved, not dropped')
+      let rows
+      assert.doesNotThrow(() => { rows = store.listUnreadable() })
+      assert.match(rows[0].handle, /^[0-9a-f]{16}$/)
+
+      assert.doesNotThrow(() => unrelated(store), 'a persist must not throw')
+      assert.equal(store.unreadableCount(), 1, 'and the deep entry survives it')
+      assert.equal(store.discardUnreadable(rows[0].handle), true, 'and it can be discarded')
+      assert.equal(store.unreadableCount(), 0)
+    })
+
+    it('two DIFFERENT deep entries get different handles (the key is not a constant fallback)', () => {
+      const a = '['.repeat(5000) + '1' + ']'.repeat(5000)
+      const b = '['.repeat(5000) + '2' + ']'.repeat(5000)
+      writeFileSync(filePath, `{"version":1,"tasks":[${a},${b}]}`)
+      const rows = newStore(() => 1000).load().listUnreadable()
+      assert.equal(rows.length, 2)
+      assert.notEqual(rows[0].handle, rows[1].handle)
+    })
+
+    it('restart parity: an operator edit kept as a duplicate survives a restart and a further save', () => {
+      writeFile([live('a')])
+      const store = newStore(() => 1000).load()
+      writeFile(readTasks().map((t) => ({ ...t, prompt: 'edited behind the daemon' })))
+      unrelated(store)
+      assert.equal(store.unreadableCount(), 1, 'precondition: kept as a duplicate')
+
+      const restarted = newStore(() => 2000).load()
+      assert.equal(restarted.get('a').prompt, 'live a', 'the live task still wins')
+      assert.equal(restarted.unreadableCount(), 1, 'the duplicate is still listed after a restart')
+      assert.match(restarted.listUnreadable()[0].reason, /duplicate/i)
+
+      unrelated(restarted)
+      assert.ok(readTasks().some((t) => t.prompt === 'edited behind the daemon'), 'and still on disk after the next save')
+      assert.equal(newStore(() => 3000).load().unreadableCount(), 1)
+    })
+
+    it('deleting a live task also drops the duplicate entries kept for its id, so a restart cannot arm one', () => {
+      writeFile([live('a')])
+      const store = newStore(() => 1000).load()
+      writeFile(readTasks().map((t) => ({ ...t, prompt: 'edited behind the daemon' })))
+      unrelated(store)
+      assert.equal(store.unreadableCount(), 1)
+
+      assert.equal(store.remove('a'), true)
+      assert.equal(store.unreadableCount(), 0, 'the duplicate is dropped with its task')
+      assert.ok(!readTasks().some((t) => t.id === 'a'), 'neither copy is on disk')
+
+      const restarted = newStore(() => 2000).load()
+      assert.equal(restarted.get('a'), null, 'a is not armed after a restart')
+    })
+
+    it('deleting a live task does NOT drop an unrelated unreadable entry that merely has another id', () => {
+      writeFile([live('a'), { id: 'bad', prompt: 'p', cadence: { kind: 'once', at: 1795000000000000000 } }])
+      const store = newStore(() => 1000).load()
+      store.remove('a')
+      assert.equal(store.unreadableCount(), 1)
+    })
+
+    it('a failed delete of a live task restores the duplicates dropped with it', () => {
+      writeFile([live('a')])
+      const store = newStore(() => 1000).load()
+      writeFile(readTasks().map((t) => ({ ...t, prompt: 'edited behind the daemon' })))
+      unrelated(store)
+      mkdirSync(`${filePath}.tmp-${process.pid}`)
+      assert.throws(() => store.remove('a'))
+      assert.equal(store.unreadableCount(), 1)
+      assert.ok(store.get('a'))
+    })
+  })
+
   // #7079 — a preserved entry must be visible and discardable without hand-editing.
   // The wire cap on a task id is correct and is NOT widened, so the operator
   // addresses an unreadable entry by a server-derived opaque HANDLE instead.
