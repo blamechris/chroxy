@@ -42,6 +42,9 @@ import {
   handleThinkingDelta as sharedThinkingDelta,
   handleThinkingStreamEnd as sharedThinkingEnd,
   finalizeThinkingStreams,
+  // #8518 — the ordering hint: a late thinking block goes above the tool row /
+  // answer it was thought before, not at the end.
+  placeThinkingBubble,
   handleAuthOk as sharedAuthOk,
   parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
@@ -2576,7 +2579,7 @@ function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
       updateSession(thinkingTargetId, (ss) => {
         const out = sharedThinkingStart(msg, get().activeSessionId, ss.messages);
         if (!out.isNewMessage || !out.newMessage) return {};
-        return { messages: [...filterThinking(ss.messages), out.newMessage] };
+        return { messages: placeThinkingBubble(filterThinking(ss.messages), out.newMessage, out.precedes) };
       });
     }
     return;
@@ -6045,8 +6048,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             messages: ss.messages.filter((message) => message.id !== 'thinking'),
           }));
         }
+        // #8518: a replayed reasoning bubble that was recorded as belonging above a
+        // tool row / the answer is rebuilt there, as the live one was.
         updateSession(targetId, (ss) => ({
-          messages: [...ss.messages, newMsg],
+          messages: result.thinkingPrecedes
+            ? placeThinkingBubble(ss.messages, newMsg, result.thinkingPrecedes)
+            : [...ss.messages, newMsg],
         }));
       } else {
         get().addMessage(newMsg);

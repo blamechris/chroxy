@@ -3340,6 +3340,30 @@ describe('@chroxy/protocol schemas', () => {
         }).success)
       })
 
+      it('ServerStreamStartSchema carries the #8518 thinkingPrecedes ordering hint, and still validates without it', async () => {
+        const { ServerStreamStartSchema, ServerMessageSchema } = await import('../src/schemas/server.ts')
+        const base = { type: 'stream_start', messageId: 'm1-thinking-0', thinking: true }
+        const tool = ServerStreamStartSchema.safeParse({ ...base, thinkingPrecedes: { kind: 'tool_use', toolUseId: 'toolu_1' } })
+        assert.ok(tool.success, JSON.stringify(tool.error?.issues))
+        assert.deepEqual(tool.data.thinkingPrecedes, { kind: 'tool_use', toolUseId: 'toolu_1' })
+        const resp = ServerStreamStartSchema.safeParse({ ...base, thinkingPrecedes: { kind: 'response', messageId: 'm1' } })
+        assert.ok(resp.success)
+        assert.deepEqual(resp.data.thinkingPrecedes, { kind: 'response', messageId: 'm1' })
+        // A kind a newer server adds must not make an older client reject the frame.
+        assert.ok(ServerStreamStartSchema.safeParse({ ...base, thinkingPrecedes: { kind: 'something_new' } }).success)
+        assert.ok(ServerStreamStartSchema.safeParse(base).success, 'additive: absent is fine')
+        // Bounded.
+        assert.ok(!ServerStreamStartSchema.safeParse({ ...base, thinkingPrecedes: { kind: 'tool_use', toolUseId: 'x'.repeat(257) } }).success)
+        assert.ok(!ServerStreamStartSchema.safeParse({ ...base, thinkingPrecedes: 'toolu_1' }).success)
+        // and on the replayed message frame
+        const replayed = ServerMessageSchema.safeParse({
+          type: 'message', messageType: 'response', content: 'x', timestamp: 1, kind: 'thinking',
+          thinkingPrecedes: { kind: 'tool_use', toolUseId: 'toolu_1' },
+        })
+        assert.ok(replayed.success, JSON.stringify(replayed.error?.issues))
+        assert.deepEqual(replayed.data.thinkingPrecedes, { kind: 'tool_use', toolUseId: 'toolu_1' })
+      })
+
       it('ServerStreamEndSchema accepts the #6391 footer-stat thinkingDurationMs + thinkingTokens', async () => {
         const { ServerStreamEndSchema } = await import('../src/schemas/server.ts')
         // Both stats present (a provider that separates reasoning tokens).

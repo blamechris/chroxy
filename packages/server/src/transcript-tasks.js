@@ -290,7 +290,10 @@ export class TranscriptTaskScanner {
 
   /**
    * #7393 — take (and clear) the queued thinking blocks, oldest first.
-   * @returns {Array<{uuid: string, ts: number, text: string, redacted: boolean, durationMs: number|undefined}>}
+   * `precedes` (#8518) is the ordering hint read off the transcript: the tool call the
+   * block comes before, or the response, or undefined when the scan cannot say.
+   * @returns {Array<{uuid: string, ts: number, text: string, redacted: boolean, durationMs: number|undefined,
+   *   precedes: ({kind: 'tool_use', toolUseId: string}|{kind: 'response'}|undefined)}>}
    */
   drainThinking() {
     const out = this._thinking
@@ -497,6 +500,7 @@ export class TranscriptTaskScanner {
         for (const block of blocks) {
           if (!block || block.type !== 'tool_use' || typeof block.id !== 'string') continue
           this._ingestToolUse(block, entryTs ?? Date.now())
+          this._claimThinkingForToolUse(entry, block.id)
         }
         this._ingestThinking(entry, blocks, entryTs)
       }
@@ -558,6 +562,17 @@ export class TranscriptTaskScanner {
       ? entry.thinkingDurationMs
       : undefined
     const uuid = typeof entry.uuid === 'string' ? entry.uuid : ''
+    // #8518: what this block precedes, from the transcript's own order. The
+    // entries of one API message share `message.id`, and that message's
+    // `stop_reason` says how it ended: in a tool call (the block precedes that
+    // message's first tool_use, which a LATER entry names: see
+    // `_claimThinkingForToolUse`) or in the answer (it precedes the response).
+    // A message that ended in a tool call, or one with no stop reason yet, can only
+    // be told once its tool_use is read; anything the scan has not reached by the
+    // time the block is drained is simply left without a hint.
+    const apiMessageId = typeof entry.message?.id === 'string' ? entry.message.id : ''
+    const stopReason = entry.message?.stop_reason
+    const endedInAnswer = typeof stopReason === 'string' && stopReason !== 'tool_use' && stopReason !== 'pause_turn'
     for (const block of thinkingBlocks) {
       const redacted = block.type === 'redacted_thinking'
       let text = ''
@@ -570,8 +585,29 @@ export class TranscriptTaskScanner {
         text,
         redacted,
         durationMs: duration,
+        apiMessageId,
+        precedes: endedInAnswer ? { kind: 'response' } : undefined,
       })
       if (this._thinking.length > MAX_PENDING_THINKING_BLOCKS) this._thinking.shift()
+    }
+  }
+
+  /**
+   * #8518 — a tool_use was read: every queued thinking block of the same API
+   * message that is still waiting for its follower precedes THIS tool call. The
+   * first tool_use of a message claims the block; a later one finds it settled.
+   * Only blocks still in the queue can be claimed, so one already drained is never
+   * amended after the fact.
+   */
+  _claimThinkingForToolUse(entry, toolUseId) {
+    if (this._thinkingSinceMs === null || this._thinking.length === 0) return
+    if (entry.isSidechain === true) return
+    const apiMessageId = typeof entry.message?.id === 'string' ? entry.message.id : ''
+    if (!apiMessageId) return
+    for (const queued of this._thinking) {
+      if (queued.apiMessageId === apiMessageId && queued.precedes === undefined) {
+        queued.precedes = { kind: 'tool_use', toolUseId }
+      }
     }
   }
 

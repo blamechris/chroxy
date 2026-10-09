@@ -11,6 +11,11 @@ export declare const ServerStreamStartSchema: z.ZodObject<{
     messageId: z.ZodString;
     serverTs: z.ZodOptional<z.ZodNumber>;
     thinking: z.ZodOptional<z.ZodBoolean>;
+    thinkingPrecedes: z.ZodOptional<z.ZodObject<{
+        kind: z.ZodString;
+        toolUseId: z.ZodOptional<z.ZodString>;
+        messageId: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>;
 }, z.core.$strip>;
 export declare const ServerStreamDeltaSchema: z.ZodObject<{
     type: z.ZodLiteral<"stream_delta">;
@@ -109,6 +114,11 @@ export declare const ServerMessageSchema: z.ZodObject<{
     kind: z.ZodOptional<z.ZodString>;
     thinkingDurationMs: z.ZodOptional<z.ZodNumber>;
     thinkingTokens: z.ZodOptional<z.ZodNumber>;
+    thinkingPrecedes: z.ZodOptional<z.ZodObject<{
+        kind: z.ZodString;
+        toolUseId: z.ZodOptional<z.ZodString>;
+        messageId: z.ZodOptional<z.ZodString>;
+    }, z.core.$strip>>;
     historySeq: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ServerToolStartSchema: z.ZodObject<{

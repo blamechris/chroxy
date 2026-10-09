@@ -1990,6 +1990,404 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           "sessionId": "s1"
         }
       ]
+    },
+    {
+      "name": "tui-thinking-read-after-its-tool-row",
+      "description": "claude-tui writes the transcript after the PreToolUse hook, so the reasoning that came before a tool call reaches the wire after that tool's row; the stream_start names the tool it precedes (#8518) and both live and replay put the bubble above it.",
+      "providers": [
+        "claude-tui"
+      ],
+      "events": [
+        [
+          "stream_start",
+          {
+            "messageId": "m1"
+          }
+        ],
+        [
+          "tool_start",
+          {
+            "messageId": "tu1",
+            "toolUseId": "tu1",
+            "tool": "Bash",
+            "input": {
+              "command": "ls"
+            }
+          }
+        ],
+        [
+          "stream_start",
+          {
+            "messageId": "m1-thinking-0",
+            "thinking": true,
+            "thinkingPrecedes": {
+              "kind": "tool_use",
+              "toolUseId": "tu1"
+            }
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1-thinking-0",
+            "delta": "List the directory first.",
+            "thinking": true
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "m1-thinking-0",
+            "thinking": true,
+            "thinkingDurationMs": 900
+          }
+        ],
+        [
+          "tool_result",
+          {
+            "toolUseId": "tu1",
+            "result": "a.js",
+            "truncated": false
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1",
+            "delta": "One file: a.js."
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "m1"
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.0123,
+            "duration": 4200,
+            "usage": {
+              "input_tokens": 120,
+              "output_tokens": 40
+            },
+            "sessionId": "s1"
+          }
+        ]
+      ],
+      "live": [
+        {
+          "type": "stream_start",
+          "messageId": "m1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_busy",
+          "sessionId": "s1"
+        },
+        {
+          "type": "tool_start",
+          "messageId": "tu1",
+          "toolUseId": "tu1",
+          "tool": "Bash",
+          "input": {
+            "command": "ls"
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_start",
+          "messageId": "m1-thinking-0",
+          "thinking": true,
+          "thinkingPrecedes": {
+            "kind": "tool_use",
+            "toolUseId": "tu1"
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1-thinking-0",
+          "delta": "List the directory first.",
+          "thinking": true,
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "m1-thinking-0",
+          "thinking": true,
+          "thinkingDurationMs": 900,
+          "sessionId": "s1"
+        },
+        {
+          "type": "tool_result",
+          "toolUseId": "tu1",
+          "result": "a.js",
+          "truncated": false,
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1",
+          "delta": "One file: a.js.",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "m1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ],
+      "replay": [
+        {
+          "type": "tool_start",
+          "messageId": "tu1",
+          "toolUseId": "tu1",
+          "tool": "Bash",
+          "input": {
+            "command": "ls"
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 1
+        },
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "List the directory first.",
+          "messageId": "m1-thinking-0",
+          "kind": "thinking",
+          "thinkingDurationMs": 900,
+          "thinkingPrecedes": {
+            "kind": "tool_use",
+            "toolUseId": "tu1"
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 2
+        },
+        {
+          "type": "tool_result",
+          "toolUseId": "tu1",
+          "result": "a.js",
+          "truncated": false,
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 3
+        },
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "One file: a.js.",
+          "messageId": "m1",
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 4
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 5
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        }
+      ]
+    },
+    {
+      "name": "tui-thinking-read-after-the-answer",
+      "description": "claude-tui can write a text-only turn's reasoning after the Stop hook; the late stream_start names the response it precedes (#8518) and both live and replay put the bubble above the answer.",
+      "providers": [
+        "claude-tui"
+      ],
+      "events": [
+        [
+          "stream_start",
+          {
+            "messageId": "m1"
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1",
+            "delta": "Hi there."
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "m1"
+          }
+        ],
+        [
+          "result",
+          {
+            "cost": 0.0123,
+            "duration": 4200,
+            "usage": {
+              "input_tokens": 120,
+              "output_tokens": 40
+            },
+            "sessionId": "s1"
+          }
+        ],
+        [
+          "stream_start",
+          {
+            "messageId": "m1-thinking-0",
+            "thinking": true,
+            "late": true,
+            "thinkingPrecedes": {
+              "kind": "response",
+              "messageId": "m1"
+            }
+          }
+        ],
+        [
+          "stream_delta",
+          {
+            "messageId": "m1-thinking-0",
+            "delta": "A greeting is enough.",
+            "thinking": true,
+            "late": true
+          }
+        ],
+        [
+          "stream_end",
+          {
+            "messageId": "m1-thinking-0",
+            "thinking": true,
+            "late": true,
+            "thinkingDurationMs": 700
+          }
+        ]
+      ],
+      "live": [
+        {
+          "type": "stream_start",
+          "messageId": "m1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_busy",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1",
+          "delta": "Hi there.",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "m1",
+          "sessionId": "s1"
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_start",
+          "messageId": "m1-thinking-0",
+          "thinking": true,
+          "thinkingPrecedes": {
+            "kind": "response",
+            "messageId": "m1"
+          },
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_delta",
+          "messageId": "m1-thinking-0",
+          "delta": "A greeting is enough.",
+          "thinking": true,
+          "sessionId": "s1"
+        },
+        {
+          "type": "stream_end",
+          "messageId": "m1-thinking-0",
+          "thinking": true,
+          "thinkingDurationMs": 700,
+          "sessionId": "s1"
+        }
+      ],
+      "replay": [
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "Hi there.",
+          "messageId": "m1",
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 1
+        },
+        {
+          "type": "result",
+          "cost": 0.0123,
+          "duration": 4200,
+          "usage": {
+            "input_tokens": 120,
+            "output_tokens": 40
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 2
+        },
+        {
+          "type": "agent_idle",
+          "sessionId": "s1"
+        },
+        {
+          "type": "message",
+          "messageType": "response",
+          "content": "A greeting is enough.",
+          "messageId": "m1-thinking-0",
+          "kind": "thinking",
+          "thinkingDurationMs": 700,
+          "thinkingPrecedes": {
+            "kind": "response",
+            "messageId": "m1"
+          },
+          "timestamp": 1700000000000,
+          "sessionId": "s1",
+          "historySeq": 3
+        }
+      ]
     }
   ]
 } /* json:end */

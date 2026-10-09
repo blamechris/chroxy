@@ -560,7 +560,8 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end'), 'the late thinking block')
     const turnId = events.frames[0].messageId
     assert.deepEqual(thinkingFrames(events.frames), [
-      { name: 'stream_start', messageId: `${turnId}-thinking-0`, thinking: true, late: true },
+      // #8518: the block's message ended the turn, so it precedes the answer that is already on the wire.
+      { name: 'stream_start', messageId: `${turnId}-thinking-0`, thinking: true, late: true, thinkingPrecedes: { kind: 'response', messageId: turnId } },
       { name: 'stream_delta', messageId: `${turnId}-thinking-0`, delta: 'Six times seven is forty-two.', thinking: true, late: true },
       { name: 'stream_end', messageId: `${turnId}-thinking-0`, thinking: true, late: true, thinkingDurationMs: 900 },
     ])
@@ -568,6 +569,65 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     assert.equal(respDelta.delta, 'The answer is 42.', 'the response text is untouched')
     // It is tagged late (after the result), so the forwarder can keep the session idle.
     assert.ok(thinkingFrames(events.frames).every((f) => f.late === true), 'late frames are tagged late:true')
+  })
+
+  it('a block that reaches the wire after the tool_start it precedes names that tool, and no wait is added (#8518)', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    const order = []
+    s.on('tool_start', (d) => order.push(`tool_start:${d.toolUseId}`))
+    s.on('stream_start', (d) => { if (d.thinking) order.push('thinking_start') })
+    const turn = s.sendMessage('list the files')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    // Claude Code runs the PreToolUse hook BEFORE it writes the turn's assistant lines.
+    writeFileSync(join(sinkDir, 'pre-aaa.json'), JSON.stringify({
+      tool_use_id: 'toolu_ls', tool_name: 'Bash', tool_input: { command: 'ls' },
+    }))
+    await waitFor(() => order.includes('tool_start:toolu_ls'), 'the tool_start')
+    assert.deepEqual(thinkingFrames(events.frames), [], 'precondition: the transcript has not been flushed yet')
+    appendJournal(transcript, [
+      thinkingEntry({ text: 'I should list the directory.', ts: now(), messageId: 'msg_T', stopReason: 'tool_use' }),
+      toolUseEntry({ ts: now(1), messageId: 'msg_T', id: 'toolu_ls', apiBlockIndex: 1 }),
+    ])
+    await waitFor(() => order.includes('thinking_start'), 'the thinking block')
+    stop(sinkDir)
+    await turn
+    assert.deepEqual(order, ['tool_start:toolu_ls', 'thinking_start'], 'the block still arrives after the row: it is a hint for the client, not a wait')
+    const start = thinkingFrames(events.frames).find((f) => f.name === 'stream_start')
+    assert.deepEqual(start.thinkingPrecedes, { kind: 'tool_use', toolUseId: 'toolu_ls' })
+    assert.ok(!start.late, 'it arrived in-turn')
+  })
+
+  it('a block that is read in order (before its tool_start) still carries the hint; the client ignores it when the row is not there yet (#8518)', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    const turn = s.sendMessage('list the files')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    appendJournal(transcript, [
+      thinkingEntry({ text: 'x', ts: now(), messageId: 'msg_T', stopReason: 'tool_use' }),
+      toolUseEntry({ ts: now(1), messageId: 'msg_T', id: 'toolu_ls', apiBlockIndex: 1 }),
+    ])
+    await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end'), 'the thinking block')
+    stop(sinkDir)
+    await turn
+    const start = thinkingFrames(events.frames).find((f) => f.name === 'stream_start')
+    assert.deepEqual(start.thinkingPrecedes, { kind: 'tool_use', toolUseId: 'toolu_ls' })
+  })
+
+  it('an in-turn block whose message ended the turn carries no response hint (the answer slot is still empty)', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    const turn = s.sendMessage('what is 6 x 7?')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    appendJournal(transcript, [thinkingEntry({ text: 'six sevens', ts: now(), messageId: 'msg_T', stopReason: 'end_turn' })])
+    await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end'), 'the thinking block')
+    stop(sinkDir)
+    await turn
+    const start = thinkingFrames(events.frames).find((f) => f.name === 'stream_start')
+    assert.ok(!('thinkingPrecedes' in start))
   })
 
   it('attributes late reasoning to the turn it belongs to when the next turn has already started', async () => {

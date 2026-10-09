@@ -7,10 +7,13 @@
 import { describe, it, expect } from 'vitest'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import {
+  handleMessage,
   handleThinkingStreamStart,
   handleThinkingDelta,
   handleThinkingStreamEnd,
   finalizeThinkingStreams,
+  parseThinkingPrecedes,
+  placeThinkingBubble,
   MAX_THINKING_CONTENT_LEN,
 } from './stream'
 import type { ChatMessage } from '../types'
@@ -273,5 +276,115 @@ describe('handleThinkingStreamEnd (#6756)', () => {
       SESSION,
     ).applyTo(messages)
     expect(again).toBe(messages)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #8518 — the ordering hint: a thinking block that reaches the client after the
+// tool row (or the answer) it was thought before is placed above it.
+// ---------------------------------------------------------------------------
+
+describe('parseThinkingPrecedes (#8518)', () => {
+  it('reads a tool_use hint and a response hint, keeping only the known fields', () => {
+    expect(parseThinkingPrecedes({ kind: 'tool_use', toolUseId: 'toolu_1', extra: 1 })).toEqual({ kind: 'tool_use', toolUseId: 'toolu_1' })
+    expect(parseThinkingPrecedes({ kind: 'response', messageId: 'm1' })).toEqual({ kind: 'response', messageId: 'm1' })
+  })
+
+  it('returns undefined for anything else: absent, a kind this client does not know, a missing/empty/non-string/over-long id', () => {
+    for (const raw of [undefined, null, 'toolu_1', 7, [], {}, { kind: 'nope' }, { kind: 'tool_use' }, { kind: 'tool_use', toolUseId: '' },
+      { kind: 'tool_use', toolUseId: 3 }, { kind: 'response' }, { kind: 'response', toolUseId: 'toolu_1' },
+      { kind: 'tool_use', toolUseId: 'x'.repeat(257) }]) {
+      expect(parseThinkingPrecedes(raw), JSON.stringify(raw)).toBeUndefined()
+    }
+  })
+})
+
+describe('placeThinkingBubble (#8518)', () => {
+  const user: ChatMessage = { id: 'u1', type: 'user_input', content: 'go', timestamp: 1 }
+  const toolA: ChatMessage = { id: 'toolu_a', type: 'tool_use', toolUseId: 'toolu_a', tool: 'Bash', content: 'ls', timestamp: 2 }
+  const toolB: ChatMessage = { id: 'toolu_b', type: 'tool_use', toolUseId: 'toolu_b', tool: 'Read', content: 'x', timestamp: 3 }
+  const answer: ChatMessage = { id: 'turn-1', type: 'response', content: 'done', timestamp: 4 }
+  const bubble: ChatMessage = { id: 'turn-1-thinking-0', type: 'thinking', content: 'hm', thinkingStreaming: true, timestamp: 5 }
+
+  it('puts the bubble directly above the tool row it precedes', () => {
+    const before = [user, toolA, toolB, answer]
+    const next = placeThinkingBubble(before, bubble, { kind: 'tool_use', toolUseId: 'toolu_b' })
+    expect(next.map((m) => m.id)).toEqual(['u1', 'toolu_a', 'turn-1-thinking-0', 'toolu_b', 'turn-1'])
+    expect(before.map((m) => m.id)).toEqual(['u1', 'toolu_a', 'toolu_b', 'turn-1'])
+  })
+
+  it('puts the bubble above the response it precedes', () => {
+    const next = placeThinkingBubble([user, toolA, answer], bubble, { kind: 'response', messageId: 'turn-1' })
+    expect(next.map((m) => m.id)).toEqual(['u1', 'toolu_a', 'turn-1-thinking-0', 'turn-1'])
+  })
+
+  it('appends, exactly as before the hint existed, when there is no hint', () => {
+    expect(placeThinkingBubble([user, toolA], bubble, undefined).map((m) => m.id)).toEqual(['u1', 'toolu_a', 'turn-1-thinking-0'])
+  })
+
+  it('appends when the target is not there (the block arrived in order: its tool_start is still to come)', () => {
+    expect(placeThinkingBubble([user], bubble, { kind: 'tool_use', toolUseId: 'toolu_a' }).map((m) => m.id)).toEqual(['u1', 'turn-1-thinking-0'])
+    expect(placeThinkingBubble([user], bubble, { kind: 'response', messageId: 'turn-1' }).map((m) => m.id)).toEqual(['u1', 'turn-1-thinking-0'])
+  })
+
+  it('matches the target by kind: a response hint never lands on a tool row, a tool hint never on a response', () => {
+    const collide: ChatMessage = { id: 'turn-1', type: 'tool_use', toolUseId: 'turn-1', content: '', timestamp: 2 }
+    expect(placeThinkingBubble([collide], bubble, { kind: 'response', messageId: 'turn-1' }).map((m) => m.id)).toEqual(['turn-1', 'turn-1-thinking-0'])
+    expect(placeThinkingBubble([answer], bubble, { kind: 'tool_use', toolUseId: 'turn-1' }).map((m) => m.id)).toEqual(['turn-1', 'turn-1-thinking-0'])
+  })
+
+  it('searches from the end, so a repeated id resolves to the most recent turn', () => {
+    const oldTool: ChatMessage = { ...toolA, timestamp: 0 }
+    const next = placeThinkingBubble([oldTool, user, toolA], bubble, { kind: 'tool_use', toolUseId: 'toolu_a' })
+    expect(next.map((m) => m.id)).toEqual(['toolu_a', 'u1', 'turn-1-thinking-0', 'toolu_a'])
+  })
+})
+
+describe('handleThinkingStreamStart carries the hint (#8518)', () => {
+  it('returns the parsed ordering hint beside the new bubble', () => {
+    const out = handleThinkingStreamStart(
+      { type: 'stream_start', messageId: 't-thinking-0', thinking: true, thinkingPrecedes: { kind: 'tool_use', toolUseId: 'toolu_1' } },
+      SESSION,
+      [],
+    )
+    expect(out.precedes).toEqual({ kind: 'tool_use', toolUseId: 'toolu_1' })
+    expect(out.newMessage!.id).toBe('t-thinking-0')
+  })
+
+  it('has no hint for a frame without one, or with a malformed one (the old behaviour)', () => {
+    expect(handleThinkingStreamStart({ type: 'stream_start', messageId: 't-thinking-0', thinking: true }, SESSION, []).precedes).toBeUndefined()
+    expect(handleThinkingStreamStart({ type: 'stream_start', messageId: 't-thinking-0', thinking: true, thinkingPrecedes: { kind: 'tool_use' } }, SESSION, []).precedes).toBeUndefined()
+  })
+})
+
+describe('a replayed thinking entry carries the hint (#8518)', () => {
+  const entry = (extra: Record<string, unknown> = {}) => ({
+    type: 'message', messageType: 'response', kind: 'thinking', content: 'hm', messageId: 't-thinking-0',
+    timestamp: 10, historySeq: 4, thinkingDurationMs: 900, ...extra,
+  })
+
+  it('hands the parsed hint to the caller, who places the rebuilt bubble', () => {
+    const out = handleMessage(entry({ thinkingPrecedes: { kind: 'response', messageId: 't' } }), SESSION, true, [])
+    expect(out.shouldDispatch).toBe(true)
+    if (!out.shouldDispatch) return
+    expect(out.chatMessage.type).toBe('thinking')
+    expect(out.thinkingPrecedes).toEqual({ kind: 'response', messageId: 't' })
+  })
+
+  it('has none for an entry without one, for a malformed one, and for a non-thinking message', () => {
+    for (const msg of [entry(), entry({ thinkingPrecedes: { kind: 'tool_use' } })]) {
+      const out = handleMessage(msg, SESSION, true, [])
+      expect(out.shouldDispatch && out.thinkingPrecedes).toBeFalsy()
+    }
+    const reply = handleMessage(
+      { type: 'message', messageType: 'response', content: 'hi', messageId: 'm1', timestamp: 1, thinkingPrecedes: { kind: 'tool_use', toolUseId: 'x' } },
+      SESSION, true, [],
+    )
+    expect(reply.shouldDispatch && reply.thinkingPrecedes).toBeFalsy()
+  })
+
+  it('a live message frame (no replay) never reads a hint', () => {
+    const out = handleMessage({ type: 'message', messageType: 'response', kind: 'thinking', content: 'hm', timestamp: 1, thinkingPrecedes: { kind: 'tool_use', toolUseId: 'x' } }, SESSION, false, [])
+    expect(out.shouldDispatch && out.thinkingPrecedes).toBeFalsy()
   })
 })

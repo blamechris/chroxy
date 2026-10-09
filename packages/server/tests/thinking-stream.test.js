@@ -105,6 +105,46 @@ describe('ThinkingStreams.emitBlock late flag (a block shown after its turn was 
   })
 })
 
+describe('ThinkingStreams.emitBlock ordering hint (#8518)', () => {
+  it('names the tool call a block precedes on the stream_start only', () => {
+    const { frames, emit } = recorder()
+    new ThinkingStreams(emit, 'turn-1').emitBlock({
+      text: 'x', durationMs: 5, late: true, precedes: { kind: 'tool_use', toolUseId: 'toolu_LS' },
+    })
+    assert.deepEqual(frames[0], {
+      name: 'stream_start', messageId: 'turn-1-thinking-0', thinking: true, late: true,
+      thinkingPrecedes: { kind: 'tool_use', toolUseId: 'toolu_LS' },
+    })
+    assert.ok(frames.slice(1).every((f) => !('thinkingPrecedes' in f)), 'delta and end do not repeat it')
+  })
+
+  it('a LATE block that precedes the response names the turn response by id', () => {
+    const { frames, emit } = recorder()
+    new ThinkingStreams(emit, 'turn-1').emitBlock({ text: 'x', late: true, precedes: { kind: 'response' } })
+    assert.deepEqual(frames[0].thinkingPrecedes, { kind: 'response', messageId: 'turn-1' })
+  })
+
+  it('an in-turn block never claims to precede the response: that slot is still empty and sits above the tool rows', () => {
+    const { frames, emit } = recorder()
+    new ThinkingStreams(emit, 'turn-1').emitBlock({ text: 'x', precedes: { kind: 'response' } })
+    assert.ok(frames.every((f) => !('thinkingPrecedes' in f)))
+  })
+
+  it('a tool hint is kept in-turn too (the client places it only if that row is already there)', () => {
+    const { frames, emit } = recorder()
+    new ThinkingStreams(emit, 'turn-1').emitBlock({ text: 'x', precedes: { kind: 'tool_use', toolUseId: 'toolu_1' } })
+    assert.deepEqual(frames[0].thinkingPrecedes, { kind: 'tool_use', toolUseId: 'toolu_1' })
+  })
+
+  it('no hint, an unknown kind or an empty tool id emits nothing extra (the old behaviour)', () => {
+    for (const precedes of [undefined, null, {}, { kind: 'banana' }, { kind: 'tool_use' }, { kind: 'tool_use', toolUseId: '' }, { kind: 'tool_use', toolUseId: 42 }]) {
+      const { frames, emit } = recorder()
+      new ThinkingStreams(emit, 'turn-1').emitBlock({ text: 'x', late: true, precedes })
+      assert.ok(frames.every((f) => !('thinkingPrecedes' in f)), JSON.stringify(precedes))
+    }
+  })
+})
+
 describe('ThinkingStreams streaming API (claude-cli content_block_* events)', () => {
   it('open emits start at once; deltas are held; close emits ONE redacted delta then end with a measured duration', () => {
     const { frames, emit } = recorder()

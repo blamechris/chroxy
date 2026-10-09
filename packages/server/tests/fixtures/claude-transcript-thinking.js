@@ -54,13 +54,17 @@ const messageOf = (content, over = {}) => ({
   ...over,
 })
 
-export function thinkingEntry({ text = '', durationMs = 1236, ts, sidechain = false, apiBlockIndex = 0, messageId } = {}) {
+export function thinkingEntry({ text = '', durationMs = 1236, ts, sidechain = false, apiBlockIndex = 0, messageId, stopReason } = {}) {
   return JSON.stringify(baseEntry({
     ...(ts ? { timestamp: ts } : {}),
     isSidechain: sidechain,
     message: messageOf(
       [{ type: 'thinking', thinking: text, signature: 'EqQBCkYIDBgCKkA'.repeat(8) }],
-      messageId ? { id: messageId } : {},
+      {
+        ...(messageId ? { id: messageId } : {}),
+        // `undefined` keeps the default ('end_turn'); pass `null` for a snapshot that has no stop reason yet.
+        ...(stopReason !== undefined ? { stop_reason: stopReason } : {}),
+      },
     ),
     ...(durationMs === null ? {} : { thinkingDurationMs: durationMs }),
     apiBlockIndex,
@@ -75,20 +79,23 @@ export function redactedThinkingEntry({ ts, apiBlockIndex = 0 } = {}) {
   }))
 }
 
-export function textEntry(text, { ts, apiBlockIndex = 1 } = {}) {
+export function textEntry(text, { ts, apiBlockIndex = 1, messageId, stopReason } = {}) {
   return JSON.stringify(baseEntry({
     ...(ts ? { timestamp: ts } : {}),
-    message: messageOf([{ type: 'text', text }]),
+    message: messageOf([{ type: 'text', text }], {
+      ...(messageId ? { id: messageId } : {}),
+      ...(stopReason !== undefined ? { stop_reason: stopReason } : {}),
+    }),
     apiBlockIndex,
   }))
 }
 
-export function toolUseEntry({ ts, apiBlockIndex = 2 } = {}) {
+export function toolUseEntry({ ts, apiBlockIndex = 2, id = 'toolu_01FIXTURE', messageId } = {}) {
   return JSON.stringify(baseEntry({
     ...(ts ? { timestamp: ts } : {}),
     message: messageOf(
-      [{ type: 'tool_use', id: 'toolu_01FIXTURE', name: 'Read', input: { file_path: '/tmp/x' } }],
-      { stop_reason: 'tool_use' },
+      [{ type: 'tool_use', id, name: 'Read', input: { file_path: '/tmp/x' } }],
+      { stop_reason: 'tool_use', ...(messageId ? { id: messageId } : {}) },
     ),
     apiBlockIndex,
   }))

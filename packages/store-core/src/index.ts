@@ -678,6 +678,7 @@ export type {
   PendingDelta,
   // #6756 — thinking-stream handler payload shapes.
   ThinkingStreamStartPayload,
+  ThinkingPrecedes,
   ThinkingDeltaPayload,
   ThinkingStreamEndPayload,
   ResultUsagePayload,
@@ -874,6 +875,9 @@ export {
   handleThinkingDelta,
   handleThinkingStreamEnd,
   finalizeThinkingStreams,
+  // #8518 — the thinking ordering hint (parse + placement), shared by both clients.
+  parseThinkingPrecedes,
+  placeThinkingBubble,
   MAX_THINKING_CONTENT_LEN,
   handleResultUsage,
   // #5454 — remaining both-sides duplicates extracted into store-core

@@ -3,7 +3,7 @@ import { createLogger } from './logger.js'
 import { truncateTitle } from './session-title.js'
 import { redactBounded, sanitizeToolInput, isSanitizedToolInput, MAX_INPUT_CHARS, RECORD_DESCRIPTION_MAX } from './redaction.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
-import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
+import { boundedNonNegInt, boundedThinkingPrecedes, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
 
 const log = createLogger('session-message-history')
@@ -180,6 +180,10 @@ export class SessionMessageHistory extends EventEmitter {
     // are not ordinary replies (reasoning). Kept beside `_pendingStreams` rather
     // than inside its value because that map is read as plain strings elsewhere.
     this._streamKinds = new Map()
+    // #8518 -- sessionId:messageId -> the ordering hint a reasoning stream_start
+    // carried (what it precedes). The entry is written at stream_end, so the
+    // start's hint is held here until then.
+    this._streamPrecedes = new Map()
     this._historyTruncated = new Map()  // sessionId -> boolean
     // #5555.3 (lastSeq delta replay) — per-session monotonic history sequence.
     // Every entry pushed into the ring buffer is stamped with a strictly
@@ -272,6 +276,7 @@ export class SessionMessageHistory extends EventEmitter {
         this._pendingStreams.delete(key)
         this._truncatedStreams.delete(key) // #6431 — release the truncation guard
         this._streamKinds.delete(key)
+        this._streamPrecedes.delete(key)
       }
     }
     return closedMessageIds
@@ -629,7 +634,11 @@ export class SessionMessageHistory extends EventEmitter {
         const key = `${sessionId}:${data.messageId}`
         this._pendingStreams.set(key, '')
         // #6630 / #8282: a reasoning stream must not be recorded as a reply.
-        if (data.thinking === true) this._streamKinds.set(key, 'thinking')
+        if (data.thinking === true) {
+          this._streamKinds.set(key, 'thinking')
+          const thinkingPrecedes = boundedThinkingPrecedes(data.thinkingPrecedes)
+          if (thinkingPrecedes) this._streamPrecedes.set(key, thinkingPrecedes)
+        }
         break
       }
 
@@ -660,8 +669,10 @@ export class SessionMessageHistory extends EventEmitter {
         const content = this._pendingStreams.get(key) || ''
         const hadStream = this._pendingStreams.has(key)
         const kind = this._streamKinds.get(key) || (data.thinking === true ? 'thinking' : undefined)
+        const thinkingPrecedes = kind === 'thinking' ? this._streamPrecedes.get(key) : undefined
         this._pendingStreams.delete(key)
         this._streamKinds.delete(key)
+        this._streamPrecedes.delete(key)
         this._truncatedStreams.delete(key) // #6431 — release the once-per-stream guard
         // A reasoning stream is recorded even with no text: current Claude models
         // return the block with its signature only, so the SDK opens and closes a
@@ -688,6 +699,10 @@ export class SessionMessageHistory extends EventEmitter {
             ...(kind ? { kind } : {}),
             ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
             ...(thinkingTokens !== undefined ? { thinkingTokens } : {}),
+            // #8518: a block that reached the wire after the tool row / answer it
+            // belongs above keeps saying so, so a reload orders it the way the live
+            // client did. Absent for a block that arrived in order.
+            ...(thinkingPrecedes ? { thinkingPrecedes } : {}),
             timestamp: Date.now(),
           }, sessionId)
         }
@@ -1019,6 +1034,9 @@ export class SessionMessageHistory extends EventEmitter {
     for (const key of this._streamKinds.keys()) {
       if (key.startsWith(prefix)) this._streamKinds.delete(key)
     }
+    for (const key of this._streamPrecedes.keys()) {
+      if (key.startsWith(prefix)) this._streamPrecedes.delete(key)
+    }
   }
 
   /**
@@ -1029,6 +1047,7 @@ export class SessionMessageHistory extends EventEmitter {
     this._historyTruncated.clear()
     this._pendingStreams.clear()
     this._streamKinds.clear()
+    this._streamPrecedes.clear()
     this._seqCounters.clear()
   }
 }

@@ -131,8 +131,14 @@ describe('live vs replayed transcript -- dashboard (#6630)', () => {
   // bubble, the server finishes the thought, and the cursor replay carries the full
   // text and duration. The held copy must be filled in (the cursor moves past the
   // entry, so nothing would ever retry), not discarded as a duplicate.
+  //
+  // Only the scenarios that open with the reasoning stream: the cut then lands inside
+  // it from the first frame. Every cut re-imports the whole connection store, and this
+  // file already runs close to its worker's 4 GB heap (a scenario with a late-placed
+  // bubble, #8518, added 13 more cuts and ran it out of memory). That bubble's partial-
+  // delivery case is pinned in late-thinking-order.test.ts instead.
   const interruptible = REPLAY_PARITY_FIXTURES.filter((fx) =>
-    fx.live.some((f) => f.type === 'stream_end' && f.thinking === true),
+    fx.live[0]?.thinking === true && fx.live.some((f) => f.type === 'stream_end' && f.thinking === true),
   )
 
   it('has scenarios to interrupt', () => {
