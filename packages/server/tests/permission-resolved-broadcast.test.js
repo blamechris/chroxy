@@ -46,6 +46,18 @@ describe('permission_resolved end-to-end broadcast (#3048)', () => {
       assert.equal(msg.sessionId, 'sess-1')
     })
 
+    it('#8517: carries the session scope next to the plain allow decision, and only when the event has one', () => {
+      const normalizer = new EventNormalizer()
+      const ctx = { sessionId: 'sess-1', mode: 'multi', getSessionEntry: () => null }
+      const scoped = normalizer.normalize('permission_resolved', { requestId: 'req-abc', decision: 'allow', reason: 'user', scope: 'session' }, ctx)
+      assert.equal(scoped.messages[0].msg.decision, 'allow')
+      assert.equal(scoped.messages[0].msg.scope, 'session')
+      const plain = normalizer.normalize('permission_resolved', { requestId: 'req-abc', decision: 'allow', reason: 'user' }, ctx)
+      assert.equal('scope' in plain.messages[0].msg, false)
+      const junk = normalizer.normalize('permission_resolved', { requestId: 'req-abc', decision: 'deny', scope: 'session' }, ctx)
+      assert.equal('scope' in junk.messages[0].msg, false, 'a scope beside a deny is never put on the wire')
+    })
+
     it('forwards deny decision from auto-deny paths (timeout/abort/cleared)', () => {
       const normalizer = new EventNormalizer()
       const ctx = { sessionId: 'sess-1', mode: 'multi', getSessionEntry: () => null }

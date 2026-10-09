@@ -394,6 +394,9 @@ export declare const ServerPermissionResolvedSchema: z.ZodObject<{
     toolUseId: z.ZodOptional<z.ZodString>;
     decision: z.ZodString;
     reason: z.ZodOptional<z.ZodString>;
+    scope: z.ZodOptional<z.ZodEnum<{
+        session: "session";
+    }>>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 /**

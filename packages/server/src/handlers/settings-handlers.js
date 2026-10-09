@@ -508,6 +508,10 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     // server bounds + redacts it (permission-manager.js buildDenyMessage) and
     // feeds it back to the agent as the denial message instead of 'User denied'.
     reason: msg.reason,
+    // #8517: the "Allow for Session" label. The resolver keeps it only beside an
+    // `allow`; it grants nothing (the session rule is the client's separate
+    // set_permission_rules) and only names the allow in the broadcast and journal.
+    scope: msg.scope,
   })
 
   if (result.kind === 'binding_mismatch') {
@@ -599,7 +603,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
       // to every client); a session-bound client still only receives its own
       // session's frames because the broadcaster checks the frame's sessionId at
       // delivery (#8342). Includes the resolver (#6590).
-      ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision, sessionId: result.sessionId })
+      ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision, ...(result.scope ? { scope: result.scope } : {}), sessionId: result.sessionId })
     } else {
       // #6590: broadcast to ALL clients INCLUDING the resolver (no `c.id !==
       // client.id` exclusion). The resolving client needs its own
@@ -615,7 +619,7 @@ function handlePermissionResponse(ws, client, msg, ctx) {
       // fallback-filled `result.sessionId` is the answerer's, not the prompt's), so
       // it goes to unbound clients only; a session-bound client has no session to
       // match (#8342).
-      ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision }, (c) => !isBoundClient(c))
+      ctx.transport.broadcast({ type: 'permission_resolved', requestId, decision, ...(result.scope ? { scope: result.scope } : {}) }, (c) => !isBoundClient(c))
     }
   }
 

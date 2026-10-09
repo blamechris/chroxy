@@ -221,7 +221,11 @@ describe('live vs replayed permission group -- rendered DOM incl. the input line
       { type: 'tool_start', messageId: `tu${n}`, toolUseId: `tu${n}`, tool: 'Bash', input: null, sessionId: SID },
       { type: 'tool_result', toolUseId: `tu${n}`, result: '', truncated: false, input, sessionId: SID },
       { type: 'permission_request', requestId: `req-${n}`, tool: 'Bash', description: DESC, input, remainingMs: 120000, sessionId: SID },
-      { type: 'permission_resolved', requestId: `req-${n}`, decision: decisions[n - 1]!, sessionId: SID },
+      // #8517: the daemon never puts `allowSession` on the wire. "Allow for Session" is
+      // the plain decision `allow` labelled `scope: 'session'`; every other token is sent as is.
+      decisions[n - 1] === 'allowSession'
+        ? { type: 'permission_resolved', requestId: `req-${n}`, decision: 'allow', scope: 'session', sessionId: SID }
+        : { type: 'permission_resolved', requestId: `req-${n}`, decision: decisions[n - 1]!, sessionId: SID },
     ])
   /** `journaled`: whether the server's `permission_outcome` entries carry the input (false = an entry from before #8503). */
   const replayFrames = (input: Record<string, unknown>, journaled: boolean, decisions: string[] = ['allow', 'allow', 'allow']): ReplayParityFrame[] =>
@@ -344,6 +348,23 @@ describe('live vs replayed permission group -- rendered DOM incl. the input line
     expect(liveHtml[0]!).not.toContain('data-testid="perm-group"')
     expect(liveHtml[0]!.match(/data-testid="perm-outcome-record"/g)).toHaveLength(3)
     expect(replayHtml).toEqual(liveHtml)
+  })
+
+  // #8517 -- the wire sequence the real daemon sends for "Allow for Session": a plain
+  // `allow` decision labelled `scope: 'session'`, not an `allowSession` decision. The
+  // journal replays the same answer as `decision: 'allowSession'`.
+  it('allow, allow, allowSession is a x2 group plus a separate session record, and its Details say allowed for the session, live and rebuilt (#8517)', () => {
+    const decisions = ['allow', 'allow', 'allowSession']
+    const clickRecord = (c: HTMLElement) => fireEvent.click(within(c).getByTestId('perm-record-toggle'))
+    const liveHtml = domSteps(live(liveFrames(INPUT, decisions)), [clickRecord, clickGroup])
+    const replayHtml = domSteps(replayed(replayFrames(INPUT, true, decisions)), [clickRecord, clickGroup])
+    const collapsed = liveHtml[0]!
+    expect(collapsed.match(/data-testid="perm-group"/g)).toHaveLength(1)
+    expect(collapsed).toContain('×2')
+    expect(collapsed).not.toContain('×3')
+    expect(collapsed.match(/data-testid="perm-outcome-record"/g)).toHaveLength(1)
+    expect(liveHtml[1]!).toContain('Allowed for session')
+    for (let i = 0; i < liveHtml.length; i++) expect(replayHtml[i], `step ${i}`).toBe(liveHtml[i])
   })
 
   it('an entry journaled before the decision field reads as a plain allow (older history is unchanged)', () => {

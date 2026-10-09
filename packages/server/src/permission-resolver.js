@@ -18,7 +18,10 @@
 //
 // ResolveResult (discriminated on `kind`):
 //   { kind: 'binding_mismatch', boundSessionId }            -> HTTP 403 / WS error  (map NOT consumed)
-//   { kind: 'resolved', via: 'sdk'|'legacy', sessionId, mapped }  -> HTTP 200 / WS ack  (map consumed)
+//   { kind: 'resolved', via: 'sdk'|'legacy', sessionId, mapped, scope? }  -> HTTP 200 / WS ack  (map consumed)
+//     `scope` (#8517): 'session' when the answer was "Allow for Session" (decision `allow` + scope
+//     `session`), absent otherwise. A label for the caller's permission_resolved broadcast; the
+//     resolver honours it only beside `allow` and it changes nothing about how the request resolves.
 //     `mapped` (#8359): true when `sessionId` came from the request's own mapping, false when it is
 //     only the WS dispatch fallback (or null). A caller deciding whether a frame may NAME the session
 //     reads this, never `sessionId`: the fallback fills `sessionId` for an unmapped prompt too.
@@ -33,6 +36,7 @@
 // `..`-laden cwd. Reused, not duplicated.
 import { normalizeProjectKey } from './permission-rule-store.js'
 import { EditedInputRefusedError } from './edited-input.js'
+import { permissionScope, permissionDecisionToken } from './permission-scope.js'
 
 /**
  * #6030: the single source of truth for the permission "dispatch origin"
@@ -98,17 +102,25 @@ export function createPermissionResolver({
    * @param {string} requestId
    * @param {string} decision
    * @param {string|null} callerBoundSessionId  token-bound id (HTTP) / client.boundSessionId (WS); null/undefined = unbound
-   * @param {{ clientId?: string|null, dispatchFallbackSessionId?: string|null, editedInput?: any, reason?: string }} [opts]
+   * @param {{ clientId?: string|null, dispatchFallbackSessionId?: string|null, editedInput?: any, reason?: string, scope?: string }} [opts]
    *   `dispatchFallbackSessionId` is the WS-only legacy "map wasn't populated"
    *   fallback (client.activeSessionId). It is used ONLY to pick the dispatch
    *   session — NEVER for the binding check (invariant B). HTTP passes nothing.
    *   `editedInput` (#6543) and `reason` (#6773) flow only to the in-process
    *   (SDK/BYOK) respondToPermission — the legacy pendingPermissions path ignores
    *   both (the CLI tool executes / denies with its own fixed message).
+   *   `scope` (#8517) is the client's "Allow for Session" label: kept only beside
+   *   `allow`, passed to the in-process session and the journal, never to anything
+   *   that grants or skips a check.
    * @returns {{ kind: string, [k: string]: any }} ResolveResult
    */
   function resolve(requestId, decision, callerBoundSessionId, opts = {}) {
     const { clientId = null, dispatchFallbackSessionId = null, editedInput = undefined, reason = undefined } = opts
+    // #8517: the label, normalised once here so no session, journal or broadcast
+    // downstream ever sees one that does not ride beside an `allow`.
+    const scope = permissionScope(decision, opts.scope)
+    const scopeResult = scope ? { scope } : {}
+    const scopeArg = scope ? [scope] : []
 
     // Invariant B (#2806 residual): the binding check reads the RAW map entry —
     // never an activeSessionId fallback. For a bound caller the request MUST be
@@ -163,7 +175,7 @@ export function createPermissionResolver({
         // agent-facing denial message (permission-manager.js buildDenyMessage).
         let resolved
         try {
-          resolved = entry.session.respondToPermission(requestId, decision, editedInput, reason)
+          resolved = entry.session.respondToPermission(requestId, decision, editedInput, reason, ...scopeArg)
         } catch (err) {
           if (!(err instanceof EditedInputRefusedError)) throw err
           // #8446 — the operator's edit cannot be applied without writing a
@@ -205,7 +217,7 @@ export function createPermissionResolver({
             }
           }
           audit(clientId, originSessionId, requestId, decision, extra)
-          return { kind: 'resolved', via: 'sdk', sessionId: originSessionId, mapped: mappedSessionId != null }
+          return { kind: 'resolved', via: 'sdk', sessionId: originSessionId, mapped: mappedSessionId != null, ...scopeResult }
         }
         return { kind: 'expired', sessionId: originSessionId }
       }
@@ -225,7 +237,7 @@ export function createPermissionResolver({
       // remembers what the prompt was from the moment it was raised, so only the
       // outcome is passed; an unknown id (an unattributed prompt) records nothing.
       try {
-        sm?.recordPermissionOutcome?.(requestId, decision === 'deny' ? 'denied' : 'allowed', decision)
+        sm?.recordPermissionOutcome?.(requestId, decision === 'deny' ? 'denied' : 'allowed', permissionDecisionToken(decision, scope))
       } catch { /* the answer already went out; journaling is best-effort */ }
       // Legacy (non-SDK) sessions have no PermissionManager/rule store, so
       // 'allowAlways' here is never durable — tool is the only enrichment.
@@ -237,7 +249,7 @@ export function createPermissionResolver({
       // `originSessionId`: there that session's own `respondToPermission` accepted
       // the id, which is what makes it the owner.)
       audit(clientId, mappedSessionId ?? null, requestId, decision, toolName ? { tool: toolName } : {})
-      return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null, mapped: mappedSessionId != null }
+      return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null, mapped: mappedSessionId != null, ...scopeResult }
     }
 
     return { kind: 'not_found' }

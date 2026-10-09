@@ -138,6 +138,20 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(withEdit.success, 'allow with an edited command should validate')
   })
 
+  it('permission_response carries an optional, enum-validated session scope (#8517)', async () => {
+    const { PermissionResponseSchema } = await import('../src/schemas/client.ts')
+    const base = { type: 'permission_response', requestId: 'r1', decision: 'allow' }
+    const scoped = PermissionResponseSchema.safeParse({ ...base, scope: 'session' })
+    assert.ok(scoped.success, 'allow + scope session must validate')
+    assert.equal(scoped.data.scope, 'session', 'the scope must survive parsing, not be stripped')
+    const bare = PermissionResponseSchema.safeParse(base)
+    assert.ok(bare.success, 'scope is optional: every existing client omits it')
+    assert.equal('scope' in bare.data, false)
+    for (const bad of ['always', 'Session', '', 1, null, ['session']]) {
+      assert.equal(PermissionResponseSchema.safeParse({ ...base, scope: bad }).success, false, `scope ${JSON.stringify(bad)} must be rejected`)
+    }
+  })
+
   it('rejects a permission_response reason over the wire cap (#6773)', async () => {
     const { PermissionResponseSchema } = await import('../src/schemas/client.ts')
     const result = PermissionResponseSchema.safeParse({
@@ -3700,6 +3714,19 @@ describe('@chroxy/protocol schemas', () => {
       const without = ServerPermissionResolvedSchema.safeParse(base)
       assert.ok(without.success, 'reason is optional: the hook route and other-client broadcasts carry none')
       assert.equal('reason' in without.data, false)
+    })
+
+    it('#8517: ServerPermissionResolvedSchema carries an optional session scope next to the decision', async () => {
+      const { ServerPermissionResolvedSchema } = await import('../src/schemas/server/stream.ts')
+      const base = { type: 'permission_resolved', requestId: 'req-1', decision: 'allow', sessionId: 's1' }
+      const scoped = ServerPermissionResolvedSchema.safeParse({ ...base, scope: 'session' })
+      assert.ok(scoped.success)
+      assert.equal(scoped.data.scope, 'session', 'the scope must survive parsing, not be stripped')
+      assert.equal(scoped.data.decision, 'allow', 'the decision stays a plain allow')
+      const without = ServerPermissionResolvedSchema.safeParse(base)
+      assert.ok(without.success, 'scope is optional: every other resolution carries none')
+      assert.equal('scope' in without.data, false)
+      assert.equal(ServerPermissionResolvedSchema.safeParse({ ...base, scope: 'forever' }).success, false, 'an unknown scope is rejected')
     })
 
     it('#8470: ServerPermissionResolvedSchema accepts the question variant (toolUseId) and needs one id', async () => {

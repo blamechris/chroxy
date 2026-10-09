@@ -5,6 +5,7 @@ import { busyStateOf } from './session-busy-state.js'
 import { buildPermissionRequestMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
+import { permissionScope } from './permission-scope.js'
 
 const log = createLogger('event-normalizer')
 
@@ -755,6 +756,8 @@ Object.assign(EVENT_MAP, {
           // that from the user pressing Deny, and the card reads "Denied" for a
           // tool nobody refused.
           ...(typeof data.reason === 'string' && data.reason ? { reason: data.reason } : {}),
+          // #8517: "Allow for Session" -- the decision above stays a plain `allow`.
+          ...(permissionScope(data.decision, data.scope) ? { scope: 'session' } : {}),
           sessionId: ctx.sessionId,
         },
       })
