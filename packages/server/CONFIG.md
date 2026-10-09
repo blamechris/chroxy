@@ -54,8 +54,10 @@ Three properties are worth knowing before you set it:
   `~/.chroxy`), `chroxy config-dir ack` records the entries currently left there
   in `config-dir-ack.json` inside the relocated root, and the startup warning and
   `chroxy doctor` stay quiet about exactly those. It is a snapshot, not a flag:
-  an entry that appears later warns again, and an unreadable or malformed file
-  counts as no acknowledgement (#7244).
+  an entry whose name was not acknowledged warns again (re-running `ack`
+  replaces the snapshot), and an unreadable or malformed file counts as no
+  acknowledgement (#7244). Run it with `CHROXY_CONFIG_DIR` set to the relocated
+  root; the warning prints the exact command.
 
 Internally the root has exactly one resolver — `configDir()` / `configPath()` in
 [`src/config-dir.js`](src/config-dir.js) — and both read the environment **per

@@ -5,9 +5,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   ACK_FILE_NAME,
+  ACK_MAX_BYTES,
   applyStrandedAck,
+  ackCommand,
   detectStrandedState,
   formatStrandedWarning,
+  missingTokenAdvice,
   readStrandedAck,
   startupStrandedWarning,
   writeStrandedAck,
@@ -54,7 +57,7 @@ const capture = () => {
 }
 
 describe('stranded-state acknowledgement (#7244)', () => {
-  it('not acknowledged: warns exactly as before', () => {
+  it('with no ack file the filtered view equals the raw detection and the warning is the pre-#7244 output', () => {
     put(source, 'config.json')
     put(source, 'push-tokens.json')
     const applied = applyStrandedAck(detect())
@@ -123,6 +126,16 @@ describe('stranded-state acknowledgement (#7244)', () => {
     })
   }
 
+  it('an otherwise valid ack file over the size cap counts as no acknowledgement', () => {
+    put(source, 'config.json')
+    const doc = { version: 1, source, acknowledged: ['config.json'], pad: 'x'.repeat(ACK_MAX_BYTES) }
+    put(target, ACK_FILE_NAME, JSON.stringify(doc))
+    assert.ok(statSync(ackPath()).size > ACK_MAX_BYTES)
+
+    assert.equal(readStrandedAck(detect()), null)
+    assert.deepEqual(applyStrandedAck(detect()).stranded, ['config.json'])
+  })
+
   it('an ack path that is a directory counts as no acknowledgement', () => {
     put(source, 'config.json')
     mkdirSync(ackPath())
@@ -159,9 +172,41 @@ describe('startup warning (#7244)', () => {
     assert.ok(/push-tokens\.json/.test(text) && !/config\.json/.test(text), text)
   })
 
-  it('is what server-cli logs, and the missing-token exit keeps the RAW detection', () => {
+  it('is what server-cli logs', () => {
     assert.ok(/startupStrandedWarning\(strandedState\)\)\s*log\.warn/.test(serverCliSrc), 'startup must log through startupStrandedWarning')
-    assert.ok(/strandedState\?\.highConsequence\.includes\('config\.json'\)/.test(serverCliSrc))
+    assert.ok(/missingTokenAdvice\(strandedState\)/.test(serverCliSrc), 'the missing-token exit must use missingTokenAdvice')
+  })
+
+  it('prints a hint that carries CHROXY_CONFIG_DIR for the resolved root, shell-quoted', () => {
+    put(source, 'config.json')
+    const text = startupStrandedWarning(detect()).join('\n')
+    assert.ok(text.includes(`CHROXY_CONFIG_DIR='${target}' chroxy config-dir ack`), text)
+    assert.equal(ackCommand("/a b/o'c"), "CHROXY_CONFIG_DIR='/a b/o'\\''c' chroxy config-dir ack")
+  })
+})
+
+describe('missing-token advice (#7244)', () => {
+  it('names the unmoved config.json when it is stranded and not acknowledged', () => {
+    put(source, 'config.json')
+    const text = missingTokenAdvice(detect()).join('\n')
+    assert.ok(/Do NOT run 'chroxy init'/.test(text) && text.includes(source), text)
+  })
+
+  it('still names the unmoved config.json after config.json was acknowledged, from the raw or the filtered detection', () => {
+    put(source, 'config.json')
+    writeStrandedAck(detect())
+    for (const det of [detect(), applyStrandedAck(detect())]) {
+      const text = missingTokenAdvice(det).join('\n')
+      assert.ok(/Do NOT run 'chroxy init'/.test(text), text)
+      assert.ok(text.includes(source) && /config-dir migrate/.test(text), text)
+    }
+  })
+
+  it('gives the generic init advice when config.json is not stranded', () => {
+    put(source, 'push-tokens.json')
+    const text = missingTokenAdvice(detect()).join('\n')
+    assert.ok(/Run 'chroxy init' first/.test(text) && !/Do NOT/.test(text), text)
+    assert.ok(/Run 'chroxy init' first/.test(missingTokenAdvice(null).join('\n')))
   })
 })
 
@@ -195,6 +240,7 @@ describe('chroxy config-dir ack (#7244)', () => {
     assert.equal(res.acknowledged, false)
     assert.ok(!existsSync(join(source, ACK_FILE_NAME)))
     assert.ok(/not relocated/i.test(out.text()))
+    assert.ok(/CHROXY_CONFIG_DIR/.test(out.text()), 'tells the operator the variable must be set')
   })
 
   it('refuses to acknowledge when the source could not be read', () => {
@@ -230,6 +276,7 @@ describe('chroxy config-dir status shows acknowledgements (#7244)', () => {
     assert.deepEqual(res.stranded, ['config.json', 'push-tokens.json'])
     assert.deepEqual(res.acknowledged, ['config.json'])
     assert.ok(/config\.json.*acknowledged/.test(out.text()))
+    assert.ok(out.text().includes(`CHROXY_CONFIG_DIR='${target}' chroxy config-dir ack`), 'footer carries the env')
     assert.ok(!/push-tokens\.json.*acknowledged/.test(out.text()))
   })
 })

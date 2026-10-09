@@ -14,6 +14,7 @@
 // stranded name is in that snapshot, so an entry that appears later warns.
 
 import {
+  ackCommand,
   detectStrandedState,
   migrateStrandedState,
   partitionStranded,
@@ -48,6 +49,9 @@ export function runConfigDirStatus(deps = {}) {
     return { relocated: true, stranded: [], acknowledged: [] }
   }
 
+  // partitionStranded, not applyStrandedAck: status must still list every
+  // stranded entry (marking the acknowledged ones), so it needs the split, not
+  // the filtered view the warning and doctor use.
   const { acknowledged } = partitionStranded(d, readAck(d))
 
   out('')
@@ -64,7 +68,7 @@ export function runConfigDirStatus(deps = {}) {
     out(`${acknowledged.length} of these ${acknowledged.length === 1 ? 'is' : 'are'} acknowledged, so the startup warning and 'chroxy doctor' leave ${acknowledged.length === 1 ? 'it' : 'them'} out.`)
   }
   out('Copy them forward with:  chroxy config-dir migrate --yes')
-  out('Or keep this root on purpose:  chroxy config-dir ack')
+  out(`Or keep this root on purpose:  ${ackCommand(d.target)}`)
   return { relocated: true, stranded: d.stranded, acknowledged }
 }
 
@@ -87,6 +91,8 @@ export function runConfigDirAck(deps = {}) {
 
   if (!d.relocated) {
     out(`Config/state root is ${d.target} — not relocated, so there is nothing to acknowledge.`)
+    out('To acknowledge a deliberate second root, run this with CHROXY_CONFIG_DIR set to that root')
+    out('(the one the daemon reads), e.g.  CHROXY_CONFIG_DIR=/path/to/root chroxy config-dir ack')
     return { acknowledged: false, names: [] }
   }
   if (d.unreadable) {
@@ -103,8 +109,8 @@ export function runConfigDirAck(deps = {}) {
   for (const name of acknowledged) out(`  ${name}`)
   out('')
   out(`Recorded in ${file}. The startup warning and 'chroxy doctor' now stay quiet about`)
-  out('these. A different entry that appears at the default root later will warn again;')
-  out('re-run this command to acknowledge it too.')
+  out('these. An entry whose name was not acknowledged will warn again; re-running this')
+  out('command replaces the snapshot with the current set.')
   return { acknowledged: true, names: acknowledged }
 }
 

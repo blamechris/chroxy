@@ -150,8 +150,8 @@ export function detectStrandedState({ source = defaultConfigDir(), target = conf
  * The acknowledgement is a SNAPSHOT of entry names, not a flag. `chroxy
  * config-dir ack` records the names stranded right now into
  * {@link ACK_FILE_NAME} in the TARGET root; the warning stays quiet only while
- * every currently stranded name is in that snapshot. An entry that appears
- * after the acknowledgement is not in it, so it warns again. A suppression
+ * every currently stranded name is in that snapshot. An entry whose NAME is
+ * not in it warns again. A suppression
  * flag (`CHROXY_CONFIG_DIR_ACK=1`) was rejected because once set it also
  * silences a stranded entry that appears later — the false-safety shape
  * #7052/#7238/#7239 closed. An automatic marker written at boot was rejected
@@ -161,11 +161,17 @@ export function detectStrandedState({ source = defaultConfigDir(), target = conf
  * The subset logic lives HERE and nowhere else: startup, `chroxy doctor`,
  * `config-dir status` and `config-dir ack` all go through it. Matching is by
  * entry name; contents are not hashed.
+ *
+ * Consequence of name-matching: a name acknowledged earlier, then removed and
+ * re-created at the default root, stays quiet until the next `ack` replaces the
+ * snapshot. That is deliberate. Keying on content or mtime would re-warn at
+ * every boot for the files a live daemon keeps rewriting at the default root,
+ * which is the noise this exists to end.
  */
 export const ACK_FILE_NAME = 'config-dir-ack.json'
 const ACK_VERSION = 1
 // The file is a few hundred bytes; a bigger one is not ours, so do not read it.
-const ACK_MAX_BYTES = 1024 * 1024
+export const ACK_MAX_BYTES = 1024 * 1024
 
 /**
  * Read the entry names acknowledged for this detection's source root.
@@ -264,6 +270,42 @@ function shellQuote(value) {
 }
 
 /**
+ * The copy-pasteable acknowledgement command. It carries `CHROXY_CONFIG_DIR`
+ * because run without it the command resolves the default root and answers
+ * "not relocated, nothing to acknowledge" (#7244).
+ *
+ * @param {string} target The resolved (relocated) root.
+ * @returns {string}
+ */
+export function ackCommand(target) {
+  return `CHROXY_CONFIG_DIR=${shellQuote(target)} chroxy config-dir ack`
+}
+
+/**
+ * The lines the daemon prints before exiting when no API token is configured.
+ *
+ * With config.json stranded, `chroxy init` is the WRONG advice (it mints a new
+ * token and forces every device to re-pair), and an acknowledgement must not
+ * change that: it quiets a warning, not a diagnosis. So this reads the
+ * high-consequence set AND the acknowledged names, which makes it correct
+ * whether it is handed the raw detection or an acknowledgement-filtered one.
+ *
+ * @param {(StrandedState & { acknowledged?: string[] })|null} detection
+ * @returns {string[]}
+ */
+export function missingTokenAdvice(detection) {
+  const configStranded = detection?.relocated
+    && (detection.highConsequence.includes('config.json') || (detection.acknowledged ?? []).includes('config.json'))
+  if (!configStranded) return ['[!] No API token configured. Run \'chroxy init\' first.']
+  return [
+    '[!] No API token configured — but config.json is still at '
+      + `${detection.source} while the daemon is reading ${detection.target}.`,
+    '    Do NOT run \'chroxy init\' — it mints a fresh token and forces every device to re-pair.',
+    '    Move your existing state instead:  chroxy config-dir migrate',
+  ]
+}
+
+/**
  * Build the startup / doctor warning for a detection result.
  *
  * @param {StrandedState} detection
@@ -303,7 +345,7 @@ export function formatStrandedWarning(detection) {
   if (acked > 0) {
     lines.push(`${acked} other ${acked === 1 ? 'entry was' : 'entries were'} acknowledged earlier and ${acked === 1 ? 'is' : 'are'} not listed above.`)
   }
-  lines.push('Keeping this root on purpose?  chroxy config-dir ack  (stays quiet until a new entry appears)')
+  lines.push(`Keeping this root on purpose?  ${ackCommand(target)}  (re-warns for any entry not acknowledged)`)
   return lines
 }
 

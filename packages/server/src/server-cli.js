@@ -36,7 +36,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
 import { configDir, configPath } from './config-dir.js'
-import { detectStrandedState, startupStrandedWarning } from './config-dir-migration.js'
+import { detectStrandedState, missingTokenAdvice, startupStrandedWarning } from './config-dir-migration.js'
 
 const log = createLogger('cli')
 // #5368 slice (b): QRCode + writeConnectionInfo moved to startup-display.js with
@@ -964,14 +964,9 @@ export async function startCliServer(config) {
     // #7240 — when config.json is sitting at ~/.chroxy and the daemon is reading
     // a relocated root, `chroxy init` is the WRONG advice: it mints a brand new
     // token and forces every paired device to re-pair. Name the real cause.
-    if (strandedState?.highConsequence.includes('config.json')) {
-      console.error('[!] No API token configured — but config.json is still at ' // intentional user-facing output
-        + `${strandedState.source} while the daemon is reading ${strandedState.target}.`)
-      console.error('    Do NOT run \'chroxy init\' — it mints a fresh token and forces every device to re-pair.')
-      console.error('    Move your existing state instead:  chroxy config-dir migrate')
-    } else {
-      console.error('[!] No API token configured. Run \'chroxy init\' first.') // intentional user-facing output
-    }
+    // The wording lives in missingTokenAdvice so a test can pin it; an
+    // acknowledgement (#7244) does not change it.
+    for (const line of missingTokenAdvice(strandedState)) console.error(line) // intentional user-facing output
     process.exit(1)
   }
 
