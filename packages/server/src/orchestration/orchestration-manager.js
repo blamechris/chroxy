@@ -153,6 +153,11 @@ export class OrchestrationManager extends EventEmitter {
     this._now = now
     this._log = log
     this._runs = new Map() // runId -> engine state
+    // #7142: the backgrounded `startRun` promises `createAndStartRun` launches.
+    // A start is a multi-minute architect turn that nothing awaits, so without a
+    // handle `dispose()` could neither wait for it nor tell it the manager is
+    // gone. Each entry removes itself when it settles (it never rejects).
+    this._starts = new Set()
     this._reports = new Map() // runId -> the architect's synthesis narrative markdown
     this._reportDocs = new Map() // runId -> { json, markdown } — the persisted M-4 report artifacts
     this._maxReports = 32
@@ -184,11 +189,29 @@ export class OrchestrationManager extends EventEmitter {
     }
   }
 
+  /**
+   * Tear the engine down. Everything that stops the manager from touching its
+   * collaborators happens SYNCHRONOUSLY, before this returns: `_disposed` is set
+   * first, and `_failRun`, the background-start handlers and `startRun`'s
+   * post-plan continuation all check it (#7142). So a start still in flight
+   * when the manager goes away can no longer journal onto — or log through — a
+   * torn-down ledger/log, whether or not the caller waits.
+   *
+   * The returned promise resolves once every backgrounded start has settled.
+   * An in-flight start only settles when its architect turn does, and the turn
+   * is the TurnDriver's to abort, not this class's — the driver is injected and
+   * its owner disposes it (`dispose()` rejects in-flight turns SESSION_GONE).
+   * Dispose the driver BEFORE awaiting this, and before disposing the ledger the
+   * start would otherwise journal to.
+   *
+   * @returns {Promise<void>}
+   */
   dispose() {
     this._disposed = true
     if (this._onSessionFreed && typeof this._sm.off === 'function') this._sm.off('session_destroyed', this._onSessionFreed)
     this._onSessionFreed = null
     this._gate?.dispose?.()
+    return Promise.allSettled([...this._starts]).then(() => undefined)
   }
 
   // --- status writes: the FSM choke point (#6732) --------------------------
@@ -313,6 +336,10 @@ export class OrchestrationManager extends EventEmitter {
     try {
       plan = await this._plan(run)
     } catch (err) {
+      // The owner disposed the manager (and so its TurnDriver) mid-plan: the
+      // turn rejecting SESSION_GONE is the teardown, not a plan failure, and
+      // there is no ledger left to journal it to (#7142).
+      if (this._disposed) return { runId, phase: run.phase }
       return this._failRun(run, `PLAN_${err instanceof DecisionParseError ? 'PARSE' : 'FAILED'}`, err)
     }
     // A cancel that landed while this turn was in flight wins. Destroying a
@@ -323,6 +350,10 @@ export class OrchestrationManager extends EventEmitter {
     // record ends up with phantom subtasks AND a rejected startRun.) `_runSubtask`
     // makes the same re-check after its awaits.
     if (run.cancelled) return { runId, phase: run.phase }
+    // Same for a dispose (#7142): the plan resolved after the manager went away,
+    // and everything below journals to a ledger its owner is about to (or has
+    // already) disposed.
+    if (this._disposed) return { runId, phase: run.phase }
     // Materialize subtasks. A subtask runs 'implement' (write-capable) ONLY when
     // the architect asked for it AND the run's worker provider is
     // implement-eligible (codex, #6735) AND no preset forces audit. Otherwise it
@@ -370,16 +401,24 @@ export class OrchestrationManager extends EventEmitter {
    */
   createAndStartRun(opts = {}) {
     const record = this.createRun(opts)
-    this.startRun(record.runId)
+    const start = this.startRun(record.runId)
       .catch((err) => {
         // The run may already be gone (cancelled, or _failRun ran inside startRun).
         const run = this._runs.get(record.runId)
-        if (!run) return null
+        if (!run || this._disposed) return null
         return this._failRun(run, 'START_FAILED', err)
       })
       .catch((err) => {
+        // A disposed manager's log/ledger belong to someone else now (#7142).
+        if (this._disposed) return
         this._log?.warn?.(`orchestration: run ${record.runId} failed to start and could not be journaled: ${err?.message || String(err)}`)
       })
+    // Track it so `dispose()` can wait for it (#7142). `start` should never reject, but if
+    // the final handler itself throws, removal still runs and no derived promise
+    // is left rejecting unhandled.
+    this._starts.add(start)
+    const forget = () => { this._starts.delete(start) }
+    start.then(forget, forget)
     return record
   }
 
@@ -966,6 +1005,11 @@ export class OrchestrationManager extends EventEmitter {
   }
 
   async _failRun(run, code, err) {
+    // A manager that has been disposed owns nothing any more: its ledger may be
+    // flushed and closed, its log gone. A start that was in flight at dispose
+    // time is rejected by the TurnDriver teardown and lands here a tick later;
+    // journaling `failed` then would write to a disposed ledger (#7142).
+    if (this._disposed) return { runId: run.runId, phase: run.phase }
     // A cancel that already tore the run down wins: don't overwrite the
     // terminal 'cancelled' status with 'failed' (or double-emit lifecycle
     // events) when an in-flight turn rejects SESSION_GONE on the next tick.

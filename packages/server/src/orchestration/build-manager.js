@@ -41,10 +41,17 @@ export function buildOrchestrationManager({ sessionManager, config, chroxyDir, l
     })
     // The factory owns construction, so it owns teardown: extend dispose() to
     // also stop the turn driver (SessionManager listeners) and flush the ledger.
+    //
+    // Async since #7142: the manager's dispose settles once its backgrounded
+    // starts have. The order is load-bearing — mark the manager disposed, then
+    // abort in-flight turns (the driver rejects them), wait for the starts that
+    // rejection unwinds, and only THEN flush and close the ledger they would
+    // otherwise journal to.
     const managerDispose = manager.dispose.bind(manager)
-    manager.dispose = () => {
-      managerDispose()
+    manager.dispose = async () => {
+      const drained = managerDispose()
       try { turnDriver.dispose() } catch { /* idempotent best-effort */ }
+      try { await drained } catch { /* allSettled never rejects; belt and braces */ }
       try { ledger.dispose() } catch { /* flushes pending snapshot writes */ }
     }
     log?.info?.('Orchestration engine enabled (features.orchestration)')

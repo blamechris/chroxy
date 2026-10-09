@@ -135,7 +135,9 @@ export class ServerOrchestrator {
     // sessions it may own — dispose unhooks its listeners and flushes the run
     // ledger, so the subsequent destroyAll can't race a debounced snapshot write.
     if (this._orchestrationManager) {
-      try { this._orchestrationManager.dispose() } catch (err) {
+      // #7142: dispose() settles once the backgrounded run starts have, so await
+      // it — otherwise the ledger flush below could race an in-flight start.
+      try { await this._orchestrationManager.dispose() } catch (err) {
         log.warn(`Orchestration engine dispose failed: ${err?.message || err}`)
       }
     }

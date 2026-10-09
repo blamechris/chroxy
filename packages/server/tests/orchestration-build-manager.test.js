@@ -26,7 +26,7 @@ test('returns null when the feature is off (fail-closed default)', () => {
   assert.equal(sm.eventNames().length, 0, 'flag-off attaches no listeners')
 })
 
-test('constructs a wired manager when features.orchestration is on', () => {
+test('constructs a wired manager when features.orchestration is on', async () => {
   const dir = tmp()
   const sm = new EventEmitter() // TurnDriver only needs .on
   sm.listSessions = () => []
@@ -40,7 +40,7 @@ test('constructs a wired manager when features.orchestration is on', () => {
     assert.ok(mgr instanceof OrchestrationManager, 'returns an OrchestrationManager')
     // it can serve its read API without a run (empty list)
     assert.deepEqual(mgr.listRuns(), [])
-    mgr.dispose?.()
+    await mgr.dispose?.()
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -57,7 +57,7 @@ test('returns null (never throws) when construction fails', () => {
   assert.ok(warnings.some((w) => /failed to initialize/i.test(w)), 'logged a warning')
 })
 
-test('recovers prior run records from disk at boot (index not clobbered)', () => {
+test('recovers prior run records from disk at boot (index not clobbered)', async () => {
   const dir = tmp()
   // cwd must be a REAL directory within (a fake) $HOME — the factory wires
   // validateCwdAllowed, which stats it and enforces the within-home rule.
@@ -72,16 +72,16 @@ test('recovers prior run records from disk at boot (index not clobbered)', () =>
   // boot 1: create a run and dispose (flushes run.json)
   const mgr1 = buildOrchestrationManager({ sessionManager: mkSm(), config: cfg, chroxyDir: dir })
   const rec = mgr1.createRun({ goal: 'g', cwd })
-  mgr1.dispose()
+  await mgr1.dispose()
   // boot 2: the prior run is recovered — listRuns sees it (no empty-map clobber)
   const mgr2 = buildOrchestrationManager({ sessionManager: mkSm(), config: cfg, chroxyDir: dir })
   const runs = mgr2.listRuns()
   assert.equal(runs.length, 1, 'prior run recovered at boot')
   assert.equal(runs[0].runId, rec.runId)
-  mgr2.dispose()
+  await mgr2.dispose()
 })
 
-test('dispose() unhooks the engine listeners from the session manager', () => {
+test('dispose() unhooks the engine listeners from the session manager', async () => {
   const dir = tmp()
   const sm = new EventEmitter()
   sm.listSessions = () => []
@@ -92,11 +92,11 @@ test('dispose() unhooks the engine listeners from the session manager', () => {
     chroxyDir: dir,
   })
   assert.ok(sm.eventNames().length > before, 'engine attached listeners (turn driver)')
-  mgr.dispose()
+  await mgr.dispose()
   assert.equal(sm.eventNames().length, before, 'dispose removed every engine listener')
 })
 
-test('honors the CHROXY_ENABLE_ORCHESTRATION=1 env override', () => {
+test('honors the CHROXY_ENABLE_ORCHESTRATION=1 env override', async () => {
   const prev = process.env.CHROXY_ENABLE_ORCHESTRATION
   process.env.CHROXY_ENABLE_ORCHESTRATION = '1'
   const dir = tmp()
@@ -105,7 +105,7 @@ test('honors the CHROXY_ENABLE_ORCHESTRATION=1 env override', () => {
   try {
     const mgr = buildOrchestrationManager({ sessionManager: sm, config: {}, chroxyDir: dir })
     assert.ok(mgr instanceof OrchestrationManager, 'env override enables the engine even with no config')
-    mgr.dispose?.()
+    await mgr.dispose?.()
   } finally {
     if (prev === undefined) delete process.env.CHROXY_ENABLE_ORCHESTRATION
     else process.env.CHROXY_ENABLE_ORCHESTRATION = prev
