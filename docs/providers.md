@@ -106,6 +106,7 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 | Plan mode | **Yes** (#8153) | **Yes** | No |
 | Resume (`resumeSessionId`) | Yes | Yes (`--resume` on respawn/restore) | Yes (`--resume` on restore) |
 | Thinking level control | Yes | No | No |
+| Reasoning shown while it works (#7393) | Yes | Yes (block ends first) | Yes (as claude writes each block; set `CHROXY_TUI_THINKING=0` to turn off) |
 | Live streaming (`stream_delta`) | Yes | Yes | No (deliver-on-complete) |
 | Auth | API key or `claude auth login` | API key or `claude auth login` | `claude auth login` only (`ANTHROPIC_API_KEY` rejected) |
 | Billing | Programmatic credits / API | Programmatic credits / API | **Subscription interactive allowance** (today; best-effort, not guaranteed) |
@@ -116,6 +117,45 @@ Pick by billing surface and required features:
 - **`claude-sdk` (default, #8266)** — the richest experience: fastest startup, live streaming, live model/mode switching, resume, thinking-level control, plan mode (#8153). A subscription login bills as the flat subscription today (the 2026-06-15 programmatic-credit change was paused, #7333); set an explicit `ANTHROPIC_API_KEY` for raw per-token billing instead.
 - **`claude-tui`** — drives the interactive `claude` TUI under a PTY and bills against the subscription's interactive allowance. It was the default from #5819 until #8266, as a hedge against the credit pool that never shipped. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
 - **`claude-cli`** — same plan-mode support as the SDK (#8153) and the same billing, but without in-process permissions (HTTP hook instead), no thinking-level control, and a live model switch that requires a process restart — see the feature table above. A `claude -p` subprocess per session instead of in-process. Pick this if the SDK itself is unavailable.
+
+### Reasoning on `claude-tui` and `claude-cli` (#7393)
+
+Both providers show the model's reasoning as a collapsed "Thinking…" /
+"Thought for Ns" bubble ahead of the answer, the same bubble `claude-sdk` and
+BYOK have always fed. The text is only as good as what claude is asked for:
+
+- **`claude-tui`** is deliver-on-complete, so there is no stream to read. The
+  reasoning is read from the session transcript (`~/.claude/projects/…/<id>.jsonl`,
+  one `thinking` block per entry) while the turn runs, each block shown a moment
+  after claude writes it. Chroxy also sets `showThinkingSummaries: true` in the
+  `--settings` file it gives that claude, because without it the API returns the
+  block with only its signature and the bubble would say "Thought for 1.2s" with
+  nothing under it. The same setting makes the terminal tab show the summaries.
+  `CHROXY_TUI_THINKING=0` (also `false`/`no`/`off`, read when the session is
+  created) turns both halves off.
+- **`claude-cli`** reads the `thinking` content blocks from the `stream-json`
+  events it already parses. It does not pass a display flag (the only one is a
+  hidden `--thinking-display` that older `claude` builds reject), so a block can
+  arrive with no text and show only its duration.
+- Neither adds thinking-level **control**: `thinkingLevel` stays `false` for both,
+  because Chroxy does not set the thinking budget of either (that is `claude-sdk`
+  only, #6779). Showing reasoning and setting its effort are separate.
+- The text is pattern-redacted (the same value-shape patterns as the logger) before
+  it leaves the daemon, and a block is shown whole rather than token by token so a
+  secret that straddles two chunks is still caught.
+- Subagent (sidechain) reasoning is not shown; only the main conversation's.
+- **Known limit, `claude-tui` (display order):** Claude Code batches its
+  transcript writes and writes a turn's assistant lines after it has run the
+  PreToolUse hook and after the Stop hook. So the reasoning often reaches the disk
+  late, and on current clients the thinking bubble can appear **below the tool row
+  it preceded, or below the answer**. Chroxy never holds a tool or the answer back
+  for it: reasoning already on disk is shown first; reasoning that lands later
+  (the daemon keeps collecting for 5 s after a turn is answered) is shown when it
+  lands, on its own id, recorded in history, so a replay shows it too, after the
+  answer. A block that has not reached the disk within 5 s is not shown. The proper
+  fix for the order is a client-side hint (the thinking frame naming what it
+  precedes), tracked in #8518; a server-side wait was tried and rejected (up to
+  500 ms on every tool turn, and it still timed out).
 
 ### `CHROXY_TUI_MULTISELECT_REINJECT` env override (experimental, #5797)
 

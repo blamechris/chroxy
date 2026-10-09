@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The default provider shows what the model is thinking (#7393).** On
+  Claude Code (TUI) a long turn used to look like a hung session until the whole
+  answer arrived. The model's reasoning now appears as a collapsed "Thinking…"
+  bubble, then "Thought for Ns", with the answer (Claude Code writes its
+  reasoning to disk a little late, so it can appear just after the answer or
+  below a tool row), and it is kept in the session history so it is still there
+  after a reconnect. Claude Code (CLI)
+  gets the same bubble. Chroxy now asks the Claude Code TUI for thinking
+  summaries, which also shows them in the terminal tab; set
+  `CHROXY_TUI_THINKING=0` to turn this off. Reasoning is redacted for secrets
+  before it is shown, and it does not add a thinking-level control to either
+  provider.
+
 ### Fixed
 
 - **A claude-tui session now reports the subagents it is running (#7396).** The

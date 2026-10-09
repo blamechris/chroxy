@@ -133,7 +133,8 @@ export class PushNotificationHandler {
     // returns no streamed text would leave the dedupe latched, and the
     // *next* turn's result would be wrongly suppressed as "already
     // notified" (#3872, Copilot review).
-    if (event === 'stream_start' || event === 'tool_start') {
+    // #7393: a `late` thinking stream_start is not the start of a busy cycle.
+    if ((event === 'stream_start' && data?.late !== true) || event === 'tool_start') {
       this._idleNotifiedSessions.delete(sessionId)
     }
 

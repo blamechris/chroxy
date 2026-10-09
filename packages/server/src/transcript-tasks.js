@@ -67,6 +67,24 @@
 // so a consumer that saw the count rise can say what the limit was. A sidechain
 // (subagent) entry is not counted: the main conversation has not stopped.
 //
+// #7393 — thinking blocks. Claude Code writes ONE JSONL entry per content block
+// (a message with thinking, text and tool_use blocks is three `assistant`
+// entries sharing `message.id` / `requestId`, told apart by `apiBlockIndex`),
+// and a thinking entry looks like:
+//     { "type": "assistant", "isSidechain": false, "uuid": "…",
+//       "timestamp": "2026-10-08T12:00:05.000Z", "thinkingDurationMs": 1236,
+//       "apiBlockIndex": 0,
+//       "message": { "role": "assistant", "content": [ { "type": "thinking",
+//         "thinking": "…", "signature": "…" } ], … } }
+// `thinking` is the empty string unless the API was asked for summaries (the
+// TUI asks only when `showThinkingSummaries` is set), and `thinkingDurationMs`
+// is on the ENTRY. claude-tui is deliver-on-complete and has no stream to read
+// reasoning from, so the transcript is the only source. Capture is opt-in per
+// turn (`startThinkingCapture`) and bounded: a scan that is only rebuilding
+// state from history queues nothing, so a long resumed transcript costs no
+// memory. Sidechain (subagent) entries are skipped, the same as for the
+// observed model.
+//
 // Robustness contract (#5431 success criterion — degrade silently):
 //   - The transcript format is the harness's INTERNAL representation, not a
 //     stable API. Every parse is defensive; an unparseable line is skipped.
@@ -125,6 +143,14 @@ export const NOTIFIED_TOOL_USE_IDS_MAX = 512
 // Truncate `description` fallbacks derived from an Agent `prompt` — prompts
 // are unbounded; 80 chars matches the issue's payload sketch.
 const PROMPT_DESCRIPTION_MAX = 80
+
+// #7393: the most thinking blocks held between two drains, and the most text
+// kept per block. A turn is drained every poll pass, so the cap is a backstop
+// against a runaway file, not a working limit; the newest blocks survive. The
+// per-block bound matches the client bubble's own cap (store-core
+// MAX_THINKING_CONTENT_LEN), past which it drops text on arrival anyway.
+export const MAX_PENDING_THINKING_BLOCKS = 256
+export const MAX_THINKING_BLOCK_CHARS = 1024 * 1024
 
 /**
  * Derive the transcript path for a per-PID session file
@@ -235,6 +261,41 @@ export class TranscriptTaskScanner {
     // entries, and the classification of the most recent one.
     this._usageLimitCount = 0
     this._lastUsageLimit = null
+    // #7393: thinking capture. `_thinkingSinceMs === null` means OFF: blocks seen
+    // while rebuilding state are never queued. It is deliberately not cleared by
+    // a rotation reset (a reset re-reads the file; the timestamp cutoff and the
+    // consumer's uuid de-duplication keep the re-read from replaying old blocks).
+    this._thinking ??= []
+    this._thinkingSinceMs ??= null
+  }
+
+  /**
+   * #7393 — start queueing the thinking blocks of the current turn: those on
+   * main-conversation assistant entries stamped at or after `sinceMs`. Idempotent
+   * while active, so a consumer can call it on every pass without moving the
+   * cutoff or dropping what is queued.
+   * @param {number} sinceMs epoch ms of the turn start
+   */
+  startThinkingCapture(sinceMs) {
+    if (this._thinkingSinceMs !== null) return
+    this._thinking = []
+    this._thinkingSinceMs = Number.isFinite(sinceMs) ? sinceMs : Date.now()
+  }
+
+  /** #7393 — stop queueing and drop whatever is queued. */
+  stopThinkingCapture() {
+    this._thinkingSinceMs = null
+    this._thinking = []
+  }
+
+  /**
+   * #7393 — take (and clear) the queued thinking blocks, oldest first.
+   * @returns {Array<{uuid: string, ts: number, text: string, redacted: boolean, durationMs: number|undefined}>}
+   */
+  drainThinking() {
+    const out = this._thinking
+    this._thinking = []
+    return out
   }
 
   /**
@@ -437,6 +498,7 @@ export class TranscriptTaskScanner {
           if (!block || block.type !== 'tool_use' || typeof block.id !== 'string') continue
           this._ingestToolUse(block, entryTs ?? Date.now())
         }
+        this._ingestThinking(entry, blocks, entryTs)
       }
       return
     }
@@ -474,6 +536,42 @@ export class TranscriptTaskScanner {
         this._notified.delete(id)
         break
       }
+    }
+  }
+
+  /**
+   * #7393 — queue the thinking blocks of one assistant entry while capture is on.
+   * An entry with no usable timestamp is skipped: without it there is no telling
+   * whether it belongs to this turn, and showing another turn's reasoning is worse
+   * than showing none.
+   */
+  _ingestThinking(entry, blocks, entryTs) {
+    if (this._thinkingSinceMs === null) return
+    if (entry.isSidechain === true) return
+    if (entryTs === null || entryTs < this._thinkingSinceMs) return
+    const thinkingBlocks = blocks.filter((b) => b && (b.type === 'thinking' || b.type === 'redacted_thinking'))
+    if (thinkingBlocks.length === 0) return
+    // `thinkingDurationMs` is per ENTRY, and Claude Code writes one block per
+    // entry. If an entry ever held several, the duration cannot be attributed to
+    // any one of them, so none gets it.
+    const duration = thinkingBlocks.length === 1 && Number.isFinite(entry.thinkingDurationMs) && entry.thinkingDurationMs >= 0
+      ? entry.thinkingDurationMs
+      : undefined
+    const uuid = typeof entry.uuid === 'string' ? entry.uuid : ''
+    for (const block of thinkingBlocks) {
+      const redacted = block.type === 'redacted_thinking'
+      let text = ''
+      if (!redacted && typeof block.thinking === 'string') {
+        text = block.thinking.length > MAX_THINKING_BLOCK_CHARS ? block.thinking.slice(0, MAX_THINKING_BLOCK_CHARS) : block.thinking
+      }
+      this._thinking.push({
+        uuid: thinkingBlocks.length > 1 ? `${uuid}#${this._thinking.length}` : uuid,
+        ts: entryTs,
+        text,
+        redacted,
+        durationMs: duration,
+      })
+      if (this._thinking.length > MAX_PENDING_THINKING_BLOCKS) this._thinking.shift()
     }
   }
 

@@ -4515,7 +4515,9 @@ export class SessionManager extends EventEmitter {
         const data = event === 'error' && emitted && typeof emitted === 'object' && !Number.isFinite(emitted.timestamp)
           ? { ...emitted, timestamp: Date.now() }
           : emitted
-        if (ACTIVITY_EVENTS.has(event)) this.touchActivity(sessionId)
+        // #7393: a `late` thinking frame is a finished turn being decorated, not
+        // activity: it must not push the idle timeout back.
+        if (ACTIVITY_EVENTS.has(event) && data?.late !== true) this.touchActivity(sessionId)
         this._recordHistory(sessionId, event, data)
         this.emit('session_event', { sessionId, event, data })
         if (LOGGED_EVENTS.has(event)) {

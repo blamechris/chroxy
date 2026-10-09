@@ -311,8 +311,12 @@ function setupSessionForwarding(normalizer, ctx) {
       return
     }
 
-    // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
-    if (event === 'stream_start') {
+    // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients.
+    // #7393: not for a `late` thinking stream_start (claude-tui shows a reasoning
+    // block that reached the transcript after its turn's `result`). That is a
+    // finished turn being decorated, not the session starting work, and nothing
+    // would send idle again until the next `result`.
+    if (event === 'stream_start' && data?.late !== true) {
       broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })
     } else if (event === 'result') {
       broadcast({ type: 'session_activity', sessionId, isBusy: false, lastCost: data?.cost ?? null })

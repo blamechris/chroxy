@@ -15,6 +15,7 @@ import { forceKill, killProcessTree } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics, parseCompactBoundaryMeta, formatCompactBoundaryContent, formatStatusContent } from './claude-stream-parser.js'
+import { ThinkingStreams } from './thinking-stream.js'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
@@ -1400,6 +1401,14 @@ export class CliSession extends BaseSession {
         if (!messageId || !ctx) break
 
         switch (event.type) {
+          case 'message_start': {
+            // #7393: a new API message (the next round of a tool loop) restarts
+            // block indexes at 0. A reasoning block the last message never closed
+            // must not absorb this one's block 0.
+            this._closeThinking(ctx)
+            break
+          }
+
           case 'content_block_start': {
             const blockType = event.content_block?.type
             ctx.currentContentBlockType = blockType
@@ -1409,6 +1418,12 @@ export class CliSession extends BaseSession {
                 ctx.hasStreamStarted = true
                 this.emit('stream_start', { messageId })
               }
+            } else if (blockType === 'thinking' || blockType === 'redacted_thinking') {
+              // #7393: the model's reasoning. Open its stream now (the "it is
+              // thinking" signal); the text is held until the block closes.
+              const key = event.index ?? 0
+              this._thinkingStreams(ctx, messageId).open(key)
+              if (blockType === 'redacted_thinking') (ctx.redactedThinking ??= new Set()).add(key)
             } else if (blockType === 'tool_use') {
               ctx.currentToolName = event.content_block.name
               ctx.toolInputChunks = ''
@@ -1445,6 +1460,14 @@ export class CliSession extends BaseSession {
               }
               ctx.didStreamText = true
               this.emit('stream_delta', { messageId, delta: delta.text })
+            } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+              // #7393: opening is idempotent, so a delta that beats its
+              // content_block_start still lands in ONE stream. `signature_delta`
+              // is not reasoning and falls through to nothing.
+              const key = event.index ?? 0
+              const streams = this._thinkingStreams(ctx, messageId)
+              streams.open(key)
+              streams.append(key, delta.thinking)
             } else if (delta.type === 'input_json_delta' && ctx.currentContentBlockType === 'tool_use') {
               if (typeof delta.partial_json === 'string' && !ctx.toolInputOverflow) {
                 const chunkBytes = Buffer.byteLength(delta.partial_json, 'utf8')
@@ -1478,6 +1501,12 @@ export class CliSession extends BaseSession {
           }
 
           case 'content_block_stop': {
+            if (ctx?.thinking) {
+              // #7393: close the reasoning block this stop belongs to (a no-op
+              // for any other block type).
+              const key = event.index ?? 0
+              ctx.thinking.close(key, { redacted: ctx.redactedThinking?.delete(key) === true })
+            }
             if (ctx && ctx.currentToolName) {
               // #7346: backfill EVERY tool's finalized input (not just the
               // four special-cased by _applyToolInputSemantics below) so a
@@ -1552,6 +1581,10 @@ export class CliSession extends BaseSession {
 
         const messageId = this._currentMessageId
         const ctx = this._currentCtx
+
+        // #7393: a turn can end under an open reasoning block; finalise it so the
+        // client's "Thinking…" settles, before anything else this result emits.
+        this._closeThinking(ctx)
 
         // #5064 — Fallback for turns that complete without ever emitting
         // streamed assistant text. The canonical case is `/compact`: the
@@ -1807,6 +1840,29 @@ export class CliSession extends BaseSession {
         return
       }
     }
+  }
+
+  /**
+   * #7393 — the turn's reasoning streams, created on first use. Lives on the
+   * per-turn `ctx` so it dies with the turn, and is built lazily so a ctx built
+   * without it (tests, an older shape) still works.
+   */
+  _thinkingStreams(ctx, messageId) {
+    return (ctx.thinking ??= new ThinkingStreams((event, data) => this.emit(event, data), messageId))
+  }
+
+  /**
+   * #7393 — finish every open reasoning block of `ctx` and forget which of them
+   * were `redacted_thinking`. The two must go together: a redacted block that
+   * never got its stop would otherwise leave its index in the set, and a later
+   * plain block at that index would be shown as the redacted marker.
+   */
+  _closeThinking(ctx) {
+    if (!ctx) return
+    // A redacted block closes as the marker even when its stop never came.
+    for (const key of ctx.redactedThinking ?? []) ctx.thinking?.close(key, { redacted: true })
+    ctx.thinking?.closeAll()
+    ctx.redactedThinking?.clear()
   }
 
   /**
@@ -2272,6 +2328,7 @@ export class CliSession extends BaseSession {
     if (!this._isBusy || !this._currentMessageId) return
     const messageId = this._currentMessageId
     const sessionId = this._sessionId
+    this._closeThinking(this._currentCtx) // #7393
     if (this._currentCtx?.hasStreamStarted) {
       this.emit('stream_end', { messageId })
     }
