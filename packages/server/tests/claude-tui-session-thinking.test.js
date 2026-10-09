@@ -387,6 +387,10 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     const sessFile = writeSessFile()
     writeJournal(sessFile, [])
     const { s, sinkDir } = makeTurnSession()
+    // The first-turn submit nudge (#5777, 1500 ms) re-sends a bare \r and holds
+    // nothing back, but a slow runner arms it inside the window below. Off here,
+    // so every timer the window records is one the tool path itself armed.
+    s._firstTurnSubmitNudgeMs = 0
     const at = []
     s.on('tool_start', () => at.push(Date.now()))
     const turn = s.sendMessage('hi')
@@ -405,11 +409,7 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     // The poll sleeps 150 ms; the 2000 ms hook-fs bound and the test's own 8 s
     // watchdogs are armed per pass but are bounds, not waits. Anything in between
     // is a wait that was added (the removed one was 500 ms).
-    // The first-turn submit nudge (#5777) re-sends a bare \r if no hook output has
-    // arrived; it can be armed inside this window on a slow runner, and it holds
-    // nothing back, so it is excluded by its own constant rather than by value.
-    const nudge = ClaudeTuiSession.FIRST_TURN_SUBMIT_NUDGE_MS
-    const long = delays.filter((d) => typeof d === 'number' && d > 160 && d < 2000 && d !== nudge)
+    const long = delays.filter((d) => typeof d === 'number' && d > 160 && d < 2000)
     assert.deepEqual(long, [], `a wait longer than the poll sleep was armed before tool_start: ${long}`)
     stop(sinkDir)
     await turn
