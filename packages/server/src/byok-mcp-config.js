@@ -1250,10 +1250,16 @@ export function describeConfigModeSecretWarning({ filePath, mode, entry } = {}) 
  *
  * @param {string} filePath
  * @param {object} value — the full config object to serialize
- * @param {{ mode: number|null }} opts — `null` mode = new file, use 0600
+ * @param {{ mode: number|null, _fsync?: Function }} opts — `null` mode = new file, use 0600.
+ *   `_fsync` is a TEST-ONLY seam (#7070): `(target, { isDir }) => void`, the same
+ *   shape as `confirmRenameDurable`'s `fsync`, defaulting to the real
+ *   `fsyncForDurability`. BOTH the temp-file fsync and the post-rename directory
+ *   fsync (made by `confirmRenameDurable`) go through it, so a test can pin
+ *   their order and fail the directory one without a real disk fault. Production
+ *   callers never pass it.
  * @returns {{ durabilityUnconfirmed: string | null }}
  */
-export function writeClaudeConfigAtomic(filePath, value, { mode }) {
+export function writeClaudeConfigAtomic(filePath, value, { mode, _fsync = fsyncForDurability }) {
   const resolved = resolveClaudeConfigWritePath(filePath)
   if (!resolved.ok) throw new Error(resolved.error)
   // Everything below targets the RESOLVED path: the sidecar has to live in the
@@ -1274,7 +1280,7 @@ export function writeClaudeConfigAtomic(filePath, value, { mode }) {
     // already was.
     writeFileSync(tmpPath, payload, { mode: targetMode })
     chmodSync(tmpPath, targetMode)
-    fsyncForDurability(tmpPath)
+    _fsync(tmpPath, { isDir: false })
   } catch (err) {
     try { unlinkSync(tmpPath) } catch { /* nothing to clean up */ }
     throw err
@@ -1300,7 +1306,7 @@ export function writeClaudeConfigAtomic(filePath, value, { mode }) {
   // trust write that had actually landed; the MCP add/remove paths reported a
   // failure for a config change that was on disk. Shared verdict now — report,
   // never throw — via the one implementation in platform.js.
-  return confirmRenameDurable(destPath, { durable: true })
+  return confirmRenameDurable(destPath, { durable: true, fsync: _fsync })
 }
 
 /**
@@ -1484,9 +1490,11 @@ export function addMcpServerToConfig(opts = {}) {
  * @param {'user'|'project'} [opts.scope]
  * @param {string} [opts.cwd] — required for scope 'project'
  * @param {string} [opts.configPath]
- * @returns {{ ok: true, found: boolean, scope: string } | { ok: false, error: string }}
+ * @param {Function} [opts._fsync] — TEST-ONLY (#7070): forwarded to
+ *   `writeClaudeConfigAtomic`; see its `_fsync` doc. Production never passes it.
+ * @returns {{ ok: true, found: boolean, scope: string, durabilityUnconfirmed?: string } | { ok: false, error: string }}
  */
-export function removeMcpServerFromConfig({ name, scope = 'user', cwd, configPath = defaultClaudeConfigPath() } = {}) {
+export function removeMcpServerFromConfig({ name, scope = 'user', cwd, configPath = defaultClaudeConfigPath(), _fsync } = {}) {
   const validName = validateMcpServerNameForRemoval(name)
   if (!validName.ok) return { ok: false, error: validName.error }
   if (!MCP_WRITE_SCOPES.includes(scope)) {
@@ -1524,7 +1532,8 @@ export function removeMcpServerFromConfig({ name, scope = 'user', cwd, configPat
   }
 
   delete block[validName.name]
-  const { durabilityUnconfirmed } = writeClaudeConfigAtomic(configPath, raw, { mode: read.mode }) ?? {}
+  // `_fsync: undefined` falls through to writeClaudeConfigAtomic's default.
+  const { durabilityUnconfirmed } = writeClaudeConfigAtomic(configPath, raw, { mode: read.mode, _fsync }) ?? {}
   // #7054/#7068: REMOVE is the load-bearing durable case — this write is durable
   // precisely so a capability REDUCTION cannot silently reappear after a power
   // loss. Dropping the caveat here would sever the only caller-visible signal on

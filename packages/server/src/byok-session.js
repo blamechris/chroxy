@@ -329,6 +329,9 @@ export class ClaudeByokSession extends BaseSession {
    *   overrides (system prompt, settings) can be added as distinct named opts when
    *   any of them are actually used.
    * @param {number} [opts.mcpToolCallTimeoutMs]  Per-tools/call timeout; null/undefined = MCPClient default (30s).
+   * @param {Function} [opts._mcpConfigFsync]  TEST-ONLY (#7070): `(target, { isDir }) => void` fsync
+   *   seam forwarded to the MCP-config remove write, so a test can fail the post-rename directory
+   *   fsync. Production never passes it; undefined keeps the real `fsyncForDurability`.
    */
   constructor(opts = {}) {
     super(buildBaseSessionOpts(opts, { provider: opts.provider || 'claude-byok' }))
@@ -467,6 +470,8 @@ export class ClaudeByokSession extends BaseSession {
     // writes back to the SAME file this session read from (a test override or
     // $CHROXY_CLAUDE_CONFIG must not be bypassed on the write half).
     this._mcpConfigPath = opts.mcpConfigPath || defaultClaudeConfigPath()
+    // #7070: test-only fsync seam for the config write; see the constructor JSDoc.
+    this._mcpConfigFsync = opts._mcpConfigFsync
     // #7112: `opts.mcpConfigPath === null` (a Task subagent, see
     // `_executeTaskTool`) explicitly SKIPS discovery — the child does not
     // parse a second copy of ~/.claude.json / <cwd>/.mcp.json and does not
@@ -978,6 +983,7 @@ export class ClaudeByokSession extends BaseSession {
         scope,
         cwd: this.cwd,
         configPath: this._mcpConfigPath,
+        _fsync: this._mcpConfigFsync,
       })
     } catch (err) {
       return { ok: false, error: `Failed to write MCP config: ${err?.message || String(err)}` }
