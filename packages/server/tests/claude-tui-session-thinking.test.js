@@ -712,6 +712,112 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     assert.equal(s._thinkingLateTimer, null)
   })
 
+  // --- late-window hardening (#8519) -------------------------------------------
+
+  it('the late timer cannot keep the process alive (#8519)', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s, sinkDir } = makeTurnSession()
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    stop(sinkDir)
+    await turn
+    assert.ok(s._thinkingLateTimer, 'precondition: the late window is open')
+    assert.equal(s._thinkingLateTimer.hasRef(), false, 'an unref\'d timer never holds the event loop open')
+  })
+
+  it('stops the late timer once no answered window is left, even while the next turn is active (#8519)', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s, sinkDir } = makeTurnSession()
+    s._thinkingLateMs = 100
+    let turn = s.sendMessage('one')
+    await waitFor(() => turnPolling(s), 'turn one polling')
+    stop(sinkDir, 'one done', 'stop-1.json')
+    await turn
+    assert.ok(s._thinkingLateTimer, 'precondition: turn one\'s late window is open')
+    turn = s.sendMessage('two')
+    await waitFor(() => turnPolling(s), 'turn two polling')
+    // Turn one's window closes while turn two is still running; turn two's own
+    // (open) record is not a reason to keep a timer that only serves late windows.
+    await waitFor(() => s._thinkingRecords.length === 1 && s._thinkingRecords[0].expiresMono === null, 'turn one\'s window to expire')
+    await waitFor(() => s._thinkingLateTimer === null, 'the late timer to stop')
+    assert.equal(s._isBusy, true, 'turn two is still active')
+    assert.equal(captureOff(s), false, 'and capture keeps running for turn two')
+    stop(sinkDir, 'two done', 'stop-2.json')
+    await turn
+  })
+
+  it('a record whose turn never ended cannot shadow the next turn\'s reasoning (#8519)', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    // A hypothetical turn-end path that forgets to close its reasoning window.
+    const realEnd = s._endThinkingForTurn
+    s._endThinkingForTurn = () => {}
+    let turn = s.sendMessage('one')
+    await waitFor(() => turnPolling(s), 'turn one polling')
+    stop(sinkDir, 'one done', 'stop-1.json')
+    await turn
+    s._endThinkingForTurn = realEnd
+    assert.equal(s._thinkingRecords.length, 1, 'precondition: turn one\'s record was left open')
+    assert.equal(s._thinkingRecords[0].untilMs, null, 'precondition: and never closed')
+
+    await new Promise((r) => setTimeout(r, 20))
+    turn = s.sendMessage('two')
+    await waitFor(() => turnPolling(s), 'turn two polling')
+    const turnTwoId = events.frames.filter((f) => f.name === 'stream_start' && !f.thinking).pop().messageId
+    appendJournal(transcript, [thinkingEntry({ text: 'turn two reasoning', ts: now() })])
+    await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end'), 'turn two thinking')
+    assert.deepEqual(
+      thinkingFrames(events.frames).filter((f) => f.name === 'stream_start').map((f) => f.messageId),
+      [`${turnTwoId}-thinking-0`],
+      'the block goes to the turn that is running, not to the stale record',
+    )
+    assert.equal(s._thinkingRecords.length, 1, 'the stale record is gone')
+    stop(sinkDir, 'two done', 'stop-2.json')
+    await turn
+  })
+
+  it('an open record with no turn running is dropped by the next settle, and capture stops (#8519)', async () => {
+    const sessFile = writeSessFile()
+    writeJournal(sessFile, [])
+    const { s, sinkDir } = makeTurnSession()
+    s._endThinkingForTurn = () => {} // the path that forgets to close its window
+    const turn = s.sendMessage('one')
+    await waitFor(() => turnPolling(s), 'turn one polling')
+    s._drainTurnThinking({ force: true }) // make sure the scanner is capturing
+    stop(sinkDir, 'one done', 'stop-1.json')
+    await turn
+    assert.equal(s._thinkingRecords.length, 1, 'precondition: the record was left open')
+    assert.equal(captureOff(s), false, 'precondition: and capture is still on')
+    s._settleThinking()
+    assert.equal(s._thinkingRecords.length, 0)
+    assert.equal(captureOff(s), true)
+  })
+
+  it('a listener that throws costs one block, not the rest of the drain pass (#8519)', async () => {
+    const sessFile = writeSessFile()
+    const transcript = writeJournal(sessFile, [])
+    const { s, events, sinkDir } = makeTurnSession()
+    let threw = false
+    s.on('stream_start', (f) => {
+      if (f.thinking === true && !threw) { threw = true; throw new Error('listener blew up') }
+    })
+    const turn = s.sendMessage('hi')
+    await waitFor(() => turnPolling(s), 'the turn to be polling')
+    // Both blocks are read by one scan, so one drain pass owns both.
+    appendJournal(transcript, [
+      thinkingEntry({ text: 'first block', ts: now() }),
+      thinkingEntry({ text: 'second block', ts: now(1) }),
+    ])
+    await waitFor(() => thinkingFrames(events.frames).some((f) => f.name === 'stream_end' && f.thinking), 'the second block to arrive')
+    const deltas = thinkingFrames(events.frames).filter((f) => f.name === 'stream_delta').map((f) => f.delta)
+    assert.ok(deltas.includes('second block'), 'the block after the throwing one is still emitted')
+    stop(sinkDir)
+    await turn
+  })
+
   // --- capture lifetime (#8513 review) ----------------------------------------
 
   const captureOff = (s) => s._transcriptTaskScanner?._thinkingSinceMs === null
