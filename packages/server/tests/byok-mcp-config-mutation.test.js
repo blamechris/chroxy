@@ -21,7 +21,7 @@ import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   addMcpServerToConfig,
   parseClaudeMcpConfig,
@@ -31,6 +31,7 @@ import {
   readClaudeConfigForMutation,
   validateNewMcpServerName,
   validateMcpServerNameForRemoval,
+  writeClaudeConfigAtomic,
 } from '../src/byok-mcp-config.js'
 
 let dir
@@ -469,6 +470,98 @@ describe('#6974 removeMcpServerFromConfig', () => {
     chmodSync(configPath, 0o640)
     removeMcpServerFromConfig({ name: 'drop', configPath })
     assert.equal(statSync(configPath).mode & 0o777, 0o640)
+  })
+})
+
+// #7070: writeClaudeConfigAtomic's `_fsync` seam (same `(target, { isDir })` shape as
+// confirmRenameDurable's `fsync`). Windows has no directory fsync (the shared helper
+// skips it there), so the directory-fsync cases only run on POSIX.
+describe('#7070 writeClaudeConfigAtomic fsync seam', () => {
+  const IS_WINDOWS = process.platform === 'win32'
+  const DIR_FSYNC_FAILURE = 'simulated directory fsync failure (EIO)'
+
+  // Fails ONLY the directory fsync, recording every call and what was on disk
+  // at the moment it ran so ordering can be asserted.
+  function makeFsync({ failDir = false, failFile = false } = {}) {
+    const calls = []
+    const fsync = (target, { isDir }) => {
+      calls.push({
+        target,
+        isDir,
+        finalExists: existsSync(configPath),
+        sidecarCount: sidecars().length,
+      })
+      if (isDir && failDir) throw new Error(DIR_FSYNC_FAILURE)
+      if (!isDir && failFile) throw new Error('simulated file fsync failure (EIO)')
+    }
+    return { calls, fsync }
+  }
+
+  it('fsyncs the sidecar file BEFORE the rename, then the containing directory AFTER it', { skip: IS_WINDOWS }, () => {
+    const { calls, fsync } = makeFsync()
+    const out = writeClaudeConfigAtomic(configPath, { mcpServers: { a: { command: 'a' } } }, { mode: null, _fsync: fsync })
+
+    assert.deepEqual(out, { durabilityUnconfirmed: null })
+    assert.equal(calls.length, 2, 'exactly one file fsync and one directory fsync')
+    assert.equal(calls[0].isDir, false)
+    assert.ok(/\.chroxy\.[^/]+\.tmp$/.test(calls[0].target), 'the file fsync targets the temp sidecar')
+    assert.equal(calls[0].finalExists, false, 'the file fsync runs BEFORE the rename publishes the config')
+    assert.equal(calls[0].sidecarCount, 1)
+    assert.deepEqual(
+      { target: calls[1].target, isDir: calls[1].isDir },
+      { target: dirname(configPath), isDir: true },
+    )
+    assert.equal(calls[1].finalExists, true, 'the directory fsync runs AFTER the rename')
+    assert.equal(calls[1].sidecarCount, 0, 'the sidecar is gone by the time the directory is fsynced')
+    assert.deepEqual(read(), { mcpServers: { a: { command: 'a' } } })
+  })
+
+  it('a post-rename directory-fsync failure RETURNS durabilityUnconfirmed and does not throw', { skip: IS_WINDOWS }, () => {
+    const { calls, fsync } = makeFsync({ failDir: true })
+    let out
+    assert.doesNotThrow(() => {
+      out = writeClaudeConfigAtomic(configPath, { mcpServers: { landed: { command: 'l' } } }, { mode: null, _fsync: fsync })
+    }, 'the rename already published the file, so reporting the write as failed would be a lie (#7054/#7067)')
+
+    assert.equal(out.durabilityUnconfirmed, DIR_FSYNC_FAILURE)
+    assert.equal(calls.filter((c) => c.isDir).length, 1, 'the directory fsync was attempted')
+    assert.deepEqual(read(), { mcpServers: { landed: { command: 'l' } } }, 'the write IS on disk with the expected content')
+    assert.equal(statSync(configPath).mode & 0o777, 0o600, 'a created file still gets 0600')
+    assert.equal(sidecars().length, 0)
+  })
+
+  it('a FILE-fsync failure (before the rename) still throws, cleans the sidecar and leaves the old config', () => {
+    write({ keep: 'me' })
+    const { calls, fsync } = makeFsync({ failFile: true })
+    assert.throws(
+      () => writeClaudeConfigAtomic(configPath, { replaced: true }, { mode: 0o600, _fsync: fsync }),
+      /simulated file fsync failure/,
+    )
+    assert.equal(calls.length, 1, 'the directory fsync is never reached')
+    assert.deepEqual(read(), { keep: 'me' }, 'nothing was published')
+    assert.equal(sidecars().length, 0)
+  })
+})
+
+describe('#7070 removeMcpServerFromConfig propagates the durability caveat', () => {
+  const IS_WINDOWS = process.platform === 'win32'
+
+  it('returns durabilityUnconfirmed (and has removed the entry) when the directory fsync fails', { skip: IS_WINDOWS }, () => {
+    write({ mcpServers: { keep: { command: 'k' }, drop: { command: 'd' } } })
+    const fsync = (_target, { isDir }) => { if (isDir) throw new Error('simulated directory fsync failure (EIO)') }
+
+    const res = removeMcpServerFromConfig({ name: 'drop', configPath, _fsync: fsync })
+
+    assert.equal(res.ok, true)
+    assert.equal(res.found, true)
+    assert.equal(res.durabilityUnconfirmed, 'simulated directory fsync failure (EIO)')
+    assert.deepEqual(Object.keys(read().mcpServers), ['keep'], 'the removal IS on disk')
+  })
+
+  it('carries no durabilityUnconfirmed key when the directory fsync succeeds', () => {
+    write({ mcpServers: { drop: { command: 'd' } } })
+    const res = removeMcpServerFromConfig({ name: 'drop', configPath, _fsync: () => {} })
+    assert.deepEqual(res, { ok: true, found: true, scope: 'user' })
   })
 })
 

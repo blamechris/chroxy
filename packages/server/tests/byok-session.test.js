@@ -1089,6 +1089,49 @@ describe('ClaudeByokSession', () => {
       })
     })
 
+    // #7070: removal is a capability REDUCTION, and its config write is durable so
+    // it cannot reappear after a power loss. A post-rename directory-fsync failure
+    // means the removal LANDED but its durability is unproven: the session must
+    // report success plus a `warning`, not a failure and not silence.
+    describe('removeMcpServer durability caveat (#7070)', () => {
+      const IS_WINDOWS = process.platform === 'win32'
+      const writeTwoServerConfig = () => {
+        const path = join(tmpHome, '.claude.json')
+        writeFileSync(path, JSON.stringify({
+          mcpServers: { drop: { command: 'd' }, keep: { command: 'k' } },
+        }))
+        return path
+      }
+
+      it('surfaces the unconfirmed-durability caveat on the warning channel while the removal stands', { skip: IS_WINDOWS }, async () => {
+        const mcpConfigPath = writeTwoServerConfig()
+        const _mcpConfigFsync = (_target, { isDir }) => {
+          if (isDir) throw new Error('simulated directory fsync failure (EIO)')
+        }
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath, _mcpConfigFsync })
+
+        const res = await session.removeMcpServer('drop')
+
+        assert.equal(res.ok, true, 'the removal landed, so this is a success carrying a warning')
+        assert.equal(res.found, true)
+        assert.ok(
+          /could not be confirmed durable \(simulated directory fsync failure \(EIO\)\)/.test(res.warning || ''),
+          `warning must carry the underlying fsync error; got: ${res.warning}`,
+        )
+        assert.deepEqual(Object.keys(JSON.parse(readFileSync(mcpConfigPath, 'utf8')).mcpServers), ['keep'], 'the removal IS on disk')
+        assert.deepEqual(session._mcpServerConfigs.map((c) => c.name), ['keep'], 'and in the session')
+      })
+
+      it('a clean directory fsync returns no warning', async () => {
+        const mcpConfigPath = writeTwoServerConfig()
+        const session = new ClaudeByokSession({ cwd: '/tmp', mcpConfigPath, _mcpConfigFsync: () => {} })
+
+        const res = await session.removeMcpServer('drop')
+
+        assert.deepEqual(res, { ok: true, found: true })
+      })
+    })
+
     // #7939: the spawn-trust prompt must name WHICH config scope a server came
     // from, so a user approving a spawn can tell "my own config" from "a
     // repository I just cloned" apart. These pin the `source` field on the
