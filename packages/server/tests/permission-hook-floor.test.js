@@ -726,6 +726,11 @@ describe('permission-hook.sh: an obviously unusable payload does not skip the pr
       // /permission cannot parse it either, so it answers a 400 deny — the tool
       // is BLOCKED. The one thing that must never happen is a silent allow.
       assert.equal(decisionOf(stdout).permissionDecision, 'deny', 'and an unparseable payload is denied, never allowed')
+      // #7044: the real daemon's 400 never reached a human, so the hook must not
+      // attribute the deny to the user.
+      const reason = decisionOf(stdout).permissionDecisionReason
+      assert.ok(!/Denied by user/i.test(reason), 'a daemon-side 400 must not read as a user deny')
+      assert.ok(reason.includes('(HTTP 400)'), `the reason names the daemon rejection, got: ${reason}`)
     })
   }
 

@@ -269,6 +269,15 @@ emit_unreachable_fallback() {
   exit 0
 }
 
+# #7044: the daemon answered /permission with a non-200 (400 unparseable, 413
+# oversize, 5xx fault, ...). No human saw this request, so say so honestly — and
+# ALWAYS deny, whatever CHROXY_HOOK_UNREACHABLE_DECISION says. $1 is the status
+# (three digits, or "unknown"), so the reason stays valid JSON.
+emit_daemon_rejected_deny() {
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy could not process the permission request (HTTP %s). Failing closed (denied)."}}\n' "$1"
+  exit 0
+}
+
 # ---- Shared: route a permission request to the phone via HTTP ----
 # Expects $REQUEST to contain the JSON body to POST.
 # Outputs the appropriate hookSpecificOutput JSON and exits.
@@ -284,12 +293,32 @@ route_to_phone() {
     CURL_ARGS+=(-H "Authorization: Bearer ${TOKEN}")
   fi
 
-  RESPONSE=$(printf '%s' "$REQUEST" | curl "${CURL_ARGS[@]}")
+  # #7044: also capture the HTTP status. `-w` appends "\n<code>" after the body, so
+  # the last line is the status and everything before it is the body. Only a 200
+  # can carry a decision a human made; the daemon also answers {"decision":"deny"}
+  # with a 400 (unparseable body), 413 (oversize body) and 5xx (daemon fault), none
+  # of which ever reached the phone.
+  CURL_ARGS+=(-w $'\n%{http_code}')
+  RESPONSE_AND_CODE=$(printf '%s' "$REQUEST" | curl "${CURL_ARGS[@]}")
   EXIT_CODE=$?
 
   if [ $EXIT_CODE -ne 0 ]; then
     # Daemon unreachable / curl timeout — the request never reached the phone.
     emit_unreachable_fallback "Chroxy could not reach the daemon to request your approval; the request never reached your phone. Failing closed (denied). Retry once Chroxy is reachable."
+  fi
+
+  HTTP_CODE="${RESPONSE_AND_CODE##*$'\n'}"
+  RESPONSE="${RESPONSE_AND_CODE%$'\n'*}"
+  # Anything that is not exactly 200 (including a missing/garbled status) is a
+  # daemon-side rejection. Always DENY — never the CHROXY_HOOK_UNREACHABLE_DECISION=ask
+  # opt-out, which exists for an unreachable daemon, not for one that answered no —
+  # and never look at the body: a non-200 must not be able to turn into an allow.
+  if [ "$HTTP_CODE" != "200" ]; then
+    case "$HTTP_CODE" in
+      [0-9][0-9][0-9]) ;;
+      *) HTTP_CODE="unknown" ;;
+    esac
+    emit_daemon_rejected_deny "$HTTP_CODE"
   fi
 
   DECISION=$(echo "$RESPONSE" | grep -o '"decision":"[^"]*"' | head -1 | cut -d'"' -f4)
