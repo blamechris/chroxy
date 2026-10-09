@@ -822,3 +822,63 @@ test('#6733: ordinary saturation with a worker still in flight does NOT report a
     cleanup()
   }
 })
+
+// #7142 — `createAndStartRun` launches `startRun` in the background. A manager
+// disposed while that start is still inside the architect's planning turn used
+// to leave a floating promise: the owner's `driver.dispose()` rejects the turn
+// (SESSION_GONE), `startRun` catches it and calls `_failRun`, which journals
+// `failed` onto a ledger the owner has already torn down.
+test('#7142 dispose() mid-planning: the in-flight start journals and logs nothing afterwards', async () => {
+  // `null` hangs the architect's planning turn: no result is ever emitted.
+  const { mgr, ledger, driver, sm, cleanup } = makeHarness(() => null)
+  try {
+    const logged = []
+    mgr._log = { info: (m) => logged.push(m), warn: (m) => logged.push(m), error: (m) => logged.push(m) }
+
+    const rec = mgr.createAndStartRun({ goal: 'Plan something', cwd: '/repo', autoApprovePlan: true })
+    // POSITIVE CONTROL: the start really is mid-planning — the architect session
+    // exists and its turn is in flight, so the abort below has something to hit.
+    assert.equal(sm.created.length, 1, 'the architect was spawned')
+    assert.equal(ledger.getRun(rec.runId).status, 'planning', 'the run is mid-planning')
+    assert.equal(mgr._starts.size, 1, 'the backgrounded start is tracked')
+
+    // Count only what happens AFTER dispose.
+    const calls = []
+    const origFail = mgr._failRun.bind(mgr)
+    mgr._failRun = (...args) => { calls.push('_failRun'); return origFail(...args) }
+    const origSetStatus = ledger.setStatus.bind(ledger)
+    ledger.setStatus = (...args) => { calls.push('ledger.setStatus'); return origSetStatus(...args) }
+    logged.length = 0
+
+    // The owner's teardown order (see build-manager): dispose the manager, abort
+    // the turn via the driver, then wait for the start to unwind.
+    const drained = mgr.dispose()
+    driver.dispose()
+    await drained
+    // and a few more turns of the event loop, for any straggler continuation
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+
+    assert.deepEqual(calls, [], 'no _failRun / ledger write against the disposed manager')
+    assert.deepEqual(logged, [], 'no log call against the disposed manager')
+    assert.equal(mgr._starts.size, 0, 'the settled start removed itself from the tracker')
+  } finally {
+    cleanup()
+  }
+})
+
+test('#7142 dispose() waits for the backgrounded start to settle', async () => {
+  const { mgr, driver, cleanup } = makeHarness(() => null)
+  try {
+    mgr.createAndStartRun({ goal: 'Plan something', cwd: '/repo', autoApprovePlan: true })
+    let settled = false
+    const drained = mgr.dispose().then(() => { settled = true })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(settled, false, 'the start is still planning, so dispose() has not resolved')
+    driver.dispose() // aborts the hung turn
+    await drained
+    assert.equal(settled, true)
+  } finally {
+    cleanup()
+  }
+})
