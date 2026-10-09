@@ -387,6 +387,10 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     const sessFile = writeSessFile()
     writeJournal(sessFile, [])
     const { s, sinkDir } = makeTurnSession()
+    // The first-turn submit nudge (#5777, 1500 ms) re-sends a bare \r and holds
+    // nothing back, but a slow runner arms it inside the window below. Off here,
+    // so every timer the window records is one the tool path itself armed.
+    s._firstTurnSubmitNudgeMs = 0
     const at = []
     s.on('tool_start', () => at.push(Date.now()))
     const turn = s.sendMessage('hi')
