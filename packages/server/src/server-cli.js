@@ -36,7 +36,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
 import { configDir, configPath } from './config-dir.js'
-import { detectStrandedState, formatStrandedWarning } from './config-dir-migration.js'
+import { detectStrandedState, startupStrandedWarning } from './config-dir-migration.js'
 
 const log = createLogger('cli')
 // #5368 slice (b): QRCode + writeConnectionInfo moved to startup-display.js with
@@ -916,10 +916,16 @@ export async function startCliServer(config) {
   //
   // Detection only — the copy is opt-in via `chroxy config-dir migrate`.
   // Best-effort, like maybeEncryptCredentialsAtRest: never blocks boot.
+  //
+  // #7244 — an operator running a deliberate second root can acknowledge the
+  // CURRENT set with `chroxy config-dir ack`. Only the warning is filtered:
+  // `strandedState` stays the raw detection, so the missing-token exit below
+  // still names an unmoved config.json even when it was acknowledged. An entry
+  // that appears after the acknowledgement is not in the snapshot and warns.
   let strandedState = null
   try {
     strandedState = detectStrandedState()
-    for (const line of formatStrandedWarning(strandedState)) log.warn(line)
+    for (const line of startupStrandedWarning(strandedState)) log.warn(line)
   } catch (err) {
     log.warn(`Stranded config-dir state check failed: ${err.message}`)
   }
