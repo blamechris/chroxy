@@ -6049,6 +6049,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (!turn) return
     turn.thinking = null
     if (!this._thinkingEnabled) return
+    this._dropStaleThinking() // #8519
     const sinceMs = Date.now()
     turn.thinking = {
       turn,
@@ -6102,7 +6103,13 @@ export class ClaudeTuiSession extends BaseSession {
             rec.seen.add(block.uuid)
           }
           // A record that has been answered is past its `result`: its blocks are late.
-          rec.streams.emitBlock({ ...block, late: rec.untilMs !== null })
+          // #8519 — the blocks are already drained, so a listener that throws on
+          // one must cost that block and not the rest of the pass.
+          try {
+            rec.streams.emitBlock({ ...block, late: rec.untilMs !== null })
+          } catch (err) {
+            ;(this._log || log).debug?.(`thinking emit failed (turn ${rec.turn?.messageId}, block ${block.uuid ?? 'n/a'}): ${err?.stack || err?.message} — block skipped`)
+          }
         }
       }
     } catch (err) {
@@ -6138,10 +6145,32 @@ export class ClaudeTuiSession extends BaseSession {
   /** #7393 — drop expired late windows; with none left, stop collecting and stop the timer. */
   _settleThinking() {
     const nowMs = this._nowMonotonic()
+    this._dropStaleThinking() // #8519
     this._thinkingRecords = this._thinkingRecords.filter((r) => r.expiresMono === null || r.expiresMono > nowMs)
+    // #8519 — the timer only serves answered (late) windows. The next turn's own
+    // open record is the poll loop's to drain, so it is no reason to keep ticking.
+    if (this._thinkingLateTimer && !this._thinkingRecords.some((r) => r.expiresMono !== null)) {
+      clearInterval(this._thinkingLateTimer)
+      this._thinkingLateTimer = null
+    }
     if (this._thinkingRecords.length > 0) return
-    if (this._thinkingLateTimer) { clearInterval(this._thinkingLateTimer); this._thinkingLateTimer = null }
     this._transcriptTaskScanner?.stopThinkingCapture()
+  }
+
+  /**
+   * #8519 — a record still open (`untilMs === null`) is only legitimate while it
+   * is the active turn's own, and only `_endThinkingForTurn` closes it. A turn-end
+   * path that skipped that call would leave its record open for good, and
+   * `_routeThinking` would hand every later turn's blocks to it (first match
+   * wins). A turn is over once it is no longer the active turn, so drop any open
+   * record that is not the live one. Never throws.
+   */
+  _dropStaleThinking() {
+    const live = this._activeTurn?.thinking
+    const kept = this._thinkingRecords.filter((r) => r.untilMs !== null || r === live)
+    if (kept.length === this._thinkingRecords.length) return
+    ;(this._log || log).debug?.('dropping a thinking window left open by an earlier turn')
+    this._thinkingRecords = kept
   }
 
   /** #7393 — destroy(): forget every window and stop the timer. */
