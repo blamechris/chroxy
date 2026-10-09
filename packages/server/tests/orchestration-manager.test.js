@@ -882,3 +882,47 @@ test('#7142 dispose() waits for the backgrounded start to settle', async () => {
     cleanup()
   }
 })
+
+// #7142 — the other half of the race: the plan RESOLVES after dispose(). Nothing
+// rejects here (the driver is deliberately left alone), so the failure path is
+// not involved; `startRun`'s continuation would materialise subtasks and, with
+// autoApprovePlan, spawn workers against the disposed manager's ledger.
+test('#7142 a plan that resolves after dispose() journals no subtasks and spawns no workers', async () => {
+  const { mgr, ledger, sm, cleanup } = makeHarness(() => null)
+  try {
+    const logged = []
+    mgr._log = { info: (m) => logged.push(m), warn: (m) => logged.push(m), error: (m) => logged.push(m) }
+    const rec = mgr.createAndStartRun({ goal: 'Plan something', cwd: '/repo', autoApprovePlan: true })
+    assert.equal(sm.created.length, 1, 'the architect was spawned')
+    assert.equal(mgr._starts.size, 1, 'the backgrounded start is tracked')
+
+    const calls = []
+    for (const name of ['createSubtask', 'setStatus', 'updateSubtask', 'recordTurnUsage']) {
+      const orig = ledger[name].bind(ledger)
+      ledger[name] = (...args) => { calls.push(name); return orig(...args) }
+    }
+    logged.length = 0
+
+    const drained = mgr.dispose()
+    // Now let the architect's turn complete with a valid plan.
+    const architect = sm.created[0]
+    const plan = { kind: 'epic_plan', summary: 'p', subtasks: [{ title: 'A', goal: 'g', role: 'audit' }] }
+    sm.emit('session_event', { sessionId: architect.sessionId, event: 'stream_delta', data: { messageId: 'm1', delta: fenced(plan) } })
+    sm.emit('session_event', {
+      sessionId: architect.sessionId,
+      event: 'result',
+      data: { model: 'fable-hi', cost: 0.01, duration: 5, usage: { input_tokens: 1, output_tokens: 1 } },
+    })
+    await drained // settles because the plan resolved
+    await new Promise((resolve) => setImmediate(resolve))
+
+    // recordTurnUsage runs inside _driveDecision BEFORE the continuation guard,
+    // so it is expected; what must not happen is anything the continuation does.
+    assert.deepEqual(calls.filter((c) => c !== 'recordTurnUsage'), [], 'no subtask / status journaling after dispose')
+    assert.equal(sm.created.length, 1, 'no worker was spawned after dispose')
+    assert.deepEqual(logged, [], 'no log call after dispose')
+    assert.equal(ledger.getRun(rec.runId).status, 'planning', 'the run was left untouched at planning')
+  } finally {
+    cleanup()
+  }
+})

@@ -413,10 +413,12 @@ export class OrchestrationManager extends EventEmitter {
         if (this._disposed) return
         this._log?.warn?.(`orchestration: run ${record.runId} failed to start and could not be journaled: ${err?.message || String(err)}`)
       })
-    // Track it so `dispose()` can wait for it (#7142). `start` never rejects, so
-    // the cleanup needs no rejection branch.
+    // Track it so `dispose()` can wait for it (#7142). `start` should never reject, but if
+    // the final handler itself throws, removal still runs and no derived promise
+    // is left rejecting unhandled.
     this._starts.add(start)
-    start.then(() => this._starts.delete(start))
+    const forget = () => { this._starts.delete(start) }
+    start.then(forget, forget)
     return record
   }
 
