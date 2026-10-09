@@ -6108,7 +6108,7 @@ export class ClaudeTuiSession extends BaseSession {
           try {
             rec.streams.emitBlock({ ...block, late: rec.untilMs !== null })
           } catch (err) {
-            ;(this._log || log).debug?.(`thinking emit failed: ${err?.message} — block skipped`)
+            ;(this._log || log).debug?.(`thinking emit failed (turn ${rec.turn?.messageId}, block ${block.uuid ?? 'n/a'}): ${err?.stack || err?.message} — block skipped`)
           }
         }
       }

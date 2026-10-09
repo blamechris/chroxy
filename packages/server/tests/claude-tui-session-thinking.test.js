@@ -714,6 +714,7 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
 
   // --- late-window hardening (#8519) -------------------------------------------
 
+  // Regression guard: passes on main by design, goes red if `unref()` is removed from the late timer.
   it('the late timer cannot keep the process alive (#8519)', async () => {
     const sessFile = writeSessFile()
     writeJournal(sessFile, [])
@@ -730,7 +731,11 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     const sessFile = writeSessFile()
     writeJournal(sessFile, [])
     const { s, sinkDir } = makeTurnSession()
-    s._thinkingLateMs = 100
+    // Expiry is driven from the monotonic clock seam, not real time, so a slow runner
+    // cannot let turn one's window lapse before turn two begins.
+    const realNow = s._nowMonotonic.bind(s)
+    let skewMs = 0
+    s._nowMonotonic = () => realNow() + skewMs
     let turn = s.sendMessage('one')
     await waitFor(() => turnPolling(s), 'turn one polling')
     stop(sinkDir, 'one done', 'stop-1.json')
@@ -738,9 +743,15 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     assert.ok(s._thinkingLateTimer, 'precondition: turn one\'s late window is open')
     turn = s.sendMessage('two')
     await waitFor(() => turnPolling(s), 'turn two polling')
+    assert.equal(s._thinkingRecords.length, 2, 'precondition: turn one\'s window and turn two\'s record both exist')
+    const [answered, open] = s._thinkingRecords
+    assert.ok(answered.expiresMono !== null && answered.expiresMono > s._nowMonotonic(), 'precondition: turn one is answered and its window is still in the future')
+    assert.equal(open.expiresMono, null, 'precondition: turn two\'s record is open')
+    assert.ok(s._thinkingLateTimer, 'precondition: the late timer is armed')
     // Turn one's window closes while turn two is still running; turn two's own
     // (open) record is not a reason to keep a timer that only serves late windows.
-    await waitFor(() => s._thinkingRecords.length === 1 && s._thinkingRecords[0].expiresMono === null, 'turn one\'s window to expire')
+    skewMs += s._thinkingLateMs + 1000
+    await waitFor(() => s._thinkingRecords.length === 1 && s._thinkingRecords[0] === open, 'turn one\'s window to expire')
     await waitFor(() => s._thinkingLateTimer === null, 'the late timer to stop')
     assert.equal(s._isBusy, true, 'turn two is still active')
     assert.equal(captureOff(s), false, 'and capture keeps running for turn two')
@@ -763,7 +774,6 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     assert.equal(s._thinkingRecords.length, 1, 'precondition: turn one\'s record was left open')
     assert.equal(s._thinkingRecords[0].untilMs, null, 'precondition: and never closed')
 
-    await new Promise((r) => setTimeout(r, 20))
     turn = s.sendMessage('two')
     await waitFor(() => turnPolling(s), 'turn two polling')
     const turnTwoId = events.frames.filter((f) => f.name === 'stream_start' && !f.thinking).pop().messageId
