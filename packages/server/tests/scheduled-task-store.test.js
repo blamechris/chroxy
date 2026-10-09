@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { ScheduledTaskCadenceCronSchema, ScheduledTaskSchema } from '@chroxy/protocol'
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync, readdirSync } from 'fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync, readdirSync, mkdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { parseCron } from '../src/schedule-parser.js'
 import { join } from 'path'
@@ -256,6 +256,379 @@ describe('#6862 ScheduledTaskStore', () => {
       assert.equal(store.remove('typo'), true, 'remove() must reach preserved entries too')
       assert.equal(store.unreadableCount(), 0)
       assert.deepEqual(onDiskIds(), ['good'])
+    })
+  })
+
+  // #7077 — the preserved raw entries are captured at load() time, but the
+  // operator can hand-edit the file while the daemon runs. Before this, the next
+  // unrelated persist wrote the STALE capture back over their fix: the file
+  // looked edited and then un-edited itself. _persist() now re-reads the file
+  // and reconciles ONLY the preserved set; the daemon's readable tasks stay
+  // authoritative, exactly as before.
+  describe('#7077 an operator hand-fix to an unreadable entry survives the next persist', () => {
+    const TYPO_EPOCH = 1795000000000000000 // ns-vs-ms typo: past MAX_EPOCH_MS
+    const GOOD_AT = 1900000000000
+    const cron = (expression = '*/5 * * * *') => ({ kind: 'cron', expression })
+
+    const live = (id = 'good') => ({ id, prompt: 'keep me', cadence: cron(), createdAt: 1, updatedAt: 1 })
+    const typo = (over = {}) => ({
+      id: 'typo', prompt: 'operator named task', cadence: { kind: 'once', at: TYPO_EPOCH }, createdAt: 1, updatedAt: 1, ...over,
+    })
+
+    const writeFile = (tasks) => writeFileSync(filePath, JSON.stringify({ version: 1, tasks }))
+    const readTasks = () => JSON.parse(readFileSync(filePath, 'utf-8')).tasks
+    const onDisk = (id) => readTasks().find((t) => t.id === id)
+    /** Operator edits the file by hand while the daemon runs. */
+    const hand = (fn) => writeFile(fn(readTasks()))
+    const unrelatedMutation = (store) =>
+      store.add({ prompt: 'unrelated', cadence: cron('0 9 * * *') })
+
+    it('ACCEPTANCE: the operator\'s correction is not reverted by an unrelated mutation', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      assert.equal(store.unreadableCount(), 1, 'precondition: the typo entry is preserved')
+
+      // The operator fixes the epoch typo in the file, mid-session.
+      hand((tasks) => tasks.map((t) => (t.id === 'typo' ? { ...t, cadence: { kind: 'once', at: GOOD_AT } } : t)))
+      unrelatedMutation(store)
+
+      assert.deepEqual(onDisk('typo').cadence, { kind: 'once', at: GOOD_AT }, 'the fix must still be on disk')
+      assert.notEqual(onDisk('typo').cadence.at, TYPO_EPOCH, 'the stale capture must NOT be written back')
+    })
+
+    it('an entry the operator fixed is ADOPTED as a live task (and is no longer unreadable)', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      hand((tasks) => tasks.map((t) => (t.id === 'typo' ? { ...t, cadence: { kind: 'once', at: GOOD_AT } } : t)))
+      unrelatedMutation(store)
+
+      assert.equal(store.unreadableCount(), 0)
+      const adopted = store.get('typo')
+      assert.ok(adopted, 'a fixed entry becomes a task')
+      assert.equal(adopted.nextRun, GOOD_AT, 'with nextRun recomputed from the corrected cadence')
+      assert.equal(readTasks().filter((t) => t.id === 'typo').length, 1, 'exactly one copy on disk')
+    })
+
+    it('CONTROL: without an edit, the preserved entry is written back verbatim', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      unrelatedMutation(store)
+      assert.deepEqual(onDisk('typo'), typo(), 'byte-identical round trip')
+      assert.equal(store.unreadableCount(), 1)
+    })
+
+    it('an entry the operator edited but is STILL unreadable keeps THEIR newer edit, not the stale capture', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      const [before] = store.listUnreadable()
+
+      const STILL_BAD = 1795000000000000001
+      hand((tasks) => tasks.map((t) => (t.id === 'typo'
+        ? { ...t, prompt: 'operator tried again', cadence: { kind: 'once', at: STILL_BAD } }
+        : t)))
+      unrelatedMutation(store)
+
+      assert.equal(onDisk('typo').prompt, 'operator tried again', 'the newer edit survives')
+      assert.equal(onDisk('typo').cadence.at, STILL_BAD)
+      assert.equal(store.unreadableCount(), 1, 'still unreadable')
+      const [after] = store.listUnreadable()
+      assert.match(after.reason, /epoch|representable/i, 'the reason is re-derived from the edited entry')
+      assert.notEqual(after.handle, before.handle, 'the entry changed, so its handle changed')
+    })
+
+    it('an entry the operator DELETED from the file is dropped, not resurrected', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      hand((tasks) => tasks.filter((t) => t.id !== 'typo'))
+      unrelatedMutation(store)
+
+      assert.equal(onDisk('typo'), undefined, 'the operator removed it; the daemon must not put it back')
+      assert.equal(store.unreadableCount(), 0)
+      assert.ok(onDisk('good'), 'the readable task is untouched')
+    })
+
+    it('the daemon\'s readable tasks stay authoritative over a hand-edit of THEM', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      hand((tasks) => tasks.map((t) => (t.id === 'good' ? { ...t, prompt: 'edited behind the daemon' } : t)))
+      unrelatedMutation(store)
+      assert.equal(onDisk('good').prompt, 'keep me', 'only the PREFERRED set is reconciled; live tasks win, as before')
+    })
+
+    it('a file that is MISSING at persist time falls back to the captured raw entries', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      rmSync(filePath)
+      unrelatedMutation(store)
+      assert.deepEqual(onDisk('typo'), typo(), 'never drop preserved data because the file could not be read')
+    })
+
+    it('an UNPARSABLE file at persist time falls back to the captured raw entries', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      writeFileSync(filePath, '{ this is half-saved by an editor')
+      unrelatedMutation(store)
+      assert.deepEqual(onDisk('typo'), typo())
+    })
+
+    it('a file with a wrong version or a non-array `tasks` falls back too', () => {
+      for (const body of [
+        JSON.stringify({ version: 99, tasks: [] }),
+        JSON.stringify({ version: 1, tasks: 'nope' }),
+        JSON.stringify(null),
+        JSON.stringify([]),
+      ]) {
+        writeFile([live(), typo()])
+        const store = newStore(() => 1000).load()
+        writeFileSync(filePath, body)
+        unrelatedMutation(store)
+        assert.deepEqual(onDisk('typo'), typo(), `fallback for ${body}`)
+        assert.equal(store.unreadableCount(), 1)
+      }
+    })
+
+    it('a file that is an UNREADABLE path (a directory) falls back and does not throw', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      rmSync(filePath)
+      mkdirSync(filePath) // readFileSync -> EISDIR; the atomic write then fails too, which is logged, not thrown
+      assert.doesNotThrow(() => unrelatedMutation(store))
+      assert.equal(store.unreadableCount(), 1, 'the in-memory capture is intact')
+    })
+
+    it('leaves no temp file behind (the write stays atomic)', () => {
+      writeFile([live(), typo()])
+      const store = newStore(() => 1000).load()
+      hand((tasks) => tasks.map((t) => (t.id === 'typo' ? { ...t, cadence: { kind: 'once', at: GOOD_AT } } : t)))
+      unrelatedMutation(store)
+      assert.deepEqual(readdirSync(dir).filter((f) => f.includes('.tmp')), [])
+      assert.equal(statSync(filePath).mode & 0o777, 0o600)
+    })
+
+    describe('identity of an entry across edits', () => {
+      it('an operator-edited entry whose id CHANGED is followed, not duplicated or lost', () => {
+        writeFile([live(), typo()])
+        const store = newStore(() => 1000).load()
+        hand((tasks) => tasks.map((t) => (t.id === 'typo'
+          ? { ...t, id: 'renamed', cadence: { kind: 'once', at: GOOD_AT } }
+          : t)))
+        unrelatedMutation(store)
+
+        assert.ok(store.get('renamed'), 'the renamed, fixed entry is adopted')
+        assert.equal(onDisk('typo'), undefined, 'and the old id is gone')
+        assert.equal(store.unreadableCount(), 0)
+      })
+
+      it('ID-LESS entries: matched by exact content; an untouched one survives while a sibling is edited', () => {
+        const idless = (prompt) => ({ prompt, cadence: { kind: 'once', at: TYPO_EPOCH } })
+        writeFile([live(), idless('first'), idless('second')])
+        const store = newStore(() => 1000).load()
+        assert.equal(store.unreadableCount(), 2)
+
+        // Operator edits only the SECOND one (still id-less, still unreadable).
+        hand((tasks) => tasks.map((t) => (t.prompt === 'second' ? { ...t, prompt: 'second, edited' } : t)))
+        unrelatedMutation(store)
+
+        const prompts = readTasks().filter((t) => t.id === undefined).map((t) => t.prompt).sort()
+        assert.deepEqual(prompts, ['first', 'second, edited'], 'the first is verbatim, the second carries the edit')
+        assert.equal(store.unreadableCount(), 2)
+      })
+
+      it('ID-LESS entries: an edit that GIVES the entry a valid id adopts it', () => {
+        const idless = (prompt) => ({ prompt, cadence: cron(), createdAt: 1, updatedAt: 1 })
+        writeFile([live(), idless('needs an id')])
+        const store = newStore(() => 1000).load()
+        assert.equal(store.unreadableCount(), 1, 'refused: task id must be a non-empty string')
+
+        hand((tasks) => tasks.map((t) => (t.prompt === 'needs an id' ? { ...t, id: 'now-has-id' } : t)))
+        unrelatedMutation(store)
+
+        assert.ok(store.get('now-has-id'), 'the operator\'s fix (adding the id) is adopted')
+        assert.equal(store.unreadableCount(), 0)
+        assert.equal(readTasks().filter((t) => t.id === undefined).length, 0, 'no stale id-less copy left behind')
+      })
+
+      it('ID-LESS entries: a deleted one is dropped and the others are untouched', () => {
+        const idless = (prompt) => ({ prompt, cadence: { kind: 'once', at: TYPO_EPOCH } })
+        writeFile([live(), idless('first'), idless('second')])
+        const store = newStore(() => 1000).load()
+        hand((tasks) => tasks.filter((t) => t.prompt !== 'first'))
+        unrelatedMutation(store)
+
+        assert.deepEqual(readTasks().filter((t) => t.id === undefined).map((t) => t.prompt), ['second'])
+        assert.equal(store.unreadableCount(), 1)
+      })
+
+      it('an entry the operator fixed to share a LIVE task\'s id is not adopted over it, and is not dropped', () => {
+        // Two entries now claim 'good'. The daemon\'s live task is authoritative
+        // and untouched; the operator\'s edited entry is kept (preserved, with the
+        // collision named) rather than adopted into a duplicate or silently lost.
+        writeFile([live(), typo()])
+        const store = newStore(() => 1000).load()
+        hand((tasks) => tasks.map((t) => (t.id === 'typo'
+          ? { ...t, id: 'good', prompt: 'operator renamed me onto a live id', cadence: { kind: 'once', at: GOOD_AT } }
+          : t)))
+        unrelatedMutation(store)
+
+        assert.equal(store.get('good').prompt, 'keep me', 'the live task is untouched')
+        assert.equal(store.unreadableCount(), 1, 'the preserved entry is kept, not adopted into a collision')
+        assert.match(store.listUnreadable()[0].reason, /duplicate/i)
+        assert.ok(
+          readTasks().some((t) => t.prompt === 'operator renamed me onto a live id'),
+          'and the operator\'s edit is still on disk',
+        )
+      })
+
+      it('a fixed entry is NOT adopted past the store cap — it stays preserved with the operator\'s new content', () => {
+        const many = Array.from({ length: 500 }, (_, i) => live(`t${i}`))
+        writeFile([...many, typo({ id: 'over' })])
+        const store = newStore(() => 1000).load()
+        assert.equal(store.list().length, 500)
+        assert.equal(store.unreadableCount(), 1, 'cap remainder preserved')
+
+        hand((tasks) => tasks.map((t) => (t.id === 'over' ? { ...t, cadence: { kind: 'once', at: GOOD_AT } } : t)))
+        store.update('t0', { prompt: 'touch' }) // persists WITHOUT freeing a slot
+
+        assert.equal(store.list().length, 500, 'the cap is never exceeded')
+        assert.equal(store.get('over'), null, 'not adopted: there is no room')
+        assert.equal(store.unreadableCount(), 1, 'but not lost either')
+        assert.deepEqual(onDisk('over').cadence, { kind: 'once', at: GOOD_AT }, 'and carries the operator\'s edit')
+        assert.match(store.listUnreadable()[0].reason, /cap/i)
+      })
+    })
+  })
+
+  // #7079 — a preserved entry must be visible and discardable without hand-editing.
+  // The wire cap on a task id is correct and is NOT widened, so the operator
+  // addresses an unreadable entry by a server-derived opaque HANDLE instead.
+  describe('#7079 unreadable entries are addressable by an opaque handle', () => {
+    const TYPO_EPOCH = 1795000000000000000
+    const cron = (expression = '*/5 * * * *') => ({ kind: 'cron', expression })
+    const live = (id = 'good') => ({ id, prompt: 'keep me', cadence: cron(), createdAt: 1, updatedAt: 1 })
+    const bad = (over = {}) => ({
+      id: 'typo', prompt: 'SECRET PROMPT TEXT', cadence: { kind: 'once', at: TYPO_EPOCH }, createdAt: 1, updatedAt: 1, ...over,
+    })
+    const writeFile = (tasks) => writeFileSync(filePath, JSON.stringify({ version: 1, tasks }))
+    const readTasks = () => JSON.parse(readFileSync(filePath, 'utf-8')).tasks
+
+    it('every unreadable entry has a handle: 16 lowercase hex, deterministic across reloads', () => {
+      writeFile([live(), bad()])
+      const a = newStore(() => 1000).load().listUnreadable()
+      const b = newStore(() => 5000).load().listUnreadable()
+      assert.equal(a.length, 1)
+      assert.match(a[0].handle, /^[0-9a-f]{16}$/)
+      assert.equal(a[0].handle, b[0].handle, 'derived from the entry\'s content, so stable across restarts')
+    })
+
+    it('the handle is derived from canonical JSON: key order does not change it, content does', () => {
+      writeFile([bad()])
+      const h1 = newStore().load().listUnreadable()[0].handle
+      writeFile([{ updatedAt: 1, createdAt: 1, cadence: { at: TYPO_EPOCH, kind: 'once' }, prompt: 'SECRET PROMPT TEXT', id: 'typo' }])
+      const h2 = newStore().load().listUnreadable()[0].handle
+      writeFile([bad({ prompt: 'different' })])
+      const h3 = newStore().load().listUnreadable()[0].handle
+      assert.equal(h1, h2)
+      assert.notEqual(h1, h3)
+    })
+
+    it('listUnreadable never carries raw contents (the prompt text is not in any row)', () => {
+      writeFile([live(), bad()])
+      const rows = newStore().load().listUnreadable()
+      assert.ok(!JSON.stringify(rows).includes('SECRET PROMPT TEXT'))
+    })
+
+    it('two byte-identical unreadable entries still get distinct handles', () => {
+      writeFile([bad(), bad()])
+      const rows = newStore().load().listUnreadable()
+      assert.equal(rows.length, 2)
+      assert.notEqual(rows[0].handle, rows[1].handle, 'a duplicate must remain individually addressable')
+    })
+
+    it('discardUnreadable(handle) removes the entry from memory AND from disk, and leaves live tasks alone', () => {
+      writeFile([live(), bad()])
+      const store = newStore(() => 1000).load()
+      const [{ handle }] = store.listUnreadable()
+      assert.equal(store.discardUnreadable(handle), true)
+      assert.equal(store.unreadableCount(), 0)
+      assert.deepEqual(readTasks().map((t) => t.id), ['good'])
+      assert.ok(store.get('good'))
+    })
+
+    it('discarding one of two byte-identical entries removes exactly one', () => {
+      writeFile([bad(), bad()])
+      const store = newStore(() => 1000).load()
+      const [first] = store.listUnreadable()
+      assert.equal(store.discardUnreadable(first.handle), true)
+      assert.equal(store.unreadableCount(), 1)
+      assert.equal(readTasks().length, 1)
+    })
+
+    it('an unknown, stale or malformed handle discards nothing and reports false', () => {
+      writeFile([live(), bad()])
+      const store = newStore(() => 1000).load()
+      for (const h of ['0000000000000000', 'typo', '', null, undefined, 42, {}, ['x']]) {
+        assert.equal(store.discardUnreadable(h), false, `handle ${JSON.stringify(h)}`)
+      }
+      assert.equal(store.unreadableCount(), 1)
+      assert.ok(readTasks().some((t) => t.id === 'typo'))
+    })
+
+    it('the id is NOT a handle: a live task\'s id can never be discarded through this path', () => {
+      writeFile([live(), bad()])
+      const store = newStore(() => 1000).load()
+      assert.equal(store.discardUnreadable('good'), false)
+      assert.ok(store.get('good'))
+    })
+
+    it('discarding after the operator edited the file refuses a stale handle (the operator\'s edit is never discarded blind)', () => {
+      writeFile([live(), bad()])
+      const store = newStore(() => 1000).load()
+      const [{ handle: stale }] = store.listUnreadable()
+      writeFileSync(filePath, JSON.stringify({ version: 1, tasks: [live(), bad({ prompt: 'operator rewrote this' })] }))
+
+      assert.equal(store.discardUnreadable(stale), false, 'the entry the operator saw is not the entry now on disk')
+      assert.ok(readTasks().some((t) => t.prompt === 'operator rewrote this'), 'their edit is still there')
+      const [fresh] = store.listUnreadable()
+      assert.notEqual(fresh.handle, stale, 'and the refreshed list carries the new handle')
+      assert.equal(store.discardUnreadable(fresh.handle), true)
+    })
+
+    it('discarding one id-less entry does not make its sibling inherit the discarded content', () => {
+      const idless = (prompt) => ({ prompt, cadence: { kind: 'once', at: TYPO_EPOCH } })
+      writeFile([idless('first'), idless('second')])
+      const store = newStore(() => 1000).load()
+      const [first] = store.listUnreadable() // load order: 'first' is row 0
+
+      // The operator edits the SECOND entry on disk, then discards the FIRST.
+      writeFile(readTasks().map((t) => (t.prompt === 'second' ? { ...t, prompt: 'second, edited' } : t)))
+      assert.equal(store.discardUnreadable(first.handle), true)
+
+      assert.deepEqual(readTasks().map((t) => t.prompt), ['second, edited'], 'the sibling keeps ITS edit, not the discarded content')
+      assert.equal(store.unreadableCount(), 1)
+    })
+
+    it('remove(id) of a preserved entry acts on the file as it is NOW (an edited sibling is not paired with the removed copy)', () => {
+      const idless = (prompt) => ({ prompt, cadence: { kind: 'once', at: TYPO_EPOCH } })
+      writeFile([bad({ id: 'a' }), idless('sibling')])
+      const store = newStore(() => 1000).load()
+      // The operator edits the id-less sibling on disk; then 'a' is removed by id.
+      writeFile(readTasks().map((t) => (t.prompt === 'sibling' ? { ...t, prompt: 'sibling, edited' } : t)))
+
+      assert.equal(store.remove('a'), true)
+      assert.deepEqual(readTasks().map((t) => t.prompt), ['sibling, edited'], 'the sibling keeps its edit; the removed entry is gone')
+      assert.equal(store.unreadableCount(), 1)
+    })
+
+    it('FULL LOOP: unreadable present -> reported -> discarded -> gone from disk and from the next load', () => {
+      writeFile([live(), bad()])
+      const store = newStore(() => 1000).load()
+      assert.equal(store.unreadableCount(), 1, 'the operator can see it')
+      const [{ handle }] = store.listUnreadable()
+      store.discardUnreadable(handle)
+      assert.deepEqual(readTasks().map((t) => t.id), ['good'])
+      const reloaded = newStore(() => 1000).load()
+      assert.equal(reloaded.unreadableCount(), 0)
+      assert.deepEqual(reloaded.listUnreadable(), [])
     })
   })
 

@@ -603,8 +603,10 @@ export declare const ScheduledTaskActionSchema: z.ZodObject<{
         pause: "pause";
         resume: "resume";
         delete: "delete";
+        discard_unreadable: "discard_unreadable";
     }>;
     taskId: z.ZodOptional<z.ZodString>;
+    handle: z.ZodOptional<z.ZodString>;
     task: z.ZodOptional<z.ZodObject<{
         name: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         prompt: z.ZodOptional<z.ZodString>;
@@ -1589,8 +1591,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         pause: "pause";
         resume: "resume";
         delete: "delete";
+        discard_unreadable: "discard_unreadable";
     }>;
     taskId: z.ZodOptional<z.ZodString>;
+    handle: z.ZodOptional<z.ZodString>;
     task: z.ZodOptional<z.ZodObject<{
         name: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         prompt: z.ZodOptional<z.ZodString>;

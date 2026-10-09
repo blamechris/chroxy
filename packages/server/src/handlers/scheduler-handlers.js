@@ -60,6 +60,17 @@ const log = createLogger('ws')
 /** Actions that only need a taskId (no `task` payload). */
 const ID_ONLY_ACTIONS = new Set(['pause', 'resume', 'delete'])
 
+// Wire caps for the snapshot's #7079 unreadable surface and the adjacent fields
+// the snapshot audit bounded. Mirror SCHEDULED_TASK_UNREADABLE_* / SCHEDULABLE_PROVIDERS_MAX
+// in @chroxy/protocol (schemas/server/scheduler.ts); the handler tests safeParse
+// the REAL schema at each boundary, so a drift fails a test instead of bricking
+// the dashboard's whole-snapshot parse.
+const UNREADABLE_MAX_ENTRIES = 100
+const UNREADABLE_REASON_MAX = 512
+const SCHEDULABLE_PROVIDERS_MAX = 256
+const SNAPSHOT_ERROR_CODE_MAX = 128
+const SNAPSHOT_ERROR_MESSAGE_MAX = 2048
+
 /**
  * Send a scheduled-task failure envelope.
  *
@@ -302,6 +313,22 @@ function buildSnapshot(ctx, requestId, { error = null } = {}) {
       })
     }
   }
+  // #7079: the load-refused stored entries. Only `{ handle, reason }` travel —
+  // never the raw entry (any shape, may be huge) and never its id (may be absent
+  // or over the id cap, which is why the handle exists). The list is bounded;
+  // `unreadableCount` is the true total so the panel can say "and N more".
+  let unreadableCount = 0
+  let unreadable = []
+  if (store && !error) {
+    try {
+      unreadableCount = store.unreadableCount()
+      unreadable = store.listUnreadable()
+        .slice(0, UNREADABLE_MAX_ENTRIES)
+        .map(({ handle, reason }) => ({ handle, reason: clampWire(reason, UNREADABLE_REASON_MAX) }))
+    } catch (err) {
+      log.warn(`Failed to list unreadable scheduled tasks: ${getErrorMessage(err)}`)
+    }
+  }
   const defaultProvider = effectiveProvider(null, ctx)
   return {
     type: 'scheduled_tasks',
@@ -313,11 +340,20 @@ function buildSnapshot(ctx, requestId, { error = null } = {}) {
       restartRequired: enabled !== engineArmed,
       source: gateSource(ctx),
     },
-    schedulableProviders: listSchedulableProviders(),
+    schedulableProviders: listSchedulableProviders().slice(0, SCHEDULABLE_PROVIDERS_MAX),
     defaultProvider,
     defaultProviderRefusal: scheduledProviderRefusalReason(defaultProvider),
     tasks,
-    ...(error ? { error } : {}),
+    unreadableCount,
+    unreadable,
+    ...(error
+      ? {
+          error: {
+            code: clampWire(String(error.code), SNAPSHOT_ERROR_CODE_MAX),
+            message: clampWire(String(error.message), SNAPSHOT_ERROR_MESSAGE_MAX),
+          },
+        }
+      : {}),
   }
 }
 
@@ -346,7 +382,8 @@ function handleScheduledTasksRequest(ws, client, msg, ctx) {
 }
 
 /**
- * Create / update / pause / resume / delete a scheduled task.
+ * Create / update / pause / resume / delete a scheduled task, or discard a
+ * load-refused stored entry (`discard_unreadable`, #7079).
  *
  * STRICT-PRIMARY gated (first statement, before any validation or store touch).
  * On success the reply is the re-emitted snapshot echoing `requestId` — that IS
@@ -370,6 +407,48 @@ function handleScheduledTaskAction(ws, client, msg, ctx) {
   const store = resolveStore(ctx)
   if (!store) {
     fail('No scheduled-task registry is available on this server.', 'SCHEDULER_REGISTRY_UNAVAILABLE')
+    return
+  }
+
+  // The registry changed — let a running engine re-evaluate immediately instead
+  // of waiting out its max-sleep tick. Best-effort: a refresh failure must not
+  // turn an applied mutation into a reported failure.
+  const refreshEngineAndReply = () => {
+    const engine = ctx?.services?.schedulerEngine ?? null
+    try {
+      engine?.refresh?.()
+    } catch (err) {
+      log.warn(`Scheduler refresh after ${action} failed: ${getErrorMessage(err)}`)
+    }
+    replySnapshot(ws, ctx, requestId)
+  }
+
+  // #7079: `discard_unreadable` is addressed by an opaque handle the SERVER derived,
+  // never by a task id — a stored entry's own id may be absent or over the wire
+  // cap, and a taskId here must never be able to name a live task.
+  if (action === 'discard_unreadable') {
+    const handle = typeof msg?.handle === 'string' ? msg.handle : ''
+    if (!handle) {
+      fail("scheduled_task_action 'discard_unreadable' requires a handle")
+      return
+    }
+    try {
+      // Authorisation is the same strict-primary gate as `delete` (checked above).
+      if (!store.discardUnreadable(handle)) {
+        fail(
+          'No unreadable scheduled-task entry matches that handle — it may already have been discarded, or the registry file was edited. Refresh to see the current list.',
+          'SCHEDULED_TASK_NOT_FOUND',
+        )
+        return
+      }
+      // The handle is a hash, safe to log; the entry's contents never are.
+      log.info(`Unreadable scheduled-task entry discarded: ${handle}`)
+    } catch (err) {
+      log.error(`scheduled_task_action 'discard_unreadable' failed: ${getErrorMessage(err)}`)
+      fail(getErrorMessage(err))
+      return
+    }
+    refreshEngineAndReply()
     return
   }
 
@@ -436,17 +515,7 @@ function handleScheduledTaskAction(ws, client, msg, ctx) {
     return
   }
 
-  // The registry changed — let a running engine re-evaluate immediately instead
-  // of waiting out its max-sleep tick. Best-effort: a refresh failure must not
-  // turn an applied mutation into a reported failure.
-  const engine = ctx?.services?.schedulerEngine ?? null
-  try {
-    engine?.refresh?.()
-  } catch (err) {
-    log.warn(`Scheduler refresh after ${action} failed: ${getErrorMessage(err)}`)
-  }
-
-  replySnapshot(ws, ctx, requestId)
+  refreshEngineAndReply()
 }
 
 /**

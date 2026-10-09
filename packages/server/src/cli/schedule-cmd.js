@@ -410,6 +410,9 @@ export function runScheduleList(options = {}, depsOverride = {}) {
   const deps = buildDeps(depsOverride)
   const out = deps.write
   const tasks = deps.store.list()
+  // #7079: stored entries the loader refused. Never printed verbatim — only the
+  // opaque handle (dashboard-discardable) and the loader's reason.
+  const unreadable = deps.store.listUnreadable()
   const schedulerEnabled = deps.checkSchedulerEnabled()
 
   const rows = tasks.map((task) => {
@@ -421,6 +424,7 @@ export function runScheduleList(options = {}, depsOverride = {}) {
     out(JSON.stringify({
       schedulerEnabled,
       tasks: rows.map((r) => ({ ...r.task, health: r.health, providerRefusal: r.providerRefusal })),
+      unreadable,
     }, null, 2))
     return { schedulerEnabled, tasks: rows }
   }
@@ -430,6 +434,15 @@ export function runScheduleList(options = {}, depsOverride = {}) {
     : 'Scheduled execution: DISABLED — tasks below are saved but will NOT fire. '
       + 'Enable via features.scheduler: true in config.json or CHROXY_ENABLE_SCHEDULER=1, then restart the daemon.')
   out('')
+
+  if (unreadable.length > 0) {
+    out(`WARNING: ${unreadable.length} stored task(s) could not be read and are NOT scheduled (kept in the registry file, not erased):`)
+    for (const { handle, id, reason } of unreadable) {
+      out(`  - ${id ? `id ${id.length > 64 ? `${id.slice(0, 64)}…` : id}` : 'no usable id'} [${handle}]: ${reason}`)
+    }
+    out('  Fix the entry in the registry file, or discard it from the dashboard Scheduled tasks panel.')
+    out('')
+  }
 
   if (rows.length === 0) {
     out('No scheduled tasks. Create one: chroxy schedule create --prompt "..." --cron "0 9 * * *"')

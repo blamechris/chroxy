@@ -1162,3 +1162,133 @@ describe('ScheduledTasksSection — the edit form sends only what the operator c
     expect(screen.getByTestId('sched-detail-name').textContent).toBe('renamed elsewhere')
   })
 })
+
+/**
+ * #7079 — stored entries the loader REFUSED are kept on disk but never served as
+ * tasks, so without this notice the list is silently shorter than the registry
+ * file and the operator has no way to learn why or to clear the entry. The
+ * server ships `{ handle, reason }` per entry (never raw contents); Discard sends
+ * the handle back through `scheduled_task_action:discard_unreadable`.
+ */
+describe('ScheduledTasksSection — unreadable stored entries (#7079)', () => {
+  const H1 = '0123456789abcdef'
+  const H2 = 'fedcba9876543210'
+  const unreadable = (n: number) =>
+    [
+      { handle: H1, reason: 'once cadence `at` must be a representable epoch-ms instant; got 1795000000000000000' },
+      { handle: H2, reason: 'task id must be a non-empty string' },
+    ].slice(0, n)
+
+  it('says how many stored tasks could not be read, with each reason', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 2, unreadable: unreadable(2) }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-unreadable-headline').textContent).toBe('2 stored tasks could not be read')
+    expect(screen.getByTestId(`sched-unreadable-reason-${H1}`).textContent).toMatch(/representable epoch-ms/)
+    expect(screen.getByTestId(`sched-unreadable-reason-${H2}`).textContent).toMatch(/non-empty string/)
+  })
+
+  it('uses the singular for one entry', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 1, unreadable: unreadable(1) }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-unreadable-headline').textContent).toBe('1 stored task could not be read')
+  })
+
+  it('CONTROL: nothing is rendered when the count is zero, absent, or malformed', () => {
+    for (const over of [{ unreadableCount: 0, unreadable: [] }, {}, { unreadableCount: 3, unreadable: 'garbage' }]) {
+      cleanup()
+      resetStore({ scheduledTasks: mkSnapshot(over) })
+      render(<ScheduledTasksSection now={() => 1900000000000} />)
+      expect(screen.queryByTestId('sched-unreadable'), JSON.stringify(over)).toBeNull()
+    }
+  })
+
+  it('still shows the notice when there are NO readable tasks (the empty list must not hide it)', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ tasks: [], unreadableCount: 1, unreadable: unreadable(1) }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-unreadable')).toBeTruthy()
+    expect(screen.getByTestId('sched-empty')).toBeTruthy()
+  })
+
+  it('says when more entries exist than are listed (the true total beats the capped list)', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 130, unreadable: unreadable(2) }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId('sched-unreadable-headline').textContent).toBe('130 stored tasks could not be read')
+    expect(screen.getByTestId('sched-unreadable-more').textContent).toMatch(/128 more/)
+  })
+
+  it('Discard requires confirmation, then sends the HANDLE (never an id)', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 2, unreadable: unreadable(2) }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId(`sched-unreadable-discard-${H2}`))
+    expect(sendActionMock).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('sched-unreadable-discard-confirm'))
+    expect(sendActionMock).toHaveBeenCalledTimes(1)
+    expect(sendActionMock).toHaveBeenCalledWith('discard_unreadable', { handle: H2 })
+  })
+
+  it('cancelling the confirmation sends nothing', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 1, unreadable: unreadable(1) }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId(`sched-unreadable-discard-${H1}`))
+    fireEvent.click(screen.getByTestId('sched-unreadable-discard-cancel'))
+    expect(sendActionMock).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('sched-unreadable-discard-confirm')).toBeNull()
+  })
+
+  it('Discard is disabled while disconnected', () => {
+    resetStore({
+      connectionPhase: 'disconnected',
+      scheduledTasks: mkSnapshot({ unreadableCount: 1, unreadable: unreadable(1) }),
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect((screen.getByTestId(`sched-unreadable-discard-${H1}`) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('an in-flight discard disables that row and says so', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 1, unreadable: unreadable(1) }) })
+    const { rerender } = render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId(`sched-unreadable-discard-${H1}`))
+    fireEvent.click(screen.getByTestId('sched-unreadable-discard-confirm'))
+    storeState.scheduledTaskPendingActions = { 'sched-action-1': { kind: 'discard_unreadable', taskId: null, at: 1 } }
+    rerender(<ScheduledTasksSection now={() => 1900000000000} />)
+    const btn = screen.getByTestId(`sched-unreadable-discard-${H1}`) as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(btn.textContent).toBe('Discarding…')
+  })
+
+  it('a refused discard is reported inline on its row, not dropped', () => {
+    resetStore({
+      scheduledTasks: mkSnapshot({ unreadableCount: 1, unreadable: unreadable(1) }),
+      scheduledTaskActionResults: { 'sched-action-1': { ok: false, error: 'No unreadable scheduled-task entry matches that handle', at: 1 } },
+    })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    fireEvent.click(screen.getByTestId(`sched-unreadable-discard-${H1}`))
+    fireEvent.click(screen.getByTestId('sched-unreadable-discard-confirm'))
+    expect(screen.getByTestId(`sched-unreadable-error-${H1}`).textContent).toMatch(/No unreadable scheduled-task entry/)
+  })
+
+  it('the notice is a stored-entry notice only: it never offers to edit or run an entry', () => {
+    resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 1, unreadable: unreadable(1) }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    const row = screen.getByTestId(`sched-unreadable-row-${H1}`)
+    expect(row.querySelectorAll('button').length).toBe(1)
+  })
+
+  it('Discard clears the 44px tap-target floor (the stylesheet says so)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { resolve } = await import('node:path')
+    const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf8')
+    const rule = css.match(/\.cr-sched-unreadable-discard\s*\{([^}]+)\}/)
+    expect(rule, 'the discard button rule exists').toBeTruthy()
+    expect(rule![1]).toMatch(/min-height:\s*44px/)
+    expect(rule![1]).toMatch(/min-width:\s*44px/)
+    // and the component actually uses that class
+    resetStore({ scheduledTasks: mkSnapshot({ unreadableCount: 1, unreadable: unreadable(1) }) })
+    render(<ScheduledTasksSection now={() => 1900000000000} />)
+    expect(screen.getByTestId(`sched-unreadable-discard-${H1}`).className).toContain('cr-sched-unreadable-discard')
+    // the confirmation's own buttons are controls too
+    fireEvent.click(screen.getByTestId(`sched-unreadable-discard-${H1}`))
+    expect(screen.getByTestId('sched-unreadable-discard-cancel').className).toContain('cr-sched-unreadable-discard')
+    expect(screen.getByTestId('sched-unreadable-discard-confirm').className).toContain('cr-sched-unreadable-discard')
+  })
+})

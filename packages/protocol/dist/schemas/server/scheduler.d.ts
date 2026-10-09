@@ -47,7 +47,16 @@ export declare const SCHEDULED_TASK_LAST_RUN_STATUS_VALUES: readonly ["success",
 /** Cadence kinds the registry accepts (scheduled-task-store.js's `CADENCE_KINDS`). */
 export declare const SCHEDULED_TASK_CADENCE_KIND_VALUES: readonly ["once", "interval", "cron"];
 /** Mutations the panel can request. `pause`/`resume` are `enabled` flips. */
-export declare const SCHEDULED_TASK_ACTION_VALUES: readonly ["create", "update", "pause", "resume", "delete"];
+export declare const SCHEDULED_TASK_ACTION_VALUES: readonly ["create", "update", "pause", "resume", "delete", "discard_unreadable"];
+/** #7079 — wire caps for the unreadable-entry surface (mirrored by `ScheduledTaskActionSchema.handle`). */
+export declare const SCHEDULED_TASK_UNREADABLE_HANDLE_MAX = 64;
+export declare const SCHEDULED_TASK_UNREADABLE_REASON_MAX = 512;
+/** Rows listed per snapshot; `unreadableCount` still reports the true total. */
+export declare const SCHEDULED_TASK_UNREADABLE_MAX_ENTRIES = 100;
+/** The store's hard cap on live tasks (scheduled-task-store.js `MAX_STORED_TASKS`; pinned by a server test). */
+export declare const SCHEDULED_TASKS_MAX = 500;
+/** Bound on `schedulableProviders` — far above any real provider registry; the handler slices to it. */
+export declare const SCHEDULABLE_PROVIDERS_MAX = 256;
 /** Where the enable gate's current value came from — surfaced so the panel can
  * explain why a config toggle may not take effect (an env var wins). */
 export declare const SCHEDULER_GATE_SOURCE_VALUES: readonly ["env", "config", "default"];
@@ -157,6 +166,17 @@ export declare const ScheduledTaskSchema: z.ZodObject<{
     quarantined: z.ZodBoolean;
 }, z.core.$strip>;
 /**
+ * One stored entry the loader REFUSED (#7050), as the panel sees it. The raw
+ * contents never travel: `handle` is a server-derived opaque token (a truncated
+ * sha256 of the entry's canonical JSON, with a `-<n>` suffix for byte-identical
+ * duplicates) that a client sends back verbatim in a `discard_unreadable` action,
+ * and `reason` is the loader's own refusal message, clamped.
+ */
+export declare const ScheduledTaskUnreadableSchema: z.ZodObject<{
+    handle: z.ZodString;
+    reason: z.ZodString;
+}, z.core.$strip>;
+/**
  * The global enable-gate + engine runtime state.
  *
  *   - `enabled` — `isSchedulerEnabled(config)`: whether the gate is OPEN.
@@ -245,12 +265,18 @@ export declare const ServerScheduledTasksSchema: z.ZodObject<{
         permissionModeClamped: z.ZodBoolean;
         quarantined: z.ZodBoolean;
     }, z.core.$strip>>;
+    unreadableCount: z.ZodOptional<z.ZodNumber>;
+    unreadable: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        handle: z.ZodString;
+        reason: z.ZodString;
+    }, z.core.$strip>>>;
     error: z.ZodOptional<z.ZodObject<{
         code: z.ZodString;
         message: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export type ScheduledTask = z.infer<typeof ScheduledTaskSchema>;
+export type ScheduledTaskUnreadable = z.infer<typeof ScheduledTaskUnreadableSchema>;
 export type ScheduledTaskCadence = z.infer<typeof ScheduledTaskCadenceSchema>;
 export type ScheduledTaskTarget = z.infer<typeof ScheduledTaskTargetSchema>;
 export type ScheduledTaskLastRun = z.infer<typeof ScheduledTaskLastRunSchema>;

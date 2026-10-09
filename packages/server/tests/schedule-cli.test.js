@@ -318,6 +318,49 @@ describe('chroxy schedule list (#6868)', () => {
   })
 })
 
+describe('chroxy schedule list — unreadable stored entries (#7079)', () => {
+  function storeWithUnreadable() {
+    const dir = mkdtempSync(join(tmpdir(), 'schedule-cli-unreadable-'))
+    const filePath = join(dir, 'scheduled-tasks.json')
+    writeFileSync(filePath, JSON.stringify({
+      version: 1,
+      tasks: [{ id: 'typo', prompt: 'SECRET PROMPT TEXT', cadence: { kind: 'once', at: 1795000000000000000 } }],
+    }))
+    return new ScheduledTaskStore({ filePath, now: () => NOW, logger: { info() {}, warn() {}, error() {} } }).load()
+  }
+
+  it('says how many stored tasks could not be read, and why, without printing their contents', () => {
+    const store = storeWithUnreadable()
+    const w = cap()
+    runScheduleList({}, baseDeps(store, w.write))
+    assert.match(w.text(), /1 stored task\(s\) could not be read/)
+    assert.match(w.text(), /epoch|representable/i, 'the reason is shown')
+    assert.ok(!w.text().includes('SECRET PROMPT TEXT'))
+    assert.match(w.text(), /No scheduled tasks/, 'and the empty-list message is still honest')
+  })
+
+  it('--json carries the unreadable rows (handle + reason), not raw contents', () => {
+    const store = storeWithUnreadable()
+    const w = cap()
+    runScheduleList({ json: true }, baseDeps(store, w.write))
+    const parsed = JSON.parse(w.text())
+    assert.equal(parsed.unreadable.length, 1)
+    assert.match(parsed.unreadable[0].handle, /^[0-9a-f]{16}$/)
+    assert.ok(!w.text().includes('SECRET PROMPT TEXT'))
+  })
+
+  it('prints nothing about it when every entry is readable', () => {
+    const store = makeStore()
+    runScheduleCreate({ prompt: 'x', cron: '0 9 * * *' }, baseDeps(store, cap().write))
+    const w = cap()
+    runScheduleList({}, baseDeps(store, w.write))
+    assert.ok(!/could not be read/.test(w.text()))
+    const j = cap()
+    runScheduleList({ json: true }, baseDeps(store, j.write))
+    assert.deepEqual(JSON.parse(j.text()).unreadable, [])
+  })
+})
+
 describe('chroxy schedule edit (#6868)', () => {
   it('updates the prompt in place', () => {
     const store = makeStore()

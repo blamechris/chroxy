@@ -50,6 +50,7 @@ import type {
   ScheduledTask,
   ScheduledTaskCadence,
   ScheduledTaskInput,
+  ScheduledTaskUnreadable,
   SchedulerGateState,
 } from '@chroxy/protocol'
 import { deriveScheduledTaskHealth } from '@chroxy/protocol'
@@ -899,6 +900,105 @@ function TaskFormModal({ task, onClose }: { task?: ScheduledTask; onClose: () =>
   )
 }
 
+/**
+ * #7079 — the "N stored tasks could not be read" notice.
+ *
+ * The loader keeps an entry it cannot read on disk (#7050) but never serves it as
+ * a task, so without this the list is silently shorter than the registry file and
+ * the operator cannot learn why. The server ships only `{ handle, reason }` per
+ * entry — never its raw contents, and never its id (which may be absent or over
+ * the wire's id cap, which is why entries are named by an opaque handle). Discard
+ * sends that handle back; there is deliberately no edit/run affordance here.
+ *
+ * `count` is the server's TRUE total and `rows` is capped on the wire, so the
+ * headline is never derived from `rows.length`. A malformed value renders nothing
+ * rather than a wrong number.
+ */
+function UnreadableNotice({ count, rows }: { count: unknown; rows: unknown }) {
+  const total = typeof count === 'number' && Number.isInteger(count) && count > 0 ? count : 0
+  const list = Array.isArray(rows) ? (rows as ScheduledTaskUnreadable[]) : []
+  if (total === 0 || list.length === 0) return null
+  const hidden = Math.max(0, total - list.length)
+  return (
+    <div className="cr-sched-unreadable" data-testid="sched-unreadable" role="region" aria-label="Unreadable stored tasks">
+      <p className="cr-sched-unreadable-headline" data-testid="sched-unreadable-headline">
+        {total} stored {total === 1 ? 'task' : 'tasks'} could not be read
+      </p>
+      <p className="cr-dim cr-sched-unreadable-help">
+        {total === 1 ? 'It is' : 'They are'} kept in the registry file but {total === 1 ? 'is' : 'are'} not
+        scheduled and will never fire. Discard {total === 1 ? 'it' : 'an entry'} here, or fix the entry in
+        the registry file (the daemon picks the edit up the next time it saves).
+      </p>
+      <ul className="cr-sched-unreadable-list">
+        {list.map((u) => (
+          <UnreadableRow key={u.handle} entry={u} />
+        ))}
+      </ul>
+      {hidden > 0 && (
+        <p className="cr-dim" data-testid="sched-unreadable-more">
+          …and {hidden} more not listed. Discarding an entry reveals the next.
+        </p>
+      )}
+    </div>
+  )
+}
+
+function UnreadableRow({ entry }: { entry: ScheduledTaskUnreadable }) {
+  const sendAction = useConnectionStore((s) => s.sendScheduledTaskAction)
+  const pending = useConnectionStore((s) => s.scheduledTaskPendingActions)
+  const results = useConnectionStore((s) => s.scheduledTaskActionResults)
+  const connected = useConnectionStore((s) => s.connectionPhase === 'connected')
+  const [reqId, setReqId] = useState<string | null>(null)
+  const [confirming, setConfirming] = useState(false)
+  const inFlight = reqId != null && reqId in pending
+  const result = reqId != null ? results[reqId] : undefined
+  const { handle, reason } = entry
+  return (
+    <li className="cr-sched-unreadable-row" data-testid={`sched-unreadable-row-${handle}`}>
+      <span className="cr-sched-unreadable-reason" data-testid={`sched-unreadable-reason-${handle}`}>{reason}</span>
+      <button
+        type="button"
+        className="cr-danger-btn cr-sched-unreadable-discard"
+        data-testid={`sched-unreadable-discard-${handle}`}
+        disabled={inFlight || !connected}
+        onClick={() => setConfirming(true)}
+      >
+        {inFlight ? 'Discarding…' : 'Discard'}
+      </button>
+      {result && !result.ok && (
+        <p className="cr-error" data-testid={`sched-unreadable-error-${handle}`}>{result.error}</p>
+      )}
+      {confirming && (
+        <Modal open onClose={() => setConfirming(false)} title="Discard unreadable task" closeOnBackdrop={false}>
+          <div className="cr-sched-modal" data-testid="sched-unreadable-discard-modal">
+            <p>
+              Permanently discard this stored entry? It could not be read, so it is not scheduled;
+              discarding removes it from the registry file and cannot be undone. If you would rather repair
+              it, edit the registry file instead.
+            </p>
+            <p className="cr-dim">{reason}</p>
+            <div className="cr-sched-modal-actions">
+              <button type="button" className="cr-sched-unreadable-discard" data-testid="sched-unreadable-discard-cancel" onClick={() => setConfirming(false)}>Cancel</button>
+              <button
+                type="button"
+                className="cr-danger-btn cr-sched-unreadable-discard"
+                data-testid="sched-unreadable-discard-confirm"
+                onClick={() => {
+                  const id = sendAction('discard_unreadable', { handle })
+                  if (id) setReqId(id)
+                  setConfirming(false)
+                }}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </li>
+  )
+}
+
 export interface ScheduledTasksSectionProps {
   /** Injectable clock for the "generated Nm ago" line. */
   now?: () => number
@@ -1010,6 +1110,8 @@ export function ScheduledTasksSection({ now = Date.now }: ScheduledTasksSectionP
       {readError && (
         <p className="cr-error" data-testid="sched-read-error">{readError}</p>
       )}
+
+      <UnreadableNotice count={snapshot?.unreadableCount} rows={snapshot?.unreadable} />
 
       {tasks.length === 0 && !snapshot?.error ? (
         <p className="cr-dim" data-testid="sched-empty">

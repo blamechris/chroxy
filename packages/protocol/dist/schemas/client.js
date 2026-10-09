@@ -515,13 +515,22 @@ export const ScheduledTaskInputSchema = z.object({
 // host-level bar rather than accidentally weaker than it (#7025).
 //
 // `create` requires `task` (with prompt + cadence); `update` requires `taskId`
-// + `task`; `pause` / `resume` / `delete` require only `taskId`. The handler
+// + `task`; `pause` / `resume` / `delete` require only `taskId`;
+// `discard_unreadable` (#7079) requires only `handle`. The handler
 // enforces that pairing and reports `SCHEDULED_TASK_ACTION_FAILED` with a
 // per-field reason rather than silently ignoring a half-filled request.
+//
+// `handle` is the opaque token the snapshot's `unreadable[]` carried for a
+// load-refused stored entry. It is NOT a task id and the server never trusts it
+// as one: it re-derives every handle itself and discards only on an exact match.
+// Cap mirrors SCHEDULED_TASK_UNREADABLE_HANDLE_MAX in schemas/server/scheduler.ts
+// (pinned by a protocol test). `taskId` stays at 256 — widening it to carry a
+// malformed record's id was rejected in favour of the handle.
 export const ScheduledTaskActionSchema = z.object({
     type: z.literal('scheduled_task_action'),
-    action: z.enum(['create', 'update', 'pause', 'resume', 'delete']),
+    action: z.enum(['create', 'update', 'pause', 'resume', 'delete', 'discard_unreadable']),
     taskId: z.string().max(256).optional(),
+    handle: z.string().min(1).max(64).optional(),
     task: ScheduledTaskInputSchema.optional(),
     requestId: z.string().max(128).optional(),
 });

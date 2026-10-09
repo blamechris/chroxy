@@ -64,7 +64,21 @@ export const SCHEDULED_TASK_ACTION_VALUES = [
   'pause',
   'resume',
   'delete',
+  // #7079: discard one load-refused ("unreadable") stored entry. Addressed by an
+  // opaque server-derived `handle`, NOT by `taskId` — the entry's own id may be
+  // absent or longer than the id cap, which is correct and is not widened.
+  'discard_unreadable',
 ] as const
+
+/** #7079 — wire caps for the unreadable-entry surface (mirrored by `ScheduledTaskActionSchema.handle`). */
+export const SCHEDULED_TASK_UNREADABLE_HANDLE_MAX = 64
+export const SCHEDULED_TASK_UNREADABLE_REASON_MAX = 512
+/** Rows listed per snapshot; `unreadableCount` still reports the true total. */
+export const SCHEDULED_TASK_UNREADABLE_MAX_ENTRIES = 100
+/** The store's hard cap on live tasks (scheduled-task-store.js `MAX_STORED_TASKS`; pinned by a server test). */
+export const SCHEDULED_TASKS_MAX = 500
+/** Bound on `schedulableProviders` — far above any real provider registry; the handler slices to it. */
+export const SCHEDULABLE_PROVIDERS_MAX = 256
 
 /** Where the enable gate's current value came from — surfaced so the panel can
  * explain why a config toggle may not take effect (an env var wins). */
@@ -157,6 +171,18 @@ export const ScheduledTaskSchema = z.object({
 })
 
 /**
+ * One stored entry the loader REFUSED (#7050), as the panel sees it. The raw
+ * contents never travel: `handle` is a server-derived opaque token (a truncated
+ * sha256 of the entry's canonical JSON, with a `-<n>` suffix for byte-identical
+ * duplicates) that a client sends back verbatim in a `discard_unreadable` action,
+ * and `reason` is the loader's own refusal message, clamped.
+ */
+export const ScheduledTaskUnreadableSchema = z.object({
+  handle: z.string().min(1).max(SCHEDULED_TASK_UNREADABLE_HANDLE_MAX),
+  reason: z.string().max(SCHEDULED_TASK_UNREADABLE_REASON_MAX),
+})
+
+/**
  * The global enable-gate + engine runtime state.
  *
  *   - `enabled` — `isSchedulerEnabled(config)`: whether the gate is OPEN.
@@ -191,21 +217,29 @@ export const SchedulerGateStateSchema = z.object({
 export const ServerScheduledTasksSchema = z.object({
   type: z.literal('scheduled_tasks'),
   requestId: z.string().max(128).nullable().optional(),
-  generatedAt: z.string().datetime(),
+  generatedAt: z.string().datetime().max(64),
   scheduler: SchedulerGateStateSchema,
-  schedulableProviders: z.array(z.string().max(128)),
+  schedulableProviders: z.array(z.string().max(128)).max(SCHEDULABLE_PROVIDERS_MAX),
   defaultProvider: z.string().max(128),
   defaultProviderRefusal: z.string().max(2048).nullable(),
-  tasks: z.array(ScheduledTaskSchema),
+  tasks: z.array(ScheduledTaskSchema).max(SCHEDULED_TASKS_MAX),
+  // #7079 — stored entries the loader could not read (kept on disk, never
+  // served as tasks). `unreadableCount` is the TRUE total; `unreadable` lists at
+  // most SCHEDULED_TASK_UNREADABLE_MAX_ENTRIES of them (discarding one reveals
+  // the next). Both optional so a dashboard still parses a snapshot from a
+  // daemon that predates them — absence reads as "none reported", never as an error.
+  unreadableCount: z.number().int().nonnegative().optional(),
+  unreadable: z.array(ScheduledTaskUnreadableSchema).max(SCHEDULED_TASK_UNREADABLE_MAX_ENTRIES).optional(),
   error: z
     .object({
-      code: z.string(),
-      message: z.string(),
+      code: z.string().max(128),
+      message: z.string().max(2048),
     })
     .optional(),
 })
 
 export type ScheduledTask = z.infer<typeof ScheduledTaskSchema>
+export type ScheduledTaskUnreadable = z.infer<typeof ScheduledTaskUnreadableSchema>
 export type ScheduledTaskCadence = z.infer<typeof ScheduledTaskCadenceSchema>
 export type ScheduledTaskTarget = z.infer<typeof ScheduledTaskTargetSchema>
 export type ScheduledTaskLastRun = z.infer<typeof ScheduledTaskLastRunSchema>
