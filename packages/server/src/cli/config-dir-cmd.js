@@ -7,43 +7,111 @@
 // at a shared, synced or bind-mounted volume is the operator's security decision,
 // and the daemon cannot tell a fresh relocation from a deliberately clean root.
 // So the copy lives here, behind an explicit command.
+//
+// #7244 — an operator who runs a deliberate second root (the isolated-preview
+// recipe does) has no way to say "I know". `ack` records the CURRENT stranded
+// names into the target root; the warning then stays quiet only while every
+// stranded name is in that snapshot, so an entry that appears later warns.
 
-import { detectStrandedState, migrateStrandedState } from '../config-dir-migration.js'
+import {
+  ackCommand,
+  detectStrandedState,
+  migrateStrandedState,
+  partitionStranded,
+  readStrandedAck,
+  writeStrandedAck,
+} from '../config-dir-migration.js'
 
 /**
  * `chroxy config-dir status` — report the resolved root and anything stranded.
  *
- * @param {object} [deps] Injected seams: `write`, `detect`.
- * @returns {{ relocated: boolean, stranded: string[] }}
+ * @param {object} [deps] Injected seams: `write`, `detect`, `readAck`.
+ * @returns {{ relocated: boolean, stranded: string[], acknowledged: string[] }}
  */
 export function runConfigDirStatus(deps = {}) {
   const out = deps.write || console.log
   const detect = deps.detect || detectStrandedState
+  const readAck = deps.readAck || readStrandedAck
   const d = detect()
 
   out(`Config/state root: ${d.target}${d.relocated ? ' (from CHROXY_CONFIG_DIR)' : ''}`)
 
   if (!d.relocated) {
     out('Not relocated — nothing can be stranded.')
-    return { relocated: false, stranded: [] }
+    return { relocated: false, stranded: [], acknowledged: [] }
   }
   if (d.unreadable) {
     out(`Could not check ${d.source} for stranded state: ${d.unreadable}`)
-    return { relocated: true, stranded: [] }
+    return { relocated: true, stranded: [], acknowledged: [] }
   }
   if (d.stranded.length === 0) {
     out(`No state stranded at ${d.source}.`)
-    return { relocated: true, stranded: [] }
+    return { relocated: true, stranded: [], acknowledged: [] }
   }
+
+  // partitionStranded, not applyStrandedAck: status must still list every
+  // stranded entry (marking the acknowledged ones), so it needs the split, not
+  // the filtered view the warning and doctor use.
+  const { acknowledged } = partitionStranded(d, readAck(d))
 
   out('')
   out(`${d.stranded.length} state ${d.stranded.length === 1 ? 'entry is' : 'entries are'} still at ${d.source}:`)
   for (const name of d.stranded) {
-    out(`  ${name}${d.highConsequence.includes(name) ? '   <- high consequence' : ''}`)
+    const marks = [
+      d.highConsequence.includes(name) ? '<- high consequence' : null,
+      acknowledged.includes(name) ? '(acknowledged)' : null,
+    ].filter(Boolean)
+    out(`  ${name}${marks.length > 0 ? `   ${marks.join(' ')}` : ''}`)
   }
   out('')
+  if (acknowledged.length > 0) {
+    out(`${acknowledged.length} of these ${acknowledged.length === 1 ? 'is' : 'are'} acknowledged, so the startup warning and 'chroxy doctor' leave ${acknowledged.length === 1 ? 'it' : 'them'} out.`)
+  }
   out('Copy them forward with:  chroxy config-dir migrate --yes')
-  return { relocated: true, stranded: d.stranded }
+  out(`Or keep this root on purpose:  ${ackCommand(d.target)}`)
+  return { relocated: true, stranded: d.stranded, acknowledged }
+}
+
+/**
+ * `chroxy config-dir ack` — acknowledge the state currently stranded at the
+ * default root, because the relocated root is deliberate (#7244).
+ *
+ * Writes a snapshot of the stranded entry NAMES into the target root. It is not
+ * a switch: an entry that appears afterwards is not in the snapshot and warns
+ * again. With nothing stranded, or no relocation, it says so and writes nothing.
+ *
+ * @param {object} [deps] Injected seams: `write`, `detect`, `ack`.
+ * @returns {{ acknowledged: boolean, names: string[] }}
+ */
+export function runConfigDirAck(deps = {}) {
+  const out = deps.write || console.log
+  const detect = deps.detect || detectStrandedState
+  const ack = deps.ack || writeStrandedAck
+  const d = detect()
+
+  if (!d.relocated) {
+    out(`Config/state root is ${d.target} — not relocated, so there is nothing to acknowledge.`)
+    out('To acknowledge a deliberate second root, run this with CHROXY_CONFIG_DIR set to that root')
+    out('(the one the daemon reads), e.g.  CHROXY_CONFIG_DIR=/path/to/root chroxy config-dir ack')
+    return { acknowledged: false, names: [] }
+  }
+  if (d.unreadable) {
+    out(`Could not read ${d.source}: ${d.unreadable} — nothing was acknowledged.`)
+    return { acknowledged: false, names: [] }
+  }
+  if (d.stranded.length === 0) {
+    out(`No state stranded at ${d.source} — nothing to acknowledge.`)
+    return { acknowledged: false, names: [] }
+  }
+
+  const { file, acknowledged } = ack(d)
+  out(`Acknowledged ${acknowledged.length} state ${acknowledged.length === 1 ? 'entry' : 'entries'} left at ${d.source}:`)
+  for (const name of acknowledged) out(`  ${name}`)
+  out('')
+  out(`Recorded in ${file}. The startup warning and 'chroxy doctor' now stay quiet about`)
+  out('these. An entry whose name was not acknowledged will warn again; re-running this')
+  out('command replaces the snapshot with the current set.')
+  return { acknowledged: true, names: acknowledged }
 }
 
 /**
@@ -132,6 +200,18 @@ export function registerConfigDirCommand(program) {
         runConfigDirStatus()
       } catch (err) {
         console.error(`config-dir status failed: ${err.message}`)
+        process.exitCode = 1
+      }
+    })
+
+  configDirCmd
+    .command('ack')
+    .description('Acknowledge the state left at ~/.chroxy because this relocated root is deliberate (new entries still warn)')
+    .action(() => {
+      try {
+        runConfigDirAck()
+      } catch (err) {
+        console.error(`config-dir ack failed: ${err.message}`)
         process.exitCode = 1
       }
     })

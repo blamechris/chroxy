@@ -1,6 +1,7 @@
-import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from 'fs'
 import { join, resolve } from 'path'
 import { configDir, defaultConfigDir } from './config-dir.js'
+import { writeFileRestricted } from './platform.js'
 
 /**
  * #7240 — daemon state left behind at `~/.chroxy` when `CHROXY_CONFIG_DIR`
@@ -140,6 +141,122 @@ export function detectStrandedState({ source = defaultConfigDir(), target = conf
 }
 
 /**
+ * #7244 — acknowledging a deliberate second root.
+ *
+ * Running a daemon at `CHROXY_CONFIG_DIR=/scratch/x` beside a real `~/.chroxy`
+ * is a legitimate setup (the isolated-preview smoke recipe does exactly that),
+ * and the stranded warning then fires at every boot with no way to say "I know".
+ *
+ * The acknowledgement is a SNAPSHOT of entry names, not a flag. `chroxy
+ * config-dir ack` records the names stranded right now into
+ * {@link ACK_FILE_NAME} in the TARGET root; the warning stays quiet only while
+ * every currently stranded name is in that snapshot. An entry whose NAME is
+ * not in it warns again. A suppression
+ * flag (`CHROXY_CONFIG_DIR_ACK=1`) was rejected because once set it also
+ * silences a stranded entry that appears later — the false-safety shape
+ * #7052/#7238/#7239 closed. An automatic marker written at boot was rejected
+ * because it would silence the warning after one boot with no operator
+ * decision, so an accidental stranding is reported once and then forgotten.
+ *
+ * The subset logic lives HERE and nowhere else: startup, `chroxy doctor`,
+ * `config-dir status` and `config-dir ack` all go through it. Matching is by
+ * entry name; contents are not hashed.
+ *
+ * Consequence of name-matching: a name acknowledged earlier, then removed and
+ * re-created at the default root, stays quiet until the next `ack` replaces the
+ * snapshot. That is deliberate. Keying on content or mtime would re-warn at
+ * every boot for the files a live daemon keeps rewriting at the default root,
+ * which is the noise this exists to end.
+ */
+export const ACK_FILE_NAME = 'config-dir-ack.json'
+const ACK_VERSION = 1
+// The file is a few hundred bytes; a bigger one is not ours, so do not read it.
+export const ACK_MAX_BYTES = 1024 * 1024
+
+/**
+ * Read the entry names acknowledged for this detection's source root.
+ *
+ * Returns `null` — "no acknowledgement" — for a missing, unreadable, oversized,
+ * malformed or wrong-version file, and for one recorded against a different
+ * source root. It never throws: the caller is the boot path, and the safe
+ * answer to "cannot tell" is to warn as before, not to stay quiet or fail.
+ *
+ * @param {StrandedState} detection
+ * @returns {string[]|null}
+ */
+export function readStrandedAck(detection) {
+  try {
+    const file = join(detection.target, ACK_FILE_NAME)
+    const st = statSync(file)
+    if (!st.isFile() || st.size > ACK_MAX_BYTES) return null
+    const doc = JSON.parse(readFileSync(file, 'utf-8'))
+    if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) return null
+    if (doc.version !== ACK_VERSION) return null
+    if (doc.source !== detection.source) return null
+    if (!Array.isArray(doc.acknowledged) || !doc.acknowledged.every((n) => typeof n === 'string')) return null
+    return doc.acknowledged
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Split a detection into the entries still unacknowledged and those that are.
+ *
+ * Pure. `stranded` / `highConsequence` on the result describe only the
+ * UNACKNOWLEDGED entries, so every consumer that already reads those fields
+ * (the warning, doctor) reports the right set without further changes;
+ * `acknowledged` carries the stranded names that were covered.
+ *
+ * @param {StrandedState} detection
+ * @param {string[]|null} ackNames
+ * @returns {StrandedState & { acknowledged: string[] }}
+ */
+export function partitionStranded(detection, ackNames) {
+  const known = new Set(ackNames ?? [])
+  const stranded = detection.stranded.filter((n) => !known.has(n))
+  return {
+    ...detection,
+    stranded,
+    highConsequence: detection.highConsequence.filter((n) => stranded.includes(n)),
+    acknowledged: detection.stranded.filter((n) => known.has(n)),
+  }
+}
+
+/**
+ * Read the acknowledgement for `detection` and apply it. The one call startup
+ * and doctor make.
+ *
+ * @param {StrandedState} detection
+ * @returns {StrandedState & { acknowledged: string[] }}
+ */
+export function applyStrandedAck(detection) {
+  if (!detection.relocated || detection.unreadable) return { ...detection, acknowledged: [] }
+  return partitionStranded(detection, readStrandedAck(detection))
+}
+
+/**
+ * Record the currently stranded names as acknowledged, replacing any earlier
+ * snapshot. Written 0600 and atomically into the TARGET root.
+ *
+ * @param {StrandedState} detection
+ * @param {{ now?: () => Date }} [opts]
+ * @returns {{ file: string, acknowledged: string[] }}
+ */
+export function writeStrandedAck(detection, { now = () => new Date() } = {}) {
+  mkdirSync(detection.target, { recursive: true, mode: 0o700 })
+  const file = join(detection.target, ACK_FILE_NAME)
+  const doc = {
+    version: ACK_VERSION,
+    source: detection.source,
+    acknowledged: [...detection.stranded],
+    at: now().toISOString(),
+  }
+  writeFileRestricted(file, JSON.stringify(doc, null, 2))
+  return { file, acknowledged: doc.acknowledged }
+}
+
+/**
  * POSIX-quote a path for a shell command we print for the operator to paste.
  *
  * The `cp -a` hint below is a command a human copies and runs, so an unquoted
@@ -150,6 +267,42 @@ export function detectStrandedState({ source = defaultConfigDir(), target = conf
  */
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`
+}
+
+/**
+ * The copy-pasteable acknowledgement command. It carries `CHROXY_CONFIG_DIR`
+ * because run without it the command resolves the default root and answers
+ * "not relocated, nothing to acknowledge" (#7244).
+ *
+ * @param {string} target The resolved (relocated) root.
+ * @returns {string}
+ */
+export function ackCommand(target) {
+  return `CHROXY_CONFIG_DIR=${shellQuote(target)} chroxy config-dir ack`
+}
+
+/**
+ * The lines the daemon prints before exiting when no API token is configured.
+ *
+ * With config.json stranded, `chroxy init` is the WRONG advice (it mints a new
+ * token and forces every device to re-pair), and an acknowledgement must not
+ * change that: it quiets a warning, not a diagnosis. So this reads the
+ * high-consequence set AND the acknowledged names, which makes it correct
+ * whether it is handed the raw detection or an acknowledgement-filtered one.
+ *
+ * @param {(StrandedState & { acknowledged?: string[] })|null} detection
+ * @returns {string[]}
+ */
+export function missingTokenAdvice(detection) {
+  const configStranded = detection?.relocated
+    && (detection.highConsequence.includes('config.json') || (detection.acknowledged ?? []).includes('config.json'))
+  if (!configStranded) return ['[!] No API token configured. Run \'chroxy init\' first.']
+  return [
+    '[!] No API token configured — but config.json is still at '
+      + `${detection.source} while the daemon is reading ${detection.target}.`,
+    '    Do NOT run \'chroxy init\' — it mints a fresh token and forces every device to re-pair.',
+    '    Move your existing state instead:  chroxy config-dir migrate',
+  ]
 }
 
 /**
@@ -188,7 +341,24 @@ export function formatStrandedWarning(detection) {
   lines.push('')
   lines.push('Copy them once:  chroxy config-dir migrate')
   lines.push(`             or: cp -a ${shellQuote(`${source}/.`)} ${shellQuote(`${target}/`)}`)
+  const acked = detection.acknowledged?.length ?? 0
+  if (acked > 0) {
+    lines.push(`${acked} other ${acked === 1 ? 'entry was' : 'entries were'} acknowledged earlier and ${acked === 1 ? 'is' : 'are'} not listed above.`)
+  }
+  lines.push(`Keeping this root on purpose?  ${ackCommand(target)}  (re-warns for any entry not acknowledged)`)
   return lines
+}
+
+/**
+ * The lines the daemon logs at startup: the warning for what is still
+ * unacknowledged (#7244). The startup path's whole seam, so a test can pin it
+ * without booting the server.
+ *
+ * @param {StrandedState} detection
+ * @returns {string[]}
+ */
+export function startupStrandedWarning(detection) {
+  return formatStrandedWarning(applyStrandedAck(detection))
 }
 
 /**

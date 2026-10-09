@@ -164,6 +164,19 @@ chroxy config-dir status         # what is stranded, and where
 chroxy config-dir migrate --yes  # copy it forward (never overwrites)
 ```
 
+**Running a second root on purpose?** An isolated preview daemon
+(`CHROXY_CONFIG_DIR=/scratch/x`) next to your real `~/.chroxy` is legitimate, and
+the stranded-state warning would otherwise repeat on every boot. Run
+`CHROXY_CONFIG_DIR=/scratch/x chroxy config-dir ack` once (the warning prints the
+exact command; without the variable it answers "not relocated"): it records the entries currently at `~/.chroxy` in
+`config-dir-ack.json` inside the relocated root, and the startup warning and
+`chroxy doctor` stay quiet about exactly those. It is a snapshot, not a switch:
+an entry whose name was not acknowledged warns again (naming only that entry),
+re-running `ack` replaces the snapshot, and an unreadable or malformed `config-dir-ack.json` counts
+as no acknowledgement. `chroxy config-dir status` marks which entries are
+acknowledged. An acknowledged `config.json` still gets the "do not run
+`chroxy init`" advice when the token is missing.
+
 The same relocation silently strands `server-identity.json`. On a keychain-less
 host that makes the daemon mint a **new identity key**, which pinned clients
 report as a possible MITM — migrating before first start avoids it; if you have

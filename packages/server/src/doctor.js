@@ -27,7 +27,7 @@ import {
 } from './billing-class.js'
 import { checkDependencies } from './utils/check-dependencies.js'
 import { configPath } from './config-dir.js'
-import { detectStrandedState } from './config-dir-migration.js'
+import { applyStrandedAck, detectStrandedState } from './config-dir-migration.js'
 import { CLAUDE_LOGIN_COMMAND } from './utils/claude-login-command.js'
 import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
 import { createLogger } from './logger.js'
@@ -775,7 +775,11 @@ export async function runDoctorChecks({
   // which is strictly worse than the problem it purports to fix.
   let strandedCheck = null
   try {
-    const stranded = detectStranded()
+    const raw = detectStranded()
+    // #7244 — entries the operator acknowledged with `chroxy config-dir ack`
+    // are dropped here; one that appeared afterwards is not, and still warns.
+    // The same helper the startup warning uses, so the two cannot disagree.
+    const stranded = applyStrandedAck(raw)
     if (stranded.unreadable) {
       strandedCheck = {
         name: 'Config/state root',
@@ -797,28 +801,37 @@ export async function runDoctorChecks({
         status: 'warn',
         message: `${stranded.target} (from CHROXY_CONFIG_DIR) — ${stranded.stranded.length} `
           + `state ${stranded.stranded.length === 1 ? 'entry is' : 'entries are'} still at `
-          + `${stranded.source}${sharp}: ${named}${rest > 0 ? `, and ${rest} more` : ''} `
-          + `— fix: chroxy config-dir migrate`,
-      }
-      if (stranded.highConsequence.includes('config.json')) {
-        configCheck = {
-          name: 'Config',
-          status: 'fail',
-          message: `Not found at ${configPath('config.json')} — it is still at `
-            + `${join(stranded.source, 'config.json')}. Do NOT run 'chroxy init' `
-            + `(it mints a fresh token and forces every device to re-pair) — `
-            + `run 'chroxy config-dir migrate' instead`,
-        }
+          + `${stranded.source}${sharp}: ${named}${rest > 0 ? `, and ${rest} more` : ''}`
+          + (stranded.acknowledged.length > 0 ? ` (${stranded.acknowledged.length} more acknowledged earlier)` : '')
+          + ` — fix: chroxy config-dir migrate (or chroxy config-dir ack to keep this root on purpose)`,
       }
     } else {
       // Read the root off the detection, NOT from configDir()/process.env
       // directly: the detection is injectable, and a branch that bypasses the
       // seam reports something the caller did not ask about — which also makes
       // this message the one branch a test cannot pin.
+      const acked = stranded.acknowledged.length
       strandedCheck = {
         name: 'Config/state root',
         status: 'pass',
-        message: `${stranded.target}${stranded.relocated ? ' (from CHROXY_CONFIG_DIR)' : ''}`,
+        message: `${stranded.target}${stranded.relocated ? ' (from CHROXY_CONFIG_DIR)' : ''}`
+          + (acked > 0
+            ? ` — ${acked} state ${acked === 1 ? 'entry' : 'entries'} at ${stranded.source} acknowledged (chroxy config-dir ack)`
+            : ''),
+      }
+    }
+    // Judged on the RAW detection, not the acknowledgement-filtered one: an
+    // acknowledged config.json is still absent from the root the daemon reads,
+    // so "run 'chroxy init'" would still be the wrong advice for a missing
+    // Config (#7244 — an acknowledgement quiets a warning, not a diagnosis).
+    if (raw.relocated && !raw.unreadable && raw.highConsequence.includes('config.json')) {
+      configCheck = {
+        name: 'Config',
+        status: 'fail',
+        message: `Not found at ${configPath('config.json')} — it is still at `
+          + `${join(raw.source, 'config.json')}. Do NOT run 'chroxy init' `
+          + `(it mints a fresh token and forces every device to re-pair) — `
+          + `run 'chroxy config-dir migrate' instead`,
       }
     }
   } catch (err) {
