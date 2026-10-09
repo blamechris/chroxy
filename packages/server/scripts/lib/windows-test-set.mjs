@@ -177,7 +177,13 @@ export const WINDOWS_EXEMPT = [
     symptom: 'timeout',
     note: 'drives a real PTY for the claude TUI trust dialog; on Windows the ConPTY session never reaches the expected state and the file does not terminate',
   },
-  // ── spawns a POSIX shell or a .sh script (8)
+  // ── spawns a POSIX shell or a .sh script (9)
+  {
+    file: 'tests/permission-hook-daemon-rejection.test.js',
+    reason: 'posix-shell-spawn',
+    symptom: 'fail',
+    note: 'spawns hooks/permission-hook.sh via /bin/bash to prove a daemon-side rejection denies with an honest reason',
+  },
   {
     file: 'tests/permission-hook-failclosed.test.js',
     reason: 'posix-shell-spawn',
