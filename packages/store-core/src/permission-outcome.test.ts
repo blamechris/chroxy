@@ -438,7 +438,7 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
   })
 
   it('handlePermissionResolved hands the wire reason on', () => {
-    expect(resolved({ reason: 'stopped' })).toEqual({ requestId: 'perm-1', toolUseId: null, decision: 'deny', reason: 'stopped' })
+    expect(resolved({ reason: 'stopped' })).toEqual({ requestId: 'perm-1', toolUseId: null, decision: 'deny', reason: 'stopped', scope: null })
     expect(resolved({ reason: 'user' }).reason).toBe('user')
     expect(resolved().reason).toBeNull()
     expect(resolved({ reason: 7 }).reason).toBeNull()
@@ -470,6 +470,42 @@ describe('a Stop-cancelled prompt is its own outcome (#8374)', () => {
     const allowed = applyPermissionResolved(livePending(), resolved({ decision: 'allow', reason: 'user' }), NOW)
     expect(allowed.answered).toBe('allow')
     expect(allowed.permissionOutcome).toBeUndefined()
+  })
+
+  // ---- #8517: "Allow for Session" survives the server's resolved echo ----
+
+  it('#8517: handlePermissionResolved hands the wire scope on, and only a string', () => {
+    expect(resolved({ decision: 'allow', scope: 'session' }).scope).toBe('session')
+    expect(resolved({ decision: 'allow' }).scope).toBeNull()
+    expect(resolved({ decision: 'allow', scope: 7 }).scope).toBeNull()
+  })
+
+  it('#8517: the echo of a session allow (decision allow, no scope: an older daemon) does not downgrade the local allowSession', () => {
+    const local = { ...livePending(), answered: 'allowSession', answeredAt: NOW - 5, options: undefined }
+    const next = applyPermissionResolved(local, resolved({ decision: 'allow', reason: 'user' }), NOW)
+    expect(next.answered).toBe('allowSession')
+    expect(next.answeredAt).toBe(NOW)
+  })
+
+  it('#8517: the echo with scope session sets allowSession, even on a card this client never answered', () => {
+    const next = applyPermissionResolved(livePending(), resolved({ decision: 'allow', reason: 'user', scope: 'session' }), NOW)
+    expect(next.answered).toBe('allowSession')
+    expect(next.permissionOutcome).toBeUndefined()
+  })
+
+  it('#8517: the echo never downgrades a local allowAlways either', () => {
+    const local = { ...livePending(), answered: 'allowAlways', options: undefined }
+    expect(applyPermissionResolved(local, resolved({ decision: 'allow' }), NOW).answered).toBe('allowAlways')
+  })
+
+  it('#8517 CONTROL: a plain allow stays allow, a deny over a local allow stays deny, and a scope beside a non-allow is ignored', () => {
+    expect(applyPermissionResolved(livePending(), resolved({ decision: 'allow' }), NOW).answered).toBe('allow')
+    const allowedLocally = { ...livePending(), answered: 'allow', options: undefined }
+    expect(applyPermissionResolved(allowedLocally, resolved({ decision: 'allow' }), NOW).answered).toBe('allow')
+    const sessionLocally = { ...livePending(), answered: 'allowSession', options: undefined }
+    expect(applyPermissionResolved(sessionLocally, resolved({ decision: 'deny' }), NOW).answered).toBe('deny')
+    expect(applyPermissionResolved(livePending(), resolved({ decision: 'deny', scope: 'session' }), NOW).answered).toBe('deny')
+    expect(applyPermissionResolved(livePending(), resolved({ decision: 'allowAlways', scope: 'session' }), NOW).answered).toBe('allowAlways')
   })
 
   it('a non-user abort (reason "aborted": a stalled stream, a dead provider) is an expired record, not a Stop and not a user deny', () => {

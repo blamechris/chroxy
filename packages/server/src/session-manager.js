@@ -31,6 +31,7 @@ import { resolveSessionPreset, foldPreamble } from './session-preset.js'
 import { SessionPresetTrustStore } from './session-preset-trust.js'
 import { BinaryProvenanceLedger } from './binary-provenance-trust.js'
 import { PermissionRuleStore } from './permission-rule-store.js'
+import { permissionDecisionToken } from './permission-scope.js'
 import { ScheduledTaskStore, defaultScheduledTasksPath } from './scheduled-task-store.js'
 import { createLogger } from './logger.js'
 import { ExternalSessionRegistry } from './external-session-registry.js'
@@ -4668,7 +4669,7 @@ export class SessionManager extends EventEmitter {
           this.notePermissionRequest(sessionId, data)
         } else if (event === 'permission_resolved' || event === 'permission_expired') {
           const outcome = permissionOutcomeForEvent(event, data)
-          if (outcome) this.recordPermissionOutcome(data.requestId, outcome, event === 'permission_resolved' ? data.decision : undefined)
+          if (outcome) this.recordPermissionOutcome(data.requestId, outcome, event === 'permission_resolved' ? permissionDecisionToken(data.decision, data.scope) : undefined)
           // #8470: a question a newer one replaced has no requestId, so the outcome
           // journal above never sees it. Its verdict is recorded on the question's
           // own history entry instead.

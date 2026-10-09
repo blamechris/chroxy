@@ -521,6 +521,51 @@ describe('message queue', () => {
     useConnectionStore.setState({ socket: null });
   });
 
+  // #8517: "Allow for Session" is wire `allow` + `scope: 'session'`. The daemon's
+  // permission_resolved echo carries the plain `allow` decision and must not
+  // downgrade the card to a one-time allow.
+  it('Allow for Session sends allow labelled with the session scope, and the resolved echo keeps allowSession (#8517)', () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const mockSocket = { readyState: 1, send: (d: string) => { sent.push(JSON.parse(d)); } } as unknown as WebSocket;
+    const prompt: ChatMessage = {
+      id: 'm1', type: 'prompt', content: 'Read /a', timestamp: 1, requestId: 'req-s', tool: 'Read',
+      expiresAt: Date.now() + 5 * 60_000,
+    };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [prompt] } },
+      socket: mockSocket,
+    });
+    _testMessageHandler.setContext(createMockConnectionContext({ socket: mockSocket }));
+    const answered = () => useConnectionStore.getState().sessionStates.s1.messages.find((m) => m.requestId === 'req-s')?.answered;
+
+    useConnectionStore.getState().sendPermissionResponse('req-s', 'allowSession');
+
+    const response = sent.find((m) => m.type === 'permission_response')!;
+    expect(response.decision).toBe('allow');
+    expect(response.scope).toBe('session');
+    expect(answered()).toBe('allowSession');
+
+    // An older daemon's echo (no scope), then a current one's (scope): both leave it.
+    _testMessageHandler.handle({ type: 'permission_resolved', requestId: 'req-s', decision: 'allow', reason: 'user', sessionId: 's1' });
+    expect(answered()).toBe('allowSession');
+    _testMessageHandler.handle({ type: 'permission_resolved', requestId: 'req-s', decision: 'allow', scope: 'session', reason: 'user', sessionId: 's1' });
+    expect(answered()).toBe('allowSession');
+
+    // CONTROL: a one-time allow carries no scope and stays allow.
+    sent.length = 0;
+    useConnectionStore.setState({
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [{ ...prompt, answered: undefined }] } },
+    });
+    useConnectionStore.getState().sendPermissionResponse('req-s', 'allow');
+    expect('scope' in sent.find((m) => m.type === 'permission_response')!).toBe(false);
+    _testMessageHandler.handle({ type: 'permission_resolved', requestId: 'req-s', decision: 'allow', reason: 'user', sessionId: 's1' });
+    expect(answered()).toBe('allow');
+
+    _testMessageHandler.clearContext();
+    useConnectionStore.setState({ socket: null });
+  });
+
   it('does not queue excluded message types (setModel)', () => {
     // setModel calls socket.send directly and doesn't use enqueueMessage,
     // so it just silently no-ops when disconnected. Verify that calling

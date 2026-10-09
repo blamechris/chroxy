@@ -740,6 +740,59 @@ describe('settings-handlers', () => {
       assert.equal(call[1]({ id: 'guest', boundSessionId: 's1' }), false)
     })
 
+    describe('#8517 session scope', () => {
+      function hookCtx() {
+        const hookSession = createMockSession()
+        delete hookSession.respondToPermission
+        const ctx = makeCtx(new Map([['s1', { session: hookSession, name: 'S', cwd: '/tmp' }]]))
+        ctx.permissions.permissionSessionMap.set('req-hook', 's1')
+        ctx.permissions.pendingPermissions = new Map([['req-hook', { data: { tool: 'Bash' } }]])
+        ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+        return ctx
+      }
+      const resolvedFrames = (ctx) => ctx.transport.broadcast.calls.filter((args) => args[0]?.type === 'permission_resolved')
+
+      it('hands the in-process session the scope as a fifth argument', () => {
+        const session = createMockSession()
+        session._pendingPermissions = new Map([['req-1', true]])
+        const ctx = makeCtx(new Map([['s1', { session, name: 'S', cwd: '/tmp' }]]))
+        ctx.permissions.permissionSessionMap.set('req-1', 's1')
+        settingsHandlers.permission_response(makeWs(), makeClient({ activeSessionId: 's1' }), { requestId: 'req-1', decision: 'allow', scope: 'session' }, ctx)
+        assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined, undefined, 'session'])
+      })
+
+      it('a hook-routed session allow broadcasts permission_resolved with decision allow and the scope', () => {
+        const ctx = hookCtx()
+        settingsHandlers.permission_response(makeWs(), makeClient({ id: 'c', activeSessionId: 's1' }), { requestId: 'req-hook', decision: 'allow', scope: 'session' }, ctx)
+        assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 1)
+        assert.deepEqual(ctx.permissions.permissions.resolvePermission.lastCall, ['req-hook', 'allow'], 'the held hook request is released as a plain allow')
+        const frames = resolvedFrames(ctx)
+        assert.equal(frames.length, 1)
+        assert.deepEqual(frames[0][0], { type: 'permission_resolved', requestId: 'req-hook', decision: 'allow', scope: 'session', sessionId: 's1' })
+      })
+
+      it('the unmapped legacy broadcast carries the scope too', () => {
+        const ctx = makeCtx()
+        ctx.permissions.pendingPermissions = new Map([['req-legacy', { data: {} }]])
+        ctx.permissions.permissions = { resolvePermission: createSpy(() => true) }
+        settingsHandlers.permission_response(makeWs(), makeClient({ id: 'c', activeSessionId: null, boundSessionId: null }), { requestId: 'req-legacy', decision: 'allow', scope: 'session' }, ctx)
+        const frames = resolvedFrames(ctx)
+        assert.equal(frames[0][0].scope, 'session')
+        assert.equal(frames[0][0].decision, 'allow')
+      })
+
+      it('a scope beside deny or allowAlways never reaches the broadcast', () => {
+        for (const decision of ['deny', 'allowAlways']) {
+          const ctx = hookCtx()
+          settingsHandlers.permission_response(makeWs(), makeClient({ id: 'c', activeSessionId: 's1' }), { requestId: 'req-hook', decision, scope: 'session' }, ctx)
+          const frames = resolvedFrames(ctx)
+          assert.equal(frames.length, 1, decision)
+          assert.equal('scope' in frames[0][0], false, decision)
+          assert.equal(frames[0][0].decision, decision)
+        }
+      })
+    })
+
     // #7976: a hook-routed prompt (claude-tui / claude-cli / claude-channel) is
     // MAPPED to its session but has no PermissionManager, so the resolver
     // dispatches it through the legacy store. The WS answer used to broadcast

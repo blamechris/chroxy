@@ -269,7 +269,7 @@ function _isSecureRequest(req) {
  *   { type: 'cancel_queued', clientMessageId, sessionId? } — cancel ONE queued send-while-busy follow-up (#5943); server emits message_dequeued(reason: 'cancelled')
  *   { type: 'set_model', model: '...' }              — change model on active session
  *   { type: 'set_permission_mode', mode: '...', confirmed? } — change permission mode (confirmed: true required for 'auto')
- *   { type: 'permission_response', requestId, decision } — respond to permission prompt
+ *   { type: 'permission_response', requestId, decision, scope? } — respond to permission prompt; `scope: 'session'` beside `allow` labels an "Allow for Session" answer (#8517: a label only, shown on permission_resolved and in the journal; the session rule is a separate set_permission_rules)
  *   { type: 'list_sessions' }                         — request session list
  *   { type: 'switch_session', sessionId }             — switch to a different session
  *   { type: 'create_session', name?, cwd?, provider?, agentCommId? } — create a new session

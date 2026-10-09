@@ -29,6 +29,7 @@ import { DROPPED_HUNKS_KEY, KEPT_HUNKS_KEY, EditedInputRefusedError, isHunkRevie
 // inside function bodies (call time), never at module evaluation, and
 // normalizeProjectKey is a hoisted function declaration.
 import { normalizeProjectKey } from './permission-rule-store.js'
+import { permissionScope } from './permission-scope.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
@@ -1070,10 +1071,14 @@ export class PermissionManager extends EventEmitter {
    *   {@link EDITABLE_INPUT_FIELDS} whitelist on an approve (ignored on deny).
    * @param {string} [reason] - #6773 operator-supplied free-text deny reason;
    *   used only on a `deny` to replace the fixed 'User denied' agent message.
+   * @param {string} [scope] - #8517 `session` when the user chose "Allow for
+   *   Session" (the decision is then `allow`). A LABEL for the permission_resolved
+   *   event and the journal: it changes nothing about how the request is resolved,
+   *   and is dropped unless it rides beside `allow` (permission-scope.js).
    * @returns {boolean} true if a pending permission was found and resolved,
    *   false if the requestId was unknown (already resolved or expired).
    */
-  respondToPermission(requestId, decision, editedInput, reason) {
+  respondToPermission(requestId, decision, editedInput, reason, scope) {
     const pending = this._pendingPermissions.get(requestId)
     if (!pending) {
       this._logWarn(`No pending permission for ${requestId}`)
@@ -1096,7 +1101,8 @@ export class PermissionManager extends EventEmitter {
 
     // Emit before resolve() so listeners see the pending-count drop
     // before any follow-on work runs synchronously.
-    this.emit('permission_resolved', { requestId, decision, reason: 'user' })
+    const resolvedScope = permissionScope(decision, scope)
+    this.emit('permission_resolved', { requestId, decision, reason: 'user', ...(resolvedScope ? { scope: resolvedScope } : {}) })
 
     // #6543 (feature B): on an approve, an operator who reviewed the proposed
     // Write/Edit per-hunk may narrow the CONTENT (never the path — see

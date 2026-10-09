@@ -2077,6 +2077,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       type: 'permission_response',
       requestId,
       decision: wireDecision,
+      // #8517: say WHICH allow this was, so the daemon's permission_resolved echo and
+      // its journal name it too (a plain `allow` there grouped it with one-time
+      // allows). A label only: the session rule is the set_permission_rules below.
+      ...(decision === 'allowSession' ? { scope: 'session' } : {}),
       ...(editedInput && Object.keys(editedInput).length > 0 && wireDecision !== 'deny' ? { editedInput } : {}),
     };
     if (wireDecision === 'deny') hapticWarning(); else hapticMedium();
