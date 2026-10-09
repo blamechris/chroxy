@@ -50,6 +50,13 @@ Three properties are worth knowing before you set it:
   their state" from "deliberately clean root", and copying an identity key into a
   possibly shared, synced or bind-mounted volume is the operator's call (#7240).
 
+  If the second root is deliberate (an isolated preview daemon beside your real
+  `~/.chroxy`), `chroxy config-dir ack` records the entries currently left there
+  in `config-dir-ack.json` inside the relocated root, and the startup warning and
+  `chroxy doctor` stay quiet about exactly those. It is a snapshot, not a flag:
+  an entry that appears later warns again, and an unreadable or malformed file
+  counts as no acknowledgement (#7244).
+
 Internally the root has exactly one resolver — `configDir()` / `configPath()` in
 [`src/config-dir.js`](src/config-dir.js) — and both read the environment **per
 call**, because a module-scope `const` freezes at import and silently ignores the
