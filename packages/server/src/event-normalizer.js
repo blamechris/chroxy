@@ -3,7 +3,7 @@ import { toShortModelId } from './models.js'
 import { createLogger } from './logger.js'
 import { busyStateOf } from './session-busy-state.js'
 import { buildPermissionRequestMessage, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
-import { boundedNonNegInt, buildMessageWire, buildErrorWire } from './message-wire.js'
+import { boundedNonNegInt, boundedThinkingPrecedes, buildMessageWire, buildErrorWire } from './message-wire.js'
 import { turnOutcomeField } from './turn-outcome.js'
 import { permissionScope } from './permission-scope.js'
 
@@ -169,8 +169,19 @@ Object.assign(EVENT_MAP, {
     // state is already owned by the response stream / the client's 'pending'
     // sentinel, so a per-thinking-block session_list refresh would be noise.
     if (data.thinking) {
+      // #8518: where this block belongs relative to a tool row / the answer, for a
+      // block that reached the wire after them. Re-bounded here like every other
+      // optional field; the history records the same value (session-message-history).
+      const thinkingPrecedes = boundedThinkingPrecedes(data.thinkingPrecedes)
       return {
-        messages: [{ msg: { type: 'stream_start', messageId: data.messageId, thinking: true } }],
+        messages: [{
+          msg: {
+            type: 'stream_start',
+            messageId: data.messageId,
+            thinking: true,
+            ...(thinkingPrecedes ? { thinkingPrecedes } : {}),
+          },
+        }],
       }
     }
     const messages = [

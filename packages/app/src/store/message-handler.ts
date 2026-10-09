@@ -50,6 +50,9 @@ import {
   handleThinkingDelta as sharedThinkingDelta,
   handleThinkingStreamEnd as sharedThinkingEnd,
   finalizeThinkingStreams,
+  // #8518 — the ordering hint: a late thinking block goes above the tool row /
+  // answer it was thought before, not at the end.
+  placeThinkingBubble,
   // #7326 — the chip for a truncated / refused / stopped turn (turn-outcome-marker.ts).
   appendTurnOutcomeMarker,
   handleAuthOk as sharedAuthOk,
@@ -2841,8 +2844,12 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             messages: ss.messages.filter((message) => message.id !== 'thinking'),
           }));
         }
+        // #8518: a replayed reasoning bubble that was recorded as belonging above a
+        // tool row / the answer is rebuilt there, as the live one was.
         updateSession(effectiveId, (ss) => ({
-          messages: [...ss.messages, newMsg],
+          messages: result.thinkingPrecedes
+            ? placeThinkingBubble(ss.messages, newMsg, result.thinkingPrecedes)
+            : [...ss.messages, newMsg],
         }));
       }
       // #7603 — the container-health state rides in on this same `error`
@@ -2876,7 +2883,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           updateSession(thinkingTargetId, (ss) => {
             const out = sharedThinkingStart(msg, get().activeSessionId, ss.messages);
             if (!out.isNewMessage || !out.newMessage) return {};
-            return { messages: [...filterThinking(ss.messages), out.newMessage] };
+            return { messages: placeThinkingBubble(filterThinking(ss.messages), out.newMessage, out.precedes) };
           });
         }
         break;

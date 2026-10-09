@@ -4886,14 +4886,15 @@ export class ClaudeTuiSession extends BaseSession {
       // Code writes a turn's assistant lines AFTER it has run the PreToolUse hook,
       // so on a turn that thinks and then calls a tool the thinking block is not
       // on disk yet when the hook is read, and it reaches the wire after the
-      // tool_start (the client then shows the tool row above it). The same lag
-      // hits the Stop: see _endThinkingForTurn's late window. Measured on a
-      // real Haiku turn (#8513): thinking stamped .588 and tool_use .594 in the
-      // transcript, yet the transcript still lacked the tool_use 500 ms after the
-      // hook was read. Waiting for it was tried and removed: it cost up to 500 ms
-      // on the first tool of every tool turn, and it timed out anyway. The real fix
-      // is a client-side hint (the thinking frame naming the tool_use it precedes),
-      // not a server-side wait. Do not reintroduce a wait here.
+      // tool_start. The same lag hits the Stop: see _endThinkingForTurn's late
+      // window. Measured on a real Haiku turn (#8513): thinking stamped .588 and
+      // tool_use .594 in the transcript, yet the transcript still lacked the
+      // tool_use 500 ms after the hook was read. Waiting for it was tried and
+      // removed: it cost up to 500 ms on the first tool of every tool turn, and it
+      // timed out anyway. The fix goes the other way (#8518): the block, when it
+      // does arrive, says what it precedes (`thinkingPrecedes`, read off the
+      // transcript's own order by TranscriptTaskScanner) and the client puts it
+      // above that tool row / the answer. Do not reintroduce a wait here.
       this._drainTurnThinking({ force: true })
       for (const { name, full, parsed } of pending) {
         this._consumedFiles.add(name)

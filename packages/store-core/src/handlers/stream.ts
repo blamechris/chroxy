@@ -78,6 +78,13 @@ export type MessagePayload =
        * derive its own variant.
        */
       containerLostPatch: SessionPatch | null
+      /**
+       * #8518 — set on a replayed reasoning entry that records an ordering hint: the
+       * tool row (or response) the bubble was thought before. The caller places the
+       * rebuilt bubble with {@link placeThinkingBubble} instead of appending it, the
+       * way the live `stream_start` did. Absent on every other message.
+       */
+      thinkingPrecedes?: ThinkingPrecedes
     }
 
 /** A patch for a message the client already holds, found by id (see {@link applyMessageReconcile}). */
@@ -524,12 +531,16 @@ export function handleMessage(
     ? null
     : handleContainerLost(msg, activeSessionId)
 
+  // #8518: a replayed reasoning entry that recorded where it belongs.
+  const thinkingPrecedes = isReplayedThinking ? parseThinkingPrecedes(msg.thinkingPrecedes) : undefined
+
   return {
     shouldDispatch: true,
     chatMessage,
     isRateLimitError,
     errorContent,
     containerLostPatch,
+    ...(thinkingPrecedes ? { thinkingPrecedes } : null),
   }
 }
 
@@ -1772,6 +1783,12 @@ export interface ThinkingStreamStartPayload {
   isNewMessage: boolean
   /** Pre-built `type: 'thinking'` ChatMessage when `isNewMessage` is true. */
   newMessage: ChatMessage | null
+  /**
+   * #8518 — the frame's ordering hint, when it carried a well-formed one: the tool
+   * row or response this bubble precedes. The caller passes it to
+   * {@link placeThinkingBubble}; absent means append.
+   */
+  precedes?: ThinkingPrecedes
 }
 
 /**
@@ -1811,7 +1828,79 @@ export function handleThinkingStreamStart(
     thinkingStreaming: true,
     timestamp: Date.now(),
   }
-  return { sessionId, thinkingMessageId, isNewMessage: true, newMessage }
+  const precedes = parseThinkingPrecedes(msg.thinkingPrecedes)
+  return { sessionId, thinkingMessageId, isNewMessage: true, newMessage, ...(precedes ? { precedes } : null) }
+}
+
+// ---------------------------------------------------------------------------
+// #8518 — thinking ordering hint
+//
+// claude-tui reads the model's reasoning from the session transcript, which Claude
+// Code writes AFTER the PreToolUse hook (that is what becomes `tool_start`) and
+// after the Stop hook (the answer). So a thinking block can reach the client after
+// the tool row, or the answer, it was thought before, and appending it puts it
+// below them. The server reads the transcript's own order and says what the block
+// precedes (`thinkingPrecedes` on the `stream_start`, and on the history entry so
+// a reload agrees); these two functions are the whole client side, shared by the
+// dashboard and the mobile app so neither carries its own copy of the placement.
+// ---------------------------------------------------------------------------
+
+/** Longest id a hint may name; mirrors the protocol's ThinkingPrecedesSchema. */
+const THINKING_PRECEDES_ID_MAX = 256
+
+/**
+ * What a thinking bubble comes before: the tool row with that `toolUseId`, or the
+ * response message with that id.
+ */
+export type ThinkingPrecedes =
+  | { kind: 'tool_use'; toolUseId: string }
+  | { kind: 'response'; messageId: string }
+
+/**
+ * Read an ordering hint off a raw wire frame / history entry. Anything that is not
+ * exactly one of the two known shapes (a kind a newer server added, a missing or
+ * empty or non-string or over-long id) is `undefined`, and the bubble is appended
+ * as it always was: an unrecognised hint must never turn into a position.
+ */
+export function parseThinkingPrecedes(raw: unknown): ThinkingPrecedes | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const hint = raw as Record<string, unknown>
+  const id = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 && v.length <= THINKING_PRECEDES_ID_MAX ? v : undefined
+  if (hint.kind === 'tool_use') {
+    const toolUseId = id(hint.toolUseId)
+    return toolUseId ? { kind: 'tool_use', toolUseId } : undefined
+  }
+  if (hint.kind === 'response') {
+    const messageId = id(hint.messageId)
+    return messageId ? { kind: 'response', messageId } : undefined
+  }
+  return undefined
+}
+
+/**
+ * Add a thinking bubble to a session's messages: directly above the tool row or
+ * response it precedes when it has a hint and that target is held, else at the end
+ * (what every client did before the hint existed, and still right for a block that
+ * arrived in order: its tool row is not there yet). The target is matched by kind
+ * as well as id, so a tool id can never position a bubble against a reply. Never
+ * mutates `messages`.
+ */
+export function placeThinkingBubble(
+  messages: readonly ChatMessage[],
+  bubble: ChatMessage,
+  precedes: ThinkingPrecedes | undefined,
+): ChatMessage[] {
+  if (precedes) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!
+      const isTarget = precedes.kind === 'tool_use'
+        ? m.type === 'tool_use' && m.toolUseId === precedes.toolUseId
+        : m.type === 'response' && m.id === precedes.messageId
+      if (isTarget) return [...messages.slice(0, i), bubble, ...messages.slice(i)]
+    }
+  }
+  return [...messages, bubble]
 }
 
 /** Result returned from {@link handleThinkingDelta} when the message is well-formed. */

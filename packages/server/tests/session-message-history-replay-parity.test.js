@@ -122,6 +122,42 @@ describe('SessionMessageHistory: replay parity (#6630)', () => {
       assert.equal(frames[0].thinkingTokens, 128)
     })
 
+    it('records the ordering hint the stream_start carried, so a replay can place the bubble where the live one went (#8518)', () => {
+      const hint = { kind: 'tool_use', toolUseId: 'toolu_LS' }
+      history.recordHistory(S, 'stream_start', { messageId: 't1-thinking-0', thinking: true, thinkingPrecedes: hint })
+      history.recordHistory(S, 'stream_delta', { messageId: 't1-thinking-0', delta: 'x', thinking: true })
+      history.recordHistory(S, 'stream_end', { messageId: 't1-thinking-0', thinking: true })
+      const [entry] = history.getHistory(S)
+      assert.deepEqual(entry.thinkingPrecedes, hint)
+      const frames = []
+      sendHistoryEntry((_ws, p) => frames.push(p), null, S, entry, { clientCapabilities: new Set() })
+      assert.deepEqual(frames[0].thinkingPrecedes, hint, 'the replay frame carries it')
+      assert.equal(frames[0].kind, 'thinking')
+    })
+
+    it('records a response hint, bounds a malformed one away, and keeps one stream\'s hint off the next stream', () => {
+      history.recordHistory(S, 'stream_start', { messageId: 't1-thinking-0', thinking: true, thinkingPrecedes: { kind: 'response', messageId: 't1' } })
+      history.recordHistory(S, 'stream_end', { messageId: 't1-thinking-0', thinking: true })
+      history.recordHistory(S, 'stream_start', { messageId: 't1-thinking-1', thinking: true })
+      history.recordHistory(S, 'stream_end', { messageId: 't1-thinking-1', thinking: true })
+      history.recordHistory(S, 'stream_start', { messageId: 't1-thinking-2', thinking: true, thinkingPrecedes: { kind: 'tool_use' } })
+      history.recordHistory(S, 'stream_end', { messageId: 't1-thinking-2', thinking: true })
+      const [a, b, c] = history.getHistory(S)
+      assert.deepEqual(a.thinkingPrecedes, { kind: 'response', messageId: 't1' })
+      assert.ok(!('thinkingPrecedes' in b), 'no hint on a stream that had none')
+      assert.ok(!('thinkingPrecedes' in c), 'a malformed hint is not recorded')
+    })
+
+    it('never records a hint on a reply, and closing the pending streams releases a hint that never ended', () => {
+      history.recordHistory(S, 'stream_start', { messageId: 'm1', thinkingPrecedes: { kind: 'response', messageId: 'm1' } })
+      history.recordHistory(S, 'stream_delta', { messageId: 'm1', delta: 'hi' })
+      history.recordHistory(S, 'stream_end', { messageId: 'm1' })
+      assert.ok(!('thinkingPrecedes' in history.getHistory(S)[0]))
+      history.recordHistory(S, 'stream_start', { messageId: 't2-thinking-0', thinking: true, thinkingPrecedes: { kind: 'tool_use', toolUseId: 'x' } })
+      history.closePendingStreams(S)
+      assert.equal(history._streamPrecedes.size, 0)
+    })
+
     it('does not tag a reply, and a reply never carries a duration', () => {
       history.recordHistory(S, 'stream_start', { messageId: 'm1' })
       history.recordHistory(S, 'stream_delta', { messageId: 'm1', delta: 'hi' })

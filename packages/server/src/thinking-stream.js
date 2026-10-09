@@ -30,6 +30,7 @@
  */
 
 import { redactBounded } from './redaction.js'
+import { boundedThinkingPrecedes } from './message-wire.js'
 
 /** What stands in for an Anthropic `redacted_thinking` block, whose payload is encrypted and never readable. */
 export const REDACTED_THINKING_PLACEHOLDER = '[redacted thinking]'
@@ -100,17 +101,35 @@ export class ThinkingStreams {
    * `stream_start` otherwise pings the sidebar "busy", and nothing pings idle again
    * until the next `result`), and it never reaches a client.
    *
-   * @param {{ text?: string, redacted?: boolean, durationMs?: number, late?: boolean }} block
+   * `precedes` (#8518) is the transcript's own order, so a client can put a block that
+   * arrives late where it belongs: `{ kind: 'tool_use', toolUseId }` above that tool
+   * row, `{ kind: 'response' }` above the turn's answer. It rides the `stream_start`
+   * as `thinkingPrecedes` (the frame that creates the bubble). A response hint is
+   * sent only for a `late` block: before the answer exists its slot is empty and
+   * sits above the tool rows, so "above the response" would put the bubble in the
+   * wrong place; the block is simply appended, which is right for a block that
+   * arrives in order.
+   *
+   * @param {{ text?: string, redacted?: boolean, durationMs?: number, late?: boolean,
+   *   precedes?: ({kind: 'tool_use', toolUseId: string}|{kind: 'response'}) }} block
    * @returns {string} the messageId used
    */
-  emitBlock({ text = '', redacted = false, durationMs, late = false } = {}) {
+  emitBlock({ text = '', redacted = false, durationMs, late = false, precedes } = {}) {
     const messageId = this._nextId()
     const tag = late ? { late: true } : {}
-    this._emit('stream_start', { messageId, thinking: true, ...tag })
+    const hint = this._hint(precedes, late)
+    this._emit('stream_start', { messageId, thinking: true, ...tag, ...(hint ? { thinkingPrecedes: hint } : {}) })
     const body = this._body(text, redacted)
     if (body) this._emit('stream_delta', { messageId, delta: body, thinking: true, ...tag })
     this._emit('stream_end', { ...this._endFrame(messageId, cleanDuration(durationMs)), ...tag })
     return messageId
+  }
+
+  _hint(precedes, late) {
+    if (precedes?.kind === 'response') {
+      return late ? boundedThinkingPrecedes({ kind: 'response', messageId: this._turnId }) : undefined
+    }
+    return boundedThinkingPrecedes(precedes)
   }
 
   /** Open a streaming block under `key` (idempotent per key). Emits `stream_start`. */

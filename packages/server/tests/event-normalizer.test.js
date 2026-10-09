@@ -160,6 +160,41 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- thinking stream_start ordering hint (#8518) ----
+  describe('thinking stream_start ordering hint (#8518)', () => {
+    const startMsg = (data) => normalizer.normalize('stream_start', { messageId: 'm1-thinking-0', thinking: true, ...data }, makeCtx()).messages[0].msg
+
+    it('forwards a tool_use hint on the thinking stream_start', () => {
+      const msg = startMsg({ thinkingPrecedes: { kind: 'tool_use', toolUseId: 'toolu_1' } })
+      assert.deepEqual(msg.thinkingPrecedes, { kind: 'tool_use', toolUseId: 'toolu_1' })
+      assert.equal(msg.thinking, true)
+    })
+
+    it('forwards a response hint', () => {
+      const msg = startMsg({ thinkingPrecedes: { kind: 'response', messageId: 'm1' } })
+      assert.deepEqual(msg.thinkingPrecedes, { kind: 'response', messageId: 'm1' })
+    })
+
+    it('re-bounds the hint at the wire: copies only the known fields, drops a malformed one', () => {
+      assert.deepEqual(
+        startMsg({ thinkingPrecedes: { kind: 'tool_use', toolUseId: 'toolu_1', extra: 'x' } }).thinkingPrecedes,
+        { kind: 'tool_use', toolUseId: 'toolu_1' },
+      )
+      for (const bad of [{ kind: 'tool_use' }, { kind: 'tool_use', toolUseId: 'x'.repeat(257) }, { kind: 'nope' }, 'toolu_1', 7]) {
+        assert.ok(!('thinkingPrecedes' in startMsg({ thinkingPrecedes: bad })), JSON.stringify(bad))
+      }
+    })
+
+    it('no hint, no field (an old server\'s frame is byte-identical)', () => {
+      assert.deepEqual(startMsg({}), { type: 'stream_start', messageId: 'm1-thinking-0', thinking: true })
+    })
+
+    it('never stamped on a response stream_start', () => {
+      const msg = normalizer.normalize('stream_start', { messageId: 'm1', thinkingPrecedes: { kind: 'tool_use', toolUseId: 't' } }, makeCtx()).messages[0].msg
+      assert.ok(!('thinkingPrecedes' in msg))
+    })
+  })
+
   // ---- compact_boundary compactMetadata bounding (#6973) ----
   //
   // #6973 (agent-review on #6970): compactMetadata's preTokens/postTokens/

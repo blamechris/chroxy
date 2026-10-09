@@ -59,11 +59,37 @@ const ThinkingDurationMsSchema = z
 // it is absent rather than fabricating a number.
 const ThinkingTokensSchema = z.number().int().nonnegative().finite().optional()
 
+// #8518: an optional ORDERING HINT on a thinking `stream_start` (and on the
+// replayed history entry for it). claude-tui learns the model's reasoning from the
+// session transcript, which Claude Code writes after the PreToolUse hook and after
+// the Stop hook, so a block can reach the wire after the tool row (or the answer)
+// it was thought BEFORE. The hint is the transcript's own order, so a client can
+// put the bubble back where it belongs instead of appending it:
+//   { kind: 'tool_use', toolUseId }  - above the tool row with that toolUseId
+//   { kind: 'response', messageId }  - above the response message with that id
+// A client that cannot find the target (or does not know the hint) appends, which
+// is what every client did before the field existed. `kind` is a plain bounded
+// string, not an enum, so a kind a newer server adds does not make an older client
+// reject the frame (the `kind` field on a replayed message does the same); the
+// ids are optional for the same reason, a reader that needs one checks for it.
+// Always optional and additive: absent on a block that arrived in order, on every
+// other provider, and from an older server.
+const ThinkingPrecedesSchema = z
+  .object({
+    kind: z.string().max(32),
+    toolUseId: z.string().max(256).optional(),
+    messageId: z.string().max(256).optional(),
+  })
+  .optional()
+
 export const ServerStreamStartSchema = z.object({
   type: z.literal('stream_start'),
   messageId: z.string(),
   serverTs: ServerTsSchema,
   thinking: ThinkingFlagSchema,
+  // #8518: where a THINKING stream belongs when it arrives after the tool row or
+  // the answer it precedes. See ThinkingPrecedesSchema.
+  thinkingPrecedes: ThinkingPrecedesSchema,
 })
 
 export const ServerStreamDeltaSchema = z.object({
@@ -223,6 +249,9 @@ export const ServerMessageSchema = z.object({
   thinkingDurationMs: ThinkingDurationMsSchema,
   // #6630: and the token count the live stream_end carried (` · N tokens`).
   thinkingTokens: ThinkingTokensSchema,
+  // #8518: and the ordering hint the live stream_start carried, so a reload puts
+  // the bubble where the live client did.
+  thinkingPrecedes: ThinkingPrecedesSchema,
   // #7454/#7458: present on REPLAYED frames only (both replay paths map the
   // server-internal `_seq` onto the wire; absent on live broadcasts). The
   // #5555.3 delta-replay cursor — and for user_question the #7420

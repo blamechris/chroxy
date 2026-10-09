@@ -196,4 +196,134 @@ describe('TranscriptTaskScanner — thinking capture (#7393)', () => {
     assert.deepEqual(snap.backgroundTasks, [])
     assert.equal(snap.authFailureCount, 0)
   })
+  // #8518 — Claude Code writes a late thinking block AFTER the tool_start (or the
+  // answer) it belongs before. The transcript's own order says what that was: the
+  // thinking entry and the entries that follow it share one API message id, and
+  // that message's stop_reason says whether it ended in a tool call or in the answer.
+  describe('ordering hint (#8518): what the thinking block precedes', () => {
+    const TS = (n) => `2026-10-08T12:00:0${n}.000Z`
+
+    it('a thinking entry whose message ended in a tool call precedes that message\'s tool_use', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(
+        thinkingEntry({ text: 'I should list the files.', ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use' }),
+        toolUseEntry({ ts: TS(6), messageId: 'msg_A', id: 'toolu_LS', apiBlockIndex: 1 }),
+      )
+      scanner.scan()
+      const [block] = scanner.drainThinking()
+      assert.deepEqual(block.precedes, { kind: 'tool_use', toolUseId: 'toolu_LS' })
+    })
+
+    it('with several tool calls in the message the thinking precedes the FIRST one', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(
+        thinkingEntry({ text: 'two reads', ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use' }),
+        toolUseEntry({ ts: TS(6), messageId: 'msg_A', id: 'toolu_ONE', apiBlockIndex: 1 }),
+        toolUseEntry({ ts: TS(6), messageId: 'msg_A', id: 'toolu_TWO', apiBlockIndex: 2 }),
+      )
+      scanner.scan()
+      assert.deepEqual(scanner.drainThinking()[0].precedes, { kind: 'tool_use', toolUseId: 'toolu_ONE' })
+    })
+
+    it('intermediate text between the thinking and the tool call does not change the answer (the text is not what the thinking precedes)', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(
+        thinkingEntry({ text: 't', ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use' }),
+        textEntry('Let me look.', { ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use', apiBlockIndex: 1 }),
+        toolUseEntry({ ts: TS(6), messageId: 'msg_A', id: 'toolu_LS', apiBlockIndex: 2 }),
+      )
+      scanner.scan()
+      assert.deepEqual(scanner.drainThinking()[0].precedes, { kind: 'tool_use', toolUseId: 'toolu_LS' })
+    })
+
+    it('each thinking block of a multi-step turn pairs with ITS OWN message\'s tool call', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(
+        thinkingEntry({ text: 'one', ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use' }),
+        toolUseEntry({ ts: TS(5), messageId: 'msg_A', id: 'toolu_A', apiBlockIndex: 1 }),
+        thinkingEntry({ text: 'two', ts: TS(7), messageId: 'msg_B', stopReason: 'tool_use' }),
+        toolUseEntry({ ts: TS(7), messageId: 'msg_B', id: 'toolu_B', apiBlockIndex: 1 }),
+      )
+      scanner.scan()
+      assert.deepEqual(
+        scanner.drainThinking().map((b) => b.precedes),
+        [{ kind: 'tool_use', toolUseId: 'toolu_A' }, { kind: 'tool_use', toolUseId: 'toolu_B' }],
+      )
+    })
+
+    it('a thinking entry whose message ended the turn precedes the response, with no follower needed', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(thinkingEntry({ text: 'just answer', ts: TS(5), messageId: 'msg_A', stopReason: 'end_turn' }))
+      scanner.scan()
+      assert.deepEqual(scanner.drainThinking()[0].precedes, { kind: 'response' })
+    })
+
+    it('the tool call can arrive in a LATER scan than the thinking, as long as the block has not been drained yet', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(thinkingEntry({ text: 't', ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use' }))
+      scanner.scan()
+      append(toolUseEntry({ ts: TS(6), messageId: 'msg_A', id: 'toolu_LS', apiBlockIndex: 1 }))
+      scanner.scan()
+      assert.deepEqual(scanner.drainThinking()[0].precedes, { kind: 'tool_use', toolUseId: 'toolu_LS' })
+    })
+
+    it('no hint when the follower has not been written by the time the block is drained (best effort, never a wait)', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(thinkingEntry({ text: 't', ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use' }))
+      scanner.scan()
+      const [block] = scanner.drainThinking()
+      assert.equal(block.precedes, undefined)
+      // and a tool call read afterwards does not reach back into a block already handed out
+      append(toolUseEntry({ ts: TS(6), messageId: 'msg_A', id: 'toolu_LS', apiBlockIndex: 1 }))
+      scanner.scan()
+      assert.equal(block.precedes, undefined)
+    })
+
+    it('no hint when the entry has no stop reason yet and only text follows (cannot tell intermediate text from the answer)', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(
+        thinkingEntry({ text: 't', ts: TS(5), messageId: 'msg_A', stopReason: null }),
+        textEntry('maybe the answer', { ts: TS(5), messageId: 'msg_A', stopReason: null, apiBlockIndex: 1 }),
+      )
+      scanner.scan()
+      assert.equal(scanner.drainThinking()[0].precedes, undefined)
+    })
+
+    it('a tool call from a DIFFERENT message does not claim the thinking', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(
+        thinkingEntry({ text: 't', ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use' }),
+        toolUseEntry({ ts: TS(6), messageId: 'msg_OTHER', id: 'toolu_X', apiBlockIndex: 0 }),
+      )
+      scanner.scan()
+      assert.equal(scanner.drainThinking()[0].precedes, undefined)
+    })
+
+    it('a redacted_thinking block gets the same hint', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      append(redactedThinkingEntry({ ts: TS(5) }))
+      scanner.scan()
+      assert.deepEqual(scanner.drainThinking()[0].precedes, { kind: 'response' })
+    })
+  })
 })

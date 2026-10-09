@@ -41,6 +41,37 @@ export function boundedNonNegInt(value, { max } = {}) {
   return floored
 }
 
+/** Ceiling on the id a `thinkingPrecedes` hint names; mirrors ThinkingPrecedesSchema (protocol). */
+export const THINKING_PRECEDES_ID_MAX = 256
+
+/**
+ * #8518 — validate the ordering hint on a thinking block: the tool call it comes
+ * before, or the response it comes before. The ONE bounder: the live
+ * `stream_start`, the history entry and the replay frame all carry what this
+ * returns, so they cannot disagree about what a hint is.
+ *
+ * Anything that is not exactly one of the two shapes (an unknown kind, a missing
+ * or non-string or over-long id) returns `undefined` and the field is simply not
+ * sent: the client then places the bubble where it always did, and an
+ * unrecognised hint can never be mistaken for a position.
+ *
+ * @param {*} value
+ * @returns {{kind: 'tool_use', toolUseId: string}|{kind: 'response', messageId: string}|undefined}
+ */
+export function boundedThinkingPrecedes(value) {
+  if (!value || typeof value !== 'object') return undefined
+  const id = (v) => (typeof v === 'string' && v.length > 0 && v.length <= THINKING_PRECEDES_ID_MAX ? v : undefined)
+  if (value.kind === 'tool_use') {
+    const toolUseId = id(value.toolUseId)
+    return toolUseId ? { kind: 'tool_use', toolUseId } : undefined
+  }
+  if (value.kind === 'response') {
+    const messageId = id(value.messageId)
+    return messageId ? { kind: 'response', messageId } : undefined
+  }
+  return undefined
+}
+
 /**
  * #6973 (agent-review on #6970) — coerce+bound `compactMetadata`'s
  * `preTokens`/`postTokens`/`durationMs` sub-fields before forwarding onto
