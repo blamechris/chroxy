@@ -405,7 +405,11 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     // The poll sleeps 150 ms; the 2000 ms hook-fs bound and the test's own 8 s
     // watchdogs are armed per pass but are bounds, not waits. Anything in between
     // is a wait that was added (the removed one was 500 ms).
-    const long = delays.filter((d) => typeof d === 'number' && d > 160 && d < 2000)
+    // The first-turn submit nudge (#5777) re-sends a bare \r if no hook output has
+    // arrived; it can be armed inside this window on a slow runner, and it holds
+    // nothing back, so it is excluded by its own constant rather than by value.
+    const nudge = ClaudeTuiSession.FIRST_TURN_SUBMIT_NUDGE_MS
+    const long = delays.filter((d) => typeof d === 'number' && d > 160 && d < 2000 && d !== nudge)
     assert.deepEqual(long, [], `a wait longer than the poll sleep was armed before tool_start: ${long}`)
     stop(sinkDir)
     await turn
