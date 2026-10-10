@@ -65,7 +65,7 @@ const SYNTHETIC_TYPES = new Set([
 // ---------------------------------------------------------------------------
 const INTENTIONALLY_UNHANDLED = new Set([
   'encrypted',          // unwrapped at connection layer before dispatch to handleMessage
-  'status',             // legacy/unused — server_status is the active equivalent
+  'status',             // sent on every connect (ws-history.js: { type: 'status', connected: true }) but no client case reads it — server_status is the active status frame
   // 'error' removed — both handlers now implement case 'error': (PR #2742)
   'session_destroyed',  // ack handled via session_list refresh, no dedicated case needed
   // rate_limited — now handled in both clients' switch (#6334): a system throttle notice.

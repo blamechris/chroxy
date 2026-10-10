@@ -3519,7 +3519,7 @@ describe('App', () => {
 //   (a) the create-confirm-window guard (#6285 effect): if the socket drops
 //       mid-create (connectionPhase leaves 'connected' while isCreatingSession),
 //       the stranded "Creating…" spinner is cleared and a retryable error is
-//       surfaced — otherwise no session_created/session_error reply ever clears
+//       surfaced — otherwise no session_switched/session_error reply ever clears
 //       it and the spinner wedges forever.
 //   (b) the not-sent else-branch in handleCreateSession: clicking Create while
 //       the socket is closed (createSession returns false) surfaces the

@@ -296,7 +296,8 @@ describe('#7085 outbound schema coverage', () => {
       const phantoms = phantomRosterTypes(rosterTypes(), serverSourceCode())
       assert.deepEqual(
         phantoms, [],
-        `documented in the ws-server.js roster but no server code builds a { type: '<t>' } frame: ${phantoms.join(', ')}. ` +
+        `documented in the ws-server.js roster but NO PRODUCER CANDIDATE found (no server code spells a { type: '<t>' } frame): ${phantoms.join(', ')}. ` +
+        '(Green means a candidate exists, not that the send is reachable.) ' +
         'Delete the roster line (and any allowlist entry), or — if it is consumed but built by a ' +
         'helper — add a checked entry to NO_SERVER_TYPE_LITERAL.',
       )
