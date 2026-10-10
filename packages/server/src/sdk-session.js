@@ -3307,10 +3307,16 @@ export class SdkSession extends BaseSession {
     // _emitInterruptedTurnResult (stream_end + result); the SDK was
     // previously missing the `result` half of the pair. cost:null skips
     // session-manager billing accumulation (mirrors CLI).
-    this.emit('result', { cost: null, duration: this._streamStallTimeoutMs, usage: null, sessionId })
+    const message = `Stream stalled — no response for ${friendly}. Try sending again.`
+    // #7072: `interrupted` + `failureMessage` are internal (event-normalizer
+    // whitelists the wire fields). An orchestration TurnDriver settles on the FIRST
+    // terminal event, this result, and drops the `error` below at its epoch guard;
+    // without the mark a stalled turn reads as a completed one and the caller never
+    // sees TURN_ERROR. The result itself stays: it is what clears activeTools.
+    this.emit('result', { cost: null, duration: this._streamStallTimeoutMs, usage: null, sessionId, interrupted: true, failureMessage: message })
     this.emit('error', {
       code: 'stream_stall',
-      message: `Stream stalled — no response for ${friendly}. Try sending again.`,
+      message,
     })
   }
 

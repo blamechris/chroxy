@@ -45,28 +45,34 @@
  *   following turn. No in-tree provider does that (every emit site listed above is
  *   a single synchronous frame); closing it by construction needs a provider-side
  *   turn id on the event payload.
- * - PARTLY closed (#7036) — be precise about which half.
- *   CliSession emits its synthetic interrupted `result` (cost:null, load-bearing
- *   for clearing the dashboard spinner) BEFORE `stopped`. Two harms follow: the
- *   turn settles as a SUCCESS on the `result`, and (since #7033) the trailing
- *   `stopped` lands on the NEXT queued turn and kills it.
+ * - Interrupted turns that LOOK finished (#7036, #7072). CliSession emits its
+ *   synthetic interrupted `result` (cost:null, load-bearing for clearing the
+ *   dashboard spinner) BEFORE `stopped`. Two harms follow: the turn settles as a
+ *   SUCCESS on the `result`, and (since #7033) the trailing `stopped` lands on the
+ *   NEXT queued turn and kills it.
  *
- *   The QUEUED-TURN KILL is now closed by construction: only claude-cli emits
- *   `result` then `stopped` for one interrupt, and claude-cli cannot enter
- *   TurnDriver by ANY route — the scheduler requires
- *   capabilities.inProcessPermissions (cli-session sets it false), the
- *   orchestration WORKER roles are gated on AUDIT/IMPLEMENT_ELIGIBLE_PROVIDERS,
- *   and the ARCHITECT role is now gated on ARCHITECT_ELIGIBLE_PROVIDERS.
+ *   The QUEUED-TURN KILL is closed by construction: only claude-cli emits `result`
+ *   then `stopped` for one interrupt, and claude-cli cannot enter TurnDriver by ANY
+ *   route — the scheduler requires capabilities.inProcessPermissions (cli-session
+ *   sets it false), the orchestration WORKER roles are gated on
+ *   AUDIT/IMPLEMENT_ELIGIBLE_PROVIDERS, and the ARCHITECT role on
+ *   ARCHITECT_ELIGIBLE_PROVIDERS.
  *
- *   The FALSE SUCCESS is NOT closed, and eligibility does not imply immunity:
- *   claude-byok can fall through to a normal `result` when an interrupt lands in
- *   the tool phase, and claude-sdk's stream-stall path emits `result` then
- *   `error` (this driver settles on the `result`; the epoch guard drops the
- *   `error`). Codex app-server depends on what the binary answers to
- *   `turn/interrupt`, which is unverified here. Closing that needs the
- *   provider-side `interrupted: true` flag so a terminal-looking result can be
- *   marked terminal-but-NOT-successful — a cross-provider wire change, not
- *   something a provider allowlist can express.
+ *   The FALSE SUCCESS is closed by a provider-side flag: a `result` payload carries
+ *   `interrupted: true` when the turn ended by abort/interrupt/stall rather than
+ *   completion, and this driver rejects it (TURN_STOPPED, or TURN_ERROR when the
+ *   payload also carries `failureMessage`). The flag is set by BaseSession.emit for
+ *   every result whose `turnOutcome` is `stopped` (the SDK's aborted_* results, an
+ *   ACP `cancelled`), by claude-byok when an interrupt lands in the tool phase, by
+ *   claude-sdk's stream-stall result and by claude-cli's synthetic interrupted
+ *   result. It is internal: event-normalizer whitelists the result fields it puts
+ *   on the wire, so clients never see it.
+ *
+ *   NOT covered: the Codex app-server. It ends an interrupted turn with
+ *   `turn/completed` and `_finishTurn` reports it as a normal result without
+ *   reading `turn.status` (see the comment there). Whether the real binary does
+ *   that is tracked separately; until it is pinned, an operator Stop on a codex
+ *   session can still settle as a success.
  * - Watchdog: on timeout, interrupt() the session and reject TURN_TIMEOUT.
  * - `session_destroyed` mid-turn → SESSION_GONE.
  */
@@ -280,6 +286,24 @@ export class TurnDriver {
         break
       }
       case 'result': {
+        // #7072 — a terminal-looking `result` the provider marked `interrupted:
+        // true` is terminal but NOT a success: the turn was cut short (a Stop that
+        // the provider answered with a normal result, a BYOK interrupt in the tool
+        // phase, a stalled stream). Settle it as a failure here, on the result,
+        // because the event that follows it in the same synchronous frame (`stopped`
+        // / `error`) is dropped by the epoch guard once this ctx is gone — which is
+        // exactly how a truncated plan or review came to be read as authoritative.
+        // A provider that also knows WHY it failed (a stall) names it in
+        // `failureMessage`, and the caller sees TURN_ERROR; otherwise it is the
+        // same TURN_STOPPED an interrupt that emits `stopped` instead produces.
+        if (data?.interrupted === true) {
+          const partialText = this._assembleText(ctx)
+          const failure = typeof data.failureMessage === 'string' && data.failureMessage ? data.failureMessage : null
+          this._finishTurn(ctx, () => ctx.reject(failure
+            ? new TurnError('TURN_ERROR', failure, { partialText })
+            : new TurnError('TURN_STOPPED', 'turn interrupted before completing', { partialText })))
+          break
+        }
         // Forward the FULL terminal usage payload, not just cost/duration/usage:
         // the ledger's recordTurnUsage keys off modelUsage/model/numTurns/
         // apiDurationMs for per-model attribution (#6692). Dropping them here

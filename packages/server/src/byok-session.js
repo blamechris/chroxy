@@ -1177,6 +1177,9 @@ export class ClaudeByokSession extends BaseSession {
     // #8461: set when the loop spends MAX_TOOL_ROUNDS; the forced summary round's
     // own `end_turn` overwrites lastStopReason, so the cap needs its own flag.
     let toolRoundCapReached = false
+    // #7072: an interrupt that landed in the tool phase ends the loop below WITHOUT a
+    // thrown abort, so the stream-phase catch (-> `error` ABORT) never sees it.
+    let stoppedInToolPhase = false
     // Snapshot the pre-turn history length so any stream-init failure (at
     // any round) can rollback the entire turn atomically. We derive it
     // from the current length minus the user message we just pushed at
@@ -1485,7 +1488,16 @@ export class ClaudeByokSession extends BaseSession {
         }
         this._history.push({ role: 'user', content: toolResults })
 
-        if (this._abortController?.signal?.aborted) break
+        if (this._abortController?.signal?.aborted) {
+          // #7072: the tool results above are committed to history (the #4061
+          // invariant) and the turn's spend is real, so this still ends in a
+          // `result` -- but one that says the turn was STOPPED, not a success. The
+          // stream-phase abort throws into the catch below and reports `error`
+          // ABORT; this path never throws, and byok never emits `stopped`, so the
+          // result is the only terminal event an orchestration TurnDriver hears.
+          stoppedInToolPhase = true
+          break
+        }
 
         if (round === MAX_TOOL_ROUNDS - 1) {
           // #4063: instead of bailing silently, run ONE more text-only
@@ -1623,7 +1635,9 @@ export class ClaudeByokSession extends BaseSession {
         stopReason: lastStopReason,
         // #7326: the provider-neutral form of the stop reason above, for the wire.
         // (A different key on purpose: `stopReason` is the raw Anthropic string.)
-        ...turnOutcomeField(outcomeFromByokTurn({ stopReason: lastStopReason, toolRoundCapReached })),
+        ...turnOutcomeField(outcomeFromByokTurn({ stopReason: lastStopReason, toolRoundCapReached, interrupted: stoppedInToolPhase })),
+        // #7072: terminal but not successful (internal; not on the wire).
+        ...(stoppedInToolPhase ? { interrupted: true } : {}),
         duration: Date.now() - turnStartedAt,
         usage: turnUsage,
         ...(finalRoundOccupancy ? { contextOccupancy: finalRoundOccupancy } : {}),

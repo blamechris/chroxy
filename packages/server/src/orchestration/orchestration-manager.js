@@ -76,34 +76,27 @@ const AUDIT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 //   `stopped` land on turn 2. None of the three below emit `stopped` after a
 //   `result`, so excluding claude-cli removes this failure by construction.
 //
-//   NOT CLOSED — false success on an interrupted turn. This is broader than
-//   claude-cli and membership here does NOT imply immunity:
-//     * claude-byok: an interrupt landing in the TOOL phase (not mid-stream)
-//       breaks the loop at the `signal.aborted` check and falls THROUGH to the
-//       normal `emit('result')` with real usage (byok-session.js ~1328 -> ~1459).
-//     * claude-sdk: a stream STALL emits a synthetic `result` then `error`;
-//       TurnDriver settles on the `result` and the trailing `error` is dropped by
-//       the epoch guard.
-//     * codex app-server: safe if the binary's answer to `turn/interrupt` routes
-//       to `_failTurn` (which emits `stopped`) rather than to `turn/completed`.
-//       Client exit and the result-timeout also reach `_failTurn`, so an `error`
-//       notification is sufficient but not necessary — which of these the real
-//       binary actually does is unverified in-repo (#7072).
-//   Closing that needs the provider-side `interrupted: true` flag the turn-driver
-//   doc-block names, so a terminal-looking result can be marked
-//   terminal-but-not-successful. Tracked separately; it is a cross-provider wire
-//   change, not something this gate can express.
+//   CLOSED (#7072) — false success on an interrupted turn, for claude-sdk and
+//   claude-byok. A `result` payload carries `interrupted: true` when the turn
+//   ended by abort/interrupt/stall rather than completion, and TurnDriver rejects
+//   it (TURN_STOPPED, or TURN_ERROR for a stall) instead of resolving it:
+//     * claude-byok: an interrupt landing in the TOOL phase (not mid-stream) ends
+//       the loop at the `signal.aborted` check and emits its `result` marked
+//       stopped + interrupted.
+//     * claude-sdk: the stream-STALL synthetic `result` is marked interrupted and
+//       names the failure; a Stop the SDK answers with an `aborted_*` result is
+//       marked by BaseSession.emit for every result whose turnOutcome is `stopped`.
 //
-// So this set means "vetted to not kill the NEXT turn", not "cannot report a
-// truncated turn as complete". Anything outside it is unvetted for either.
+//   NOT CLOSED — codex app-server. It ends an interrupted turn with
+//   `turn/completed`, which `_finishTurn` reports as a normal result without
+//   reading `turn.status` (the protocol's TurnStatus has an `interrupted` value).
+//   Whether the real binary answers `turn/interrupt` that way is unverified
+//   against a live process (#7072 follow-up), so an operator Stop on a codex
+//   architect session may still settle as a completed turn.
 //
-// Keeping claude-byok here is deliberate on that reading: it genuinely satisfies
-// the enforceable predicate (it never emits `stopped`), and dropping it while
-// retaining claude-sdk — which has its own false-success path via the stall —
-// would re-encode the very mistake this comment exists to correct, namely set
-// membership implying a safety property it does not deliver. That position holds
-// only while #7072 is open and honest; if #7072 is ever closed wontfix, revisit
-// byok's membership rather than leaving this comment to rot.
+// So this set means "vetted to not kill the NEXT turn", and — for claude-sdk and
+// claude-byok — "cannot report an interrupted turn as complete". Anything outside
+// it is unvetted for either.
 const ARCHITECT_ELIGIBLE_PROVIDERS = new Set(['claude-sdk', 'claude-byok', 'codex'])
 
 // v1: write/implement workers are codex-ONLY. codexSandbox:'workspace-write' is a

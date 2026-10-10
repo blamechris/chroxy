@@ -1527,6 +1527,14 @@ export class CodexAppServerSession extends BaseSession {
     }
   }
 
+  // #7072 -- UNVERIFIED against a live binary: a turn the operator stopped may
+  // arrive HERE. `interrupt()` sends `turn/interrupt`; if the binary answers it
+  // with `turn/completed` (the protocol's TurnStatus enum has an `interrupted`
+  // value, which this method never reads) rather than an `error` notification, the
+  // cut-off turn is reported below as a NORMAL result with no `interrupted` mark, and
+  // an orchestration TurnDriver settles it as a success. Do not infer the binary's
+  // behaviour from tests: #6606's C1 test only MODELS turn/completed-after-interrupt.
+  // Pin it with a live probe before changing this.
   _finishTurn(turn) {
     if (!this._activeTurn) return
     const t = this._activeTurn

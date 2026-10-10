@@ -2333,7 +2333,8 @@ export class CliSession extends BaseSession {
       this.emit('stream_end', { messageId })
     }
     this._clearMessageState({ terminatedReason })
-    this.emit('result', { cost: null, duration, usage: null, sessionId })
+    // #7072: terminal but not a completed turn (internal; not on the wire).
+    this.emit('result', { cost: null, duration, usage: null, sessionId, interrupted: true })
   }
 
   _handleChildClose(code) {

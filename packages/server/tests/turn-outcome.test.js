@@ -49,6 +49,12 @@ describe('provider signal -> turn outcome (#7326)', () => {
     assert.equal(outcomeFromAnthropicStopReason('tool_use'), undefined)
   })
 
+  it('BYOK: an interrupted turn is stopped, whatever the last round\'s stop reason was (#7072)', () => {
+    assert.equal(outcomeFromByokTurn({ stopReason: 'tool_use', interrupted: true }), 'stopped')
+    assert.equal(outcomeFromByokTurn({ stopReason: 'end_turn', toolRoundCapReached: true, interrupted: true }), 'stopped')
+    assert.equal(outcomeFromByokTurn({ stopReason: 'tool_use', interrupted: false }), undefined)
+  })
+
   it('BYOK: a turn that spent the tool-round cap is truncated, whatever its summary round said (#8461)', () => {
     // The forced no-tools summary ends with an ordinary end_turn that overwrites the loop's stop reason.
     assert.equal(outcomeFromByokTurn({ stopReason: 'end_turn', toolRoundCapReached: true }), 'truncated')

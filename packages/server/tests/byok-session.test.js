@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { APIUserAbortError } from '@anthropic-ai/sdk'
+import { EventEmitter } from 'node:events'
 import { ClaudeByokSession } from '../src/byok-session.js'
+import { TurnDriver } from '../src/orchestration/turn-driver.js'
 import { BUILTIN_TOOLS } from '../src/byok-tools.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 import { recordTrust } from '../src/byok-mcp-trust.js'
@@ -2856,6 +2858,82 @@ describe('ClaudeByokSession', () => {
       assert.equal(session._history[3].role, 'assistant')
       session._executeToolBlock = originalExecute
       await session.destroy()
+    })
+
+    // #7072 -- an interrupt that lands in the TOOL phase breaks the agent loop at the
+    // signal.aborted check and used to fall through to the normal success `result`
+    // (real usage, a tool_use stop reason, no `stopped` -- byok never emits one), so
+    // an orchestration TurnDriver settled the cut-off turn as a finished one. The
+    // result is the turn's only terminal event, so it has to say the turn was stopped.
+    describe('interrupt in the tool phase is not a success (#7072)', () => {
+      function toolPhaseSession() {
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session.setPermissionMode('auto')
+        session._executeToolBlock = async function ({ block }) {
+          // The user presses Stop while the tool is running.
+          session.interrupt()
+          return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+        }
+        session._client = {
+          messages: {
+            stream: () =>
+              fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                {
+                  stop_reason: 'tool_use',
+                  content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } }],
+                  usage: { input_tokens: 7, output_tokens: 3 },
+                },
+              ),
+          },
+        }
+        return session
+      }
+
+      it('ends with a result marked stopped + interrupted, keeping the usage it billed', async () => {
+        const session = toolPhaseSession()
+        const captured = captureEvents(session)
+        await session.start()
+        await session.sendMessage('go')
+        const results = captured.filter((e) => e.name === 'result')
+        assert.equal(results.length, 1, 'the loop still ends the turn exactly once')
+        const r = results[0].payload
+        assert.equal(r.interrupted, true, 'an aborted turn must not read as a completed one')
+        assert.equal(r.turnOutcome, 'stopped', 'clients read it as stopped, not as a failure')
+        assert.equal(r.usage.input_tokens, 7, 'the tokens the turn spent are still accounted')
+        assert.equal(captured.filter((e) => e.name === 'error').length, 0,
+          'a Stop the user asked for is not reported as an error')
+        await session.destroy()
+      })
+
+      it('a completed tool turn is NOT marked interrupted', async () => {
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session._client = { messages: { stream: () => fakeStream([{ type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi' } }]) } }
+        const captured = captureEvents(session)
+        await session.start()
+        await session.sendMessage('go')
+        const r = captured.find((e) => e.name === 'result').payload
+        assert.equal(r.interrupted, undefined)
+        assert.equal(r.turnOutcome, 'completed')
+        await session.destroy()
+      })
+
+      it('a TurnDriver driving the session rejects the cut-off turn instead of resolving it', async () => {
+        const session = toolPhaseSession()
+        const sm = new EventEmitter()
+        sm.getSession = () => ({ session })
+        for (const ev of ['stream_delta', 'result', 'error', 'stopped']) {
+          session.on(ev, (data) => sm.emit('session_event', { sessionId: 's1', event: ev, data }))
+        }
+        await session.start()
+        const driver = new TurnDriver({ sessionManager: sm })
+        try {
+          await assert.rejects(driver.driveTurn('s1', 'go', { timeoutMs: 5000 }), (err) => err.code === 'TURN_STOPPED')
+        } finally {
+          driver.dispose()
+          await session.destroy()
+        }
+      })
     })
 
     it('fills synthetic tool_result blocks for unexecuted tool_use on mid-loop abort (#4061, #4062)', async () => {

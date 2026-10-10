@@ -465,3 +465,68 @@ describe('TurnDriver — post-timeout drain (no cross-turn misattribution)', () 
     assert.equal(r2.result.cost, 2, 'turn-2 did not absorb turn-1 stale result')
   })
 })
+
+describe('TurnDriver — an `interrupted` result is terminal but NOT a success (#7072)', () => {
+  // A provider can end an interrupted turn with a terminal-looking `result`: the
+  // SDK answers a Stop with a result whose terminal_reason is aborted_*, BYOK
+  // falls through to its normal result when the interrupt lands in the tool
+  // phase, and the SDK stream-stall path emits a synthetic result THEN an error.
+  // The `result` settles the turn first, so what follows (`stopped` / `error`) hits
+  // the epoch guard — the provider's `interrupted: true` flag is the only signal
+  // that the turn did not complete.
+  it('rejects TURN_STOPPED with the partial text instead of resolving', async () => {
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p = driver.driveTurn('s1', 'go', { timeoutMs: 60_000 })
+    p.catch(() => {})
+    sm.ev('s1', 'stream_delta', { messageId: 'm1', delta: 'half a plan' })
+    sm.ev('s1', 'result', { cost: 0.5, duration: 4, usage: { input_tokens: 1 }, interrupted: true })
+    sm.ev('s1', 'stopped', {}) // the trailing half of the same frame is dropped, not re-settled
+    const outcome = await settleOrPending(p)
+    assert.equal(outcome.kind, 'rejected', 'an interrupted result must never resolve as a completed turn')
+    assert.ok(outcome.err instanceof TurnError)
+    assert.equal(outcome.err.code, 'TURN_STOPPED')
+    assert.equal(outcome.err.partialText, 'half a plan')
+  })
+
+  it('rejects TURN_ERROR with the failure message when the provider names one (a stall)', async () => {
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p = driver.driveTurn('s1', 'go', { timeoutMs: 60_000 })
+    p.catch(() => {})
+    sm.ev('s1', 'stream_delta', { messageId: 'm1', delta: 'partial' })
+    sm.ev('s1', 'result', { cost: null, duration: 300000, usage: null, interrupted: true, failureMessage: 'Stream stalled — no response for 5 minutes.' })
+    sm.ev('s1', 'error', { code: 'stream_stall', message: 'Stream stalled — no response for 5 minutes.' })
+    const outcome = await settleOrPending(p)
+    assert.equal(outcome.kind, 'rejected')
+    assert.equal(outcome.err.code, 'TURN_ERROR')
+    assert.match(outcome.err.message, /stalled/)
+    assert.equal(outcome.err.partialText, 'partial')
+  })
+
+  it('releases the mutex so the queued turn starts, and a later normal result still resolves', async () => {
+    const { sm, addSession } = mkStub()
+    const s = addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p1 = driver.driveTurn('s1', 'first', { timeoutMs: 60_000 })
+    p1.catch(() => {})
+    const p2 = driver.driveTurn('s1', 'second', { timeoutMs: 60_000 })
+    sm.ev('s1', 'result', { cost: 1, duration: 1, usage: {}, interrupted: true })
+    assert.equal((await settleOrPending(p1)).kind, 'rejected')
+    await flush()
+    assert.equal(s.sent.length, 2, 'the interrupted turn released the per-session mutex')
+    sm.ev('s1', 'result', { cost: 3, duration: 3, usage: {} })
+    assert.equal((await settleOrPending(p2)).kind, 'resolved', 'a result without the flag is still a success')
+  })
+
+  it('only a literal `interrupted: true` marks a result (a falsy/absent flag stays a success)', async () => {
+    const { sm, addSession } = mkStub()
+    addSession('s1')
+    driver = new TurnDriver({ sessionManager: sm })
+    const p = driver.driveTurn('s1', 'go', { timeoutMs: 60_000 })
+    sm.ev('s1', 'result', { cost: 1, duration: 1, usage: {}, interrupted: false })
+    assert.equal((await settleOrPending(p)).kind, 'resolved')
+  })
+})
