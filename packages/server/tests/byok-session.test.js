@@ -2866,12 +2866,16 @@ describe('ClaudeByokSession', () => {
     // an orchestration TurnDriver settled the cut-off turn as a finished one. The
     // result is the turn's only terminal event, so it has to say the turn was stopped.
     describe('interrupt in the tool phase is not a success (#7072)', () => {
-      function toolPhaseSession() {
+      // `stop` is how the Stop arrives: 'requested' goes through interrupt() (the
+      // user, the scheduler, the orchestration watchdog); 'unrequested' trips the
+      // abort controller directly, as nothing that asked for a Stop would.
+      function toolPhaseSession({ stop = 'requested' } = {}) {
         const session = new ClaudeByokSession({ cwd: '/tmp' })
         session.setPermissionMode('auto')
         session._executeToolBlock = async function ({ block }) {
-          // The user presses Stop while the tool is running.
-          session.interrupt()
+          // The Stop lands while the tool is running.
+          if (stop === 'requested') session.interrupt()
+          else session._abortController.abort()
           return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
         }
         session._client = {
@@ -2890,9 +2894,11 @@ describe('ClaudeByokSession', () => {
         return session
       }
 
-      it('ends with a result marked stopped + interrupted, keeping the usage it billed', async () => {
-        const session = toolPhaseSession()
+      it('an abort nobody asked for ends with a result marked stopped + interrupted, keeping the usage it billed', async () => {
+        const session = toolPhaseSession({ stop: 'unrequested' })
         const captured = captureEvents(session)
+        const stopped = []
+        session.on('stopped', (e) => stopped.push(e))
         await session.start()
         await session.sendMessage('go')
         const results = captured.filter((e) => e.name === 'result')
@@ -2901,20 +2907,117 @@ describe('ClaudeByokSession', () => {
         assert.equal(r.interrupted, true, 'an aborted turn must not read as a completed one')
         assert.equal(r.turnOutcome, 'stopped', 'clients read it as stopped, not as a failure')
         assert.equal(r.usage.input_tokens, 7, 'the tokens the turn spent are still accounted')
-        assert.equal(captured.filter((e) => e.name === 'error').length, 0,
-          'a Stop the user asked for is not reported as an error')
+        assert.equal(captured.filter((e) => e.name === 'error').length, 0, 'not reported as an error')
+        assert.equal(stopped.length, 0, 'no Stop was requested, so no stopped confirmation either')
         await session.destroy()
       })
 
-      it('a completed tool turn is NOT marked interrupted', async () => {
-        const session = new ClaudeByokSession({ cwd: '/tmp' })
-        session._client = { messages: { stream: () => fakeStream([{ type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi' } }]) } }
+      // #8461 parity: a Stop somebody requested is acknowledged by ONE quiet
+      // `stopped` instead of a chip, exactly as on claude-sdk and claude-cli. The
+      // interrupted mark is applied before the chip is dropped, so the driver still
+      // hears that the turn did not complete.
+      it('a requested Stop leaves no chip, is acknowledged once, and keeps the interrupted mark', async () => {
+        const session = toolPhaseSession({ stop: 'requested' })
         const captured = captureEvents(session)
+        const stopped = []
+        session.on('stopped', (e) => stopped.push(e))
         await session.start()
         await session.sendMessage('go')
+        const results = captured.filter((e) => e.name === 'result')
+        assert.equal(results.length, 1)
+        const r = results[0].payload
+        assert.equal('turnOutcome' in r, false, 'no chip for a requested Stop')
+        assert.equal(r.interrupted, true, 'still terminal-but-not-successful for a TurnDriver')
+        assert.equal(r.usage.input_tokens, 7, 'usage still accounted')
+        assert.equal(stopped.length, 1, 'the quiet stopped confirmation replaces the chip, exactly once')
+        assert.equal(captured.filter((e) => e.name === 'error').length, 0)
+        await session.destroy()
+      })
+
+      it('the Stop request does not leak into the next turn: its own abort still shows the chip', async () => {
+        const session = toolPhaseSession({ stop: 'requested' })
+        await session.start()
+        await session.sendMessage('go')
+        assert.equal(session._stopRequestedThisTurn, false, 'cleared when the turn ends')
+        const captured = captureEvents(session)
+        session._executeToolBlock = async function ({ block }) {
+          this._abortController.abort()
+          return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+        }
+        await session.sendMessage('again')
         const r = captured.find((e) => e.name === 'result').payload
-        assert.equal(r.interrupted, undefined)
-        assert.equal(r.turnOutcome, 'completed')
+        assert.equal(r.turnOutcome, 'stopped')
+        await session.destroy()
+      })
+
+      it('a Stop mid-stream is unchanged: error ABORT, no result, no stopped (#8553 owns that path)', async () => {
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session._client = {
+          messages: {
+            stream: () => ({
+              async *[Symbol.asyncIterator]() {
+                await new Promise((r) => setTimeout(r, 20))
+                throw new APIUserAbortError({ message: 'Request was aborted.' })
+              },
+              async finalMessage() { throw new APIUserAbortError({ message: 'Request was aborted.' }) },
+            }),
+          },
+        }
+        const captured = captureEvents(session)
+        const stopped = []
+        session.on('stopped', (e) => stopped.push(e))
+        await session.start()
+        const turn = session.sendMessage('go')
+        setTimeout(() => session.interrupt(), 5)
+        await turn
+        assert.equal(captured.filter((e) => e.name === 'result').length, 0)
+        assert.equal(captured.find((e) => e.name === 'error').payload.code, 'ABORT')
+        assert.equal(stopped.length, 0)
+        assert.equal(session._stopRequestedThisTurn, false)
+        await session.destroy()
+      })
+
+      it('a tool turn that runs to completion is NOT marked interrupted', async () => {
+        // A REAL tool turn: round 1 ends in tool_use, the tool executes, round 2 ends
+        // end_turn. It reaches the tool-phase signal.aborted check and must not trip it.
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session.setPermissionMode('auto')
+        let executed = 0
+        session._executeToolBlock = async function ({ block }) {
+          executed += 1
+          return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+        }
+        let round = 0
+        session._client = {
+          messages: {
+            stream: () => {
+              round += 1
+              if (round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } }],
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  },
+                )
+              }
+              return fakeStream([{ type: 'content_block_delta', delta: { type: 'text_delta', text: 'done' } }])
+            },
+          },
+        }
+        const captured = captureEvents(session)
+        const stopped = []
+        session.on('stopped', (e) => stopped.push(e))
+        await session.start()
+        await session.sendMessage('go')
+        assert.equal(executed, 1, 'the tool really ran')
+        assert.equal(round, 2, 'and the loop went on to the closing round')
+        const results = captured.filter((e) => e.name === 'result')
+        assert.equal(results.length, 1)
+        assert.equal(results[0].payload.interrupted, undefined)
+        assert.equal(results[0].payload.turnOutcome, 'completed')
+        assert.equal(stopped.length, 0)
         await session.destroy()
       })
 

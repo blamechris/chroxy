@@ -2795,10 +2795,24 @@ export class ClaudeByokSession extends BaseSession {
     // fired and the fold-in step above was skipped.
     this._subagentUsageThisTurn = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     this._subagentCostThisTurn = 0
+    // #7072/#8461: this teardown skips BaseSession._clearMessageState, so the
+    // turn-scoped Stop request (see interrupt()) is cleared here, or it would tag
+    // the NEXT turn's own abort as a requested Stop.
+    this._stopRequestedThisTurn = false
+    this._clearIntentionalStop()
   }
 
   interrupt() {
     if (!this._isBusy) return
+    // #7072/#8461: a Stop somebody requested (the user, the scheduler, the
+    // orchestration watchdog) is acknowledged by one quiet `stopped` instead of a
+    // "Stopped" chip, exactly as on claude-sdk and claude-cli. This matters on the
+    // tool-phase abort, which ends in a `result` (see sendMessage); BaseSession.emit
+    // drops the chip and sends the confirmation, after marking the result
+    // `interrupted`. The stream-phase abort ends in `error` ABORT and emits no
+    // `result`, so this changes nothing there.
+    this.markIntentionalStop()
+    this._noteTurnStopRequested()
     if (this._abortController) {
       this._abortController.abort()
     }
