@@ -2393,7 +2393,17 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
           heldAnswered !== undefined &&
           heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER &&
           !isQuestionNoAnswerToken(heldAnswered)
-        next[idx] = reviveHeldPrompt(held, chatMessage, { keepAnswered })
+        const revived = reviveHeldPrompt(held, chatMessage, { keepAnswered })
+        // #7509 N1 — `answeredAnswers` is keyed by question TEXT. The held-base
+        // merge carries it across with the kept answer, but a re-send that rewords
+        // (or reshapes) the questions leaves a map no question matches, and the
+        // multi-question chip then renders blank labels. The flat `answered`
+        // summary stays truthful, so drop only the map -- which is what the old
+        // replace-with-the-fresh-message did.
+        if (keepAnswered && revived.answeredAnswers && !sameQuestions(held.questions, chatMessage.questions)) {
+          delete revived.answeredAnswers
+        }
+        next[idx] = revived
       }
       return { messages: next } as Partial<S>
     })

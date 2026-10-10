@@ -1333,6 +1333,54 @@ describe('shared dispatch table', () => {
         })
       })
 
+      // #7509 N1 -- `answeredAnswers` is keyed by question TEXT. Keeping a real answer
+      // across a re-send that REWORDS the questions would leave a map no question
+      // matches, and the multi-question chip renders blank labels; the flat
+      // `answered` summary is what stays truthful, so only the map is dropped.
+      it('drops answeredAnswers when the re-sent frame rewords the questions, keeps the flat answer (#7509 N1)', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: {
+            s1: {
+              sessionId: 's1',
+              messages: [held({ answered: 'A', answeredAt: 42, answeredAnswers: { 'Which approach?': 'A' } })],
+            },
+          },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach NOW?' }],
+        })
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0].answered).toBe('A')
+        expect(env.sessions.s1.messages[0].answeredAnswers).toBeUndefined()
+      })
+
+      it('keeps answeredAnswers when the re-sent frame asks the same questions (#7509 N1)', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: {
+            s1: {
+              sessionId: 's1',
+              messages: [held({ answered: 'A', answeredAt: 42, answeredAnswers: { 'Which approach?': 'A' } })],
+            },
+          },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(env.sessions.s1.messages[0]).toMatchObject({
+          answered: 'A',
+          answeredAt: 42,
+          answeredAnswers: { 'Which approach?': 'A' },
+        })
+      })
+
       // #7509 F6 -- a supersede is a correction of a question the person was already
       // told about, so it raises no second notification; an append raises one.
       it('raises no question notification when the dispatch superseded a held prompt (#7509 F6)', () => {

@@ -587,6 +587,29 @@ describe('replayHistory — a provider whose follow-up read fails (#7509 F7)', (
       assert.ok(logged[0].message.includes('custom provider blew up'))
     })
 
+    // The non-array branch: a custom provider that answers, but not with a list.
+    // `for...of undefined` would throw inside the setImmediate continuation, so
+    // the helper reports it instead.
+    it(`logs a getPendingQuestions() that returns a non-array (undefined) and still finishes -- ${path}`, async () => {
+      const history = parks
+        ? Array.from({ length: 25 }, (_, i) => ({ type: 'response', content: `m${i}`, _seq: i + 1 }))
+        : [{ type: 'response', content: 'hi', _seq: 1 }]
+      const manager = managerWithPending(history, [])
+      manager.getSession('sess-1').session.getPendingQuestions = () => undefined
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      const { uncaught, entries } = await replayCapturing(ctx, ws, parks)
+
+      assert.deepEqual(uncaught.map((e) => e.message), [])
+      assert.ok(ctx._sends.some((m) => m.type === 'history_replay_end'), 'the replay still finished')
+      assert.equal(ctx._sends.filter((m) => m.type === 'user_question').length, 0, 'nothing is re-sent')
+      const logged = errorsMentioning(entries, 'getPendingQuestions')
+      assert.equal(logged.length, 1, `must be logged with session id + method; got ${JSON.stringify(entries.map((e) => e.message))}`)
+      assert.ok(logged[0].message.includes('expected an array'))
+    })
+
     it(`logs a provider that LACKS getActiveAgents() and still runs the later follow-ups -- ${path}`, async () => {
       const history = parks
         ? Array.from({ length: 25 }, (_, i) => ({ type: 'response', content: `m${i}`, _seq: i + 1 }))
