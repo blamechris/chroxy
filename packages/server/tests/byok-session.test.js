@@ -3131,6 +3131,289 @@ describe('ClaudeByokSession', () => {
         }
       })
 
+      // #8559 -- what a Stop leaves in `_history`. A requested Stop that lands while
+      // the model is STREAMING keeps the prompt and every completed tool round, like
+      // the tool-phase Stop (#4061). The half-streamed answer is KEPT as a truncated
+      // assistant message (its text only): that is what makes the next request
+      // alternate user/assistant strictly, which the compatible endpoints a byok
+      // session can point at may insist on. An in-flight tool_use is never kept (an
+      // unanswered tool_use is a 400), and a Stop before any text keeps a one-line
+      // placeholder in the assistant slot rather than an empty text block (a 400).
+      // `seen` is the messages array of every request, snapshotted when it was sent
+      // (the session mutates the live array afterwards).
+      function stopHistorySession({ events, priorRound = false, stop = 'requested' } = {}) {
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session.setPermissionMode('auto')
+        session._executeToolBlock = async function ({ block }) {
+          return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+        }
+        const seen = []
+        let call = 0
+        const stopCall = priorRound ? 2 : 1
+        const abortError = () => new APIUserAbortError({ message: 'Request was aborted.' })
+        session._client = {
+          messages: {
+            stream: (params) => {
+              call += 1
+              seen.push(JSON.parse(JSON.stringify(params.messages)))
+              if (priorRound && call === 1) {
+                return fakeStream(
+                  [textDelta('first round text'), { type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{ type: 'text', text: 'first round text' }, { type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } }],
+                    usage: { input_tokens: 7, output_tokens: 3 },
+                  },
+                )
+              }
+              if (call === stopCall) {
+                return {
+                  async *[Symbol.asyncIterator]() {
+                    for (const e of events) yield e
+                    if (stop === 'requested') session.interrupt()
+                    else if (stop === 'unrequested') session._abortController.abort()
+                    throw stop === 'provider' ? new Error('upstream exploded') : abortError()
+                  },
+                  async finalMessage() { throw abortError() },
+                }
+              }
+              return fakeStream([{ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } }])
+            },
+          },
+        }
+        return { session, seen }
+      }
+      const textDelta = (text) => ({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } })
+
+      // The invariants the API holds a request to: strict alternation starting with a
+      // user turn, no empty text block, and no tool_use without its tool_result.
+      function assertValidRequest(messages) {
+        assert.equal(messages[0].role, 'user', 'a request opens with a user turn')
+        messages.forEach((m, i) => {
+          if (i > 0) assert.notEqual(m.role, messages[i - 1].role, `turn ${i} alternates`)
+          if (!Array.isArray(m.content)) return
+          for (const b of m.content) {
+            if (b.type === 'text') assert.ok(b.text.trim().length > 0, `turn ${i} has no blank text block`)
+          }
+          const uses = m.content.filter((b) => b.type === 'tool_use').map((b) => b.id)
+          if (uses.length === 0) return
+          const answers = (messages[i + 1]?.content || []).filter((b) => b.type === 'tool_result').map((b) => b.tool_use_id)
+          assert.deepEqual(answers, uses, `turn ${i}'s tool_use blocks are answered next`)
+        })
+      }
+
+      it('a requested Stop mid-stream keeps the prompt and the truncated answer in history (#8559)', async () => {
+        const { session, seen } = stopHistorySession({ events: [textDelta('half a '), textDelta('rep')] })
+        captureEvents(session)
+        await session.start()
+        await session.sendMessage('first question')
+        assert.deepEqual(session._history, [
+          { role: 'user', content: 'first question' },
+          { role: 'assistant', content: [{ type: 'text', text: 'half a rep' }] },
+        ])
+        await session.sendMessage('What did I just ask you?')
+        const next = seen[seen.length - 1]
+        assert.deepEqual(next.map((m) => m.role), ['user', 'assistant', 'user'])
+        assert.equal(next[0].content, 'first question', 'the stopped prompt is in the request that follows')
+        assertValidRequest(next)
+        await session.destroy()
+      })
+
+      it('a requested Stop mid-stream keeps every completed tool round (#8559)', async () => {
+        const { session, seen } = stopHistorySession({ events: [textDelta('half')], priorRound: true })
+        captureEvents(session)
+        await session.start()
+        await session.sendMessage('read /a then explain')
+        assert.deepEqual(session._history.map((m) => m.role), ['user', 'assistant', 'user', 'assistant'])
+        assert.equal(session._history[0].content, 'read /a then explain')
+        assert.equal(session._history[1].content[1].type, 'tool_use', 'the completed round is kept')
+        assert.equal(session._history[2].content[0].type, 'tool_result')
+        assert.deepEqual(session._history[3].content, [{ type: 'text', text: 'half' }])
+        await session.sendMessage('go on')
+        assertValidRequest(seen[seen.length - 1])
+        assert.equal(seen[seen.length - 1].length, 5)
+        await session.destroy()
+      })
+
+      it('a Stop before any text keeps a placeholder answer, never an empty text block (#8559)', async () => {
+        const { session, seen } = stopHistorySession({ events: [] })
+        captureEvents(session)
+        await session.start()
+        await session.sendMessage('first question')
+        assert.deepEqual(session._history.map((m) => m.role), ['user', 'assistant'])
+        const [block] = session._history[1].content
+        assert.equal(block.type, 'text')
+        assert.ok(block.text.trim().length > 0, 'a blank text block is a 400')
+        await session.sendMessage('again')
+        assertValidRequest(seen[seen.length - 1])
+        await session.destroy()
+      })
+
+      it('a Stop mid-stream never keeps a half-streamed tool_use (#8559)', async () => {
+        const { session, seen } = stopHistorySession({
+          events: [
+            textDelta('let me look'),
+            { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'tu_half', name: 'Read' } },
+            { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"file_pa' } },
+          ],
+        })
+        captureEvents(session)
+        await session.start()
+        await session.sendMessage('q')
+        assert.deepEqual(session._history[1].content, [{ type: 'text', text: 'let me look' }])
+        await session.sendMessage('next')
+        assertValidRequest(seen[seen.length - 1])
+        await session.destroy()
+      })
+
+      it('only the in-flight round\'s text is kept, not an earlier round\'s (#8559)', async () => {
+        // Round 1 streams 'first round text' and completes (committed with its tool_use);
+        // round 2 streams 'second' and is stopped. Without the per-round resets the
+        // kept answer would be 'first round textsecond'.
+        const { session } = stopHistorySession({ events: [textDelta('second')], priorRound: true })
+        captureEvents(session)
+        await session.start()
+        await session.sendMessage('go')
+        assert.deepEqual(session._history[3].content, [{ type: 'text', text: 'second' }])
+        await session.destroy()
+      })
+
+      // A requested Stop that THROWS between the round's assistant push and its
+      // tool_result push (an emit listener, the tool executor) leaves a tool_use
+      // with no answer; every later request would be refused. The prompt and the
+      // earlier rounds stay, and the tool_use is answered with an is_error result.
+      for (const [label, where] of [['the tool executor', 'exec'], ['a tool_input_delta listener', 'listener']]) {
+        it(`a requested Stop that throws out of ${label} after the tool_use was committed leaves a valid history (#8559)`, async () => {
+          const session = new ClaudeByokSession({ cwd: '/tmp' })
+          session.setPermissionMode('auto')
+          const abortError = () => new APIUserAbortError({ message: 'Request was aborted.' })
+          if (where === 'exec') {
+            session._executeToolBlock = async function () { this.interrupt(); throw abortError() }
+          } else {
+            session._executeToolBlock = async function ({ block }) {
+              return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+            }
+            // Fires from _recordToolInput, after the assistant turn is committed.
+            session.on('tool_input_delta', () => { session.interrupt(); throw abortError() })
+          }
+          const seen = []
+          let call = 0
+          session._client = {
+            messages: {
+              stream: (params) => {
+                call += 1
+                seen.push(JSON.parse(JSON.stringify(params.messages)))
+                if (call === 1) {
+                  return fakeStream(
+                    [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                    { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } }], usage: { input_tokens: 1, output_tokens: 1 } },
+                  )
+                }
+                return fakeStream([textDelta('ok')])
+              },
+            },
+          }
+          const captured = captureEvents(session)
+          await session.start()
+          await session.sendMessage('go')
+          assert.equal(captured.filter((e) => e.name === 'error').length, 0, 'still a quiet stop')
+          assert.equal(captured.filter((e) => e.name === 'result').length, 1)
+          assert.deepEqual(session._history.map((m) => m.role), ['user', 'assistant', 'user'])
+          assert.equal(session._history[0].content, 'go', 'the prompt is kept')
+          assert.equal(session._history[2].content[0].tool_use_id, 'tu_1')
+          assert.equal(session._history[2].content[0].is_error, true)
+          assertValidRequest(JSON.parse(JSON.stringify(session._history)))
+          await session.sendMessage('next')
+          const next = seen[seen.length - 1]
+          assert.deepEqual(next.map((m) => m.role), ['user', 'assistant', 'user', 'user'], 'tool_results then the new prompt, the same shape the tool-phase Stop leaves')
+          await session.destroy()
+        })
+      }
+
+      it('an abort nobody asked for mid-stream still rolls the whole turn back (#8559)', async () => {
+        const { session } = stopHistorySession({ events: [textDelta('half')], priorRound: true, stop: 'unrequested' })
+        captureEvents(session)
+        await session.start()
+        session._history.push({ role: 'user', content: 'earlier' }, { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] })
+        await session.sendMessage('go')
+        assert.deepEqual(session._history, [
+          { role: 'user', content: 'earlier' },
+          { role: 'assistant', content: [{ type: 'text', text: 'earlier answer' }] },
+        ], 'prompt and the completed tool round are gone: nothing says the user wanted them kept')
+        await session.destroy()
+      })
+
+      it('a provider error mid-stream still rolls the whole turn back (#8559)', async () => {
+        const { session } = stopHistorySession({ events: [textDelta('half')], priorRound: true, stop: 'provider' })
+        captureEvents(session)
+        await session.start()
+        await session.sendMessage('go')
+        assert.deepEqual(session._history, [])
+        await session.destroy()
+      })
+
+      it('a cascaded Stop mid-stream still rolls the turn back (#8559)', async () => {
+        const child = new ClaudeByokSession({ cwd: '/tmp' })
+        captureEvents(child)
+        child._client = {
+          messages: {
+            stream: () => ({
+              async *[Symbol.asyncIterator]() {
+                yield textDelta('half')
+                await new Promise((r) => setTimeout(r, 20))
+                throw new APIUserAbortError({ message: 'Request was aborted.' })
+              },
+              async finalMessage() { throw new APIUserAbortError({ message: 'Request was aborted.' }) },
+            }),
+          },
+        }
+        await child.start()
+        const turn = child.sendMessage('go')
+        setTimeout(() => child.interrupt({ cascaded: true }), 5)
+        await turn
+        assert.deepEqual(child._history, [])
+        await child.destroy()
+      })
+
+      it('a Stop during the tool-budget summary round drops the summary instruction and keeps the rest (#8559)', async () => {
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session.setPermissionMode('auto')
+        session._executeToolBlock = async function ({ block }) {
+          return { type: 'tool_result', tool_use_id: block.id, content: 'r', is_error: false }
+        }
+        let n = 0
+        session._client = {
+          messages: {
+            stream: ({ tools }) => {
+              n += 1
+              if (!tools || tools.length === 0) {
+                return {
+                  async *[Symbol.asyncIterator]() {
+                    yield textDelta('in sum')
+                    session.interrupt()
+                    throw new APIUserAbortError({ message: 'Request was aborted.' })
+                  },
+                  async finalMessage() { throw new APIUserAbortError({ message: 'Request was aborted.' }) },
+                }
+              }
+              return fakeStream(
+                [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+                { stop_reason: 'tool_use', content: [{ type: 'tool_use', id: `tu_${n}`, name: 'Read', input: {} }], usage: { input_tokens: 1, output_tokens: 1 } },
+              )
+            },
+          },
+        }
+        captureEvents(session)
+        await session.start()
+        await session.sendMessage('go')
+        const h = session._history
+        assertValidRequest(h)
+        assert.deepEqual(h[h.length - 1].content, [{ type: 'text', text: 'in sum' }])
+        const lastUser = h[h.length - 2]
+        assert.ok(lastUser.content.every((b) => b.type === 'tool_result'), 'no leftover summary instruction')
+        await session.destroy()
+      })
+
       it('a tool turn that runs to completion is NOT marked interrupted', async () => {
         // A REAL tool turn: round 1 ends in tool_use, the tool executes, round 2 ends
         // end_turn. It reaches the tool-phase signal.aborted check and must not trip it.
