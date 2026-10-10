@@ -484,7 +484,9 @@ export interface BaseSessionState {
    * Cleared when a fresh `claude_ready` arrives for the same session
    * (server restarted the child after the next user input) — the call
    * sites in app/dashboard message-handler clear it alongside the
-   * `claudeReady: true` patch returned from `handleClaudeReady`.
+   * `claudeReady: true` patch returned from `handleClaudeReady` — and
+   * (#8558) when the next turn begins (`agent_busy`), for providers that keep
+   * their process across a Stop and so send no `claude_ready` for it.
    */
   stoppedAt: number | null;
   /**

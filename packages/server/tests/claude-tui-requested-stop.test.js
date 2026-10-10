@@ -215,6 +215,57 @@ describe('claude-tui: a requested Stop is a quiet stopped, not an error (#8558)'
       for (const r of only('result')) assert.notEqual(r.interrupted, true)
     })
 
+    // `_writePtyTextThrottled` calls `onAbort` for an abort, a PTY exit AND a
+    // prompt that sanitises to nothing. These two use the REAL writer (no stub),
+    // because the bug was in how sendMessage read its three reasons for calling
+    // back, and a stub that only ever calls back for a Stop cannot show it.
+    describe('through the real prompt writer', () => {
+      function realWriterSession(onFirstWrite) {
+        turnSession(() => {})
+        delete session._writePtyTextThrottled // back to the prototype's real one
+        let writes = 0
+        session._term = {
+          write: () => { writes += 1; if (writes === 1) onFirstWrite?.(session) },
+          kill: () => {},
+          pid: 4242,
+        }
+        return session
+      }
+
+      it('the PTY dies in the middle of the prompt write: an error, never a quiet stop', async () => {
+        realWriterSession((s) => {
+          s._ptyExited = true
+          s._ptyExitInfo = { exitCode: 143, signal: 'SIGTERM' }
+        })
+        // Bracketed-paste-disable (the first write) is the first byte out; the PTY
+        // is gone by the time the loop writes its first character.
+        const result = await run('a prompt long enough to be mid-write')
+        assert.equal(result.reason, 'pty_exited')
+        assert.deepEqual(only('error').map((e) => e.message), ['Claude exited mid-turn \u2014 restarting.'])
+        assert.deepEqual(only('stopped'), [], 'a dead PTY is not a Stop')
+        assert.notEqual(only('result')[0].interrupted, true)
+        assert.equal(only('result')[0].turnOutcome, undefined)
+      })
+
+      it('a prompt that is only control characters: an error that says why, never a quiet stop', async () => {
+        realWriterSession()
+        const result = await run('\x1b[31m\x07\x1b[0m')
+        assert.equal(result.reason, 'prompt_empty')
+        assert.equal(only('error').length, 1, `one error, got ${JSON.stringify(names())}`)
+        assert.match(only('error')[0].message, /empty after removing control characters/)
+        assert.deepEqual(only('stopped'), [], 'an empty prompt is not a Stop')
+        assert.notEqual(only('result')[0].interrupted, true)
+        assert.equal(session._isBusy, false)
+      })
+
+      it('a Stop through the real writer is still the quiet stop', async () => {
+        realWriterSession((s) => { s.interrupt() })
+        const result = await run('a prompt long enough to be mid-write')
+        assert.equal(result.reason, 'aborted')
+        assertQuietStop()
+      })
+    })
+
     it('a Stop that was requested for a turn before does not turn a later death into a quiet stop', async () => {
       turnSession((s) => { s.interrupt() })
       await run('one')
@@ -244,8 +295,7 @@ describe('claude-tui: a requested Stop is a quiet stopped, not an error (#8558)'
     })
   })
 
-  it('an orchestration TurnDriver settles a requested claude-tui Stop as TURN_STOPPED, not TURN_ERROR', async () => {
-    turnSession((s) => { s.interrupt() })
+  async function driveWithTurnDriver() {
     const sm = new EventEmitter()
     sm.getSession = (id) => (id === 'sess-8558' ? { session } : null)
     for (const name of ['stream_delta', 'message', 'result', 'error', 'stopped', 'stream_end']) {
@@ -254,12 +304,31 @@ describe('claude-tui: a requested Stop is a quiet stopped, not an error (#8558)'
     const driver = new TurnDriver({ sessionManager: sm })
     try {
       mock.timers.reset()
-      await assert.rejects(
-        driver.driveTurn('sess-8558', 'plan it', { timeoutMs: 30_000 }),
-        (err) => err.code === 'TURN_STOPPED',
-      )
+      return await driver.driveTurn('sess-8558', 'plan it', { timeoutMs: 30_000 }).then(() => null, (err) => err)
     } finally {
       driver.dispose()
     }
+  }
+
+  it('an orchestration TurnDriver settles a requested claude-tui Stop as TURN_STOPPED, not TURN_ERROR', async () => {
+    turnSession((s) => { s.interrupt() })
+    const err = await driveWithTurnDriver()
+    assert.equal(err?.code, 'TURN_STOPPED')
+  })
+
+  it('an orchestration TurnDriver settles a PTY that dies mid-write as TURN_ERROR, not TURN_STOPPED', async () => {
+    turnSession(() => {})
+    delete session._writePtyTextThrottled
+    let writes = 0
+    session._term = {
+      write: () => {
+        writes += 1
+        if (writes === 1) { session._ptyExited = true; session._ptyExitInfo = { exitCode: 143, signal: 'SIGTERM' } }
+      },
+      kill: () => {},
+      pid: 4242,
+    }
+    const err = await driveWithTurnDriver()
+    assert.equal(err?.code, 'TURN_ERROR')
   })
 })

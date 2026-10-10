@@ -371,6 +371,17 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { sessions: { active: { isIdle: false } } },
   },
 
+  {
+    // #8558: a turn beginning ends the quiet "Session stopped." state. A provider
+    // that keeps its process across a Stop (claude-tui) sends no claude_ready for
+    // the next turn, so claude_ready alone left the strip up through later turns.
+    name: 'agent_busy clears the stopped marker (stoppedAt / stoppedCode) of the session whose turn began',
+    type: 'agent_busy',
+    init: { sessions: { s1: { isIdle: true, stoppedAt: 1234, stoppedCode: 0 } } },
+    message: { type: 'agent_busy', sessionId: 's1' },
+    expect: { sessions: { s1: { isIdle: false, stoppedAt: null, stoppedCode: null } } },
+  },
+
   // 3a. session_activity (#4639 / #7518) — the LIVE half of the isBusy → isIdle
   // resync, lifted out of the dashboard's switch so BOTH clients share it. Until
   // #7518 the app had no handler at all: `agent_idle` was its only `isIdle`
