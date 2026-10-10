@@ -54,6 +54,8 @@ describe('ClaudeByokSession #5274 — cancelActivity', () => {
 
     assert.deepEqual(res, { ok: true })
     assert.equal(child.interrupt.mock.callCount(), 1)
+    // #8553: reaches the subagent as the parent's doing, not as a Stop of its own.
+    assert.deepEqual(child.interrupt.mock.calls[0].arguments, [{ cascaded: true }])
     // Optimistic finalize: node cleared + agent_completed fired.
     assert.deepEqual(completed, [{ toolUseId: 'tu-1' }])
     assert.equal(session._activeAgents.has('tu-1'), false)

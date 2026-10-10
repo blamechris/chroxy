@@ -1934,7 +1934,7 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
-    it('reports an ABORT error code when interrupt() fires mid-stream', async () => {
+    it('ends with a stopped result, not an ABORT error, when interrupt() fires mid-stream (#8553)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp' })
       session._client = {
         messages: {
@@ -1958,9 +1958,12 @@ describe('ClaudeByokSession', () => {
       const turn = session.sendMessage('hi')
       setTimeout(() => session.interrupt(), 20)
       await turn
-      const errorEvent = captured.find((e) => e.name === 'error')
-      assert.ok(errorEvent, 'interrupt should produce an error event')
-      assert.equal(errorEvent.payload.code, 'ABORT')
+      // A Stop somebody requested is not a failure. The unrequested abort that
+      // still reports `error` ABORT is pinned in the #8553 block of 'tool dispatch'.
+      assert.equal(captured.filter((e) => e.name === 'error').length, 0, 'a requested Stop is not an error')
+      const results = captured.filter((e) => e.name === 'result')
+      assert.equal(results.length, 1)
+      assert.equal(results[0].payload.interrupted, true)
       await session.destroy()
     })
 
@@ -2954,9 +2957,142 @@ describe('ClaudeByokSession', () => {
         await session.destroy()
       })
 
-      it('a Stop mid-stream is unchanged: error ABORT, no result, no stopped (#8553 owns that path)', async () => {
+      // #8553 -- the same user action in the STREAM phase used to throw into the
+      // catch and emit `error` ABORT, which the dashboard paints as a red
+      // "Interrupted by user" toast. A requested Stop now ends exactly like the
+      // tool-phase one above: one `result` that says it was stopped, one quiet
+      // `stopped`, no `error`. `stop` is how the Stop arrives, as in toolPhaseSession.
+      function streamPhaseSession({ stop = 'requested', priorRound = false } = {}) {
         const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session.setPermissionMode('auto')
+        session._executeToolBlock = async function ({ block }) {
+          return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+        }
+        let round = 0
+        const abortError = () => new APIUserAbortError({ message: 'Request was aborted.' })
         session._client = {
+          messages: {
+            stream: () => {
+              round += 1
+              if (priorRound && round === 1) {
+                return fakeStream(
+                  [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' }],
+                  {
+                    stop_reason: 'tool_use',
+                    content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } }],
+                    usage: { input_tokens: 7, output_tokens: 3 },
+                  },
+                )
+              }
+              return {
+                async *[Symbol.asyncIterator]() {
+                  yield { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'half a rep' } }
+                  // The Stop lands while the model is still streaming.
+                  if (stop === 'requested') session.interrupt()
+                  else session._abortController.abort()
+                  throw abortError()
+                },
+                async finalMessage() { throw abortError() },
+              }
+            },
+          },
+        }
+        return session
+      }
+
+      it('a requested Stop mid-stream ends stopped: no error, one quiet stopped, interrupted result (#8553)', async () => {
+        const session = streamPhaseSession({ stop: 'requested' })
+        const captured = captureEvents(session)
+        const stopped = []
+        session.on('stopped', (e) => stopped.push(e))
+        await session.start()
+        await session.sendMessage('go')
+        assert.equal(captured.filter((e) => e.name === 'error').length, 0, 'a Stop the user asked for is not an error')
+        const results = captured.filter((e) => e.name === 'result')
+        assert.equal(results.length, 1, 'the turn ends with exactly one result')
+        const r = results[0].payload
+        assert.equal(r.interrupted, true, 'terminal but not successful, for a TurnDriver')
+        assert.equal('turnOutcome' in r, false, 'no chip for a requested Stop, as in the tool phase')
+        assert.equal(stopped.length, 1, 'the quiet stopped confirmation, exactly once')
+        assert.equal(captured.filter((e) => e.name === 'stream_end').length, 1, 'the stream still closes once')
+        assert.equal(session._stopRequestedThisTurn, false, 'cleared when the turn ends')
+        await session.destroy()
+      })
+
+      it('a requested Stop mid-stream accounts the usage the turn spent exactly once, as the tool phase does', async () => {
+        const session = streamPhaseSession({ stop: 'requested', priorRound: true })
+        const captured = captureEvents(session)
+        await session.start()
+        await session.sendMessage('go')
+        // Round 1 (tool_use) completed and billed; round 2 was cut off mid-stream.
+        const costed = captured.filter((e) => (e.name === 'result' || e.name === 'error') && e.payload.usage)
+        assert.equal(costed.length, 1, 'one event carries the spend, so session-manager counts it once')
+        assert.equal(costed[0].name, 'result')
+        assert.equal(costed[0].payload.usage.input_tokens, 7)
+        assert.equal(costed[0].payload.usage.output_tokens, 3)
+        assert.equal(captured.filter((e) => e.name === 'error').length, 0)
+        await session.destroy()
+      })
+
+      it('an abort nobody asked for mid-stream keeps error ABORT: no result, no stopped (#8553)', async () => {
+        const session = streamPhaseSession({ stop: 'unrequested' })
+        const captured = captureEvents(session)
+        const stopped = []
+        session.on('stopped', (e) => stopped.push(e))
+        await session.start()
+        await session.sendMessage('go')
+        assert.equal(captured.filter((e) => e.name === 'result').length, 0)
+        assert.equal(captured.find((e) => e.name === 'error').payload.code, 'ABORT')
+        assert.equal(stopped.length, 0)
+        await session.destroy()
+      })
+
+      it('a destroy mid-stream is not a requested Stop: still error ABORT (#8553)', async () => {
+        // destroy() calls interrupt() itself, so the Stop flag is set -- but nobody
+        // is waiting for a stopped turn, so the abort keeps reporting as one.
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        let release
+        const gate = new Promise((r) => { release = r })
+        session._client = {
+          messages: {
+            stream: () => ({
+              async *[Symbol.asyncIterator]() {
+                await gate
+                throw new APIUserAbortError({ message: 'Request was aborted.' })
+              },
+              async finalMessage() { throw new APIUserAbortError({ message: 'Request was aborted.' }) },
+            }),
+          },
+        }
+        // destroy() drops every listener, so watch emit() itself.
+        const names = []
+        const realEmit = session.emit.bind(session)
+        session.emit = (name, ...args) => {
+          names.push(name === 'error' ? `error:${args[0]?.code}` : name)
+          // With every listener gone an `error` emit throws; we only watch it.
+          try { return realEmit(name, ...args) } catch { return false }
+        }
+        await session.start()
+        const turn = session.sendMessage('go')
+        await new Promise((r) => setTimeout(r, 5))
+        const destroyed = session.destroy()
+        release()
+        await turn
+        await destroyed
+        assert.ok(names.includes('error:ABORT'), `destroy keeps its error ABORT (saw ${names.join(',')})`)
+        assert.ok(!names.includes('result'), 'and ends no result')
+        assert.ok(!names.includes('stopped'), 'and no stopped')
+      })
+
+      it('a Stop cascaded to a Task subagent stays the subagent\'s failure, not a stopped turn (#8553)', async () => {
+        // The parent's Stop reaches the child through interrupt({ cascaded: true }).
+        // The child's own stream abort must still surface as the child's error --
+        // the parent reports it as "Subagent failed" -- not as a stopped result.
+        const child = new ClaudeByokSession({ cwd: '/tmp' })
+        const captured = captureEvents(child)
+        const stopped = []
+        child.on('stopped', (e) => stopped.push(e))
+        child._client = {
           messages: {
             stream: () => ({
               async *[Symbol.asyncIterator]() {
@@ -2967,18 +3103,32 @@ describe('ClaudeByokSession', () => {
             }),
           },
         }
-        const captured = captureEvents(session)
-        const stopped = []
-        session.on('stopped', (e) => stopped.push(e))
-        await session.start()
-        const turn = session.sendMessage('go')
-        setTimeout(() => session.interrupt(), 5)
+        await child.start()
+        const turn = child.sendMessage('go')
+        setTimeout(() => child.interrupt({ cascaded: true }), 5)
         await turn
-        assert.equal(captured.filter((e) => e.name === 'result').length, 0)
         assert.equal(captured.find((e) => e.name === 'error').payload.code, 'ABORT')
+        assert.equal(captured.filter((e) => e.name === 'result').length, 0)
         assert.equal(stopped.length, 0)
-        assert.equal(session._stopRequestedThisTurn, false)
-        await session.destroy()
+        assert.notEqual(child._abortCascaded, true, 'cleared when the turn ends')
+        await child.destroy()
+      })
+
+      it('a TurnDriver driving a session stopped mid-stream rejects TURN_STOPPED (#8553)', async () => {
+        const session = streamPhaseSession({ stop: 'requested' })
+        const sm = new EventEmitter()
+        sm.getSession = () => ({ session })
+        for (const ev of ['stream_delta', 'result', 'error', 'stopped']) {
+          session.on(ev, (data) => sm.emit('session_event', { sessionId: 's1', event: ev, data }))
+        }
+        await session.start()
+        const driver = new TurnDriver({ sessionManager: sm })
+        try {
+          await assert.rejects(driver.driveTurn('s1', 'go', { timeoutMs: 5000 }), (err) => err.code === 'TURN_STOPPED')
+        } finally {
+          driver.dispose()
+          await session.destroy()
+        }
       })
 
       it('a tool turn that runs to completion is NOT marked interrupted', async () => {
@@ -4697,6 +4847,8 @@ describe('ClaudeByokSession', () => {
       let parentInterruptOnStack = false
       let cascadedChildAborts = 0
       let childInstance = null
+      const childErrors = []
+      const childResults = []
       const origParentInterrupt = session.interrupt.bind(session)
       session.interrupt = function () {
         parentInterruptOnStack = true
@@ -4711,9 +4863,11 @@ describe('ClaudeByokSession', () => {
         const origSet = this._subagentSessions.set.bind(this._subagentSessions)
         this._subagentSessions.set = (k, v) => {
           childInstance = v
+          v.on('error', (e) => childErrors.push(e))
+          v.on('result', (e) => childResults.push(e))
           const origInterrupt = v.interrupt.bind(v)
-          v.interrupt = function () {
-            const result = origInterrupt()
+          v.interrupt = function (...args) {
+            const result = origInterrupt(...args)
             if (parentInterruptOnStack && v._abortController?.signal?.aborted) {
               cascadedChildAborts += 1
             }
@@ -4782,6 +4936,10 @@ describe('ClaudeByokSession', () => {
         cascadedChildAborts > 0,
         "parent.interrupt() must abort the child's stream through the cascade",
       )
+      // #8553: the cascade is not a Stop of the child -- its abort stays the
+      // child's error (the parent reports "Subagent failed"), not a stopped result.
+      assert.deepEqual(childErrors.map((e) => e.code), ['ABORT'])
+      assert.equal(childResults.length, 0)
       await session.destroy()
     })
 
