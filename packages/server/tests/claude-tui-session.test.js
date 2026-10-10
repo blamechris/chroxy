@@ -2188,7 +2188,9 @@ describe('ClaudeTuiSession', () => {
       // #7041: no elapsed-time bound. sendMessage() returning at all is the
       // not-wedged proof (a wedge hangs the test, as the comment above says);
       // WHAT ended the turn is asserted structurally: the hard-timeout watchdog
-      // was armed at its configured 400ms, fired, and reported the timeout.
+      // was armed at its configured 400ms, and the turn ended with a hard-timeout
+      // error from whichever of the budget's two paths ran first (see
+      // HARD_TIMEOUT_END_RE) — the watchdog may be armed without ever firing.
       const arms = recordTimerArms(t)
       await session.sendMessage('hi')
       assert.ok(arms.some((a) => a.ms === 400), 'the 400ms hard-timeout watchdog was armed')
