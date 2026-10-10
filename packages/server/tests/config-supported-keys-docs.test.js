@@ -3,16 +3,20 @@ import assert from 'node:assert/strict'
 import { readdir, readFile } from 'node:fs/promises'
 import * as configModule from '../src/config.js'
 import * as providersModule from '../src/anthropic-compatible-config.js'
+import * as acpModule from '../src/acp-config.js'
 import {
+  extractEntryShapes,
   extractTypeShapes,
   findConfigTableRow,
   claimedSubKeyTokens,
   GENERIC_BACKTICK_LITERALS,
   findSchemaComment,
   findSection,
+  parseKeySets,
   parseRecognisedSubKeys,
   parseSupportedKeySets,
   parseWarnUnknownKeysCallSites,
+  sliceBetween,
   wordTokens,
 } from './helpers/config-key-rosters.js'
 
@@ -93,6 +97,44 @@ const BLOCKS_WITH_NO_PROSE_REGION = ['environments.k8s', 'environments.rancher']
 const BLOCKS_WITH_DOC_TYPE_SHAPE = ['worktreeGc', 'orphanReap', 'sessionCi', 'userShell']
 const BLOCKS_WITH_SCHEMA_COMMENT_SHAPE = ['worktreeGc', 'orphanReap', 'sessionCi', 'userShell']
 
+// #7547 — the provider ENTRY level, one nesting step below `providers`. An entry
+// is an array element, not a config block, so these rosters are NOT
+// `*_SUPPORTED_KEYS` (no "Recognised sub-keys" row, no warnUnknownKeys call
+// site); they are swept by their own `*_ENTRY_KEYS` suffix and compared against
+// the entry shape CONFIG.md writes on the `providers` row.
+//
+// roster const name -> the exported Set it must resolve to. Closed from both
+// ends like BLOCK_TO_SET_NAME: every `*_ENTRY_KEYS` declaration under src/ must
+// be registered here, and every name here must still be declared.
+const ENTRY_ROSTERS = new Map([
+  ['COMPATIBLE_ENTRY_KEYS', () => providersModule.COMPATIBLE_ENTRY_KEYS],
+  ['ACP_ENTRY_KEYS', () => acpModule.ACP_ENTRY_KEYS],
+])
+
+// Where the `providers` row documents each entry. Each segment runs from one
+// sub-block's backticked name to the next, so it carries exactly that
+// sub-block's entry shape. `openaiCompatible` writes no shape of its own — it
+// says its entries are the identical shape. That sentence is only true while
+// both blocks resolve to ONE roster, so a segment that relies on it names the
+// segment it claims to equal (`sameAs`) and the test asserts the two rosters are
+// the same Set — a divergent roster forces the doc off the sentence (#7547
+// review S1). An explicit shape added there later is compared too.
+const ENTRY_DOC_SEGMENTS = [
+  { label: 'providers.anthropicCompatible', roster: 'COMPATIBLE_ENTRY_KEYS', from: '`providers.anthropicCompatible`', to: '`providers.openaiCompatible`', shape: 'required' },
+  { label: 'providers.openaiCompatible', roster: 'COMPATIBLE_ENTRY_KEYS', from: '`providers.openaiCompatible`', to: '`providers.acp`', shape: 'identical-or-explicit', sameAs: 'providers.anthropicCompatible' },
+  { label: 'providers.acp', roster: 'ACP_ENTRY_KEYS', from: '`providers.acp`', to: '`providers.allowAnyModel`', shape: 'required' },
+]
+
+// The three entry validators, the roster each enforces, and the exact text of its
+// unknown-key condition (see the SOURCE check in the registry test).
+const ENTRY_VALIDATORS = [
+  { label: 'anthropicCompatible', validate: providersModule.validateAnthropicCompatibleProviders, roster: 'COMPATIBLE_ENTRY_KEYS', file: 'anthropic-compatible-config.js', expected: '!COMPATIBLE_ENTRY_KEYS.has(key) && !FORBIDDEN_SECRET_KEYS.includes(key)' },
+  { label: 'openaiCompatible', validate: providersModule.validateOpenAiCompatibleProviders, roster: 'COMPATIBLE_ENTRY_KEYS', file: 'anthropic-compatible-config.js', expected: '!COMPATIBLE_ENTRY_KEYS.has(key) && !FORBIDDEN_SECRET_KEYS.includes(key)' },
+  { label: 'acp', validate: acpModule.validateAcpProviders, roster: 'ACP_ENTRY_KEYS', file: 'acp-config.js', expected: '!ACP_ENTRY_KEYS.has(key)' },
+]
+// The entry-level unknown-key loop: `for (const key of Object.keys(raw)) { if (<cond>) { warnings.push(`Unknown key '${path}.${key}'`
+const UNKNOWN_ENTRY_KEY_LOOP_RE = /for \(const key of Object\.keys\(raw\)\) \{\s*if \(([^\n]*)\) \{\s*warnings\.push\(`Unknown key '\$\{path\}\.\$\{key\}'/g
+
 const sorted = it2 => [...it2].sort()
 
 const SRC_ROOT = new URL('../src/', import.meta.url)
@@ -115,6 +157,8 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
   let md
   let declared
   let declaredIn
+  let entryDeclared
+  let entryDeclaredIn
   let srcFiles
   let callSites
   let docTable
@@ -136,18 +180,30 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     srcFiles = (await collectSourceFiles(SRC_ROOT)).sort((a, b) => (a.href < b.href ? -1 : 1))
     declared = new Map()
     declaredIn = new Map()
+    entryDeclared = new Map()
+    entryDeclaredIn = new Map()
     for (const file of srcFiles) {
       const rel = decodeURIComponent(file.href.slice(SRC_ROOT.href.length))
       const text = (await readFile(file, 'utf8')).replace(/\r\n/g, '\n')
-      // Cheap prefilter: parseSupportedKeySets REFUSEs on a file with zero
+      // Cheap prefilters: parseKeySets REFUSEs on a file with zero
       // declarations, which is almost every file here.
-      if (!/_SUPPORTED_KEYS\s*=\s*new Set/.test(text)) continue
-      for (const [name, keys] of parseSupportedKeySets(text, `src/${rel}`)) {
-        if (declared.has(name)) {
-          throw new Error(`REFUSE: ${name} is declared in two files: src/${declaredIn.get(name)} and src/${rel}`)
+      if (/_SUPPORTED_KEYS\s*=/.test(text)) {
+        for (const [name, keys] of parseSupportedKeySets(text, `src/${rel}`)) {
+          if (declared.has(name)) {
+            throw new Error(`REFUSE: ${name} is declared in two files: src/${declaredIn.get(name)} and src/${rel}`)
+          }
+          declared.set(name, keys)
+          declaredIn.set(name, rel)
         }
-        declared.set(name, keys)
-        declaredIn.set(name, rel)
+      }
+      if (/_ENTRY_KEYS\s*=/.test(text)) {
+        for (const [name, keys] of parseKeySets(text, `src/${rel}`, '_ENTRY_KEYS')) {
+          if (entryDeclared.has(name)) {
+            throw new Error(`REFUSE: ${name} is declared in two files: src/${entryDeclaredIn.get(name)} and src/${rel}`)
+          }
+          entryDeclared.set(name, keys)
+          entryDeclaredIn.set(name, rel)
+        }
       }
     }
     callSites = parseWarnUnknownKeysCallSites(configSrc)
@@ -341,8 +397,9 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     // billing plan classes are values of `class`, not sub-keys
     ['billing', ['pro', 'max5x', 'max20x']],
     // apiKeyEnv/credentialsKey/baseUrl are entry-level keys one nesting BELOW
-    // this roster (validated by KNOWN_ENTRY_KEYS in anthropic-compatible-
-    // config); `provider` is the TOP-LEVEL CONFIG_SCHEMA key cross-referenced
+    // this roster (validated by COMPATIBLE_ENTRY_KEYS in anthropic-compatible-
+    // config, and gated against the `providers` row's entry shapes by the
+    // #7547 tests below); `provider` is the TOP-LEVEL CONFIG_SCHEMA key cross-referenced
     // here (#7545 review F3 corrected the original entry-level claim). With
     // all four excluded plus the own-name rule this region contributes ZERO
     // claims — recorded in REGION_MIN_CLAIMS below as explicitly vacuous; the
@@ -411,6 +468,131 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
         `GENERIC_BACKTICK_LITERALS entry '${lit}' appears backticked in no gated region — stale, remove it`
       )
     }
+  })
+
+  // ---- the provider ENTRY level (#7547) ----
+
+  // The entry level has the same two documents (CONFIG.md's `providers` row
+  // writes `{ id, label?, baseUrl, ... }` for each sub-block) and the same
+  // hand-typed-list-beside-a-growing-set defect: `modelDiscovery` (#5548) joined
+  // the roster and never reached the row. The expectations are the REAL exported
+  // Sets; only the doc side is parsed.
+
+  it('the entry rosters are registered, and each one is what the validators enforce', async () => {
+    // Registry closed from both ends, as for the block rosters.
+    const orphans = sorted(entryDeclared.keys()).filter(n => !ENTRY_ROSTERS.has(n))
+    assert.deepEqual(
+      orphans,
+      [],
+      'these *_ENTRY_KEYS rosters exist under packages/server/src/ but are not gated against CONFIG.md — add them to ' +
+        `ENTRY_ROSTERS and ENTRY_DOC_SEGMENTS: ${orphans.map(n => `${n} (src/${entryDeclaredIn.get(n)})`).join(', ')}`
+    )
+    const phantoms = sorted(ENTRY_ROSTERS.keys()).filter(n => !entryDeclared.has(n))
+    assert.deepEqual(phantoms, [], `ENTRY_ROSTERS names rosters that no longer exist: ${phantoms.join(', ')}`)
+    // The source parse and the exported value agree (the parse is only an
+    // enumeration; a regex that quietly stopped matching must not look clean).
+    for (const [name, get] of ENTRY_ROSTERS) {
+      const value = get()
+      assert.ok(value instanceof Set && value.size > 0, `${name} is not an exported non-empty Set — nothing to compare`)
+      assert.deepEqual(sorted(entryDeclared.get(name)), sorted(value), `the parsed declaration of ${name} differs from its exported Set`)
+    }
+    // Two halves, because neither alone is enough:
+    //  1. The PROBE proves exported ⊆ accepted — every roster key passes the
+    //     validator's unknown-key check and an invented key does not. It cannot
+    //     see a validator-private extra (`&& key !== 'secretExtra'`), which makes
+    //     accepted ⊋ exported and stays green.
+    //  2. The SOURCE check below proves accepted ⊆ exported — the unknown-key
+    //     condition in each validator's source is exactly the exported roster
+    //     (plus the one documented secret-key carve-out), nothing else. Together:
+    //     accepted === exported, so the roster compared against CONFIG.md is the
+    //     set the daemon actually enforces (#7547 review S2).
+    const probe = (validate, key) => {
+      const { warnings } = validate([{ id: 'zz-entry-probe', baseUrl: 'http://localhost:1', defaultModel: 'm', command: 'x', [key]: 1 }])
+      return warnings.some(w => w.includes(`Unknown key`) && w.includes(`.${key}'`))
+    }
+    // Every registered entry roster must have at least one validator row, or a new
+    // roster would be documented and swept but never probed or source-checked.
+    const validated = new Set(ENTRY_VALIDATORS.map(v => v.roster))
+    const unvalidated = sorted(ENTRY_ROSTERS.keys()).filter(n => !validated.has(n))
+    assert.deepEqual(unvalidated, [], `ENTRY_ROSTERS has rosters with no ENTRY_VALIDATORS row: ${unvalidated.join(', ')}`)
+    for (const { label, validate, roster } of ENTRY_VALIDATORS) {
+      assert.equal(probe(validate, 'zzNotAnEntryKey'), true, `${label}: an invented entry key did not warn — the probe cannot detect the roster`)
+      const rejected = [...ENTRY_ROSTERS.get(roster)()].filter(k => probe(validate, k))
+      assert.deepEqual(rejected, [], `${label}'s validator warns "Unknown key" for ${roster} members: ${rejected.join(', ')}`)
+    }
+    const conditions = new Map()
+    for (const { file, expected } of ENTRY_VALIDATORS) {
+      if (conditions.has(file)) continue
+      const text = (await readFile(new URL(file, SRC_ROOT), 'utf8')).replace(/\r\n/g, '\n')
+      const found = [...text.matchAll(UNKNOWN_ENTRY_KEY_LOOP_RE)].map(m => m[1].trim())
+      assert.equal(found.length, 1, `src/${file}: expected exactly 1 entry-level unknown-key loop, found ${found.length} (shape changed?)`)
+      conditions.set(file, found[0])
+      assert.ok(
+        found[0] === expected,
+        `src/${file}: the unknown-key condition is \`${found[0]}\`, expected \`${expected}\` — a validator-private key ` +
+          'would be accepted without being in the exported roster, so CONFIG.md would be gated against a set the daemon does not enforce'
+      )
+    }
+  })
+
+  it("CONFIG.md's `providers` row documents exactly the keys each entry roster accepts", () => {
+    const row = findConfigTableRow(md, 'providers')
+    assert.ok(row, 'CONFIG.md has no per-key table row for `providers`')
+    const checked = []
+    for (const seg of ENTRY_DOC_SEGMENTS) {
+      assert.ok(ENTRY_ROSTERS.has(seg.roster), `${seg.label}: segment names unknown roster ${seg.roster}`)
+      const text = sliceBetween(row, seg.from, seg.to)
+      const shapes = extractEntryShapes(text)
+      const runtimeKeys = sorted(ENTRY_ROSTERS.get(seg.roster)())
+      if (shapes.length === 0 && seg.shape === 'identical-or-explicit') {
+        // No shape of its own: the claim "identical" must still be written, and
+        // is true by construction (one validator, one roster — pinned above).
+        assert.ok(
+          /identical entry shape/.test(text),
+          `${seg.label} documents neither an entry shape nor "the identical entry shape" — its entries are undocumented`
+        )
+        const other = ENTRY_DOC_SEGMENTS.find(o => o.label === seg.sameAs)
+        assert.ok(other, `${seg.label} says "identical" but names no segment it equals (sameAs=${seg.sameAs})`)
+        assert.ok(
+          ENTRY_ROSTERS.get(seg.roster)() === ENTRY_ROSTERS.get(other.roster)(),
+          `${seg.label} says "the identical entry shape" but resolves to ${seg.roster}, not ${other.label}'s ${other.roster} — ` +
+            'the sentence is false; document its own entry shape'
+        )
+        checked.push(`${seg.label}:identical`)
+        continue
+      }
+      assert.equal(shapes.length, 1, `${seg.label}'s segment of the \`providers\` row carries ${shapes.length} entry shapes — expected exactly 1`)
+      const documented = sorted(shapes[0].names)
+      const undocumented = runtimeKeys.filter(k => !documented.includes(k))
+      const phantom = documented.filter(k => !runtimeKeys.includes(k))
+      assert.deepEqual(
+        undocumented,
+        [],
+        `CONFIG.md's entry shape for ${seg.label} never lists ${undocumented.join(', ')} — accepted by ${seg.roster} but undocumented (#7547)`
+      )
+      assert.deepEqual(
+        phantom,
+        [],
+        `CONFIG.md's entry shape for ${seg.label} lists ${phantom.join(', ')}, which ${seg.roster} does not accept`
+      )
+      const dupes = shapes[0].names.filter((k, i) => shapes[0].names.indexOf(k) !== i)
+      assert.deepEqual(dupes, [], `duplicate keys in ${seg.label}'s entry shape: ${dupes.join(', ')}`)
+      checked.push(`${seg.label}:shape`)
+    }
+    // Counted: a segment that lost its shape (and so its check) must force an
+    // edit here instead of shrinking the compared set in silence.
+    assert.deepEqual(
+      checked,
+      ['providers.anthropicCompatible:shape', 'providers.openaiCompatible:identical', 'providers.acp:shape'],
+      'the set of entry shapes CONFIG.md documents changed'
+    )
+  })
+
+  it('carries the entry key whose omission motivated the entry gate', () => {
+    assert.ok(
+      providersModule.COMPATIBLE_ENTRY_KEYS.has('modelDiscovery'),
+      'COMPATIBLE_ENTRY_KEYS must still carry modelDiscovery — the #5548 knob that was missing from CONFIG.md until #7547'
+    )
   })
 
   // ---- the #7445 incident itself, pinned by name ----

@@ -96,7 +96,17 @@ const FORBIDDEN_SECRET_KEYS = Object.freeze(['apiKey', 'api_key', 'key', 'token'
 // Keys an entry is allowed to carry. Anything else gets an
 // "(will be ignored)" warning so typos (`model` vs `defaultModel`)
 // surface at startup instead of silently doing nothing.
-const KNOWN_ENTRY_KEYS = new Set([
+//
+// #7547: exported and named `*_ENTRY_KEYS` so the CONFIG.md doc gate
+// (packages/server/tests/config-supported-keys-docs.test.js) compares the
+// entry shape documented on the `providers` row against THIS set. It is
+// deliberately not `*_SUPPORTED_KEYS`: that suffix is the gate's registry for
+// config BLOCKS (a "Recognised sub-keys" row + a warnUnknownKeys call site per
+// block), and an array ENTRY is neither. The gate sweeps `*_ENTRY_KEYS`
+// declarations separately, so a new entry roster is still picked up rather than
+// escaping. Shared by `anthropicCompatible` and `openaiCompatible` (one
+// validator, two block labels).
+export const COMPATIBLE_ENTRY_KEYS = new Set([
   'id', 'label', 'baseUrl', 'apiKeyEnv', 'credentialsKey',
   'defaultModel', 'models', 'pricing', 'contextWindow', 'modelDiscovery',
 ])
@@ -162,7 +172,7 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
   }
 
   for (const key of Object.keys(raw)) {
-    if (!KNOWN_ENTRY_KEYS.has(key) && !FORBIDDEN_SECRET_KEYS.includes(key)) {
+    if (!COMPATIBLE_ENTRY_KEYS.has(key) && !FORBIDDEN_SECRET_KEYS.includes(key)) {
       warnings.push(`Unknown key '${path}.${key}' (will be ignored)`)
     }
   }

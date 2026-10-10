@@ -62,7 +62,9 @@ export { RESERVED_PROVIDER_IDS }
 // digits, or dashes; max 64 chars.
 const PROVIDER_ID_RE = /^[a-z][a-z0-9-]{0,63}$/
 
-const KNOWN_ENTRY_KEYS = new Set(['id', 'label', 'command', 'args', 'env'])
+// #7547: exported + `*_ENTRY_KEYS` so the CONFIG.md doc gate compares the ACP entry
+// shape on the `providers` row against this set (see COMPATIBLE_ENTRY_KEYS).
+export const ACP_ENTRY_KEYS = new Set(['id', 'label', 'command', 'args', 'env'])
 
 function typeName(value) {
   return Array.isArray(value) ? 'array' : typeof value
@@ -81,7 +83,7 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
   let valid = true
 
   for (const key of Object.keys(raw)) {
-    if (!KNOWN_ENTRY_KEYS.has(key)) {
+    if (!ACP_ENTRY_KEYS.has(key)) {
       warnings.push(`Unknown key '${path}.${key}' (will be ignored)`)
     }
   }
