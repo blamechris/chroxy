@@ -137,12 +137,38 @@ describe('live vs replayed transcript -- dashboard (#6630)', () => {
   // file already runs close to its worker's 4 GB heap (a scenario with a late-placed
   // bubble, #8518, added 13 more cuts and ran it out of memory). That bubble's partial-
   // delivery case is pinned in late-thinking-order.test.ts instead.
-  const interruptible = REPLAY_PARITY_FIXTURES.filter((fx) =>
-    fx.live[0]?.thinking === true && fx.live.some((f) => f.type === 'stream_end' && f.thinking === true),
+  //
+  // The excluded scenarios are NAMED (#8532 N2): a position test (`live[0]?.thinking`)
+  // would silently drop a future scenario whose reasoning is not first. Removing the
+  // exclusion altogether is #8531.
+  const hasThinkingEnd = (fx: (typeof REPLAY_PARITY_FIXTURES)[number]) =>
+    fx.live.some((f) => f.type === 'stream_end' && f.thinking === true)
+  const NOT_INTERRUPTED_BY_NAME: readonly string[] = [
+    'tui-thinking-read-after-its-tool-row',
+    'tui-thinking-read-after-the-answer',
+  ]
+  const interruptible = REPLAY_PARITY_FIXTURES.filter(
+    (fx) => hasThinkingEnd(fx) && !NOT_INTERRUPTED_BY_NAME.includes(fx.name),
   )
 
   it('has scenarios to interrupt', () => {
     expect(interruptible.map((f) => f.name)).toEqual(expect.arrayContaining(['thinking-then-reply', 'thinking-without-text']))
+  })
+
+  it('the named exclusions are exactly the thinking scenarios that do not open with the reasoning', () => {
+    const names = new Set(REPLAY_PARITY_FIXTURES.map((f) => f.name))
+    // A name that no longer exists, or no longer carries a reasoning stream.
+    for (const name of NOT_INTERRUPTED_BY_NAME) {
+      expect(names.has(name), `excluded scenario "${name}" no longer exists`).toBe(true)
+      const fx = REPLAY_PARITY_FIXTURES.find((f) => f.name === name)!
+      expect(hasThinkingEnd(fx), `excluded scenario "${name}" has no reasoning stream to interrupt`).toBe(true)
+    }
+    // A scenario the cut loop would skip (or run) that the list does not say so.
+    const opensWithReasoning = REPLAY_PARITY_FIXTURES.filter((fx) => hasThinkingEnd(fx) && fx.live[0]?.thinking === true)
+    expect(
+      interruptible.map((f) => f.name).sort(),
+      'the interrupted scenarios must be exactly those that open with the reasoning stream: name the new exclusion in NOT_INTERRUPTED_BY_NAME',
+    ).toEqual(opensWithReasoning.map((f) => f.name).sort())
   })
 
   for (const fx of interruptible) {

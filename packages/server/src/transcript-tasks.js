@@ -497,12 +497,15 @@ export class TranscriptTaskScanner {
       }
       const blocks = entry?.message?.content
       if (Array.isArray(blocks)) {
+        // #8532: queue this entry's thinking BEFORE its tool_use claims one, so an
+        // entry that carries both (Claude Code writes one block per entry today)
+        // still hints its own thinking.
+        this._ingestThinking(entry, blocks, entryTs)
         for (const block of blocks) {
           if (!block || block.type !== 'tool_use' || typeof block.id !== 'string') continue
           this._ingestToolUse(block, entryTs ?? Date.now())
           this._claimThinkingForToolUse(entry, block.id)
         }
-        this._ingestThinking(entry, blocks, entryTs)
       }
       return
     }

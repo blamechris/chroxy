@@ -317,6 +317,17 @@ describe('TranscriptTaskScanner — thinking capture (#7393)', () => {
       assert.equal(scanner.drainThinking()[0].precedes, undefined)
     })
 
+    it('a SINGLE entry carrying both the thinking block and its tool_use still gets the hint (#8532 N1)', () => {
+      write()
+      const scanner = new TranscriptTaskScanner(path)
+      scanner.startThinkingCapture(T0)
+      const entry = JSON.parse(thinkingEntry({ text: 'one entry', ts: TS(5), messageId: 'msg_A', stopReason: 'tool_use' }))
+      entry.message.content.push({ type: 'tool_use', id: 'toolu_SAME', name: 'Bash', input: { command: 'ls' } })
+      append(JSON.stringify(entry))
+      scanner.scan()
+      assert.deepEqual(scanner.drainThinking()[0].precedes, { kind: 'tool_use', toolUseId: 'toolu_SAME' })
+    })
+
     it('a redacted_thinking block gets the same hint', () => {
       write()
       const scanner = new TranscriptTaskScanner(path)

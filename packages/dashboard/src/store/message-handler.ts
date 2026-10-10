@@ -6057,6 +6057,17 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
             ? placeThinkingBubble(ss.messages, newMsg, result.thinkingPrecedes)
             : [...ss.messages, newMsg],
         }));
+      } else if (result.thinkingPrecedes) {
+        // #8532 N3: the flat fallback places a hinted reasoning bubble the same way
+        // (same placement, same placeholder drop as addMessage); unhinted entries
+        // keep going through addMessage below.
+        set((state) => ({
+          messages: placeThinkingBubble(
+            state.messages.filter((m) => m.id !== 'thinking' || newMsg.id === 'thinking'),
+            newMsg,
+            result.thinkingPrecedes,
+          ),
+        }));
       } else {
         get().addMessage(newMsg);
       }
