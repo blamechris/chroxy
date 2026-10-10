@@ -346,6 +346,284 @@ describe('#7085 outbound schema coverage', () => {
     })
   })
 
+  describe('#7107 roster field lists are pinned to the schemas', () => {
+    // The roster is hand-written prose, so nothing stopped a line naming a field no
+    // producer sends (`git_status_result` documented `status`, `diff_result` documented
+    // `diff`, `git_branches_result` documented `current`, `web_feature_status` documented
+    // `features`) or omitting one it does (`session_context` documented `cwd` while sending
+    // `gitBranch`). The comparison runs BOTH ways against the registered schema, because the
+    // drift ran both ways: a roster naming more than the schema, and a schema missing what a
+    // producer really sends.
+    //
+    // `sessionId` is excluded on both sides: `_broadcastToSession` stamps it on every
+    // session-scoped frame downstream of the producer, so most schemas rightly omit it
+    // (#7108 decided it is a transport tag, not a producer field). `type` is the key.
+
+    /** Fields a producer sends and the roster names, that the schema does not declare yet. */
+    const ROSTER_FIELDS_SCHEMA_LACKS = new Map([
+      ['auth_ok', {
+        fields: ['defaultCwd', 'webFeatures', 'features'],
+        why: 'ws-history.js sends all three in auth_ok; ServerAuthOkSchema declares none, so a parse strips them',
+      }],
+      ['tool_result', {
+        fields: ['images'],
+        why: 'event-normalizer.js attaches `images` when the tool returned any; ServerToolResultSchema lacks it',
+      }],
+      ['server_error', {
+        fields: ['correlationId'],
+        why: 'ws-server.js _handleMessage\'s catch path sends it; ServerErrorSchema lacks it',
+      }],
+      ['host_status_snapshot', {
+        fields: ['requestId'],
+        why: 'control-room-handlers.js echoes the request id; ServerHostStatusSnapshotSchema lacks it (the sibling snapshots declare it)',
+      }],
+    ])
+
+    /** Everything up to the Encrypted-envelope marker: the Server -> Client section proper. */
+    function rosterSectionText() {
+      const lines = readFileSync(WS_SERVER, 'utf8').split('\n')
+      const start = lines.findIndex((l) => l.includes('Server -> Client:'))
+      assert.ok(start > 0, 'the Server -> Client roster must exist in ws-server.js')
+      const body = []
+      let closed = false
+      for (const line of lines.slice(start + 1)) {
+        if (!line.trimStart().startsWith('*')) break
+        if (line.includes('Encrypted envelope')) { closed = true; break }
+        body.push(line.replace(/^\s*\*\s?/, ''))
+      }
+      assert.ok(closed, 'the roster section must end at the "Encrypted envelope" marker — did it move?')
+      return body.join('\n')
+    }
+
+    /**
+     * Parse every `{ type: '<t>', field, field?, ... }` head in `text`. Fails LOUD on a head it
+     * cannot close or a field it cannot name, so an unparsed line cannot read as "no fields".
+     */
+    function parseRosterEntries(text) {
+      const entries = []
+      for (const m of text.matchAll(/\{\s*type:\s*'([a-z0-9_]+)'/g)) {
+        let depth = 0
+        let end = -1
+        for (let i = m.index; i < text.length; i++) {
+          const c = text[i]
+          if (c === '{' || c === '[' || c === '(') depth++
+          else if (c === '}' || c === ']' || c === ')') {
+            depth--
+            if (depth === 0) { end = i; break }
+          }
+        }
+        assert.ok(end > 0, `roster head for '${m[1]}' never closes`)
+        const inner = text.slice(m.index + 1, end)
+        const parts = []
+        let cur = ''
+        let d = 0
+        for (const c of inner) {
+          if ('{[('.includes(c)) d++
+          else if ('}])'.includes(c)) d--
+          if (c === ',' && d === 0) { parts.push(cur); cur = '' } else cur += c
+        }
+        parts.push(cur)
+        const fields = []
+        for (const raw of parts.slice(1).map((x) => x.trim()).filter(Boolean)) {
+          if (raw.startsWith('...')) { fields.push({ name: '...', optional: false }); continue }
+          const f = /^([A-Za-z_][A-Za-z0-9_]*)(\?)?/.exec(raw)
+          assert.ok(f, `roster '${m[1]}': cannot name the field "${raw.slice(0, 30)}"`)
+          fields.push({ name: f[1], optional: f[2] === '?' })
+        }
+        entries.push({ type: m[1], fields })
+      }
+      return entries
+    }
+
+    /**
+     * name -> { optional } over every object arm of the schemas registered for `type`. A field is
+     * optional when ANY arm omits it or declares it optional, i.e. a valid frame can lack it.
+     * Returns null when nothing is registered (the type is unpinned).
+     */
+    function schemaFieldsFor(type) {
+      const schemas = outboundSchemasForType(type)
+      if (schemas.length === 0) return null
+      const objects = []
+      const collect = (schema) => {
+        const options = schema?._def?.options
+        if (options) { for (const o of options) collect(o); return }
+        assert.ok(schema?.shape, `${type}: cannot read the shape of an arm — the pin would pass vacuously`)
+        objects.push(schema)
+      }
+      for (const { schema } of schemas) collect(schema)
+      const names = new Set(objects.flatMap((o) => Object.keys(o.shape)))
+      const out = new Map()
+      for (const name of names) {
+        const optional = objects.some((o) => !(name in o.shape) || o.shape[name].isOptional())
+        out.set(name, { optional })
+      }
+      return out
+    }
+
+    /** The disagreements between one roster line and its schema. Empty means pinned. */
+    function rosterLineProblems(entry, schemaFields, lacks = []) {
+      const problems = []
+      const named = new Map(entry.fields.map((f) => [f.name, f]))
+      for (const [name, f] of named) {
+        if (name === 'sessionId') continue
+        if (name === '...') { problems.push('uses `...`, which hides fields from the pin: list them'); continue }
+        const declared = schemaFields.get(name)
+        if (!declared) {
+          if (!lacks.includes(name)) problems.push(`names \`${name}\`, which the schema does not declare`)
+          continue
+        }
+        // One-sided on purpose: a roster `?` on a field the schema requires is a contradiction, but a
+        // roster-REQUIRED field the schema marks optional is allowed — the schemas are lenient on parse
+        // while the roster states what the producer always sends (#7107 review, N2).
+        if (f.optional && !declared.optional) problems.push(`marks \`${name}?\` optional but the schema requires it`)
+      }
+      for (const name of schemaFields.keys()) {
+        if (name === 'type' || name === 'sessionId') continue
+        if (!named.has(name)) problems.push(`omits schema field \`${name}\``)
+      }
+      return problems
+    }
+
+    const ENTRIES = parseRosterEntries(rosterSectionText())
+
+    /**
+     * Every `type: '<name>'` the section spells, by a LOOSER pattern than the parser's (quotes of any
+     * kind, optional quotes round the key, any spacing). A head the parser's strict pattern cannot
+     * read — `{type:"pong", serverTs?}` — leaves the pin silently, and nothing downstream notices
+     * a line that is simply absent from ENTRIES; this is the independent count that does.
+     */
+    function looseTypeMentions(text) {
+      return [...text.matchAll(/["']?\btype\b["']?\s*:\s*['"`]([A-Za-z0-9_]+)['"`]/g)].map((m) => m[1])
+    }
+
+    it('every `type: \'<name>\'` the section spells is parsed into an entry', () => {
+      const text = rosterSectionText()
+      assert.deepEqual(
+        ENTRIES.map((e) => e.type).sort(), looseTypeMentions(text).sort(),
+        'a roster head the parser cannot read (double quotes, no space after the brace, …) is dropped from the pin: write it as `{ type: \'<name>\', … }`',
+      )
+    })
+
+    it('CONTROL: the loose count sees a head the strict parser misses', () => {
+      const text = `{ type: 'a_frame', x }\n{type:"b_frame", y?}\n`
+      assert.deepEqual(parseRosterEntries(text).map((e) => e.type), ['a_frame'])
+      assert.deepEqual(looseTypeMentions(text), ['a_frame', 'b_frame'])
+    })
+
+    it('CONTROL: the roster section parses to a duplicate-free list', () => {
+      // No size floor here: the parse is held to an independent count above, and the registry to the
+      // roster below (every registered type must be listed), so an empty parse fails there already.
+      const seen = new Set()
+      const dupes = ENTRIES.filter((e) => seen.has(e.type) || !seen.add(e.type)).map((e) => e.type)
+      assert.deepEqual(dupes, [], 'a type listed twice would let one line dodge the pin')
+    })
+
+    it('every schema-backed roster line names exactly the schema fields', () => {
+      let pinned = 0
+      const problems = []
+      for (const entry of ENTRIES) {
+        const schemaFields = schemaFieldsFor(entry.type)
+        if (!schemaFields) continue
+        pinned++
+        const lacks = ROSTER_FIELDS_SCHEMA_LACKS.get(entry.type)?.fields ?? []
+        for (const p of rosterLineProblems(entry, schemaFields, lacks)) problems.push(`${entry.type}: ${p}`)
+      }
+      assert.ok(pinned > 0, 'no roster line was pinned')
+      assert.deepEqual(problems, [], 'roster line(s) disagree with their Server*Schema (edit the roster line; a producer-side field the schema lacks goes in ROSTER_FIELDS_SCHEMA_LACKS)')
+    })
+
+    /** Registered frame types that genuinely should not have a roster line. Empty today; entries are stale-checked. */
+    const ROSTER_EXEMPT_SCHEMA_TYPES = new Map()
+
+    function schemaTypesMissingFromRoster(listed, registered = SCHEMA_BACKED_OUTBOUND_TYPES, exempt = ROSTER_EXEMPT_SCHEMA_TYPES) {
+      return registered.filter((t) => !listed.has(t) && !exempt.has(t))
+    }
+
+    it('every registered Server*Schema frame type has a roster line (the reverse direction)', () => {
+      const listed = new Set(ENTRIES.map((e) => e.type))
+      assert.deepEqual(
+        schemaTypesMissingFromRoster(listed), [],
+        'a frame with a schema and no roster line is documented nowhere: add `{ type: \'<t>\', … }` to the Server -> Client roster',
+      )
+      // The registry is large by construction; a near-empty one would make the line above vacuous.
+      assert.ok(SCHEMA_BACKED_OUTBOUND_TYPES.length >= 150, 'registry undercounts')
+    })
+
+    it('a roster-exempt schema type is only valid while it is registered and still unlisted', () => {
+      const listed = new Set(ENTRIES.map((e) => e.type))
+      for (const [type, why] of ROSTER_EXEMPT_SCHEMA_TYPES) {
+        assert.ok(why.length > 20, `'${type}' needs a stated reason`)
+        assert.ok(SCHEMA_BACKED_OUTBOUND_TYPES.includes(type), `'${type}' is exempted but has no schema (stale)`)
+        assert.equal(listed.has(type), false, `'${type}' now has a roster line — drop its exemption`)
+      }
+    })
+
+    it('CONTROL: a registered type missing from the roster is reported, unless exempted', () => {
+      const listed = new Set(['a', 'b'])
+      assert.deepEqual(schemaTypesMissingFromRoster(listed, ['a', 'b', 'c'], new Map()), ['c'])
+      assert.deepEqual(schemaTypesMissingFromRoster(listed, ['a', 'b', 'c'], new Map([['c', 'a stated reason that is long enough']])), [])
+    })
+
+    it('the unpinned lines are exactly the types with no schema', () => {
+      const unpinned = ENTRIES.filter((e) => !schemaFieldsFor(e.type)).map((e) => e.type).sort()
+      assert.deepEqual(unpinned, [...UNSCHEMAD].sort(), 'the lines the pin cannot see must be the UNSCHEMAD allowlist, no more and no fewer')
+    })
+
+    it('a schema-gap exemption is only valid while the roster names the field and the schema still lacks it', () => {
+      for (const [type, { fields, why }] of ROSTER_FIELDS_SCHEMA_LACKS) {
+        assert.ok(why.length > 20, `'${type}' needs a stated reason`)
+        const entry = ENTRIES.find((e) => e.type === type)
+        const schemaFields = schemaFieldsFor(type)
+        assert.ok(entry && schemaFields, `'${type}' is exempted but is not a schema-backed roster line (stale)`)
+        for (const f of fields) {
+          assert.ok(entry.fields.some((x) => x.name === f), `'${type}.${f}' is exempted but the roster no longer names it (stale)`)
+          assert.equal(schemaFields.has(f), false, `'${type}.${f}' now HAS a schema field — drop its exemption`)
+        }
+      }
+    })
+
+    it('CONTROL: a roster line that omits a schema field is reported', () => {
+      const schema = new Map([['type', { optional: false }], ['a', { optional: false }], ['b', { optional: true }]])
+      assert.deepEqual(rosterLineProblems({ type: 'x', fields: [{ name: 'a', optional: false }] }, schema), ['omits schema field `b`'])
+    })
+
+    it('CONTROL: a roster line that names a field the schema lacks is reported, unless exempted', () => {
+      const schema = new Map([['type', { optional: false }], ['a', { optional: false }]])
+      const entry = { type: 'x', fields: [{ name: 'a', optional: false }, { name: 'ghost', optional: false }] }
+      assert.deepEqual(rosterLineProblems(entry, schema), ['names `ghost`, which the schema does not declare'])
+      assert.deepEqual(rosterLineProblems(entry, schema, ['ghost']), [])
+    })
+
+    it('CONTROL: `?` on a field the schema requires is reported; sessionId is ignored both ways', () => {
+      const schema = new Map([['type', { optional: false }], ['a', { optional: false }]])
+      const entry = { type: 'x', fields: [{ name: 'a', optional: true }, { name: 'sessionId', optional: false }] }
+      assert.deepEqual(rosterLineProblems(entry, schema), ['marks `a?` optional but the schema requires it'])
+      const withSid = new Map([...schema, ['sessionId', { optional: false }]])
+      assert.deepEqual(rosterLineProblems({ type: 'x', fields: [{ name: 'a', optional: false }] }, withSid), [])
+    })
+
+    it('CONTROL: `...` is not a way around the pin', () => {
+      const schema = new Map([['type', { optional: false }], ['a', { optional: false }]])
+      const problems = rosterLineProblems({ type: 'x', fields: [{ name: '...', optional: false }] }, schema)
+      assert.equal(problems.length, 2, `expected the \`...\` and the omitted field, got ${problems.join(' | ')}`)
+    })
+
+    it('CONTROL: the parser reads multi-line heads, [] and |null suffixes, nested braces and optionals', () => {
+      const text = [
+        "{ type: 'a_frame', one, two?, list[], name|null,",
+        "  nested: { x, y } | null, tail: [ { p, q } ] }  — prose with { braces } and, commas",
+        "{ type: 'b_frame' }",
+      ].join('\n')
+      const [a, b] = parseRosterEntries(text)
+      assert.deepEqual(a.fields.map((f) => f.name + (f.optional ? '?' : '')), ['one', 'two?', 'list', 'name', 'nested', 'tail'])
+      assert.deepEqual(b.fields, [])
+    })
+
+    it('CONTROL: the parser fails loud on a head it cannot close', () => {
+      assert.throws(() => parseRosterEntries("{ type: 'c_frame', a, b"), /never closes/)
+    })
+  })
+
   describe('validateOutbound', () => {
     it('accepts a well-formed frame', () => {
       const r = validateOutbound({ type: 'available_models', models: [], defaultModel: 'm', provider: null })

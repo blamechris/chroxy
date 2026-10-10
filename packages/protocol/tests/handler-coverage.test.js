@@ -43,14 +43,15 @@ const SYNTHETIC_TYPES = new Set([
   'raw',               // raw terminal output (server-internal)
   'raw_background',    // background agent raw output (server-internal)
   'user_input',        // echoed user input (server-internal)
-  'permission_resolved', // permission outcome (server-internal)
   'subscriptions_updated', // subscription ack (server-internal)
   'conversations_list',    // legacy alias for list response
   'search_results',        // legacy alias for search response
   'budget_resumed',        // budget resume ack (server-internal)
-  'budget_resume_ack',     // #5752 resume_budget positive ack — emitted from input-handlers.js (not the ws-server.js broadcast surface the extractor scans), handled by the shared store-core dispatch table
-  'cancel_activity_ack',   // #5277 cancel correlation ack — emitted from input-handlers.js (not the ws-server.js broadcast surface the extractor scans), handled by the dashboard
-  'billing_canary',        // #5821 live billing canary — broadcast from billing-canary-monitor.js (not the ws-server.js broadcast surface the extractor scans), handled by the dashboard; also seeded into auth_ok
+  // 'permission_resolved' / 'budget_resume_ack' / 'cancel_activity_ack' / 'billing_canary' removed
+  // (#7107): all four are real, schema-backed ServerMessageTypes the ws-server.js roster simply did
+  // not list — which is why they sat here as "emitted outside the surface the extractor scans".
+  // The roster now lists them (and ws-outbound-coverage.test.js fails on a schema-backed type it
+  // lacks), so they are checked by the main coverage tests below like every other frame.
   // 'thinking_level_changed' removed (#7803) — it IS a real ServerMessageType
   // (ServerThinkingLevelChangedSchema, #7795) and is now in the ws-server.js
   // roster, so it belongs in the main coverage checks, not here. Both clients
@@ -104,6 +105,12 @@ const INTENTIONALLY_UNHANDLED = new Set([
 // Key = message type, Value = which handler covers it.
 // ---------------------------------------------------------------------------
 const PLATFORM_SPECIFIC = {
+  // #7107: both were SCHEMA-BACKED frames the ws-server.js roster did not list, so this guard never
+  // asked about them. Listing them surfaced the gap: only the dashboard handles them (its billing
+  // banner, #5821, and the Control Room activity-cancel correlation, #5277). The mobile app has
+  // neither surface; an unknown type falls through its graceful default case.
+  billing_canary: 'dashboard',
+  cancel_activity_ack: 'dashboard',
   // #7625: the failed-restore roster + retry ack. Dashboard-only for the same
   // reason as the environment_* family above — the surface is a host-level
   // operator console, and the mobile app has no non-session-scoped list to host

@@ -41,9 +41,9 @@ export const ServerGitStatusResultSchema = z.object({
     untracked: z.array(z.string()),
     error: z.string().nullable(),
 });
-// `git_branches` response. NOTE the wire field is `currentBranch` (the
-// ws-server.js doc comment's `current` is stale). App-only today (the dashboard
-// has no git_branches_result handler).
+// `git_branches` response. NOTE the wire field is `currentBranch` (not `current`);
+// the ws-server.js roster line is pinned to this schema by ws-outbound-coverage.test.js.
+// App-only today (the dashboard has no git_branches_result handler).
 export const ServerGitBranchesResultSchema = z.object({
     type: z.literal('git_branches_result'),
     branches: z.array(z.object({
