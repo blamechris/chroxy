@@ -39,6 +39,7 @@ import {
   mcpWriteScopeToSource,
   planAddMcpServerToConfig,
   removeMcpServerFromConfig,
+  mcpSourceToWriteScope,
   toMcpServerMetadata,
   validateMcpServerNameForRemoval,
   validateNewMcpServerName,
@@ -665,11 +666,14 @@ export class ClaudeByokSession extends BaseSession {
     if (this._mcpFleet) return this._mcpFleet.getServerStatuses()
     return this._mcpServerConfigs.map((cfg) => {
       const disabled = this._disabledMcpServers.has(cfg.name)
+      const scope = mcpSourceToWriteScope(cfg.source)
       return {
         name: cfg.name,
         status: disabled ? 'disabled' : 'configured',
         enabled: !disabled,
         canToggle: true,
+        // #7028: same rule as the fleet's snapshot — present only when known.
+        ...(scope ? { scope } : {}),
       }
     })
   }

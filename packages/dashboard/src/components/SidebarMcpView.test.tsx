@@ -236,6 +236,61 @@ describe('SidebarMcpView remove action (#6999)', () => {
     expect(mockRemoveMcpServer).toHaveBeenCalledWith('filesystem', 'project', expect.any(Function))
   })
 
+  // #7028: when the server reports the scope a server is defined in, the confirm
+  // step pre-selects it. It is a reported fact, not a guess, and the user still
+  // has to click Remove and then Confirm.
+  describe('reported scope (#7028)', () => {
+    const scoped = (name: string, scope: 'user' | 'project'): McpServer => ({ name, status: 'connected', scope })
+
+    it.each(['user', 'project'] as const)('pre-selects the reported "%s" scope and enables confirm', (scope) => {
+      render(<SidebarMcpView servers={[scoped('filesystem', scope)]} />)
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+      const select = screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem') as HTMLSelectElement
+      expect(select.value).toBe(scope)
+      const btn = screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem') as HTMLButtonElement
+      expect(btn.disabled).toBe(false)
+      expect(screen.getByTestId('sidebar-mcp-view-remove-hint-filesystem').textContent).toMatch(
+        new RegExp(`Removes filesystem from ${scope} scope only`),
+      )
+      // The "could not determine" explanation is for the unreported case only.
+      expect(screen.getByTestId('sidebar-mcp-view-remove-hint-filesystem').textContent).not.toMatch(/doesn't report/)
+    })
+
+    it('Confirm targets the pre-selected scope without the user touching the select', () => {
+      render(<SidebarMcpView servers={[scoped('filesystem', 'project')]} />)
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
+      expect(mockRemoveMcpServer).toHaveBeenCalledTimes(1)
+      expect(mockRemoveMcpServer).toHaveBeenCalledWith('filesystem', 'project', expect.any(Function))
+    })
+
+    it('the user can still override the pre-selection, and Confirm then targets the override', () => {
+      render(<SidebarMcpView servers={[scoped('filesystem', 'project')]} />)
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+      fireEvent.change(screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem'), { target: { value: 'user' } })
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-filesystem'))
+      expect(mockRemoveMcpServer).toHaveBeenCalledWith('filesystem', 'user', expect.any(Function))
+    })
+
+    it('reopening the confirm step after a cancel resets to the reported scope, not the abandoned override', () => {
+      render(<SidebarMcpView servers={[scoped('filesystem', 'project')]} />)
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+      fireEvent.change(screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem'), { target: { value: 'user' } })
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-cancel-filesystem'))
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))
+      expect((screen.getByTestId('sidebar-mcp-view-remove-scope-filesystem') as HTMLSelectElement).value).toBe('project')
+    })
+
+    it('a row whose entry has no scope still opens with nothing selected and Confirm disabled', () => {
+      render(<SidebarMcpView servers={[scoped('known', 'user'), srv('unknown', 'connected')]} />)
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-unknown'))
+      expect((screen.getByTestId('sidebar-mcp-view-remove-scope-unknown') as HTMLSelectElement).value).toBe('')
+      expect((screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-unknown') as HTMLButtonElement).disabled).toBe(true)
+      fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-confirm-btn-unknown'))
+      expect(mockRemoveMcpServer).not.toHaveBeenCalled()
+    })
+  })
+
   it('a failed removal (callback ok:false) surfaces the server message and returns to the confirm step', () => {
     render(<SidebarMcpView servers={[srv('filesystem', 'connected')]} />)
     fireEvent.click(screen.getByTestId('sidebar-mcp-view-remove-filesystem'))

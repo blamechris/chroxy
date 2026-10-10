@@ -20,6 +20,7 @@ import {
   defaultTrustStorePath,
 } from './byok-mcp-trust.js'
 import { MCP_PREFIX, parseMcpToolName } from './mcp-tools.js'
+import { mcpSourceToWriteScope } from './byok-mcp-config.js'
 
 export const FLEET_KILL_GRACE_MS = 2000
 
@@ -217,20 +218,29 @@ export class MCPFleet {
    */
   getServerStatuses() {
     return this._configs.map((cfg) => {
+      // #7028: the config scope this server's definition lives in, as a
+      // `remove_mcp_server` scope ('user' | 'project'). Spread in only when
+      // known — a config with no origin, or one defined in `<cwd>/.mcp.json`
+      // (not removable), carries NO `scope` key rather than a guess. When the
+      // same name is defined in more than one scope this is the scope of the
+      // definition in effect (discovery's precedence winner), because that is
+      // the single config the fleet holds for the name.
+      const scope = mcpSourceToWriteScope(cfg.source)
+      const scoped = scope ? { scope } : {}
       if (this._disabled.has(cfg.name)) {
-        return { name: cfg.name, status: 'disabled', enabled: false, canToggle: true }
+        return { name: cfg.name, status: 'disabled', enabled: false, canToggle: true, ...scoped }
       }
       const client = this._clients.find((c) => c.name === cfg.name)
       // #6822: a remote server awaiting OAuth reports `oauth-required` + the
       // browser authorization URL (never a token/secret), so the client can
       // render an "Authorize" affordance instead of a bare failure.
       if (client && client.needsAuthorization) {
-        const entry = { name: cfg.name, status: 'oauth-required', enabled: true, canToggle: true }
+        const entry = { name: cfg.name, status: 'oauth-required', enabled: true, canToggle: true, ...scoped }
         if (client.authorizationUrl) entry.authUrl = client.authorizationUrl
         return entry
       }
       const status = client ? mcpStateToStatus(client.state) : 'connecting'
-      return { name: cfg.name, status, enabled: true, canToggle: true }
+      return { name: cfg.name, status, enabled: true, canToggle: true, ...scoped }
     })
   }
 

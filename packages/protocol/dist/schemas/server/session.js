@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import { MAX_SANE_DURATION_MS } from "./connection.js";
 import { ServerPendingBackgroundShellSchema } from "./stream.js";
+import { McpConfigScopeSchema } from "../client.js";
 // #6901: single-source the Codex sandbox enum so the `codexSandbox` field below
 // stays in lockstep with the create-time `create_session` control (client.ts)
 // and the server's `resolveCodexSandbox` — same list, one place.
@@ -97,6 +98,18 @@ export const ServerMcpServersSchema = z.object({
         // ONLY the public authorization URL — never a token/verifier/secret.
         // Optional (present only on the oauth-required entry).
         authUrl: z.string().optional(),
+        // #7028: the config scope this server is defined in, in the SAME vocabulary
+        // `remove_mcp_server` / `add_mcp_server` take ('user' = root `mcpServers`,
+        // 'project' = `projects[<cwd>].mcpServers`), so a client can hand it
+        // straight back — removal is scope-exact (a wrong scope reports
+        // MCP_SERVER_NOT_FOUND). Optional and ABSENT, never guessed, whenever it is
+        // not known or not removable: a server reported by a provider runtime with
+        // no config origin, or one defined only in `<cwd>/.mcp.json` (not a
+        // writable scope). When a name is defined in more than one scope this is
+        // the scope of the definition in effect (the highest-precedence one — the
+        // one that actually runs); a shadowed same-name definition in another scope
+        // is not reported. Also lets a pre-#7028 emitter round-trip.
+        scope: McpConfigScopeSchema.optional(),
     })),
 });
 export const ServerPlanStartedSchema = z.object({

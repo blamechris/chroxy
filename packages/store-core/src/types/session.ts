@@ -296,6 +296,12 @@ export interface McpServer {
   // user opens to authorize this remote MCP server. Carries only the public URL
   // (never a token/secret). Absent for every other status.
   authUrl?: string;
+  // #7028: the config scope this server is defined in, in the vocabulary
+  // `remove_mcp_server` takes (removal is scope-exact). Absent — never guessed —
+  // when unknown or when the definition is not removable (`<cwd>/.mcp.json`,
+  // or a provider-runtime server with no config origin). A name defined in
+  // several scopes reports the scope of the definition in effect.
+  scope?: 'user' | 'project';
 }
 
 export interface DevPreview {
