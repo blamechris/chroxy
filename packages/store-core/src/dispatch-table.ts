@@ -140,6 +140,7 @@ import {
   buildPermissionOutcomeMessage,
   // --- user_question (#5618) — byte-identical parse + append + notify ---
   handleUserQuestion,
+  reviveHeldPrompt,
   OTHER_OPTION_VALUE,
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
   handleMultiQuestionIntervention,
@@ -2259,7 +2260,14 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // supersede the freshly minted `chatMessage.id` is discarded, and recording it
   // would protect a message that is not in the array while leaving the revived
   // one stampable by the sweep.
-  let survivingId = chatMessage.id
+  //
+  // #7509 F4 — a LIVE supersede revives EVERY copy it matches, so more than one id
+  // can survive; the ledger below names all of them.
+  let survivingIds: string[] = [chatMessage.id]
+  // #7509 F6 — whether this dispatch added a NEW prompt. A supersede (or a replayed
+  // copy collapsing onto the held one) is a correction of a question the person
+  // was already told about, so only an append raises the notification.
+  let appended = true
   if (sessionId && adapter.hasSession(sessionId)) {
     adapter.updateSession(sessionId, (ss) => {
       // #7508 F2 — search only the view a rebuild will KEEP. During a full
@@ -2297,20 +2305,31 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
       // PermissionManager and providers mint their own tool ids, so a clash is
       // not expected -- but a dropped question is silent and unrecoverable,
       // while one extra card is not, so the replayed branch pays for the check.
-      const found = hasToolUseId
-        ? searchable.findIndex(
-            (m) =>
-              m.type === 'prompt' &&
-              m.toolUseId === toolUseId &&
-              (!deliveredByReplay || sameQuestions(m.questions, chatMessage.questions)),
-          )
-        : -1
-      const idx = found === -1 ? -1 : found + offset
-      const held = idx === -1 ? undefined : ss.messages[idx]
-      if (!held) return { messages: [...ss.messages, chatMessage] } as Partial<S>
-      survivingId = held.id
-      const heldAnswered = held.answered
+      //
+      // #7509 F4 — every match, not the first: a delta replay can leave two copies
+      // of one question (`user_question` frames bypass `isReplayDuplicate`), and a
+      // live re-delivery must not revive one and leave a stale '(resolved)' twin.
+      // The permission path has always mapped over every copy carrying the id.
+      const matches: number[] = []
+      if (hasToolUseId) {
+        searchable.forEach((m, i) => {
+          if (
+            m.type === 'prompt' &&
+            m.toolUseId === toolUseId &&
+            (!deliveredByReplay || sameQuestions(m.questions, chatMessage.questions))
+          ) {
+            matches.push(i + offset)
+          }
+        })
+      }
+      if (matches.length === 0) return { messages: [...ss.messages, chatMessage] } as Partial<S>
+      appended = false
       if (deliveredByReplay) {
+        // A replayed copy only ever adjusts the first held bubble (see below).
+        const idx = matches[0] as number
+        const held = ss.messages[idx] as ChatMessage
+        survivingIds = [held.id]
+        const heldAnswered = held.answered
         // The held bubble stays as it is — its id, its age, and above all its
         // `answered`, which may be a real decision the replay knows nothing of.
         // The one thing a replayed copy may add is the server's verdict that the
@@ -2360,15 +2379,31 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
       // late second answer is dropped as an unmapped toolUseId. So carry a real
       // token across, and clear only the placeholder. A LIVE frame proves the
       // question is pending again, which is why it may also clear "interrupted".
-      const keepAnswered =
-        heldAnswered !== undefined &&
-        heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER &&
-        !isQuestionNoAnswerToken(heldAnswered)
-      next[idx] = {
-        ...chatMessage,
-        id: held.id,
-        timestamp: held.timestamp,
-        ...(keepAnswered ? { answered: heldAnswered } : {}),
+      //
+      // #7509 F5 — through `reviveHeldPrompt`, the merge the permission path
+      // shares: held copy as the base, the re-sent frame refreshing what it names,
+      // id/timestamp always the held ones. Each copy decides `keepAnswered` for
+      // itself, so a real answer on one twin survives next to a revived sibling.
+      survivingIds = []
+      for (const idx of matches) {
+        const held = ss.messages[idx] as ChatMessage
+        survivingIds.push(held.id)
+        const heldAnswered = held.answered
+        const keepAnswered =
+          heldAnswered !== undefined &&
+          heldAnswered !== REPLAY_RESOLVED_PLACEHOLDER &&
+          !isQuestionNoAnswerToken(heldAnswered)
+        const revived = reviveHeldPrompt(held, chatMessage, { keepAnswered })
+        // #7509 N1 — `answeredAnswers` is keyed by question TEXT. The held-base
+        // merge carries it across with the kept answer, but a re-send that rewords
+        // (or reshapes) the questions leaves a map no question matches, and the
+        // multi-question chip then renders blank labels. The flat `answered`
+        // summary stays truthful, so drop only the map -- which is what the old
+        // replace-with-the-fresh-message did.
+        if (keepAnswered && revived.answeredAnswers && !sameQuestions(held.questions, chatMessage.questions)) {
+          delete revived.answeredAnswers
+        }
+        next[idx] = revived
       }
       return { messages: next } as Partial<S>
     })
@@ -2378,13 +2413,19 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   // Recorded AFTER the write so the surviving id is known, and still recorded
   // for a session the store holds nothing for — `noteLivePromptDuringReplay`
   // reads no store state, so only the statement order moved.
-  if (!deliveredByReplay) noteLivePromptDuringReplay(sessionId, survivingId)
+  if (!deliveredByReplay) {
+    for (const id of survivingIds) noteLivePromptDuringReplay(sessionId, id)
+  }
   // #8336 (and #8470, a superseded one) — an ended question is a correction, not a new question: it
   // arrives replayed (in place, or as the tail copy that carries the verdict past
   // a delta cursor) for a question the person was already told about, and nothing
   // is waiting on them. Notifying "has a question" for it, on a session they are
   // not looking at, is a false alarm that fires again on every such replay.
-  if (sessionId && !isQuestionNoAnswerToken(chatMessage.answered)) {
+  //
+  // #7509 F6 — and a supersede is the same kind of correction: the server re-asserts
+  // every pending question after EVERY replay, so a flapping connection would
+  // otherwise re-raise the ping once per pending question per reconnect.
+  if (appended && sessionId && !isQuestionNoAnswerToken(chatMessage.answered)) {
     adapter.pushSessionNotification(sessionId, 'question', questionText)
   }
 }

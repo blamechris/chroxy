@@ -782,6 +782,8 @@ export {
   // #8374 — a `permission_resolved` applied to its prompt message, the ONE place
   // both clients decide that a Stop-cancelled prompt is `stopped`, not denied.
   applyPermissionResolved,
+  // #7509 F5 — the one merge both prompt re-delivery paths share.
+  reviveHeldPrompt,
   PERMISSION_STOPPED_REASON,
   PERMISSION_ABORTED_REASON,
   // #8470 — a question a newer one replaced (the question variant of the frame).

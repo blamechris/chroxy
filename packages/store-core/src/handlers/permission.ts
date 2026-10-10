@@ -242,6 +242,39 @@ export function applyPermissionResolved(
 }
 
 /**
+ * #7509 F5 -- the ONE merge rule for re-delivering a prompt the client already
+ * holds: a re-sent `permission_request` (keyed on `requestId`) and a
+ * re-delivered `user_question` (keyed on `toolUseId`) both land here.
+ *
+ * The held copy is the base, so every field it carries that the incoming copy
+ * does not name survives -- the next field added to a prompt ChatMessage is kept
+ * on BOTH paths instead of on whichever one spelled it out. `incoming` overlays
+ * the fields the re-delivery refreshes (an explicit `undefined` clears). The
+ * bubble's identity -- `id`, `timestamp` -- always stays the held one, so it
+ * neither moves nor re-ages.
+ *
+ * `answered` is decided by the RE-DELIVERY, never inherited: it is `incoming.answered`
+ * (absent counts as cleared -- a re-delivery proves the prompt is pending again, and
+ * a replay-end placeholder must not ride along). A caller that holds a real decision
+ * token passes `keepAnswered` to carry it across instead.
+ *
+ * Returns a new message; the caller owns finding it.
+ */
+export function reviveHeldPrompt(
+  held: ChatMessage,
+  incoming: Partial<ChatMessage>,
+  options: { keepAnswered?: boolean } = {},
+): ChatMessage {
+  return {
+    ...held,
+    ...incoming,
+    id: held.id,
+    timestamp: held.timestamp,
+    answered: options.keepAnswered ? held.answered : incoming.answered,
+  }
+}
+
+/**
  * Parsed payload from a `permission_outcome` message (#8348): the server's
  * durable record of how a permission prompt ended, delivered inside a history
  * replay (the live `permission_*` frames are transient and are not replayed).

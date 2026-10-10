@@ -34,6 +34,7 @@ import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSpy, createMockSessionManager } from './test-helpers.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import { replayHistory, resendPendingQuestions } from '../src/ws-history.js'
 import { PermissionManager, wirePermissionManager } from '../src/permission-manager.js'
 import { BaseSession } from '../src/base-session.js'
@@ -524,6 +525,113 @@ describe('getPendingQuestions — BaseSession default (#7457)', () => {
     assert.deepEqual(session.getPendingQuestions(), [])
     session.destroy?.()
   })
+})
+
+// ── #7509 F7: a provider that cannot answer a follow-up read ───────────────
+
+describe('replayHistory — a provider whose follow-up read fails (#7509 F7)', () => {
+  /**
+   * Run a replay under an `uncaughtException` listener and a log listener.
+   * `finishReplay` runs in a `setImmediate` continuation, so an unguarded throw
+   * there is not a caught error -- it is an uncaught exception on the event loop.
+   */
+  async function replayCapturing(ctx, ws, parks) {
+    const uncaught = []
+    const entries = []
+    const onUncaught = (err) => uncaught.push(err)
+    const onLog = (entry) => entries.push(entry)
+    // node:test installs its own uncaughtException handler; ours must run FIRST
+    // and swallow, so the assertion below is the reported failure.
+    const prior = process.listeners('uncaughtException')
+    process.removeAllListeners('uncaughtException')
+    process.on('uncaughtException', onUncaught)
+    addLogListener(onLog)
+    try {
+      replayHistory(ctx, ws, 'sess-1')
+      // A parked (>1 chunk) replay finishes a turn later than a one-chunk one.
+      await new Promise((r) => setImmediate(r))
+      if (parks) await new Promise((r) => setImmediate(r))
+      await new Promise((r) => setImmediate(r))
+    } finally {
+      removeLogListener(onLog)
+      process.removeListener('uncaughtException', onUncaught)
+      for (const l of prior) process.on('uncaughtException', l)
+    }
+    return { uncaught, entries }
+  }
+
+  const errorsMentioning = (entries, method) =>
+    entries.filter((e) => e.level === 'error' && e.message.includes(method) && e.message.includes('sess-1'))
+
+  for (const parks of [false, true]) {
+    const path = parks ? 'a parked (>1 chunk) replay' : 'a one-chunk replay'
+
+    it(`logs a throwing getPendingQuestions() and still finishes the replay -- ${path}`, async () => {
+      const history = parks
+        ? Array.from({ length: 25 }, (_, i) => ({ type: 'response', content: `m${i}`, _seq: i + 1 }))
+        : [{ type: 'response', content: 'hi', _seq: 1 }]
+      const manager = managerWithPending(history, [])
+      manager.getSession('sess-1').session.getPendingQuestions = () => {
+        throw new Error('custom provider blew up')
+      }
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      const { uncaught, entries } = await replayCapturing(ctx, ws, parks)
+
+      assert.deepEqual(uncaught.map((e) => e.message), [], 'must not escape as an uncaught exception')
+      assert.ok(ctx._sends.some((m) => m.type === 'history_replay_end'), 'the replay still finished')
+      const logged = errorsMentioning(entries, 'getPendingQuestions')
+      assert.equal(logged.length, 1, `the failure must be logged with session id + method; got ${JSON.stringify(entries.map((e) => e.message))}`)
+      assert.ok(logged[0].message.includes('custom provider blew up'))
+    })
+
+    // The non-array branch: a custom provider that answers, but not with a list.
+    // `for...of undefined` would throw inside the setImmediate continuation, so
+    // the helper reports it instead.
+    it(`logs a getPendingQuestions() that returns a non-array (undefined) and still finishes -- ${path}`, async () => {
+      const history = parks
+        ? Array.from({ length: 25 }, (_, i) => ({ type: 'response', content: `m${i}`, _seq: i + 1 }))
+        : [{ type: 'response', content: 'hi', _seq: 1 }]
+      const manager = managerWithPending(history, [])
+      manager.getSession('sess-1').session.getPendingQuestions = () => undefined
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      const { uncaught, entries } = await replayCapturing(ctx, ws, parks)
+
+      assert.deepEqual(uncaught.map((e) => e.message), [])
+      assert.ok(ctx._sends.some((m) => m.type === 'history_replay_end'), 'the replay still finished')
+      assert.equal(ctx._sends.filter((m) => m.type === 'user_question').length, 0, 'nothing is re-sent')
+      const logged = errorsMentioning(entries, 'getPendingQuestions')
+      assert.equal(logged.length, 1, `must be logged with session id + method; got ${JSON.stringify(entries.map((e) => e.message))}`)
+      assert.ok(logged[0].message.includes('expected an array'))
+    })
+
+    it(`logs a provider that LACKS getActiveAgents() and still runs the later follow-ups -- ${path}`, async () => {
+      const history = parks
+        ? Array.from({ length: 25 }, (_, i) => ({ type: 'response', content: `m${i}`, _seq: i + 1 }))
+        : [{ type: 'response', content: 'hi', _seq: 1 }]
+      // The pending question comes AFTER the failing reseed in finishReplay, so
+      // it only lands if one failure does not abort the rest.
+      const manager = managerWithPending(history, [{ toolUseId: 'ask-1', questions: QUESTIONS }])
+      delete manager.getSession('sess-1').session.getActiveAgents
+      const ws = makeFakeWs()
+      const ctx = makeCtx({ sessionManager: manager })
+      registerClient(ctx, ws)
+
+      const { uncaught, entries } = await replayCapturing(ctx, ws, parks)
+
+      assert.deepEqual(uncaught.map((e) => e.message), [])
+      assert.equal(errorsMentioning(entries, 'getActiveAgents').length, 1, 'a missing method is logged, never a silent no-op')
+      const types = ctx._sends.map((m) => m.type)
+      const endIdx = types.indexOf('history_replay_end')
+      assert.ok(endIdx >= 0)
+      assert.ok(types.indexOf('user_question') > endIdx, 'the question re-send after the failed reseed still ran')
+    })
+  }
 })
 
 // ── Roster guard: every replay-end that can sweep a LIVE session ───────────
