@@ -1130,16 +1130,16 @@ describe('outbound message sequence numbers', () => {
     await waitForMessage(messages1, 'client_joined')
     // #5555: the connect-time auth_bootstrap burst is fire-and-forget, so it can
     // land AFTER the broadcast. Settle it on BOTH clients first, otherwise a late
-    // burst frame lands between `discovered_sessions` and the post-broadcast ping
+    // burst frame lands between `broadcast_test_probe` and the post-broadcast ping
     // below and the seq assertions race it.
     await waitForMessage(messages1, 'auth_bootstrap', 1000)
     await waitForMessage(messages2, 'auth_bootstrap', 1000)
 
     // Broadcast a message — each client gets their own seq
-    server.broadcast({ type: 'discovered_sessions', tmux: [] })
+    server.broadcast({ type: 'broadcast_test_probe', tmux: [] })
 
-    const disc1 = await waitForMessage(messages1, 'discovered_sessions')
-    const disc2 = await waitForMessage(messages2, 'discovered_sessions')
+    const disc1 = await waitForMessage(messages1, 'broadcast_test_probe')
+    const disc2 = await waitForMessage(messages2, 'broadcast_test_probe')
     assert.ok(disc1, 'Client 1 should receive broadcast')
     assert.ok(disc2, 'Client 2 should receive broadcast')
 

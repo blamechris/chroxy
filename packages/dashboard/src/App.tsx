@@ -1490,7 +1490,7 @@ export function App() {
   // #6285 — clear a stranded "Creating…" spinner if the socket drops mid-create.
   // The socket onclose only resets ~12 transient flags, NOT isCreatingSession, and
   // a closed-socket createSession is a silent no-op — so a drop between Create-click
-  // and the server's session_created/session_error reply would wedge the spinner
+  // and the server's session_switched/session_error reply would wedge the spinner
   // forever. Reset it and surface a retryable error the moment connectionPhase
   // leaves 'connected' while a create is in flight.
   useEffect(() => {
@@ -2259,7 +2259,7 @@ export function App() {
     // #6285 — only latch the "Creating…" spinner when the request actually went
     // on the wire. createSession is a silent no-op when the socket is closed; if
     // we latched unconditionally the spinner would wedge forever (no
-    // session_created / session_error reply ever arrives to clear it). On a
+    // session_switched / session_error reply ever arrives to clear it). On a
     // closed socket, surface a retryable error instead.
     const sent = createSession({ name: data.name, cwd: data.cwd || undefined, provider: data.provider, model: data.model, permissionMode: data.permissionMode, worktree: data.worktree, skipPermissions: data.skipPermissions })
     if (sent) {

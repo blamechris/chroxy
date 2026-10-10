@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
@@ -56,7 +56,6 @@ const UNSCHEMAD = new Set([
   'confirm_permission_mode',
   'dev_preview',
   'dev_preview_stopped',
-  'discovered_sessions',
   'file_list',
   'file_listing',
   'history_replay_end',
@@ -68,7 +67,6 @@ const UNSCHEMAD = new Set([
   'server_mode',
   'server_status',
   'session_context',
-  'session_created',
   'session_destroyed',
   'session_role',
   'session_switched',
@@ -89,6 +87,91 @@ function rosterTypes() {
     for (const m of line.matchAll(/\{\s*type:\s*'([a-z0-9_]+)'/g)) found.add(m[1])
   }
   return [...found].sort()
+}
+
+const SERVER_SRC = join(HERE, '..', 'src')
+const REPO_ROOT = join(HERE, '..', '..', '..')
+
+/**
+ * #7109 — the roster is hand-written prose, so nothing stops it documenting a frame
+ * the server never sends. `discovered_sessions` and `session_created` both sat in it
+ * (and in UNSCHEMAD) for years as phantoms: documented, allowlisted, and never emitted.
+ *
+ * The first sweep missed `session_created` because it matched the BARE STRING, and the
+ * string is everywhere — as a `SessionManager` EventEmitter event, which is not a wire
+ * frame. A bare-string match cannot tell the two apart. A wire frame is built as an
+ * object with a `type:` key, so that is the form this matches.
+ */
+
+/** Drop whole-line comments, so a type named only in prose (the roster itself included) is not a producer. */
+function stripCommentLines(text) {
+  return text
+    .split('\n')
+    .filter((l) => {
+      const t = l.trimStart()
+      return !(t.startsWith('*') || t.startsWith('//') || t.startsWith('/*'))
+    })
+    .join('\n')
+}
+
+/** All of packages/server/src as code: no comments, so the roster and prose are not producers. */
+function serverSourceCode() {
+  const out = []
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name)
+      if (statSync(p).isDirectory()) walk(p)
+      else if (p.endsWith('.js')) out.push(stripCommentLines(readFileSync(p, 'utf8')))
+    }
+  }
+  walk(SERVER_SRC)
+  return out.join('\n')
+}
+
+/**
+ * True when `code` builds a wire frame of `type`: an object with `type: '<t>'`, or a
+ * `broadcastType: '<t>'` (per-session-settings.js builds three frames from that field).
+ * An EventEmitter `emit('<t>')` or a `.on('<t>')` deliberately does NOT match.
+ */
+function buildsWireFrame(code, type) {
+  return new RegExp(`\\b(?:type|broadcastType)\\s*:\\s*['"\`]${type}['"\`]`).test(code)
+}
+
+/**
+ * Roster types the server source does not spell as a `type:` literal, each for a stated
+ * reason and each CHECKED: every anchor must still match, so an exemption cannot outlive
+ * the code it points at.
+ */
+const NO_SERVER_TYPE_LITERAL = new Map([
+  ['permission_request', {
+    why: 'built by the protocol builder buildPermissionRequestMessage, which the event normalizer calls',
+    anchors: [
+      ['packages/protocol/src/schemas/server/stream.ts', /\btype:\s*'permission_request'/],
+      ['packages/server/src/event-normalizer.js', /buildPermissionRequestMessage\(/],
+    ],
+  }],
+  ['extension_message', {
+    why: 'RESERVED, NEVER SENT: the outbound arm of the extension framework has a schema and is documented, but ' +
+      'no session emits it today (the server only RECEIVES extension_message). Distinct from #7109\'s phantoms, ' +
+      'which had no schema and no purpose; whether to delete it is its own decision.',
+    anchors: [
+      ['packages/protocol/src/schemas/server/billing.ts', /type:\s*z\.literal\('extension_message'\)/],
+      ['packages/server/src/handlers/feature-handlers.js', /\bextension_message:\s*handleExtensionMessage/],
+    ],
+  }],
+  ['web_feature_status', {
+    why: 'CONSUMED, NEVER SENT: no server producer (its data ships as auth_ok.webFeatures) but both clients ' +
+      'dispatch on it through store-core. Not a phantom — deleting it breaks working code.',
+    anchors: [
+      ['packages/store-core/src/dispatch-table.ts', /\bweb_feature_status:\s*dispatchWebFeatureStatus/],
+      ['packages/server/src/ws-history.js', /\bwebFeatures:\s*webTaskManager\.getFeatureStatus\(\)/],
+    ],
+  }],
+])
+
+/** Roster types with no producer and no verified exemption. */
+function phantomRosterTypes(roster, code, exempt = NO_SERVER_TYPE_LITERAL, transport = TRANSPORT_FRAMES) {
+  return roster.filter((t) => !transport.has(t) && !exempt.has(t) && !buildsWireFrame(code, t))
 }
 
 describe('#7085 outbound schema coverage', () => {
@@ -206,6 +289,61 @@ describe('#7085 outbound schema coverage', () => {
     // reading `.value` before `_def.values` would have been a module-load crash.
     const multi = z.object({ type: z.literal(['m_one', 'm_two']) })
     assert.deepEqual([...typeLiteralsOf(multi)].sort(), ['m_one', 'm_two'])
+  })
+
+  describe('#7109 no phantom frames in the roster', () => {
+    it('every documented frame is built somewhere in the server source', () => {
+      const phantoms = phantomRosterTypes(rosterTypes(), serverSourceCode())
+      assert.deepEqual(
+        phantoms, [],
+        `documented in the ws-server.js roster but NO PRODUCER CANDIDATE found (no server code spells a { type: '<t>' } frame): ${phantoms.join(', ')}. ` +
+        '(Green means a candidate exists, not that the send is reachable.) ' +
+        'Delete the roster line (and any allowlist entry), or — if it is consumed but built by a ' +
+        'helper — add a checked entry to NO_SERVER_TYPE_LITERAL.',
+      )
+    })
+
+    it('CONTROL: an EventEmitter event of the same name is not mistaken for a frame', () => {
+      // The exact false negative of the first sweep: `session_created` is emitted by
+      // SessionManager, so the bare string is all over the tree. It must still be flagged.
+      const code = "this.emit('session_created', { sessionId })\nmgr.on('session_created', () => {})\n"
+      assert.deepEqual(phantomRosterTypes(['session_created'], code, new Map(), new Map()), ['session_created'])
+      assert.deepEqual(
+        phantomRosterTypes(['session_created'], code + "send({ type: 'session_created', sessionId })\n", new Map(), new Map()),
+        [],
+        'a real { type: ... } frame is a producer',
+      )
+      assert.deepEqual(
+        phantomRosterTypes(['x_changed'], "def({ broadcastType: 'x_changed' })\n", new Map(), new Map()), [],
+        'a broadcastType field builds a frame',
+      )
+    })
+
+    it('CONTROL: prose naming a type is not a producer', () => {
+      const code = stripCommentLines("/**\n * { type: 'ghost_frame', a } — documented\n */\n// type: 'ghost_frame'\nconst x = 1\n")
+      assert.deepEqual(phantomRosterTypes(['ghost_frame'], code, new Map(), new Map()), ['ghost_frame'])
+    })
+
+    it('an exemption is only valid while every one of its anchors still matches', () => {
+      for (const [type, { why, anchors }] of NO_SERVER_TYPE_LITERAL) {
+        assert.ok(why.length > 20, `'${type}' needs a stated reason`)
+        for (const [file, re] of anchors) {
+          assert.ok(
+            re.test(readFileSync(join(REPO_ROOT, file), 'utf8')),
+            `exemption for '${type}': ${file} no longer matches ${re} — the exemption is stale`,
+          )
+        }
+      }
+    })
+
+    it('an exemption is removed once the server does build the frame', () => {
+      const code = serverSourceCode()
+      const roster = new Set(rosterTypes())
+      for (const type of NO_SERVER_TYPE_LITERAL.keys()) {
+        assert.ok(roster.has(type), `'${type}' is exempted but not in the roster (stale)`)
+        assert.equal(buildsWireFrame(code, type), false, `'${type}' is now built as a { type } literal — drop its exemption`)
+      }
+    })
   })
 
   describe('validateOutbound', () => {

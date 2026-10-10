@@ -61,7 +61,6 @@ const FORWARDED_TYPES = new Set([
   'agent_idle',
   'session_error',
   'session_switched',
-  'session_created',
   'session_destroyed',
   'session_stopped',
   'session_restore_failed',

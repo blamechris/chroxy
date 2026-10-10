@@ -856,10 +856,10 @@ describe('public broadcast method', () => {
     send(ws, { type: 'auth', token: 'test-token' })
     await waitForMessage(messages, 'auth_ok', 2000)
 
-    // Use public broadcast to send discovered_sessions
-    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'test-session', cwd: '/tmp', pid: 123 }] })
+    // Use public broadcast to send broadcast_test_probe
+    server.broadcast({ type: 'broadcast_test_probe', tmux: [{ sessionName: 'test-session', cwd: '/tmp', pid: 123 }] })
 
-    const discoveryMsg = await waitForMessage(messages, 'discovered_sessions')
+    const discoveryMsg = await waitForMessage(messages, 'broadcast_test_probe')
     assert.ok(discoveryMsg, 'Client should receive broadcast message')
     assert.equal(discoveryMsg.tmux.length, 1)
     assert.equal(discoveryMsg.tmux[0].sessionName, 'test-session')
@@ -881,10 +881,10 @@ describe('public broadcast method', () => {
     const { ws, messages } = await createClient(port, false)
     await new Promise(r => setTimeout(r, 100))
 
-    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'test-session', cwd: '/tmp', pid: 123 }] })
+    server.broadcast({ type: 'broadcast_test_probe', tmux: [{ sessionName: 'test-session', cwd: '/tmp', pid: 123 }] })
     await new Promise(r => setTimeout(r, 100))
 
-    const discoveryMsg = messages.find(m => m.type === 'discovered_sessions')
+    const discoveryMsg = messages.find(m => m.type === 'broadcast_test_probe')
     assert.ok(!discoveryMsg, 'Unauthenticated client should NOT receive broadcast')
 
     ws.close()
@@ -930,11 +930,11 @@ describe('public broadcast method', () => {
     // connection message order is preserved by WebSocket, so once a client
     // sees the marker we know any earlier tunnel_warming for that client
     // has already arrived — or was correctly suppressed.
-    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: '__marker__' }] })
+    server.broadcast({ type: 'broadcast_test_probe', tmux: [{ sessionName: '__marker__' }] })
 
     await waitForMessageMatch(
       oldClient.messages,
-      (m) => m.type === 'discovered_sessions' && m.tmux?.[0]?.sessionName === '__marker__',
+      (m) => m.type === 'broadcast_test_probe' && m.tmux?.[0]?.sessionName === '__marker__',
       2000,
       'marker on v1 client',
     )
@@ -1421,9 +1421,9 @@ describe('broadcast backpressure', () => {
     const { ws, messages } = await createClient(port, true)
 
     // Verify normal broadcast works
-    server.broadcast({ type: 'discovered_sessions', tmux: [] })
-    await waitFor(() => messages.find(m => m.type === 'discovered_sessions'), { label: 'normal broadcast' })
-    assert.ok(messages.find(m => m.type === 'discovered_sessions'), 'Should receive broadcast when under threshold')
+    server.broadcast({ type: 'broadcast_test_probe', tmux: [] })
+    await waitFor(() => messages.find(m => m.type === 'broadcast_test_probe'), { label: 'normal broadcast' })
+    assert.ok(messages.find(m => m.type === 'broadcast_test_probe'), 'Should receive broadcast when under threshold')
 
     // Stub bufferedAmount to simulate backpressure
     const clientWs = [...server.clients.keys()][0]
@@ -1434,7 +1434,7 @@ describe('broadcast backpressure', () => {
     const originalSend = server._send.bind(server)
     server._send = (ws, msg) => { sendCalls.push({ ws, msg }); return originalSend(ws, msg) }
 
-    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'bp-test' }] })
+    server.broadcast({ type: 'broadcast_test_probe', tmux: [{ sessionName: 'bp-test' }] })
 
     const clientSends = sendCalls.filter(call => call.ws === clientWs)
     assert.equal(clientSends.length, 0, 'Should NOT send broadcast to client when over backpressure threshold')
@@ -1442,9 +1442,9 @@ describe('broadcast backpressure', () => {
 
     // Restore bufferedAmount and verify broadcast resumes
     Object.defineProperty(clientWs, 'bufferedAmount', { get: () => 0, configurable: true })
-    server.broadcast({ type: 'discovered_sessions', tmux: [{ sessionName: 'resumed' }] })
+    server.broadcast({ type: 'broadcast_test_probe', tmux: [{ sessionName: 'resumed' }] })
     const resumedMsg = await waitFor(
-      () => messages.find(m => m.type === 'discovered_sessions' && m.tmux?.[0]?.sessionName === 'resumed'),
+      () => messages.find(m => m.type === 'broadcast_test_probe' && m.tmux?.[0]?.sessionName === 'resumed'),
       { label: 'resumed broadcast' }
     )
     assert.ok(resumedMsg, 'Should receive broadcast after backpressure clears')

@@ -288,7 +288,6 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `server_status` | Non-error status update (e.g., recovery) |
 | `session_activity` | Session busy state change (isBusy, lastCost) — global broadcast |
 | `session_context` | Context info for specific session |
-| `session_created` | New session created |
 | `session_destroyed` | Session removed |
 | `session_error` | Session operation error |
 | `session_list` | All available sessions |
