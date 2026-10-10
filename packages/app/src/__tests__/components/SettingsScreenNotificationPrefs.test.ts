@@ -7,6 +7,15 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  NOTIFICATION_CATEGORIES,
+  NOTIFICATION_CATEGORY_LABELS as PROTOCOL_LABELS,
+  NOTIFICATION_CATEGORY_ORDER as PROTOCOL_ORDER,
+} from '@chroxy/protocol';
+import {
+  NOTIFICATION_CATEGORY_LABELS,
+  NOTIFICATION_CATEGORY_ORDER,
+} from '../../components/settings/constants';
 
 // #5655: the notification-prefs / quiet-hours / per-device UI was extracted
 // from SettingsScreen.tsx into `src/components/settings/*`. These static-
@@ -74,28 +83,42 @@ describe('SettingsScreen — Notification categories section (#4542)', () => {
     expect(settingsSource).toMatch(/Loading preferences/);
   });
 
-  it('labels every category from the server-side RATE_LIMITS enum', () => {
-    // These labels MUST exist so the mobile-side stays in sync with
-    // packages/server/src/notification-prefs.js ALL_CATEGORIES.
-    expect(settingsSource).toMatch(/permission:.*Permission requests/);
-    expect(settingsSource).toMatch(/result:.*Task completion/);
-    expect(settingsSource).toMatch(/activity_update:.*Activity updates/);
-    expect(settingsSource).toMatch(/activity_waiting:.*Waiting for input/);
-    expect(settingsSource).toMatch(/activity_error:.*Session errors/);
-    expect(settingsSource).toMatch(/inactivity_warning:.*Inactivity warnings/);
-    expect(settingsSource).toMatch(/live_activity:.*Live Activity/);
-    // #5435: external-session categories fed by POST /api/events (#5413).
-    expect(settingsSource).toMatch(/session_online:.*External session online/);
-    expect(settingsSource).toMatch(/session_offline:.*External session offline/);
-    expect(settingsSource).toMatch(/session_activity:.*External session activity/);
+  it('takes its roster from @chroxy/protocol, not a local copy (#7429)', () => {
+    // The labels + order are the SAME objects the dashboard imports, so the two
+    // clients cannot drift. The server's ALL_CATEGORIES is pinned to that
+    // roster, in both directions, by
+    // packages/server/tests/notification-category-roster.test.js.
+    expect(NOTIFICATION_CATEGORY_LABELS).toBe(PROTOCOL_LABELS);
+    expect(NOTIFICATION_CATEGORY_ORDER).toBe(PROTOCOL_ORDER);
   });
 
-  it('includes the external-session categories in the render order (#5435)', () => {
-    // The order array drives rendering; a label without an order slot would
-    // fall through to the unknown-key tail and jitter on every snapshot.
-    expect(settingsSource).toMatch(
-      /NOTIFICATION_CATEGORY_ORDER\s*=\s*\[[\s\S]{0,600}'session_online',\s*\n\s*'session_offline',\s*\n\s*'session_activity',/,
-    );
+  it('labels every category with a human label (no raw-key fallback)', () => {
+    // Refuse an empty roster — it would satisfy every loop below.
+    expect(NOTIFICATION_CATEGORIES.length).toBeGreaterThanOrEqual(10);
+    const unlabelled = NOTIFICATION_CATEGORIES.map((c) => c.key).filter((key) => {
+      const label = NOTIFICATION_CATEGORY_LABELS[key]?.label;
+      return !label || label === key;
+    });
+    expect(unlabelled).toEqual([]);
+    // Spot-check the wording the Maestro flows and users see.
+    expect(NOTIFICATION_CATEGORY_LABELS.permission?.label).toBe('Permission requests');
+    expect(NOTIFICATION_CATEGORY_LABELS.result?.label).toBe('Task completion');
+    expect(NOTIFICATION_CATEGORY_LABELS.live_activity?.label).toBe('Live Activity (iOS)');
+    expect(NOTIFICATION_CATEGORY_LABELS.ci_complete?.label).toBe('CI results');
+    // #5435: external-session categories fed by POST /api/events (#5413).
+    expect(NOTIFICATION_CATEGORY_LABELS.session_online?.label).toBe('External session online');
+    expect(NOTIFICATION_CATEGORY_LABELS.session_offline?.label).toBe('External session offline');
+    expect(NOTIFICATION_CATEGORY_LABELS.session_activity?.label).toBe('External session activity');
+  });
+
+  it('gives every labelled category exactly one render slot (#5435)', () => {
+    // A label without an order slot would fall through to the unknown-key tail
+    // and jitter on every snapshot.
+    expect([...NOTIFICATION_CATEGORY_ORDER].sort()).toEqual(Object.keys(NOTIFICATION_CATEGORY_LABELS).sort());
+    expect(new Set(NOTIFICATION_CATEGORY_ORDER).size).toBe(NOTIFICATION_CATEGORY_ORDER.length);
+    const order = [...NOTIFICATION_CATEGORY_ORDER];
+    expect(order.indexOf('session_online')).toBeLessThan(order.indexOf('session_offline'));
+    expect(order.indexOf('session_offline')).toBeLessThan(order.indexOf('session_activity'));
   });
 
   it('passes the toggled value through Switch.onValueChange to setNotificationPrefsCategory', () => {

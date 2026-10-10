@@ -34,6 +34,7 @@ import {
 } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import { isMacPlatform } from '../utils/platform'
+import { NOTIFICATION_CATEGORY_LABELS, NOTIFICATION_CATEGORY_ORDER } from '@chroxy/protocol'
 import { getTauriInvoke } from '../utils/tauri-bridge'
 import {
   getTunnelMode,
@@ -124,91 +125,13 @@ export function describePermissionAuditEntry(entry: PermissionAuditEntry): strin
 const CURRENT_DEVICE_CLEAR_CONFIRM_MESSAGE =
   'Clear your per-device overrides? Notifications on this device will fall back to global defaults.'
 
-/**
- * #4542: friendly labels + ordering for the per-category notification
- * toggles. Keys MUST match the server-side `ALL_CATEGORIES` enum from
- * packages/server/src/notification-prefs.js (mirrors RATE_LIMITS in
- * push.js). Unknown keys from the snapshot fall back to the raw key name
- * so a future server-side category isn't silently hidden.
- */
-const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?: string }> = {
-  permission: {
-    label: 'Permission requests',
-    hint: 'Tool-use prompts that need an allow / deny decision.',
-  },
-  result: {
-    label: 'Task completion',
-    hint: 'Sent when a Claude turn finishes and no one is watching.',
-  },
-  activity_update: {
-    label: 'Activity updates',
-    hint: 'Foreground task progress while you are away.',
-  },
-  activity_waiting: {
-    label: 'Waiting for input',
-    hint: 'Claude asked a question or is paused on a prompt.',
-  },
-  activity_error: {
-    label: 'Session errors',
-    hint: 'Crashes, tunnel drops, and unrecoverable session failures.',
-  },
-  inactivity_warning: {
-    label: 'Inactivity warnings',
-    hint: 'Heads-up before a long-idle session is auto-paused.',
-  },
-  // #5828: billing canary early-warnings (silent metered default, claude-tui
-  // reclassification, datacenter egress).
-  billing_warning: {
-    label: 'Billing alerts',
-    hint: 'Metered-credit and datacenter-egress warnings from the billing canary.',
-  },
-  live_activity: {
-    label: 'Live Activity (iOS)',
-    hint: 'iOS Dynamic Island / lock-screen Live Activity updates.',
-  },
-  // #5413 Phase 3: external-session categories fed by POST /api/events.
-  session_online: {
-    label: 'External session online',
-    hint: 'An external session reported in via /api/events.',
-  },
-  session_offline: {
-    label: 'External session offline',
-    hint: 'An external session ended or went away.',
-  },
-  session_activity: {
-    label: 'External session activity',
-    hint: 'Subagent and tool activity from external sessions.',
-  },
-  // Mailbox live-interrupt: "new mail" pings fed by POST /api/mailbox.
-  mailbox: {
-    label: 'Mailbox',
-    hint: 'New agent-to-agent mailbox messages waiting for a session.',
-  },
-  // #7424: CI runs settling on a session's pull request.
-  ci_complete: {
-    label: 'CI results',
-    hint: 'A CI run finished on the pull request a session opened.',
-  },
-}
-
-/** Render order for known categories. Unknown keys append at the end in snapshot order. */
-const NOTIFICATION_CATEGORY_ORDER = [
-  'permission',
-  'activity_waiting',
-  'activity_error',
-  'activity_update',
-  'inactivity_warning',
-  'billing_warning',
-  'result',
-  // External-session categories (#5413) grouped together, ahead of the
-  // platform-specific Live Activity entry which stays last.
-  'session_online',
-  'session_offline',
-  'session_activity',
-  'mailbox',
-  'ci_complete',
-  'live_activity',
-]
+// #4542 / #7429: the per-category labels + render order are NOT defined here —
+// both clients import the one roster in `@chroxy/protocol`
+// (`notification-categories.ts`), and the server's `ALL_CATEGORIES` is pinned
+// to it in both directions by
+// `packages/server/tests/notification-category-roster.test.js`. Unknown keys
+// from the snapshot fall back to the raw key name (after the known ones) so a
+// category from a newer server isn't silently hidden.
 
 /**
  * #4544: documented defaults for the quiet-hours bypass list. Mirrors

@@ -120,6 +120,7 @@ export * from './codex.ts'
 // for the same reason as `./codex.ts`: `./schemas/client.ts` composes the
 // predicate for `set_thinking_level` without a circular import through this
 // entry, and store-core / the clients import it without pulling in Zod.
+export * from './notification-categories.ts'
 export * from './thinking-levels.ts'
 
 // #7822: one canonical serializer keeps the dashboard and mobile wire shape
