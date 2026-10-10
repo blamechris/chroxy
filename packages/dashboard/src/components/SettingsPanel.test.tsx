@@ -6,9 +6,8 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
-import fs from 'node:fs'
-import path from 'node:path'
 import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
+import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES } from '@chroxy/protocol'
 import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
 
 // Mock theme-engine
@@ -1384,8 +1383,8 @@ describe('SettingsPanel', () => {
     }
     const defaultPrefs = { categories, devices: {}, quietHours: null }
 
-    // Wording copied verbatim from packages/app/src/screens/SettingsScreen.tsx
-    // (#5435) — change both together or not at all.
+    // Wording from the shared @chroxy/protocol roster (#7429) — the mobile app
+    // renders the same strings, so it can no longer drift from this panel.
     const expectedLabels: Record<string, { label: string; hint: string }> = {
       session_online: {
         label: 'External session online',
@@ -1433,31 +1432,21 @@ describe('SettingsPanel', () => {
     })
   })
 
-  describe('Notification preferences — label sync with server ALL_CATEGORIES (#5446)', () => {
-    // Hardening: parse the canonical category enum straight out of
-    // packages/server/src/notification-prefs.js so a future server-side
-    // addition fails HERE (and in the mirror check below) instead of
-    // silently shipping a raw-key row in the unknown tail — the exact gap
-    // #5435 (mobile) and #5446 (dashboard) had to close after #5413.
-    function parseServerCategories(): string[] {
-      const src = fs.readFileSync(
-        path.resolve(__dirname, '../../../server/src/notification-prefs.js'),
-        'utf-8',
-      )
-      const m = src.match(/export const ALL_CATEGORIES = Object\.freeze\(\[([\s\S]*?)\]\)/)
-      if (!m) {
-        throw new Error(
-          'ALL_CATEGORIES not found in packages/server/src/notification-prefs.js — update this sync test',
-        )
-      }
-      return [...m[1]!.matchAll(/'([^']+)'/g)].map((hit) => hit[1]!)
-    }
-    const allCategories = parseServerCategories()
+  describe('Notification preferences — roster is the shared @chroxy/protocol one (#5446, #7429)', () => {
+    // #7429: the dashboard no longer parses the server source (a regex over
+    // text) or keeps its own label list. The roster is the ONE exported by
+    // @chroxy/protocol, and the server's ALL_CATEGORIES is pinned to it in both
+    // directions by packages/server/tests/notification-category-roster.test.js —
+    // so a server-only addition fails THERE, by name, instead of rendering a
+    // raw-key row here. What this block proves is that the component honours the
+    // roster: a label for every category, and a render slot for every one.
+    const allCategories: string[] = [...NOTIFICATION_CATEGORY_ORDER]
 
-    it('parses a sane category list from the server source', () => {
+    it('has a sane shared roster (refuses an empty one, which would pass every loop below)', () => {
       expect(allCategories.length).toBeGreaterThanOrEqual(10)
       expect(allCategories).toContain('permission')
-      expect(allCategories).toContain('session_activity')
+      expect(allCategories).toContain('ci_complete')
+      expect(new Set(allCategories).size).toBe(allCategories.length)
     })
 
     it('renders a friendly label for every server category (no raw-key fallback)', () => {
@@ -1474,6 +1463,25 @@ describe('SettingsPanel', () => {
         // The unknown-key tail renders the raw key as the label text.
         expect(toggle.closest('label')?.textContent).not.toBe(cat)
       }
+    })
+
+    it('renders every category, with its shared label, in the shared order', () => {
+      setMockState({
+        notificationPrefs: {
+          categories: Object.fromEntries(allCategories.map((c) => [c, true])),
+          devices: {},
+          quietHours: null,
+        },
+      })
+      render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      const toggles = screen.getAllByTestId(/^notification-prefs-toggle-/)
+      expect(toggles.map((el) => el.getAttribute('data-testid')!.replace('notification-prefs-toggle-', ''))).toEqual(
+        allCategories,
+      )
+      // The row's own text is the label, never the raw key.
+      expect(toggles.map((el) => el.closest('label')?.textContent)).toEqual(
+        NOTIFICATION_CATEGORIES.map((c) => c.label),
+      )
     })
 
     it('gives every server category an order slot (renders ahead of unknown keys)', () => {
@@ -1503,26 +1511,6 @@ describe('SettingsPanel', () => {
       expect(sentinelIdx).toBeGreaterThan(-1)
       for (const cat of allCategories) {
         expect(rendered.indexOf(cat), `order slot for ${cat}`).toBeLessThan(sentinelIdx)
-      }
-    })
-
-    it('mobile SettingsScreen also labels every server category (cross-client guard)', () => {
-      // Same guard for the other client, asserted from one place so a new
-      // server category cannot fall into the raw-key tail on either UI.
-      // NOTIFICATION_CATEGORY_LABELS was lifted from SettingsScreen.tsx into
-      // packages/app/src/components/settings/constants.ts (#5658).
-      const mobileSource = fs.readFileSync(
-        path.resolve(__dirname, '../../../app/src/components/settings/constants.ts'),
-        'utf-8',
-      )
-      const m = mobileSource.match(/const NOTIFICATION_CATEGORY_LABELS[^=]*=\s*\{([\s\S]*?)\n\};/)
-      if (!m) {
-        throw new Error(
-          'NOTIFICATION_CATEGORY_LABELS not found in packages/app/src/components/settings/constants.ts — update this sync test',
-        )
-      }
-      for (const cat of allCategories) {
-        expect(m[1], `mobile label for ${cat}`).toMatch(new RegExp(`\\b${cat}:`))
       }
     })
   })

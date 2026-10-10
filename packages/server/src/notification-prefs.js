@@ -62,7 +62,10 @@ import { configPath } from './config-dir.js'
  * Authoritative category list. MUST stay in sync with the keys of
  * `RATE_LIMITS` in `push.js` — these are the categories the server can
  * fire today. The schema-coverage test asserts every category has a
- * default.
+ * default. It is also pinned, in both directions, to the client roster
+ * (labels + render order) in `@chroxy/protocol`
+ * (`notification-categories.ts`) by `tests/notification-category-roster.test.js`
+ * (#7429): add a new category there too, or that test names the one missing.
  *
  * History: the issue text (#4541) sketches `permission / question / error /
  * result / inactivity` as user-facing labels; the wire-level set below is

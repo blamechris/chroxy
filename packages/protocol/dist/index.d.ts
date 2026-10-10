@@ -82,6 +82,7 @@ export declare const CLAUDE_TUI_PTY_MIN_SIZE: Readonly<{
     rows: 24;
 }>;
 export * from './codex.ts';
+export * from './notification-categories.ts';
 export * from './thinking-levels.ts';
 export { computeHunks, splitContentLines, DEFAULT_CONTEXT_LINES, MAX_DIFF_LINES } from './hunk-diff.ts';
 export type { DiffHunk, DiffHunkLine } from './hunk-diff.ts';

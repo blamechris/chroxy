@@ -1,4 +1,8 @@
 import type { VoiceInputMode } from '@chroxy/store-core';
+import {
+  NOTIFICATION_CATEGORY_LABELS as PROTOCOL_NOTIFICATION_CATEGORY_LABELS,
+  NOTIFICATION_CATEGORY_ORDER as PROTOCOL_NOTIFICATION_CATEGORY_ORDER,
+} from '@chroxy/protocol';
 
 /**
  * Shared constants for SettingsScreen and its extracted section components.
@@ -8,50 +12,19 @@ import type { VoiceInputMode } from '@chroxy/store-core';
  */
 
 /**
- * #4542: friendly labels for per-category notification toggles. Keys MUST
- * match the server-side `ALL_CATEGORIES` enum from notification-prefs.js
- * (mirrors RATE_LIMITS in push.js). Unknown keys fall back to the raw key
- * so a future server-side category is never silently hidden.
+ * #4542 / #7429: friendly labels + render order for the per-category
+ * notification toggles. The roster is NOT written here: both clients import
+ * the one in `@chroxy/protocol` (`notification-categories.ts`), and the
+ * server's `ALL_CATEGORIES` is pinned to it in both directions by
+ * `packages/server/tests/notification-category-roster.test.js`. Add a category
+ * there, not here. Unknown keys from a newer server fall back to the raw key
+ * (and render after the known ones) so a category is never silently hidden.
  */
-export const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?: string }> = {
-  permission: { label: 'Permission requests', hint: 'Tool-use prompts awaiting allow / deny.' },
-  result: { label: 'Task completion', hint: 'Sent when a Claude turn finishes unattended.' },
-  activity_update: { label: 'Activity updates', hint: 'Foreground task progress when you are away.' },
-  activity_waiting: { label: 'Waiting for input', hint: 'Claude paused on a question or prompt.' },
-  activity_error: { label: 'Session errors', hint: 'Crashes, tunnel drops, fatal session failures.' },
-  inactivity_warning: { label: 'Inactivity warnings', hint: 'Heads-up before a long-idle session is paused.' },
-  // #5828: billing canary early-warnings (silent metered default, claude-tui
-  // reclassification, datacenter egress).
-  billing_warning: { label: 'Billing alerts', hint: 'Metered-credit and datacenter-egress warnings from the billing canary.' },
-  live_activity: { label: 'Live Activity (iOS)', hint: 'iOS Dynamic Island / lock-screen updates.' },
-  // #5413 Phase 3: external-session categories fed by POST /api/events.
-  session_online: { label: 'External session online', hint: 'An external session reported in via /api/events.' },
-  session_offline: { label: 'External session offline', hint: 'An external session ended or went away.' },
-  session_activity: { label: 'External session activity', hint: 'Subagent and tool activity from external sessions.' },
-  // Mailbox live-interrupt: "new mail" pings fed by POST /api/mailbox.
-  mailbox: { label: 'Mailbox', hint: 'New agent-to-agent mailbox messages waiting for a session.' },
-  // #7424: CI runs settling on a session's pull request.
-  ci_complete: { label: 'CI results', hint: 'A CI run finished on the pull request a session opened.' },
-};
+export const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?: string }> =
+  PROTOCOL_NOTIFICATION_CATEGORY_LABELS;
 
 /** Render order for known categories. Unknown keys append in snapshot order. */
-export const NOTIFICATION_CATEGORY_ORDER = [
-  'permission',
-  'activity_waiting',
-  'activity_error',
-  'activity_update',
-  'inactivity_warning',
-  'billing_warning',
-  'result',
-  // External-session categories (#5413) grouped together, ahead of the
-  // platform-specific Live Activity entry which stays last.
-  'session_online',
-  'session_offline',
-  'session_activity',
-  'mailbox',
-  'ci_complete',
-  'live_activity',
-];
+export const NOTIFICATION_CATEGORY_ORDER: readonly string[] = PROTOCOL_NOTIFICATION_CATEGORY_ORDER;
 
 /**
  * #4544: documented defaults for the quiet-hours bypass list. Mirrors
