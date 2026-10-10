@@ -3627,7 +3627,7 @@ describe('ClaudeTuiSession', () => {
       assert.deepEqual(result, { ok: false, reason: 'pty_exited' })
     })
 
-    it('sendMessage bails out via _finishTurnError when interrupt() fires during the probe wait', async () => {
+    it('sendMessage bails out via _finishTurnStopped when interrupt() fires during the probe wait', async () => {
       // Race: user clicks Stop while the readiness probe is still polling.
       // Without the abort guard, sendMessage would happily write the
       // prompt after interrupt() has already sent Ctrl-C, queuing a turn
@@ -3650,7 +3650,9 @@ describe('ClaudeTuiSession', () => {
       session._resultTimeoutMs = 5000
 
       const errors = []
+      const stopped = []
       session.on('error', (e) => errors.push(e))
+      session.on('stopped', () => stopped.push(true))
 
       // Fire interrupt() partway through the probe wait. No session
       // file is ever written so the probe is still polling when this
@@ -3669,8 +3671,9 @@ describe('ClaudeTuiSession', () => {
 
       assert.equal(promptWritten, false,
         'prompt MUST NOT be written after interrupt() during probe wait')
-      assert.ok(errors.find((e) => e.message === 'Stopped.'),
-        `expected the plain "Stopped." error, got: ${errors.map((e) => e.message).join(' | ')}`)
+      // #8558: a Stop the user asked for is the quiet stopped, not a red error.
+      assert.deepEqual(errors, [], `a requested Stop raises no error, got: ${errors.map((e) => e.message).join(' | ')}`)
+      assert.equal(stopped.length, 1, 'one quiet stopped')
       assert.equal(session._isBusy, false, 'busy cleared after probe-time abort')
       assert.equal(session._activeTurn, null, 'active turn cleared after probe-time abort')
     })

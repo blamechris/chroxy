@@ -177,10 +177,10 @@ const DENIED_QUESTION_REAPER_MS = ASK_USER_QUESTION_WATCHDOG_MS
 // and the run of them that becomes one `[REDACTED]` once escapes are scrubbed.
 const REDACTION_FILL = '\ue000'
 const REDACTION_RUN = /\ue000+(?:[ \n]+\ue000+)*/g
-const TURN_STOPPED_MESSAGE = 'Stopped.'
 const PTY_EXITED_MESSAGE = 'Claude exited — restarting.'
 const PTY_EXITED_BEFORE_PROMPT_MESSAGE = 'Claude exited before your message could be sent.'
 const PTY_EXITED_MID_TURN_MESSAGE = 'Claude exited mid-turn — restarting.'
+const PROMPT_EMPTY_MESSAGE = 'Your message was empty after removing control characters, so nothing was sent.'
 const PTY_RESPAWN_EXHAUSTED_MESSAGE = 'Claude kept exiting; stopped restarting it.'
 
 /**
@@ -2800,6 +2800,9 @@ export class ClaudeTuiSession extends BaseSession {
     // it (matches _clearTurnEndState / base _clearMessageState). On respawn the
     // next turn starts clean; on destroy _clearMessageState would clear it anyway.
     this._pendingBackgroundCommands.clear()
+    // #8558: a Stop requested for the turn that just died is spent with it. This
+    // path nulls the busy triple by hand and never reaches `_clearTurnEndState`.
+    this._resetStopRequestState()
     // #8379: the cross-turn BackgroundShellTracker is deliberately NOT cleared
     // here (contrast CliSession._killAndRespawn, #7611, which calls
     // _clearPendingBackgroundShells()). That clear is right only where chroxy
@@ -4714,7 +4717,7 @@ export class ClaudeTuiSession extends BaseSession {
     // still process the bytes once it returns to prompt). Bail cleanly.
     if (this._activeTurn?.aborted) {
       this._logPtyDiagnostic('turn aborted before prompt write', 'info')
-      this._finishTurnError(TURN_STOPPED_MESSAGE, messageId)
+      this._finishTurnStopped(messageId)
       reportInputAdmission(sendOptions, {
         status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
         reason: 'aborted', message: 'The turn was aborted before the prompt was written.',
@@ -4747,22 +4750,45 @@ export class ClaudeTuiSession extends BaseSession {
       // wrap is kept as defense-in-depth for any claude version that
       // DOES honor mode 2004; the throttle is what actually fixes the
       // bug. Same helper also serves respondToQuestion() (#4278).
+      // `_writePtyTextThrottled` calls `onAbort` for THREE different reasons, and
+      // only one of them is a Stop: the turn was aborted by `interrupt()`, the PTY
+      // died under the write, or the prompt sanitised to nothing (a control- or
+      // escape-only message). Only the first is a requested Stop (#8558); the
+      // other two stay errors, so a dead PTY is not announced as a quiet Stop and
+      // an empty prompt is not either. `abortCause` is read again below for the
+      // typed admission result.
+      let abortCause = null
       const completed = await this._writePtyTextThrottled(promptToSend, {
         onAbort: () => {
-          this._logPtyDiagnostic('turn aborted during prompt write', 'info')
-          this._finishTurnError(TURN_STOPPED_MESSAGE, messageId)
+          if (this._activeTurn?.aborted) {
+            abortCause = 'aborted'
+            this._logPtyDiagnostic('turn aborted during prompt write', 'info')
+            this._finishTurnStopped(messageId)
+          } else if (this._ptyExited) {
+            abortCause = 'pty_exited'
+            this._finishTurnWithoutStopHook(messageId, this._nowMonotonic())
+          } else {
+            abortCause = 'prompt_empty'
+            this._logPtyDiagnostic('prompt was empty after sanitising control characters; nothing written')
+            this._finishTurnError(PROMPT_EMPTY_MESSAGE, messageId)
+          }
         },
       })
-      // #5813: typed failure. _writePtyTextThrottled returns false for BOTH an
-      // aborted turn AND a mid-write PTY exit, so report the actual cause (#5848
-      // review) rather than always labelling it 'aborted'.
+      // #5813: typed failure. _writePtyTextThrottled returns false for an aborted
+      // turn, a mid-write PTY exit AND a prompt that sanitised to nothing, so
+      // report the actual cause (#5848 review) rather than always labelling it
+      // 'aborted'. `abortCause` is what `onAbort` decided; the fallback covers a
+      // write that returned false without calling it.
       if (!completed) {
-        const reason = this._ptyExited ? 'pty_exited' : 'aborted'
+        const reason = abortCause || (this._ptyExited ? 'pty_exited' : 'aborted')
+        const messages = {
+          pty_exited: 'The provider terminal exited before the prompt write completed.',
+          prompt_empty: 'The prompt was empty after removing control characters, so nothing was written.',
+          aborted: 'The turn was aborted before the prompt write completed.',
+        }
         reportInputAdmission(sendOptions, {
           status: 'rejected', delivery: 'not_dispatched', retrySafe: true, reason,
-          message: reason === 'pty_exited'
-            ? 'The provider terminal exited before the prompt write completed.'
-            : 'The turn was aborted before the prompt write completed.',
+          message: messages[reason],
         })
         return { ok: false, reason }
       }
@@ -5075,50 +5101,20 @@ export class ClaudeTuiSession extends BaseSession {
     log.info(`hookPoll exit (msg=${messageId} iters=${pollIters} elapsedMs=${this._nowMonotonic() - pollStart} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'} aborted=${this._activeTurn?.aborted ? 'yes' : 'no'} ptyExited=${this._ptyExited ? 'yes' : 'no'} stillBusy=${this._isBusy ? 'yes' : 'no'})`)
 
     if (!stopPayload) {
-      // #8252: `message` is what the chat shows; `diagnostic` is what the log
-      // gets alongside the terminal tail.
-      let message
-      let diagnostic
+      // #8558: a turn the user (or the scheduler / orchestration watchdog) stopped
+      // through `interrupt()` is not a failure. It ends as the quiet `stopped`
+      // every other provider sends, with no `error` and so no red card.
+      //
+      // This is checked on `_activeTurn`, and a PTY death nulls `_activeTurn`
+      // (`_onPtyGone`) -- so a Stop that coincides with the PTY dying is NOT a quiet
+      // stop. It falls through to the error below, which is the safe direction: the
+      // process the Stop was aimed at is gone, and the person should hear that.
       if (this._activeTurn?.aborted) {
-        message = TURN_STOPPED_MESSAGE
-        diagnostic = 'turn aborted'
-      } else if (this._ptyExited) {
-        const code = this._ptyExitInfo?.exitCode
-        const signal = this._ptyExitInfo?.signal
-        message = PTY_EXITED_MID_TURN_MESSAGE
-        diagnostic = `Claude PTY exited mid-turn (code=${code}${signal ? ` signal=${signal}` : ''})`
-      } else if (!this._isBusy) {
-        // _handleHardTimeout already cleared state + emitted its own
-        // error. Just return without double-firing.
-        return
-      } else {
-        const seconds = Math.round((this._nowMonotonic() - pollStart) / 1000)
-        message = `Claude did not finish responding (gave up after ${seconds}s).`
-        diagnostic = `Stop hook timeout after ${seconds}s`
-      }
-      this._logPtyDiagnostic(diagnostic, this._activeTurn?.aborted ? 'info' : 'warn')
-      // #8252 review: the tail used to ride in this message, so a login banner the
-      // TUI rendered was visible in the card. It is in the log now, so classify it
-      // here as the stall, first-output and hard-timeout paths do: an auth failure
-      // still gets its dedicated, actionable error. Not on a Stop the user asked
-      // for. The scan reads only what THIS turn printed (#8223).
-      const stopped = !!this._activeTurn?.aborted
-      const authFail = !stopped && this._scanTurnOutputForAuthFailure()
-      // #8441: and a usage limit that ended claude (or the turn) says so. The poll
-      // loop leaves on `_ptyExited` before it reads the transcript, so
-      // `_detectTurnUsageLimit` reads the transcript first and then this turn's PTY
-      // output, as the stall handlers do. Not on a Stop, and an auth failure wins.
-      const limit = stopped || authFail ? null : this._detectTurnUsageLimit()
-      if (limit) {
-        const payload = this._usageLimitPayload(limit)
-        this._finishTurnError(payload.message, messageId, { code: payload.code })
+        this._logPtyDiagnostic('turn aborted', 'info')
+        this._finishTurnStopped(messageId)
         return
       }
-      this._finishTurnError(
-        authFail ? AUTH_REQUIRED_MESSAGE : message,
-        messageId,
-        authFail ? { code: AUTH_REQUIRED_CODE } : undefined,
-      )
+      this._finishTurnWithoutStopHook(messageId, pollStart)
       return
     }
 
@@ -5542,6 +5538,19 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #8558: the turn is over, so a Stop requested during it is spent. Left armed,
+   * `_stopRequestedThisTurn` would tag the NEXT turn's cut-off tools `user_stop`
+   * and mark its result as a requested Stop, and `_intentionalStop` (which no
+   * child-close handler consumes here, unlike the subprocess providers) would
+   * stay true for the life of the session. BaseSession resets the first in
+   * `_clearMessageState`, which this provider's turn ends do not reach.
+   */
+  _resetStopRequestState() {
+    this._stopRequestedThisTurn = false
+    this._clearIntentionalStop()
+  }
+
+  /**
    * Common per-turn teardown shared by the success path and `_finishTurnError`
    * (audit P1-1). Both previously hand-rolled these clears and the success path
    * had DRIFTED — it omitted the AskUserQuestion sibling-lock clear and the
@@ -5602,12 +5611,95 @@ export class ClaudeTuiSession extends BaseSession {
     this._clearAskUserQuestionLock()
     this._clearAllAskUserQuestionWatchdogs()
     this._pendingBackgroundCommands.clear()
+    this._resetStopRequestState() // #8558
     this._markTurnOutputEnd() // #8454
     // #7327: the turn that just ended is the readiness edge most likely to
     // have written a fresh `message.model` to the transcript — re-scan and
     // tell clients if it changed. See `_refreshObservedModel` doc for why
     // this lives here rather than inside `getBackgroundTaskSnapshot()`.
     this._refreshObservedModel()
+  }
+
+  /**
+   * The turn ended with no Stop payload and nobody asked it to: the PTY died, or
+   * the poll loop ran out its budget. Reports an error and classifies it (auth
+   * failure, usage limit) from what THIS turn printed. Shared by the poll loop and
+   * the prompt-write abort so a PTY that dies mid-write reports exactly what one
+   * dying mid-poll does (#8558: the write path used to say "Stopped.").
+   *
+   * @param {string} messageId - the turn's id, for stream_end pairing
+   * @param {number} pollStart - monotonic start of the wait, for the give-up message
+   */
+  _finishTurnWithoutStopHook(messageId, pollStart) {
+    // #8252: `message` is what the chat shows; `diagnostic` is what the log
+    // gets alongside the terminal tail.
+    let message
+    let diagnostic
+    if (this._ptyExited) {
+      const code = this._ptyExitInfo?.exitCode
+      const signal = this._ptyExitInfo?.signal
+      message = PTY_EXITED_MID_TURN_MESSAGE
+      diagnostic = `Claude PTY exited mid-turn (code=${code}${signal ? ` signal=${signal}` : ''})`
+    } else if (!this._isBusy) {
+      // _handleHardTimeout already cleared state + emitted its own
+      // error. Just return without double-firing.
+      return
+    } else {
+      const seconds = Math.round((this._nowMonotonic() - pollStart) / 1000)
+      message = `Claude did not finish responding (gave up after ${seconds}s).`
+      diagnostic = `Stop hook timeout after ${seconds}s`
+    }
+    this._logPtyDiagnostic(diagnostic, 'warn')
+    // #8252 review: the tail used to ride in this message, so a login banner the
+    // TUI rendered was visible in the card. It is in the log now, so classify it
+    // here as the stall, first-output and hard-timeout paths do: an auth failure
+    // still gets its dedicated, actionable error. The scan reads only what THIS
+    // turn printed (#8223).
+    const authFail = this._scanTurnOutputForAuthFailure()
+    // #8441: and a usage limit that ended claude (or the turn) says so. The poll
+    // loop leaves on `_ptyExited` before it reads the transcript, so
+    // `_detectTurnUsageLimit` reads the transcript first and then this turn's PTY
+    // output, as the stall handlers do. An auth failure wins.
+    const limit = authFail ? null : this._detectTurnUsageLimit()
+    if (limit) {
+      const payload = this._usageLimitPayload(limit)
+      this._finishTurnError(payload.message, messageId, { code: payload.code })
+      return
+    }
+    this._finishTurnError(
+      authFail ? AUTH_REQUIRED_MESSAGE : message,
+      messageId,
+      authFail ? { code: AUTH_REQUIRED_CODE } : undefined,
+    )
+  }
+
+  /**
+   * #8558: end a turn the user asked to stop. The same wire shape every other
+   * provider gives a requested Stop: `stream_end`, then ONE terminal `result`
+   * marked `turnOutcome: 'stopped'`, and no `error`. BaseSession.emit does the
+   * rest because `interrupt()` armed the request (`_noteTurnStopRequested`): it
+   * drops the Stopped chip (a Stop somebody asked for is not a failure to
+   * announce), marks the result `interrupted: true` for an orchestration
+   * TurnDriver (#7072 / TURN_STOPPED), and sends the one quiet `stopped`.
+   *
+   * Reached ONLY for a turn `interrupt()` aborted. A PTY that died, a hard
+   * timeout, a stall watchdog and a destroy all keep `_finishTurnError` /
+   * `_teardownTurn`, and with them an `error` the person can see.
+   */
+  _finishTurnStopped(callerMessageId) {
+    this._assertBusyHasMessageId('_finishTurnStopped')
+    this._logSendMessageSummary('stopped')
+    // Same pairing rule as `_finishTurnError`: the caller's id first, because a
+    // PTY exit racing the Stop can null `_currentMessageId` before we get here.
+    const messageId = callerMessageId || this._currentMessageId
+    const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : 0
+    if (messageId) this.emit('stream_end', { messageId })
+    // The tools the Stop cut off were cut off, not failed (#7376).
+    this._emitResult(
+      { cost: null, duration, usage: null, sessionId: this._sessionId, turnOutcome: 'stopped', interrupted: true },
+      'user_stop',
+    )
+    this._clearTurnEndState()
   }
 
   _finishTurnError(message, callerMessageId, errorExtras) {
@@ -6602,6 +6694,7 @@ export class ClaudeTuiSession extends BaseSession {
     // #4307: drop the ephemeral intra-turn run_in_background tool_use→command
     // map on this turn-end too (matches _clearTurnEndState / base _clearMessageState).
     this._pendingBackgroundCommands.clear()
+    this._resetStopRequestState() // #8558
     this._markTurnOutputEnd() // #8454
     // 5. Error + result emit, in the order the caller requests. The two
     // existing callers disagree (hard-timeout: error first; stream-stall:
@@ -6673,6 +6766,15 @@ export class ClaudeTuiSession extends BaseSession {
   interrupt() {
     if (!this._activeTurn) return
     this._activeTurn.aborted = true
+    // #8558: a Stop somebody asked for. Arm BaseSession's requested-Stop
+    // machinery, as claude-cli / claude-sdk / byok do, so `_finishTurnStopped`'s
+    // `result` is confirmed with the one quiet `stopped` and not a red error.
+    // `_activeTurn.aborted` is still the discriminator that routes the turn end
+    // (it is set here and nowhere else); these two make BaseSession.emit treat
+    // the result as a requested Stop. Both are reset when the turn ends
+    // (`_resetStopRequestState`).
+    this.markIntentionalStop()
+    this._noteTurnStopRequested()
     if (this._term) {
       // Write Ctrl-C (0x03) to the PTY rather than killing the process.
       // Claude TUI intercepts it as "cancel current request, return to

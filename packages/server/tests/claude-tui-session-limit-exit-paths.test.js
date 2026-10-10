@@ -156,11 +156,15 @@ describe('claude-tui surfaces a usage limit from the exit paths (#8441)', () => 
     it('CONTROL: a Stop the user asked for is never relabelled as a limit', async () => {
       const { s, errors } = turnSession((x) => {
         x._appendToOutputTail(framed(SESSION_LIMIT))
-        x._activeTurn.aborted = true
+        x.interrupt()
       })
+      const stopped = []
+      s.on('stopped', () => stopped.push(true))
       await send(s)
-      assert.deepEqual(errors.map((e) => e.message), ['Stopped.'])
-      assert.equal('code' in errors[0], false)
+      // #8558: a requested Stop is a quiet stopped, not an error: so not the
+      // limit error either, and no error of any kind.
+      assert.deepEqual(errors, [])
+      assert.equal(stopped.length, 1)
     })
 
     it('CONTROL: a login failure still gets the dedicated auth error over a limit', async () => {

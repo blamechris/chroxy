@@ -232,6 +232,12 @@ export interface DispatchSessionBase {
   // session-scoped set. Both clients' real `SessionState` carry it.
   persistentRules?: PermissionRule[]
   isIdle?: boolean
+  // `stoppedAt` / `stoppedCode` — the quiet "Session stopped." marker
+  // (#4879). Written by session_stopped, cleared by claude_ready and by
+  // agent_busy (#8558: a turn beginning ends the stopped state). Both clients'
+  // real `SessionState` carry them.
+  stoppedAt?: number | null
+  stoppedCode?: number | null
   // --- slice 2 reads (epic #5556) ---
   // `activeAgents` — read+rewritten by agent_spawned / agent_completed
   // `pendingBackgroundShells` — read+rewritten by background_work_changed
@@ -1178,6 +1184,16 @@ function dispatchAgentBusy<S extends DispatchSessionBase>(
       // "Waiting on N background shells". `undefined` means the server never
       // sent a reason: that stays unknown, we do not invent one.
       if (ss.busyReason !== undefined && ss.busyReason !== 'turn') patch.busyReason = 'turn'
+      // #8558: a turn beginning ends the "Session stopped." state. `claude_ready`
+      // used to be the only thing that cleared it, but a provider that keeps its
+      // process across a Stop (claude-tui) sends `claude_ready` only on start,
+      // respawn and model change -- so the strip would have outlived every later
+      // turn. `agent_busy` is what every provider's `stream_start` is paired with.
+      // Only touched when set, so a session that was never stopped gains no fields.
+      if (ss.stoppedAt != null || ss.stoppedCode != null) {
+        patch.stoppedAt = null
+        patch.stoppedCode = null
+      }
       return patch as Partial<S>
     })
   }

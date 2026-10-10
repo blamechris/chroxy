@@ -386,6 +386,60 @@ describe('shared dispatch table', () => {
       dispatch(env, { type: 'agent_busy' })
       expect(Object.keys(env.sessions)).toHaveLength(0)
     })
+
+    // #8558: claude-tui ends a requested Stop with the quiet `session_stopped`
+    // and keeps its PTY, so it sends no `claude_ready` for the next turn (it only
+    // sends one on start, respawn and model change). `claude_ready` was the one
+    // thing that cleared the "Session stopped." strip, so on the default provider
+    // the strip would have stayed up through every later turn. A turn beginning
+    // (`agent_busy`, which every provider's `stream_start` is paired with) is the
+    // signal each of them emits, so it clears the strip too.
+    describe('a new turn clears the "Session stopped." strip (#8558)', () => {
+      const stoppedSession = (extra: Record<string, unknown> = {}) => ({
+        sessionId: 's1', messages: [], isIdle: true, ...extra,
+      })
+
+      it('claude-tui sequence: result -> agent_idle -> session_stopped, then the next turn starts', () => {
+        const env = makeAdapter({ sessions: { s1: stoppedSession() } })
+        dispatch(env, { type: 'agent_idle', sessionId: 's1' })
+        dispatch(env, { type: 'session_stopped', sessionId: 's1' })
+        expect(typeof env.sessions.s1.stoppedAt).toBe('number')
+        // Nothing between the Stop and the next send clears it: no claude_ready.
+        dispatch(env, { type: 'agent_idle', sessionId: 's1' })
+        expect(typeof env.sessions.s1.stoppedAt).toBe('number')
+
+        dispatch(env, { type: 'agent_busy', sessionId: 's1' })
+        expect(env.sessions.s1.stoppedAt).toBeNull()
+        expect(env.sessions.s1.stoppedCode).toBeNull()
+        expect(env.sessions.s1.isIdle).toBe(false)
+      })
+
+      it('clears a stopped marker that carries an exit code too', () => {
+        const env = makeAdapter({ sessions: { s1: stoppedSession({ stoppedAt: 1234, stoppedCode: 143 }) } })
+        dispatch(env, { type: 'agent_busy', sessionId: 's1' })
+        expect(env.sessions.s1.stoppedAt).toBeNull()
+        expect(env.sessions.s1.stoppedCode).toBeNull()
+      })
+
+      it('only the session whose turn began is cleared', () => {
+        const env = makeAdapter({
+          sessions: {
+            s1: stoppedSession({ stoppedAt: 1234, stoppedCode: 0 }),
+            s2: stoppedSession({ sessionId: 's2', stoppedAt: 5678, stoppedCode: 0 }),
+          },
+        })
+        dispatch(env, { type: 'agent_busy', sessionId: 's1' })
+        expect(env.sessions.s1.stoppedAt).toBeNull()
+        expect(env.sessions.s2.stoppedAt).toBe(5678)
+      })
+
+      it('leaves a session that was never stopped without invented fields', () => {
+        const env = makeAdapter({ sessions: { s1: stoppedSession() } })
+        dispatch(env, { type: 'agent_busy', sessionId: 's1' })
+        expect('stoppedAt' in env.sessions.s1).toBe(false)
+        expect('stoppedCode' in env.sessions.s1).toBe(false)
+      })
+    })
   })
 
   // -------------------------------------------------------------------------
