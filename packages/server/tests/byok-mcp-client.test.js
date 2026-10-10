@@ -39,18 +39,42 @@ async function waitForState(client, target, timeoutMs = 4000) {
   })
 }
 
-// Timer-free wait for a state transition. waitForState() arms a setTimeout, which
-// a recordTimerArms() spy would record alongside the client's own timers; tests
-// that assert on WHICH timers the client armed use this instead and rely on the
-// test runner's own timeout to bound a transition that never comes.
-function nextState(client, target) {
-  return new Promise((resolve) => {
-    const onState = ({ next }) => {
+// Captured at module load, BEFORE any test installs a recordTimerArms() spy on
+// global.setTimeout, so nextState()'s own ceiling is never recorded as one of the
+// client's timers.
+const realSetTimeout = setTimeout
+
+// Wait for a state transition without arming a recorded timer. waitForState()
+// arms through global.setTimeout, which a recordTimerArms() spy would record
+// alongside the client's own timers. The ceiling is generous and REJECTS: the
+// server suite runs with no --test-timeout, so a transition that never comes
+// (e.g. a restart delay mutated to 600000ms) must print `not ok`, not hang.
+function nextState(client, target, ceilingMs = 15_000) {
+  return new Promise((resolve, reject) => {
+    const timer = realSetTimeout(() => {
+      client.off('state', onState)
+      reject(new Error(`timeout waiting for state=${target}, got=${client.state}`))
+    }, ceilingMs)
+    function onState({ next }) {
       if (next !== target) return
+      clearTimeout(timer)
       client.off('state', onState)
       resolve()
     }
     client.on('state', onState)
+  })
+}
+
+// Bound a promise that only settles on a terminal client state (start() resolves
+// on READY or DEAD). With no --test-timeout on this suite, a restart delay that
+// regresses to minutes would otherwise HANG the run instead of failing it.
+function withCeiling(promise, ceilingMs, label) {
+  return new Promise((resolve, reject) => {
+    const timer = realSetTimeout(() => reject(new Error(`timeout (${ceilingMs}ms) waiting for ${label}`)), ceilingMs)
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v) },
+      (e) => { clearTimeout(timer); reject(e) },
+    )
   })
 }
 
@@ -87,7 +111,8 @@ describe('MCPClient', () => {
       // 5s-per-handshake wait.
       assert.equal(client._handshakeTimeoutMs, 200)
       const arms = recordTimerArms(t)
-      await client.start()
+      t.after(() => client.destroy()) // a failed wait must not leak a pending restart timer
+      await withCeiling(client.start(), 20_000, 'DEAD after repeated handshake timeouts')
       // start() resolves on DEAD. We DID hit DEAD via handshake timeouts, not
       // via spawn-failure (the stub spawns fine and just never answers).
       assert.equal(client.state, MCP_STATES.DEAD)
@@ -103,7 +128,8 @@ describe('MCPClient', () => {
       const client = new MCPClient(cfg, { log: silentLog() })
       assert.equal(client._handshakeTimeoutMs, 200, 'config.handshakeTimeoutMs must be the resolved value')
       const arms = recordTimerArms(t)
-      await client.start()
+      t.after(() => client.destroy()) // a failed wait must not leak a pending restart timer
+      await withCeiling(client.start(), 20_000, 'DEAD after repeated handshake timeouts')
       assert.equal(client.state, MCP_STATES.DEAD)
       assert.ok(arms.some((a) => a.ms === 200 && a.fired), 'a 200ms handshake timer must have been armed and fired')
       await client.destroy()
@@ -116,7 +142,8 @@ describe('MCPClient', () => {
       const client = new MCPClient(cfg, { log: silentLog(), handshakeTimeoutMs: 200 })
       assert.equal(client._handshakeTimeoutMs, 200, 'opts override should have won over config')
       const arms = recordTimerArms(t)
-      await client.start()
+      t.after(() => client.destroy()) // a failed wait must not leak a pending restart timer
+      await withCeiling(client.start(), 20_000, 'DEAD after repeated handshake timeouts')
       assert.equal(client.state, MCP_STATES.DEAD)
       assert.ok(arms.some((a) => a.ms === 200 && a.fired), 'a 200ms handshake timer must have been armed and fired')
       assert.ok(!arms.some((a) => a.ms === 60_000), 'the losing 60s config value must never be armed')
@@ -137,7 +164,7 @@ describe('MCPClient', () => {
       }
     })
 
-    it('handshake-timeout path: initialize hang → DEAD with no leaked timers (#4454)', async () => {
+    it('handshake-timeout path: initialize hang → DEAD with no leaked timers (#4454)', async (t) => {
       // Stub accepts the spawn but never replies to initialize. The client
       // must hit its handshake timeout, kill the child, restart, eventually
       // declare DEAD. Verifies the negative branch of _handshake() that the
@@ -147,7 +174,8 @@ describe('MCPClient', () => {
         stubConfig({ env: { MCP_STUB_INITIALIZE_HANG: '1' } }),
         { log: silentLog(), handshakeTimeoutMs: 200 },
       )
-      await client.start()
+      t.after(() => client.destroy()) // a failed wait must not leak a pending restart timer
+      await withCeiling(client.start(), 20_000, 'DEAD after repeated handshake timeouts')
       assert.equal(client.state, MCP_STATES.DEAD)
       assert.equal(client.tools.length, 0)
       // The restart timer should have been cleared (DEAD path never schedules
@@ -158,7 +186,7 @@ describe('MCPClient', () => {
       await client.destroy()
     })
 
-    it('handshake-timeout path: tools/list hang → DEAD (#4454)', async () => {
+    it('handshake-timeout path: tools/list hang → DEAD (#4454)', async (t) => {
       // Same flow as initialize-hang but the timeout fires on the SECOND
       // handshake request (tools/list). Asserts the catch-around-handshake
       // path correctly kills the child after the partially-completed
@@ -167,7 +195,8 @@ describe('MCPClient', () => {
         stubConfig({ env: { MCP_STUB_TOOLS_LIST_HANG: '1' } }),
         { log: silentLog(), handshakeTimeoutMs: 200 },
       )
-      await client.start()
+      t.after(() => client.destroy()) // a failed wait must not leak a pending restart timer
+      await withCeiling(client.start(), 20_000, 'DEAD after repeated handshake timeouts')
       assert.equal(client.state, MCP_STATES.DEAD)
       assert.equal(client._restartTimer, null)
       assert.equal(client._pending.size, 0)
@@ -324,6 +353,7 @@ describe('MCPClient', () => {
       // two state events. The restart timer is the only timer armed while the
       // client is RESTARTING, so tagging by state isolates it from the handshake
       // and request timers.
+      t.after(() => client.destroy()) // clears a pending restart timer even when an assertion throws
       const arms = recordTimerArms(t, { tag: () => client.state })
       await client.start()
       // First life: spawns, handshakes, reaches READY, then exits at ~100ms.
@@ -334,13 +364,13 @@ describe('MCPClient', () => {
       // subsequent attempts back off.
       const restarting = nextState(client, MCP_STATES.RESTARTING)
       const restarted = nextState(client, MCP_STATES.STARTING)
+      restarted.catch(() => {}) // surfaced by the await below; no unhandled rejection if an earlier await throws first
       await waitForState(client, MCP_STATES.READY)
       await restarting
       await restarted
       const restartArms = arms.filter((a) => a.state === MCP_STATES.RESTARTING)
       assert.deepEqual(restartArms.map((a) => a.ms), [1000], 'the 1st restart must be armed once, at 1000ms')
       assert.equal(restartArms[0].fired, true, 'the armed restart timer is what led to the 2nd spawn')
-      await client.destroy()
     })
 
     it('arms the 2nd restart attempt at 2s after the 2nd failure (#4453 exponential backoff)', async (t) => {
@@ -359,8 +389,9 @@ describe('MCPClient', () => {
       // between state events — that gap is what flaked on a loaded runner.
       const events = []
       client.on('state', ({ next }) => events.push(next))
+      t.after(() => client.destroy())
       const arms = recordTimerArms(t, { tag: () => client.state })
-      await client.start()
+      await withCeiling(client.start(), 20_000, 'DEAD after the 1/2/4 restart schedule')
       // start() resolves on DEAD. By then we should have observed:
       //   STARTING(1) → RESTARTING(1) → STARTING(2) → RESTARTING(2) →
       //   STARTING(3) → RESTARTING(3) ... → DEAD
@@ -371,7 +402,6 @@ describe('MCPClient', () => {
       assert.equal(restartArms[1].ms, 2000, '2nd backoff must be armed at 2000ms')
       assert.equal(restartArms[1].fired, true)
       assert.ok(events.filter((e) => e === MCP_STATES.STARTING).length >= 3, `expected ≥3 STARTINGs — events=${JSON.stringify(events)}`)
-      await client.destroy()
     })
 
     it('arms the 3rd restart attempt at 4s after the 3rd failure (#4453 exponential backoff)', async (t) => {
@@ -384,8 +414,9 @@ describe('MCPClient', () => {
       )
       const events = []
       client.on('state', ({ next }) => events.push(next))
+      t.after(() => client.destroy())
       const arms = recordTimerArms(t, { tag: () => client.state })
-      await client.start()
+      await withCeiling(client.start(), 20_000, 'DEAD after the 1/2/4 restart schedule')
       // After the 3rd RESTARTING, the client arms the 4s timer; when it fires the
       // 4th spawn exits and DEAD follows. Assert the full armed schedule, the
       // 3rd entry having fired, and that DEAD came after it (#7041: no gap
@@ -394,10 +425,9 @@ describe('MCPClient', () => {
       assert.deepEqual(restartArms.map((a) => a.ms), [1000, 2000, 4000], `full 1/2/4 schedule, events=${JSON.stringify(events)}`)
       assert.equal(restartArms[2].fired, true, 'the 4s timer fired — that is what led to the final exit')
       assert.ok(events.includes(MCP_STATES.DEAD), `expected DEAD transition, got events=${JSON.stringify(events)}`)
-      await client.destroy()
     })
 
-    it('declares dead after MAX_RESTART_ATTEMPTS (3) consecutive failed restarts', async () => {
+    it('declares dead after MAX_RESTART_ATTEMPTS (3) consecutive failed restarts', async (t) => {
       // Use a bad command so spawn succeeds at exec(2) layer but child exits
       // immediately. Three failures + the new 1/2/4s backoff schedule tip
       // the total budget to ~7s, so the deadline is bumped from 8s to 10s
@@ -406,15 +436,17 @@ describe('MCPClient', () => {
         { name: 'bad', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
         { log: silentLog() },
       )
-      await client.start()
+      t.after(() => client.destroy()) // a failing wait must not leak a pending restart timer
+      await withCeiling(client.start(), 20_000, 'DEAD after the 1/2/4 restart schedule')
       await waitForState(client, MCP_STATES.DEAD, 10_000)
       assert.equal(client.state, MCP_STATES.DEAD)
       assert.equal(client.tools.length, 0)
       await client.destroy()
     })
 
-    it('clears tools when entering DEAD state', async () => {
+    it('clears tools when entering DEAD state', async (t) => {
       const client = new MCPClient(stubConfig(), { log: silentLog() })
+      t.after(() => client.destroy())
       await client.start()
       await waitForState(client, MCP_STATES.READY)
       assert.equal(client.tools.length, 1)

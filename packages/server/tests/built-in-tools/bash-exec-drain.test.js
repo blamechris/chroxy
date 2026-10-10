@@ -2,6 +2,7 @@ import { describe, it, mock, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { PassThrough } from 'node:stream'
+import { recordTimerArms } from '../test-helpers.js'
 import * as realChildProcess from 'node:child_process'
 
 /**
@@ -58,7 +59,7 @@ describe('executeBash drains stdio after the child exits (#8120)', () => {
 
   // The explicit timeout turns an unbounded-drain regression into a fast RED
   // instead of a hung run.
-  it('does not hang when a stream never ends (a backgrounded grandchild holds the pipe)', { timeout: 5_000 }, async () => {
+  it('does not hang when a stream never ends (a backgrounded grandchild holds the pipe)', { timeout: 15_000 }, async (t) => {
     let child
     makeChild = () => {
       child = scriptedChild()
@@ -70,12 +71,17 @@ describe('executeBash drains stdio after the child exits (#8120)', () => {
       })
       return child
     }
-    const started = Date.now()
+    // #7041: not a two-sided elapsed window. The drain returns because its grace
+    // timer fired; the 30s command timeout was armed but never fired.
+    const arms = recordTimerArms(t)
     const r = await executeBash({ command: 'ignored', timeoutMs: 30_000 })
-    const elapsed = Date.now() - started
     assert.equal(r.exitCode, 0)
     assert.equal(r.stdout, 'before exit\n')
-    assert.ok(elapsed >= STDIO_DRAIN_GRACE_MS - 20, `waited the drain grace (${elapsed}ms)`)
-    assert.ok(elapsed < STDIO_DRAIN_GRACE_MS + 1_000, `bounded by the drain grace, not the ${30_000}ms timeout (${elapsed}ms)`)
+    const grace = arms.filter((a) => a.ms === STDIO_DRAIN_GRACE_MS)
+    assert.equal(grace.length, 1, 'the drain arms exactly one grace timer')
+    assert.equal(grace[0].fired, true, 'the call was released by the drain grace firing')
+    const cmdTimeout = arms.filter((a) => a.ms === 30_000)
+    assert.equal(cmdTimeout.length, 1)
+    assert.equal(cmdTimeout[0].fired, false, `bounded by the drain grace, not the ${30_000}ms command timeout`)
   })
 })

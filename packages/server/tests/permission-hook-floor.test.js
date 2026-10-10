@@ -634,15 +634,15 @@ describe('permission-hook.sh: the floor probe fails CLOSED (#7004)', () => {
     })
     hung.on('connection', (sock) => { sockets.add(sock); sock.on('close', () => sockets.delete(sock)) })
     await new Promise((r) => hung.listen(0, r))
-    // Backstop so a regression (a longer or missing curl timeout) fails in ~20s
+    // Backstop so a regression (a longer or missing curl timeout) fails in ~15s
     // instead of waiting out the longer timeout: dropping the connection lets curl
     // return, and `backstopFired` below then reports the real defect. #7041: this
     // used to be a two-sided window (9000..13500ms) on the measured wait, whose
     // upper edge sat 3.5s over the curl timeout and flaked when the runner stalled;
     // it is now a one-sided lower bound (the wait really happened) plus a flag with
-    // 10s of headroom (the curl timeout, not the backstop, ended the wait).
+    // 5s of headroom (the curl timeout, not the backstop, ended the wait).
     let backstopFired = false
-    const backstop = setTimeout(() => { backstopFired = true; for (const sock of sockets) sock.destroy() }, 20000)
+    const backstop = setTimeout(() => { backstopFired = true; for (const sock of sockets) sock.destroy() }, 15000)
     try {
       const started = Date.now()
       const { stdout } = await runHook({ payload: readPayload('src/index.js'), port: hung.address().port, mode: 'auto', timeout: 30000 })
@@ -650,7 +650,7 @@ describe('permission-hook.sh: the floor probe fails CLOSED (#7004)', () => {
       assert.equal(stats.floorRequests, 1)
       assert.equal(stats.permissionRequests, 1, 'a probe that never answers must not be read as clearance')
       assert.equal(decisionOf(stdout).permissionDecision, 'deny', 'the (denying) prompt answer, not a silent allow')
-      assert.equal(backstopFired, false, 'curl must give up on its own (--max-time 10), not be cut off by the 20s backstop')
+      assert.equal(backstopFired, false, 'curl must give up on its own (--max-time 10), not be cut off by the 15s backstop')
       assert.ok(elapsed >= 9000, `the curl timeout should have waited out its ~10s, took only ${elapsed}ms`)
     } finally {
       clearTimeout(backstop)

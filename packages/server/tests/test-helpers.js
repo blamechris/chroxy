@@ -289,11 +289,14 @@ export function waitForEvent(emitter, event, timeoutMs = 5000) {
  * `tag()` returned at the moment of arming (so a caller can tell a restart
  * timer, armed while RESTARTING, from a handshake timer armed while STARTING).
  *
- * @param {import('node:test').TestContext} t - the `it(name, async (t) => ...)` context
  * `realDelay(ms)` (default: identity) picks the delay the REAL timer is armed
  * with, for a test whose wrong outcome would otherwise sit out a long timer:
  * `entry.ms` still records what the code asked for, which is what gets asserted.
  *
+ * It patches the GLOBAL `setTimeout`, so concurrent tests in one file would see
+ * each other's arms. No current consumer runs concurrently; keep it that way.
+ *
+ * @param {import('node:test').TestContext} t - the `it(name, async (t) => ...)` context
  * @param {{tag?: () => any, realDelay?: (ms: number) => number}} [options]
  * @returns {Array<{ms: number, fired: boolean, state: any}>} live array, appended to as timers arm
  */
