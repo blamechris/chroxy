@@ -67,9 +67,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'encrypted',          // unwrapped at connection layer before dispatch to handleMessage
   'status',             // legacy/unused — server_status is the active equivalent
   // 'error' removed — both handlers now implement case 'error': (PR #2742)
-  'session_created',    // ack handled via session_list refresh, no dedicated case needed
   'session_destroyed',  // ack handled via session_list refresh, no dedicated case needed
-  'discovered_sessions', // multi-server discovery, handled at connection layer
   // rate_limited — now handled in both clients' switch (#6334): a system throttle notice.
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573

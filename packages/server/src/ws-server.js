@@ -387,7 +387,6 @@ function _isSecureRequest(req) {
  *   { type: 'available_permission_modes', modes: [...], provider? } — permission modes for ONE provider (#8224: `provider` names it; clients file the roster under it and derive the active session's picker, so a session of a provider that has no roster yet never inherits another provider's "Plan (unavailable)"). Sent with the connect burst and by `sendSessionInfo` for every session surfaced to a client
  *   { type: 'session_list', sessions: [...] }         — all sessions
  *   { type: 'session_switched', sessionId, name, cwd, conversationId?, sessionPreset? } — switched active session. On a fresh create-confirm `sessionPreset` (#5553) discloses the resolved per-repo preset (length-only preamble — the text is already folded into the prompt server-side — plus the seed staged editable into the composer + trust metadata); omitted when the session has no preset.
- *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
  *   { type: 'session_stopped', sessionId?, code? } — user-initiated Stop confirmation (#4756); CliSession emitted `stopped` after a clean SIGINT exit; pairs with the louder `session_error` crash toast; #8497: on a turn that ended without a `result` the server follows it with `agent_idle` and a `session_activity` isBusy=false so the client leaves busy
  *   { type: 'session_restore_failed', sessionId, name, provider, cwd?, model?, permissionMode?, errorCode, errorMessage, originalHistoryPreserved, historyLength? }
@@ -463,7 +462,6 @@ function _isSecureRequest(req) {
  *   { type: 'session_activity', sessionId, isBusy, lastCost } — session busy/idle state change
  *   { type: 'session_context', sessionId, cwd, conversationId?, ... } — session context data
  *   { type: 'session_updated', sessionId, name }        — session metadata updated
- *   { type: 'discovered_sessions', sessions }           — discovered local Claude sessions
  *   { type: 'pair_fail', reason }                       — pairing failed
  *   { type: 'pairing_refreshed' }                       — pairing ID consumed; clients should re-fetch /qr (#2916)
  *   { type: 'pair_request_pending', requestId, verifyCode } — pairing-approval primitive (#5510, epic #5509): ack to the camera-less requester carrying the 6-digit code to DISPLAY. Sent only over the requester's own pre-auth connection; the code travels server→requester only and is never echoed back.
@@ -527,7 +525,7 @@ function _isSecureRequest(req) {
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit
  *   { type: 'budget_exceeded', sessionId, message, ... } — budget exceeded
  *   { type: 'monthly_budget', month, spentUsd, budgetUsd, percent, warning, exceeded, ... } — machine-wide monthly programmatic-credit meter (#5665); broadcast to ALL clients after each programmatic-credit turn + sent once on connect
- *   { type: 'web_feature_status', features }            — web feature availability
+ *   { type: 'web_feature_status', features }            — web feature availability. CONSUMED, NEVER SENT (#7109): no server code builds this frame (the data ships as `auth_ok.webFeatures`), but both clients dispatch on it through store-core. Not a phantom — keep it.
  *   { type: 'permission_rules_updated', rules }         — per-session auto-approval rules changed
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
  *   { type: 'environment_created', environmentId, name, status } — environment created
