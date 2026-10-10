@@ -76,13 +76,51 @@ async function runLiveThenCursorReplay(live: ReplayParityFrame[], replay: Replay
   return replayParityModel(read())
 }
 
+/**
+ * Every case re-imports the connection store (`vi.resetModules()`), and importing it
+ * registers a `visibilitychange` listener on the jsdom `document` -- which outlives
+ * the module registry, so each listener pins its whole module graph (~48 MB of heap,
+ * not collectable) for the rest of the file. 34 cases ran this file at ~3.4 GB RSS,
+ * within reach of its worker's 4 GB heap (#8531). Record what the import adds to the
+ * document and take it off after each case, so a case's store is collectable.
+ *
+ * A manual patch and not `vi.spyOn`: a spy keeps every call's arguments in
+ * `mock.calls`, which is the same listener closures, so it re-creates the retention.
+ */
+function trackDocumentListeners() {
+  const added: Array<[string, EventListenerOrEventListenerObject, boolean | AddEventListenerOptions | undefined]> = []
+  const original = document.addEventListener
+  document.addEventListener = function (this: Document, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+    added.push([type, listener, options])
+    return original.call(this, type, listener, options)
+  } as typeof document.addEventListener
+  return {
+    types: () => added.map(([type]) => type),
+    release() {
+      document.addEventListener = original
+      for (const [type, listener, options] of added.splice(0)) document.removeEventListener(type, listener, options)
+    },
+  }
+}
+
 describe('live vs replayed transcript -- dashboard (#6630)', () => {
+  let listeners: ReturnType<typeof trackDocumentListeners>
   beforeEach(() => {
     vi.resetModules()
     vi.useFakeTimers()
+    listeners = trackDocumentListeners()
   })
   afterEach(() => {
     vi.useRealTimers()
+    listeners.release()
+  })
+
+  // The release above is only worth anything while the import still registers on the
+  // document where trackDocumentListeners can see it: if that moves (another target,
+  // another API), the leak returns and nothing else here goes red.
+  it('the connection store import registers its document listener where the harness can release it', async () => {
+    await boot()
+    expect(listeners.types()).toContain('visibilitychange')
   })
 
   it('has fixtures, and every pinned divergence names a scenario that exists', () => {
@@ -132,43 +170,27 @@ describe('live vs replayed transcript -- dashboard (#6630)', () => {
   // text and duration. The held copy must be filled in (the cursor moves past the
   // entry, so nothing would ever retry), not discarded as a duplicate.
   //
-  // Only the scenarios that open with the reasoning stream: the cut then lands inside
-  // it from the first frame. Every cut re-imports the whole connection store, and this
-  // file already runs close to its worker's 4 GB heap (a scenario with a late-placed
-  // bubble, #8518, added 13 more cuts and ran it out of memory). That bubble's partial-
-  // delivery case is pinned in late-thinking-order.test.ts instead.
-  //
-  // The excluded scenarios are NAMED (#8532 N2): a position test (`live[0]?.thinking`)
-  // would silently drop a future scenario whose reasoning is not first. Removing the
-  // exclusion altogether is #8531.
+  // EVERY scenario with a reasoning stream (#8531): the cut loop used to skip the ones
+  // whose bubble is placed late (#8518) because each cut leaked a whole store (see
+  // trackDocumentListeners). A scenario whose reasoning does not open the turn still
+  // gets its cuts -- they run up to the frame that closes the stream, wherever it is.
   const hasThinkingEnd = (fx: (typeof REPLAY_PARITY_FIXTURES)[number]) =>
     fx.live.some((f) => f.type === 'stream_end' && f.thinking === true)
-  const NOT_INTERRUPTED_BY_NAME: readonly string[] = [
-    'tui-thinking-read-after-its-tool-row',
-    'tui-thinking-read-after-the-answer',
-  ]
-  const interruptible = REPLAY_PARITY_FIXTURES.filter(
-    (fx) => hasThinkingEnd(fx) && !NOT_INTERRUPTED_BY_NAME.includes(fx.name),
-  )
+  const interruptible = REPLAY_PARITY_FIXTURES.filter(hasThinkingEnd)
 
-  it('has scenarios to interrupt', () => {
-    expect(interruptible.map((f) => f.name)).toEqual(expect.arrayContaining(['thinking-then-reply', 'thinking-without-text']))
-  })
-
-  it('the named exclusions are exactly the thinking scenarios that do not open with the reasoning', () => {
-    const names = new Set(REPLAY_PARITY_FIXTURES.map((f) => f.name))
-    // A name that no longer exists, or no longer carries a reasoning stream.
-    for (const name of NOT_INTERRUPTED_BY_NAME) {
-      expect(names.has(name), `excluded scenario "${name}" no longer exists`).toBe(true)
-      const fx = REPLAY_PARITY_FIXTURES.find((f) => f.name === name)!
-      expect(hasThinkingEnd(fx), `excluded scenario "${name}" has no reasoning stream to interrupt`).toBe(true)
-    }
-    // A scenario the cut loop would skip (or run) that the list does not say so.
-    const opensWithReasoning = REPLAY_PARITY_FIXTURES.filter((fx) => hasThinkingEnd(fx) && fx.live[0]?.thinking === true)
+  it('has scenarios to interrupt, including the ones whose reasoning is not the first frame', () => {
+    const names = interruptible.map((f) => f.name)
+    expect(names).toEqual(expect.arrayContaining(['thinking-then-reply', 'thinking-without-text']))
+    // The scenarios #8518 added, whose bubble is read after the row it precedes: they
+    // are what the exclusion used to drop, so they must be in the loop.
+    expect(names).toEqual(expect.arrayContaining(['tui-thinking-read-after-its-tool-row', 'tui-thinking-read-after-the-answer']))
+    // A scenario with a reasoning frame but no closing one would be skipped by the
+    // filter: the cut loop stops at the closing frame, so name it rather than lose it.
+    const streamsReasoning = REPLAY_PARITY_FIXTURES.filter((fx) => fx.live.some((f) => f.thinking === true))
     expect(
-      interruptible.map((f) => f.name).sort(),
-      'the interrupted scenarios must be exactly those that open with the reasoning stream: name the new exclusion in NOT_INTERRUPTED_BY_NAME',
-    ).toEqual(opensWithReasoning.map((f) => f.name).sort())
+      streamsReasoning.filter((fx) => !hasThinkingEnd(fx)).map((fx) => fx.name),
+      'a scenario streams reasoning but never closes it with a thinking stream_end, so no cut is run on it',
+    ).toEqual([])
   })
 
   for (const fx of interruptible) {
