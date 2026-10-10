@@ -683,6 +683,57 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
       assert.ok(ticks >= 3, `drained only after the bound (${ticks} failing ticks)`)
     })
 
+    it('errors in an earlier poll lifetime do not shorten a later lifetime\'s budget (#8515)', async () => {
+      Object.defineProperty(ClaudeTuiSession, 'AGENT_POLL_ERRORS_MAX', { value: 4, configurable: true })
+      const { s, events } = await confirmed()
+      const real = s._completeNotifiedAgents.bind(s)
+      let throwing = 0
+      s._completeNotifiedAgents = () => { throwing++; throw new Error('listener blew up') }
+      await waitFor(() => throwing >= 3, 'three failing ticks in lifetime one')
+      // The agent ends by another route; the next failing tick finds nothing confirmed and stops the poll.
+      s._completeAgent('toolu_bg')
+      await waitFor(() => s._backgroundTaskPollTimer === null, 'lifetime one to stop')
+      s._completeNotifiedAgents = real
+      // Lifetime two: a new agent re-arms the poll, then fails fewer ticks than the bound.
+      await runTurn(s, { 'pre-b.json': preAgent('toolu_two'), 'post-b.json': postAsync('toolu_two'), 'stop-y.json': stopHook })
+      assert.ok(s._backgroundTaskPollTimer, 'precondition: poll re-armed for the second agent')
+      let second = 0
+      s._completeNotifiedAgents = (n) => { if (++second <= 2) throw new Error('listener blew up'); return real(n) }
+      await waitFor(() => second >= 3, 'two failing ticks then a healthy one in lifetime two')
+      assert.equal(s._activeAgents.size, 1, '2 failures (plus 3 from lifetime one) must not reach the bound of 4')
+      assert.equal(events.filter((e) => e.name === 'agent_completed' && e.toolUseId === 'toolu_two').length, 0)
+    })
+
+    it('the poll_failed drain completes every confirmed agent even when a listener throws on the first (#8515)', async () => {
+      Object.defineProperty(ClaudeTuiSession, 'AGENT_POLL_ERRORS_MAX', { value: 3, configurable: true })
+      const s = makeLiveSession()
+      const events = record(s)
+      await runTurn(s, {
+        'pre-a.json': preAgent('toolu_a'), 'post-a.json': postAsync('toolu_a'),
+        'pre-b.json': preAgent('toolu_b'), 'post-b.json': postAsync('toolu_b'),
+        'stop-z.json': stopHook,
+      })
+      assert.equal(s._activeAgents.size, 2, 'precondition: both confirmed')
+      let first = true
+      s.on('agent_completed', () => { if (first) { first = false; throw new Error('listener blew up') } })
+      s._completeNotifiedAgents = () => { throw new Error('tick blew up') }
+      await waitFor(() => s._activeAgents.size === 0, 'both agents to drain')
+      assert.deepEqual(events.filter((e) => e.name === 'agent_completed').map((e) => e.toolUseId).sort(), ['toolu_a', 'toolu_b'])
+      assert.deepEqual(s.getRestartBlockers(), [])
+      await waitFor(() => s._backgroundTaskPollTimer === null, 'the poll to stop')
+    })
+
+    it('rewriting the session file with the SAME session id and cwd does not drain a confirmed agent (#8515)', async () => {
+      const { s, events } = await confirmed()
+      const sessFile = join(fakeHome, '.claude', 'sessions', `${fakePid}.json`)
+      writeFileSync(sessFile, JSON.stringify({ pid: fakePid, sessionId: s._sessionId, cwd: fakeCwd, startedAt: Date.now() + 1 }))
+      s._scanTranscript() // another caller re-resolves the scanner; same path, so no replacement
+      assert.equal(s._transcriptTaskScanner.path, transcriptPath, 'precondition: same transcript')
+      await new Promise((resolve) => setTimeout(resolve, 200)) // > 3 blind ticks at 20 ms
+      assert.equal(s._activeAgents.size, 1, 'a rewrite that names the same transcript is not a swap')
+      assert.equal(events.filter((e) => e.name === 'agent_completed').length, 0)
+    })
+
     it('the tick with no scanner stops the poll once the agents are drained (#8515)', async () => {
       const { s, events } = await confirmed()
       // Unreachable in production (confirming an agent creates the scanner and nothing

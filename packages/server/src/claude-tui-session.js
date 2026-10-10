@@ -2082,7 +2082,7 @@ export class ClaudeTuiSession extends BaseSession {
    *  - `max_lifetime`: `AGENT_MAX_LIFETIME_MS` since confirmation, the backstop
    *    for a notification that is simply never written.
    *
-   * All three fail toward clearing the badge early, which is recoverable (the
+   * Every reason fails toward clearing the badge early, which is recoverable (the
    * notification may still arrive; completing is idempotent), where a stuck
    * badge pins the session working and blocks daemon restarts.
    *
@@ -2146,7 +2146,14 @@ export class ClaudeTuiSession extends BaseSession {
     ;(this._log || log).warn(`giving up on ${toolUseIds.length} background subagent(s) (${reason}): ${toolUseIds.join(', ')}`)
     for (const id of toolUseIds) {
       this._agentWatch.delete(id)
-      this._completeAgent(id, { reason })
+      // One id's completion (a throwing `agent_completed` listener) must not
+      // leave the rest of the batch tracked. `_completeAgent` removes the agent
+      // before it emits, so a throw here has still ended that agent.
+      try {
+        this._completeAgent(id, { reason })
+      } catch (err) {
+        ;(this._log || log).warn(`completing background subagent ${id} (${reason}) failed: ${err.message}`)
+      }
     }
   }
 
@@ -2156,6 +2163,9 @@ export class ClaudeTuiSession extends BaseSession {
       clearInterval(this._backgroundTaskPollTimer)
       this._backgroundTaskPollTimer = null
     }
+    // #8515: the consecutive-failure budget belongs to one poll lifetime; every
+    // stop path (not just a healthy tick) hands the next lifetime a full one.
+    this._pollTickErrors = 0
   }
 
   // ---------------------------------------------------------------------
