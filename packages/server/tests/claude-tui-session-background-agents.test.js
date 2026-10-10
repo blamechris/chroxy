@@ -49,6 +49,7 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
   let origPollMsDescriptor
   let origBlindDescriptor
   let origLifetimeDescriptor
+  let origPollErrDescriptor
   let transcriptPath
 
   beforeEach(() => {
@@ -72,6 +73,7 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
     // undefined, which restores to "absent" below.
     origBlindDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'AGENT_BLIND_TICKS_MAX')
     origLifetimeDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'AGENT_MAX_LIFETIME_MS')
+    origPollErrDescriptor = Object.getOwnPropertyDescriptor(ClaudeTuiSession, 'AGENT_POLL_ERRORS_MAX')
     Object.defineProperty(ClaudeTuiSession, 'AGENT_BLIND_TICKS_MAX', { value: 3, configurable: true })
   })
 
@@ -86,7 +88,7 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
     if (fakeHome) rmSync(fakeHome, { recursive: true, force: true })
     if (skillsDir) rmSync(skillsDir, { recursive: true, force: true })
     Object.defineProperty(ClaudeTuiSession, 'BACKGROUND_TASK_POLL_MS', origPollMsDescriptor)
-    for (const [name, d] of [['AGENT_BLIND_TICKS_MAX', origBlindDescriptor], ['AGENT_MAX_LIFETIME_MS', origLifetimeDescriptor]]) {
+    for (const [name, d] of [['AGENT_BLIND_TICKS_MAX', origBlindDescriptor], ['AGENT_MAX_LIFETIME_MS', origLifetimeDescriptor], ['AGENT_POLL_ERRORS_MAX', origPollErrDescriptor]]) {
       if (d) Object.defineProperty(ClaudeTuiSession, name, d)
       else delete ClaudeTuiSession[name]
     }
@@ -614,6 +616,81 @@ describe('ClaudeTuiSession background-agent tracking (#7396)', () => {
 
     it('the default ceiling is generous (hours), not minutes', () => {
       assert.ok(ClaudeTuiSession.AGENT_MAX_LIFETIME_MS >= 4 * 3600 * 1000)
+    })
+
+    // #8515: the blind-path check compares the session file with the scanner the
+    // tick holds, but any other caller of _scanTranscript() (ready edge, turn
+    // end, auth scan) swaps that scanner first, so the check sees a match.
+    it('a scanner swap by another caller (ready edge / turn end) does not strand an agent confirmed on the old transcript (#8515)', async () => {
+      const { s, events } = await confirmed()
+      const oldPath = transcriptPath
+      const sessFile = join(fakeHome, '.claude', 'sessions', `${fakePid}.json`)
+      writeFileSync(sessFile, JSON.stringify({ pid: fakePid, sessionId: 'uuid-after-clear', cwd: fakeCwd, startedAt: Date.now() }))
+      const newPath = transcriptPathForSessionFile(sessFile)
+      assert.notEqual(newPath, oldPath, 'precondition: the session file now names another transcript')
+      mkdirSync(dirname(newPath), { recursive: true })
+      writeFileSync(newPath, '')
+      // What getBackgroundTaskSnapshot() does on the next ready edge / turn end.
+      s._scanTranscript()
+      assert.equal(s._transcriptTaskScanner.path, newPath, 'precondition: the scanner was replaced')
+      await assertDrained(s, events, 'transcript_replaced')
+    })
+
+    it('an agent confirmed AFTER the swap is tracked against the new transcript and completes by its own notification, not drained (#8515)', async () => {
+      const { s, events } = await confirmed()
+      const sessFile = join(fakeHome, '.claude', 'sessions', `${fakePid}.json`)
+      writeFileSync(sessFile, JSON.stringify({ pid: fakePid, sessionId: 'uuid-after-clear', cwd: fakeCwd, startedAt: Date.now() }))
+      const newPath = transcriptPathForSessionFile(sessFile)
+      mkdirSync(dirname(newPath), { recursive: true })
+      writeFileSync(newPath, '')
+      s._scanTranscript()
+      await waitFor(() => s._activeAgents.size === 0, 'the old agent to drain')
+      transcriptPath = newPath
+      s._sinkDir = null
+      await runTurn(s, { 'pre-b.json': preAgent('toolu_new'), 'post-b.json': postAsync('toolu_new'), 'stop-y.json': stopHook })
+      assert.equal(s._activeAgents.size, 1, 'precondition: the new agent is confirmed and survives the turn')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      assert.equal(s._activeAgents.size, 1, 'a swap that happened BEFORE confirmation is not a reason to drain')
+      appendTranscript([enqueueLine('toolu_new')])
+      await waitFor(() => s._activeAgents.size === 0, 'the notification to complete it')
+      const done = events.filter((e) => e.name === 'agent_completed' && e.toolUseId === 'toolu_new')
+      assert.equal(done.length, 1)
+      assert.equal(done[0].reason, undefined)
+    })
+
+    it('a poll-tick error while agents are confirmed keeps the poll armed (#8515)', async () => {
+      Object.defineProperty(ClaudeTuiSession, 'AGENT_POLL_ERRORS_MAX', { value: 1000, configurable: true })
+      const { s, events } = await confirmed()
+      const real = s._completeNotifiedAgents.bind(s)
+      let throwsLeft = 3
+      s._completeNotifiedAgents = (notified) => {
+        if (throwsLeft > 0) { throwsLeft--; throw new Error('listener blew up') }
+        return real(notified)
+      }
+      await waitFor(() => throwsLeft === 0, 'three failing ticks')
+      assert.ok(s._backgroundTaskPollTimer, 'the only mechanism that drains confirmed agents must survive a failing tick')
+      appendTranscript([enqueueLine('toolu_bg')])
+      await waitFor(() => s._activeAgents.size === 0, 'the notification to complete it on a later tick')
+      assert.equal(events.find((e) => e.name === 'agent_completed').reason, undefined)
+    })
+
+    it('a poll tick that keeps failing drains the confirmed agents after the bound, then stops the poll (#8515)', async () => {
+      Object.defineProperty(ClaudeTuiSession, 'AGENT_POLL_ERRORS_MAX', { value: 3, configurable: true })
+      const { s, events } = await confirmed()
+      let ticks = 0
+      s._completeNotifiedAgents = () => { ticks++; throw new Error('listener blew up') }
+      await assertDrained(s, events, 'poll_failed')
+      assert.ok(ticks >= 3, `drained only after the bound (${ticks} failing ticks)`)
+    })
+
+    it('the tick with no scanner stops the poll once the agents are drained (#8515)', async () => {
+      const { s, events } = await confirmed()
+      // Unreachable in production (confirming an agent creates the scanner and nothing
+      // clears it); other callers would rebuild it, so pin it absent.
+      s._transcriptTaskScanner = null
+      s._resolveTranscriptScanner = () => null
+      s._scanTranscript = () => null
+      await assertDrained(s, events, 'transcript_unreadable')
     })
   })
 
