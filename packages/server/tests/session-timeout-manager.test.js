@@ -194,12 +194,15 @@ describe('SessionTimeoutManager', () => {
       const timeouts = []
       mgr.on('timeout', (data) => timeouts.push(data))
 
+      const beforeCheck = Date.now()
       mgr._checkTimeouts()
 
       assert.equal(timeouts.length, 0)
-      // Activity should have been refreshed
+      // Activity should have been refreshed: stamped by the check itself, not left
+      // at the 15s-old value (#7041: compared to a reading taken just before the
+      // call rather than to a 1s wall-clock window).
       const ts = mgr._lastActivity.get('s1')
-      assert.ok(Date.now() - ts < 1_000, 'should have touched activity')
+      assert.ok(ts >= beforeCheck, 'should have touched activity')
     })
 
     it('skips busy sessions (isRunning)', () => {

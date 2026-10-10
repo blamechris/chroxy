@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { recordTimerArms, waitFor } from './test-helpers.js'
 import { MCPClient, MCP_STATES, MCP_PROTOCOL_VERSION, MCP_CLIENT_VERSION, DEFAULT_HANDSHAKE_TIMEOUT_MS } from '../src/byok-mcp-client.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -38,6 +39,21 @@ async function waitForState(client, target, timeoutMs = 4000) {
   })
 }
 
+// Timer-free wait for a state transition. waitForState() arms a setTimeout, which
+// a recordTimerArms() spy would record alongside the client's own timers; tests
+// that assert on WHICH timers the client armed use this instead and rely on the
+// test runner's own timeout to bound a transition that never comes.
+function nextState(client, target) {
+  return new Promise((resolve) => {
+    const onState = ({ next }) => {
+      if (next !== target) return
+      client.off('state', onState)
+      resolve()
+    }
+    client.on('state', onState)
+  })
+}
+
 describe('MCPClient', () => {
   describe('handshake', () => {
     it('initializes, fetches tools/list, and reaches READY', async () => {
@@ -55,7 +71,7 @@ describe('MCPClient', () => {
       assert.ok(DEFAULT_HANDSHAKE_TIMEOUT_MS > 0, 'default must be a positive ms count')
     })
 
-    it('per-instance opts.handshakeTimeoutMs overrides the default (#4454)', async () => {
+    it('per-instance opts.handshakeTimeoutMs overrides the default (#4454)', async (t) => {
       // The stub never replies to tools/list. A 200ms override on the
       // client should expire well before the 5s default, surfacing the
       // restart loop quickly. End-to-end success: client reaches DEAD via
@@ -64,41 +80,46 @@ describe('MCPClient', () => {
         stubConfig({ env: { MCP_STUB_TOOLS_LIST_HANG: '1' } }),
         { log: silentLog(), handshakeTimeoutMs: 200 },
       )
-      const t0 = Date.now()
+      // The override is what this test is about, so assert the value the client
+      // resolved rather than how long the run took (#7041): an elapsed-time
+      // ceiling only passes on a quiet machine, the resolved field does not.
+      // Checked BEFORE start() so a wrong precedence fails here, not after a
+      // 5s-per-handshake wait.
+      assert.equal(client._handshakeTimeoutMs, 200)
+      const arms = recordTimerArms(t)
       await client.start()
-      // start() resolves on DEAD. Three handshakes × 200ms timeout + 3
-      // restart backoffs + spawn overhead → comfortably under 12s for the
-      // test deadline. The point is just that we DID hit DEAD via timeouts,
-      // not via spawn-failure.
+      // start() resolves on DEAD. We DID hit DEAD via handshake timeouts, not
+      // via spawn-failure (the stub spawns fine and just never answers).
       assert.equal(client.state, MCP_STATES.DEAD)
-      const elapsed = Date.now() - t0
-      assert.ok(elapsed < 12_000, `DEAD took ${elapsed}ms, expected <12s`)
+      // ...and the 200ms override reached the wire: each handshake armed it.
+      assert.ok(arms.some((a) => a.ms === 200 && a.fired), 'a 200ms handshake timer must have been armed and fired')
       await client.destroy()
     })
 
-    it('per-config handshakeTimeoutMs overrides the default (#4454)', async () => {
+    it('per-config handshakeTimeoutMs overrides the default (#4454)', async (t) => {
       // Same shape as above but the override lives on `config` (the path
       // ~/.claude.json → byok-mcp-config will use).
       const cfg = { ...stubConfig({ env: { MCP_STUB_TOOLS_LIST_HANG: '1' } }), handshakeTimeoutMs: 200 }
       const client = new MCPClient(cfg, { log: silentLog() })
-      const t0 = Date.now()
+      assert.equal(client._handshakeTimeoutMs, 200, 'config.handshakeTimeoutMs must be the resolved value')
+      const arms = recordTimerArms(t)
       await client.start()
       assert.equal(client.state, MCP_STATES.DEAD)
-      const elapsed = Date.now() - t0
-      assert.ok(elapsed < 12_000, `DEAD took ${elapsed}ms via config override, expected <12s`)
+      assert.ok(arms.some((a) => a.ms === 200 && a.fired), 'a 200ms handshake timer must have been armed and fired')
       await client.destroy()
     })
 
-    it('opts.handshakeTimeoutMs takes precedence over config.handshakeTimeoutMs (#4454)', async () => {
-      // opts=200, config=60_000 — if precedence is reversed we'd hang for
-      // a minute. A successful 12s-bounded DEAD asserts opts won.
+    it('opts.handshakeTimeoutMs takes precedence over config.handshakeTimeoutMs (#4454)', async (t) => {
+      // opts=200, config=60_000 — assert the resolved value so reversed
+      // precedence fails immediately instead of hanging for a minute.
       const cfg = { ...stubConfig({ env: { MCP_STUB_TOOLS_LIST_HANG: '1' } }), handshakeTimeoutMs: 60_000 }
       const client = new MCPClient(cfg, { log: silentLog(), handshakeTimeoutMs: 200 })
-      const t0 = Date.now()
+      assert.equal(client._handshakeTimeoutMs, 200, 'opts override should have won over config')
+      const arms = recordTimerArms(t)
       await client.start()
       assert.equal(client.state, MCP_STATES.DEAD)
-      const elapsed = Date.now() - t0
-      assert.ok(elapsed < 12_000, `DEAD took ${elapsed}ms, expected <12s — opts override should have won`)
+      assert.ok(arms.some((a) => a.ms === 200 && a.fired), 'a 200ms handshake timer must have been armed and fired')
+      assert.ok(!arms.some((a) => a.ms === 60_000), 'the losing 60s config value must never be armed')
       await client.destroy()
     })
 
@@ -183,9 +204,19 @@ describe('MCPClient', () => {
           clientInfo: { name: 'chroxy-byok', version: MCP_CLIENT_VERSION },
         },
       }) + '\n')
-      await new Promise((r) => setTimeout(r, 200))
-      child.kill('SIGKILL')
-      const match = stderr.match(/MCP_STUB_INITIALIZE_PARAMS=(.+)/)
+      // Wait on the CONDITION, not the clock (#7041): the stub echoes the params
+      // to stderr as soon as it has read the request, and a fixed 200ms sleep
+      // followed by SIGKILL destroyed that evidence whenever the runner was slow
+      // to schedule the child. Poll for a COMPLETE echo line (newline-terminated,
+      // so we never parse half a chunk) under a generous ceiling that still fails
+      // loudly, and kill only afterwards.
+      const echoed = /MCP_STUB_INITIALIZE_PARAMS=(.+)\n/
+      try {
+        await waitFor(() => echoed.test(stderr), { timeoutMs: 15_000, label: 'stub to echo initialize params on stderr' })
+      } finally {
+        child.kill('SIGKILL')
+      }
+      const match = stderr.match(echoed)
       assert.ok(match, `expected echoed initialize params on stderr, got: ${JSON.stringify(stderr)}`)
       const params = JSON.parse(match[1])
       assert.equal(params.protocolVersion, MCP_PROTOCOL_VERSION)
@@ -284,29 +315,35 @@ describe('MCPClient', () => {
   })
 
   describe('crash + restart', () => {
-    it('triggers the 1st restart attempt ~1s after child exit (#4453 — first-attempt timing unchanged)', async () => {
+    it('arms the 1st restart attempt at 1s after child exit (#4453 — first-attempt timing unchanged)', async (t) => {
       const client = new MCPClient(
         stubConfig({ env: { MCP_STUB_DIE_AFTER_MS: '100' } }),
         { log: silentLog() },
       )
+      // #7041: assert the delay the client ARMED, not the wall-clock gap between
+      // two state events. The restart timer is the only timer armed while the
+      // client is RESTARTING, so tagging by state isolates it from the handshake
+      // and request timers.
+      const arms = recordTimerArms(t, { tag: () => client.state })
       await client.start()
       // First life: spawns, handshakes, reaches READY, then exits at ~100ms.
-      // The client schedules a restart for ~1s later.  Acceptance criterion:
-      // the *actual* restart attempt (second spawn → STARTING) happens within
-      // ~1s of the death.  Measure between the death (RESTARTING entry) and
-      // the next spawn (next STARTING entry). #4453 added exponential backoff
-      // but the FIRST attempt's timing is intentionally preserved at 1s so a
-      // fast-recovery flake doesn't regress; subsequent attempts back off.
+      // The client schedules a restart. Acceptance criterion: that restart is
+      // armed at 1s and, when it fires, the second spawn (STARTING) follows.
+      // #4453 added exponential backoff but the FIRST attempt's timing is
+      // intentionally preserved at 1s so a fast-recovery flake doesn't regress;
+      // subsequent attempts back off.
+      const restarting = nextState(client, MCP_STATES.RESTARTING)
+      const restarted = nextState(client, MCP_STATES.STARTING)
       await waitForState(client, MCP_STATES.READY)
-      await waitForState(client, MCP_STATES.RESTARTING, 2000)
-      const t0 = Date.now()
-      await waitForState(client, MCP_STATES.STARTING, 2000)
-      const elapsed = Date.now() - t0
-      assert.ok(elapsed >= 800 && elapsed <= 1500, `1st restart fired at ${elapsed}ms after RESTARTING, expected ~1000ms`)
+      await restarting
+      await restarted
+      const restartArms = arms.filter((a) => a.state === MCP_STATES.RESTARTING)
+      assert.deepEqual(restartArms.map((a) => a.ms), [1000], 'the 1st restart must be armed once, at 1000ms')
+      assert.equal(restartArms[0].fired, true, 'the armed restart timer is what led to the 2nd spawn')
       await client.destroy()
     })
 
-    it('triggers the 2nd restart attempt ~2s after the 2nd failure (#4453 exponential backoff)', async () => {
+    it('arms the 2nd restart attempt at 2s after the 2nd failure (#4453 exponential backoff)', async (t) => {
       // Bad command so each spawn immediately exits — drives the restart loop
       // without depending on the stub fixture's handshake.
       const client = new MCPClient(
@@ -317,27 +354,27 @@ describe('MCPClient', () => {
       // don't miss the first STARTING/RESTARTING (start() resolves only when
       // the client reaches a terminal state — READY or DEAD — so by the time
       // it returns the early transitions are already over).
+      // #7041: assert the delays the client ARMED while RESTARTING (the restart
+      // timer is the only timer armed in that state), not the wall-clock gap
+      // between state events — that gap is what flaked on a loaded runner.
       const events = []
-      client.on('state', ({ next }) => events.push({ state: next, t: Date.now() }))
+      client.on('state', ({ next }) => events.push(next))
+      const arms = recordTimerArms(t, { tag: () => client.state })
       await client.start()
       // start() resolves on DEAD. By then we should have observed:
       //   STARTING(1) → RESTARTING(1) → STARTING(2) → RESTARTING(2) →
       //   STARTING(3) → RESTARTING(3) ... → DEAD
-      // Pick the 2nd RESTARTING and the 3rd STARTING — the gap is the
-      // 2nd backoff delay under the 1/2/4 schedule.
-      const restarts = events.filter((e) => e.state === MCP_STATES.RESTARTING)
-      const starts = events.filter((e) => e.state === MCP_STATES.STARTING)
-      assert.ok(restarts.length >= 2, `expected ≥2 RESTARTINGs, got ${restarts.length} — events=${JSON.stringify(events)}`)
-      assert.ok(starts.length >= 3, `expected ≥3 STARTINGs, got ${starts.length} — events=${JSON.stringify(events)}`)
-      const secondGap = starts[2].t - restarts[1].t
-      assert.ok(
-        secondGap >= 1700 && secondGap <= 2500,
-        `2nd backoff fired at ${secondGap}ms after RESTARTING#2, expected ~2000ms`,
-      )
+      // so the 2nd backoff is the 2nd RESTARTING-armed timer under the 1/2/4
+      // schedule, and its firing is what produced the 3rd STARTING.
+      const restartArms = arms.filter((a) => a.state === MCP_STATES.RESTARTING)
+      assert.ok(restartArms.length >= 2, `expected ≥2 restart timers, got ${restartArms.length} — events=${JSON.stringify(events)}`)
+      assert.equal(restartArms[1].ms, 2000, '2nd backoff must be armed at 2000ms')
+      assert.equal(restartArms[1].fired, true)
+      assert.ok(events.filter((e) => e === MCP_STATES.STARTING).length >= 3, `expected ≥3 STARTINGs — events=${JSON.stringify(events)}`)
       await client.destroy()
     })
 
-    it('triggers the 3rd restart attempt ~4s after the 3rd failure (#4453 exponential backoff)', async () => {
+    it('arms the 3rd restart attempt at 4s after the 3rd failure (#4453 exponential backoff)', async (t) => {
       // Same fixture as the 2nd-backoff test, but assert the 3rd gap to lock
       // in the full 1/2/4 schedule. Two tests rather than one combined check
       // so a regression in just one of the steps surfaces clearly.
@@ -346,21 +383,17 @@ describe('MCPClient', () => {
         { log: silentLog() },
       )
       const events = []
-      client.on('state', ({ next }) => events.push({ state: next, t: Date.now() }))
+      client.on('state', ({ next }) => events.push(next))
+      const arms = recordTimerArms(t, { tag: () => client.state })
       await client.start()
-      const restarts = events.filter((e) => e.state === MCP_STATES.RESTARTING)
-      assert.ok(restarts.length >= 3, `expected ≥3 RESTARTINGs, got ${restarts.length}`)
-      // After the 3rd RESTARTING, the client schedules a 4s timer then DEAD
-      // fires on the next exit. We can't observe a 4th STARTING (the loop
-      // stops there), so measure RESTARTING(3) → DEAD instead, which is
-      // backoff(3) + spawn(~50ms exit) ≈ ~4050ms.
-      const deadEvent = events.find((e) => e.state === MCP_STATES.DEAD)
-      assert.ok(deadEvent, `expected DEAD transition, got events=${JSON.stringify(events)}`)
-      const thirdGap = deadEvent.t - restarts[2].t
-      assert.ok(
-        thirdGap >= 3700 && thirdGap <= 4800,
-        `3rd backoff + final exit took ${thirdGap}ms after RESTARTING#3, expected ~4050ms`,
-      )
+      // After the 3rd RESTARTING, the client arms the 4s timer; when it fires the
+      // 4th spawn exits and DEAD follows. Assert the full armed schedule, the
+      // 3rd entry having fired, and that DEAD came after it (#7041: no gap
+      // measured, so a slow runner cannot move the verdict).
+      const restartArms = arms.filter((a) => a.state === MCP_STATES.RESTARTING)
+      assert.deepEqual(restartArms.map((a) => a.ms), [1000, 2000, 4000], `full 1/2/4 schedule, events=${JSON.stringify(events)}`)
+      assert.equal(restartArms[2].fired, true, 'the 4s timer fired — that is what led to the final exit')
+      assert.ok(events.includes(MCP_STATES.DEAD), `expected DEAD transition, got events=${JSON.stringify(events)}`)
       await client.destroy()
     })
 
@@ -532,18 +565,29 @@ describe('MCPClient', () => {
       assert.equal(client.state, MCP_STATES.DESTROYED)
     })
 
-    it('SIGTERM then SIGKILL grace — escalates within KILL_GRACE_MS for a hung child', async () => {
+    it('SIGTERM then SIGKILL grace — escalates after KILL_GRACE_MS for a hung child', async (t) => {
       const client = new MCPClient(
         stubConfig({ env: { MCP_STUB_HANG: '1' } }),
         { log: silentLog() },
       )
       await client.start()
       await waitForState(client, MCP_STATES.READY)
-      const t0 = Date.now()
+      // #7041: record the signals the child receives, in order, and the grace
+      // timer destroy() armed — instead of bounding destroy()'s wall-clock time
+      // (a two-sided window that failed whenever the runner overshot it).
+      const child = client._child
+      const signals = []
+      const realKill = child.kill.bind(child)
+      child.kill = (sig) => { signals.push(sig); return realKill(sig) }
+      const arms = recordTimerArms(t)
       await client.destroy()
-      const elapsed = Date.now() - t0
-      // SIGTERM is swallowed; SIGKILL fires at 1000ms; child exits ~immediately.
-      assert.ok(elapsed >= 900 && elapsed <= 2000, `destroy took ${elapsed}ms, expected ~1000ms (SIGTERM grace before SIGKILL)`)
+      // SIGTERM is swallowed by the hung child, so only the escalation timer can
+      // end it: SIGTERM first, SIGKILL second, the timer armed at 1000ms and fired.
+      assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
+      const grace = arms.filter((a) => a.ms === 1000)
+      assert.equal(grace.length, 1, 'destroy() arms exactly one 1000ms kill-grace timer')
+      assert.equal(grace[0].fired, true, 'the grace timer fired — it is what delivered SIGKILL')
+      assert.equal(child.signalCode, 'SIGKILL', 'the child ended by SIGKILL, not by SIGTERM')
     })
 
     it('destroy() while the handshake is in flight must not resurrect a destroyed client as READY (#7906)', async () => {

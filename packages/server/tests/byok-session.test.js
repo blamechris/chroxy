@@ -874,14 +874,16 @@ describe('ClaudeByokSession', () => {
         mcpStartCapMs: 400,
       })
       session._client = { messages: { stream: () => fakeStream([]) } }
-      const t0 = Date.now()
-      let readyAt = null
-      session.on('ready', () => { readyAt = Date.now() })
+      let ready = false
+      session.on('ready', () => { ready = true })
       await session.start()
-      const elapsed = (readyAt ?? Date.now()) - t0
-      // Under the cap the session emits ready promptly; without it, start()
-      // would block ~7s for the broken server's full restart budget.
-      assert.ok(elapsed < 1000, `session 'ready' fired at ${elapsed}ms, expected <1000ms under 400ms cap`)
+      // #7041: not a wall-clock bound on 'ready'. The cap is a config value the
+      // session must forward to the fleet; without it the fleet falls back to its
+      // 1500ms default (and without any cap start() blocks ~7s on the broken
+      // server). Assert the forwarded value, then that start() really did return
+      // while the broken server was still mid-restart (below).
+      assert.equal(session._mcpFleet._startCapMs, 400, 'mcpStartCapMs must reach the fleet')
+      assert.equal(ready, true, "session emitted 'ready'")
       assert.equal(session._mcpFleet.clients.find((c) => c.name === 'stub').state, MCP_STATES.READY)
       // Broken still in mid-restart loop, not DEAD yet.
       assert.notEqual(
@@ -905,10 +907,12 @@ describe('ClaudeByokSession', () => {
       await session.start()
       const client = session._mcpFleet.clients[0]
       assert.equal(client.state, MCP_STATES.READY)
-      const t0 = Date.now()
+      const child = client._child
       await session.destroy()
-      const elapsed = Date.now() - t0
-      assert.ok(elapsed <= 2500, `destroy took ${elapsed}ms, expected <= 2500ms (FLEET_KILL_GRACE_MS + safety)`)
+      // #7041: assert the MCP child is actually gone, not that destroy() was
+      // quick. A destroy() that skipped the fleet would return instantly and
+      // leave this child running, which an elapsed-time ceiling never caught.
+      assert.ok(child.exitCode !== null || child.signalCode !== null, 'MCP child must have exited once destroy() returns')
       assert.equal(session._mcpFleet, null, 'fleet reference cleared after destroy')
     })
 

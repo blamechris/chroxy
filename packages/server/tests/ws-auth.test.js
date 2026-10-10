@@ -459,7 +459,12 @@ describe('handleAuthMessage', () => {
       assert.equal(authFailures.get('127.0.0.1').count, 2)
     })
 
-    it('applies exponential backoff: 1s for first failure, 4s for third', () => {
+    it('applies exponential backoff: 1s for first failure, 4s for third', (t) => {
+      // #7041: freeze the clock the handler reads, so the backoff is asserted
+      // EXACTLY (blockedUntil - now) instead of inside a 200ms wall-clock window
+      // that a stalled runner can overshoot between the call and the read.
+      const FROZEN_NOW = 1_700_000_000_000
+      t.mock.method(Date, 'now', () => FROZEN_NOW)
       // First failure from a fresh IP → backoff 2^0 * 1000 = 1000ms
       const authFailures1 = new Map()
       const ws1 = makeMockWs()
@@ -473,10 +478,9 @@ describe('handleAuthMessage', () => {
         minProtocolVersion: 1,
         serverProtocolVersion: 3,
       }
-      const before1 = Date.now()
       handleAuthMessage(ctx1, ws1, { type: 'auth', token: 'bad' })
-      const backoff1 = authFailures1.get('10.0.0.1').blockedUntil - before1
-      assert.ok(backoff1 >= 980 && backoff1 <= 1200, `first failure backoff should be ~1s, got ${backoff1}ms`)
+      const backoff1 = authFailures1.get('10.0.0.1').blockedUntil - FROZEN_NOW
+      assert.equal(backoff1, 1000, 'first failure backoff must be exactly 2^0 * 1000ms')
 
       // Seed count=2, blockedUntil=0 → next failure is attempt 3 → 2^2 * 1000 = 4000ms
       const authFailures3 = new Map([
@@ -493,10 +497,9 @@ describe('handleAuthMessage', () => {
         minProtocolVersion: 1,
         serverProtocolVersion: 3,
       }
-      const before3 = Date.now()
       handleAuthMessage(ctx3, ws3, { type: 'auth', token: 'bad' })
-      const backoff3 = authFailures3.get('10.0.0.2').blockedUntil - before3
-      assert.ok(backoff3 >= 3980 && backoff3 <= 4200, `third failure backoff should be ~4s, got ${backoff3}ms`)
+      const backoff3 = authFailures3.get('10.0.0.2').blockedUntil - FROZEN_NOW
+      assert.equal(backoff3, 4000, 'third failure backoff must be exactly 2^2 * 1000ms')
     })
 
     it('caps backoff at 60 seconds', () => {

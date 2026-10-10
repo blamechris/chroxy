@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { BaseTunnelAdapter } from '../../src/tunnel/base.js'
-import { waitForEvent } from '../test-helpers.js'
+import { waitForEvent, recordTimerArms } from '../test-helpers.js'
 
 /**
  * Concrete test adapter with configurable _startTunnel behavior.
@@ -82,7 +82,7 @@ describe('BaseTunnelAdapter', () => {
       assert.equal(adapter._startCallCount, adapter.maxStartAttempts)
     })
 
-    it('aborts mid-retry when stop() is called during the cold-start sleep', async () => {
+    it('aborts mid-retry when stop() is called during the cold-start sleep', async (t) => {
       const adapter = new TestAdapter({
         port: 3000,
         startBehavior: () => { throw new Error('boom') },
@@ -90,13 +90,18 @@ describe('BaseTunnelAdapter', () => {
       // Long backoff so the test would hang for ~30s without abort.
       adapter.recoveryBackoffs = [30_000, 30_000, 30_000]
 
-      const startedAt = Date.now()
+      // #7041: not an elapsed-time bound. Record the backoff sleep the retry loop
+      // arms (clamped to 2s of real time so a regressed abort fails fast rather
+      // than sitting out 30s) and require that stop() cancelled it before it fired.
+      const arms = recordTimerArms(t, { realDelay: (ms) => Math.min(ms, 2000) })
       const startPromise = adapter.start()
       // Trigger stop() during the first cold-start backoff sleep.
       setTimeout(() => { adapter.stop().catch(() => {}) }, 50)
 
       await assert.rejects(startPromise, /boom/)
-      assert.ok(Date.now() - startedAt < 5_000, 'stop() during cold-start sleep should abort within seconds, not the full backoff')
+      const backoff = arms.filter((a) => a.ms === 30_000)
+      assert.equal(backoff.length, 1, 'the first cold-start backoff sleep was armed')
+      assert.equal(backoff[0].fired, false, 'stop() during cold-start sleep must cancel it, not let it run out')
       assert.equal(adapter._startCallCount, 1, 'should not retry after abort')
     })
   })

@@ -127,19 +127,18 @@ describe('#7280 openNoFollow — POSIX branch keeps O_NOFOLLOW', () => {
     try {
       const fifoPath = join(dir, 'evil.fifo')
       execFileSync('mkfifo', [fifoPath])
-      const HANG_GUARD_MS = 2000
-      const start = Date.now()
+      // #7041: generous, because all this must separate is "returned" from
+      // "blocked forever" (a regression blocks indefinitely), not time the call.
+      const HANG_GUARD_MS = 15_000
       const result = await Promise.race([
         openNoFollow(fifoPath, fsConstants.O_RDONLY).then(
           (fh) => ({ outcome: 'resolved', fh }),
           (err) => ({ outcome: 'rejected', err }),
         ),
-        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS).unref()),
       ])
-      const elapsed = Date.now() - start
       assert.notEqual(result.outcome, 'hung',
         `openNoFollow blocked for >= ${HANG_GUARD_MS}ms opening a planted FIFO — the underlying open() needs O_NONBLOCK (#7938)`)
-      assert.ok(elapsed < 1000, `openNoFollow must return promptly for a FIFO (O_NONBLOCK), not block waiting for a writer (elapsed=${elapsed}ms)`)
       // O_NONBLOCK makes the OPEN return; it is the caller's job to then
       // refuse a non-regular file via fstat before reading (see reader.js /
       // memory.js's post-open isFile() checks) — openNoFollow itself has no

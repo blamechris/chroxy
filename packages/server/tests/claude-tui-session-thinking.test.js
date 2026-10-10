@@ -550,9 +550,12 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     await waitFor(() => turnPolling(s), 'the turn to be polling')
     const stamp = now() // claude stamps the block now, but writes the line later
     stop(sinkDir, 'The answer is 42.')
-    const t0 = Date.now()
     await turn
-    assert.ok(Date.now() - t0 < 600, 'the answer did not wait for the transcript')
+    // #7041: not a wall-clock bound. The Stop opens a late window (THINKING_LATE_MS)
+    // for the block to land in; an answer that waited for the transcript would
+    // either never return (the line is only written below) or hold the turn open
+    // until that window expired. It returned with the window still open.
+    assert.ok(s._thinkingRecords.some((r) => r.expiresMono !== null && r.expiresMono > s._nowMonotonic()), 'the answer was delivered inside the late window, without waiting it out')
     assert.equal(events.results.length, 1)
     assert.deepEqual(thinkingFrames(events.frames), [], 'precondition: nothing on disk yet')
 

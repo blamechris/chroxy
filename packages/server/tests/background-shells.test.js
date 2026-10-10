@@ -559,11 +559,13 @@ describe('SessionTimeoutManager honours pending background work (#4307)', () => 
 
     const timeouts = []
     mgr.on('timeout', (data) => timeouts.push(data))
+    const beforeCheck = Date.now()
     mgr._checkTimeouts()
     assert.equal(timeouts.length, 0)
     // Touching activity is the existing skip path — the session stays
     // tracked so a later state change (work done) re-enables timeout
-    // checks naturally.
-    assert.ok(Date.now() - mgr._lastActivity.get('s1') < 1_000)
+    // checks naturally. #7041: compared to a reading taken just before the call,
+    // not to a 1s wall-clock window.
+    assert.ok(mgr._lastActivity.get('s1') >= beforeCheck, 'activity was re-stamped by the check, not left 60s stale')
   })
 })

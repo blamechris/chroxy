@@ -3,6 +3,7 @@
  * retention + normalization layer.
  */
 import { describe, it } from 'node:test'
+import { recordTimerArms } from '../test-helpers.js'
 import assert from 'node:assert/strict'
 import {
   SessionEventLog,
@@ -84,13 +85,17 @@ describe('SessionEventLog waiter cleanup', () => {
     assert.equal(log._waiters.get('s')?.size || 0, 0)
   })
 
-  it('a push wakes a waiting poll immediately rather than waiting out its timer', async () => {
+  it('a push wakes a waiting poll immediately rather than waiting out its timer', async (t) => {
     const log = new SessionEventLog()
-    const start = Date.now()
+    // #7041: not an elapsed-time bound. The poll arms its 5s wait timer; woken by
+    // the push it must return with that timer still unfired.
+    const arms = recordTimerArms(t)
     const pending = log.waitAndRead('s', { waitMs: 5000 })
     log.push('s', 'agent_busy', {})
     const result = await pending
-    assert.ok(Date.now() - start < 1000, 'push must wake the waiter well before the 5s timer')
+    const wait = arms.filter((a) => a.ms === 5000)
+    assert.equal(wait.length, 1, 'the poll armed its 5s wait timer')
+    assert.equal(wait[0].fired, false, 'push must wake the waiter before the 5s timer fires')
     assert.equal(result.events.length, 1)
   })
 })

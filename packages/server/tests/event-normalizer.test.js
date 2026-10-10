@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
+import { recordTimerArms } from './test-helpers.js'
 import { getLogLevel, setLogLevel } from '../src/logger.js'
 import { ServerSkillChangedSchema, MAX_SANE_DURATION_MS } from '@chroxy/protocol'
 
@@ -1955,23 +1956,26 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
   // #5515/#5520 emitMonoMs instrumentation bufferDelta carries through still
   // round-trips to the flushed entry after the window change. The EXACT 8/16ms
   // contract is locked by the setTimeout-spy tests above; this test deliberately
-  // does NOT re-assert it. The upper bound here is a loose ceiling only — proof
-  // the flush is no longer near the old 25/50ms-stacked floor — set well above
-  // worst-case timer slip so it can't go flaky under CI scheduling jitter. A
-  // bounded timeout makes a never-fired callback fail fast instead of hanging,
-  // and destroy() runs in finally so an assertion failure can't leak the timer.
-  it('flushes a single-subscriber delta via the real timer and round-trips emitMonoMs', async () => {
+  // does NOT re-assert it. #7041: this used to also bound the wall-clock time to
+  // flush (`< 100ms`), which a GC pause or a context switch on a shared runner
+  // could blow without any regression. It now records the delay the flush timer
+  // was ARMED with (a pass-through spy, so the real timer still fires) and asserts
+  // that the timer which produced the flush was the shrunk single-subscriber
+  // window, not the old 25/50ms-stacked one. A bounded timeout makes a
+  // never-fired callback fail fast instead of hanging, and destroy() runs in
+  // finally so an assertion failure can't leak the timer.
+  it('flushes a single-subscriber delta via the real timer and round-trips emitMonoMs', async (t) => {
     const n = new EventNormalizer({ getSubscriberCount: () => 1 })
     try {
       const flushed = []
       let resolveFlush
       const done = new Promise((res) => { resolveFlush = res })
       n.onFlush = (entries) => {
-        flushed.push({ at: performance.now(), entries })
+        flushed.push({ entries })
         resolveFlush()
       }
       const emitMono = Number(process.hrtime.bigint() / 1_000_000n)
-      const buffered = performance.now()
+      const arms = recordTimerArms(t)
       n.bufferDelta('sess-1', 'msg-1', 'hello', emitMono)
       // Bounded race: if the flush callback never fires, fail fast rather than
       // hang until the test-runner timeout.
@@ -1984,12 +1988,11 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
       } finally {
         clearTimeout(bail)
       }
-      const elapsed = flushed[0].at - buffered
-      // Loose ceiling — NOT the 8ms contract (that's the spy tests' job). 100ms is
-      // far above any realistic single-timer slip yet still well below the old
-      // 25/50ms server window stacked on the client EWMA, so it confirms the
-      // server half no longer dominates without being jitter-sensitive.
-      assert.ok(elapsed < 100, `expected a prompt real-timer flush, got ${elapsed.toFixed(1)}ms`)
+      // bufferDelta armed the flush timer before the bail timer below, so it is
+      // the first arm. It must be the shrunk single-subscriber window, and it
+      // must have fired for the flush to have happened through the real path.
+      assert.equal(arms[0].ms, 8, 'the flush timer must be armed with the 8ms single-subscriber window')
+      assert.equal(arms[0].fired, true, 'the flush came from that timer firing')
       assert.equal(flushed[0].entries.length, 1)
       assert.equal(flushed[0].entries[0].delta, 'hello')
       // The #5520 emitMonoMs instrumentation survives the coalescing path.

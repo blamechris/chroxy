@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url'
 import { ClaudeTuiSession, SINK_BASE_UNTRUSTED_CODE, buildNativeRouteCheckHook, withHookFsTimeout, _resetLoginProbeWarningForTests } from '../src/claude-tui-session.js'
 import { AUTH_FAILURE_PATTERNS, AUTH_FAILURE_COMPACT_PATTERNS } from '../src/claude-tui/pty-driver.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
+import { recordTimerArms } from './test-helpers.js'
 import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
@@ -1815,7 +1816,7 @@ describe('ClaudeTuiSession', () => {
     // #8223: the short-circuit is footer-only now. It used to key on the banner
     // `Invalid API key · Please run /login`, which is also what a `--resume`
     // re-renders from history; the live no-credentials signal is the footer.
-    it('_waitForPrompt short-circuits the warmup wait on the logged-out footer (#5355 m3 — no 90s hang)', async () => {
+    it('_waitForPrompt short-circuits the warmup wait on the logged-out footer (#5355 m3 — no 90s hang)', async (t) => {
       const s = makeSession()
       // Real _waitForPrompt: a live pid + a never-ready session file, but the
       // login footer already in the tail. With detectAuthFailure it must bail on
@@ -1824,13 +1825,19 @@ describe('ClaudeTuiSession', () => {
       s._appendToOutputTail('Not logged in · Run /login')
       const origRead = ClaudeTuiSession.readSessionStatus
       ClaudeTuiSession.readSessionStatus = () => null // never reaches idle
+      // #7041: no wall-clock bound. The poll loop sleeps 100ms between probes, so
+      // "bailed on the FIRST poll" is exactly "armed no poll sleep" — assert that.
+      // The loop's clock (the `_nowMonotonic` seam) advances 10s per read, so a
+      // regressed short-circuit runs the 60s window out in a handful of polls
+      // instead of the test actually waiting a minute.
+      let fakeNow = 0
+      s._nowMonotonic = () => (fakeNow += 10_000)
+      const arms = recordTimerArms(t)
       try {
-        const startedAt = Date.now()
         const ready = await s._waitForPrompt(60_000, { detectAuthFailure: true })
-        const elapsed = Date.now() - startedAt
         assert.equal(ready, false, 'not ready')
         assert.equal(s._authFailureDetected, true, 'auth failure latched')
-        assert.ok(elapsed < 2_000, `short-circuited fast (elapsed=${elapsed}ms, not the 60s timeout)`)
+        assert.equal(arms.filter((a) => a.ms === 100).length, 0, 'short-circuited on the first poll — no poll sleep was armed')
       } finally {
         ClaudeTuiSession.readSessionStatus = origRead
       }
@@ -2148,7 +2155,7 @@ describe('ClaudeTuiSession', () => {
     // #6178: per-session self-recovery — the hot-path fs ops are bounded so a
     // stuck sink fs can't wedge the turn that owns it (the cross-session win was
     // #6132; this is the single-session follow-up).
-    it('self-recovers from a hung sink fs instead of wedging the turn (#6178)', async () => {
+    it('self-recovers from a hung sink fs instead of wedging the turn (#6178)', async (t) => {
       session = new ClaudeTuiSession({
         cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
         resultTimeoutMs: 5000, hardTimeoutMs: 400,
@@ -2166,11 +2173,16 @@ describe('ClaudeTuiSession', () => {
       let readdirCalls = 0
       session._hookReaddir = () => { readdirCalls++; return new Promise(() => {}) }
       session._term = { write: () => {}, kill: () => {} }
-      session.on('error', () => {})
-      const start = Date.now()
+      const errors = []
+      session.on('error', (e) => errors.push(e))
+      // #7041: no elapsed-time bound. sendMessage() returning at all is the
+      // not-wedged proof (a wedge hangs the test, as the comment above says);
+      // WHAT ended the turn is asserted structurally: the hard-timeout watchdog
+      // was armed at its configured 400ms, fired, and reported the timeout.
+      const arms = recordTimerArms(t)
       await session.sendMessage('hi')
-      const elapsed = Date.now() - start
-      assert.ok(elapsed < 3000, `turn self-terminated (${elapsed}ms), not wedged on the frozen readdir`)
+      assert.ok(arms.some((a) => a.ms === 400 && a.fired), 'the 400ms hard-timeout watchdog was armed and is what ended the turn')
+      assert.ok(errors.some((e) => /Response timed out after/.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging')
       assert.equal(session._isBusy, false, 'busy cleared — the next turn isn\'t wedged')
       // #6178 (review): the stuck readdir is COALESCED — re-raced, not re-issued.
       // Across the multiple poll passes before the hard timeout, the underlying
@@ -2183,12 +2195,13 @@ describe('ClaudeTuiSession', () => {
     // #6178: the bound primitive itself.
     describe('withHookFsTimeout', () => {
       it('rejects with a tagged HOOK_FS_TIMEOUT after the bound on a stuck promise', async () => {
-        const start = Date.now()
+        // #7041: the rejection itself is the proof the bound fired — a primitive
+        // that never bounded a stuck promise would hang here, not reject with
+        // HOOK_FS_TIMEOUT; no elapsed-time ceiling is needed (or stable).
         await assert.rejects(
           () => withHookFsTimeout(new Promise(() => {}), 30, 'readdir'),
           (err) => err.code === 'HOOK_FS_TIMEOUT' && /readdir/.test(err.message),
         )
-        assert.ok(Date.now() - start < 1000, 'rejected promptly at the bound, not hung')
       })
 
       it('resolves with the value when the promise settles before the bound', async () => {
@@ -9291,7 +9304,7 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
   // turn down — the poll loop keeps iterating (mirroring the existing #6178
   // hung-readdir self-recovery test) rather than misreporting a slow mount as
   // an attack.
-  it('a hung base lstat times out and skips the pass — it is not reported as a compromised base (#7926 review)', async () => {
+  it('a hung base lstat times out and skips the pass — it is not reported as a compromised base (#7926 review)', async (t) => {
     // A short hardTimeoutMs (mirroring the #6178 hung-readdir test) so this
     // proves the turn self-terminates via the EXISTING hard-timeout watchdog
     // rather than sitting through makeStartedSession's default 5000ms.
@@ -9315,10 +9328,11 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     let lstatCalls = 0
     session._hookLstat = () => { lstatCalls++; return new Promise(() => {}) } // never resolves
     session._term = { write: () => {}, kill: () => {} }
-    const start = Date.now()
+    // #7041: structural, not wall-clock — see the #6178 hung-readdir test.
+    const arms = recordTimerArms(t)
     await session.sendMessage('hi')
-    const elapsed = Date.now() - start
-    assert.ok(elapsed < 3000, `turn self-terminated (${elapsed}ms) via the hard-timeout watchdog, not wedged on the frozen lstat`)
+    assert.ok(arms.some((a) => a.ms === 400 && a.fired), 'the 400ms hard-timeout watchdog was armed and is what ended the turn')
+    assert.ok(errors.some((e) => /Response timed out after/.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging on the frozen lstat')
     assert.equal(session._isBusy, false, 'busy cleared — the next turn is not wedged')
     const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
     assert.equal(untrusted.length, 0, 'a hung lstat must never be reported as SINK_BASE_UNTRUSTED — that is a security verdict, this is a stuck filesystem')
@@ -9352,20 +9366,20 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     session = makeStartedSession('s-fifo-hang')
     const fifoPath = join(session._sinkDir, 'stop-evil.json')
     execFileSync('mkfifo', [fifoPath])
-    const HANG_GUARD_MS = 2000
-    const start = Date.now()
+    // Generous: this only has to tell "returned" from "blocked forever" (#7041),
+    // not time the call. A real regression blocks indefinitely, so any ceiling
+    // above scheduler noise separates the two.
+    const HANG_GUARD_MS = 15_000
     const result = await Promise.race([
       session._hookReadFile(fifoPath).then(
         (v) => ({ outcome: 'resolved', value: v }),
         (err) => ({ outcome: 'rejected', err }),
       ),
-      new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+      new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS).unref()),
     ])
-    const elapsed = Date.now() - start
     assert.notEqual(result.outcome, 'hung', `_hookReadFile blocked for >= ${HANG_GUARD_MS}ms on a planted FIFO — open() needs O_NONBLOCK`)
     assert.equal(result.outcome, 'rejected', 'a FIFO planted at a hook-file name must be refused, not read as a payload')
     assert.match(result.err.message, /is not a regular file/, 'refused via the isFile() check, not some other failure')
-    assert.ok(elapsed < 1000, `_hookReadFile must return promptly for a FIFO (O_NONBLOCK), not block waiting for a writer (elapsed=${elapsed}ms)`)
   })
 
   // #7938 — the SAME hang class, found in `_captureSinkBaseIdentity`
@@ -9383,17 +9397,15 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     session = makeStartedSession('s-fifo-base')
     const fifoPath = join(baseDir, 'evil-base.fifo')
     execFileSync('mkfifo', [fifoPath])
-    const HANG_GUARD_MS = 2000
-    const start = Date.now()
+    // #7041: the call is synchronous, so a blocking open() never returns and no
+    // after-the-fact elapsed check could ever have caught it; what is asserted is
+    // the outcome of a call that DID return — refused via the isDirectory() check.
     let thrown = null
     try {
       session._captureSinkBaseIdentity(fifoPath)
     } catch (err) {
       thrown = err
     }
-    const elapsed = Date.now() - start
-    assert.ok(elapsed < HANG_GUARD_MS,
-      `_captureSinkBaseIdentity blocked for ${elapsed}ms opening a planted FIFO — the open needs O_NONBLOCK (#7938)`)
     assert.ok(thrown, 'a FIFO planted at the sink base path must be refused, not silently captured as the base identity')
     assert.match(thrown.message, /not a directory/i, 'refused via the post-open isDirectory() check, not some other failure')
   })
@@ -9409,7 +9421,7 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
   // completes — with a post-check lstat that never resolves, proving the
   // batch is still discarded when the check can't complete at all, not only
   // when it completes and says "not ok".
-  it('a slow post-check lstat during an ACTUAL base swap must not deliver the batch — timeout fails closed, not open (#7926 re-review)', { skip: SKIP_NO_SYMLINK }, async () => {
+  it('a slow post-check lstat during an ACTUAL base swap must not deliver the batch — timeout fails closed, not open (#7926 re-review)', { skip: SKIP_NO_SYMLINK }, async (t) => {
     const sinkName = 's-toctou-timeout-fail-closed'
     const sinkDir = join(baseDir, sinkName)
     mkdirSync(sinkDir, { recursive: true, mode: 0o700 })
@@ -9471,11 +9483,12 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
       kill: () => {},
     }
 
-    const start = Date.now()
+    // #7041: structural, not wall-clock — see the #6178 hung-readdir test.
+    const arms = recordTimerArms(t)
     await session.sendMessage('hi')
-    const elapsed = Date.now() - start
 
-    assert.ok(elapsed < 3000, `turn self-terminated (${elapsed}ms) via the hard-timeout watchdog, not wedged forever on the frozen post-check lstat`)
+    assert.ok(arms.some((a) => a.ms === 400 && a.fired), 'the 400ms hard-timeout watchdog was armed and is what ended the turn')
+    assert.ok(errors.some((e) => /Response timed out after/.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging forever on the frozen post-check lstat')
     assert.equal(session._isBusy, false, 'turn ended — the next turn is not wedged')
     assert.equal(events.length, 0, 'nothing delivered while the base swap could not be confirmed — a stuck check must fail CLOSED for delivery, not open')
     const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)

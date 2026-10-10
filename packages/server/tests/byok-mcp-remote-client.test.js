@@ -1,4 +1,5 @@
 import { describe, it, afterEach } from 'node:test'
+import { recordTimerArms } from './test-helpers.js'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
@@ -261,17 +262,20 @@ describe('MCPRemoteClient — Streamable HTTP (#6821)', () => {
     await client.destroy()
   })
 
-  it('handshake timeout → DEAD with no oauth status', async () => {
+  it('handshake timeout → DEAD with no oauth status', async (t) => {
     srv = await startMockMcpServer({ hangMethods: ['initialize'] })
     const client = new MCPRemoteClient(
       { name: 'remote', type: 'http', url: srv.url, headers: {} },
       { log: silentLog(), handshakeTimeoutMs: 150 },
     )
-    const t0 = Date.now()
+    // #7041: assert the deadline the handshake ARMED, not how quickly start()
+    // returned: the 150ms override fired, the 5s default was never armed.
+    const arms = recordTimerArms(t)
     await client.start()
     assert.equal(client.state, MCP_STATES.DEAD)
     assert.equal(client.statusReason, null, 'a timeout is not an oauth failure')
-    assert.ok(Date.now() - t0 < 5000, 'timeout must fire well under the default 5s handshake budget')
+    assert.ok(arms.some((a) => a.ms === 150 && a.fired), 'the 150ms handshake override must have been armed and fired')
+    assert.ok(!arms.some((a) => a.ms === 5000), 'the default 5s handshake budget must not have been armed')
     await client.destroy()
   })
 

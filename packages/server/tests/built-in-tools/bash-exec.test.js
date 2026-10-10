@@ -63,9 +63,10 @@ describe('executeBash', () => {
     const r = await executeBash({ command: 'sleep 5', timeoutMs: 200 })
     assert.equal(r.timedOut, true)
     // The process should be killed before completing. exitCode may be
-    // null (signal kill) or non-zero. Just assert duration is well
-    // below the sleep target.
-    assert.ok(r.durationMs < 4000, `expected fast kill, got ${r.durationMs}ms`)
+    // null (signal kill) or non-zero. #7041: assert it did not run to
+    // completion (a `sleep 5` that finished would exit 0 with no signal)
+    // rather than bounding durationMs, which a loaded runner can stretch.
+    assert.ok(r.signal !== null || r.exitCode !== 0, `expected the process to be killed, got exitCode=${r.exitCode} signal=${r.signal}`)
   })
 
   it('aborts via AbortSignal', async () => {
@@ -73,7 +74,8 @@ describe('executeBash', () => {
     setTimeout(() => ctrl.abort(), 50)
     const r = await executeBash({ command: 'sleep 5', signal: ctrl.signal, timeoutMs: 30_000 })
     assert.equal(r.aborted, true)
-    assert.ok(r.durationMs < 3000, `expected fast abort kill, got ${r.durationMs}ms`)
+    // #7041: killed, not run to completion (no wall-clock bound).
+    assert.ok(r.signal !== null || r.exitCode !== 0, `expected the process to be killed, got exitCode=${r.exitCode} signal=${r.signal}`)
   })
 
   it('caps output bytes and marks truncated', async () => {

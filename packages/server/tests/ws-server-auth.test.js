@@ -1036,7 +1036,7 @@ describe('auth rate limiting', () => {
     ws3.close()
   })
 
-  it('exponential backoff increases block duration', async () => {
+  it('exponential backoff increases block duration', async (t) => {
     const mockSession = createMockSession()
     server = new WsServer({
       port: 0,
@@ -1046,6 +1046,16 @@ describe('auth rate limiting', () => {
     })
     const port = await startServerAndGetPort(server)
 
+    // #7041: the backoff is blockedUntil - (the clock reading the handler took),
+    // so record every Date.now() reading and look for the one that yields exactly
+    // the scheduled backoff. The old `blockedUntil - Date.now()` taken AFTER the
+    // client round trip was a window that shrank (or went negative) with every
+    // millisecond the runner stalled before the test read the clock.
+    const readings = []
+    const realNow = Date.now
+    t.mock.method(Date, 'now', () => { const v = realNow(); readings.push(v); return v })
+    const backoffMatches = (entry, ms) => readings.some((r) => entry.blockedUntil - r === ms)
+
     // Access internal state to verify backoff progression
     // First failure: 1s backoff
     const { ws: ws1, messages: msgs1 } = await createClient(port, false)
@@ -1054,9 +1064,8 @@ describe('auth rate limiting', () => {
 
     const entry1 = server._authFailures.values().next().value
     assert.equal(entry1.count, 1)
-    // Backoff should be ~1000ms (1s)
-    const backoff1 = entry1.blockedUntil - Date.now()
-    assert.ok(backoff1 > 0 && backoff1 <= 1000, `First backoff should be ~1s, got ${backoff1}ms`)
+    // Backoff is exactly 1000ms (1s)
+    assert.ok(backoffMatches(entry1, 1000), `First backoff should be exactly 1s (blockedUntil=${entry1.blockedUntil})`)
 
     // Wait for first backoff to expire, then fail again
     await new Promise(r => setTimeout(r, 1100))
@@ -1067,9 +1076,8 @@ describe('auth rate limiting', () => {
 
     const entry2 = server._authFailures.values().next().value
     assert.equal(entry2.count, 2)
-    // Backoff should be ~2000ms (2s)
-    const backoff2 = entry2.blockedUntil - Date.now()
-    assert.ok(backoff2 > 1000 && backoff2 <= 2000, `Second backoff should be ~2s, got ${backoff2}ms`)
+    // Backoff is exactly 2000ms (2s)
+    assert.ok(backoffMatches(entry2, 2000), `Second backoff should be exactly 2s (blockedUntil=${entry2.blockedUntil})`)
 
     ws1.close()
     ws2.close()

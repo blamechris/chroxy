@@ -1642,9 +1642,10 @@ describe('service', () => {
 
       it('passes against this repo\'s real server tree (offline, fast)', () => {
         const here = fileURLToPath(new URL('../src/cli.js', import.meta.url))
-        const t0 = Date.now()
+        // #7041: the preflight is synchronous fs checks only, so it cannot hang on a
+        // network or a subprocess; a wall-clock "must be fast" bound added nothing
+        // but a way to fail on a loaded runner.
         assert.deepEqual(checkChroxyTree(here).problems, [])
-        assert.ok(Date.now() - t0 < 1000, 'preflight must be fast')
       })
     })
 
