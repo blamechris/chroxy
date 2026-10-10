@@ -21,6 +21,16 @@ import {
   observeClaudeNativeRoute,
 } from '../src/utils/claude-native-route.js'
 
+// The hard-timeout budget ends a stuck turn by whichever of its two paths runs
+// first: the watchdog (`_handleHardTimeout`, "Response timed out after …") or the
+// hook-poll loop's own deadline at the same budget ("Claude did not finish
+// responding (gave up after Ns)"). On a loaded runner either can win, so a test
+// that means "the budget ended the turn, it did not wedge" accepts both — but the
+// poll path only at the budget: its message carries the elapsed seconds, and a
+// sub-second budget may read 0-2s under load, never the 20s of a deadline that
+// stopped honouring the budget (#7041 follow-up).
+const HARD_TIMEOUT_END_RE = /Response timed out after|Claude did not finish responding \(gave up after [0-2]s\)/
+
 // Independent roster from the locally installed Claude Code 2.1.270 route
 // selectors. Do not derive this from CLAUDE_NATIVE_ROUTE_FORBIDDEN_ENV: a new
 // or accidentally deleted implementation row must make the parity check red.
@@ -2178,11 +2188,13 @@ describe('ClaudeTuiSession', () => {
       // #7041: no elapsed-time bound. sendMessage() returning at all is the
       // not-wedged proof (a wedge hangs the test, as the comment above says);
       // WHAT ended the turn is asserted structurally: the hard-timeout watchdog
-      // was armed at its configured 400ms, fired, and reported the timeout.
+      // was armed at its configured 400ms, and the turn ended with a hard-timeout
+      // error from whichever of the budget's two paths ran first (see
+      // HARD_TIMEOUT_END_RE) — the watchdog may be armed without ever firing.
       const arms = recordTimerArms(t)
       await session.sendMessage('hi')
-      assert.ok(arms.some((a) => a.ms === 400 && a.fired), 'the 400ms hard-timeout watchdog was armed and is what ended the turn')
-      assert.ok(errors.some((e) => /Response timed out after/.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging')
+      assert.ok(arms.some((a) => a.ms === 400), 'the 400ms hard-timeout watchdog was armed')
+      assert.ok(errors.some((e) => HARD_TIMEOUT_END_RE.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging (either hard-timeout path may win the race at the same budget)')
       assert.equal(session._isBusy, false, 'busy cleared — the next turn isn\'t wedged')
       // #6178 (review): the stuck readdir is COALESCED — re-raced, not re-issued.
       // Across the multiple poll passes before the hard timeout, the underlying
@@ -9331,8 +9343,8 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     // #7041: structural, not wall-clock — see the #6178 hung-readdir test.
     const arms = recordTimerArms(t)
     await session.sendMessage('hi')
-    assert.ok(arms.some((a) => a.ms === 400 && a.fired), 'the 400ms hard-timeout watchdog was armed and is what ended the turn')
-    assert.ok(errors.some((e) => /Response timed out after/.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging on the frozen lstat')
+    assert.ok(arms.some((a) => a.ms === 400), 'the 400ms hard-timeout watchdog was armed')
+    assert.ok(errors.some((e) => HARD_TIMEOUT_END_RE.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging on the frozen lstat (either hard-timeout path may win the race at the same budget)')
     assert.equal(session._isBusy, false, 'busy cleared — the next turn is not wedged')
     const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
     assert.equal(untrusted.length, 0, 'a hung lstat must never be reported as SINK_BASE_UNTRUSTED — that is a security verdict, this is a stuck filesystem')
@@ -9487,8 +9499,8 @@ describe('ClaudeTuiSession — sink base re-validation on the poll read path (#7
     const arms = recordTimerArms(t)
     await session.sendMessage('hi')
 
-    assert.ok(arms.some((a) => a.ms === 400 && a.fired), 'the 400ms hard-timeout watchdog was armed and is what ended the turn')
-    assert.ok(errors.some((e) => /Response timed out after/.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging forever on the frozen post-check lstat')
+    assert.ok(arms.some((a) => a.ms === 400), 'the 400ms hard-timeout watchdog was armed')
+    assert.ok(errors.some((e) => HARD_TIMEOUT_END_RE.test(e.message)), 'the turn ended with the hard-timeout error, not by wedging forever on the frozen post-check lstat (either hard-timeout path may win the race at the same budget)')
     assert.equal(session._isBusy, false, 'turn ended — the next turn is not wedged')
     assert.equal(events.length, 0, 'nothing delivered while the base swap could not be confirmed — a stuck check must fail CLOSED for delivery, not open')
     const untrusted = errors.filter((e) => e.code === SINK_BASE_UNTRUSTED_CODE)
