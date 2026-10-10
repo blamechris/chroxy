@@ -79,8 +79,10 @@ const MAX_TOOL_ROUNDS = 25
 // model streamed any text. The API refuses an empty text block, and leaving the
 // assistant slot out would put the stopped prompt and the next one back to back.
 const STOPPED_BEFORE_TEXT = '[Interrupted by the user before any reply was produced.]'
-// ...and the tool_result answering a tool_use the Stop threw before it could run.
-const STOPPED_BEFORE_TOOL = 'Interrupted by the user before the tool ran.'
+// ...and the tool_result answering a tool_use whose result the Stop kept from being
+// recorded. It may already have run (an earlier tool in the same round can complete
+// before a later one throws), so the model is told to check, not that it did not run.
+const STOPPED_BEFORE_TOOL = 'Interrupted by the user before this result was recorded. The tool may or may not have run; check its effects before running it again.'
 
 // TTL for the per-session realpath cache used by validatePathWithinCwd
 // in the tool executor. The cwd shouldn't change mid-session, but caching
