@@ -1222,6 +1222,168 @@ describe('shared dispatch table', () => {
         expect(sweepUnansweredPromptsAtReplayEnd('s1', env.sessions.s1.messages)).toBeNull()
         resetReplayReconcile({ clearCursors: true })
       })
+
+      // #7509 F4 -- a delta replay can leave TWO copies of one question (user_question
+      // frames bypass isReplayDuplicate). The permission precedent revives every copy
+      // carrying the id; reviving only the first left a stale '(resolved)' twin.
+      it('revives EVERY held copy carrying the toolUseId, not just the first (#7509 F4)', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: {
+            s1: {
+              sessionId: 's1',
+              messages: [
+                held({ id: 'question-a', answered: '(resolved)' }),
+                { id: 'sys-1', type: 'system', content: 'between', timestamp: 1 } as ChatMessage,
+                held({ id: 'question-b', answered: '(resolved)' }),
+              ],
+            },
+          },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach NOW?' }],
+        })
+        const msgs = env.sessions.s1.messages
+        expect(msgs).toHaveLength(3)
+        expect(msgs.map((m) => m.id)).toEqual(['question-a', 'sys-1', 'question-b'])
+        expect(msgs[0]).toMatchObject({ content: 'Which approach NOW?' })
+        expect(msgs[2]).toMatchObject({ content: 'Which approach NOW?' })
+        expect(msgs[0].answered).toBeUndefined()
+        expect(msgs[2].answered).toBeUndefined()
+      })
+
+      it('records EVERY revived copy in the live-arrival ledger (#7509 F4)', () => {
+        resetReplayReconcile({ clearCursors: true })
+        reconcileReplayStart('s1', false, [])
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: {
+            s1: {
+              sessionId: 's1',
+              messages: [
+                held({ id: 'question-a', answered: '(resolved)' }),
+                held({ id: 'question-b', answered: '(resolved)' }),
+              ],
+            },
+          },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(wasPromptLiveDuringReplay('s1', 'question-a')).toBe(true)
+        expect(wasPromptLiveDuringReplay('s1', 'question-b')).toBe(true)
+        resetReplayReconcile({ clearCursors: true })
+      })
+
+      // #7509 F4 -- each copy keeps its OWN real decision; only the placeholder clears.
+      it('carries a real answer on one copy while clearing the placeholder on the other (#7509 F4)', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: {
+            s1: {
+              sessionId: 's1',
+              messages: [
+                held({ id: 'question-a', answered: 'Round' }),
+                held({ id: 'question-b', answered: '(resolved)' }),
+              ],
+            },
+          },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(env.sessions.s1.messages[0].answered).toBe('Round')
+        expect(env.sessions.s1.messages[1].answered).toBeUndefined()
+      })
+
+      // #7509 F5 -- both re-delivery paths merge through reviveHeldPrompt, so a field
+      // the held copy carries and the re-sent frame does not is KEPT here exactly as
+      // the permission path keeps it. Before, this path replaced the whole message
+      // with the freshly built one and silently dropped it.
+      it('keeps a field the held copy carries that the re-sent frame does not (#7509 F5)', () => {
+        const env = makeAdapter({
+          activeSessionId: 's1',
+          sessions: {
+            s1: {
+              sessionId: 's1',
+              messages: [held({ answered: '(resolved)', originSessionId: 'origin-1', toolInput: { q: 1 } })],
+            },
+          },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach NOW?' }],
+        })
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.sessions.s1.messages[0]).toMatchObject({
+          content: 'Which approach NOW?',
+          originSessionId: 'origin-1',
+          toolInput: { q: 1 },
+        })
+      })
+
+      // #7509 F6 -- a supersede is a correction of a question the person was already
+      // told about, so it raises no second notification; an append raises one.
+      it('raises no question notification when the dispatch superseded a held prompt (#7509 F6)', () => {
+        const env = makeAdapter({
+          activeSessionId: 'other',
+          sessions: { s1: { sessionId: 's1', messages: [held({ answered: '(resolved)' })] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.notifications).toEqual([])
+      })
+
+      // The replayed twin of the same rule: a replayed copy that collapses onto the
+      // bubble already held is not a new question either.
+      it('raises no question notification when a REPLAYED copy collapses onto the held prompt (#7509 F6)', () => {
+        const env = makeAdapter({
+          activeSessionId: 'other',
+          sessions: { s1: { sessionId: 's1', messages: [held()] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?', options: [] }],
+          historySeq: 7,
+        } as never)
+        expect(env.sessions.s1.messages).toHaveLength(1)
+        expect(env.notifications).toEqual([])
+      })
+
+      it('still raises exactly one question notification when it appends (#7509 F6)', () => {
+        const env = makeAdapter({
+          activeSessionId: 'other',
+          sessions: { s1: { sessionId: 's1', messages: [held({ toolUseId: 'ask-OTHER' })] } },
+        })
+        dispatch(env, {
+          type: 'user_question',
+          sessionId: 's1',
+          toolUseId: 'ask-1',
+          questions: [{ question: 'Which approach?' }],
+        })
+        expect(env.sessions.s1.messages).toHaveLength(2)
+        expect(env.notifications).toEqual([
+          { sessionId: 's1', eventType: 'question', message: 'Which approach?' },
+        ])
+      })
     })
 
     it('is handled (no mutation) when the questions payload is malformed', () => {

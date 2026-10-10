@@ -104,6 +104,8 @@ import {
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   applyPermissionResolved,
+  // #7509 F5 — the one merge a re-sent prompt (permission or question) goes through.
+  reviveHeldPrompt,
   // #8470 — a question that ended with no answer: replaced by a newer one
   // (permission_resolved, question variant) or answered into nothing (error).
   QUESTION_SUPERSEDED_REASON,
@@ -2996,7 +2998,7 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
     const updater = (ss: { messages: ChatMessage[] }) => ({
       messages: ss.messages.map((m) =>
         m.requestId === permRequestId && m.type === 'prompt'
-          ? { ...m, answered: undefined, options: newOptions, expiresAt: newExpiresAt }
+          ? reviveHeldPrompt(m, { answered: undefined, options: newOptions, expiresAt: newExpiresAt })
           : m
       ),
     });

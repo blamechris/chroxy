@@ -1567,6 +1567,39 @@ export function resolveReplayPlan(sessionManager, history, sessionId, lastSeq, l
 }
 
 /**
+ * #7509 F7 -- read a list off a provider session for a replay follow-up, and turn
+ * a provider that cannot answer into a LOGGED, empty result instead of a throw.
+ *
+ * `getActiveAgents()` and `getPendingQuestions()` are defined on BaseSession, but
+ * `validateProviderClass` (providers.js) only requires six prototype methods, so
+ * a custom provider that does not extend BaseSession can lack either -- and both
+ * follow-ups run inside `finishReplay`, a `setImmediate` continuation, where a
+ * throw is an uncaught exception that also skips every follow-up after it.
+ *
+ * This is deliberately NOT a feature-detect: the method is still called, so a
+ * provider that lacks it or throws is reported (session id, method, cause) at
+ * error level rather than treated as "nothing to send". It is the ONE place both
+ * follow-ups read through, so a third caller inherits it.
+ *
+ * @param {object} session
+ * @param {string} sessionId
+ * @param {'getActiveAgents' | 'getPendingQuestions'} method
+ * @returns {Array}
+ */
+function readProviderList(session, sessionId, method) {
+  try {
+    const list = session[method]()
+    if (!Array.isArray(list)) {
+      throw new TypeError(`${method}() returned ${list === null ? 'null' : typeof list}, expected an array`)
+    }
+    return list
+  } catch (err) {
+    log.error(`Replay follow-up ${method}() failed on session ${sessionId}: ${err?.message || err} -- skipping it, the replay still finishes`)
+    return []
+  }
+}
+
+/**
  * #7340 — re-seed a client's `activeAgents` after a history replay.
  *
  * Both clients WIPE `activeAgents` on `history_replay_start` (dashboard
@@ -1599,9 +1632,14 @@ export function reseedActiveAgents(ctx, ws, sessionId) {
   // and a feature-detect that can never fail turns a future regression into a
   // silent no-op instead of a crash ("cannot check this" read as "nothing to
   // check", docs/false-safety-guards.md).
+  //
+  // What `readProviderList` adds is the opposite of a feature-detect: the call
+  // is still made, and a provider that lacks it or throws is LOGGED loudly
+  // (#7509 F7), never swallowed -- and never allowed to escape a `setImmediate`
+  // continuation as an uncaught exception that skips the follow-ups after it.
   const session = sessionManager?.getSession(sessionId)?.session
   if (!session) return
-  for (const agent of session.getActiveAgents()) {
+  for (const agent of readProviderList(session, sessionId, 'getActiveAgents')) {
     send(ws, { type: 'agent_spawned', sessionId, ...agent })
   }
 }
@@ -1644,10 +1682,12 @@ export function reseedActiveAgents(ctx, ws, sessionId) {
  * wire-shape change, no protocol bump, and both clients supersede the copy they
  * already hold by `toolUseId` rather than stacking a duplicate bubble.
  *
- * `getPendingQuestions()` is called UNGUARDED for the same reason
- * `getActiveAgents()` above is: BaseSession defines it, every provider extends
- * BaseSession, so a feature-detect here could never fail and would only convert
- * a future regression into a silent no-op.
+ * `getPendingQuestions()` carries no feature-detect for the same reason
+ * `getActiveAgents()` above does not: BaseSession defines it, so a detect here
+ * could never fail and would only convert a future regression into a silent
+ * no-op. It IS read through `readProviderList` (#7509 F7), so a custom provider
+ * that lacks it or throws is logged with the session id and method rather than
+ * escaping `finishReplay`'s `setImmediate` as an uncaught exception.
  *
  * No route registration: `_questionSessionMap` entries are pruned only when the
  * question resolves or its session is destroyed, so a still-pending question is
@@ -1663,7 +1703,7 @@ export function resendPendingQuestions(ctx, ws, sessionId) {
   const { sessionManager, send } = ctx
   const session = sessionManager?.getSession(sessionId)?.session
   if (!session) return
-  for (const { toolUseId, questions } of session.getPendingQuestions()) {
+  for (const { toolUseId, questions } of readProviderList(session, sessionId, 'getPendingQuestions')) {
     // An entry with no id is unanswerable: `handleUserQuestionResponse` routes
     // strictly by `toolUseId` and fails closed on one it cannot find. Skip it
     // rather than send a prompt whose answer can only be dropped -- and skip
