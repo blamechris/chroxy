@@ -30,7 +30,7 @@ import {
   resetReplayFlags,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
-import type { ConnectionState } from './types'
+import type { ConnectionState, ChatMessage } from './types'
 
 const SID = 'sess-order'
 const TURN = 'turn-1'
@@ -175,6 +175,19 @@ describe('a late thinking block is placed by its ordering hint (#8518)', () => {
       send({ type: 'history_replay_end' })
       expect(ids()).toEqual([`${TURN}-thinking-0`, 'toolu_a'])
       expect(store.getState().sessionStates[SID]!.messages[0]).toMatchObject({ content: 'reasoning', thinkingStreaming: false })
+    })
+
+    it('the flat fallback (a replayed entry for a session the store holds no state for) honours the hint too (#8532 N3)', () => {
+      const toolRow = { id: 'toolu_a', type: 'tool_use', toolUseId: 'toolu_a', tool: 'Bash', content: '', timestamp: 20 }
+      // The real store's addMessage (connection.ts): append, dropping the 'thinking' placeholder.
+      const addMessage = (m: ChatMessage) => store.setState((st) => ({
+        messages: [...st.messages.filter((x) => x.id !== 'thinking' || m.id === 'thinking'), m],
+      }))
+      store.setState({ messages: [toolRow], addMessage } as unknown as Partial<ConnectionState>)
+      send({ type: 'history_replay_start', sessionId: 'sess-unknown', fullHistory: true })
+      send({ ...replayThinkingEntry({ historySeq: 2, thinkingPrecedes: { kind: 'tool_use', toolUseId: 'toolu_a' } }), sessionId: 'sess-unknown' })
+      send({ type: 'history_replay_end', sessionId: 'sess-unknown' })
+      expect(store.getState().messages.map((m) => m.id)).toEqual([`${TURN}-thinking-0`, 'toolu_a'])
     })
 
     it('an entry without a hint is appended (history recorded before the hint existed)', () => {

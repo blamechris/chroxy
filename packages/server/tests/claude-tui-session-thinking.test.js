@@ -750,7 +750,9 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     assert.ok(s._thinkingLateTimer, 'precondition: the late timer is armed')
     // Turn one's window closes while turn two is still running; turn two's own
     // (open) record is not a reason to keep a timer that only serves late windows.
-    skewMs += s._thinkingLateMs + 1000
+    // Skew by exactly the time left in turn one's window (plus 1 ms), no more: the
+    // same clock drives turn two's hook-poll hard timeout, and any extra skew eats it.
+    skewMs += answered.expiresMono - s._nowMonotonic() + 1
     await waitFor(() => s._thinkingRecords.length === 1 && s._thinkingRecords[0] === open, 'turn one\'s window to expire')
     await waitFor(() => s._thinkingLateTimer === null, 'the late timer to stop')
     assert.equal(s._isBusy, true, 'turn two is still active')
