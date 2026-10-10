@@ -378,3 +378,104 @@ export function claimedSubKeyTokens(regionText) {
   }
   return out
 }
+
+// ---- the `features` inventory (#7032) ------------------------------------
+//
+// CONFIG.md lists the opt-in `features` flags in THREE places (the `features`
+// per-key table row, the "Opt-in features" table, and the "Direct reads"
+// env-var list) and counts them in prose ("All four are fail-closed", "the four
+// `features` gates"). #6997 and #7010 each added an inventory and merged ~33
+// minutes apart; the result on main was two inventories each missing a flag the
+// other had, and a numeral that no longer matched. These functions are the
+// parse the gate in config-supported-keys-docs.test.js compares against the
+// producer. Same contract as everything above: REFUSE rather than return an
+// empty result.
+
+/**
+ * Every `<x>.features?.<flag> === true` gate in one source file's text.
+ * Comment-only lines and block comments are dropped first, so a doc comment that
+ * quotes a gate is not counted as one; a trailing comment is left alone (a
+ * phantom gate there fails LOUDLY as "documented flag has no gate").
+ *
+ * Returns [] for a file with no gate — the caller aggregates across `src/` and
+ * REFUSES on zero in total, because most files legitimately have none.
+ *
+ * @param {string} src
+ * @returns {string[]} flag names, in source order (duplicates preserved)
+ */
+export function parseFeatureGates(src) {
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+  return [...code.matchAll(/\bfeatures\??\.([A-Za-z_$][\w$]*)\s*===\s*true\b/g)].map(m => m[1])
+}
+
+const NUMBER_WORDS = new Map([
+  ['one', 1], ['two', 2], ['three', 3], ['four', 4], ['five', 5], ['six', 6],
+  ['seven', 7], ['eight', 8], ['nine', 9], ['ten', 10], ['eleven', 11], ['twelve', 12],
+])
+
+/** A prose count — "four" or "4" — as a number. REFUSES on a word it does not know. */
+function proseNumeral(word, where) {
+  const n = /^\d+$/.test(word) ? Number(word) : NUMBER_WORDS.get(word.toLowerCase())
+  if (n === undefined) throw new Error(`REFUSE: CONFIG.md: ${where} counts the gates with "${word}", which is not a numeral this parser reads`)
+  return n
+}
+
+/**
+ * Everything CONFIG.md says about the `features` flags, from its three
+ * inventories plus the two prose counts.
+ *
+ * @param {string} md
+ * @returns {{
+ *   keyRow: { flags: Set<string>, envs: Set<string> },
+ *   optIn: { flags: Set<string>, envs: Set<string>, numeral: number },
+ *   directReads: { envs: Set<string>, numeral: number },
+ * }}
+ */
+export function parseFeaturesInventories(md) {
+  // 1. The `features` row of the per-key table. Flags are the bare lower-camel
+  //    backtick tokens of its description cell (the same token shape
+  //    claimedSubKeyTokens already reads), envs the CHROXY_* tokens of its env
+  //    cell.
+  const row = findConfigTableRow(md, 'features')
+  if (row === null) throw new Error('REFUSE: CONFIG.md: no per-key table row for `features`')
+  const cells = row.split('|').slice(1, -1)
+  const keyRow = {
+    flags: claimedSubKeyTokens(cells[4]),
+    envs: new Set([...cells[3].matchAll(/`(CHROXY_[A-Z0-9_]+)`/g)].map(m => m[1])),
+  }
+
+  // 2. The "Opt-in features (`features`)" section: a `features.<flag>` table and
+  //    the "All N are fail-closed" sentence.
+  const section = findSection(md, 'features')
+  if (section === null) throw new Error('REFUSE: CONFIG.md: no "Opt-in features (`features`)" section')
+  const optIn = { flags: new Set(), envs: new Set(), numeral: NaN }
+  for (const line of section.split('\n')) {
+    const m = /^\| `features\.([A-Za-z_$][\w$]*)` \|(.*)$/.exec(line)
+    if (!m) continue
+    if (optIn.flags.has(m[1])) throw new Error(`REFUSE: CONFIG.md: the Opt-in features table lists features.${m[1]} twice`)
+    optIn.flags.add(m[1])
+    for (const e of m[2].matchAll(/`(CHROXY_[A-Z0-9_]+)=/g)) optIn.envs.add(e[1])
+  }
+  const counted = [...section.matchAll(/\bAll (\w+) (?:are )?\*\*fail-closed\*\*/g)]
+  if (counted.length !== 1) {
+    throw new Error(`REFUSE: CONFIG.md: expected exactly one "All N are **fail-closed**" sentence in the Opt-in features section, found ${counted.length}`)
+  }
+  optIn.numeral = proseNumeral(counted[0][1], 'the "All N are fail-closed" sentence')
+
+  // 3. The "Direct reads" list: `CHROXY_ENABLE_IDE` / `...` (the four
+  //    [`features` gates](#...)).
+  const direct = /((?:`CHROXY_[A-Z0-9_]+`\s*\/?\s*)+)\(the (\w+) \[`features` gates\]/.exec(md)
+  if (direct === null) {
+    throw new Error('REFUSE: CONFIG.md: the "Direct reads" paragraph no longer reads "`CHROXY_…` / … (the N [`features` gates](…))"')
+  }
+  const directReads = {
+    envs: new Set([...direct[1].matchAll(/`(CHROXY_[A-Z0-9_]+)`/g)].map(m => m[1])),
+    numeral: proseNumeral(direct[2], 'the "Direct reads" list'),
+  }
+
+  for (const [name, flags] of [['`features` table row', keyRow.flags], ['Opt-in features table', optIn.flags]]) {
+    if (flags.size === 0) throw new Error(`REFUSE: CONFIG.md: the ${name} parsed to zero flags`)
+  }
+  if (directReads.envs.size === 0) throw new Error('REFUSE: CONFIG.md: the "Direct reads" features list parsed to zero env vars')
+  return { keyRow, optIn, directReads }
+}

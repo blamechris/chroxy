@@ -12,6 +12,8 @@ import {
   GENERIC_BACKTICK_LITERALS,
   findSchemaComment,
   findSection,
+  parseFeatureGates,
+  parseFeaturesInventories,
   parseKeySets,
   parseRecognisedSubKeys,
   parseSupportedKeySets,
@@ -605,6 +607,108 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     assert.ok(
       runtime.get('userShell').includes('requireApproval'),
       'userShell must still carry requireApproval — omitted from its CONFIG_SCHEMA type shape until #7449'
+    )
+  })
+})
+
+/**
+ * #7032 — CONFIG.md's `features` inventory must be gated on the PRODUCER.
+ *
+ * #6997 and #7010 each added a `features` inventory to CONFIG.md and merged ~33
+ * minutes apart, neither aware of the other: two inventories each missing a flag
+ * the other had, and an "All three are fail-closed" sentence that no longer
+ * matched. #7031 reconciled it by hand with a checker that was never committed,
+ * so the next pair of concurrent PRs would have drifted silently again.
+ *
+ * Producer = every `features.<flag> === true` gate under packages/server/src/,
+ * discovered by sweep (not a hand list — `scheduler` is gated in TWO files).
+ * Consumers = the three places CONFIG.md lists the flags, and the two places it
+ * counts them. Every direction is checked, and a sweep that finds no gate
+ * REFUSES instead of comparing the doc against nothing.
+ */
+describe('CONFIG.md features inventory vs the features.<flag> gates in src (#7032)', () => {
+  let md
+  let gates // flag -> files that gate it
+  let inv
+  let srcText // every src file concatenated, for the literal env-read check
+
+  before(async () => {
+    md = (await readFile(new URL('../CONFIG.md', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+    gates = new Map()
+    srcText = ''
+    for (const file of await collectSourceFiles(SRC_ROOT)) {
+      const rel = decodeURIComponent(file.href.slice(SRC_ROOT.href.length))
+      const text = (await readFile(file, 'utf8')).replace(/\r\n/g, '\n')
+      srcText += text + '\n'
+      for (const flag of parseFeatureGates(text)) {
+        gates.set(flag, [...new Set([...(gates.get(flag) ?? []), rel])])
+      }
+    }
+    // The "cannot find any" case is the false-safety one: comparing the doc to an
+    // empty set of gates passes every direction below.
+    if (gates.size === 0) {
+      throw new Error('REFUSE: found no `features.<flag> === true` gate anywhere under packages/server/src/ — the gate regex or the gate shape changed, so there is nothing to compare CONFIG.md against')
+    }
+    inv = parseFeaturesInventories(md)
+  })
+
+  it('finds the gates it is meant to guard (positive control)', () => {
+    // Floors, not pins: the point is that the sweep reads real gates. The
+    // two-file flag proves the sweep covers src/ beyond config.js.
+    for (const flag of ['ide', 'orchestration', 'scheduler', 'semanticTitles']) {
+      assert.ok(gates.has(flag), `the sweep no longer finds the features.${flag} gate — it is not reading src/`)
+    }
+    assert.ok(
+      gates.get('scheduler').length >= 2,
+      'features.scheduler is gated in config.js AND handlers/scheduler-handlers.js; the sweep saw ' + gates.get('scheduler').join(', ')
+    )
+  })
+
+  const sortedFlags = () => sorted(gates.keys())
+
+  for (const [label, get] of [
+    ['the `features` row of the per-key table', () => inv.keyRow.flags],
+    ['the "Opt-in features" table', () => inv.optIn.flags],
+  ]) {
+    it(`${label} lists exactly the flags that have a gate`, () => {
+      const documented = sorted(get())
+      assert.deepEqual(
+        sortedFlags().filter(f => !documented.includes(f)),
+        [],
+        `CONFIG.md's ${label} never lists a flag that src/ gates — add it (#6997/#7010 drift)`
+      )
+      assert.deepEqual(
+        documented.filter(f => !gates.has(f)),
+        [],
+        `CONFIG.md's ${label} lists a flag no features.<flag> === true gate in src/ reads`
+      )
+    })
+  }
+
+  it('the "Direct reads" env list names the same env vars as the Opt-in features table', () => {
+    // That list names env vars, not flags, so the flag <-> env mapping the
+    // Opt-in table carries is the bridge. This is the third location a
+    // two-inventory checker misses (#7032).
+    assert.deepEqual(sorted(inv.directReads.envs), sorted(inv.optIn.envs))
+    assert.deepEqual(sorted(inv.keyRow.envs), sorted(inv.optIn.envs))
+    for (const env of inv.optIn.envs) {
+      assert.ok(
+        new RegExp(`process\\.env\\.${env}\\b`).test(srcText),
+        `${env} is documented as a features override but no process.env.${env} read exists under src/`
+      )
+    }
+  })
+
+  it('both prose counts equal the number of gated flags', () => {
+    assert.equal(
+      inv.optIn.numeral,
+      gates.size,
+      `"All N are fail-closed" says ${inv.optIn.numeral} but src/ gates ${gates.size} flags (${sortedFlags().join(', ')})`
+    )
+    assert.equal(
+      inv.directReads.numeral,
+      gates.size,
+      `the "Direct reads" list says "the ${inv.directReads.numeral} features gates" but src/ gates ${gates.size} flags`
     )
   })
 })
