@@ -14,6 +14,8 @@
 // cannot escape the registry) and to cross-check that the enumeration agrees
 // with the runtime values.
 
+import { parse as acornParse } from 'acorn'
+
 /** A `{ name?: type, ... }` member list, e.g. `{ watch?: boolean }`. */
 const SHAPE_MEMBER_RE = /^\s*([A-Za-z_$][\w$]*)\??\s*:\s*\S[\s\S]*$/
 
@@ -391,115 +393,155 @@ export function claimedSubKeyTokens(regionText) {
 // producer. Same contract as everything above: REFUSE rather than return an
 // empty result.
 
-/**
- * `src` with every comment and every string/template-literal BODY blanked to
- * spaces, in one left-to-right pass. Newlines and the string delimiters survive,
- * so offsets and line numbers still line up with the original. `${ ... }`
- * inside a template is CODE and is kept.
- *
- * One pass is the point (#8563 review): stripping block comments and THEN line
- * comments lets a `//` comment containing `/*`, or a string like 'assets/*',
- * open a phantom block comment that swallows real code up to the next `*` + `/`
- * — silently, which for a gate sweep means a real undocumented gate is never
- * seen. A scanner that knows it is inside a string or a line comment cannot be
- * fooled that way.
- *
- * It does not understand regex literals. A quote inside one is bounded by the
- * end of the line, but a backtick or an unterminated block comment would swallow
- * the rest of the file, so those REFUSE instead of returning a quietly short
- * result.
- *
- * @param {string} src
- * @param {string} label - File label used in refusal messages
- * @returns {string} same length as `src`
- */
-export function stripCommentsAndStrings(src, label) {
-  const n = src.length
-  let out = ''
-  const blank = ch => (ch === '\n' ? '\n' : ' ')
-  // One entry per open `${`: the count of `{` opened inside it.
-  const exprDepth = []
-  let inTemplate = false
-  let i = 0
-  while (i < n) {
-    const c = src[i]
-    if (inTemplate) {
-      if (c === '\\') { out += ' ' + (i + 1 < n ? blank(src[i + 1]) : ''); i += 2 } else if (c === '`') { out += c; inTemplate = false; i++ } else if (c === '$' && src[i + 1] === '{') { out += '${'; exprDepth.push(0); inTemplate = false; i += 2 } else { out += blank(c); i++ }
-      continue
-    }
-    const d = src[i + 1]
-    if (c === '/' && d === '/') {
-      while (i < n && src[i] !== '\n') { out += ' '; i++ }
-    } else if (c === '/' && d === '*') {
-      const end = src.indexOf('*/', i + 2)
-      if (end === -1) throw new Error(`REFUSE: ${label}: unterminated block comment — the scan cannot tell code from comment`)
-      for (; i < end + 2; i++) out += blank(src[i])
-    } else if (c === "'" || c === '"') {
-      out += c; i++
-      while (i < n && src[i] !== c && src[i] !== '\n') {
-        if (src[i] === '\\') { out += ' '; i++ }
-        if (i < n && src[i] !== '\n') { out += ' '; i++ }
-      }
-      if (src[i] === c) { out += c; i++ }
-    } else if (c === '`') {
-      out += c; inTemplate = true; i++
-    } else if (exprDepth.length > 0 && c === '{') {
-      exprDepth[exprDepth.length - 1]++; out += c; i++
-    } else if (exprDepth.length > 0 && c === '}') {
-      if (exprDepth[exprDepth.length - 1] === 0) { exprDepth.pop(); inTemplate = true } else exprDepth[exprDepth.length - 1]--
-      out += c; i++
-    } else {
-      out += c; i++
+const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'])
+
+/** Depth-first walk keeping the ancestor chain. `visit(node, ancestors)`; ancestors[0] is the Program. */
+function walkAst(node, ancestors, visit) {
+  visit(node, ancestors)
+  ancestors.push(node)
+  for (const key of Object.keys(node)) {
+    if (key === 'loc') continue
+    const v = node[key]
+    if (Array.isArray(v)) {
+      for (const c of v) if (c && typeof c.type === 'string') walkAst(c, ancestors, visit)
+    } else if (v && typeof v.type === 'string') {
+      walkAst(v, ancestors, visit)
     }
   }
-  if (inTemplate || exprDepth.length > 0) {
-    throw new Error(`REFUSE: ${label}: unterminated template literal — the scan cannot tell code from string (a backtick inside a regex literal?)`)
+  ancestors.pop()
+}
+
+/** A member's property name when it is spelled `.name` or `['name']`, else null. */
+function memberName(m) {
+  if (!m.computed && m.property.type === 'Identifier') return m.property.name
+  if (m.computed && m.property.type === 'Literal' && typeof m.property.value === 'string') return m.property.value
+  return null
+}
+
+const isLiteralTrue = n => n.type === 'Literal' && n.value === true
+
+/** Every `process.env.CHROXY_*` read anywhere inside `root`. */
+function collectChroxyEnvReads(root) {
+  const envs = new Set()
+  walkAst(root, [], node => {
+    if (node.type !== 'MemberExpression') return
+    const name = memberName(node)
+    const o = node.object
+    if (name && name.startsWith('CHROXY_') && o.type === 'MemberExpression' && memberName(o) === 'env' &&
+        o.object.type === 'Identifier' && o.object.name === 'process') envs.add(name)
+  })
+  return [...envs].sort()
+}
+
+const describeNode = n => (n.operator ? `${n.type}(${n.operator})` : n.type)
+
+/** The name of the function a node lives in, for exemptions and messages. */
+function enclosingFunctionName(ancestors) {
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const f = ancestors[i]
+    if (!FUNCTION_TYPES.has(f.type)) continue
+    if (f.id) return f.id.name
+    const p = ancestors[i - 1]
+    if (p?.type === 'VariableDeclarator' && p.id.type === 'Identifier') return p.id.name
+    if ((p?.type === 'Property' || p?.type === 'MethodDefinition' || p?.type === 'PropertyDefinition') && p.key.type === 'Identifier') return p.key.name
+    return '<anonymous>'
   }
-  if (out.length !== n) throw new Error(`REFUSE: ${label}: comment stripper changed the text length`)
-  return out
+  return '<module>'
 }
 
 /**
- * Every read of `features` in one source file, classified.
+ * Parse one source file, or REFUSE naming it. Never skip a file: a file the
+ * parser cannot read is a file whose gates nothing can see.
+ */
+function parseSource(src, label) {
+  try {
+    return acornParse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true, allowHashBang: true })
+  } catch (err) {
+    throw new Error(`REFUSE: ${label}: cannot parse (${err.message}) — its features gates, if any, are invisible to this sweep`)
+  }
+}
+
+/**
+ * Every use of `features` in one source file, classified from the AST (#8563:
+ * the first two versions of this were lexical — a comment/string stripper and a
+ * text window for "the enclosing function" — and both silently blanked real code
+ * on a regex literal containing a quote or backtick).
  *
- *  - `gates`: `features.<flag> === true` (optional chaining accepted), with the
- *    `process.env.CHROXY_*` names read in the same function. A gate's env override
- *    is the only thing the document has to get right per flag, so the function
- *    window (from the last `function` keyword or column-0 `}` to the gate) is
- *    what makes the flag -> env pairing derivable from source.
- *  - `unrecognised`: any OTHER occurrence of the word `features` — `!!x.features.f`,
- *    `Boolean(...)`, a destructure, `['f']`, `true === ...`, `!== false`, a copy
- *    into a local — that is not an assignment. The caller must either exempt it
- *    explicitly or fail: a gate in a spelling this sweep does not read is
- *    invisible to the doc comparison (#8563 review, the hardcoded-shape class).
- *
- * Assignments (`x.features = ...`, `x.features.f = ...`) are writes, not gates.
- * Comments and string bodies are not read (see stripCommentsAndStrings).
+ *  - `gates`: a BinaryExpression `<x>.features.<flag> === true` (optional
+ *    chaining accepted, `.flag` spelled non-computed, `true` on the right), with
+ *    `envs` = every `process.env.CHROXY_*` read in the INNERMOST enclosing
+ *    function (the enclosing top-level statement if there is none). Comments are
+ *    not in the AST, so a commented-out read cannot count.
+ *  - `unrecognised`: every OTHER use — a read in any other spelling (`!!`,
+ *    `Boolean()`, destructure, alias, bracket, `true ===`, `!== false`, a bare
+ *    `features` identifier), and a WRITE that could enable a flag:
+ *    `x.features.f = true`, `x.features = <anything but {}>`, a compound
+ *    assignment. Writes of any other right-hand side (`= enabled`,
+ *    `= enabled === true`) are not gates and are not reported. Each entry has a
+ *    structural `descriptor` and the enclosing function name as `context`, which
+ *    is what exemptions key on.
  *
  * @param {string} src
  * @param {string} label
- * @returns {{ gates: {flag: string, line: number, envs: string[]}[], unrecognised: {line: number, text: string}[] }}
+ * @returns {{
+ *   gates: {flag: string, line: number, envs: string[]}[],
+ *   unrecognised: {line: number, descriptor: string, context: string}[],
+ * }}
  */
 export function scanFeatureReads(src, label) {
-  const code = stripCommentsAndStrings(src, label)
-  const origLines = src.split('\n')
-  const lineOf = pos => code.slice(0, pos).split('\n').length
+  const ast = parseSource(src, label)
   const gates = []
   const unrecognised = []
-  for (const m of code.matchAll(/(?<![\w$])features(?![\w$])/g)) {
-    const rest = code.slice(m.index + 'features'.length)
-    const gate = /^\??\.([A-Za-z_$][\w$]*)\s*===\s*true(?![\w$])/.exec(rest)
-    if (gate) {
-      const before = code.slice(0, m.index)
-      const start = Math.max(before.lastIndexOf('function'), before.lastIndexOf('\n}'), 0)
-      const envs = [...new Set([...before.slice(start).matchAll(/process\.env\.(CHROXY_[A-Z0-9_]+)/g)].map(e => e[1]))]
-      gates.push({ flag: gate[1], line: lineOf(m.index), envs: envs.sort() })
-      continue
-    }
-    if (/^(?:\??\.[A-Za-z_$][\w$]*)?\s*=(?!=)/.test(rest)) continue
-    const line = lineOf(m.index)
-    unrecognised.push({ line, text: origLines[line - 1].trim() })
+  const seenIdentifiers = new Set()
+  const report = (node, ancestors, descriptor) => {
+    unrecognised.push({ line: node.loc.start.line, descriptor, context: enclosingFunctionName(ancestors) })
   }
+  // The node a member chain ends in, past any ChainExpression wrapper, plus its parent.
+  const outward = (node, ancestors) => {
+    let top = node
+    let i = ancestors.length - 1
+    while (ancestors[i]?.type === 'ChainExpression') { top = ancestors[i]; i-- }
+    return { top, parent: ancestors[i], index: i }
+  }
+
+  walkAst(ast, [], (node, ancestors) => {
+    if (node.type === 'MemberExpression' && memberName(node) === 'features') {
+      const { top, parent, index } = outward(node, ancestors)
+      if (parent?.type === 'MemberExpression' && parent.object === top) {
+        // `<x>.features.<something>`
+        const flag = !parent.computed && parent.property.type === 'Identifier' ? parent.property.name : null
+        const up = outward(parent, ancestors.slice(0, index))
+        const p = up.parent
+        if (flag && p?.type === 'BinaryExpression' && p.operator === '===' && p.left === up.top && isLiteralTrue(p.right)) {
+          const fn = [...ancestors].reverse().find(a => FUNCTION_TYPES.has(a.type)) ?? ancestors[1]
+          gates.push({ flag, line: node.loc.start.line, envs: collectChroxyEnvReads(fn) })
+        } else if (p?.type === 'AssignmentExpression' && p.left === up.top) {
+          if (p.operator !== '=' || isLiteralTrue(p.right)) report(node, ancestors, `write:features.${flag ?? '<computed>'} ${p.operator} ${p.operator === '=' ? 'true' : '...'}`)
+        } else {
+          report(node, ancestors, `flag-access:${p ? describeNode(p) : 'none'}`)
+        }
+      } else if (parent?.type === 'AssignmentExpression' && parent.left === top) {
+        const empty = parent.operator === '=' && parent.right.type === 'ObjectExpression' && parent.right.properties.length === 0
+        if (!empty) report(node, ancestors, 'write:features = <not an empty object literal>')
+      } else {
+        report(node, ancestors, `member:${parent ? describeNode(parent) : 'none'}`)
+      }
+      return
+    }
+    if (node.type === 'Identifier' && node.name === 'features') {
+      const parent = ancestors[ancestors.length - 1]
+      if (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed) return // handled above
+      if (seenIdentifiers.has(node.start)) return // a shorthand property visits key and value
+      seenIdentifiers.add(node.start)
+      let kind = parent ? parent.type : 'none'
+      if (parent?.type === 'VariableDeclarator' && parent.id === node) kind = 'declaration'
+      else if (parent?.type === 'Property') {
+        const inPattern = ancestors[ancestors.length - 2]?.type === 'ObjectPattern'
+        kind = (parent.shorthand ? 'shorthand-' : 'key-') + (inPattern ? 'destructure' : 'property')
+      } else if (parent?.type === 'MemberExpression' && parent.object === node) kind = 'member-object'
+      report(node, ancestors, `identifier:${kind}`)
+    }
+  })
   return { gates, unrecognised }
 }
 

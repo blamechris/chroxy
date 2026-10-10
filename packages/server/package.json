@@ -56,6 +56,7 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "acorn": "8.16.0",
     "c8": "^11.0.0",
     "eslint": "^9.39.3",
     "js-yaml": "^4.1.1",

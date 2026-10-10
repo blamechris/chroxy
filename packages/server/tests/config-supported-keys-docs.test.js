@@ -621,144 +621,287 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
  * so the next pair of concurrent PRs would have drifted silently again.
  *
  * Producer = every `features.<flag> === true` gate under packages/server/src/,
- * discovered by sweep (not a hand list — `scheduler` is gated in TWO files),
- * read from comment- and string-stripped code. Consumers = the three places
- * CONFIG.md lists the flags, and the two places it counts them. Every direction
- * is checked, a sweep that finds no gate REFUSES, and any OTHER read of
- * `features` (a spelling the gate regex does not know) is a failure unless it is
- * exempted below with a reason — so a gate written differently cannot be
+ * found by PARSING every file there (acorn) and walking the AST — not by regex
+ * over text, which twice silently blanked real code on a regex literal holding a
+ * quote or backtick (#8563 review). Consumers = the three places CONFIG.md lists
+ * the flags, and the two places it counts them. Every direction is checked, a
+ * sweep that finds no gate REFUSES, a file that does not parse REFUSES, and any
+ * OTHER use of `features` (a spelling that is not an `=== true` gate) is a
+ * failure unless exempted below — so a gate written differently cannot be
  * invisible to the doc comparison.
+ *
+ * `checkFeatures` is pure over (sources, markdown): the real tree is one input,
+ * and the regression tests below feed it the review's mutants as in-memory
+ * fixtures, so the check is proven red against the real implementation without
+ * editing src/.
  */
 
-// Reads of the word `features` under src/ that are not gates and not
-// assignments. Keyed by file + the trimmed line, with the exact number of
-// unrecognised occurrences on it; an entry that no longer matches EXACTLY fails
-// as stale, so this list cannot outlive the code it excuses. Grow it with the
-// reason in hand, never by loosening the scan.
+// Uses of the word `features` under src/ that are not gates and not benign
+// writes. Keyed by file + a STRUCTURAL description (descriptor from the AST +
+// the enclosing function) with the exact number of occurrences; an entry that no
+// longer matches EXACTLY fails as stale, so this list cannot outlive the code it
+// excuses. Grow it with the reason in hand, never by loosening the scan.
 const FEATURES_READ_EXEMPTIONS = [
-  { file: 'config.js', text: "features: 'object',", count: 1, reason: 'CONFIG_SCHEMA key declaration, not a read of config.features' },
-  { file: 'config.js', text: "if (!existing.features || typeof existing.features !== 'object' || Array.isArray(existing.features)) {", count: 3, reason: 'shape check on the persisted config before writing features.scheduler; reads no flag' },
-  { file: 'handlers/scheduler-handlers.js', text: "if (!config.features || typeof config.features !== 'object') config.features = {}", count: 2, reason: 'shape check before writing features.scheduler (the trailing assignment is not counted); reads no flag' },
-  { file: 'ws-history.js', text: 'features,', count: 1, reason: 'shorthand property of a local variable named features in the history payload builder (its `const features = {` declaration is an assignment), unrelated to config.features' },
+  { file: 'config.js', descriptor: 'identifier:key-property', context: '<module>', count: 1, reason: 'CONFIG_SCHEMA key declaration, not a read of config.features' },
+  { file: 'config.js', descriptor: 'member:UnaryExpression(!)', context: 'writeSchedulerEnabledToConfig', count: 1, reason: 'shape check on the persisted config before writing features.scheduler; reads no flag' },
+  { file: 'config.js', descriptor: 'member:UnaryExpression(typeof)', context: 'writeSchedulerEnabledToConfig', count: 1, reason: 'shape check on the persisted config before writing features.scheduler; reads no flag' },
+  { file: 'config.js', descriptor: 'member:CallExpression', context: 'writeSchedulerEnabledToConfig', count: 1, reason: 'Array.isArray shape check on the persisted config; reads no flag' },
+  { file: 'handlers/scheduler-handlers.js', descriptor: 'member:UnaryExpression(!)', context: 'handleSetSchedulerEnabled', count: 1, reason: 'shape check before writing features.scheduler; reads no flag' },
+  { file: 'handlers/scheduler-handlers.js', descriptor: 'member:UnaryExpression(typeof)', context: 'handleSetSchedulerEnabled', count: 1, reason: 'shape check before writing features.scheduler; reads no flag' },
+  { file: 'ws-history.js', descriptor: 'identifier:declaration', context: 'sendPostAuthInfo', count: 1, reason: 'a local variable named features, unrelated to config.features' },
+  { file: 'ws-history.js', descriptor: 'identifier:shorthand-property', context: 'sendPostAuthInfo', count: 1, reason: 'the same local variable as a shorthand property' },
 ]
+
+/**
+ * Compare CONFIG.md against the gates in `sources` (rel path -> text).
+ * @returns {{ gates: Map<string, {file: string, line: number, envs: string[]}[]>, problems: {kind: string, message: string}[] }}
+ */
+function checkFeatures(sources, markdown) {
+  const gates = new Map()
+  const unrecognised = []
+  for (const [file, text] of sources) {
+    const found = scanFeatureReads(text, `src/${file}`)
+    for (const g of found.gates) gates.set(g.flag, [...(gates.get(g.flag) ?? []), { file, line: g.line, envs: g.envs }])
+    for (const u of found.unrecognised) unrecognised.push({ file, ...u })
+  }
+  // The "cannot find any" case is the false-safety one: comparing the doc to an
+  // empty set of gates passes every direction below.
+  if (gates.size === 0) {
+    throw new Error('REFUSE: found no `features.<flag> === true` gate anywhere under packages/server/src/ — the gate shape changed, so there is nothing to compare CONFIG.md against')
+  }
+  const inv = parseFeaturesInventories(markdown)
+  const problems = []
+  const add = (kind, message) => problems.push({ kind, message })
+
+  const left = unrecognised.map(u => ({ ...u }))
+  for (const ex of FEATURES_READ_EXEMPTIONS) {
+    const hit = left.filter(u => u.file === ex.file && u.descriptor === ex.descriptor && u.context === ex.context)
+    if (hit.length !== ex.count) {
+      add('stale-exemption', `stale exemption: ${ex.file} ${ex.descriptor} in ${ex.context} matches ${hit.length} use(s), expected ${ex.count} (${ex.reason})`)
+    }
+    for (const u of hit) left.splice(left.indexOf(u), 1)
+  }
+  for (const u of left) add('shape', `gate shape not recognised: ${u.file}:${u.line}  ${u.descriptor} in ${u.context}`)
+
+  const flags = sorted(gates.keys())
+  for (const [label, kind, documented] of [
+    ['the `features` row of the per-key table', 'key-row', inv.keyRow.flags],
+    ['the "Opt-in features" table', 'opt-in', inv.optIn.flags],
+  ]) {
+    for (const f of flags.filter(f => !documented.has(f))) add(kind, `CONFIG.md's ${label} never lists features.${f}, which src/ gates (#6997/#7010 drift)`)
+    for (const f of sorted(documented).filter(f => !gates.has(f))) add(kind, `CONFIG.md's ${label} lists features.${f}, which no gate in src/ reads`)
+  }
+
+  // Per flag, not as sets: swapping two rows' envs must fail, and an env a gate
+  // reads that no row documents must fail. EVERY function that gates the flag
+  // must read exactly the documented env, so a second gate site cannot mask a
+  // broken one.
+  for (const [flag, sites] of gates) {
+    const documented = inv.optIn.pairs.get(flag)
+    if (!documented) { add('env', `features.${flag} is gated in src/ but has no row in the Opt-in features table`); continue }
+    for (const site of sites) {
+      if (JSON.stringify(site.envs) !== JSON.stringify(documented)) {
+        add('env', `features.${flag} at ${site.file}:${site.line} reads env [${site.envs.join(', ')}] in its function but CONFIG.md documents [${documented.join(', ')}]`)
+      }
+    }
+  }
+  // The other two env lists carry names, not flag -> env pairs; compare to the union.
+  for (const [label, envs] of [['"Direct reads" list', inv.directReads.envs], ['key-row env column', inv.keyRow.envs]]) {
+    if (JSON.stringify(sorted(envs)) !== JSON.stringify(sorted(inv.optIn.envs))) {
+      add('env-sets', `CONFIG.md's ${label} names [${sorted(envs).join(', ')}] but the Opt-in table names [${sorted(inv.optIn.envs).join(', ')}]`)
+    }
+  }
+  if (inv.optIn.numeral !== gates.size) add('numeral', `"All N are fail-closed" says ${inv.optIn.numeral} but src/ gates ${gates.size} flags (${flags.join(', ')})`)
+  if (inv.directReads.numeral !== gates.size) add('numeral', `the "Direct reads" list says "the ${inv.directReads.numeral} features gates" but src/ gates ${gates.size} flags`)
+  return { gates, problems }
+}
 
 describe('CONFIG.md features inventory vs the features.<flag> gates in src (#7032)', () => {
   let md
-  let gates // flag -> [{ file, line, envs }]
-  let unrecognised // [{ file, line, text }]
-  let inv
+  let sources // rel path -> text, EVERY *.js under src/
+  let real // checkFeatures over the real tree
 
   before(async () => {
     md = (await readFile(new URL('../CONFIG.md', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
-    gates = new Map()
-    unrecognised = []
+    sources = new Map()
     for (const file of await collectSourceFiles(SRC_ROOT)) {
       const rel = decodeURIComponent(file.href.slice(SRC_ROOT.href.length))
-      const text = (await readFile(file, 'utf8')).replace(/\r\n/g, '\n')
-      // Cheap prefilter; scanFeatureReads is the real judge.
-      if (!/\bfeatures\b/.test(text)) continue
-      const found = scanFeatureReads(text, `src/${rel}`)
-      for (const g of found.gates) gates.set(g.flag, [...(gates.get(g.flag) ?? []), { file: rel, line: g.line, envs: g.envs }])
-      for (const u of found.unrecognised) unrecognised.push({ file: rel, ...u })
+      sources.set(rel, (await readFile(file, 'utf8')).replace(/\r\n/g, '\n'))
     }
-    // The "cannot find any" case is the false-safety one: comparing the doc to an
-    // empty set of gates passes every direction below.
-    if (gates.size === 0) {
-      throw new Error('REFUSE: found no `features.<flag> === true` gate anywhere under packages/server/src/ — the gate regex or the gate shape changed, so there is nothing to compare CONFIG.md against')
-    }
-    inv = parseFeaturesInventories(md)
+    // Parses EVERY file (no prefilter) and REFUSES on one it cannot read.
+    real = checkFeatures(sources, md)
   })
 
-  const sortedFlags = () => sorted(gates.keys())
+  const ofKind = (result, kind) => result.problems.filter(p => p.kind === kind).map(p => p.message)
 
-  it('finds the gates it is meant to guard (positive control)', () => {
-    // Floors, not pins: the point is that the sweep reads real gates. The
-    // two-file flag proves the sweep covers src/ beyond config.js.
-    for (const flag of ['ide', 'orchestration', 'scheduler', 'semanticTitles']) {
-      assert.ok(gates.has(flag), `the sweep no longer finds the features.${flag} gate — it is not reading src/`)
-    }
-    const files = new Set(gates.get('scheduler').map(g => g.file))
-    assert.ok(
-      files.size >= 2,
-      'features.scheduler is gated in config.js AND handlers/scheduler-handlers.js; the sweep saw ' + [...files].join(', ')
-    )
-  })
-
-  it('every read of `features` in src is a recognised gate, an assignment, or an explicit exemption', () => {
-    const left = unrecognised.map(u => ({ ...u }))
-    for (const ex of FEATURES_READ_EXEMPTIONS) {
-      const hit = left.filter(u => u.file === ex.file && u.text === ex.text)
-      assert.equal(
-        hit.length,
-        ex.count,
-        `stale exemption: ${ex.file} "${ex.text}" matches ${hit.length} unrecognised read(s), expected ${ex.count} (${ex.reason})`
-      )
-      for (const u of hit) left.splice(left.indexOf(u), 1)
-    }
-    assert.deepEqual(
-      left.map(u => `gate shape not recognised: ${u.file}:${u.line}  ${u.text}`),
-      [],
-      'a read of `features` in a spelling the sweep does not read as an `=== true` gate — a flag gated this way is invisible to the CONFIG.md comparison. ' +
-        'Write it as `features.<flag> === true`, or exempt it in FEATURES_READ_EXEMPTIONS with a reason'
-    )
-  })
-
-  for (const [label, get] of [
-    ['the `features` row of the per-key table', () => inv.keyRow.flags],
-    ['the "Opt-in features" table', () => inv.optIn.flags],
-  ]) {
-    it(`${label} lists exactly the flags that have a gate`, () => {
-      const documented = sorted(get())
-      assert.deepEqual(
-        sortedFlags().filter(f => !documented.includes(f)),
-        [],
-        `CONFIG.md's ${label} never lists a flag that src/ gates — add it (#6997/#7010 drift)`
-      )
-      assert.deepEqual(
-        documented.filter(f => !gates.has(f)),
-        [],
-        `CONFIG.md's ${label} lists a flag no features.<flag> === true gate in src/ reads`
-      )
-    })
+  /** `text` with `from` replaced by `to`; fails if `from` is not found exactly once (a silent no-op mutant proves nothing). */
+  const mutate = (text, from, to) => {
+    assert.equal(text.split(from).length - 1, 1, `mutation anchor ${JSON.stringify(from)} must occur exactly once`)
+    return text.replace(from, () => to)
   }
+  /** The real tree plus/minus in-memory edits. */
+  const withSources = edits => {
+    const m = new Map(sources)
+    for (const [file, text] of Object.entries(edits)) m.set(file, typeof text === 'function' ? text(m.get(file)) : text)
+    return m
+  }
+  const fixtureGate = body => withSources({ '_fixture.js': body })
 
-  it('each flag\'s documented env override is exactly what every function that gates it reads', () => {
-    // Per flag, not as sets (#8563 review): swapping two rows' envs must fail,
-    // and an env a gate reads that no row documents must fail. The read has to be
-    // in EVERY function that gates the flag, so a second gate site
-    // (scheduler-handlers.js) cannot mask a broken one (config.js). Comments are
-    // already stripped, so a commented-out read does not count.
-    for (const [flag, sites] of gates) {
-      const documented = inv.optIn.pairs.get(flag)
-      assert.ok(documented, `features.${flag} is gated in src/ but has no row in the Opt-in features table`)
-      for (const site of sites) {
-        assert.deepEqual(
-          site.envs,
-          documented,
-          `features.${flag} at ${site.file}:${site.line} reads env [${site.envs.join(', ')}] in its function but CONFIG.md documents [${documented.join(', ')}]`
-        )
-      }
+  // ---- the real tree ----
+
+  it('parses every file under src/ and finds the gates it is meant to guard (positive control)', () => {
+    assert.ok(sources.size >= 300, `only ${sources.size} files collected under src/`)
+    for (const known of ['config.js', 'handlers/scheduler-handlers.js', 'ws-history.js', 'cli/schedule-cmd.js']) {
+      assert.ok(sources.has(known), `${known} is not in the sweep`)
     }
+    for (const flag of ['ide', 'orchestration', 'scheduler', 'semanticTitles']) {
+      assert.ok(real.gates.has(flag), `the sweep no longer finds the features.${flag} gate — it is not reading src/`)
+    }
+    const files = new Set(real.gates.get('scheduler').map(g => g.file))
+    assert.ok(files.size >= 2, 'features.scheduler is gated in config.js AND handlers/scheduler-handlers.js; the sweep saw ' + [...files].join(', '))
+    // service.js is one of the files the earlier text-stripper corrupted (regex literals holding quotes/backticks); it is parsed here like the rest.
+    assert.ok(sources.has('service.js'), 'service.js is not in the sweep')
+  })
+
+  it('every use of `features` in src is a recognised gate, a benign write, or an explicit exemption', () => {
+    assert.deepEqual(ofKind(real, 'shape'), [])
+    assert.deepEqual(ofKind(real, 'stale-exemption'), [])
+  })
+
+  it('the `features` row of the per-key table lists exactly the flags that have a gate', () => {
+    assert.deepEqual(ofKind(real, 'key-row'), [])
+  })
+
+  it('the "Opt-in features" table lists exactly the flags that have a gate', () => {
+    assert.deepEqual(ofKind(real, 'opt-in'), [])
+  })
+
+  it("each flag's documented env override is exactly what every function that gates it reads", () => {
+    assert.deepEqual(ofKind(real, 'env'), [])
   })
 
   it('the "Direct reads" list and the key-row env column name the same env vars as the Opt-in features table', () => {
-    // Those two carry env names, not flag->env pairs, so the per-flag mapping
-    // above is the Opt-in table's job and these are compared against its union.
-    // This is the third location a two-inventory checker misses (#7032).
-    assert.deepEqual(sorted(inv.directReads.envs), sorted(inv.optIn.envs))
-    assert.deepEqual(sorted(inv.keyRow.envs), sorted(inv.optIn.envs))
+    // The third location a two-inventory checker misses (#7032).
+    assert.deepEqual(ofKind(real, 'env-sets'), [])
   })
 
   it('both prose counts equal the number of gated flags', () => {
-    assert.equal(
-      inv.optIn.numeral,
-      gates.size,
-      `"All N are fail-closed" says ${inv.optIn.numeral} but src/ gates ${gates.size} flags (${sortedFlags().join(', ')})`
-    )
-    assert.equal(
-      inv.directReads.numeral,
-      gates.size,
-      `the "Direct reads" list says "the ${inv.directReads.numeral} features gates" but src/ gates ${gates.size} flags`
-    )
+    assert.deepEqual(ofKind(real, 'numeral'), [])
+  })
+
+  // ---- the check is red against the review's mutants (in-memory, never src/) ----
+
+  describe('regression: each mutant goes red against the real check', () => {
+    it('baseline: the unmutated tree has no problems', () => {
+      assert.deepEqual(real.problems.map(p => p.message), [])
+    })
+
+    it('M1: two backtick regexes around an undocumented gate (the stripper blanked it)', () => {
+      const r = checkFeatures(fixtureGate('const a = /`/\nexport const g = c => c?.features?.sneak === true\nconst b = /`/\n'), md)
+      assert.ok(ofKind(r, 'opt-in').some(m => m.includes('features.sneak')), 'undocumented gate must be reported')
+    })
+
+    it('M2: a lone-quote regex on the gate line', () => {
+      const r = checkFeatures(fixtureGate("export const g = c => /'/.test('') || c?.features?.sneak2 === true\n"), md)
+      assert.ok(ofKind(r, 'opt-in').some(m => m.includes('features.sneak2')))
+    })
+
+    it('M3: a top-level env read with an arrow gate (the lexical window leaked scope)', () => {
+      const r = checkFeatures(fixtureGate('const _e = process.env.CHROXY_ENABLE_SCHEDULER\nexport const isX = c => c?.features?.scheduler === true\n'), md)
+      assert.ok(ofKind(r, 'env').some(m => m.includes('_fixture.js') && m.includes('reads env []')))
+    })
+
+    it('M3b: env read in one class method, gate in another', () => {
+      const r = checkFeatures(fixtureGate(
+        'export class K {\n  envOn() { return process.env.CHROXY_ENABLE_ORCHESTRATION === \'1\' }\n  cfgOn(c) { return c?.features?.orchestration === true }\n}\n'), md)
+      assert.ok(ofKind(r, 'env').some(m => m.includes('_fixture.js') && m.includes('reads env []')))
+    })
+
+    it('M3c: an env read AFTER the gate in the same function still counts (no false red)', () => {
+      const r = checkFeatures(withSources({ '_fixture.js': "export function f(c) {\n  if (c?.features?.ide === true) return true\n  return process.env.CHROXY_ENABLE_IDE === '1'\n}\n" }), md)
+      assert.deepEqual(r.problems.map(p => p.message), [])
+    })
+
+    for (const [name, body] of [
+      ['config.features.ide = true', 'export const f = config => { config.features.ide = true }'],
+      ['config.features = { ide: true }', 'export const f = config => { config.features = { ide: true } }'],
+      ['config.features ||= { ide: true }', 'export const f = config => { config.features ||= { ide: true } }'],
+      ['config.features.ide ||= true', 'export const f = config => { config.features.ide ||= true }'],
+    ]) {
+      it(`M4: enabling write \`${name}\``, () => {
+        const r = checkFeatures(fixtureGate(body + '\n'), md)
+        assert.ok(ofKind(r, 'shape').some(m => m.includes('_fixture.js') && m.includes('write:')), ofKind(r, 'shape').join(' | '))
+      })
+    }
+
+    for (const [name, body] of [
+      ['!!config?.features?.newThing', 'return !!config?.features?.newThing'],
+      ['Boolean(config.features.newThing)', 'return Boolean(config.features.newThing)'],
+      ['const { newThing } = config.features', 'const { newThing } = config.features'],
+      ["config.features['newThing'] === true", "return config.features['newThing'] === true"],
+      ['true === config.features.newThing', 'return true === config.features.newThing'],
+      ['config?.features?.newThing !== false', 'return config?.features?.newThing !== false'],
+      ['const f = config.features; f.newThing === true', 'const f = config.features; return f.newThing === true'],
+      ['const { features } = config', 'const { features } = config; return features.newThing === true'],
+      ['config.features.newThing === 1', 'return config.features.newThing === 1'],
+    ]) {
+      it(`gate spelling \`${name}\``, () => {
+        const r = checkFeatures(fixtureGate(`export const g = config => {\n  ${body}\n}\n`), md)
+        assert.ok(ofKind(r, 'shape').some(m => m.includes('gate shape not recognised: _fixture.js')), ofKind(r, 'shape').join(' | '))
+      })
+    }
+
+    it('a gate in a comment, a block comment or a string is not a gate', () => {
+      const r = checkFeatures(fixtureGate('// c?.features?.ghost === true\n/* c?.features?.ghost === true */\nexport const s = "c?.features?.ghost === true"\nexport const t = `c.features.ghost === ${1}`\n'), md)
+      assert.deepEqual(r.problems.map(p => p.message), [])
+    })
+
+    it('a file that does not parse REFUSES, naming the file', () => {
+      assert.throws(() => checkFeatures(fixtureGate('export const = ;\n'), md), /REFUSE: src\/_fixture\.js: cannot parse/)
+    })
+
+    it('a tree with no gate REFUSES', () => {
+      assert.throws(() => checkFeatures(new Map([['a.js', 'export const x = 1\n']]), md), /REFUSE: found no/)
+    })
+
+    it('an enabled write of the real shapes is accepted: = {}, = enabled, = enabled === true', () => {
+      const r = checkFeatures(fixtureGate('export function f(c, enabled) {\n  c.features = {}\n  c.features.scheduler = enabled\n  c.features.scheduler = enabled === true\n}\n'), md)
+      assert.deepEqual(ofKind(r, 'shape'), [])
+    })
+
+    it('env: the read commented out in isOrchestrationEnabled', () => {
+      const r = checkFeatures(withSources({ 'config.js': t => mutate(t, "if (process.env.CHROXY_ENABLE_ORCHESTRATION === '1') return true", '// process.env.CHROXY_ENABLE_ORCHESTRATION') }), md)
+      assert.ok(ofKind(r, 'env').some(m => m.includes('features.orchestration') && m.includes('reads env []')))
+    })
+
+    it('env: a broken name in isSchedulerEnabled while scheduler-handlers.js still reads the real one', () => {
+      const r = checkFeatures(withSources({ 'config.js': t => mutate(t, "if (process.env.CHROXY_ENABLE_SCHEDULER === '1') return true", "if (process.env.CHROXY_ENABLE_SCHEDULERX === '1') return true") }), md)
+      assert.ok(ofKind(r, 'env').some(m => m.includes('features.scheduler') && m.includes('config.js') && m.includes('SCHEDULERX')))
+    })
+
+    it('env: an undocumented env read in a gating function', () => {
+      const r = checkFeatures(withSources({ 'config.js': t => mutate(t, "if (process.env.CHROXY_ENABLE_IDE === '1') return true", "if (process.env.CHROXY_ENABLE_IDE === '1') return true\n  if (process.env.CHROXY_UNDOCUMENTED_X) return false") }), md)
+      assert.ok(ofKind(r, 'env').some(m => m.includes('CHROXY_UNDOCUMENTED_X')))
+    })
+
+    it('env: two rows of the Opt-in table swap their envs', () => {
+      const swapped = mutate(mutate(md, '`features.ide` | `CHROXY_ENABLE_IDE=1`', '`features.ide` | `CHROXY_ENABLE_ORCHESTRATION=1`'),
+        '`features.orchestration` | `CHROXY_ENABLE_ORCHESTRATION=1`', '`features.orchestration` | `CHROXY_ENABLE_IDE=1`')
+      const r = checkFeatures(sources, swapped)
+      assert.ok(ofKind(r, 'env').length >= 2, 'a swap must fail per flag even though the env SET is unchanged')
+    })
+
+    it('stale exemption: a listed use that no longer exists', () => {
+      const r = checkFeatures(withSources({ 'ws-history.js': t => mutate(t, '    features,\n', '') }), md)
+      assert.ok(ofKind(r, 'stale-exemption').some(m => m.includes('ws-history.js')))
+    })
+
+    it('doc: a flag dropped from the Opt-in table, the key row, or the Direct reads list; a numeral changed', () => {
+      assert.ok(ofKind(checkFeatures(sources, md.replace(/^\| `features\.ide` \|.*\n/m, '')), 'opt-in').length > 0)
+      assert.ok(ofKind(checkFeatures(sources, mutate(md, '`ide` (IDE navigation surface, epic #6469), ', '')), 'key-row').length > 0)
+      assert.ok(ofKind(checkFeatures(sources, mutate(md, '`CHROXY_ENABLE_IDE` / ', '')), 'env-sets').length > 0)
+      assert.ok(ofKind(checkFeatures(sources, mutate(md, 'All four are', 'All five are')), 'numeral').length > 0)
+      assert.ok(ofKind(checkFeatures(sources, mutate(md, '(the four [', '(the five [')), 'numeral').length > 0)
+    })
   })
 })
