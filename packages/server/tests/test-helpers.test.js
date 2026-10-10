@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createSpy, createMockSession, createMockSessionManager, withEnv, nsCtx, makeSessionIndexCtx, assertCtxShape } from './test-helpers.js'
+import { createSpy, createMockSession, createMockSessionManager, withEnv, nsCtx, makeSessionIndexCtx, assertCtxShape, recordTimerArms } from './test-helpers.js'
 import { CTX_NAMESPACE_NAMES, CTX_NAMESPACES } from '../src/ws-handler-context.js'
 import { EventEmitter } from 'node:events'
 
@@ -347,5 +347,33 @@ describe('assertCtxShape', () => {
   it('returns the ctx for chaining', () => {
     const ctx = nsCtx()
     assert.equal(assertCtxShape(ctx), ctx)
+  })
+})
+
+describe('recordTimerArms (#7041)', () => {
+  it('records the delay each setTimeout was armed with and whether it fired, without changing behaviour', async (t) => {
+    const arms = recordTimerArms(t)
+    let ran = 0
+    setTimeout(() => { ran++ }, 5)
+    const cancelled = setTimeout(() => { ran += 100 }, 60_000)
+    clearTimeout(cancelled)
+    await new Promise((r) => setTimeout(r, 30))
+    assert.equal(ran, 1, 'the real timer still ran its callback; the cancelled one did not')
+    const byMs = (ms) => arms.find((a) => a.ms === ms)
+    assert.equal(byMs(5).fired, true)
+    assert.equal(byMs(60_000).fired, false, 'a cleared timer is recorded as armed but never fired')
+  })
+
+  it('tags each arm with the state at arming time and honours realDelay without touching the recorded ms', async (t) => {
+    let phase = 'a'
+    const arms = recordTimerArms(t, { tag: () => phase, realDelay: (ms) => Math.min(ms, 10) })
+    phase = 'b'
+    let fired = false
+    setTimeout(() => { fired = true }, 5_000)
+    await new Promise((r) => setTimeout(r, 40))
+    const arm = arms.find((a) => a.ms === 5_000)
+    assert.equal(arm.state, 'b')
+    assert.equal(fired, true, 'realDelay shortened the real timer')
+    assert.equal(arm.fired, true)
   })
 })

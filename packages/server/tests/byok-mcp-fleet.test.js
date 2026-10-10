@@ -2,6 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { recordTimerArms } from './test-helpers.js'
 import { MCPFleet, FLEET_KILL_GRACE_MS, DEFAULT_FLEET_START_CAP_MS, parseMcpToolName, mcpStateToStatus } from '../src/byok-mcp-fleet.js'
 import { MCP_STATES } from '../src/byok-mcp-client.js'
 
@@ -63,7 +64,7 @@ describe('MCPFleet', () => {
       assert.ok(DEFAULT_FLEET_START_CAP_MS > 0)
     })
 
-    it('returns within ~startCapMs even when one server is permanently broken', async () => {
+    it('returns at the startCapMs cap even when one server is permanently broken', async (t) => {
       // One healthy + one perpetually-failing server. Without the cap,
       // start() would wait the full ~7s restart budget on the broken one.
       // With a 300ms cap, we expect start() to return promptly — the broken
@@ -72,10 +73,12 @@ describe('MCPFleet', () => {
         cfg('alpha'),
         { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
       ], { log: silentLog(), startCapMs: 300 })
-      const t0 = Date.now()
+      // #7041: assert the cap that start() ARMED, not how long it took. What
+      // proves the cap (and not the broken server's restart budget) ended the
+      // wait is that start() returned while `broken` was still not DEAD, below.
+      const arms = recordTimerArms(t)
       await fleet.start()
-      const elapsed = Date.now() - t0
-      assert.ok(elapsed < 800, `start() took ${elapsed}ms, expected <800ms under 300ms cap`)
+      assert.equal(arms.filter((a) => a.ms === 300).length, 1, 'start() must arm exactly one 300ms cap timer')
       // alpha should have stabilized inside the cap (handshake ~50-200ms).
       assert.equal(fleet.clients[0].state, MCP_STATES.READY)
       // broken should NOT be DEAD yet — the restart loop is still running
@@ -84,34 +87,36 @@ describe('MCPFleet', () => {
       await fleet.destroy()
     })
 
-    it('returns immediately on the happy path (no cap-induced latency)', async () => {
+    it('returns immediately on the happy path (no cap-induced latency)', async (t) => {
       // All servers healthy — start() should resolve as soon as every
-      // handshake completes, well under the default cap.
+      // handshake completes, not because the cap fired.
       const fleet = new MCPFleet([cfg('alpha'), cfg('beta')], { log: silentLog() })
-      const t0 = Date.now()
+      const arms = recordTimerArms(t)
       await fleet.start()
-      const elapsed = Date.now() - t0
-      // Generous bound — healthy handshakes typically complete in <300ms.
-      assert.ok(elapsed < 1200, `happy-path start() took ${elapsed}ms, expected <1200ms`)
+      // #7041: "no cap-induced latency" means the cap timer was armed and never
+      // fired — start() was released by the handshakes. Both clients READY at the
+      // moment start() returned is the other half: a cap that fired early would
+      // have released start() before the handshakes finished.
+      const cap = arms.filter((a) => a.ms === DEFAULT_FLEET_START_CAP_MS)
+      assert.equal(cap.length, 1, 'start() arms one default-cap timer')
+      assert.equal(cap[0].fired, false, 'the cap must not have fired on the happy path')
       assert.equal(fleet.clients[0].state, MCP_STATES.READY)
       assert.equal(fleet.clients[1].state, MCP_STATES.READY)
       await fleet.destroy()
     })
 
-    it('uses DEFAULT_FLEET_START_CAP_MS when no override is supplied', async () => {
-      // The cap default itself bounds the wait — verify the broken-server
-      // worst case stays under the default + a generous margin.
+    it('uses DEFAULT_FLEET_START_CAP_MS when no override is supplied', async (t) => {
+      // The cap default itself bounds the wait: with a permanently broken
+      // server, start() must arm the default cap and return before that server
+      // has used up its restart budget.
       const fleet = new MCPFleet([
         cfg('alpha'),
         { name: 'broken', command: process.execPath, args: ['-e', 'process.exit(2)'], env: {} },
       ], { log: silentLog() })
-      const t0 = Date.now()
+      const arms = recordTimerArms(t)
       await fleet.start()
-      const elapsed = Date.now() - t0
-      assert.ok(
-        elapsed < DEFAULT_FLEET_START_CAP_MS + 500,
-        `start() took ${elapsed}ms, expected <${DEFAULT_FLEET_START_CAP_MS + 500}ms under default cap`,
-      )
+      assert.equal(arms.filter((a) => a.ms === DEFAULT_FLEET_START_CAP_MS).length, 1, 'start() must arm the default cap')
+      assert.notEqual(fleet.clients[1].state, MCP_STATES.DEAD, 'the cap, not the restart budget, released start()')
       await fleet.destroy()
     })
 
@@ -126,17 +131,29 @@ describe('MCPFleet', () => {
     })
   })
 
-  it('destroy() returns within FLEET_KILL_GRACE_MS + safety margin even with hung children', async () => {
+  it('destroy() ends hung children and arms its own FLEET_KILL_GRACE_MS + safety ceiling', async (t) => {
     const fleet = new MCPFleet([
       cfg('hung1', { MCP_STUB_HANG: '1' }),
       cfg('hung2', { MCP_STUB_HANG: '1' }),
     ], { log: silentLog() })
     await fleet.start()
     await Promise.all(fleet.clients.map((c) => waitForReady(c)))
-    const t0 = Date.now()
+    // #7041: not an elapsed-time bound. Assert (a) destroy() armed its fleet-level
+    // ceiling, and (b) every hung child is actually gone when destroy() returns —
+    // if the per-client SIGKILL escalation were broken, the ceiling would release
+    // destroy() with the children still alive, which is what (b) catches.
+    const children = fleet.clients.map((c) => c._child)
+    assert.equal(children.length, 2)
+    const arms = recordTimerArms(t)
     await fleet.destroy()
-    const elapsed = Date.now() - t0
-    assert.ok(elapsed <= FLEET_KILL_GRACE_MS + 600, `destroy took ${elapsed}ms, expected <= ${FLEET_KILL_GRACE_MS + 600}ms`)
+    assert.equal(
+      arms.filter((a) => a.ms === FLEET_KILL_GRACE_MS + 500).length,
+      1,
+      'destroy() must arm the FLEET_KILL_GRACE_MS + 500 ceiling once',
+    )
+    for (const child of children) {
+      assert.ok(child.exitCode !== null || child.signalCode !== null, 'hung child must have exited by the time destroy() returns')
+    }
   })
 
   describe('trust gate (#4457)', () => {

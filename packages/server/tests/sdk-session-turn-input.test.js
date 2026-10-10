@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { SdkSession, isSdkToolCancellationText, SDK_TOOL_CANCELLED_PREFIXES } from '../src/sdk-session.js'
 import { wakeSession } from '../src/session-wake.js'
+import { recordTimerArms } from './test-helpers.js'
 
 /**
  * #8300 — a claude-sdk turn keeps its permission/hook channel for the whole
@@ -659,16 +660,19 @@ describe('SdkSession turn input (#8300)', () => {
 
     // A node:test timeout, so an UNBOUNDED stop fails this test instead of
     // hanging the runner (the hung fake stopTask never resolves).
-    it('reports a task the CLI never answered the stop for, within the bounded wait', { timeout: 3000 }, async () => {
+    it('reports a task the CLI never answered the stop for, within the bounded wait', { timeout: 15_000 }, async (t) => {
       const defaultStop = SdkSession.STOP_TASK_TIMEOUT_MS
       SdkSession.STOP_TASK_TIMEOUT_MS = 40
       try {
         const events = capture(session)
         state.stopTaskHangs = true
         wire(session, launchScript(), state)
-        const t0 = Date.now()
+        // #7041: not an elapsed-time bound. The stop wait was armed at the
+        // (shortened) STOP_TASK_TIMEOUT_MS and it was that timer firing which
+        // released the turn; sendMessage() returning is the not-held proof.
+        const arms = recordTimerArms(t)
         await session.sendMessage('start a background count')
-        assert.ok(Date.now() - t0 < 2000, 'the hung stop did not hold the turn past the bound')
+        assert.ok(arms.some((a) => a.ms === 40 && a.fired), 'the hung stop was released by its 40ms bounded wait firing')
         const loss = events.filter((e) => e.name === 'error')
         assert.equal(loss.length, 1)
         assert.equal(loss[0].stopped, false)

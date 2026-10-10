@@ -302,16 +302,14 @@ describe('memory_read (readMemory) handler', () => {
     const fifoPath = join(dir, 'CLAUDE.md')
     execFileSync('mkfifo', [fifoPath])
     try {
-      const HANG_GUARD_MS = 3000
-      const start = Date.now()
+      // #7041: generous — separates "returned" from "blocked forever", no timing.
+      const HANG_GUARD_MS = 15_000
       const result = await Promise.race([
         fileOps.readMemory(mockWs, dir).then(() => ({ outcome: 'resolved' })),
-        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS)),
+        new Promise((resolve) => setTimeout(() => resolve({ outcome: 'hung' }), HANG_GUARD_MS).unref()),
       ])
-      const elapsed = Date.now() - start
       assert.notEqual(result.outcome, 'hung',
         `readMemory blocked for >= ${HANG_GUARD_MS}ms on a FIFO planted at CLAUDE.md — the open needs O_NONBLOCK (#7938)`)
-      assert.ok(elapsed < 2000, `readMemory must return promptly against a planted FIFO (elapsed=${elapsed}ms)`)
 
       const { entries } = responses[0]
       const projectEntry = entries.find((e) => e.scope === 'project')

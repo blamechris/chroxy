@@ -174,14 +174,13 @@ describe('ClaudeTuiSession — usage limit surfaced in the chat (#8400)', () => 
     const transcript = writeJournal(sessFile, [userLine('earlier turn')])
     const { s, events } = makeTurnSession()
 
-    const startedAt = Date.now()
     const turn = s.sendMessage('hi')
     await waitFor(() => turnPolling(s), 'the turn to be busy with a baseline')
     appendJournal(transcript, [limitLine()])
     await turn
-    const elapsed = Date.now() - startedAt
 
-    assert.ok(elapsed < 3000, `fired in ${elapsed}ms, inside the 5000ms first-output timeout`)
+    // #7041: no wall-clock bound. Ending "inside the first-output timeout" is
+    // exactly "the teardown reason is the fast path's own, not that timeout's".
     assert.deepEqual(events.reasons, ['usage_limit'], 'its own teardown reason, not first_output_timeout')
     assert.equal(events.errors.length, 1)
     assert.equal(events.errors[0].code, 'usage_limit')

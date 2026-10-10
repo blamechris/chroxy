@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { recordTimerArms } from './test-helpers.js'
 import { evaluateDraft, shouldSkipEvaluator } from '../src/prompt-evaluator.js'
 
 /**
@@ -496,36 +497,40 @@ describe('evaluateDraft', () => {
       }
     })
 
-    it('honours CHROXY_EVALUATOR_TIMEOUT_MS env override when no explicit timeoutMs given', async () => {
+    it('honours CHROXY_EVALUATOR_TIMEOUT_MS env override when no explicit timeoutMs given', async (t) => {
       const saved = process.env.CHROXY_EVALUATOR_TIMEOUT_MS
       process.env.CHROXY_EVALUATOR_TIMEOUT_MS = '15'
       try {
         const client = makeHangingClient()
-        const start = Date.now()
+        // #7041: assert the deadline evaluateDraft ARMED, not how quickly it
+        // rejected — a loaded runner can take 200ms+ to run a 15ms timer.
+        const arms = recordTimerArms(t)
         await assert.rejects(
           () => evaluateDraft({ draft: 'a substantive draft for evaluation', client }),
-          (err) => err.code === 'EVALUATOR_TIMEOUT',
+          (err) => err.code === 'EVALUATOR_TIMEOUT' && /timed out after 15ms/.test(err.message),
         )
-        const elapsed = Date.now() - start
-        assert.ok(elapsed < 200, `env-configured timeout should fire well before 200ms (took ${elapsed}ms)`)
+        assert.deepEqual(arms.map((a) => a.ms), [15], 'the env value is the deadline armed')
+        assert.equal(arms[0].fired, true)
       } finally {
         if (saved !== undefined) process.env.CHROXY_EVALUATOR_TIMEOUT_MS = saved
         else delete process.env.CHROXY_EVALUATOR_TIMEOUT_MS
       }
     })
 
-    it('explicit timeoutMs arg beats env override', async () => {
+    it('explicit timeoutMs arg beats env override', async (t) => {
       const saved = process.env.CHROXY_EVALUATOR_TIMEOUT_MS
       process.env.CHROXY_EVALUATOR_TIMEOUT_MS = '60000'
       try {
         const client = makeHangingClient()
-        const start = Date.now()
+        // Record the armed deadline but run the real timer short: if the env
+        // value ever won, the assertions below fail at once instead of the test
+        // sitting out a 60s timer.
+        const arms = recordTimerArms(t, { realDelay: (ms) => Math.min(ms, 50) })
         await assert.rejects(
           () => evaluateDraft({ draft: 'a substantive draft for evaluation', client, timeoutMs: 20 }),
-          (err) => err.code === 'EVALUATOR_TIMEOUT',
+          (err) => err.code === 'EVALUATOR_TIMEOUT' && /timed out after 20ms/.test(err.message),
         )
-        const elapsed = Date.now() - start
-        assert.ok(elapsed < 200, `explicit arg should fire well before the env-configured 60s (took ${elapsed}ms)`)
+        assert.deepEqual(arms.map((a) => a.ms), [20], 'the explicit arg, not the 60s env value, is the deadline armed')
       } finally {
         if (saved !== undefined) process.env.CHROXY_EVALUATOR_TIMEOUT_MS = saved
         else delete process.env.CHROXY_EVALUATOR_TIMEOUT_MS

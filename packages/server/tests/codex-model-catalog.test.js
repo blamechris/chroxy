@@ -1,4 +1,5 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
+import { recordTimerArms } from './test-helpers.js'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { existsSync } from 'fs'
@@ -414,22 +415,23 @@ describe('codex model catalog — the no-session spawn probe', () => {
   // WHOLE probe. It used to be applied to initialize() and again to
   // model/list, so a slow handshake plus a wedged model/list held a spawned
   // child for ~2x the stated budget. The deadline is computed once and split.
-  it('bounds the WHOLE probe with ONE deadline, not each request separately', async () => {
+  it('bounds the WHOLE probe with ONE deadline, not each request separately', async (t) => {
     const client = stubClient({ [CODEX_CATALOG_METHOD]: () => new Promise(() => {}) }) // never settles
     let clock = 1000
     client.initialize = () => { clock += 4800; return Promise.resolve({ userAgent: 'chroxy/0.154.0 (Mac OS 26.6.2; arm64)' }) }
-    const startedAt = Date.now()
+    const arms = recordTimerArms(t)
     const rows = await probeCodexCatalog({
       bin: '/fake/codex',
       createClient: () => client,
       timeoutMs: 5000,
       now: () => clock,
     })
-    const elapsed = Date.now() - startedAt
     assert.equal(rows, null, 'the wedged model/list must time out, not hang')
-    // 4800ms of the 5000ms budget was spent in the handshake, so the real
-    // setTimeout left for model/list is ~200ms — NOT another full 5000ms.
-    assert.ok(elapsed < 2000, `model/list must inherit the REMAINING budget, waited ${elapsed}ms`)
+    // 4800ms of the 5000ms budget was spent in the handshake, so the setTimeout
+    // armed for model/list is the remaining 200ms — NOT another full 5000ms.
+    // #7041: asserted as the armed delay (the injected clock makes it exact),
+    // not as a wall-clock ceiling on how long the probe took.
+    assert.deepEqual(arms.map((a) => a.ms), [5000, 200], 'initialize gets the full budget, model/list only what is left')
     assert.equal(client.killed, true)
   })
 
@@ -456,7 +458,7 @@ describe('codex model catalog — the no-session spawn probe', () => {
   // "no bound at all", so the clamp did not survive a non-finite clock. Both
   // halves are needed: the first kills a "clamp to 1ms" fix, the second kills
   // the unguarded `Math.max` (which leaves model/list unbounded).
-  it('a non-finite clock keeps the FULL budget — neither shrunk to 1ms nor left unbounded', { timeout: 3000 }, async () => {
+  it('a non-finite clock keeps the FULL budget — neither shrunk to 1ms nor left unbounded', { timeout: 3000 }, async (t) => {
     // Reading 1: the deadline. Every later reading is non-finite.
     const nanClock = () => { let n = 0; return () => (n++ === 0 ? 1000 : NaN) }
 
@@ -470,13 +472,15 @@ describe('codex model catalog — the no-session spawn probe', () => {
 
     // (2) …and a wedged one is still BOUNDED by the full timeoutMs.
     const wedged = stubClient({ [CODEX_CATALOG_METHOD]: () => new Promise(() => {}) })
-    const startedAt = Date.now()
+    const arms = recordTimerArms(t)
     const none = await probeCodexCatalog({
       bin: '/fake/codex', createClient: () => wedged, timeoutMs: 200, now: nanClock(),
     })
-    const elapsed = Date.now() - startedAt
     assert.equal(none, null, 'a non-finite remainder must not leave model/list unbounded')
-    assert.ok(elapsed < 1500, `model/list must still be bounded, waited ${elapsed}ms`)
+    // #7041: both requests are armed with the FULL 200ms budget (initialize and
+    // the model/list that inherits it because the clock is unreadable) — a
+    // shrunk-to-1ms or unbounded model/list would arm something else, or nothing.
+    assert.deepEqual(arms.map((a) => a.ms), [200, 200], 'initialize and model/list are each bounded by the full budget')
     assert.equal(wedged.killed, true)
   })
 

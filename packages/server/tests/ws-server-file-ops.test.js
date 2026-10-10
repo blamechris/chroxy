@@ -1053,19 +1053,17 @@ describe('file browser symlink security', () => {
     execFileSync('mkfifo', [fifoPath])
     const { ws, messages } = await createFileBrowserTestServer()
 
-    const HANG_GUARD_MS = 3000
-    const start = Date.now()
+    // #7041: generous — separates "returned" from "blocked forever", no timing.
+    const HANG_GUARD_MS = 15_000
     send(ws, { type: 'read_file', path: 'evil.fifo' })
     // waitForMessage REJECTS on its own timeout; map that to the sentinel so
     // a hang always fails on the assertion below, never on whichever of two
     // equal-length timers happened to fire first.
     const content = await waitForMessage(messages, 'file_content', HANG_GUARD_MS)
       .catch(() => ({ outcome: 'hung' }))
-    const elapsed = Date.now() - start
 
     assert.notEqual(content?.outcome, 'hung',
       `read_file blocked for >= ${HANG_GUARD_MS}ms on a planted FIFO — the open needs O_NONBLOCK (#7938)`)
-    assert.ok(elapsed < 2500, `read_file must return promptly against a planted FIFO (elapsed=${elapsed}ms)`)
     assert.equal(content.content, null, 'a FIFO must never be read as file content')
     assert.match(content.error || '', /not a regular file/i,
       'a FIFO must be refused via the post-open isFile() check, not a different/incidental error (#7938)')

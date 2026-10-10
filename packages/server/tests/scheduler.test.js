@@ -864,10 +864,8 @@ describe('#6865 SchedulerEngine', () => {
       const engine = newEngine({ sessionManager: sm, runTimeoutMs: 5_000 })
       engine.start()
 
-      const startedAt = Date.now()
       clock = 2000
       await timers.tick()
-      const elapsedMs = Date.now() - startedAt
 
       assert.deepEqual(sm.responded, [['req-1', 'deny']])
       assert.equal(sm.interrupted.length, 1)
@@ -876,10 +874,9 @@ describe('#6865 SchedulerEngine', () => {
       // watchdog fires — the slot held for the whole window.
       const record = store.get(task.id)
       assert.ok(record.lastRun, 'the interrupted run must be recorded already, not left pending until runTimeoutMs')
-      // Belt-and-braces only — `runTimeoutMs` rides the FAKE clock, so this
-      // wall-clock bound can never be what fails. `record.lastRun` above is the
-      // load-bearing assertion.
-      assert.ok(elapsedMs < 2_000, `settling must not block on runTimeoutMs (took ${elapsedMs}ms of a 5000ms window)`)
+      // (#7041: a wall-clock "settled within 2s" line stood here. `runTimeoutMs`
+      // rides the FAKE clock, so it could never be what failed — `record.lastRun`
+      // above is the load-bearing assertion and the only one that can go red.)
       // ...and the outcome is still the VISIBLE blocked failure. Settling faster
       // must never turn an interrupted run into a completed one.
       assert.notEqual(record.lastRun.status, 'success', 'an interrupted run must never report success')
@@ -903,16 +900,13 @@ describe('#6865 SchedulerEngine', () => {
       const engine = newEngine({ sessionManager: sm, runTimeoutMs: 5_000 })
       engine.start()
 
-      const startedAt = Date.now()
       clock = 2000
       await timers.tick()
-      const elapsedMs = Date.now() - startedAt
 
       assert.equal(sm.interrupted.length, 1)
       const record = store.get(task.id)
       assert.ok(record.lastRun, 'the stopped run must be recorded already, not left pending until runTimeoutMs')
-      // Belt-and-braces only (fake clock) — see the previous test.
-      assert.ok(elapsedMs < 2_000, `settling must not block on runTimeoutMs (took ${elapsedMs}ms of a 5000ms window)`)
+      // (No wall-clock bound — see the previous test; `record.lastRun` is the assertion.)
       assert.notEqual(record.lastRun.status, 'success', 'a stopped run did not do the work — never success')
       assert.equal(record.lastRun.status, INTERRUPTED_STATUS, 'a deliberate Stop gets its OWN status, not the crash bucket')
       assert.notEqual(record.lastRun.status, 'error', 'an operator Stop is not a provider failure')

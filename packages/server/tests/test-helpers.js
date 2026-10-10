@@ -276,6 +276,45 @@ export function waitForEvent(emitter, event, timeoutMs = 5000) {
 }
 
 /**
+ * Record every `setTimeout` the code under test arms, WITHOUT changing its
+ * behaviour — the real timer still runs and fires. Lets a test assert WHICH
+ * deadline was armed (and whether it fired) instead of how long a wall-clock
+ * measurement took, which is the flake shape #7041 removes: an absolute
+ * elapsed-time bound passes or fails on scheduler pressure, an armed delay
+ * does not.
+ *
+ * The spy is installed through the test context's mock tracker, so it is
+ * restored when the test ends. Each entry is `{ ms, fired, state }`:
+ * `fired` flips true when the timer's callback runs, and `state` is whatever
+ * `tag()` returned at the moment of arming (so a caller can tell a restart
+ * timer, armed while RESTARTING, from a handshake timer armed while STARTING).
+ *
+ * `realDelay(ms)` (default: identity) picks the delay the REAL timer is armed
+ * with, for a test whose wrong outcome would otherwise sit out a long timer:
+ * `entry.ms` still records what the code asked for, which is what gets asserted.
+ *
+ * It patches the GLOBAL `setTimeout`, so concurrent tests in one file would see
+ * each other's arms. No current consumer runs concurrently; keep it that way.
+ *
+ * @param {import('node:test').TestContext} t - the `it(name, async (t) => ...)` context
+ * @param {{tag?: () => any, realDelay?: (ms: number) => number}} [options]
+ * @returns {Array<{ms: number, fired: boolean, state: any}>} live array, appended to as timers arm
+ */
+export function recordTimerArms(t, { tag = () => undefined, realDelay = (ms) => ms } = {}) {
+  const arms = []
+  const real = global.setTimeout
+  t.mock.method(global, 'setTimeout', (cb, ms, ...rest) => {
+    const entry = { ms, fired: false, state: tag() }
+    arms.push(entry)
+    return real((...args) => {
+      entry.fired = true
+      return cb(...args)
+    }, realDelay(ms), ...rest)
+  })
+  return arms
+}
+
+/**
  * Wait until a message of the given `type` appears in `messages`, then return it.
  * Thin wrapper around waitFor for the common WS integration pattern.
  *

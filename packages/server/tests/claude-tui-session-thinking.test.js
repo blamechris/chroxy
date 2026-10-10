@@ -7,6 +7,7 @@ import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { writeHookSettings } from '../src/claude-tui/pty-driver.js'
 import { transcriptPathForSessionFile } from '../src/transcript-tasks.js'
 import { SessionMessageHistory, streamKindOf } from '../src/session-message-history.js'
+import { recordTimerArms } from './test-helpers.js'
 import {
   thinkingEntry, redactedThinkingEntry, textEntry, toolUseEntry, userEntry,
 } from './fixtures/claude-transcript-thinking.js'
@@ -542,17 +543,26 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
   // after the answer, so the block was never shown on either turn. The answer must
   // not wait for it, and the block must still be shown when it lands.
 
-  it('shows reasoning whose transcript line lands AFTER the Stop was processed, without delaying the answer', async () => {
+  it('shows reasoning whose transcript line lands AFTER the Stop was processed, without delaying the answer', async (t) => {
     const sessFile = writeSessFile()
     const transcript = writeJournal(sessFile, [])
     const { s, events, sinkDir } = makeTurnSession()
     const turn = s.sendMessage('what is 6 x 7?')
     await waitFor(() => turnPolling(s), 'the turn to be polling')
     const stamp = now() // claude stamps the block now, but writes the line later
+    const arms = recordTimerArms(t)
     stop(sinkDir, 'The answer is 42.')
-    const t0 = Date.now()
     await turn
-    assert.ok(Date.now() - t0 < 600, 'the answer did not wait for the transcript')
+    // #7041: not a wall-clock bound, and not "the late window is still open" (that
+    // holds for any wait shorter than THINKING_LATE_MS). The answer waits for the
+    // transcript only by arming a deadline and letting it run out, so: no timer of
+    // more than 160ms fired between the Stop and the turn settling (the same bound
+    // as the sibling row above). The 8000/5000ms backstops re-armed by the poll
+    // loop are cleared unfired, and the poll's own sleeps are ~1ms. A wait built
+    // from many short sleeps, or from no timer at all, is NOT caught here; that
+    // needs a call count and is listed as residual in the PR.
+    const waited = arms.filter((a) => a.ms > 160 && a.fired)
+    assert.deepEqual(waited.map((a) => a.ms), [], 'the answer must not wait out a timer for the transcript to land')
     assert.equal(events.results.length, 1)
     assert.deepEqual(thinkingFrames(events.frames), [], 'precondition: nothing on disk yet')
 

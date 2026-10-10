@@ -160,16 +160,17 @@ describe('ClaudeTuiSession — expired login from the transcript (#8223)', () =>
     const transcript = writeJournal(sessFile, [userLine('earlier turn')])
     const { s, events } = makeTurnSession()
 
-    const startedAt = Date.now()
     const turn = s.sendMessage('hi')
     await waitFor(() => turnPolling(s), 'the turn to be busy with a baseline')
     assert.equal(s._isBusy, true, 'precondition: the turn is busy and has produced no output')
     assert.equal(s._firstOutputDisarmed, false, 'precondition: no first output yet')
     appendJournal(transcript, [authErrorLine()])
     await turn
-    const elapsed = Date.now() - startedAt
 
-    assert.ok(elapsed < 3000, `fast path fired in ${elapsed}ms, far inside the 5000ms first-output timeout`)
+    // #7041: no wall-clock bound. "Well before the first-output timeout" is
+    // exactly "the teardown reason is the fast path's own, not that timeout's":
+    // had the timeout (not the transcript scan) ended the turn, the reason
+    // would be first_output_timeout.
     assert.deepEqual(events.reasons, ['auth_required'], 'its own teardown reason, not first_output_timeout')
     assert.equal(events.errors.length, 1)
     assert.equal(events.errors[0].code, 'AUTH_REQUIRED')
