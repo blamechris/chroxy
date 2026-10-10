@@ -187,7 +187,7 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
       const text = (await readFile(file, 'utf8')).replace(/\r\n/g, '\n')
       // Cheap prefilters: parseKeySets REFUSEs on a file with zero
       // declarations, which is almost every file here.
-      if (/_SUPPORTED_KEYS\s*=\s*new Set/.test(text)) {
+      if (/_SUPPORTED_KEYS\s*=/.test(text)) {
         for (const [name, keys] of parseSupportedKeySets(text, `src/${rel}`)) {
           if (declared.has(name)) {
             throw new Error(`REFUSE: ${name} is declared in two files: src/${declaredIn.get(name)} and src/${rel}`)
@@ -510,6 +510,11 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
       const { warnings } = validate([{ id: 'zz-entry-probe', baseUrl: 'http://localhost:1', defaultModel: 'm', command: 'x', [key]: 1 }])
       return warnings.some(w => w.includes(`Unknown key`) && w.includes(`.${key}'`))
     }
+    // Every registered entry roster must have at least one validator row, or a new
+    // roster would be documented and swept but never probed or source-checked.
+    const validated = new Set(ENTRY_VALIDATORS.map(v => v.roster))
+    const unvalidated = sorted(ENTRY_ROSTERS.keys()).filter(n => !validated.has(n))
+    assert.deepEqual(unvalidated, [], `ENTRY_ROSTERS has rosters with no ENTRY_VALIDATORS row: ${unvalidated.join(', ')}`)
     for (const { label, validate, roster } of ENTRY_VALIDATORS) {
       assert.equal(probe(validate, 'zzNotAnEntryKey'), true, `${label}: an invented entry key did not warn — the probe cannot detect the roster`)
       const rejected = [...ENTRY_ROSTERS.get(roster)()].filter(k => probe(validate, k))
