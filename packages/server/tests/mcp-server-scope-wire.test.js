@@ -11,7 +11,7 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -152,7 +152,7 @@ describe('ClaudeByokSession mcp_servers scope (#7028)', () => {
     assert.equal('scope' in byName.fromRepo, false, '.mcp.json is not removable, so no scope is claimed')
   })
 
-  it('a server defined in BOTH scopes is reported once, with the scope of the definition in effect (project)', () => {
+  it('a server defined in BOTH scopes is reported once, with the scope of the definition in effect (project)', async () => {
     const mcpConfigPath = writeConfigs({
       user: { both: entry('user-cmd') },
       local: { both: entry('local-cmd') },
@@ -162,6 +162,14 @@ describe('ClaudeByokSession mcp_servers scope (#7028)', () => {
     assert.equal(out.length, 1, 'one wire entry per name')
     assert.equal(out[0].scope, 'project', 'local/"project" outranks user — the same winner discovery spawns')
     assert.equal(session._mcpServerConfigs[0].command, 'local-cmd')
+    // Removing with the reported scope removes ONLY the project definition: the
+    // shadowed user definition stays on disk (#7028 review).
+    const res = await session.removeMcpServer('both', out[0].scope)
+    assert.equal(res.found, true, res.error)
+    const onDisk = JSON.parse(readFileSync(mcpConfigPath, 'utf8'))
+    assert.equal(onDisk.mcpServers?.both?.command, 'user-cmd', 'the user definition survives')
+    const projectBlocks = Object.values(onDisk.projects || {})
+    assert.equal(projectBlocks.some((b) => b?.mcpServers?.both), false, 'the project definition is gone')
   })
 
   it('every reported scope is accepted by removeMcpServer (found: true) — the field is a usable remove target', async () => {
