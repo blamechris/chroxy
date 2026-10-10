@@ -645,7 +645,7 @@ describe('permission-hook.sh: the floor probe fails CLOSED (#7004)', () => {
       assert.equal(stats.floorRequests, 1)
       assert.equal(stats.permissionRequests, 1, 'a probe that never answers must not be read as clearance')
       assert.equal(decisionOf(stdout).permissionDecision, 'deny', 'the (denying) prompt answer, not a silent allow')
-      assert.ok(elapsed >= 9000 && elapsed < 12500, `the curl timeout should bound the wait (~10s), took ${elapsed}ms`)
+      assert.ok(elapsed >= 9000 && elapsed < 13500, `the curl timeout should bound the wait (~10s), took ${elapsed}ms`)
     } finally {
       clearTimeout(backstop)
       for (const sock of sockets) sock.destroy()

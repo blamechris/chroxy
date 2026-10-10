@@ -156,7 +156,7 @@ describe('POST /permission-floor through the real WsServer (#7019)', () => {
       await boot()
       const res = await globalThis.fetch(`http://127.0.0.1:${port}/permission-floor`, { headers: bearer(HOOK_SECRET) })
       const text = await res.text()
-      assert.notEqual(res.status, 200)
+      assert.equal(res.status, 404)
       assert.equal(text.includes('"floor"'), false)
     })
   })
