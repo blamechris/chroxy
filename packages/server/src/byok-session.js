@@ -344,6 +344,8 @@ export class ClaudeByokSession extends BaseSession {
     this._history = []
     // AbortController for the active stream so interrupt() can cancel.
     this._abortController = null
+    // #8553: this turn's abort was driven by a parent session (see interrupt()).
+    this._abortCascaded = false
 
     // PermissionManager + event re-emission via the shared wiring (P2-9) so the
     // dashboard / mobile permission UI and the audit log work uniformly across
@@ -1178,7 +1180,8 @@ export class ClaudeByokSession extends BaseSession {
     // own `end_turn` overwrites lastStopReason, so the cap needs its own flag.
     let toolRoundCapReached = false
     // #7072: an interrupt that landed in the tool phase ends the loop below WITHOUT a
-    // thrown abort, so the stream-phase catch (-> `error` ABORT) never sees it.
+    // thrown abort, so the stream-phase catch never sees it. (A requested Stop that
+    // lands in the stream phase reaches the same `result` through that catch, #8553.)
     let stoppedInToolPhase = false
     // Snapshot the pre-turn history length so any stream-init failure (at
     // any round) can rollback the entire turn atomically. We derive it
@@ -1492,9 +1495,10 @@ export class ClaudeByokSession extends BaseSession {
           // #7072: the tool results above are committed to history (the #4061
           // invariant) and the turn's spend is real, so this still ends in a
           // `result` -- but one that says the turn was STOPPED, not a success. The
-          // stream-phase abort throws into the catch below and reports `error`
-          // ABORT; this path never throws, and byok never emits `stopped`, so the
-          // result is the only terminal event an orchestration TurnDriver hears.
+          // stream-phase abort throws into the catch below, which ends a REQUESTED
+          // Stop in the same result (#8553); this path never throws. byok emits no
+          // `stopped` of its own, so the result is the only terminal event an
+          // orchestration TurnDriver hears (BaseSession.emit adds the quiet one).
           stoppedInToolPhase = true
           break
         }
@@ -1628,32 +1632,16 @@ export class ClaudeByokSession extends BaseSession {
       // keep their previous snapshot.
       const finalRoundOccupancy = ClaudeByokSession._buildFinalRoundOccupancy(lastRoundUsage)
 
-      this.emit('stream_end', { messageId })
-      this.emit('result', {
-        sessionId: null,
+      this._emitTurnResult({
         messageId,
-        stopReason: lastStopReason,
-        // #7326: the provider-neutral form of the stop reason above, for the wire.
-        // (A different key on purpose: `stopReason` is the raw Anthropic string.)
-        ...turnOutcomeField(outcomeFromByokTurn({ stopReason: lastStopReason, toolRoundCapReached, interrupted: stoppedInToolPhase })),
-        // #7072: terminal but not successful (internal; not on the wire).
-        ...(stoppedInToolPhase ? { interrupted: true } : {}),
-        duration: Date.now() - turnStartedAt,
-        usage: turnUsage,
-        ...(finalRoundOccupancy ? { contextOccupancy: finalRoundOccupancy } : {}),
-        // #5630: emit null when no round produced a known cost so the UI
-        // shows "n/a" instead of a misleading $0.00.
-        cost: turnCostKnown ? turnCost : null,
-        // #6692: single-model split. Task-subagent usage is folded into
-        // turnUsage under the parent's model, which is CORRECT today because
-        // children hard-inherit the parent model (see _executeTaskTool). If a
-        // per-profile model override ever lands (#5018's deferred AC), that
-        // change must split this map by actual child model (#5020).
-        modelUsage: synthesizeModelUsage(
-          this.model || this._defaultModel,
-          turnUsage,
-          turnCostKnown ? turnCost : null,
-        ),
+        lastStopReason,
+        toolRoundCapReached,
+        interrupted: stoppedInToolPhase,
+        turnStartedAt,
+        turnUsage,
+        turnCost,
+        turnCostKnown,
+        finalRoundOccupancy,
       })
     } catch (err) {
       // #4118: extend the synchronous stream-init rollback (#4109) to
@@ -1690,6 +1678,25 @@ export class ClaudeByokSession extends BaseSession {
       turnUsage.cache_creation_input_tokens += this._subagentUsageThisTurn.cache_creation_input_tokens
       turnCost += this._subagentCostThisTurn
       if (this._subagentCostThisTurn > 0) turnCostKnown = true
+      // #8553: a Stop somebody requested that lands while the model is STREAMING
+      // ends the turn exactly as the tool-phase one does (#7072): one `result`
+      // that says it was stopped, then the quiet `stopped` BaseSession.emit adds
+      // for it, and no `error`. The rollback and the usage fold above already ran
+      // and are the same either way.
+      if (this._isRequestedStop(err)) {
+        this._emitTurnResult({
+          messageId,
+          lastStopReason,
+          toolRoundCapReached,
+          interrupted: true,
+          turnStartedAt,
+          turnUsage,
+          turnCost,
+          turnCostKnown,
+          finalRoundOccupancy: ClaudeByokSession._buildFinalRoundOccupancy(lastRoundUsage),
+        })
+        return
+      }
       this.emit('stream_end', { messageId })
       this._emitTurnError(messageId, err, 'STREAM_ERROR', {
         usage: turnUsage,
@@ -2318,7 +2325,7 @@ export class ClaudeByokSession extends BaseSession {
     // already iterates _subagentSessions, but this listener also
     // catches the micro-race when the signal aborts between the
     // top-of-function check and child.sendMessage's first await.
-    const onAbort = () => { try { child.interrupt() } catch { /* noop */ } }
+    const onAbort = () => { try { child.interrupt({ cascaded: true }) } catch { /* noop */ } }
     if (signal) {
       if (signal.aborted) onAbort()
       else signal.addEventListener('abort', onAbort, { once: true })
@@ -2741,6 +2748,67 @@ export class ClaudeByokSession extends BaseSession {
     }
   }
 
+  /**
+   * #8553: the one way a turn's terminal `result` is built and sent, for the
+   * normal ending and for a requested Stop alike (tool phase #7072, stream phase
+   * #8553). `interrupted` makes the outcome `stopped` and marks the result
+   * terminal-but-not-successful; BaseSession.emit turns that into the quiet
+   * `stopped` when the Stop was requested. Emits `stream_end` first.
+   */
+  _emitTurnResult({
+    messageId, lastStopReason, toolRoundCapReached, interrupted,
+    turnStartedAt, turnUsage, turnCost, turnCostKnown, finalRoundOccupancy,
+  }) {
+    this.emit('stream_end', { messageId })
+    this.emit('result', {
+      sessionId: null,
+      messageId,
+      stopReason: lastStopReason,
+      // #7326: the provider-neutral form of the stop reason above, for the wire.
+      // (A different key on purpose: `stopReason` is the raw Anthropic string.)
+      ...turnOutcomeField(outcomeFromByokTurn({ stopReason: lastStopReason, toolRoundCapReached, interrupted })),
+      // #7072: terminal but not successful (internal; not on the wire).
+      ...(interrupted ? { interrupted: true } : {}),
+      duration: Date.now() - turnStartedAt,
+      usage: turnUsage,
+      ...(finalRoundOccupancy ? { contextOccupancy: finalRoundOccupancy } : {}),
+      // #5630: emit null when no round produced a known cost so the UI
+      // shows "n/a" instead of a misleading $0.00.
+      cost: turnCostKnown ? turnCost : null,
+      // #6692: single-model split. Task-subagent usage is folded into
+      // turnUsage under the parent's model, which is CORRECT today because
+      // children hard-inherit the parent model (see _executeTaskTool). If a
+      // per-profile model override ever lands (#5018's deferred AC), that
+      // change must split this map by actual child model (#5020).
+      modelUsage: synthesizeModelUsage(
+        this.model || this._defaultModel,
+        turnUsage,
+        turnCostKnown ? turnCost : null,
+      ),
+    })
+  }
+
+  /** True when `err` is the abort of an in-flight stream (see _emitTurnError). */
+  _isAbortError(err) {
+    return err instanceof APIUserAbortError ||
+      err?.name === 'AbortError' ||
+      !!this._abortController?.signal?.aborted
+  }
+
+  /**
+   * #8553: did somebody ASK for the abort `err` reports? True only for an abort
+   * that came through interrupt() (the user, the scheduler, the orchestration
+   * watchdog). Not a teardown (destroy() calls interrupt() too, but nobody is
+   * waiting for a stopped turn), and not the abort a parent's Stop cascades to
+   * its Task subagent, which the parent reports as the subagent's failure.
+   */
+  _isRequestedStop(err) {
+    return this._isAbortError(err) &&
+      this._stopRequestedThisTurn &&
+      !this._destroying &&
+      !this._abortCascaded
+  }
+
   _emitTurnError(messageId, err, fallbackCode, partials) {
     // #4057: SDK v0.81+ throws `APIUserAbortError` (not the generic
     // `AbortError`) when an in-flight messages.stream sees its signal
@@ -2760,11 +2828,7 @@ export class ClaudeByokSession extends BaseSession {
     // so additional fields propagate without a wire-side schema change.
     // Optional / undefined-safe: pre-#5020 call sites pass nothing and
     // the fields are simply absent on the event payload.
-    const aborted =
-      err instanceof APIUserAbortError ||
-      err?.name === 'AbortError' ||
-      this._abortController?.signal?.aborted
-    if (aborted) {
+    if (this._isAbortError(err)) {
       this.emit('error', {
         messageId,
         message: 'Interrupted by user',
@@ -2799,18 +2863,25 @@ export class ClaudeByokSession extends BaseSession {
     // turn-scoped Stop request (see interrupt()) is cleared here, or it would tag
     // the NEXT turn's own abort as a requested Stop.
     this._stopRequestedThisTurn = false
+    this._abortCascaded = false
     this._clearIntentionalStop()
   }
 
-  interrupt() {
+  /**
+   * @param {{ cascaded?: boolean }} [opts] `cascaded`: the parent session is
+   *   stopping this Task subagent (its own Stop reaching it, or a cancel of this
+   *   one node), rather than a Stop of this session (#8553).
+   */
+  interrupt({ cascaded = false } = {}) {
     if (!this._isBusy) return
-    // #7072/#8461: a Stop somebody requested (the user, the scheduler, the
+    if (cascaded) this._abortCascaded = true
+    // #7072/#8461/#8553: a Stop somebody requested (the user, the scheduler, the
     // orchestration watchdog) is acknowledged by one quiet `stopped` instead of a
-    // "Stopped" chip, exactly as on claude-sdk and claude-cli. This matters on the
-    // tool-phase abort, which ends in a `result` (see sendMessage); BaseSession.emit
-    // drops the chip and sends the confirmation, after marking the result
-    // `interrupted`. The stream-phase abort ends in `error` ABORT and emits no
-    // `result`, so this changes nothing there.
+    // "Stopped" chip, exactly as on claude-sdk and claude-cli. Both phases end in a
+    // `result` (see sendMessage): the tool-phase abort never throws, and the
+    // stream-phase one is turned into the same result by the catch, so
+    // BaseSession.emit drops the chip and sends the confirmation, after marking the
+    // result `interrupted`.
     this.markIntentionalStop()
     this._noteTurnStopRequested()
     if (this._abortController) {
@@ -2822,7 +2893,7 @@ export class ClaudeByokSession extends BaseSession {
     // _executeTaskTool's awaited promise resolve and the parent's
     // outer agent loop can finish the user-facing result event.
     for (const child of this._subagentSessions.values()) {
-      try { child.interrupt() } catch (err) {
+      try { child.interrupt({ cascaded: true }) } catch (err) {
         log.warn(`subagent interrupt failed: ${err?.message || err}`)
       }
     }
@@ -2865,7 +2936,9 @@ export class ClaudeByokSession extends BaseSession {
     // optimistically finalize the node, matching the SDK path's best-effort
     // stopTask contract.
     try {
-      child.interrupt()
+      // A cancel of one node reaches the subagent like the parent's own Stop
+      // does: the parent reports it as the subagent's failure (#8553).
+      child.interrupt({ cascaded: true })
     } catch (err) {
       log.warn(`subagent cancel failed for ${activityId}: ${err?.message || err}`)
       return { ok: false, reason: 'stop-failed', error: err?.message || String(err) }
