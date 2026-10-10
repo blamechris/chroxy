@@ -127,69 +127,42 @@ describe('SessionScreen component structure', () => {
     expect(src).toMatch(/<CreateSessionModal/)
   })
 
-  describe('compact chat filter consumes the shared predicate (#6882)', () => {
+  // The chat filter lives in src/screens/selectChatMessages.ts (#7201) and its
+  // behaviour -- compaction markers surviving compact mode (#7186), every other
+  // system event excluded, the injected compact predicate honoured (#6882) -- is
+  // pinned by src/screens/__tests__/selectChatMessages.test.ts. What only this
+  // file can see is the wiring: SessionScreen must hand the SHARED store-core
+  // predicate to that selector and must not grow its own copy of the filter.
+  //
+  // There is deliberately no `m.type === 'system'` negative guard here:
+  // SessionScreen.tsx legitimately contains that text (the System tab label), so
+  // any such negative would fail on correct code.
+  describe('SessionScreen wires the chat filter to the shared predicate (#6882, #7201)', () => {
+    // Boolean assertions, not toMatch against the whole file: a failing toMatch
+    // on a multi-KB source would dump all of it into the error.
+    const SHARED_PREDICATE_IMPORT =
+      /import\s*\{[^}]*\bisHiddenInCompactMode\b[^}]*\}\s*from\s*'@chroxy\/store-core'/
+    const SELECTOR_IMPORT = /from\s*'\.\/selectChatMessages'/
+    const DELEGATING_CALL =
+      /selectChatMessages\(\s*allMessages\s*,\s*\{\s*chatFilterCompact\s*,\s*isHiddenInCompactMode\s*,?\s*\}\s*,?\s*\)/
+    // The filter body, however it is spaced -- not the legitimate
+    // `isHiddenInCompactMode` import or the shorthand property in the call above.
+    const INLINE_COMPACT_FILTER = /chatFilterCompact\s*&&\s*(isHiddenInCompactMode\s*\(|\()/
+
     test('imports isHiddenInCompactMode from @chroxy/store-core', () => {
-      expect(src).toMatch(
-        /import\s*\{[^}]*\bisHiddenInCompactMode\b[^}]*\}\s*from\s*'@chroxy\/store-core'/,
-      )
+      expect(SHARED_PREDICATE_IMPORT.test(src)).toBe(true)
     })
 
-    test('the compact filter calls the shared predicate, not a hand-rolled duplicate', () => {
-      // #7201 moved the predicate into src/screens/selectChatMessages.ts so its
-      // invariants could be tested behaviourally. #6882's rule is unchanged —
-      // it just applies there now, so this reads that file.
-      const selector = fs.readFileSync(
-        path.resolve(__dirname, '../src/screens/selectChatMessages.ts'),
-        'utf-8',
-      )
-      expect(selector).toMatch(
-        /chatFilterCompact\s*&&\s*isHiddenInCompactMode\(m\.type\)/,
-      )
-      // SessionScreen must delegate rather than keep its own copy.
-      expect(src).toMatch(
-        /selectChatMessages\(\s*allMessages\s*,\s*\{\s*chatFilterCompact\s*,\s*isHiddenInCompactMode\s*,?\s*\}\s*,?\s*\)/,
-      )
-      expect(src).not.toMatch(/chatFilterCompact\s*&&\s*isHiddenInCompactMode/)
-      // The old hard-coded duplicate must be gone — this is the exact string
-      // #6882 was filed to remove (drift risk vs. the store-core predicate).
-      // Whitespace-tolerant: catches the duplicate regardless of spacing
-      // around `===`/`||` (e.g. `m.type==='tool_use'`), without matching the
-      // legitimate isHiddenInCompactMode(m.type) call.
-      expect(selector).not.toMatch(
-        /chatFilterCompact\s*&&\s*\(\s*m\.type\s*===\s*'tool_use'\s*\|\|\s*m\.type\s*===\s*'thinking'\s*\)/,
-      )
+    test('imports the selector', () => {
+      expect(SELECTOR_IMPORT.test(src)).toBe(true)
     })
 
-    test('system filtering is delegated to selectChatMessages, not the compact predicate', () => {
-      // #6882: system filtering is its own rule — isHiddenInCompactMode is
-      // specifically the compact-hide predicate, not a catch-all message
-      // filter. It moved out of SessionScreen into selectChatMessages (#7201);
-      // what matters is that the two stay separate, not where they live.
-      expect(src).toMatch(
-        /selectChatMessages\(\s*allMessages\s*,\s*\{\s*chatFilterCompact\s*,\s*isHiddenInCompactMode\s*,?\s*\}\s*,?\s*\)/,
-      )
+    test('hands the shared predicate to selectChatMessages', () => {
+      expect(DELEGATING_CALL.test(src)).toBe(true)
     })
 
-    test('compaction markers survive the system filter so ChatView can reinsert them (#7186)', () => {
-      // The system filter used to be a flat `return false`, which meant
-      // ChatView's insertCompactionMarkers — which reads the SAME array it is
-      // handed — filtered a list that could never contain a system message.
-      // The marker was unreachable on mobile entirely.
-      //
-      // The predicate now lives in selectChatMessages.ts and is covered
-      // behaviourally by selectChatMessages.test.ts (#7201). The only thing
-      // left for THIS file to assert is that SessionScreen still delegates
-      // rather than growing an inline copy back — which the import below plus
-      // the call-site assertion above both catch.
-      //
-      // There used to be a `not.toMatch(/if \(m\.type === 'system'\) return
-      // false;/)` here. It was inert: the predicate moved out of this file, so
-      // that string can no longer appear in `src` under any edit, and a
-      // reverting mutation failed zero assertions in this file (#7228). Nor can
-      // it be widened — `m.type === 'system'` legitimately appears twice in
-      // SessionScreen.tsx, deriving the System tab, so a broader negative would
-      // fail on correct code. Removed rather than left looking like cover.
-      expect(src).toMatch(/from '\.\/selectChatMessages'/)
+    test('keeps no inline copy of the compact filter', () => {
+      expect(INLINE_COMPACT_FILTER.test(src)).toBe(false)
     })
   })
 })
