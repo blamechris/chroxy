@@ -472,6 +472,9 @@ describe('#7085 outbound schema coverage', () => {
           if (!lacks.includes(name)) problems.push(`names \`${name}\`, which the schema does not declare`)
           continue
         }
+        // One-sided on purpose: a roster `?` on a field the schema requires is a contradiction, but a
+        // roster-REQUIRED field the schema marks optional is allowed — the schemas are lenient on parse
+        // while the roster states what the producer always sends (#7107 review, N2).
         if (f.optional && !declared.optional) problems.push(`marks \`${name}?\` optional but the schema requires it`)
       }
       for (const name of schemaFields.keys()) {
@@ -483,8 +486,33 @@ describe('#7085 outbound schema coverage', () => {
 
     const ENTRIES = parseRosterEntries(rosterSectionText())
 
-    it('CONTROL: the roster section parses to a populated, duplicate-free list', () => {
-      assert.ok(ENTRIES.length >= 180, `roster section undercounts: ${ENTRIES.length} (expected >= 180)`)
+    /**
+     * Every `type: '<name>'` the section spells, by a LOOSER pattern than the parser's (quotes of any
+     * kind, optional quotes round the key, any spacing). A head the parser's strict pattern cannot
+     * read — `{type:"pong", serverTs?}` — leaves the pin silently, and nothing downstream notices
+     * a line that is simply absent from ENTRIES; this is the independent count that does.
+     */
+    function looseTypeMentions(text) {
+      return [...text.matchAll(/["']?\btype\b["']?\s*:\s*['"`]([A-Za-z0-9_]+)['"`]/g)].map((m) => m[1])
+    }
+
+    it('every `type: \'<name>\'` the section spells is parsed into an entry', () => {
+      const text = rosterSectionText()
+      assert.deepEqual(
+        ENTRIES.map((e) => e.type).sort(), looseTypeMentions(text).sort(),
+        'a roster head the parser cannot read (double quotes, no space after the brace, …) is dropped from the pin: write it as `{ type: \'<name>\', … }`',
+      )
+    })
+
+    it('CONTROL: the loose count sees a head the strict parser misses', () => {
+      const text = `{ type: 'a_frame', x }\n{type:"b_frame", y?}\n`
+      assert.deepEqual(parseRosterEntries(text).map((e) => e.type), ['a_frame'])
+      assert.deepEqual(looseTypeMentions(text), ['a_frame', 'b_frame'])
+    })
+
+    it('CONTROL: the roster section parses to a duplicate-free list', () => {
+      // No size floor here: the parse is held to an independent count above, and the registry to the
+      // roster below (every registered type must be listed), so an empty parse fails there already.
       const seen = new Set()
       const dupes = ENTRIES.filter((e) => seen.has(e.type) || !seen.add(e.type)).map((e) => e.type)
       assert.deepEqual(dupes, [], 'a type listed twice would let one line dodge the pin')
@@ -500,9 +528,40 @@ describe('#7085 outbound schema coverage', () => {
         const lacks = ROSTER_FIELDS_SCHEMA_LACKS.get(entry.type)?.fields ?? []
         for (const p of rosterLineProblems(entry, schemaFields, lacks)) problems.push(`${entry.type}: ${p}`)
       }
-      // A floor, so a registry or parser that yields nothing cannot pass this by pinning nothing.
-      assert.ok(pinned >= 160, `only ${pinned} roster lines were pinned (expected >= 160)`)
+      assert.ok(pinned > 0, 'no roster line was pinned')
       assert.deepEqual(problems, [], 'roster line(s) disagree with their Server*Schema (edit the roster line; a producer-side field the schema lacks goes in ROSTER_FIELDS_SCHEMA_LACKS)')
+    })
+
+    /** Registered frame types that genuinely should not have a roster line. Empty today; entries are stale-checked. */
+    const ROSTER_EXEMPT_SCHEMA_TYPES = new Map()
+
+    function schemaTypesMissingFromRoster(listed, registered = SCHEMA_BACKED_OUTBOUND_TYPES, exempt = ROSTER_EXEMPT_SCHEMA_TYPES) {
+      return registered.filter((t) => !listed.has(t) && !exempt.has(t))
+    }
+
+    it('every registered Server*Schema frame type has a roster line (the reverse direction)', () => {
+      const listed = new Set(ENTRIES.map((e) => e.type))
+      assert.deepEqual(
+        schemaTypesMissingFromRoster(listed), [],
+        'a frame with a schema and no roster line is documented nowhere: add `{ type: \'<t>\', … }` to the Server -> Client roster',
+      )
+      // The registry is large by construction; a near-empty one would make the line above vacuous.
+      assert.ok(SCHEMA_BACKED_OUTBOUND_TYPES.length >= 150, 'registry undercounts')
+    })
+
+    it('a roster-exempt schema type is only valid while it is registered and still unlisted', () => {
+      const listed = new Set(ENTRIES.map((e) => e.type))
+      for (const [type, why] of ROSTER_EXEMPT_SCHEMA_TYPES) {
+        assert.ok(why.length > 20, `'${type}' needs a stated reason`)
+        assert.ok(SCHEMA_BACKED_OUTBOUND_TYPES.includes(type), `'${type}' is exempted but has no schema (stale)`)
+        assert.equal(listed.has(type), false, `'${type}' now has a roster line — drop its exemption`)
+      }
+    })
+
+    it('CONTROL: a registered type missing from the roster is reported, unless exempted', () => {
+      const listed = new Set(['a', 'b'])
+      assert.deepEqual(schemaTypesMissingFromRoster(listed, ['a', 'b', 'c'], new Map()), ['c'])
+      assert.deepEqual(schemaTypesMissingFromRoster(listed, ['a', 'b', 'c'], new Map([['c', 'a stated reason that is long enough']])), [])
     })
 
     it('the unpinned lines are exactly the types with no schema', () => {
