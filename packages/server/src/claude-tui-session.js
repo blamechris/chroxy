@@ -802,11 +802,14 @@ export class ClaudeTuiSession extends BaseSession {
     this._transcriptTaskScanner = null
     // #7396 (review): what the poll needs to give up on a confirmed background
     // subagent whose transcript stopped delivering. `_agentWatch` maps a
-    // confirmed agent's tool-use id to when it was confirmed and the scanner's
-    // discard count then; `_agentBlindTicks` counts consecutive ticks on which
-    // the transcript could not be looked at.
+    // confirmed agent's tool-use id to when it was confirmed, and the path and
+    // discard count of the scanner it was confirmed against (the baseline belongs
+    // to that one file, #8515); `_agentBlindTicks` counts consecutive ticks on
+    // which the transcript could not be looked at; `_pollTickErrors` counts
+    // consecutive poll ticks that threw.
     this._agentWatch = new Map()
     this._agentBlindTicks = 0
+    this._pollTickErrors = 0
     // #5431: change-detection poll armed while the last snapshot reported
     // outstanding work. Re-scans the transcript so a task-notification that
     // lands while the session is IDLE still clears the dashboard indicator
@@ -1719,6 +1722,10 @@ export class ClaudeTuiSession extends BaseSession {
   // early clear is recoverable (the notification still arrives; completing is
   // idempotent) where a stuck badge is not.
   static get AGENT_MAX_LIFETIME_MS() { return 12 * 60 * 60 * 1000 }
+  // #8515: consecutive poll ticks that may throw while confirmed agents are
+  // tracked before they are drained. A failing tick must not silently stop the
+  // only mechanism that drains those agents, and must not retry for ever either.
+  static get AGENT_POLL_ERRORS_MAX() { return 4 }
 
   /**
    * #5431 — outstanding background work derived from the session transcript:
@@ -1995,6 +2002,9 @@ export class ClaudeTuiSession extends BaseSession {
         // A confirmed agent implies a scanner existed; its absence is a tick the
         // transcript could not be looked at.
         this._watchConfirmedAgents(null)
+        // Same exit as the idle tick below: nothing confirmed left, nothing to poll for.
+        if (!this._hasConfirmedBackgroundAgents()) this._stopBackgroundTaskPoll()
+        this._pollTickErrors = 0
         return
       }
       const next = scanner.scan()
@@ -2005,7 +2015,10 @@ export class ClaudeTuiSession extends BaseSession {
       // The broadcast (and the decision to stop) stays idle-only, as before:
       // the turn-end `result` path recomputes the snapshot anyway, and stopping
       // on a busy tick would swallow a drain nobody has been told about yet.
-      if (this._isBusy) return
+      if (this._isBusy) {
+        this._pollTickErrors = 0
+        return
+      }
       const key = this._backgroundTaskKey(next)
       if (key !== this._lastBackgroundTaskKey) {
         this._lastBackgroundTaskKey = key
@@ -2014,10 +2027,31 @@ export class ClaudeTuiSession extends BaseSession {
       if (next.backgroundTasks.length === 0 && !next.scheduledWakeup && !this._hasConfirmedBackgroundAgents()) {
         this._stopBackgroundTaskPoll()
       }
+      this._pollTickErrors = 0
     } catch (err) {
-      // Never let the poll throw out of a timer tick — stop watching and
-      // degrade to "no live updates until the next readiness edge".
-      ;(this._log || log).debug?.(`background-task poll failed: ${err.message} — stopping poll`)
+      // Never let the poll throw out of a timer tick. With nothing confirmed to
+      // wait on, stop watching and degrade to "no live updates until the next
+      // readiness edge". With confirmed agents the poll is the only thing that
+      // drains them (#8515), so a failing tick keeps it armed for a bounded
+      // number of consecutive failures, then gives up on those agents.
+      this._pollTickErrors++
+      if (!this._hasConfirmedBackgroundAgents()) {
+        ;(this._log || log).debug?.(`background-task poll failed: ${err.message} — stopping poll`)
+        this._stopBackgroundTaskPoll()
+        return
+      }
+      if (this._pollTickErrors < ClaudeTuiSession.AGENT_POLL_ERRORS_MAX) {
+        ;(this._log || log).debug?.(`background-task poll failed (${this._pollTickErrors}/${ClaudeTuiSession.AGENT_POLL_ERRORS_MAX}): ${err.message} — keeping poll for confirmed agents`)
+        return
+      }
+      ;(this._log || log).warn(`background-task poll failed ${this._pollTickErrors} ticks in a row: ${err.message} — giving up on the confirmed agents`)
+      this._pollTickErrors = 0
+      try {
+        const confirmed = [...this._activeAgents].filter(([, a]) => a?.backgroundConfirmed === true).map(([id]) => id)
+        this._drainWatchedAgents(confirmed, 'poll_failed')
+      } catch (drainErr) {
+        ;(this._log || log).debug?.(`draining after poll failure failed: ${drainErr.message}`)
+      }
       this._stopBackgroundTaskPoll()
     }
   }
@@ -2026,7 +2060,7 @@ export class ClaudeTuiSession extends BaseSession {
    * #7396 (review) -- the way out for a CONFIRMED background subagent whose
    * transcript stops delivering its notification. Runs on every poll tick.
    *
-   * Three independent reasons to stop waiting, each ending the agent with
+   * Independent reasons to stop waiting, each ending the agent with
    * `agent_completed { reason }` (the wire message carries only the id; the
    * reason is for in-process listeners and the log):
    *
@@ -2036,12 +2070,19 @@ export class ClaudeTuiSession extends BaseSession {
    *    (or to none), or there is no scanner. `scan()` degrades a read error to
    *    an empty snapshot, which reads as "nothing new" for ever, so health is
    *    asked of the scanner (`readable`) rather than inferred.
+   *  - `transcript_replaced`: the scanner now reads a different file from the one
+   *    the agent was confirmed against (a `/clear` or resume gave the session a new
+   *    transcript, and any `_scanTranscript()` caller swapped the scanner before the
+   *    tick looked). The notification belongs to a file this session no longer
+   *    reads, so waiting for it is waiting for nothing.
+   *  - `poll_failed`: the poll tick itself threw `AGENT_POLL_ERRORS_MAX` times in
+   *    a row (see `_backgroundTaskPollTick`).
    *  - `transcript_gap`: the scanner skipped an over-cap unread tail after the
    *    agent was confirmed. A notification in that prefix is gone for good.
    *  - `max_lifetime`: `AGENT_MAX_LIFETIME_MS` since confirmation, the backstop
    *    for a notification that is simply never written.
    *
-   * All three fail toward clearing the badge early, which is recoverable (the
+   * Every reason fails toward clearing the badge early, which is recoverable (the
    * notification may still arrive; completing is idempotent), where a stuck
    * badge pins the session working and blocks daemon restarts.
    *
@@ -2075,19 +2116,44 @@ export class ClaudeTuiSession extends BaseSession {
     for (const id of confirmed) {
       let watch = this._agentWatch.get(id)
       if (!watch) {
-        watch = { at: now, discards: scanner ? scanner.discardCount : 0 }
+        watch = this._newAgentWatch(now, scanner)
         this._agentWatch.set(id, watch)
       }
-      if (scanner && scanner.discardCount > watch.discards) this._drainWatchedAgents([id], 'transcript_gap')
+      // #8515: a scanner replaced by some other caller reads a different file at
+      // byte 0, so the blind check above (which compares the SESSION FILE with the
+      // scanner) cannot see it, and `watch.discards` counted another file.
+      if (scanner && watch.path === null) {
+        watch.path = scanner.path
+        watch.discards = scanner.discardCount
+      }
+      if (scanner && scanner.path !== watch.path) this._drainWatchedAgents([id], 'transcript_replaced')
+      else if (scanner && scanner.discardCount > watch.discards) this._drainWatchedAgents([id], 'transcript_gap')
       else if (now - watch.at > ClaudeTuiSession.AGENT_MAX_LIFETIME_MS) this._drainWatchedAgents([id], 'max_lifetime')
     }
+  }
+
+  /**
+   * #8515 -- the watch entry for an agent being confirmed now: when, and which
+   * transcript (path + discard baseline) its notification is expected in. A null
+   * path means no scanner existed yet; such an entry adopts the first scanner it
+   * sees rather than being compared against nothing.
+   */
+  _newAgentWatch(now, scanner) {
+    return { at: now, path: scanner ? scanner.path : null, discards: scanner ? scanner.discardCount : 0 }
   }
 
   _drainWatchedAgents(toolUseIds, reason) {
     ;(this._log || log).warn(`giving up on ${toolUseIds.length} background subagent(s) (${reason}): ${toolUseIds.join(', ')}`)
     for (const id of toolUseIds) {
       this._agentWatch.delete(id)
-      this._completeAgent(id, { reason })
+      // One id's completion (a throwing `agent_completed` listener) must not
+      // leave the rest of the batch tracked. `_completeAgent` removes the agent
+      // before it emits, so a throw here has still ended that agent.
+      try {
+        this._completeAgent(id, { reason })
+      } catch (err) {
+        ;(this._log || log).warn(`completing background subagent ${id} (${reason}) failed: ${err.message}`)
+      }
     }
   }
 
@@ -2097,6 +2163,9 @@ export class ClaudeTuiSession extends BaseSession {
       clearInterval(this._backgroundTaskPollTimer)
       this._backgroundTaskPollTimer = null
     }
+    // #8515: the consecutive-failure budget belongs to one poll lifetime; every
+    // stop path (not just a healthy tick) hands the next lifetime a full one.
+    this._pollTickErrors = 0
   }
 
   // ---------------------------------------------------------------------
@@ -2184,7 +2253,7 @@ export class ClaudeTuiSession extends BaseSession {
     })
     if (!confirmable) return
     if (!this._agentWatch.has(toolUseId)) {
-      this._agentWatch.set(toolUseId, { at: this._nowMonotonic(), discards: this._transcriptTaskScanner?.discardCount ?? 0 })
+      this._agentWatch.set(toolUseId, this._newAgentWatch(this._nowMonotonic(), this._transcriptTaskScanner))
     }
     // A notification can already be in the transcript (a very short-lived
     // subagent); read it now rather than after the next poll interval.
