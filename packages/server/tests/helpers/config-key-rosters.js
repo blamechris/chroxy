@@ -392,20 +392,115 @@ export function claimedSubKeyTokens(regionText) {
 // empty result.
 
 /**
- * Every `<x>.features?.<flag> === true` gate in one source file's text.
- * Comment-only lines and block comments are dropped first, so a doc comment that
- * quotes a gate is not counted as one; a trailing comment is left alone (a
- * phantom gate there fails LOUDLY as "documented flag has no gate").
+ * `src` with every comment and every string/template-literal BODY blanked to
+ * spaces, in one left-to-right pass. Newlines and the string delimiters survive,
+ * so offsets and line numbers still line up with the original. `${ ... }`
+ * inside a template is CODE and is kept.
  *
- * Returns [] for a file with no gate — the caller aggregates across `src/` and
- * REFUSES on zero in total, because most files legitimately have none.
+ * One pass is the point (#8563 review): stripping block comments and THEN line
+ * comments lets a `//` comment containing `/*`, or a string like 'assets/*',
+ * open a phantom block comment that swallows real code up to the next `*` + `/`
+ * — silently, which for a gate sweep means a real undocumented gate is never
+ * seen. A scanner that knows it is inside a string or a line comment cannot be
+ * fooled that way.
+ *
+ * It does not understand regex literals. A quote inside one is bounded by the
+ * end of the line, but a backtick or an unterminated block comment would swallow
+ * the rest of the file, so those REFUSE instead of returning a quietly short
+ * result.
  *
  * @param {string} src
- * @returns {string[]} flag names, in source order (duplicates preserved)
+ * @param {string} label - File label used in refusal messages
+ * @returns {string} same length as `src`
  */
-export function parseFeatureGates(src) {
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
-  return [...code.matchAll(/\bfeatures\??\.([A-Za-z_$][\w$]*)\s*===\s*true\b/g)].map(m => m[1])
+export function stripCommentsAndStrings(src, label) {
+  const n = src.length
+  let out = ''
+  const blank = ch => (ch === '\n' ? '\n' : ' ')
+  // One entry per open `${`: the count of `{` opened inside it.
+  const exprDepth = []
+  let inTemplate = false
+  let i = 0
+  while (i < n) {
+    const c = src[i]
+    if (inTemplate) {
+      if (c === '\\') { out += ' ' + (i + 1 < n ? blank(src[i + 1]) : ''); i += 2 } else if (c === '`') { out += c; inTemplate = false; i++ } else if (c === '$' && src[i + 1] === '{') { out += '${'; exprDepth.push(0); inTemplate = false; i += 2 } else { out += blank(c); i++ }
+      continue
+    }
+    const d = src[i + 1]
+    if (c === '/' && d === '/') {
+      while (i < n && src[i] !== '\n') { out += ' '; i++ }
+    } else if (c === '/' && d === '*') {
+      const end = src.indexOf('*/', i + 2)
+      if (end === -1) throw new Error(`REFUSE: ${label}: unterminated block comment — the scan cannot tell code from comment`)
+      for (; i < end + 2; i++) out += blank(src[i])
+    } else if (c === "'" || c === '"') {
+      out += c; i++
+      while (i < n && src[i] !== c && src[i] !== '\n') {
+        if (src[i] === '\\') { out += ' '; i++ }
+        if (i < n && src[i] !== '\n') { out += ' '; i++ }
+      }
+      if (src[i] === c) { out += c; i++ }
+    } else if (c === '`') {
+      out += c; inTemplate = true; i++
+    } else if (exprDepth.length > 0 && c === '{') {
+      exprDepth[exprDepth.length - 1]++; out += c; i++
+    } else if (exprDepth.length > 0 && c === '}') {
+      if (exprDepth[exprDepth.length - 1] === 0) { exprDepth.pop(); inTemplate = true } else exprDepth[exprDepth.length - 1]--
+      out += c; i++
+    } else {
+      out += c; i++
+    }
+  }
+  if (inTemplate || exprDepth.length > 0) {
+    throw new Error(`REFUSE: ${label}: unterminated template literal — the scan cannot tell code from string (a backtick inside a regex literal?)`)
+  }
+  if (out.length !== n) throw new Error(`REFUSE: ${label}: comment stripper changed the text length`)
+  return out
+}
+
+/**
+ * Every read of `features` in one source file, classified.
+ *
+ *  - `gates`: `features.<flag> === true` (optional chaining accepted), with the
+ *    `process.env.CHROXY_*` names read in the same function. A gate's env override
+ *    is the only thing the document has to get right per flag, so the function
+ *    window (from the last `function` keyword or column-0 `}` to the gate) is
+ *    what makes the flag -> env pairing derivable from source.
+ *  - `unrecognised`: any OTHER occurrence of the word `features` — `!!x.features.f`,
+ *    `Boolean(...)`, a destructure, `['f']`, `true === ...`, `!== false`, a copy
+ *    into a local — that is not an assignment. The caller must either exempt it
+ *    explicitly or fail: a gate in a spelling this sweep does not read is
+ *    invisible to the doc comparison (#8563 review, the hardcoded-shape class).
+ *
+ * Assignments (`x.features = ...`, `x.features.f = ...`) are writes, not gates.
+ * Comments and string bodies are not read (see stripCommentsAndStrings).
+ *
+ * @param {string} src
+ * @param {string} label
+ * @returns {{ gates: {flag: string, line: number, envs: string[]}[], unrecognised: {line: number, text: string}[] }}
+ */
+export function scanFeatureReads(src, label) {
+  const code = stripCommentsAndStrings(src, label)
+  const origLines = src.split('\n')
+  const lineOf = pos => code.slice(0, pos).split('\n').length
+  const gates = []
+  const unrecognised = []
+  for (const m of code.matchAll(/(?<![\w$])features(?![\w$])/g)) {
+    const rest = code.slice(m.index + 'features'.length)
+    const gate = /^\??\.([A-Za-z_$][\w$]*)\s*===\s*true(?![\w$])/.exec(rest)
+    if (gate) {
+      const before = code.slice(0, m.index)
+      const start = Math.max(before.lastIndexOf('function'), before.lastIndexOf('\n}'), 0)
+      const envs = [...new Set([...before.slice(start).matchAll(/process\.env\.(CHROXY_[A-Z0-9_]+)/g)].map(e => e[1]))]
+      gates.push({ flag: gate[1], line: lineOf(m.index), envs: envs.sort() })
+      continue
+    }
+    if (/^(?:\??\.[A-Za-z_$][\w$]*)?\s*=(?!=)/.test(rest)) continue
+    const line = lineOf(m.index)
+    unrecognised.push({ line, text: origLines[line - 1].trim() })
+  }
+  return { gates, unrecognised }
 }
 
 const NUMBER_WORDS = new Map([
@@ -427,7 +522,7 @@ function proseNumeral(word, where) {
  * @param {string} md
  * @returns {{
  *   keyRow: { flags: Set<string>, envs: Set<string> },
- *   optIn: { flags: Set<string>, envs: Set<string>, numeral: number },
+ *   optIn: { flags: Set<string>, envs: Set<string>, pairs: Map<string, string[]>, numeral: number },
  *   directReads: { envs: Set<string>, numeral: number },
  * }}
  */
@@ -448,13 +543,15 @@ export function parseFeaturesInventories(md) {
   //    the "All N are fail-closed" sentence.
   const section = findSection(md, 'features')
   if (section === null) throw new Error('REFUSE: CONFIG.md: no "Opt-in features (`features`)" section')
-  const optIn = { flags: new Set(), envs: new Set(), numeral: NaN }
+  const optIn = { flags: new Set(), envs: new Set(), pairs: new Map(), numeral: NaN }
   for (const line of section.split('\n')) {
     const m = /^\| `features\.([A-Za-z_$][\w$]*)` \|(.*)$/.exec(line)
     if (!m) continue
     if (optIn.flags.has(m[1])) throw new Error(`REFUSE: CONFIG.md: the Opt-in features table lists features.${m[1]} twice`)
     optIn.flags.add(m[1])
-    for (const e of m[2].matchAll(/`(CHROXY_[A-Z0-9_]+)=/g)) optIn.envs.add(e[1])
+    const rowEnvs = [...m[2].matchAll(/`(CHROXY_[A-Z0-9_]+)=/g)].map(e => e[1]).sort()
+    optIn.pairs.set(m[1], rowEnvs)
+    for (const e of rowEnvs) optIn.envs.add(e)
   }
   const counted = [...section.matchAll(/\bAll (\w+) (?:are )?\*\*fail-closed\*\*/g)]
   if (counted.length !== 1) {

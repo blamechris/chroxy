@@ -12,12 +12,12 @@ import {
   GENERIC_BACKTICK_LITERALS,
   findSchemaComment,
   findSection,
-  parseFeatureGates,
   parseFeaturesInventories,
   parseKeySets,
   parseRecognisedSubKeys,
   parseSupportedKeySets,
   parseWarnUnknownKeysCallSites,
+  scanFeatureReads,
   sliceBetween,
   wordTokens,
 } from './helpers/config-key-rosters.js'
@@ -621,28 +621,45 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
  * so the next pair of concurrent PRs would have drifted silently again.
  *
  * Producer = every `features.<flag> === true` gate under packages/server/src/,
- * discovered by sweep (not a hand list — `scheduler` is gated in TWO files).
- * Consumers = the three places CONFIG.md lists the flags, and the two places it
- * counts them. Every direction is checked, and a sweep that finds no gate
- * REFUSES instead of comparing the doc against nothing.
+ * discovered by sweep (not a hand list — `scheduler` is gated in TWO files),
+ * read from comment- and string-stripped code. Consumers = the three places
+ * CONFIG.md lists the flags, and the two places it counts them. Every direction
+ * is checked, a sweep that finds no gate REFUSES, and any OTHER read of
+ * `features` (a spelling the gate regex does not know) is a failure unless it is
+ * exempted below with a reason — so a gate written differently cannot be
+ * invisible to the doc comparison.
  */
+
+// Reads of the word `features` under src/ that are not gates and not
+// assignments. Keyed by file + the trimmed line, with the exact number of
+// unrecognised occurrences on it; an entry that no longer matches EXACTLY fails
+// as stale, so this list cannot outlive the code it excuses. Grow it with the
+// reason in hand, never by loosening the scan.
+const FEATURES_READ_EXEMPTIONS = [
+  { file: 'config.js', text: "features: 'object',", count: 1, reason: 'CONFIG_SCHEMA key declaration, not a read of config.features' },
+  { file: 'config.js', text: "if (!existing.features || typeof existing.features !== 'object' || Array.isArray(existing.features)) {", count: 3, reason: 'shape check on the persisted config before writing features.scheduler; reads no flag' },
+  { file: 'handlers/scheduler-handlers.js', text: "if (!config.features || typeof config.features !== 'object') config.features = {}", count: 2, reason: 'shape check before writing features.scheduler (the trailing assignment is not counted); reads no flag' },
+  { file: 'ws-history.js', text: 'features,', count: 1, reason: 'shorthand property of a local variable named features in the history payload builder (its `const features = {` declaration is an assignment), unrelated to config.features' },
+]
+
 describe('CONFIG.md features inventory vs the features.<flag> gates in src (#7032)', () => {
   let md
-  let gates // flag -> files that gate it
+  let gates // flag -> [{ file, line, envs }]
+  let unrecognised // [{ file, line, text }]
   let inv
-  let srcText // every src file concatenated, for the literal env-read check
 
   before(async () => {
     md = (await readFile(new URL('../CONFIG.md', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
     gates = new Map()
-    srcText = ''
+    unrecognised = []
     for (const file of await collectSourceFiles(SRC_ROOT)) {
       const rel = decodeURIComponent(file.href.slice(SRC_ROOT.href.length))
       const text = (await readFile(file, 'utf8')).replace(/\r\n/g, '\n')
-      srcText += text + '\n'
-      for (const flag of parseFeatureGates(text)) {
-        gates.set(flag, [...new Set([...(gates.get(flag) ?? []), rel])])
-      }
+      // Cheap prefilter; scanFeatureReads is the real judge.
+      if (!/\bfeatures\b/.test(text)) continue
+      const found = scanFeatureReads(text, `src/${rel}`)
+      for (const g of found.gates) gates.set(g.flag, [...(gates.get(g.flag) ?? []), { file: rel, line: g.line, envs: g.envs }])
+      for (const u of found.unrecognised) unrecognised.push({ file: rel, ...u })
     }
     // The "cannot find any" case is the false-safety one: comparing the doc to an
     // empty set of gates passes every direction below.
@@ -652,19 +669,39 @@ describe('CONFIG.md features inventory vs the features.<flag> gates in src (#703
     inv = parseFeaturesInventories(md)
   })
 
+  const sortedFlags = () => sorted(gates.keys())
+
   it('finds the gates it is meant to guard (positive control)', () => {
     // Floors, not pins: the point is that the sweep reads real gates. The
     // two-file flag proves the sweep covers src/ beyond config.js.
     for (const flag of ['ide', 'orchestration', 'scheduler', 'semanticTitles']) {
       assert.ok(gates.has(flag), `the sweep no longer finds the features.${flag} gate — it is not reading src/`)
     }
+    const files = new Set(gates.get('scheduler').map(g => g.file))
     assert.ok(
-      gates.get('scheduler').length >= 2,
-      'features.scheduler is gated in config.js AND handlers/scheduler-handlers.js; the sweep saw ' + gates.get('scheduler').join(', ')
+      files.size >= 2,
+      'features.scheduler is gated in config.js AND handlers/scheduler-handlers.js; the sweep saw ' + [...files].join(', ')
     )
   })
 
-  const sortedFlags = () => sorted(gates.keys())
+  it('every read of `features` in src is a recognised gate, an assignment, or an explicit exemption', () => {
+    const left = unrecognised.map(u => ({ ...u }))
+    for (const ex of FEATURES_READ_EXEMPTIONS) {
+      const hit = left.filter(u => u.file === ex.file && u.text === ex.text)
+      assert.equal(
+        hit.length,
+        ex.count,
+        `stale exemption: ${ex.file} "${ex.text}" matches ${hit.length} unrecognised read(s), expected ${ex.count} (${ex.reason})`
+      )
+      for (const u of hit) left.splice(left.indexOf(u), 1)
+    }
+    assert.deepEqual(
+      left.map(u => `gate shape not recognised: ${u.file}:${u.line}  ${u.text}`),
+      [],
+      'a read of `features` in a spelling the sweep does not read as an `=== true` gate — a flag gated this way is invisible to the CONFIG.md comparison. ' +
+        'Write it as `features.<flag> === true`, or exempt it in FEATURES_READ_EXEMPTIONS with a reason'
+    )
+  })
 
   for (const [label, get] of [
     ['the `features` row of the per-key table', () => inv.keyRow.flags],
@@ -685,18 +722,31 @@ describe('CONFIG.md features inventory vs the features.<flag> gates in src (#703
     })
   }
 
-  it('the "Direct reads" env list names the same env vars as the Opt-in features table', () => {
-    // That list names env vars, not flags, so the flag <-> env mapping the
-    // Opt-in table carries is the bridge. This is the third location a
-    // two-inventory checker misses (#7032).
+  it('each flag\'s documented env override is exactly what every function that gates it reads', () => {
+    // Per flag, not as sets (#8563 review): swapping two rows' envs must fail,
+    // and an env a gate reads that no row documents must fail. The read has to be
+    // in EVERY function that gates the flag, so a second gate site
+    // (scheduler-handlers.js) cannot mask a broken one (config.js). Comments are
+    // already stripped, so a commented-out read does not count.
+    for (const [flag, sites] of gates) {
+      const documented = inv.optIn.pairs.get(flag)
+      assert.ok(documented, `features.${flag} is gated in src/ but has no row in the Opt-in features table`)
+      for (const site of sites) {
+        assert.deepEqual(
+          site.envs,
+          documented,
+          `features.${flag} at ${site.file}:${site.line} reads env [${site.envs.join(', ')}] in its function but CONFIG.md documents [${documented.join(', ')}]`
+        )
+      }
+    }
+  })
+
+  it('the "Direct reads" list and the key-row env column name the same env vars as the Opt-in features table', () => {
+    // Those two carry env names, not flag->env pairs, so the per-flag mapping
+    // above is the Opt-in table's job and these are compared against its union.
+    // This is the third location a two-inventory checker misses (#7032).
     assert.deepEqual(sorted(inv.directReads.envs), sorted(inv.optIn.envs))
     assert.deepEqual(sorted(inv.keyRow.envs), sorted(inv.optIn.envs))
-    for (const env of inv.optIn.envs) {
-      assert.ok(
-        new RegExp(`process\\.env\\.${env}\\b`).test(srcText),
-        `${env} is documented as a features override but no process.env.${env} read exists under src/`
-      )
-    }
   })
 
   it('both prose counts equal the number of gated flags', () => {
