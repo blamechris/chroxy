@@ -1338,6 +1338,35 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     },
   },
 
+  // 14c. mcp_servers — #7028 each entry carries the config scope it is defined in
+  // (the `remove_mcp_server` vocabulary); an entry with no known scope keeps the
+  // key absent rather than defaulting one.
+  {
+    name: 'mcp_servers carries the per-server config scope, and leaves it absent when unknown',
+    type: 'mcp_servers',
+    init: { sessions: { s1: { mcpServers: [] } } },
+    message: {
+      type: 'mcp_servers',
+      sessionId: 's1',
+      servers: [
+        { name: 'u', status: 'connected', enabled: true, canToggle: true, scope: 'user' },
+        { name: 'p', status: 'connected', enabled: true, canToggle: true, scope: 'project' },
+        { name: 'repo', status: 'configured' },
+      ],
+    },
+    expect: {
+      sessions: {
+        s1: {
+          mcpServers: [
+            { name: 'u', status: 'connected', enabled: true, canToggle: true, scope: 'user' },
+            { name: 'p', status: 'connected', enabled: true, canToggle: true, scope: 'project' },
+            { name: 'repo', status: 'configured' },
+          ],
+        },
+      },
+    },
+  },
+
   // 15. session_usage — store cumulative usage
   {
     name: 'session_usage stores the session cumulative usage',

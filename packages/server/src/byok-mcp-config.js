@@ -663,6 +663,30 @@ export function mcpWriteScopeToSource(scope) {
 }
 
 /**
+ * #7028: the inverse of `mcpWriteScopeToSource` — map a READ-side
+ * `MCP_SERVER_SOURCE` onto the `MCP_WRITE_SCOPES` value that REMOVES a server
+ * defined there, for the `scope` field on each `mcp_servers` wire entry.
+ *
+ * The wire vocabulary is the write one on purpose: `remove_mcp_server` is
+ * scope-exact (a wrong scope reports `MCP_SERVER_NOT_FOUND`), and the field
+ * exists so a client can hand it straight back.
+ *
+ *   - LOCAL            → 'project'  (`projects[<cwd>].mcpServers`)
+ *   - USER             → 'user'     (root `mcpServers`)
+ *   - PROJECT_MCP_JSON → undefined  (`<cwd>/.mcp.json` is not a writable scope,
+ *                                    so no remove could name it)
+ *   - anything else    → undefined  (an unknown/absent source is never guessed)
+ *
+ * @param {string | undefined} source — an `MCP_SERVER_SOURCE` value, if known
+ * @returns {'user' | 'project' | undefined}
+ */
+export function mcpSourceToWriteScope(source) {
+  if (source === MCP_SERVER_SOURCE.USER) return 'user'
+  if (source === MCP_SERVER_SOURCE.LOCAL) return 'project'
+  return undefined
+}
+
+/**
  * Read the three MCP config sources Claude Code itself reads, in a single
  * pass, in Claude Code's documented scope-precedence order (highest to
  * lowest), per https://code.claude.com/docs/en/mcp, "Scope Hierarchy and

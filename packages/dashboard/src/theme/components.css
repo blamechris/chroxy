@@ -1784,10 +1784,11 @@ button.sidebar-token-view-session-row:hover {
 }
 
 /*
- * #6999 — the scope a server actually lives in is not on the wire (the
- * `mcp_servers` payload carries no scope), so the confirm strip must ask rather
- * than pre-select a guess. This spells that out instead of letting a wrong
- * default ride behind a confident-looking dialog.
+ * #6999 / #7028 — the confirm strip pre-selects the scope a server reports on
+ * the wire. When an entry reports none (a server defined only in .mcp.json, or
+ * one with no config origin), it asks rather than pre-select a guess. This hint
+ * spells that out instead of letting a wrong default ride behind a
+ * confident-looking dialog.
  */
 .sidebar-mcp-view-remove-hint {
   flex-basis: 100%;

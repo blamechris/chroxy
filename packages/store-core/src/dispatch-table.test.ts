@@ -13,6 +13,7 @@ import type {
   PendingBackgroundShell,
   QueuedSessionMessage,
   Checkpoint,
+  McpServer,
 } from './types'
 import type { PermissionRule } from './handlers'
 import { clearPendingRestoreNotices, settlePendingRestoreNotice } from './handlers'
@@ -2586,6 +2587,27 @@ describe('shared dispatch table', () => {
         servers: [{ name: 'fs', status: 'connected' }],
       })
       expect(env.sessions.s1.mcpServers).toEqual([{ name: 'fs', status: 'connected' }])
+    })
+
+    // #7028: the per-server config scope must survive the store write verbatim
+    // (and stay absent when the wire entry had none) — the dashboard reads it to
+    // pre-select the remove-confirm scope.
+    it('keeps each entry\'s config scope verbatim, and absent when not reported (#7028)', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], mcpServers: [] } },
+      })
+      dispatch(env, {
+        type: 'mcp_servers',
+        sessionId: 's1',
+        servers: [
+          { name: 'u', status: 'connected', scope: 'user' },
+          { name: 'p', status: 'connected', scope: 'project' },
+          { name: 'repo', status: 'configured' },
+        ],
+      })
+      const stored = env.sessions.s1.mcpServers as McpServer[]
+      expect(stored.map((s) => s.scope)).toEqual(['user', 'project', undefined])
+      expect('scope' in stored[2]!).toBe(false)
     })
 
     it('falls back to the active session when sessionId is absent', () => {

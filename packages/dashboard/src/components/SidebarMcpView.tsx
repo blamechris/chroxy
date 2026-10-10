@@ -31,10 +31,14 @@
  * each row gets a "Remove" action that sends `remove_mcp_server` after an
  * inline scope-confirm step (removal is scope-exact — the server reports
  * MCP_SERVER_NOT_FOUND rather than guessing which scope a same-named server
- * lives in). That confirm step deliberately starts with NO scope selected: the
- * `mcp_servers` payload carries no scope field, so the client cannot derive the
- * right one, and a pre-selected default would let a single click delete from a
- * scope the user never chose. Confirm stays disabled until the choice is made.
+ * lives in). #7028: the `mcp_servers` entry now carries the scope the server is
+ * defined in (`McpServer.scope`), so the confirm step pre-selects it — a
+ * reported fact, not a guess, and the user still opens the strip and presses
+ * Confirm. When the entry reports NO scope (unknown, or defined somewhere not
+ * removable such as `<cwd>/.mcp.json`) the strip deliberately starts with NO
+ * scope selected and Confirm stays disabled until the user picks one: a
+ * pre-selected default there would let a single click delete from a scope
+ * nobody chose.
  * Both mutations require the strict-primary token class
  * server-side; `mcpConfigForbiddenNonPrimary` (set the first time either is
  * actually refused with MCP_CONFIG_FORBIDDEN_NON_PRIMARY_CLIENT — see
@@ -118,16 +122,26 @@ interface McpServerRowProps {
 function McpServerRow({ server, onToggle, onSubmitAuthCode, onRemove, removeDisabled }: McpServerRowProps) {
   const [code, setCode] = useState('')
   const [removeStep, setRemoveStep] = useState<'idle' | 'confirm' | 'removing'>('idle')
-  // #6999: '' = no choice made yet. Removal is scope-EXACT server-side and the
-  // wire `mcp_servers` payload carries no scope, so there is nothing to derive a
-  // correct default from. Pre-selecting one would make a click-through delete
-  // from a scope the user never picked, so the choice stays explicit and the
-  // confirm button stays disabled until it is made.
+  // '' = no choice made yet. Removal is scope-EXACT server-side. #7028: the
+  // starting value is the scope the server REPORTS for this entry (see
+  // `openRemoveConfirm`); when it reports none there is nothing correct to
+  // default to, and pre-selecting a guess would make a click-through delete from
+  // a scope the user never picked — so the choice stays explicit and the confirm
+  // button stays disabled until it is made (#6999).
   const [removeScope, setRemoveScope] = useState<McpConfigScope | ''>('')
   const [removeError, setRemoveError] = useState<string | null>(null)
   const connected = server.status === 'connected'
   const enabled = isServerEnabled(server)
   const needsAuth = server.status === 'oauth-required'
+
+  // Re-derived on every open (not captured once at mount) so a reopen after a
+  // cancel starts from the server's current report rather than an abandoned
+  // override, and so a row that has since started reporting a scope picks it up.
+  const openRemoveConfirm = () => {
+    setRemoveScope(server.scope ?? '')
+    setRemoveError(null)
+    setRemoveStep('confirm')
+  }
 
   const confirmRemove = () => {
     if (removeScope === '') return // guarded by the disabled button; belt-and-braces
@@ -181,7 +195,7 @@ function McpServerRow({ server, onToggle, onSubmitAuthCode, onRemove, removeDisa
                 : `Remove MCP server ${server.name}`
             }
             aria-label={`Remove MCP server ${server.name}`}
-            onClick={() => setRemoveStep('confirm')}
+            onClick={openRemoveConfirm}
           >
             Remove
           </button>
@@ -229,8 +243,8 @@ function McpServerRow({ server, onToggle, onSubmitAuthCode, onRemove, removeDisa
             data-testid={`sidebar-mcp-view-remove-hint-${server.name}`}
           >
             {removeScope === ''
-              ? "The server list doesn't report which scope a server is configured in, so pick the scope to remove it from — removal affects that scope only."
-              : `Removes ${server.name} from ${removeScope} scope only.`}
+              ? "The server list doesn't report which scope this server is configured in, so pick the scope to remove it from — removal affects that scope only."
+              : `Removes ${server.name} from ${removeScope} scope only${removeScope === server.scope ? ' (the scope it is configured in)' : ''}.`}
           </p>
           {removeError && (
             <p className="sidebar-mcp-view-remove-error" data-testid={`sidebar-mcp-view-remove-error-${server.name}`} role="alert">

@@ -676,7 +676,7 @@ describe('ClaudeByokSession', () => {
         await session.start()
         assert.equal(emitted.length, 1, 'exactly one mcp_servers emit on start')
         assert.deepEqual(emitted[0].servers, [
-          { name: 'stub', status: 'connected', enabled: true, canToggle: true },
+          { name: 'stub', status: 'connected', enabled: true, canToggle: true, scope: 'user' },
         ])
         await session.destroy()
       })
@@ -698,7 +698,7 @@ describe('ClaudeByokSession', () => {
         // A fresh mcp_servers emit reflects the parked status.
         const last = emitted[emitted.length - 1]
         assert.deepEqual(last.servers, [
-          { name: 'stub', status: 'disabled', enabled: false, canToggle: true },
+          { name: 'stub', status: 'disabled', enabled: false, canToggle: true, scope: 'user' },
         ])
         await session.destroy()
       })
@@ -737,7 +737,7 @@ describe('ClaudeByokSession', () => {
         assert.deepEqual(session._mcpFleet.tools, [])
         assert.deepEqual(session.getDisabledMcpServers(), ['stub'])
         assert.deepEqual(emitted[emitted.length - 1].servers, [
-          { name: 'stub', status: 'disabled', enabled: false, canToggle: true },
+          { name: 'stub', status: 'disabled', enabled: false, canToggle: true, scope: 'user' },
         ])
         await session.destroy()
       })
@@ -948,7 +948,7 @@ describe('ClaudeByokSession', () => {
         assert.notEqual(res.status, 'configured', 'status must reflect the live connection, not the static fallback')
         assert.equal(res.status, 'connected')
         assert.deepEqual(session._mcpFleet.getServerStatuses(), [
-          { name: 'stub', status: 'connected', enabled: true, canToggle: true },
+          { name: 'stub', status: 'connected', enabled: true, canToggle: true, scope: 'user' },
         ])
         await session.destroy()
       })

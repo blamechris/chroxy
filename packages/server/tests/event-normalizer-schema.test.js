@@ -211,6 +211,8 @@ const FIXTURES = [
   ['activity_delta', { schemaVersion: 1, op: 'started', entry: activityEntry }, makeCtx()],
   ['activity_snapshot', { schemaVersion: 1, entries: [activityEntry] }, makeCtx()],
   ['mcp_servers', { servers: [{ name: 'filesystem', status: 'connected', enabled: true, canToggle: true }] }, makeCtx()],
+  // #7028: a per-entry config scope must pass the wire schema AND survive the normalizer.
+  ['mcp_servers', { servers: [{ name: 'filesystem', status: 'connected', enabled: true, canToggle: true, scope: 'project' }, { name: 'gh', status: 'configured' }] }, makeCtx(), 'mcp_servers (with scope)'],
   ['message_queued', { clientMessageId: 'c-1', text: 'follow-up while busy', queueLength: 1 }, makeCtx()],
   ['message_dequeued', { clientMessageId: 'c-1', queueLength: 0, reason: 'flush' }, makeCtx()],
   ['skill_changed', { name: 'coding-style', oldHash: 'a'.repeat(64), newHash: 'b'.repeat(64), blocked: false, mode: 'warn' }, makeCtx()],

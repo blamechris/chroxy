@@ -3917,3 +3917,42 @@ describe('@chroxy/protocol schemas', () => {
     })
   })
 })
+
+// #7028: the `mcp_servers` entry carries the config scope the server is defined
+// in, in the vocabulary `remove_mcp_server` takes. Imports ../src directly (tsx)
+// so the assertion sees THIS tree's schema, not a stale dist.
+describe('ServerMcpServersSchema scope (#7028)', () => {
+  const frame = (servers) => ({ type: 'mcp_servers', servers })
+
+  it('keeps a user / project scope through parse (not stripped)', async () => {
+    const { ServerMcpServersSchema } = await import('../src/schemas/server/session.ts')
+    const r = ServerMcpServersSchema.safeParse(frame([
+      { name: 'a', status: 'connected', scope: 'user' },
+      { name: 'b', status: 'connected', scope: 'project' },
+    ]))
+    assert.ok(r.success, 'scope user/project must validate')
+    assert.deepEqual(r.data.servers.map((s) => s.scope), ['user', 'project'])
+  })
+
+  it('round-trips an entry with no scope (pre-#7028 emitter / unknown scope) with the key still absent', async () => {
+    const { ServerMcpServersSchema } = await import('../src/schemas/server/session.ts')
+    const r = ServerMcpServersSchema.safeParse(frame([{ name: 'a', status: 'connected' }]))
+    assert.ok(r.success)
+    assert.equal('scope' in r.data.servers[0], false)
+  })
+
+  it('rejects a scope outside the remove vocabulary (a path, "local", or a non-string)', async () => {
+    const { ServerMcpServersSchema } = await import('../src/schemas/server/session.ts')
+    for (const bad of ['local', '/etc/claude.json', '', 7, null]) {
+      assert.ok(!ServerMcpServersSchema.safeParse(frame([{ name: 'a', status: 'connected', scope: bad }])).success, String(bad))
+    }
+  })
+
+  it('accepts exactly the scopes remove_mcp_server accepts', async () => {
+    const { ServerMcpServersSchema } = await import('../src/schemas/server/session.ts')
+    const { McpConfigScopeSchema } = await import('../src/schemas/client.ts')
+    for (const scope of McpConfigScopeSchema.options) {
+      assert.ok(ServerMcpServersSchema.safeParse(frame([{ name: 'a', status: 'x', scope }])).success, scope)
+    }
+  })
+})
