@@ -175,6 +175,7 @@ created ──start──▶ planning ──plan parsed──▶ plan_review ─
                                planning/executing/synthesizing ──unrecoverable──▶ failed
 ```
 
+- **A user rejecting the epic plan cancels the run** (`plan_review --reject--> cancelled`, reason `plan_rejected`, via `cancelRun`: full teardown, `cancelling -> cancelled`, `run_cancelled`; #7131). An escalation's `fail-run` (§3.3) deliberately fails the run (`ESCALATION_REJECTED`, `run_failed`). Otherwise `failed` means an engine-side failure (`PLAN_PARSE`, `START_FAILED`, `SYNTHESIS_FAILED`, ...).
 - `plan_review` is skipped (auto-approved, `approvedBy:'auto'`) when `mode.autoApprovePlan`. **The v1 user gate sits here — after the architect's (cheap, single-session) planning turn, before any worker spend.** A second implicit user surface exists at `escalated` subtasks and permission-gate escalations; no other approvals block auto flow.
 - `budget_paused` (§11): in-flight turns complete; no new spawns/committee turns start.
 - `resource_paused` (#6733): entered ONLY when all three hold — pending subtasks remain, ZERO

@@ -253,18 +253,44 @@ test('plan gate: startRun opens epic_plan gate; approve runs it to completion', 
   }
 })
 
-test('plan gate: reject fails the run', async () => {
-  const { ledger, mgr, cleanup } = makeHarness(happyDecider)
+// Journaled (status, reason) pairs for one run, read off the ledger's single
+// status choke point. The run record keeps only the latest status, so the reason
+// a run ended for is observable only on what setStatus was handed.
+function spyStatuses(ledger) {
+  const writes = []
+  const orig = ledger.setStatus.bind(ledger)
+  ledger.setStatus = (runId, status, reason = null) => {
+    writes.push({ status, reason })
+    return orig(runId, status, reason)
+  }
+  return writes
+}
+
+test('plan gate: reject cancels the run (#7131, engine.md 3.2: plan_review --reject--> cancelled)', async () => {
+  const { sm, ledger, mgr, cleanup } = makeHarness(happyDecider)
   try {
+    const writes = spyStatuses(ledger)
+    const events = []
+    mgr.on('run_failed', (p) => events.push(['run_failed', p]))
+    mgr.on('run_cancelled', (p) => events.push(['run_cancelled', p]))
     const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: false })
     const gated = waitFor(mgr, ['gate_opened'])
     await mgr.startRun(rec.runId)
     const { payload } = await gated
-    const failed = waitFor(mgr, ['run_failed'])
+    const cancelled = waitFor(mgr, ['run_cancelled'])
     await mgr.resolveGate(rec.runId, payload.gate.gateId, { decision: 'reject', note: 'no' })
-    const { payload: fp } = await failed
-    assert.equal(fp.code, 'PLAN_REJECTED')
-    assert.equal(ledger.getRun(rec.runId).status, 'failed')
+    const { event, payload: cp } = await cancelled
+    assert.equal(event, 'run_cancelled')
+    assert.equal(cp.reason, 'plan_rejected')
+    assert.equal(ledger.getRun(rec.runId).status, 'cancelled')
+    assert.deepEqual(events.map(([name]) => name), ['run_cancelled'], 'cancelled, never failed')
+    // full teardown through cancelRun: cancelling -> cancelled, both carrying the reason
+    const tail = writes.slice(-2)
+    assert.deepEqual(tail, [
+      { status: 'cancelling', reason: 'plan_rejected' },
+      { status: 'cancelled', reason: 'plan_rejected' },
+    ])
+    assert.ok(sm.destroyedIds.length > 0, 'the architect session was torn down')
   } finally {
     cleanup()
   }
@@ -318,6 +344,38 @@ test('iteration cap escalates the subtask; skip lets the run finish', async () =
     const record = ledger.getRun(rec.runId)
     assert.equal(record.status, 'completed')
     assert.equal(record.subtasks[0].status, 'skipped')
+  } finally {
+    cleanup()
+  }
+})
+
+test('escalation gate: reject (fail-run) deliberately FAILS the run, unlike a rejected plan (#7131 pin, engine.md 3.3)', async () => {
+  const decide = (ctx) => {
+    if (ctx.role === 'architect' && ctx.kind === 'poa_review') return { kind: 'poa_review', verdict: 'revise', feedback: 'again' }
+    if (ctx.role === 'architect' && ctx.kind === 'epic_plan') {
+      return { kind: 'epic_plan', subtasks: [{ title: 'Only area', goal: 'g', role: 'audit' }] }
+    }
+    return happyDecider(ctx)
+  }
+  const { ledger, mgr, cleanup } = makeHarness(decide, { config: { maxCommitteeIterations: 2 } })
+  try {
+    const events = []
+    mgr.on('run_failed', (p) => events.push(['run_failed', p]))
+    mgr.on('run_cancelled', (p) => events.push(['run_cancelled', p]))
+    const rec = mgr.createRun({ goal: 'Audit', cwd: '/repo', autoApprovePlan: true })
+    const escalated = waitFor(mgr, ['gate_opened'])
+    await mgr.startRun(rec.runId)
+    const { payload } = await escalated
+    assert.equal(payload.gate.kind, 'escalation')
+
+    const failed = waitFor(mgr, ['run_failed'])
+    await mgr.resolveGate(rec.runId, payload.gate.gateId, { decision: 'reject', note: 'abandon' })
+    const { event, payload: fp } = await failed
+    assert.equal(event, 'run_failed')
+    assert.equal(fp.code, 'ESCALATION_REJECTED')
+    assert.equal(fp.message, 'abandon')
+    assert.equal(ledger.getRun(rec.runId).status, 'failed')
+    assert.deepEqual(events.map(([name]) => name), ['run_failed'], 'failed, never cancelled')
   } finally {
     cleanup()
   }

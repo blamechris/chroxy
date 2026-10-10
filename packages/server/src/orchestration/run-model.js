@@ -105,7 +105,8 @@ export function assertRunTransition(from, to) {
   if (!RUN_STATUSES.has(to)) throw new TransitionError('run', from, `${to} (unknown state)`)
   if (from === to && to === 'executing') return true
   // `failed` is an ERROR terminal, not forward progress: an unrecoverable engine
-  // error (or a user rejecting the plan / an escalation) can end a run from any
+  // error (or a user choosing fail-run on an escalation; a declined plan cancels
+  // instead, #7131) can end a run from any
   // non-terminal state. Enumerating it per-row would leave whichever row was
   // missed as a fail-closed landmine that wedges a live run.
   if ((to === 'cancelling' || to === 'suspended' || to === 'failed') && !TERMINAL_RUN_STATUSES.has(from)) return true

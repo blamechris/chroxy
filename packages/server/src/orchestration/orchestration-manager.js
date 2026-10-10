@@ -474,7 +474,12 @@ export class OrchestrationManager extends EventEmitter {
 
     if (gate.kind === 'epic_plan') {
       if (decision === 'approve') return this._beginExecuting(run)
-      return this._failRun(run, 'PLAN_REJECTED', new Error(note || 'epic plan rejected'))
+      // Any non-approve decision on the plan (reject, revise, skip) declines it,
+      // and a declined plan is a cancellation, not a failure (design §3.2:
+      // plan_review --reject--> cancelled; #7131). The reason code tells it apart
+      // from a manual cancel ('user'); the reviewer's note is already journaled on
+      // the gate_resolved timeline entry.
+      return this.cancelRun(run.runId, { reason: 'plan_rejected' })
     }
     if (gate.kind === 'escalation') {
       return this._resolveEscalation(run, gate, decision, note)
@@ -683,6 +688,8 @@ export class OrchestrationManager extends EventEmitter {
     const st = subtaskId ? run.subtasks.get(subtaskId) : null
     if (!st) return { runId: run.runId, resolved: true }
     if (decision === 'skip') { await this._finishSubtask(run, subtaskId, 'skipped'); return { runId: run.runId, subtaskId, skipped: true } }
+    // The escalation verb is `fail-run` (engine.md §3.3): the user is deliberately
+    // failing the run, unlike a rejected plan, which cancels it (#7131).
     if (decision === 'reject') return this._failRun(run, 'ESCALATION_REJECTED', new Error(note || 'user failed the run'))
     // approve / revise → re-drive the subtask (iteration reset via a fresh worker)
     st.state = 'pending'
