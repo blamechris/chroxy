@@ -14,6 +14,8 @@
 // cannot escape the registry) and to cross-check that the enumeration agrees
 // with the runtime values.
 
+import { parse as acornParse } from 'acorn'
+
 /** A `{ name?: type, ... }` member list, e.g. `{ watch?: boolean }`. */
 const SHAPE_MEMBER_RE = /^\s*([A-Za-z_$][\w$]*)\??\s*:\s*\S[\s\S]*$/
 
@@ -377,4 +379,242 @@ export function claimedSubKeyTokens(regionText) {
     if (!GENERIC_BACKTICK_LITERALS.has(m[1])) out.add(m[1])
   }
   return out
+}
+
+// ---- the `features` inventory (#7032) ------------------------------------
+//
+// CONFIG.md lists the opt-in `features` flags in THREE places (the `features`
+// per-key table row, the "Opt-in features" table, and the "Direct reads"
+// env-var list) and counts them in prose ("All four are fail-closed", "the four
+// `features` gates"). #6997 and #7010 each added an inventory and merged ~33
+// minutes apart; the result on main was two inventories each missing a flag the
+// other had, and a numeral that no longer matched. These functions are the
+// parse the gate in config-supported-keys-docs.test.js compares against the
+// producer. Same contract as everything above: REFUSE rather than return an
+// empty result.
+
+const FUNCTION_TYPES = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'])
+
+/** Depth-first walk keeping the ancestor chain. `visit(node, ancestors)`; ancestors[0] is the Program. */
+function walkAst(node, ancestors, visit) {
+  visit(node, ancestors)
+  ancestors.push(node)
+  for (const key of Object.keys(node)) {
+    if (key === 'loc') continue
+    const v = node[key]
+    if (Array.isArray(v)) {
+      for (const c of v) if (c && typeof c.type === 'string') walkAst(c, ancestors, visit)
+    } else if (v && typeof v.type === 'string') {
+      walkAst(v, ancestors, visit)
+    }
+  }
+  ancestors.pop()
+}
+
+/** A member's property name when it is spelled `.name` or `['name']`, else null. */
+function memberName(m) {
+  if (!m.computed && m.property.type === 'Identifier') return m.property.name
+  if (m.computed && m.property.type === 'Literal' && typeof m.property.value === 'string') return m.property.value
+  return null
+}
+
+const isLiteralTrue = n => n.type === 'Literal' && n.value === true
+
+/** Every `process.env.CHROXY_*` read anywhere inside `root`. */
+function collectChroxyEnvReads(root) {
+  const envs = new Set()
+  walkAst(root, [], node => {
+    if (node.type !== 'MemberExpression') return
+    const name = memberName(node)
+    const o = node.object
+    if (name && name.startsWith('CHROXY_') && o.type === 'MemberExpression' && memberName(o) === 'env' &&
+        o.object.type === 'Identifier' && o.object.name === 'process') envs.add(name)
+  })
+  return [...envs].sort()
+}
+
+const describeNode = n => (n.operator ? `${n.type}(${n.operator})` : n.type)
+
+/** The name of the function a node lives in, for exemptions and messages. */
+function enclosingFunctionName(ancestors) {
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const f = ancestors[i]
+    if (!FUNCTION_TYPES.has(f.type)) continue
+    if (f.id) return f.id.name
+    const p = ancestors[i - 1]
+    if (p?.type === 'VariableDeclarator' && p.id.type === 'Identifier') return p.id.name
+    if ((p?.type === 'Property' || p?.type === 'MethodDefinition' || p?.type === 'PropertyDefinition') && p.key.type === 'Identifier') return p.key.name
+    return '<anonymous>'
+  }
+  return '<module>'
+}
+
+/**
+ * Parse one source file, or REFUSE naming it. Never skip a file: a file the
+ * parser cannot read is a file whose gates nothing can see.
+ */
+function parseSource(src, label) {
+  try {
+    return acornParse(src, { ecmaVersion: 'latest', sourceType: 'module', locations: true, allowHashBang: true })
+  } catch (err) {
+    throw new Error(`REFUSE: ${label}: cannot parse (${err.message}) — its features gates, if any, are invisible to this sweep`)
+  }
+}
+
+/**
+ * Every use of `features` in one source file, classified from the AST (#8563:
+ * the first two versions of this were lexical — a comment/string stripper and a
+ * text window for "the enclosing function" — and both silently blanked real code
+ * on a regex literal containing a quote or backtick).
+ *
+ *  - `gates`: a BinaryExpression `<x>.features.<flag> === true` (optional
+ *    chaining accepted, `.flag` spelled non-computed, `true` on the right), with
+ *    `envs` = every `process.env.CHROXY_*` read in the INNERMOST enclosing
+ *    function (the enclosing top-level statement if there is none). Comments are
+ *    not in the AST, so a commented-out read cannot count.
+ *  - `unrecognised`: every OTHER use — a read in any other spelling (`!!`,
+ *    `Boolean()`, destructure, alias, bracket, `true ===`, `!== false`, a bare
+ *    `features` identifier), and a WRITE that could enable a flag:
+ *    `x.features.f = true`, `x.features = <anything but {}>`, a compound
+ *    assignment. Writes of any other right-hand side (`= enabled`,
+ *    `= enabled === true`) are not gates and are not reported. Each entry has a
+ *    structural `descriptor` and the enclosing function name as `context`, which
+ *    is what exemptions key on.
+ *
+ * @param {string} src
+ * @param {string} label
+ * @returns {{
+ *   gates: {flag: string, line: number, envs: string[]}[],
+ *   unrecognised: {line: number, descriptor: string, context: string}[],
+ * }}
+ */
+export function scanFeatureReads(src, label) {
+  const ast = parseSource(src, label)
+  const gates = []
+  const unrecognised = []
+  const seenIdentifiers = new Set()
+  const report = (node, ancestors, descriptor) => {
+    unrecognised.push({ line: node.loc.start.line, descriptor, context: enclosingFunctionName(ancestors) })
+  }
+  // The node a member chain ends in, past any ChainExpression wrapper, plus its parent.
+  const outward = (node, ancestors) => {
+    let top = node
+    let i = ancestors.length - 1
+    while (ancestors[i]?.type === 'ChainExpression') { top = ancestors[i]; i-- }
+    return { top, parent: ancestors[i], index: i }
+  }
+
+  walkAst(ast, [], (node, ancestors) => {
+    if (node.type === 'MemberExpression' && memberName(node) === 'features') {
+      const { top, parent, index } = outward(node, ancestors)
+      if (parent?.type === 'MemberExpression' && parent.object === top) {
+        // `<x>.features.<something>`
+        const flag = !parent.computed && parent.property.type === 'Identifier' ? parent.property.name : null
+        const up = outward(parent, ancestors.slice(0, index))
+        const p = up.parent
+        if (flag && p?.type === 'BinaryExpression' && p.operator === '===' && p.left === up.top && isLiteralTrue(p.right)) {
+          const fn = [...ancestors].reverse().find(a => FUNCTION_TYPES.has(a.type)) ?? ancestors[1]
+          gates.push({ flag, line: node.loc.start.line, envs: collectChroxyEnvReads(fn) })
+        } else if (p?.type === 'AssignmentExpression' && p.left === up.top) {
+          if (p.operator !== '=' || isLiteralTrue(p.right)) report(node, ancestors, `write:features.${flag ?? '<computed>'} ${p.operator} ${p.operator === '=' ? 'true' : '...'}`)
+        } else {
+          report(node, ancestors, `flag-access:${p ? describeNode(p) : 'none'}`)
+        }
+      } else if (parent?.type === 'AssignmentExpression' && parent.left === top) {
+        const empty = parent.operator === '=' && parent.right.type === 'ObjectExpression' && parent.right.properties.length === 0
+        if (!empty) report(node, ancestors, 'write:features = <not an empty object literal>')
+      } else {
+        report(node, ancestors, `member:${parent ? describeNode(parent) : 'none'}`)
+      }
+      return
+    }
+    if (node.type === 'Identifier' && node.name === 'features') {
+      const parent = ancestors[ancestors.length - 1]
+      if (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed) return // handled above
+      if (seenIdentifiers.has(node.start)) return // a shorthand property visits key and value
+      seenIdentifiers.add(node.start)
+      let kind = parent ? parent.type : 'none'
+      if (parent?.type === 'VariableDeclarator' && parent.id === node) kind = 'declaration'
+      else if (parent?.type === 'Property') {
+        const inPattern = ancestors[ancestors.length - 2]?.type === 'ObjectPattern'
+        kind = (parent.shorthand ? 'shorthand-' : 'key-') + (inPattern ? 'destructure' : 'property')
+      } else if (parent?.type === 'MemberExpression' && parent.object === node) kind = 'member-object'
+      report(node, ancestors, `identifier:${kind}`)
+    }
+  })
+  return { gates, unrecognised }
+}
+
+const NUMBER_WORDS = new Map([
+  ['one', 1], ['two', 2], ['three', 3], ['four', 4], ['five', 5], ['six', 6],
+  ['seven', 7], ['eight', 8], ['nine', 9], ['ten', 10], ['eleven', 11], ['twelve', 12],
+])
+
+/** A prose count — "four" or "4" — as a number. REFUSES on a word it does not know. */
+function proseNumeral(word, where) {
+  const n = /^\d+$/.test(word) ? Number(word) : NUMBER_WORDS.get(word.toLowerCase())
+  if (n === undefined) throw new Error(`REFUSE: CONFIG.md: ${where} counts the gates with "${word}", which is not a numeral this parser reads`)
+  return n
+}
+
+/**
+ * Everything CONFIG.md says about the `features` flags, from its three
+ * inventories plus the two prose counts.
+ *
+ * @param {string} md
+ * @returns {{
+ *   keyRow: { flags: Set<string>, envs: Set<string> },
+ *   optIn: { flags: Set<string>, envs: Set<string>, pairs: Map<string, string[]>, numeral: number },
+ *   directReads: { envs: Set<string>, numeral: number },
+ * }}
+ */
+export function parseFeaturesInventories(md) {
+  // 1. The `features` row of the per-key table. Flags are the bare lower-camel
+  //    backtick tokens of its description cell (the same token shape
+  //    claimedSubKeyTokens already reads), envs the CHROXY_* tokens of its env
+  //    cell.
+  const row = findConfigTableRow(md, 'features')
+  if (row === null) throw new Error('REFUSE: CONFIG.md: no per-key table row for `features`')
+  const cells = row.split('|').slice(1, -1)
+  const keyRow = {
+    flags: claimedSubKeyTokens(cells[4]),
+    envs: new Set([...cells[3].matchAll(/`(CHROXY_[A-Z0-9_]+)`/g)].map(m => m[1])),
+  }
+
+  // 2. The "Opt-in features (`features`)" section: a `features.<flag>` table and
+  //    the "All N are fail-closed" sentence.
+  const section = findSection(md, 'features')
+  if (section === null) throw new Error('REFUSE: CONFIG.md: no "Opt-in features (`features`)" section')
+  const optIn = { flags: new Set(), envs: new Set(), pairs: new Map(), numeral: NaN }
+  for (const line of section.split('\n')) {
+    const m = /^\| `features\.([A-Za-z_$][\w$]*)` \|(.*)$/.exec(line)
+    if (!m) continue
+    if (optIn.flags.has(m[1])) throw new Error(`REFUSE: CONFIG.md: the Opt-in features table lists features.${m[1]} twice`)
+    optIn.flags.add(m[1])
+    const rowEnvs = [...m[2].matchAll(/`(CHROXY_[A-Z0-9_]+)=/g)].map(e => e[1]).sort()
+    optIn.pairs.set(m[1], rowEnvs)
+    for (const e of rowEnvs) optIn.envs.add(e)
+  }
+  const counted = [...section.matchAll(/\bAll (\w+) (?:are )?\*\*fail-closed\*\*/g)]
+  if (counted.length !== 1) {
+    throw new Error(`REFUSE: CONFIG.md: expected exactly one "All N are **fail-closed**" sentence in the Opt-in features section, found ${counted.length}`)
+  }
+  optIn.numeral = proseNumeral(counted[0][1], 'the "All N are fail-closed" sentence')
+
+  // 3. The "Direct reads" list: `CHROXY_ENABLE_IDE` / `...` (the four
+  //    [`features` gates](#...)).
+  const direct = /((?:`CHROXY_[A-Z0-9_]+`\s*\/?\s*)+)\(the (\w+) \[`features` gates\]/.exec(md)
+  if (direct === null) {
+    throw new Error('REFUSE: CONFIG.md: the "Direct reads" paragraph no longer reads "`CHROXY_…` / … (the N [`features` gates](…))"')
+  }
+  const directReads = {
+    envs: new Set([...direct[1].matchAll(/`(CHROXY_[A-Z0-9_]+)`/g)].map(m => m[1])),
+    numeral: proseNumeral(direct[2], 'the "Direct reads" list'),
+  }
+
+  for (const [name, flags] of [['`features` table row', keyRow.flags], ['Opt-in features table', optIn.flags]]) {
+    if (flags.size === 0) throw new Error(`REFUSE: CONFIG.md: the ${name} parsed to zero flags`)
+  }
+  if (directReads.envs.size === 0) throw new Error('REFUSE: CONFIG.md: the "Direct reads" features list parsed to zero env vars')
+  return { keyRow, optIn, directReads }
 }
