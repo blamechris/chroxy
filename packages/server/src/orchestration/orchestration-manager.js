@@ -474,10 +474,11 @@ export class OrchestrationManager extends EventEmitter {
 
     if (gate.kind === 'epic_plan') {
       if (decision === 'approve') return this._beginExecuting(run)
-      // A user declining the plan is a cancellation, not a failure (design §3.2:
-      // plan_review --reject--> cancelled; #7131). The reason code is what tells it
-      // apart from a manual cancel ('user'). The
-      // reviewer's note is already journaled on the gate_resolved timeline entry.
+      // Any non-approve decision on the plan (reject, revise, skip) declines it,
+      // and a declined plan is a cancellation, not a failure (design §3.2:
+      // plan_review --reject--> cancelled; #7131). The reason code tells it apart
+      // from a manual cancel ('user'); the reviewer's note is already journaled on
+      // the gate_resolved timeline entry.
       return this.cancelRun(run.runId, { reason: 'plan_rejected' })
     }
     if (gate.kind === 'escalation') {
