@@ -64,7 +64,7 @@ export const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[] = Obje
   {
     key: 'inactivity_warning',
     label: 'Inactivity warnings',
-    hint: 'Heads-up before a long-idle session is auto-paused.',
+    hint: 'Heads-up when a session has gone quiet for a long time. It keeps running.',
   },
   // #5828: billing canary early-warnings (silent metered default, claude-tui
   // reclassification, datacenter egress).
