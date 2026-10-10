@@ -61,6 +61,18 @@ export function parseKeySets(src, label, suffix) {
     if (out.has(name)) throw new Error(`REFUSE: ${label}: ${name} declared twice`)
     out.set(name, keys)
   }
+  // A declaration the strict pattern above could not read (`Object.freeze(new
+  // Set([...]))`, a plain array, a computed Set) must not be skipped — in a file
+  // that also holds a readable roster the strict pattern still "finds
+  // something", so the zero-declarations refusal below would never fire (#7547
+  // review N3). Any `const <X><suffix> =` the strict pattern missed is a REFUSE.
+  const loose = [...src.matchAll(new RegExp(`\\b(?:const|let|var)\\s+([A-Z0-9_]+${suffix})\\s*=`, 'g'))].map(m => m[1])
+  const unread = loose.filter(name => !out.has(name))
+  if (unread.length > 0) {
+    throw new Error(
+      `REFUSE: ${label}: ${unread.join(', ')} is declared in a form other than a literal new Set([...]) — its roster cannot be read`
+    )
+  }
   if (out.size === 0) {
     throw new Error(`REFUSE: ${label}: found no *${suffix} declarations (the naming convention changed?)`)
   }

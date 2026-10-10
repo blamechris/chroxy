@@ -114,14 +114,26 @@ const ENTRY_ROSTERS = new Map([
 // Where the `providers` row documents each entry. Each segment runs from one
 // sub-block's backticked name to the next, so it carries exactly that
 // sub-block's entry shape. `openaiCompatible` writes no shape of its own — it
-// says its entries are the identical shape — which is only true because both
-// blocks run one validator over one roster; an explicit shape added there later
-// is compared too.
+// says its entries are the identical shape. That sentence is only true while
+// both blocks resolve to ONE roster, so a segment that relies on it names the
+// segment it claims to equal (`sameAs`) and the test asserts the two rosters are
+// the same Set — a divergent roster forces the doc off the sentence (#7547
+// review S1). An explicit shape added there later is compared too.
 const ENTRY_DOC_SEGMENTS = [
   { label: 'providers.anthropicCompatible', roster: 'COMPATIBLE_ENTRY_KEYS', from: '`providers.anthropicCompatible`', to: '`providers.openaiCompatible`', shape: 'required' },
-  { label: 'providers.openaiCompatible', roster: 'COMPATIBLE_ENTRY_KEYS', from: '`providers.openaiCompatible`', to: '`providers.acp`', shape: 'identical-or-explicit' },
+  { label: 'providers.openaiCompatible', roster: 'COMPATIBLE_ENTRY_KEYS', from: '`providers.openaiCompatible`', to: '`providers.acp`', shape: 'identical-or-explicit', sameAs: 'providers.anthropicCompatible' },
   { label: 'providers.acp', roster: 'ACP_ENTRY_KEYS', from: '`providers.acp`', to: '`providers.allowAnyModel`', shape: 'required' },
 ]
+
+// The three entry validators, the roster each enforces, and the exact text of its
+// unknown-key condition (see the SOURCE check in the registry test).
+const ENTRY_VALIDATORS = [
+  { label: 'anthropicCompatible', validate: providersModule.validateAnthropicCompatibleProviders, roster: 'COMPATIBLE_ENTRY_KEYS', file: 'anthropic-compatible-config.js', expected: '!COMPATIBLE_ENTRY_KEYS.has(key) && !FORBIDDEN_SECRET_KEYS.includes(key)' },
+  { label: 'openaiCompatible', validate: providersModule.validateOpenAiCompatibleProviders, roster: 'COMPATIBLE_ENTRY_KEYS', file: 'anthropic-compatible-config.js', expected: '!COMPATIBLE_ENTRY_KEYS.has(key) && !FORBIDDEN_SECRET_KEYS.includes(key)' },
+  { label: 'acp', validate: acpModule.validateAcpProviders, roster: 'ACP_ENTRY_KEYS', file: 'acp-config.js', expected: '!ACP_ENTRY_KEYS.has(key)' },
+]
+// The entry-level unknown-key loop: `for (const key of Object.keys(raw)) { if (<cond>) { warnings.push(`Unknown key '${path}.${key}'`
+const UNKNOWN_ENTRY_KEY_LOOP_RE = /for \(const key of Object\.keys\(raw\)\) \{\s*if \(([^\n]*)\) \{\s*warnings\.push\(`Unknown key '\$\{path\}\.\$\{key\}'/g
 
 const sorted = it2 => [...it2].sort()
 
@@ -184,7 +196,7 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
           declaredIn.set(name, rel)
         }
       }
-      if (/_ENTRY_KEYS\s*=\s*new Set/.test(text)) {
+      if (/_ENTRY_KEYS\s*=/.test(text)) {
         for (const [name, keys] of parseKeySets(text, `src/${rel}`, '_ENTRY_KEYS')) {
           if (entryDeclared.has(name)) {
             throw new Error(`REFUSE: ${name} is declared in two files: src/${entryDeclaredIn.get(name)} and src/${rel}`)
@@ -466,7 +478,7 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
   // the roster and never reached the row. The expectations are the REAL exported
   // Sets; only the doc side is parsed.
 
-  it('the entry rosters are registered, and each one is what the validators enforce', () => {
+  it('the entry rosters are registered, and each one is what the validators enforce', async () => {
     // Registry closed from both ends, as for the block rosters.
     const orphans = sorted(entryDeclared.keys()).filter(n => !ENTRY_ROSTERS.has(n))
     assert.deepEqual(
@@ -479,28 +491,42 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
     assert.deepEqual(phantoms, [], `ENTRY_ROSTERS names rosters that no longer exist: ${phantoms.join(', ')}`)
     // The source parse and the exported value agree (the parse is only an
     // enumeration; a regex that quietly stopped matching must not look clean).
-    assert.equal(ENTRY_ROSTERS.size, 2, 'expected exactly 2 provider entry rosters')
     for (const [name, get] of ENTRY_ROSTERS) {
       const value = get()
       assert.ok(value instanceof Set && value.size > 0, `${name} is not an exported non-empty Set — nothing to compare`)
       assert.deepEqual(sorted(entryDeclared.get(name)), sorted(value), `the parsed declaration of ${name} differs from its exported Set`)
     }
-    // The exported Set IS the one the validator consults: every roster key
-    // passes the unknown-key check and an invented key does not. Otherwise a
-    // second, validator-private set could drift from the one this file compares.
+    // Two halves, because neither alone is enough:
+    //  1. The PROBE proves exported ⊆ accepted — every roster key passes the
+    //     validator's unknown-key check and an invented key does not. It cannot
+    //     see a validator-private extra (`&& key !== 'secretExtra'`), which makes
+    //     accepted ⊋ exported and stays green.
+    //  2. The SOURCE check below proves accepted ⊆ exported — the unknown-key
+    //     condition in each validator's source is exactly the exported roster
+    //     (plus the one documented secret-key carve-out), nothing else. Together:
+    //     accepted === exported, so the roster compared against CONFIG.md is the
+    //     set the daemon actually enforces (#7547 review S2).
     const probe = (validate, key) => {
       const { warnings } = validate([{ id: 'zz-entry-probe', baseUrl: 'http://localhost:1', defaultModel: 'm', command: 'x', [key]: 1 }])
       return warnings.some(w => w.includes(`Unknown key`) && w.includes(`.${key}'`))
     }
-    const validators = [
-      ['anthropicCompatible', providersModule.validateAnthropicCompatibleProviders, 'COMPATIBLE_ENTRY_KEYS'],
-      ['openaiCompatible', providersModule.validateOpenAiCompatibleProviders, 'COMPATIBLE_ENTRY_KEYS'],
-      ['acp', acpModule.validateAcpProviders, 'ACP_ENTRY_KEYS'],
-    ]
-    for (const [label, validate, rosterName] of validators) {
+    for (const { label, validate, roster } of ENTRY_VALIDATORS) {
       assert.equal(probe(validate, 'zzNotAnEntryKey'), true, `${label}: an invented entry key did not warn — the probe cannot detect the roster`)
-      const rejected = [...ENTRY_ROSTERS.get(rosterName)()].filter(k => probe(validate, k))
-      assert.deepEqual(rejected, [], `${label}'s validator warns "Unknown key" for ${rosterName} members: ${rejected.join(', ')}`)
+      const rejected = [...ENTRY_ROSTERS.get(roster)()].filter(k => probe(validate, k))
+      assert.deepEqual(rejected, [], `${label}'s validator warns "Unknown key" for ${roster} members: ${rejected.join(', ')}`)
+    }
+    const conditions = new Map()
+    for (const { file, expected } of ENTRY_VALIDATORS) {
+      if (conditions.has(file)) continue
+      const text = (await readFile(new URL(file, SRC_ROOT), 'utf8')).replace(/\r\n/g, '\n')
+      const found = [...text.matchAll(UNKNOWN_ENTRY_KEY_LOOP_RE)].map(m => m[1].trim())
+      assert.equal(found.length, 1, `src/${file}: expected exactly 1 entry-level unknown-key loop, found ${found.length} (shape changed?)`)
+      conditions.set(file, found[0])
+      assert.ok(
+        found[0] === expected,
+        `src/${file}: the unknown-key condition is \`${found[0]}\`, expected \`${expected}\` — a validator-private key ` +
+          'would be accepted without being in the exported roster, so CONFIG.md would be gated against a set the daemon does not enforce'
+      )
     }
   })
 
@@ -519,6 +545,13 @@ describe('CONFIG.md sub-key rosters vs config.js *_SUPPORTED_KEYS (#7449)', () =
         assert.ok(
           /identical entry shape/.test(text),
           `${seg.label} documents neither an entry shape nor "the identical entry shape" — its entries are undocumented`
+        )
+        const other = ENTRY_DOC_SEGMENTS.find(o => o.label === seg.sameAs)
+        assert.ok(other, `${seg.label} says "identical" but names no segment it equals (sameAs=${seg.sameAs})`)
+        assert.ok(
+          ENTRY_ROSTERS.get(seg.roster)() === ENTRY_ROSTERS.get(other.roster)(),
+          `${seg.label} says "the identical entry shape" but resolves to ${seg.roster}, not ${other.label}'s ${other.roster} — ` +
+            'the sentence is false; document its own entry shape'
         )
         checked.push(`${seg.label}:identical`)
         continue
