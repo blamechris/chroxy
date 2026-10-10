@@ -1,0 +1,10 @@
+# Blank issues stay enabled: most issues here are filed without a template
+# (by automation and by hand), and the templates are the preferred shape, not a gate.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/blamechris/chroxy/security/advisories/new
+    about: Report a suspected vulnerability privately. Do not open a public issue for it.
+  - name: Setup and troubleshooting guide
+    url: https://github.com/blamechris/chroxy/blob/main/docs/troubleshooting.md
+    about: Check connectivity, tunnel and server problems before filing a bug.
