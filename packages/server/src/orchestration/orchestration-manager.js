@@ -476,12 +476,12 @@ export class OrchestrationManager extends EventEmitter {
       if (decision === 'approve') return this._beginExecuting(run)
       // A user declining the plan is a cancellation, not a failure (design §3.2:
       // plan_review --reject--> cancelled; #7131). The reason code is what tells it
-      // apart from a manual cancel ('user') and from a rejected escalation. The
+      // apart from a manual cancel ('user'). The
       // reviewer's note is already journaled on the gate_resolved timeline entry.
       return this.cancelRun(run.runId, { reason: 'plan_rejected' })
     }
     if (gate.kind === 'escalation') {
-      return this._resolveEscalation(run, gate, decision)
+      return this._resolveEscalation(run, gate, decision, note)
     }
     return { runId, gateId, decision }
   }
@@ -682,14 +682,14 @@ export class OrchestrationManager extends EventEmitter {
     return { runId: run.runId, subtaskId, escalated: true, gateId: gate.gateId }
   }
 
-  async _resolveEscalation(run, gate, decision) {
+  async _resolveEscalation(run, gate, decision, note) {
     const subtaskId = gate.nodeId
     const st = subtaskId ? run.subtasks.get(subtaskId) : null
     if (!st) return { runId: run.runId, resolved: true }
     if (decision === 'skip') { await this._finishSubtask(run, subtaskId, 'skipped'); return { runId: run.runId, subtaskId, skipped: true } }
-    // Rejecting an escalation abandons the run — a user cancellation, journaled
-    // `cancelling -> cancelled` like the plan reject (#7131), not a `failed` run.
-    if (decision === 'reject') return this.cancelRun(run.runId, { reason: 'escalation_rejected' })
+    // The escalation verb is `fail-run` (engine.md §3.3): the user is deliberately
+    // failing the run, unlike a rejected plan, which cancels it (#7131).
+    if (decision === 'reject') return this._failRun(run, 'ESCALATION_REJECTED', new Error(note || 'user failed the run'))
     // approve / revise → re-drive the subtask (iteration reset via a fresh worker)
     st.state = 'pending'
     st.iterations = 0

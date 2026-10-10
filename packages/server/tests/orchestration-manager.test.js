@@ -349,7 +349,7 @@ test('iteration cap escalates the subtask; skip lets the run finish', async () =
   }
 })
 
-test('escalation gate: reject cancels the run, distinguishable from a rejected plan (#7131)', async () => {
+test('escalation gate: reject (fail-run) deliberately FAILS the run, unlike a rejected plan (#7131 pin, engine.md 3.3)', async () => {
   const decide = (ctx) => {
     if (ctx.role === 'architect' && ctx.kind === 'poa_review') return { kind: 'poa_review', verdict: 'revise', feedback: 'again' }
     if (ctx.role === 'architect' && ctx.kind === 'epic_plan') {
@@ -359,7 +359,6 @@ test('escalation gate: reject cancels the run, distinguishable from a rejected p
   }
   const { ledger, mgr, cleanup } = makeHarness(decide, { config: { maxCommitteeIterations: 2 } })
   try {
-    const writes = spyStatuses(ledger)
     const events = []
     mgr.on('run_failed', (p) => events.push(['run_failed', p]))
     mgr.on('run_cancelled', (p) => events.push(['run_cancelled', p]))
@@ -369,16 +368,14 @@ test('escalation gate: reject cancels the run, distinguishable from a rejected p
     const { payload } = await escalated
     assert.equal(payload.gate.kind, 'escalation')
 
-    const cancelled = waitFor(mgr, ['run_cancelled'])
+    const failed = waitFor(mgr, ['run_failed'])
     await mgr.resolveGate(rec.runId, payload.gate.gateId, { decision: 'reject', note: 'abandon' })
-    const { payload: cp } = await cancelled
-    assert.equal(cp.reason, 'escalation_rejected')
-    assert.equal(ledger.getRun(rec.runId).status, 'cancelled')
-    assert.deepEqual(events.map(([name]) => name), ['run_cancelled'], 'cancelled, never failed')
-    assert.deepEqual(writes.slice(-2), [
-      { status: 'cancelling', reason: 'escalation_rejected' },
-      { status: 'cancelled', reason: 'escalation_rejected' },
-    ])
+    const { event, payload: fp } = await failed
+    assert.equal(event, 'run_failed')
+    assert.equal(fp.code, 'ESCALATION_REJECTED')
+    assert.equal(fp.message, 'abandon')
+    assert.equal(ledger.getRun(rec.runId).status, 'failed')
+    assert.deepEqual(events.map(([name]) => name), ['run_failed'], 'failed, never cancelled')
   } finally {
     cleanup()
   }
