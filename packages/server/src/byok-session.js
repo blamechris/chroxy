@@ -75,6 +75,11 @@ const MAX_HISTORY_TURNS = 50
 // up an unbounded API bill.
 const MAX_TOOL_ROUNDS = 25
 
+// #8559: the assistant turn kept in history when a requested Stop lands before the
+// model streamed any text. The API refuses an empty text block, and leaving the
+// assistant slot out would put the stopped prompt and the next one back to back.
+const STOPPED_BEFORE_TEXT = '[The response was stopped before any text was produced.]'
+
 // TTL for the per-session realpath cache used by validatePathWithinCwd
 // in the tool executor. The cwd shouldn't change mid-session, but caching
 // for 30s strikes a balance between safety (re-stat to catch a swap) and
@@ -1197,9 +1202,16 @@ export class ClaudeByokSession extends BaseSession {
     // `user` turn back-to-back, soft-breaking the alternation invariant
     // the API may tighten on in future.
     const historyLengthBeforeSend = Math.max(0, this._history.length - 1)
+    // #8559: text streamed by the round that is still in flight (not yet committed to
+    // `_history`). A requested Stop mid-stream keeps it as a truncated assistant turn.
+    let streamedText = ''
+    // The summary round's instruction block (appended to the last tool_result turn)
+    // while that round is in flight, so a requested Stop can take it back out.
+    let pendingSummary = null
 
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+        streamedText = ''
         let stream
         try {
           stream = this._client.messages.stream(
@@ -1244,6 +1256,7 @@ export class ClaudeByokSession extends BaseSession {
           if (!t) continue
           switch (t.kind) {
             case 'stream_delta':
+              streamedText += t.text
               this.emit('stream_delta', { messageId, delta: t.text })
               break
             case 'thinking_delta': {
@@ -1398,6 +1411,7 @@ export class ClaudeByokSession extends BaseSession {
         // Append the assistant turn — full content array preserves
         // tool_use blocks for the next round of conversation.
         this._history.push({ role: 'assistant', content: final.content })
+        streamedText = ''
 
         // Computed once — reused below both for the finalized
         // tool_input_delta emission (#8137) and, if the round proceeds
@@ -1545,6 +1559,8 @@ export class ClaudeByokSession extends BaseSession {
             break
           }
 
+          pendingSummary = { turn: lastTurn, block: summaryInstruction }
+          streamedText = ''
           let summaryStream
           try {
             summaryStream = this._client.messages.stream(
@@ -1582,6 +1598,7 @@ export class ClaudeByokSession extends BaseSession {
             if (!t) continue
             switch (t.kind) {
               case 'stream_delta':
+                streamedText += t.text
                 this.emit('stream_delta', { messageId, delta: t.text })
                 break
               case 'message_delta':
@@ -1608,6 +1625,8 @@ export class ClaudeByokSession extends BaseSession {
             if (c !== null) { turnCost += c; turnCostKnown = true }
           }
           this._history.push({ role: 'assistant', content: summaryFinal.content })
+          streamedText = ''
+          pendingSummary = null
           break
         }
       }
@@ -1666,7 +1685,17 @@ export class ClaudeByokSession extends BaseSession {
       // Truncating to historyLengthBeforeSend is idempotent: if the
       // inner stream-init catch already truncated (round-0 path), the
       // length is already at or below the snapshot and this is a no-op.
-      if (this._history.length > historyLengthBeforeSend) {
+      //
+      // #8559: the exception is a Stop somebody requested while the model was
+      // STREAMING. The tool-phase Stop above keeps the prompt and every completed
+      // round, so this one does too: the user asked for the turn to END, not to be
+      // erased, and the next prompt ("what did I just ask?") needs it. Every other
+      // abort (a destroy, a parent's cascade) and every provider error keeps the
+      // rollback: nobody asked for those turns to count.
+      const requestedStop = this._isRequestedStop(err)
+      if (requestedStop) {
+        this._commitStoppedStream({ streamedText, historyLengthBeforeSend, pendingSummary })
+      } else if (this._history.length > historyLengthBeforeSend) {
         this._history.length = historyLengthBeforeSend
       }
       // #5020: fold any subagent (Task tool) usage + cost into the
@@ -1687,7 +1716,7 @@ export class ClaudeByokSession extends BaseSession {
       // that says it was stopped, then the quiet `stopped` BaseSession.emit adds
       // for it, and no `error`. The rollback and the usage fold above already ran
       // and are the same either way.
-      if (this._isRequestedStop(err)) {
+      if (requestedStop) {
         this._emitTurnResult({
           messageId,
           lastStopReason,
@@ -2811,6 +2840,36 @@ export class ClaudeByokSession extends BaseSession {
       this._stopRequestedThisTurn &&
       !this._destroying &&
       !this._abortCascaded
+  }
+
+  /**
+   * #8559: settle `_history` after a requested Stop that cut a stream short.
+   *
+   * What is in `_history` then is the prompt plus every COMPLETED round (the
+   * in-flight round's assistant turn is only committed once its stream finishes),
+   * so it ends on a `user` turn. Closing it with an assistant turn holding the
+   * text that did stream -- what Claude Code keeps -- gives the next request a
+   * strict user/assistant alternation and the model the answer it was giving. Only
+   * text is kept: a half-streamed tool_use has no result to pair with and the API
+   * refuses it. With no text at all, a one-line placeholder stands in, because an
+   * empty text block is refused too.
+   *
+   * A no-op when the turn is already rolled back (a stream-init failure) or the
+   * tail is not a user turn.
+   */
+  _commitStoppedStream({ streamedText, historyLengthBeforeSend, pendingSummary }) {
+    if (this._history.length <= historyLengthBeforeSend) return
+    const tail = this._history[this._history.length - 1]
+    if (tail?.role !== 'user') return
+    if (pendingSummary && pendingSummary.turn === tail && Array.isArray(tail.content)) {
+      // The summary round never ran to completion: take its instruction back out so
+      // the next turn is not told to stop using tools.
+      tail.content = tail.content.filter((b) => b !== pendingSummary.block)
+    }
+    this._history.push({
+      role: 'assistant',
+      content: [{ type: 'text', text: streamedText.trim() ? streamedText : STOPPED_BEFORE_TEXT }],
+    })
   }
 
   _emitTurnError(messageId, err, fallbackCode, partials) {
