@@ -613,6 +613,46 @@ describe('permission-hook.sh: the floor probe fails CLOSED (#7004)', () => {
     assert.equal(decisionOf(stdout).permissionDecision, 'deny')
   })
 
+  // #7019 — the failure mode a loaded or wedged daemon actually hits: the probe
+  // connects and then never answers. The hook's `curl --max-time 10` must expire
+  // and the call must route to a prompt, not hang the tool call and not be cleared.
+  // Costs ~10s of wall clock by construction (the timeout under test).
+  it('auto + a probe that accepts the connection and NEVER answers → routes to a PROMPT after the 10s curl timeout', { timeout: 40000 }, async () => {
+    const stats = { floorRequests: 0, permissionRequests: 0 }
+    const sockets = new Set()
+    const hung = createServer((req, res) => {
+      req.on('data', () => {})
+      req.on('end', () => {
+        if (req.url === '/permission-floor') {
+          stats.floorRequests++
+          return // never respond
+        }
+        stats.permissionRequests++
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ decision: 'deny' }))
+      })
+    })
+    hung.on('connection', (sock) => { sockets.add(sock); sock.on('close', () => sockets.delete(sock)) })
+    await new Promise((r) => hung.listen(0, r))
+    // Backstop so a regression (a longer or missing curl timeout) fails in ~14s
+    // instead of waiting out the longer timeout: dropping the connection lets curl
+    // return, and the elapsed-time assertion below then reports the real defect.
+    const backstop = setTimeout(() => { for (const sock of sockets) sock.destroy() }, 14000)
+    try {
+      const started = Date.now()
+      const { stdout } = await runHook({ payload: readPayload('src/index.js'), port: hung.address().port, mode: 'auto', timeout: 30000 })
+      const elapsed = Date.now() - started
+      assert.equal(stats.floorRequests, 1)
+      assert.equal(stats.permissionRequests, 1, 'a probe that never answers must not be read as clearance')
+      assert.equal(decisionOf(stdout).permissionDecision, 'deny', 'the (denying) prompt answer, not a silent allow')
+      assert.ok(elapsed >= 9000 && elapsed < 13500, `the curl timeout should bound the wait (~10s), took ${elapsed}ms`)
+    } finally {
+      clearTimeout(backstop)
+      for (const sock of sockets) sock.destroy()
+      await new Promise((r) => hung.close(r))
+    }
+  })
+
   it('a malformed hook payload that still names a path field prompts (server fails closed)', async () => {
     daemon = await startRealDaemon()
     // tool_input is a STRING — no target can be extracted, so the server answers
@@ -1007,6 +1047,139 @@ describe('permission-hook.sh: the callback host is not hardcoded to localhost (#
   })
 })
 
+// (tool, input) matrix spanning both floors, both non-floored shapes, and the
+// path-less tools. `expected` is the floor verdict every pipeline must produce:
+// the hook-path predicate, the in-process manager, AND the real permission-hook.sh
+// subprocess (#7019 — the shell's own pre-filter / case patterns / JSON parse are
+// only exercised by running the script itself).
+//
+// A SAME-PATH read-vs-write pair is deliberate: the write floor is a superset of
+// the read floor, so `.git/HEAD` and `.vscode/settings.json` must be benign to a
+// read tool and floored to a write tool. Only a path run under BOTH tool classes
+// exposes a tool-classification disagreement.
+const MATRIX = [
+  // secret files — floored for reads AND writes
+  ['Read', { file_path: '.env' }, true],
+  ['Read', { file_path: '.env.local' }, true],
+  ['Read', { file_path: 'deploy/id_ed25519' }, true],
+  ['Read', { file_path: 'certs/server.pem' }, true],
+  ['Read', { file_path: 'app.key' }, true],
+  ['Read', { file_path: '.netrc' }, true],
+  ['Glob', { path: '.env' }, true],
+  ['Grep', { path: 'secrets/keystore.p12' }, true],
+  ['Write', { file_path: '.env' }, true],
+  ['Edit', { file_path: '.env.production' }, true],
+  // credential-dense config files — floored on BOTH floors
+  ['Read', { file_path: '.git/config' }, true],
+  ['Read', { file_path: '.claude/settings.local.json' }, true],
+  // config DIRS — write floor only; a read of a non-credential file is benign
+  ['Write', { file_path: '.git/hooks/pre-commit' }, true],
+  ['Write', { file_path: '.vscode/tasks.json' }, true],
+  ['NotebookEdit', { notebook_path: '.claude/nb.ipynb' }, true],
+  ['Read', { file_path: '.git/HEAD' }, false],
+  ['Write', { file_path: '.git/HEAD' }, true], // same path as the Read above
+  ['Read', { file_path: '.vscode/settings.json' }, false],
+  ['Write', { file_path: '.vscode/settings.json' }, true], // same path as the Read above
+  ['Grep', { path: '.claude/skills' }, false],
+  // `..` traversal above cwd is scanned as an absolute path
+  ['Read', { file_path: '../../.env.local' }, true],
+  ['Write', { file_path: '../sibling/.git/config' }, true],
+  ['Read', { file_path: '../other/src/a.js' }, false],
+  // ordinary work — never floored
+  ['Read', { file_path: 'src/index.js' }, false],
+  ['Write', { file_path: 'packages/server/src/x.js' }, false],
+  ['Edit', { file_path: 'README.md' }, false],
+  ['Glob', { path: 'packages' }, false],
+  // an unknown/future tool gets the STRONGER floor on both paths
+  ['MultiEdit', { file_path: '.claude/settings.json' }, true],
+  ['MultiEdit', { file_path: 'src/a.js' }, false],
+  // path-less tools carry nothing the floor can match
+  ['Bash', { command: 'cat .env' }, false],
+  ['WebFetch', { url: 'https://example.com/.env' }, false],
+]
+
+
+// ---------------------------------------------------------------------------
+// 3c. #7019 — the parity matrix through the REAL shell hook
+// ---------------------------------------------------------------------------
+//
+// The parity describe below compares JS to JS: `evaluateHookFloorRequest` and
+// `PermissionManager.handlePermission` both call `isFlooredTarget`, so they agree
+// by construction and cannot catch a failure that lives in the SHELL — a
+// pre-filter that under-probes a path field, a `case` pattern typo, or a mis-parse
+// of the daemon's answer. Here every row runs through `permission-hook.sh` as a
+// subprocess against the production handler, and the observable is what the user
+// would experience: a floored row raises a prompt (answered `deny`, so a silent
+// allow cannot be mistaken for the user's own approval), a benign row is
+// auto-allowed with no prompt at all.
+
+describe('permission-hook.sh: the whole parity matrix through the REAL shell (#7019)', () => {
+  let daemon
+
+  afterEach(async () => {
+    if (daemon) await daemon.close()
+    daemon = null
+  })
+
+  // Tools whose payload names no path field: the hook's pre-filter skips the
+  // probe for them, so they never reach /permission-floor at all.
+  const PATHLESS = new Set(['Bash', 'WebFetch'])
+  // The tools the hook's acceptEdits short-circuit covers (anything else is
+  // routed to the phone in that mode whatever the floor says).
+  const ACCEPT_EDITS_SHELL_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
+
+  assert.ok(MATRIX.some(([, , e]) => e === true) && MATRIX.some(([, , e]) => e === false), 'fixture sanity: both verdicts present')
+
+  async function runRow(tool, input, mode) {
+    daemon = await startRealDaemon({ promptDecision: 'deny' })
+    const { stdout } = await runHook({ payload: { tool_name: tool, tool_input: input, cwd: CWD }, port: daemon.port, mode })
+    return { stats: daemon.stats, out: decisionOf(stdout) }
+  }
+
+  for (const [tool, input, expected] of MATRIX) {
+    it(`auto: ${tool} ${JSON.stringify(input)} → ${expected ? 'PROMPT' : 'auto-allowed'}`, async () => {
+      const { stats, out } = await runRow(tool, input, 'auto')
+      assert.equal(stats.floorRequests, PATHLESS.has(tool) ? 0 : 1, 'floor probe consulted exactly when the payload names a path')
+      if (expected) {
+        assert.equal(stats.permissionRequests, 1, 'a floored target must raise a real permission request')
+        assert.equal(stats.prompts.length, 1, 'and a prompt must have been broadcast')
+        assert.equal(out.permissionDecision, 'deny', 'the user answered deny — nothing else may have approved it')
+      } else {
+        assert.equal(stats.permissionRequests, 0, 'a benign target must not add friction')
+        assert.equal(out.permissionDecision, 'allow')
+      }
+    })
+  }
+
+  for (const [tool, input, expected] of MATRIX.filter(([tool]) => ACCEPT_EDITS_SHELL_TOOLS.has(tool))) {
+    it(`acceptEdits: ${tool} ${JSON.stringify(input)} → ${expected ? 'PROMPT' : 'auto-allowed'}`, async () => {
+      const { stats, out } = await runRow(tool, input, 'acceptEdits')
+      assert.equal(stats.floorRequests, 1)
+      if (expected) {
+        assert.equal(stats.permissionRequests, 1)
+        assert.equal(out.permissionDecision, 'deny')
+      } else {
+        assert.equal(stats.permissionRequests, 0, 'a non-floored target still short-circuits under acceptEdits')
+        assert.equal(out.permissionDecision, 'allow')
+      }
+    })
+  }
+
+  // The same path under a read tool and a write tool, spelled out so the pairing
+  // survives someone reordering or trimming the matrix above.
+  for (const file_path of ['.git/HEAD', '.vscode/settings.json']) {
+    it(`same path ${file_path}: Read is auto-allowed, Write is floored (tool classification)`, async () => {
+      const read = await runRow('Read', { file_path }, 'auto')
+      assert.equal(read.stats.permissionRequests, 0)
+      assert.equal(read.out.permissionDecision, 'allow')
+      await daemon.close()
+      const write = await runRow('Write', { file_path }, 'auto')
+      assert.equal(write.stats.permissionRequests, 1)
+      assert.equal(write.out.permissionDecision, 'deny')
+    })
+  }
+})
+
 // ---------------------------------------------------------------------------
 // 4. Parity: the two pipelines must agree
 // ---------------------------------------------------------------------------
@@ -1028,47 +1201,6 @@ describe('floor PARITY: hook path vs in-process permission-manager (#7004)', () 
     pm.off('permission_request', onReq)
     return seen.length > 0
   }
-
-  // (tool, input) matrix spanning both floors, both non-floored shapes, and the
-  // path-less tools. `expected` is the floor verdict both pipelines must produce.
-  const MATRIX = [
-    // secret files — floored for reads AND writes
-    ['Read', { file_path: '.env' }, true],
-    ['Read', { file_path: '.env.local' }, true],
-    ['Read', { file_path: 'deploy/id_ed25519' }, true],
-    ['Read', { file_path: 'certs/server.pem' }, true],
-    ['Read', { file_path: 'app.key' }, true],
-    ['Read', { file_path: '.netrc' }, true],
-    ['Glob', { path: '.env' }, true],
-    ['Grep', { path: 'secrets/keystore.p12' }, true],
-    ['Write', { file_path: '.env' }, true],
-    ['Edit', { file_path: '.env.production' }, true],
-    // credential-dense config files — floored on BOTH floors
-    ['Read', { file_path: '.git/config' }, true],
-    ['Read', { file_path: '.claude/settings.local.json' }, true],
-    // config DIRS — write floor only; a read of a non-credential file is benign
-    ['Write', { file_path: '.git/hooks/pre-commit' }, true],
-    ['Write', { file_path: '.vscode/tasks.json' }, true],
-    ['NotebookEdit', { notebook_path: '.claude/nb.ipynb' }, true],
-    ['Read', { file_path: '.git/HEAD' }, false],
-    ['Read', { file_path: '.vscode/settings.json' }, false],
-    ['Grep', { path: '.claude/skills' }, false],
-    // `..` traversal above cwd is scanned as an absolute path
-    ['Read', { file_path: '../../.env.local' }, true],
-    ['Write', { file_path: '../sibling/.git/config' }, true],
-    ['Read', { file_path: '../other/src/a.js' }, false],
-    // ordinary work — never floored
-    ['Read', { file_path: 'src/index.js' }, false],
-    ['Write', { file_path: 'packages/server/src/x.js' }, false],
-    ['Edit', { file_path: 'README.md' }, false],
-    ['Glob', { path: 'packages' }, false],
-    // an unknown/future tool gets the STRONGER floor on both paths
-    ['MultiEdit', { file_path: '.claude/settings.json' }, true],
-    ['MultiEdit', { file_path: 'src/a.js' }, false],
-    // path-less tools carry nothing the floor can match
-    ['Bash', { command: 'cat .env' }, false],
-    ['WebFetch', { url: 'https://example.com/.env' }, false],
-  ]
 
   for (const [tool, input, expected] of MATRIX) {
     it(`${tool} ${JSON.stringify(input)} → floor=${expected} on BOTH paths`, async () => {
