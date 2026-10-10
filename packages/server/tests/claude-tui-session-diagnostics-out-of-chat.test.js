@@ -93,25 +93,31 @@ describe('claude-tui diagnostics stay out of the chat (#8252)', () => {
     return session
   }
 
-  it('Stop with the turn in flight: the chat says "Stopped.", the cleaned tail is in the log', async () => {
-    turnSession((s) => { s._activeTurn.aborted = true })
+  // #8558: a Stop the user asked for is not an error any more. It used to put a
+  // red "Stopped." card in the chat; it now ends the turn with the quiet
+  // `stopped` every other provider sends (claude-tui-requested-stop.test.js owns
+  // that contract). What stays pinned HERE is the #8252 half: the cleaned
+  // terminal tail goes to the log, and none of it reaches the chat.
+  it('Stop with the turn in flight: nothing in the chat, the cleaned tail is in the log', async () => {
+    turnSession((s) => { s.interrupt() })
     const errors = []
+    const stopped = []
     session.on('error', (e) => errors.push(e))
+    session.on('stopped', () => stopped.push(true))
 
     // Unfake the clock for the poll loop's 150ms sleeps.
     mock.timers.reset()
     await session.sendMessage('Use the Bash tool to run exactly: echo f3')
 
-    assert.equal(errors.length, 1, `one error, got ${JSON.stringify(errors)}`)
-    assert.equal(errors[0].message, 'Stopped.')
-    assertNoTerminalDebris(errors[0].message, 'stop')
+    assert.deepEqual(errors, [], `a requested Stop is not an error, got ${JSON.stringify(errors)}`)
+    assert.equal(stopped.length, 1, 'one quiet stopped')
     assertCleanTailInLog()
   })
 
-  it('Stop DURING the prompt write says "Stopped." too', async () => {
+  it('Stop DURING the prompt write is quiet too, with the tail in the log', async () => {
     turnSession(() => {})
     session._writePtyTextThrottled = async (_text, { onAbort } = {}) => {
-      session._activeTurn.aborted = true
+      session.interrupt()
       onAbort()
       return false
     }
@@ -121,7 +127,7 @@ describe('claude-tui diagnostics stay out of the chat (#8252)', () => {
     mock.timers.reset()
     await session.sendMessage('hello')
 
-    assert.deepEqual(errors.map((e) => e.message), ['Stopped.'])
+    assert.deepEqual(errors, [])
     assertCleanTailInLog()
   })
 
@@ -254,16 +260,19 @@ describe('claude-tui diagnostics stay out of the chat (#8252)', () => {
     it('POSITIVE CONTROL: a Stop is never relabelled as an auth failure, banner or not', async () => {
       turnSession((s) => {
         s._appendToOutputTail(BANNER)
-        s._activeTurn.aborted = true
+        s.interrupt()
       })
       const errors = []
+      const stopped = []
       session.on('error', (e) => errors.push(e))
+      session.on('stopped', () => stopped.push(true))
 
       mock.timers.reset()
       await session.sendMessage('hello')
 
-      assert.deepEqual(errors.map((e) => e.message), ['Stopped.'])
-      assert.equal('code' in errors[0], false)
+      // #8558: no AUTH_REQUIRED error, and no error at all -- the quiet stopped.
+      assert.deepEqual(errors, [])
+      assert.equal(stopped.length, 1)
     })
   })
 
