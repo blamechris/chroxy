@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { EventEmitter } from 'node:events'
 import { SdkSession } from '../src/sdk-session.js'
+import { TurnDriver } from '../src/orchestration/turn-driver.js'
 import { SessionStatePersistence } from '../src/session-state-persistence.js'
 import { resetModels } from '../src/models.js'
 
@@ -4080,6 +4082,49 @@ describe('SdkSession', () => {
       assert.equal(events[2].payload.code, 'stream_stall',
         'error still carries the structured code for the dashboard stall chip')
       s.destroy()
+    })
+
+    // #7072 -- the synthetic result is emitted BEFORE the error, so a TurnDriver
+    // settles on the result and the error then hits its epoch guard: the caller
+    // never saw TURN_ERROR and a stalled architect turn read as completed. The
+    // result stays (it clears the dashboard's activeTools, #4616) but is marked.
+    it('marks the synthetic result interrupted and names the failure (#7072)', () => {
+      const s = createSession({ streamStallTimeoutMs: 60_000 })
+      s._isBusy = true
+      s._currentMessageId = 'msg_ss'
+      const results = []
+      const errors = []
+      s.on('result', (p) => results.push(p))
+      s.on('error', (p) => errors.push(p))
+
+      s._handleStreamStall('msg_ss', true)
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].interrupted, true, 'a stalled turn did not complete')
+      assert.equal(results[0].failureMessage, errors[0].message,
+        'the result names the same failure the trailing error carries')
+      s.destroy()
+    })
+
+    it('a TurnDriver driving a stalled session sees TURN_ERROR, not a completed turn (#7072)', async () => {
+      const s = createSession({ streamStallTimeoutMs: 60_000 })
+      s._isBusy = true
+      s._currentMessageId = 'msg_ss'
+      const sm = new EventEmitter()
+      sm.getSession = () => ({ session: s })
+      for (const ev of ['stream_delta', 'result', 'error', 'stopped']) {
+        s.on(ev, (data) => sm.emit('session_event', { sessionId: 's1', event: ev, data }))
+      }
+      s.sendMessage = () => { /* the turn is already in flight; the stall timer fires next */ }
+      const driver = new TurnDriver({ sessionManager: sm })
+      try {
+        const p = driver.driveTurn('s1', 'go', { timeoutMs: 5000 })
+        s._handleStreamStall('msg_ss', true)
+        await assert.rejects(p, (err) => err.code === 'TURN_ERROR' && /stalled/i.test(err.message))
+      } finally {
+        driver.dispose()
+        s.destroy()
+      }
     })
   })
 })

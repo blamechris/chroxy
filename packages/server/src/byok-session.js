@@ -1177,6 +1177,9 @@ export class ClaudeByokSession extends BaseSession {
     // #8461: set when the loop spends MAX_TOOL_ROUNDS; the forced summary round's
     // own `end_turn` overwrites lastStopReason, so the cap needs its own flag.
     let toolRoundCapReached = false
+    // #7072: an interrupt that landed in the tool phase ends the loop below WITHOUT a
+    // thrown abort, so the stream-phase catch (-> `error` ABORT) never sees it.
+    let stoppedInToolPhase = false
     // Snapshot the pre-turn history length so any stream-init failure (at
     // any round) can rollback the entire turn atomically. We derive it
     // from the current length minus the user message we just pushed at
@@ -1485,7 +1488,16 @@ export class ClaudeByokSession extends BaseSession {
         }
         this._history.push({ role: 'user', content: toolResults })
 
-        if (this._abortController?.signal?.aborted) break
+        if (this._abortController?.signal?.aborted) {
+          // #7072: the tool results above are committed to history (the #4061
+          // invariant) and the turn's spend is real, so this still ends in a
+          // `result` -- but one that says the turn was STOPPED, not a success. The
+          // stream-phase abort throws into the catch below and reports `error`
+          // ABORT; this path never throws, and byok never emits `stopped`, so the
+          // result is the only terminal event an orchestration TurnDriver hears.
+          stoppedInToolPhase = true
+          break
+        }
 
         if (round === MAX_TOOL_ROUNDS - 1) {
           // #4063: instead of bailing silently, run ONE more text-only
@@ -1623,7 +1635,9 @@ export class ClaudeByokSession extends BaseSession {
         stopReason: lastStopReason,
         // #7326: the provider-neutral form of the stop reason above, for the wire.
         // (A different key on purpose: `stopReason` is the raw Anthropic string.)
-        ...turnOutcomeField(outcomeFromByokTurn({ stopReason: lastStopReason, toolRoundCapReached })),
+        ...turnOutcomeField(outcomeFromByokTurn({ stopReason: lastStopReason, toolRoundCapReached, interrupted: stoppedInToolPhase })),
+        // #7072: terminal but not successful (internal; not on the wire).
+        ...(stoppedInToolPhase ? { interrupted: true } : {}),
         duration: Date.now() - turnStartedAt,
         usage: turnUsage,
         ...(finalRoundOccupancy ? { contextOccupancy: finalRoundOccupancy } : {}),
@@ -2781,10 +2795,24 @@ export class ClaudeByokSession extends BaseSession {
     // fired and the fold-in step above was skipped.
     this._subagentUsageThisTurn = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     this._subagentCostThisTurn = 0
+    // #7072/#8461: this teardown skips BaseSession._clearMessageState, so the
+    // turn-scoped Stop request (see interrupt()) is cleared here, or it would tag
+    // the NEXT turn's own abort as a requested Stop.
+    this._stopRequestedThisTurn = false
+    this._clearIntentionalStop()
   }
 
   interrupt() {
     if (!this._isBusy) return
+    // #7072/#8461: a Stop somebody requested (the user, the scheduler, the
+    // orchestration watchdog) is acknowledged by one quiet `stopped` instead of a
+    // "Stopped" chip, exactly as on claude-sdk and claude-cli. This matters on the
+    // tool-phase abort, which ends in a `result` (see sendMessage); BaseSession.emit
+    // drops the chip and sends the confirmation, after marking the result
+    // `interrupted`. The stream-phase abort ends in `error` ABORT and emits no
+    // `result`, so this changes nothing there.
+    this.markIntentionalStop()
+    this._noteTurnStopRequested()
     if (this._abortController) {
       this._abortController.abort()
     }

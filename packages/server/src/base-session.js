@@ -2192,6 +2192,15 @@ export class BaseSession extends EventEmitter {
       // `_stoppedSinceStopRequest`). An agent that cancelled on its own (ACP
       // `cancelled`) keeps its chip.
       this._stopAckedByResult = false
+      // #7072: a result whose outcome is `stopped` is terminal but NOT a success,
+      // and an orchestration TurnDriver hears nothing else for the turn -- the
+      // `stopped` that follows it (acknowledgement below, or a provider's own) lands
+      // after the driver has already settled. Mark it here, before the chip is
+      // dropped for a requested Stop, so every provider that maps an abort onto a
+      // result gets it. Internal only: event-normalizer whitelists the wire fields.
+      if (payload && typeof payload === 'object' && payload.turnOutcome === 'stopped' && payload.interrupted !== true) {
+        payload = { ...payload, interrupted: true }
+      }
       if (payload && typeof payload === 'object' && payload.turnOutcome === 'stopped' && this._stopRequestedThisTurn) {
         const { turnOutcome: _userStop, ...rest } = payload
         payload = rest

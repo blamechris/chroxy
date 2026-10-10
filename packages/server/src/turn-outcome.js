@@ -91,10 +91,15 @@ export function outcomeFromAnthropicStopReason(stopReason) {
  * said: the forced no-tools summary ends with an ordinary `end_turn`, which
  * overwrites the loop's own stop reason and read as a clean finish (#8461). The
  * work was cut off by the round cap; the summary only reports how far it got.
- * @param {{ stopReason?: unknown, toolRoundCapReached?: boolean }} turn
+ *
+ * An `interrupted` turn (an abort that landed in the tool phase, #7072) is
+ * `stopped` whatever stop reason the last round carried: that reason is
+ * `tool_use`, which says nothing about how the turn ended.
+ * @param {{ stopReason?: unknown, toolRoundCapReached?: boolean, interrupted?: boolean }} turn
  * @returns {'completed'|'truncated'|'refused'|'stopped'|undefined}
  */
-export function outcomeFromByokTurn({ stopReason, toolRoundCapReached = false } = {}) {
+export function outcomeFromByokTurn({ stopReason, toolRoundCapReached = false, interrupted = false } = {}) {
+  if (interrupted) return 'stopped'
   // A refusal in the summary round still outranks the cap: it is the more specific fact.
   const mapped = outcomeFromAnthropicStopReason(stopReason)
   if (toolRoundCapReached && (mapped === undefined || mapped === 'completed')) return 'truncated'

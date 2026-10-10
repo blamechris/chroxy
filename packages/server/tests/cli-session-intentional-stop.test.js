@@ -328,3 +328,19 @@ describe('a Stop answered by an aborted result (#8461)', () => {
     assert.equal(stopped.length, 0)
   })
 })
+
+// #7072 -- the synthetic result a death path emits is cost:null and load-bearing for
+// the dashboard spinner, but it is not a completed turn.
+describe('CliSession synthetic interrupted result is marked interrupted (#7072)', () => {
+  it('_emitInterruptedTurnResult marks the result terminal-but-not-successful', () => {
+    const session = createReadySession()
+    session._isBusy = true
+    session._currentMessageId = 'msg-1'
+    const results = []
+    session.on('result', (r) => results.push(r))
+    session._emitInterruptedTurnResult(0, 'user_stop')
+    assert.equal(results.length, 1)
+    assert.equal(results[0].interrupted, true)
+    assert.equal(results[0].cost, null)
+  })
+})
