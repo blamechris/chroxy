@@ -175,6 +175,7 @@ created ──start──▶ planning ──plan parsed──▶ plan_review ─
                                planning/executing/synthesizing ──unrecoverable──▶ failed
 ```
 
+- **A user rejecting the epic plan, or rejecting an escalation gate, cancels the run** (`plan_review --reject--> cancelled`; #7131): it goes through `cancelRun` (full teardown, `cancelling -> cancelled`, `run_cancelled`, never `run_failed`), and the journaled reason distinguishes the two: `plan_rejected` vs `escalation_rejected` (a manual cancel is `user`). `failed` is reserved for engine-side failures (`PLAN_PARSE`, `START_FAILED`, `SYNTHESIS_FAILED`, ...).
 - `plan_review` is skipped (auto-approved, `approvedBy:'auto'`) when `mode.autoApprovePlan`. **The v1 user gate sits here — after the architect's (cheap, single-session) planning turn, before any worker spend.** A second implicit user surface exists at `escalated` subtasks and permission-gate escalations; no other approvals block auto flow.
 - `budget_paused` (§11): in-flight turns complete; no new spawns/committee turns start.
 - `resource_paused` (#6733): entered ONLY when all three hold — pending subtasks remain, ZERO
@@ -219,7 +220,7 @@ pending ─deps met + slot free + budget ok─▶ spawning ─session ready─�
   merging ── conflict ─▶ conflict_fixup (one fixup worker turn in integration worktree) ─▶ merging retry
   conflict_fixup ── fixup failed once ──▶ escalated
   iterations > maxCommitteeIterations at ANY gate ──▶ escalated   (forced; never loops silently)
-  escalated ── user: accept-as-is | retry-with-note | skip | fail-run ──▶ done|briefing|skipped|(run failed)
+  escalated ── user: accept-as-is | retry-with-note | skip | fail-run ──▶ done|briefing|skipped|(run cancelled: escalation_rejected)
   any ── cancel/restart-unresumed ──▶ cancelled / interrupted
 Terminal: done | skipped | failed | cancelled
 ```
