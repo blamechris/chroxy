@@ -26,7 +26,22 @@ const SHAPE_MEMBER_RE = /^\s*([A-Za-z_$][\w$]*)\??\s*:\s*\S[\s\S]*$/
  * @returns {Map<string, string[]>}
  */
 export function parseSupportedKeySets(src, label) {
-  const re = /(?:export\s+)?const\s+([A-Z0-9_]+_SUPPORTED_KEYS)\s*=\s*new Set\(\[([\s\S]*?)\]\)/g
+  return parseKeySets(src, label, '_SUPPORTED_KEYS')
+}
+
+/**
+ * Every `const <X><suffix> = new Set([...])` declaration in a source file.
+ * `parseSupportedKeySets` is this with the block-roster suffix; the provider
+ * ENTRY rosters use `_ENTRY_KEYS` (#7547).
+ *
+ * @param {string} src - File contents
+ * @param {string} label - File label used in refusal messages
+ * @param {string} suffix - e.g. '_SUPPORTED_KEYS' or '_ENTRY_KEYS'
+ * @returns {Map<string, string[]>}
+ */
+export function parseKeySets(src, label, suffix) {
+  if (!/^_[A-Z0-9_]+$/.test(suffix)) throw new Error(`REFUSE: parseKeySets: bad suffix ${JSON.stringify(suffix)}`)
+  const re = new RegExp(`(?:export\\s+)?const\\s+([A-Z0-9_]+${suffix})\\s*=\\s*new Set\\(\\[([\\s\\S]*?)\\]\\)`, 'g')
   const out = new Map()
   for (const m of src.matchAll(re)) {
     const [, name, rawBody] = m
@@ -47,7 +62,7 @@ export function parseSupportedKeySets(src, label) {
     out.set(name, keys)
   }
   if (out.size === 0) {
-    throw new Error(`REFUSE: ${label}: found no *_SUPPORTED_KEYS declarations (the naming convention changed?)`)
+    throw new Error(`REFUSE: ${label}: found no *${suffix} declarations (the naming convention changed?)`)
   }
   return out
 }
@@ -236,6 +251,55 @@ export function extractTypeShapes(text) {
     shapes.push(members.map(mem => SHAPE_MEMBER_RE.exec(mem)[1]))
   }
   return shapes
+}
+
+/** A bare entry-shape member: `name` or `name?` — NO type annotation, no quotes. */
+const ENTRY_MEMBER_RE = /^([A-Za-z_$][\w$]*)(\?)?$/
+
+/**
+ * Every `{ name, name?, ... }` group in `text` whose members ALL are bare
+ * identifiers (optionally `?`-suffixed), as { names, optional } — the shape a
+ * provider ARRAY ENTRY is documented in (`{ id, label?, baseUrl, ... }`, #7547).
+ *
+ * This is the complement of `extractTypeShapes`: that one wants every member
+ * typed (`name: type`) and deliberately rejects these; this one rejects typed
+ * and quoted members, so a JSON example (`{ "url": ..., "format": ... }`) or a
+ * type shape in the same region is not mistaken for an entry shape. Callers
+ * scope `text` to one segment (see `sliceBetween`) and assert how many shapes
+ * it carries, because two groups in one segment is ambiguous, not "pick one".
+ *
+ * @param {string} text
+ * @returns {Array<{ names: string[], optional: string[] }>}
+ */
+export function extractEntryShapes(text) {
+  const shapes = []
+  for (const m of text.matchAll(/\{([^{}]*)\}/g)) {
+    const members = m[1].split(',').map(s => s.trim()).filter(Boolean)
+    if (members.length < 2) continue
+    const parsed = members.map(mem => ENTRY_MEMBER_RE.exec(mem))
+    if (parsed.some(p => p === null)) continue
+    shapes.push({ names: parsed.map(p => p[1]), optional: parsed.filter(p => p[2]).map(p => p[1]) })
+  }
+  return shapes
+}
+
+/**
+ * The text from the first occurrence of `from` up to (not including) the first
+ * occurrence of `to` after it. REFUSES when either anchor is missing, or `to`
+ * does not follow `from` — a renamed anchor must stop the gate, not shrink the
+ * segment to nothing and let an empty shape list pass.
+ *
+ * @param {string} text
+ * @param {string} from
+ * @param {string} to
+ * @returns {string}
+ */
+export function sliceBetween(text, from, to) {
+  const a = text.indexOf(from)
+  if (a === -1) throw new Error(`REFUSE: CONFIG.md: anchor ${JSON.stringify(from)} not found`)
+  const b = text.indexOf(to, a + from.length)
+  if (b === -1) throw new Error(`REFUSE: CONFIG.md: anchor ${JSON.stringify(to)} not found after ${JSON.stringify(from)}`)
+  return text.slice(a, b)
 }
 
 /**
