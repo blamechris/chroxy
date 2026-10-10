@@ -78,7 +78,9 @@ const MAX_TOOL_ROUNDS = 25
 // #8559: the assistant turn kept in history when a requested Stop lands before the
 // model streamed any text. The API refuses an empty text block, and leaving the
 // assistant slot out would put the stopped prompt and the next one back to back.
-const STOPPED_BEFORE_TEXT = '[The response was stopped before any text was produced.]'
+const STOPPED_BEFORE_TEXT = '[Interrupted by the user before any reply was produced.]'
+// ...and the tool_result answering a tool_use the Stop threw before it could run.
+const STOPPED_BEFORE_TOOL = 'Interrupted by the user before the tool ran.'
 
 // TTL for the per-session realpath cache used by validatePathWithinCwd
 // in the tool executor. The cwd shouldn't change mid-session, but caching
@@ -2843,24 +2845,44 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   /**
-   * #8559: settle `_history` after a requested Stop that cut a stream short.
+   * #8559: settle `_history` after a requested Stop that ended the turn by a throw.
    *
-   * What is in `_history` then is the prompt plus every COMPLETED round (the
-   * in-flight round's assistant turn is only committed once its stream finishes),
-   * so it ends on a `user` turn. Closing it with an assistant turn holding the
-   * text that did stream -- what Claude Code keeps -- gives the next request a
-   * strict user/assistant alternation and the model the answer it was giving. Only
-   * text is kept: a half-streamed tool_use has no result to pair with and the API
-   * refuses it. With no text at all, a one-line placeholder stands in, because an
-   * empty text block is refused too.
+   * Whatever the tail is, it leaves `_history` a VALID conversation (the next
+   * request is never rejected for it) and keeps the prompt and the completed work:
    *
-   * A no-op when the turn is already rolled back (a stream-init failure) or the
-   * tail is not a user turn.
+   * - `user` tail (the stop cut a stream short; the in-flight round's assistant
+   *   turn is only committed once its stream finishes): close it with an assistant
+   *   turn holding the text that did stream -- what Claude Code keeps -- so the
+   *   next request alternates strictly. Only text is kept: a half-streamed
+   *   tool_use has no result to pair with. With no text at all a placeholder
+   *   stands in, because an empty text block is refused.
+   * - `assistant` tail with tool_use blocks (the stop threw between the round's
+   *   assistant push and its tool_result push): the tool_use would be unanswered,
+   *   which the API refuses on every later request, so answer each with a
+   *   synthesized is_error tool_result, as the tool-phase Stop does (#4061). The
+   *   rounds before it stay too; rolling back instead would drop the prompt.
+   * - `assistant` tail without tool_use: already a valid end, left alone.
+   *
+   * A no-op only when the turn is already rolled back (a stream-init failure).
    */
   _commitStoppedStream({ streamedText, historyLengthBeforeSend, pendingSummary }) {
     if (this._history.length <= historyLengthBeforeSend) return
     const tail = this._history[this._history.length - 1]
-    if (tail?.role !== 'user') return
+    if (tail?.role === 'assistant') {
+      const uses = Array.isArray(tail.content) ? tail.content.filter((b) => b?.type === 'tool_use') : []
+      if (uses.length > 0) {
+        this._history.push({
+          role: 'user',
+          content: uses.map((b) => ({
+            type: 'tool_result',
+            tool_use_id: b.id,
+            content: STOPPED_BEFORE_TOOL,
+            is_error: true,
+          })),
+        })
+      }
+      return
+    }
     if (pendingSummary && pendingSummary.turn === tail && Array.isArray(tail.content)) {
       // The summary round never ran to completion: take its instruction back out so
       // the next turn is not told to stop using tools.
