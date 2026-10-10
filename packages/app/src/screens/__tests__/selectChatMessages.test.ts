@@ -21,7 +21,7 @@ const marker = (id = 'compact1'): ChatMessage =>
     type: 'system',
     content: 'Context compacted (auto): 128,000 → 12,000 tokens',
     compactMetadata: { trigger: 'auto', preTokens: 128_000, postTokens: 12_000, durationMs: 2_500 },
-  } as Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'type'>);
+  });
 
 const opts = (chatFilterCompact: boolean) => ({ chatFilterCompact, isHiddenInCompactMode });
 
@@ -102,6 +102,23 @@ describe('selectChatMessages', () => {
 
     it.each(['tool_use', 'thinking'] as const)('shows %s when compact is OFF', (type) => {
       expect(shouldShowInChat(msg({ id: 'x', type }), opts(false))).toBe(true);
+    });
+
+    // The selector must ask the INJECTED predicate, not carry its own idea of
+    // what compact mode hides (#6882: one definition, store-core's). A type the
+    // real predicate never hides is the probe -- a selector with a hard-coded
+    // tool_use/thinking check would keep it.
+    it('hides exactly what the injected predicate says, no more and no less', () => {
+      const hidesResponses = {
+        chatFilterCompact: true,
+        isHiddenInCompactMode: (type: ChatMessage['type']) => type === 'response',
+      };
+      expect(shouldShowInChat(msg({ id: 'x', type: 'response' }), hidesResponses)).toBe(false);
+      expect(shouldShowInChat(msg({ id: 'x', type: 'tool_use' }), hidesResponses)).toBe(true);
+      // Compact mode OFF never consults the predicate at all.
+      expect(
+        shouldShowInChat(msg({ id: 'x', type: 'response' }), { ...hidesResponses, chatFilterCompact: false }),
+      ).toBe(true);
     });
 
     // Negative control: without this, a predicate that hid everything in
