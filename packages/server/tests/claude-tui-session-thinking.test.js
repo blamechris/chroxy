@@ -556,10 +556,12 @@ describe('ClaudeTuiSession — thinking blocks from the transcript (#7393)', () 
     // #7041: not a wall-clock bound, and not "the late window is still open" (that
     // holds for any wait shorter than THINKING_LATE_MS). The answer waits for the
     // transcript only by arming a deadline and letting it run out, so: no timer of
-    // 500ms or more fired between the Stop and the turn settling. The 8000/5000ms
-    // backstops re-armed by the poll loop are cleared unfired, and the poll's own
-    // sleeps are ~1ms.
-    const waited = arms.filter((a) => a.ms >= 500 && a.fired)
+    // more than 160ms fired between the Stop and the turn settling (the same bound
+    // as the sibling row above). The 8000/5000ms backstops re-armed by the poll
+    // loop are cleared unfired, and the poll's own sleeps are ~1ms. A wait built
+    // from many short sleeps, or from no timer at all, is NOT caught here; that
+    // needs a call count and is listed as residual in the PR.
+    const waited = arms.filter((a) => a.ms > 160 && a.fired)
     assert.deepEqual(waited.map((a) => a.ms), [], 'the answer must not wait out a timer for the transcript to land')
     assert.equal(events.results.length, 1)
     assert.deepEqual(thinkingFrames(events.frames), [], 'precondition: nothing on disk yet')

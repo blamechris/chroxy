@@ -364,7 +364,8 @@ describe('MCPClient', () => {
       // subsequent attempts back off.
       const restarting = nextState(client, MCP_STATES.RESTARTING)
       const restarted = nextState(client, MCP_STATES.STARTING)
-      restarted.catch(() => {}) // surfaced by the await below; no unhandled rejection if an earlier await throws first
+      restarting.catch(() => {}) // both are surfaced by the awaits below; no unhandled rejection if an earlier await throws first
+      restarted.catch(() => {})
       await waitForState(client, MCP_STATES.READY)
       await restarting
       await restarted
