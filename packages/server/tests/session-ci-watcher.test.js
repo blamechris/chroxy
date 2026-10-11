@@ -33,6 +33,7 @@ import {
   MAX_TITLE_CHARS,
   DEFAULT_TICK_INTERVAL_MS,
   DEFAULT_DISCOVERY_INTERVAL_MS,
+  DEFAULT_UNDETERMINABLE_BACKOFF_AFTER,
 } from '../src/session-ci-watcher.js'
 
 const SHA1 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -906,6 +907,171 @@ describe('SessionCiWatcher — bounded fan-out', () => {
     watcher.stop()
     await watcher.tick()
     assert.deepEqual(surveyed, [], 'a stopped watcher must spawn no subprocess')
+  })
+})
+
+describe('SessionCiWatcher — a permanently undeterminable session backs off, never disarms (#7443)', () => {
+  // The cadence arithmetic under test (threshold 3, tick 60s, discovery 300s):
+  // surveys at t = 0, 1, 2 min (every tick until the streak reaches 3), then the
+  // gap doubles from one tick — 2, 4, 8 min — capped at the discovery interval
+  // (5 min): t = 4, 8, 13, 18, 23, 28. Counted over 30 simulated ticks with an
+  // injected clock; no wall time anywhere.
+  const TICK = 60_000
+  const DISCOVERY = 300_000
+
+  /** A watcher armed (via observe) on s1 whose survey returns `current()`. */
+  function armedHarness({ threshold = 3, current } = {}) {
+    const lines = { warn: [], info: [] }
+    const h = harness({
+      tickIntervalMs: TICK,
+      discoveryIntervalMs: DISCOVERY,
+      undeterminableThreshold: threshold,
+      survey: async ({ sessionId, cwd }) => { h.surveyed.push({ sessionId, cwd }); return current() },
+      logger: { debug() {}, info: m => lines.info.push(m), warn: m => lines.warn.push(m) },
+    })
+    assert.equal(h.watcher.observe('s1', pending()), 'armed', 'sanity: the fixture must start armed')
+    return { ...h, lines }
+  }
+
+  /** Drive n ticks; `h.surveyTicks` collects the tick index of every survey. */
+  async function runTicks(h, n) {
+    h.surveyTicks ??= []
+    h.tickNo ??= 0
+    for (let i = 0; i < n; i += 1) {
+      const before = h.surveyed.length
+      await h.watcher.tick()
+      for (let k = before; k < h.surveyed.length; k += 1) h.surveyTicks.push(h.tickNo)
+      h.tickNo += 1
+      h.advance(TICK)
+    }
+  }
+
+  it('the default threshold is a named, documented constant above 1', () => {
+    assert.ok(Number.isInteger(DEFAULT_UNDETERMINABLE_BACKOFF_AFTER) && DEFAULT_UNDETERMINABLE_BACKOFF_AFTER > 1)
+  })
+
+  it('stops paying every-tick survey cost once the streak crosses the threshold', async () => {
+    const h = armedHarness({ current: () => degraded() })
+    await runTicks(h, 30)
+    assert.deepEqual(h.surveyTicks, [0, 1, 2, 4, 8, 13, 18, 23, 28],
+      'every tick for the first 3, then gaps of 2, 4, then the 5-minute cap — exact ticks, so an off-by-one on the threshold cannot hide behind an equal count')
+  })
+
+  it('CONTROL: below the threshold the session is still surveyed every tick', async () => {
+    const h = armedHarness({ threshold: 100, current: () => degraded() })
+    await runTicks(h, 30)
+    assert.equal(h.surveyed.length, 30, 'the unfixed every-tick cadence, still in force under the threshold')
+  })
+
+  it('treats an `indeterminate` fork bail-out exactly like a `reason`', async () => {
+    const h = armedHarness({ current: () => indeterminate() })
+    await runTicks(h, 30)
+    assert.equal(h.surveyed.length, 9)
+  })
+
+  it('the backoff is capped at the discovery interval, however long the streak', async () => {
+    const h = armedHarness({ current: () => degraded() })
+    await runTicks(h, 60)
+    const before = h.surveyed.length
+    await runTicks(h, 30)
+    assert.equal(h.surveyed.length - before, 6, 'steady state: one survey per 5 minutes (6 in 30 ticks), never slower')
+  })
+
+  it('KEEPS the arm: a later settled reading still closes the transition and fires exactly once (the #7435 invariant)', async () => {
+    let reading = degraded()
+    const h = armedHarness({ current: () => reading })
+    await runTicks(h, 30)
+    assert.equal(h.events.length, 0)
+    reading = green()
+    // The next due survey sees the settled run for the SAME (number, SHA) the
+    // arm was keyed on. Walk the clock until it is due.
+    await runTicks(h, 6)
+    assert.equal(h.events.length, 1, 'the arm survived the backoff and closed')
+    assert.equal(h.events[0].verdict, 'success')
+    await runTicks(h, 10)
+    assert.equal(h.events.length, 1, 'and it fires once, not once per later survey')
+  })
+
+  it('a determinable reading restores the every-tick cadence immediately', async () => {
+    let reading = degraded()
+    const h = armedHarness({ current: () => reading })
+    await runTicks(h, 30)
+    reading = pending()
+    // Run until the backed-off session is next due and sees the pending reading.
+    let guard = 0
+    while (h.watcher._state.get('s1').undeterminableStreak !== 0 && guard++ < 10) await runTicks(h, 1)
+    assert.ok(guard < 10, 'sanity: the determinable reading was eventually surveyed')
+    const before = h.surveyed.length
+    await runTicks(h, 5)
+    assert.equal(h.surveyed.length - before, 5, 'every tick again, no residual backoff')
+  })
+
+  it('a dashboard observe() of a determinable reading also restores it immediately', async () => {
+    const h = armedHarness({ current: () => degraded() })
+    await runTicks(h, 30)
+    const before = h.surveyed.length
+    assert.equal(h.watcher.observe('s1', pending()), 'armed')
+    await h.watcher.tick()
+    assert.equal(h.surveyed.length - before, 1, 'surveyed on the very next tick, not at the end of the backoff window')
+  })
+
+  it('observe() of an undeterminable reading does not count toward the streak', async () => {
+    // A dashboard polling an undeterminable session must not be able to demote
+    // the sweep: the streak counts the sweep's own consecutive outcomes.
+    const h = armedHarness({ current: () => pending() })
+    for (let i = 0; i < 10; i += 1) h.watcher.observe('s1', degraded())
+    await runTicks(h, 10)
+    assert.equal(h.surveyed.length, 10, 'ten observe()d failures did not demote a session whose sweep readings are fine')
+  })
+
+  it('resets the streak on ANY determinable reading, so interleaved failures never reach the threshold', async () => {
+    const seq = [degraded(), degraded(), pending(), degraded(), degraded(), pending(), degraded(), degraded(), pending()]
+    let i = 0
+    const h = armedHarness({ current: () => seq[i++ % seq.length] })
+    await runTicks(h, 18)
+    assert.equal(h.surveyed.length, 18, 'a flapping gh never accumulates a streak of 3')
+    assert.equal(h.lines.warn.length, 0, 'and so never logs')
+  })
+
+  it('logs ONCE on crossing the threshold, naming the session and the reason, and once on recovery', async () => {
+    let reading = degraded()
+    const h = armedHarness({ current: () => reading })
+    await runTicks(h, 40)
+    assert.equal(h.lines.warn.length, 1, 'one line however many surveys follow')
+    assert.ok(h.lines.warn[0].includes('s1'), 'names the session')
+    assert.ok(h.lines.warn[0].includes('gh CLI not found on PATH'), "carries the survey's own reason, so a broken gh auth is diagnosable")
+    assert.equal(h.lines.info.length, 0)
+
+    reading = pending()
+    await runTicks(h, 10)
+    assert.equal(h.lines.info.length, 1, 'exactly one recovery line')
+    assert.ok(h.lines.info[0].includes('s1'))
+    assert.equal(h.lines.warn.length, 1, 'recovery does not add a second warning')
+  })
+
+  it('an UNARMED session keeps the discovery cadence — the backoff never slows it past that', async () => {
+    const h = harness({
+      tickIntervalMs: TICK,
+      discoveryIntervalMs: DISCOVERY,
+      undeterminableThreshold: 3,
+      survey: async ({ sessionId, cwd }) => { h.surveyed.push({ sessionId, cwd }); return degraded() },
+    })
+    await runTicks(h, 30)
+    assert.equal(h.surveyed.length, 6, 'surveys at t=0,5,10,15,20,25 minutes: the discovery interval, unchanged')
+    assert.equal(h.watcher._state.get('s1').armed, null)
+  })
+
+  it('a survey that THROWS neither counts toward the streak nor disarms', async () => {
+    const h = harness({
+      tickIntervalMs: TICK,
+      discoveryIntervalMs: DISCOVERY,
+      undeterminableThreshold: 2,
+      survey: async () => { h.surveyed.push(1); throw new Error('boom') },
+    })
+    h.watcher.observe('s1', pending())
+    await runTicks(h, 10)
+    assert.equal(h.surveyed.length, 10, 'a defect is not an undeterminable reading; cadence is unchanged')
+    assert.ok(h.watcher._state.get('s1').armed, 'and the arm is intact')
   })
 })
 

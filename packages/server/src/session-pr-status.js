@@ -116,6 +116,13 @@ export const NO_GITHUB_REMOTE_REASON = 'no GitHub remote'
 /** Reason when `gh` is not installed (mirrors the Control Room integrations note). */
 export const GH_MISSING_REASON = 'gh CLI not found on PATH — install GitHub CLI (gh) to see pull-request and CI status'
 
+/**
+ * A row for THIS branch came back from `gh pr list` but cannot be normalised
+ * into a usable PR. One wording for the one condition, on both the same-repo
+ * and the fork path (#7441).
+ */
+export const UNUSABLE_ROW_REASON = 'gh pr list returned a row without a usable pull-request number'
+
 /** Reason when the branch name is not safe to place in an option-parsed argv slot. */
 export const UNSAFE_BRANCH_REASON = 'branch name cannot be passed safely to gh'
 
@@ -605,10 +612,16 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
     if (!mine) return snapshot
 
     const forkNormalised = normalisePrRow(mine)
-    // Our row exists but is unusable — the same condition the same-repo path
-    // reports as a reason. Absence was not established either way (#7435).
+    // Our row exists but is unusable — the identical condition the same-repo
+    // path reports as a reason, reported the same way (#7441). Unlike the
+    // widening bail-outs above this is not a best-effort lookup failing: the
+    // upstream ANSWERED and returned OUR row, so no usable partial answer is
+    // being protected, and a `reason` keeps `branch` and `repo` exactly as the
+    // quiet negative would. The `reason` alone makes the CI watcher hold its
+    // arm (#7435), so this site needs no `indeterminate` marker.
     if (!forkNormalised) {
-      return markIndeterminate(snapshot)
+      snapshot.reason = UNUSABLE_ROW_REASON
+      return snapshot
     }
     // `repo` names the repo the PR actually lives on, which is what the user
     // needs in order to find it — for a fork that is the base, not `origin`.
@@ -628,7 +641,7 @@ export async function surveySessionPrStatus({ sessionId, cwd, _execFile = execFi
 
   const normalised = normalisePrRow(rows[0])
   if (!normalised) {
-    snapshot.reason = 'gh pr list returned a row without a usable pull-request number'
+    snapshot.reason = UNUSABLE_ROW_REASON
     return snapshot
   }
 

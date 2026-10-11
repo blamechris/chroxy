@@ -16,6 +16,7 @@ import {
   PR_JSON_FIELDS,
   FORK_QUERY_LIMIT,
   isIndeterminate,
+  UNUSABLE_ROW_REASON,
 } from '../src/session-pr-status.js'
 import { ServerSessionPrStatusSchema } from '@chroxy/protocol'
 
@@ -442,18 +443,30 @@ describe('#7344 — session PR/CI status survey', () => {
       }
     })
 
-    it('marks a matching-but-unusable upstream row indeterminate, not a negative (#7435)', async () => {
+    it('reports a matching-but-unusable upstream row as a REASON, worded like the same-repo twin (#7441)', async () => {
       // The row IS ours (head owner matches) but carries no usable number — the
-      // same condition the same-repo path reports as a reason. Absence was not
-      // established, so it must not read as the quiet negative.
+      // identical condition the same-repo path reports as a reason. The upstream
+      // ANSWERED, so there is no best-effort widening to protect: the chip must
+      // read "cannot determine", not "no open pull request", and the reason
+      // alone makes the watcher hold its arm (no `indeterminate` marker needed).
       const mine = prRow({ number: 0, headRepositoryOwner: { login: 'MsfPablo' } })
       const snap = await surveySessionPrStatus({
         sessionId: 's1', cwd: '/repo',
         _execFile: fakeExec(forkTable({ baseRows: JSON.stringify([mine]) })),
       })
       assert.equal(snap.pr, null)
-      assert.equal(snap.reason, null)
-      assert.equal(snap.indeterminate, true)
+      assert.equal(snap.reason, UNUSABLE_ROW_REASON)
+      assert.equal(snap.indeterminate, false, 'the reason carries it; the marker stays for the best-effort bail-outs only')
+      assert.equal(snap.branch, 'fix-typos', 'the reason path keeps branch and repo, as the same-repo path does')
+      assert.deepEqual(snap.repo, { owner: 'MsfPablo', name: 'cli' }, 'repo stays the checkout origin, as the quiet negative would')
+
+      // PAIRED POSITIVE CONTROL: the same-repo twin yields the same text.
+      const sameRepo = await surveySessionPrStatus({
+        sessionId: 's1', cwd: '/repo',
+        _execFile: fakeExec(happyTable(JSON.stringify([prRow({ number: 0 })]))),
+      })
+      assert.equal(sameRepo.reason, UNUSABLE_ROW_REASON)
+      assert.equal(sameRepo.reason, snap.reason, 'one wording for one condition')
     })
 
     it('never puts an option-parseable parent owner/name into an argv slot', async () => {
