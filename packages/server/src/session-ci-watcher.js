@@ -477,13 +477,15 @@ export class SessionCiWatcher {
         const level = st.armed ? 'warn' : 'info'
         this._log?.[level]?.(
           `ci-watch: ${sessionId} has been undeterminable for ${st.undeterminableStreak} consecutive surveys (${st.lastUndeterminableReason}); ` +
-          `${st.armed ? 'its armed watch is kept but ' : ''}surveying it less often until a survey succeeds`
+          (st.armed
+            ? 'its armed watch is kept but it is surveyed less often until a survey succeeds'
+            : 'it is not armed, so it stays at the discovery cadence')
         )
       }
       return
     }
     if (st.undeterminableStreak >= this._undeterminableThreshold) {
-      this._log?.info?.(`ci-watch: ${sessionId} is determinable again after ${st.undeterminableStreak} undeterminable surveys; normal cadence restored`)
+      this._log?.info?.(`ci-watch: ${sessionId} is determinable again after ${st.undeterminableStreak} undeterminable surveys${st.armed ? '; every-tick surveying restored' : ''}`)
     }
     st.undeterminableStreak = 0
     st.lastUndeterminableReason = null
