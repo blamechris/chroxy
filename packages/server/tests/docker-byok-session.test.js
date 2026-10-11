@@ -2747,8 +2747,12 @@ describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
       'setup_log must be in customEvents',
     )
     // Inherited BYOK events must still be present (extend, not replace).
-    assert.ok(DockerByokSession.customEvents.includes('tool_start'))
-    assert.ok(DockerByokSession.customEvents.includes('tool_result'))
+    assert.ok(DockerByokSession.customEvents.includes('tool_input_delta'))
+    assert.ok(DockerByokSession.customEvents.includes('agent_event'))
+    // #8574: tool_start / tool_result are proxied events, so listing them here
+    // would forward every frame twice.
+    assert.ok(!DockerByokSession.customEvents.includes('tool_start'))
+    assert.ok(!DockerByokSession.customEvents.includes('tool_result'))
   })
 
   it('#5069: a failed streamed postCreateCommand still attaches the buffered tail to the error event', async () => {

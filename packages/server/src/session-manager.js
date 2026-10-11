@@ -51,6 +51,15 @@ import { AgentConnectionRegistry, createLegacyAgentConnection } from './agent-co
 import { forgetSurveyKey } from './handlers/survey-throttle.js'
 import { busyStateOf } from './session-busy-state.js'
 
+/**
+ * Session events that `_wireSessionEvents` forwards to clients AND records to
+ * history (one listener per name). A provider's static `customEvents` must not
+ * repeat any of them: the transient listener it would add forwards each frame a
+ * second time (#8574). Exported so the overlap guard derives its expectation
+ * from this one list rather than copying it.
+ */
+export const PROXIED_SESSION_EVENTS = Object.freeze(['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question', 'background_tasks_changed'])
+
 const log = createLogger('session-manager')
 /**
  * The state file a SessionManager falls back to when no `stateFilePath` is
@@ -4448,7 +4457,7 @@ export class SessionManager extends EventEmitter {
     // landed or a wakeup fired while no turn was running). Deliberately NOT
     // an ACTIVITY_EVENT: the session is idle by definition when it fires, so
     // it must not reset the idle timeout.
-    const PROXIED_EVENTS = ['ready', 'stream_start', 'stream_delta', 'stream_end', 'message', 'tool_start', 'tool_result', 'result', 'error', 'user_question', 'background_tasks_changed']
+    const PROXIED_EVENTS = PROXIED_SESSION_EVENTS
     // Events that indicate meaningful activity (reset idle timeout)
     const ACTIVITY_EVENTS = new Set(['message', 'stream_start', 'tool_start', 'result', 'user_question'])
     // Session-scoped logger — entries are tagged with sessionId for per-session routing
@@ -4658,7 +4667,17 @@ export class SessionManager extends EventEmitter {
     // mid-queue won't see the pre-existing queued items — acceptable for the
     // foundation slice, tracked in #5937.
     const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued', 'busy_cleared']
-    const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
+    const declaredCustomEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
+    // #8574: a name that is already PROXIED has its listener (above); a second
+    // transient one would forward every frame to the client twice. Every
+    // in-repo provider is held to this by tests/provider-custom-events-overlap.test.js;
+    // this covers a provider registered from outside the repo, and says so
+    // rather than hiding the provider's mistake.
+    const overlapping = declaredCustomEvents.filter((e) => PROXIED_EVENTS.includes(e))
+    if (overlapping.length > 0) {
+      sessionLog.warn(`[customEvents] ${session.constructor.name} lists proxied event(s) ${overlapping.join(', ')} in customEvents; ignoring the duplicate (they are already forwarded)`)
+    }
+    const customEvents = declaredCustomEvents.filter((e) => !PROXIED_EVENTS.includes(e))
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {
       session.on(event, (data) => {
