@@ -218,8 +218,15 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   static get customEvents() {
-    // tool_start / tool_result / tool_input_delta are surfaced per turn
-    // for the dashboard's tool-call bubble UI. permission_request /
+    // #8574: `tool_start` / `tool_result` are deliberately NOT listed. They are
+    // PROXIED events (session-manager.js PROXIED_SESSION_EVENTS): the proxied
+    // listener forwards them AND records them to history, so listing them
+    // here added a second, transient listener and every frame reached the
+    // client twice. tool-events-overlap guard:
+    // tests/provider-custom-events-overlap.test.js.
+    //
+    // tool_input_delta is surfaced per turn for the dashboard's tool-call
+    // bubble UI. permission_request /
     // user_question / permission_resolved are re-emitted from
     // PermissionManager and already known to the SessionManager
     // forwarding pipeline, but list them here so the capability matrix
@@ -244,7 +251,7 @@ export class ClaudeByokSession extends BaseSession {
     // accumulator and the final summary text becomes the parent's
     // Task tool_result content; replaying it as a nested event would
     // double-render the same content.
-    return ['tool_start', 'tool_result', 'tool_input_delta', 'agent_spawned', 'agent_completed', 'agent_event']
+    return ['tool_input_delta', 'agent_spawned', 'agent_completed', 'agent_event']
   }
 
   /**
