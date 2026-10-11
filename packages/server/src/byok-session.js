@@ -459,6 +459,10 @@ export class ClaudeByokSession extends BaseSession {
     // leak into a future turn.
     this._subagentUsageThisTurn = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     this._subagentCostThisTurn = 0
+    // #8569: tool_use ids whose `tool_result` event already went out this turn, so a
+    // Stop that settles `_history` with synthesized results closes only the rows
+    // still open and never emits a second result for a tool that has one.
+    this._toolResultsEmitted = new Set()
 
     // #5018: per-session built-in tool allowlist. Set by _executeTaskTool
     // ONLY on child sessions spawned with a `subagent_type` profile that
@@ -1150,6 +1154,7 @@ export class ClaudeByokSession extends BaseSession {
       ? this._buildSystemPrompt()
       : ''
 
+    this._toolResultsEmitted.clear()
     this.emit('stream_start', { messageId })
 
     // Agent loop. Each iteration:
@@ -1698,7 +1703,7 @@ export class ClaudeByokSession extends BaseSession {
       // rollback: nobody asked for those turns to count.
       const requestedStop = this._isRequestedStop(err)
       if (requestedStop) {
-        this._commitStoppedStream({ streamedText, historyLengthBeforeSend, pendingSummary })
+        this._commitStoppedStream({ streamedText, historyLengthBeforeSend, pendingSummary, messageId })
       } else if (this._history.length > historyLengthBeforeSend) {
         this._history.length = historyLengthBeforeSend
       }
@@ -1795,19 +1800,11 @@ export class ClaudeByokSession extends BaseSession {
         // inter-phase guard fires when startIndex === 0, but only the
         // blocks that *would* have executed in phase 2 need filling).
         if (toolResults[j]) continue
-        const remaining = toolBlocks[j]
-        this.emit('tool_result', {
+        toolResults[j] = this._interruptedToolResult({
           messageId,
-          toolUseId: remaining.id,
-          result: interrupted,
-          isError: true,
-        })
-        toolResults[j] = {
-          type: 'tool_result',
-          tool_use_id: remaining.id,
+          toolUseId: toolBlocks[j].id,
           content: interrupted,
-          is_error: true,
-        }
+        })
       }
     }
 
@@ -1947,7 +1944,7 @@ export class ClaudeByokSession extends BaseSession {
 
     if (resolvedDecision.behavior !== 'allow') {
       const msg = resolvedDecision.message || 'Permission denied by user.'
-      this.emit('tool_result', {
+      this._emitToolResult({
         messageId,
         toolUseId,
         result: msg,
@@ -1994,7 +1991,7 @@ export class ClaudeByokSession extends BaseSession {
     }
     const { content, isError } = dispatchResult
 
-    this.emit('tool_result', {
+    this._emitToolResult({
       messageId,
       toolUseId,
       result: content,
@@ -2847,6 +2844,28 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   /**
+   * Emit a `tool_result` event and remember its tool_use id for the turn (#8569).
+   * Every tool_result event this session sends goes through here, so "has this tool
+   * been closed on the client?" has one answer.
+   */
+  _emitToolResult({ messageId, toolUseId, result, isError }) {
+    this._toolResultsEmitted.add(toolUseId)
+    this.emit('tool_result', { messageId, toolUseId, result, isError })
+  }
+
+  /**
+   * The synthesized `is_error` tool_result for a tool the user's Stop kept from
+   * running to a result: emits the closing event for the client's tool row and
+   * returns the content block that answers the tool_use in `_history`. The one
+   * place that shape lives -- the tool-phase Stop (`_processToolBlocks`) and the
+   * Stop that threw between the history pushes (`_commitStoppedStream`) both use it.
+   */
+  _interruptedToolResult({ messageId, toolUseId, content }) {
+    this._emitToolResult({ messageId, toolUseId, result: content, isError: true })
+    return { type: 'tool_result', tool_use_id: toolUseId, content, is_error: true }
+  }
+
+  /**
    * #8559: settle `_history` after a requested Stop that ended the turn by a throw.
    *
    * Whatever the tail is, it leaves `_history` a VALID conversation (the next
@@ -2863,24 +2882,26 @@ export class ClaudeByokSession extends BaseSession {
    *   which the API refuses on every later request, so answer each with a
    *   synthesized is_error tool_result, as the tool-phase Stop does (#4061). The
    *   rounds before it stay too; rolling back instead would drop the prompt.
+   *   Each also gets the `tool_result` event that closes its row on the client
+   *   (#8569), unless its real result already went out.
    * - `assistant` tail without tool_use: already a valid end, left alone.
    *
    * A no-op only when the turn is already rolled back (a stream-init failure).
    */
-  _commitStoppedStream({ streamedText, historyLengthBeforeSend, pendingSummary }) {
+  _commitStoppedStream({ streamedText, historyLengthBeforeSend, pendingSummary, messageId }) {
     if (this._history.length <= historyLengthBeforeSend) return
     const tail = this._history[this._history.length - 1]
     if (tail?.role === 'assistant') {
       const uses = Array.isArray(tail.content) ? tail.content.filter((b) => b?.type === 'tool_use') : []
       if (uses.length > 0) {
+        // #8569: the client opened a row for each of these on `tool_start`, and only
+        // a `tool_result` event closes it. Emit the same interrupted result the
+        // tool-phase Stop does, except for a tool whose real result already went out.
         this._history.push({
           role: 'user',
-          content: uses.map((b) => ({
-            type: 'tool_result',
-            tool_use_id: b.id,
-            content: STOPPED_BEFORE_TOOL,
-            is_error: true,
-          })),
+          content: uses.map((b) => (this._toolResultsEmitted.has(b.id)
+            ? { type: 'tool_result', tool_use_id: b.id, content: STOPPED_BEFORE_TOOL, is_error: true }
+            : this._interruptedToolResult({ messageId, toolUseId: b.id, content: STOPPED_BEFORE_TOOL }))),
         })
       }
       return
