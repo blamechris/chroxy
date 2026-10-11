@@ -63,7 +63,10 @@ describe('#8574 — a byok tool call reaches the client exactly once', () => {
     assert.equal(frames.filter((f) => f.event === 'agent_event').length, 1)
   })
 
-  it('the one tool_start is recorded to history exactly once', () => {
+  // Regression pin only: this passes on the unfixed code too (the transient
+  // listener never recorded history). The discriminating tests are the
+  // forwarding-count ones above.
+  it('regression pin (not discriminating): the one tool_start is recorded to history exactly once', () => {
     const mgr = makeManager()
     const session = new ClaudeByokSession({ cwd: '/tmp' })
     wire(mgr, session, 'byok')
