@@ -3330,6 +3330,107 @@ describe('ClaudeByokSession', () => {
         })
       }
 
+      // #8569 -- the history is not the only thing the Stop must settle: the client
+      // opened a tool row on `tool_start`, and only a `tool_result` event closes it
+      // (nothing on `result` does), so a synthesized result needs its event too --
+      // the same one the tool-phase Stop emits, once per tool, never a second for a
+      // tool whose real result already went out.
+      function stopBetweenPushesSession({ blocks, where }) {
+        const session = new ClaudeByokSession({ cwd: '/tmp' })
+        session.setPermissionMode('auto')
+        const abortError = () => new APIUserAbortError({ message: 'Request was aborted.' })
+        if (where === 'listener') {
+          session._executeToolBlock = async function ({ block }) {
+            return { type: 'tool_result', tool_use_id: block.id, content: 'ok', is_error: false }
+          }
+          session.on('tool_input_delta', () => { session.interrupt(); throw abortError() })
+        } else if (where === 'exec') {
+          session._executeToolBlock = async function () { this.interrupt(); throw abortError() }
+        } else {
+          // The real executor: the first block finishes and emits its own tool_result;
+          // the second stops the session and throws, so Promise.all rejects and the
+          // first result never reaches `_history`.
+          session._dispatchBuiltinTool = async function ({ input }) {
+            if (input.slow) {
+              await new Promise((resolve) => setTimeout(resolve, 10))
+              this.interrupt()
+              throw abortError()
+            }
+            return { content: 'real result', isError: false }
+          }
+        }
+        session._client = {
+          messages: {
+            stream: () => fakeStream(
+              [{ type: 'message_delta', delta: { stop_reason: 'tool_use' } }],
+              { stop_reason: 'tool_use', content: blocks, usage: { input_tokens: 1, output_tokens: 1 } },
+            ),
+          },
+        }
+        return session
+      }
+      const readBlock = (id, input = { file_path: '/a' }) => ({ type: 'tool_use', id, name: 'Read', input })
+
+      for (const [label, where] of [['the tool executor', 'exec'], ['a tool_input_delta listener', 'listener']]) {
+        it(`a requested Stop that throws out of ${label} after the tool_use was committed closes the tool row with a tool_result event (#8569)`, async () => {
+          const session = stopBetweenPushesSession({ blocks: [readBlock('tu_1'), readBlock('tu_2', { file_path: '/b' })], where })
+          const captured = captureEvents(session)
+          await session.start()
+          await session.sendMessage('go')
+          const results = captured.filter((e) => e.name === 'tool_result')
+          assert.deepEqual(
+            results.map((e) => e.payload.toolUseId).sort(),
+            ['tu_1', 'tu_2'],
+            'every tool the client opened a row for gets exactly one tool_result event',
+          )
+          for (const { payload } of results) {
+            assert.equal(payload.isError, true)
+            assert.ok(typeof payload.result === 'string' && payload.result.length > 0)
+            assert.equal(payload.messageId, captured.find((e) => e.name === 'stream_start')?.payload.messageId)
+          }
+          // The event says what the history says.
+          const history = session._history[session._history.length - 1].content
+          for (const block of history) {
+            assert.equal(results.find((e) => e.payload.toolUseId === block.tool_use_id).payload.result, block.content)
+          }
+          const names = captured.map((e) => e.name)
+          assert.ok(names.lastIndexOf('tool_result') < names.indexOf('result'), 'the rows close before the turn result')
+          await session.destroy()
+        })
+      }
+
+      it('a synthesized stopped tool_result is not emitted for a tool whose real result already went out (#8569)', async () => {
+        const session = stopBetweenPushesSession({
+          blocks: [readBlock('tu_done'), readBlock('tu_slow', { file_path: '/b', slow: true })],
+          where: 'dispatch',
+        })
+        const captured = captureEvents(session)
+        await session.start()
+        await session.sendMessage('go')
+        const results = captured.filter((e) => e.name === 'tool_result')
+        const byId = (id) => results.filter((e) => e.payload.toolUseId === id)
+        assert.equal(byId('tu_done').length, 1, 'the real result is the only event for the finished tool')
+        assert.equal(byId('tu_done')[0].payload.result, 'real result')
+        assert.equal(byId('tu_done')[0].payload.isError, false)
+        assert.equal(byId('tu_slow').length, 1, 'the tool that was cut off still gets its closing event')
+        assert.equal(byId('tu_slow')[0].payload.isError, true)
+        // ...and the history still answers both, as before.
+        assert.deepEqual(session._history[session._history.length - 1].content.map((b) => b.tool_use_id), ['tu_done', 'tu_slow'])
+        await session.destroy()
+      })
+
+      it('a turn after a stopped one starts with a clean record of emitted tool results (#8569)', async () => {
+        // Same tool_use id reused on the next turn (a stub, or a provider that numbers
+        // ids per request) must still get its closing event.
+        const session = stopBetweenPushesSession({ blocks: [readBlock('tu_1')], where: 'exec' })
+        const captured = captureEvents(session)
+        await session.start()
+        await session.sendMessage('one')
+        await session.sendMessage('two')
+        assert.equal(captured.filter((e) => e.name === 'tool_result' && e.payload.toolUseId === 'tu_1').length, 2)
+        await session.destroy()
+      })
+
       it('an abort nobody asked for mid-stream still rolls the whole turn back (#8559)', async () => {
         const { session } = stopHistorySession({ events: [textDelta('half')], priorRound: true, stop: 'unrequested' })
         captureEvents(session)
