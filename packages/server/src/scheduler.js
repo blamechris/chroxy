@@ -528,33 +528,31 @@ export class SchedulerEngine extends EventEmitter {
   }
 
   /**
-   * @private — end the session lifecycle of tasks that no longer have one (#7006).
-   * A live recurring task keeps exactly ONE session between fires (see
-   * _runViaSessionManager), so the cache is bounded by the number of live tasks;
-   * this is the other half — what happens when a task stops being live.
+   * @private — end the session lifecycle of tasks that no longer exist (#7006).
+   * A recurring task keeps exactly ONE session between fires (see
+   * _runViaSessionManager); this is the other half — what happens when the task
+   * is deleted.
    *
-   * - REMOVED (deleted by the operator): the session is destroyed with the task,
-   *   so a deleted task no longer leaves a provider session running until the
-   *   daemon exits. Never while the task's run is in flight — the turn is still
-   *   using it — so it is skipped here and released by the pass that follows the
-   *   run settling (_fire re-arms after every run).
-   * - DISABLED, or retired (a `once` task whose nextRun became null): only the
-   *   mapping is dropped. The session is NOT destroyed — it stays an ordinary
-   *   session the operator can open to read what the last run did, and close like
-   *   any other. Re-enabling the task then creates a session through the normal
-   *   _resolveSession fallback.
+   * Only REMOVAL (the task is gone from the store) ends the session: it is
+   * destroyed and the mapping dropped, so a deleted task no longer leaves a
+   * provider session running until the daemon exits. Never while the task's run
+   * is in flight — the turn is still using it — so it is skipped here and
+   * released by the pass that follows the run settling (_fire re-arms after every
+   * run).
    *
-   * The mapping is in-memory only; nothing persists it across a daemon restart,
-   * so a restart forgets every task->session link without destroying anything.
-   * Never throws: a failing destroy must not take the scheduling tick down.
+   * A task that is merely DISABLED, or a `once` task that retired (nextRun null),
+   * keeps its mapping and its session. Resume reuses the same session (dropping
+   * the mapping on pause would strand one session per pause/resume cycle), and
+   * the session still holds what the last run did. If such a task is deleted
+   * later, the pass above destroys its session.
+   *
+   * The mapping is in-memory only, so a restart forgets every task->session link
+   * without destroying anything. Never throws: a failing destroy must not take
+   * the scheduling tick down.
    */
   _releaseSessions() {
     for (const [taskId, sessionId] of [...this._sessionByTask]) {
-      const task = this._store.get(taskId)
-      if (task) {
-        if (!task.enabled || !Number.isFinite(task.nextRun)) this._sessionByTask.delete(taskId)
-        continue
-      }
+      if (this._store.get(taskId)) continue
       if (this._running.has(taskId)) continue
       this._sessionByTask.delete(taskId)
       this._destroyTaskSession(taskId, sessionId)
@@ -563,20 +561,19 @@ export class SchedulerEngine extends EventEmitter {
 
   /** @private — destroy a removed task's session if it is still alive; never throws. */
   _destroyTaskSession(taskId, sessionId) {
+    const warn = (err) => {
+      this._log.warn(`Could not destroy the session of removed scheduled task ${taskId}: ${err?.message || err}`)
+    }
     try {
       // Already gone (the operator closed it, or a teardown is in progress).
       if (!this._sm?.getSession?.(sessionId)) return
+      this._log.info(`Scheduled task ${taskId} was removed — closing its session ${sessionId}`)
       const pending = typeof this._sm.destroySessionLocked === 'function'
         ? this._sm.destroySessionLocked(sessionId)
         : this._sm.destroySession?.(sessionId)
-      if (pending && typeof pending.catch === 'function') {
-        pending.catch((err) => {
-          this._log.warn(`Could not destroy the session of removed scheduled task ${taskId}: ${err?.message || err}`)
-        })
-      }
-      this._log.info(`Scheduled task ${taskId} was removed — closed its session ${sessionId}`)
+      if (pending && typeof pending.catch === 'function') pending.catch(warn)
     } catch (err) {
-      this._log.warn(`Could not destroy the session of removed scheduled task ${taskId}: ${err?.message || err}`)
+      warn(err)
     }
   }
 
@@ -824,10 +821,11 @@ export class SchedulerEngine extends EventEmitter {
    * meaningful (the operator can open it and read what the run actually did), and
    * gives a recurring task continuity across runs. Sessions are NOT auto-destroyed
    * after a run — they are ordinary sessions the operator can inspect and close.
-   * A live recurring task therefore keeps exactly one session between fires, so
-   * the cache is bounded by the number of live tasks; there is no idle reap and no
-   * cap. The session ends with the task: see _releaseSessions (#7006) for what
-   * deleting, disabling and retiring a task each do to it.
+   * A recurring task therefore keeps exactly one session between fires, so within
+   * one daemon process the cache is bounded by the number of tasks in the registry;
+   * there is no idle reap and no cap. (A restart restores old sessions without
+   * their task link.) The session ends when the task is DELETED: see
+   * _releaseSessions (#7006). Pausing, resuming or retiring a task leaves it be.
    *
    * Because they are ordinary sessions, the operator can also change their
    * permission mode. That makes reuse an escalation vector, so the clamped mode is

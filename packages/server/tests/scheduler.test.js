@@ -661,14 +661,15 @@ describe('#6865 SchedulerEngine', () => {
     })
   })
 
-  // ── #7006: a task's session is released with the task ──────────────────────
+  // ── #7006: a task's session is released when the task is DELETED ───────────
   //
   // A live recurring task keeps exactly ONE session between fires. What was
   // missing was the end of that lifecycle: a task the operator DELETES used to
   // leave its session (and the provider process behind it) running until the
-  // daemon exited. Only deletion destroys the session; disabling a task or
-  // retiring a one-time task merely forgets the mapping, because the session
-  // holds what the last run did and the operator may still want to read it.
+  // daemon exited. Only deletion ends it. Pausing and resuming a task, or a
+  // one-time task retiring, keep the mapping: resume reuses the same session
+  // (dropping it would strand one session per pause/resume cycle), and the
+  // session still holds what the last run did.
 
   describe('session release (#7006)', () => {
     const recurring = { cadence: { kind: 'interval', everyMs: MINUTE, anchor: 1000 } }
@@ -746,7 +747,7 @@ describe('#6865 SchedulerEngine', () => {
       assert.equal(engine.scheduledSessionIds.size, 0)
     })
 
-    it('keeps the session when a task is disabled, forgets the mapping, and a re-enabled task gets a fresh one', async () => {
+    it('keeps the mapping when a task is paused, and resume reuses the same session', async () => {
       const sm = new FakeSessionManager()
       const task = addTask({ prompt: 'daily', ...recurring })
       const engine = newEngine({ sessionManager: sm })
@@ -757,20 +758,18 @@ describe('#6865 SchedulerEngine', () => {
 
       store.update(task.id, { enabled: false })
       engine.refresh()
-
-      assert.deepEqual(sm.destroyed, [], 'a paused task\'s session stays an ordinary session the operator can read')
-      assert.ok(sm.getSession(sessionId))
-      assert.equal(engine.scheduledSessionIds.size, 0, 'but it is no longer the task\'s cached session')
+      assert.deepEqual(sm.destroyed, [])
+      assert.equal(engine.scheduledSessionIds.get(task.id), sessionId, 'a paused task keeps its session')
 
       store.update(task.id, { enabled: true })
       clock = 200_000
       engine.refresh()
       await timers.tick()
-      assert.equal(sm.created.length, 2, 're-enabling creates a session through the normal fallback')
-      assert.ok(sm.getSession(sessionId), 'the old one is untouched')
+      assert.equal(sm.created.length, 1, 'resume reuses the session instead of stranding one per pause/resume cycle')
+      assert.equal(sm.sends.length, 2)
     })
 
-    it('keeps the session when a one-time task retires, and forgets the mapping', async () => {
+    it('keeps the mapping when a one-time task retires', async () => {
       const sm = new FakeSessionManager()
       const task = addTask({ prompt: 'just once', cadence: { kind: 'once', at: 2000 } })
       const engine = newEngine({ sessionManager: sm })
@@ -781,8 +780,41 @@ describe('#6865 SchedulerEngine', () => {
       assert.equal(store.get(task.id).nextRun, null, 'precondition: the one-time task retired')
 
       assert.deepEqual(sm.destroyed, [], 'the record of what the run did is not thrown away')
-      assert.ok(sm.getSession(sessionId))
-      assert.equal(engine.scheduledSessionIds.size, 0, 'a retired task caches nothing')
+      assert.equal(engine.scheduledSessionIds.get(task.id), sessionId)
+    })
+
+    it('destroys the session when a PAUSED task is deleted', async () => {
+      const sm = new FakeSessionManager()
+      const task = addTask({ prompt: 'daily', ...recurring })
+      const engine = newEngine({ sessionManager: sm })
+      engine.start()
+      clock = 61_000
+      await timers.tick()
+      const sessionId = sm.created[0].id
+      store.update(task.id, { enabled: false })
+      engine.refresh()
+
+      store.remove(task.id)
+      engine.refresh()
+
+      assert.deepEqual(sm.destroyed, [sessionId])
+      assert.equal(engine.scheduledSessionIds.size, 0)
+    })
+
+    it('destroys the session when a RETIRED one-time task is deleted', async () => {
+      const sm = new FakeSessionManager()
+      const task = addTask({ prompt: 'just once', cadence: { kind: 'once', at: 2000 } })
+      const engine = newEngine({ sessionManager: sm })
+      engine.start()
+      clock = 3000
+      await timers.tick()
+      const sessionId = sm.created[0].id
+
+      store.remove(task.id)
+      engine.refresh()
+
+      assert.deepEqual(sm.destroyed, [sessionId])
+      assert.equal(engine.scheduledSessionIds.size, 0)
     })
 
     it('leaves a live recurring task\'s session alone across unrelated refreshes', async () => {
@@ -823,8 +855,44 @@ describe('#6865 SchedulerEngine', () => {
       assert.equal(engine.scheduledSessionIds.size, 0, 'the stale mapping is dropped')
     })
 
-    it('a throwing destroySession neither escapes refresh() nor leaves the mapping behind', async () => {
+    it('a REJECTED async destroy is logged, not thrown, and the mapping is still dropped', async () => {
       const sm = new FakeSessionManager()
+      const warnings = []
+      const task = addTask({ prompt: 'daily', ...recurring })
+      const engine = newEngine({ sessionManager: sm, logger: { ...silentLog, warn: (m) => warnings.push(m) } })
+      engine.start()
+      clock = 61_000
+      await timers.tick()
+      sm.lockedDestroyError = new Error('provider teardown failed')
+
+      store.remove(task.id)
+      assert.doesNotThrow(() => engine.refresh())
+      await settle()
+
+      assert.equal(engine.scheduledSessionIds.size, 0)
+      assert.equal(warnings.length, 1, 'the failure is reported once')
+      assert.match(warnings[0], /provider teardown failed/)
+    })
+
+    it('falls back to the sync destroySession when the manager has no destroySessionLocked', async () => {
+      const sm = new FakeSessionManager()
+      sm.destroySessionLocked = undefined
+      const task = addTask({ prompt: 'daily', ...recurring })
+      const engine = newEngine({ sessionManager: sm })
+      engine.start()
+      clock = 61_000
+      await timers.tick()
+      const sessionId = sm.created[0].id
+
+      store.remove(task.id)
+      engine.refresh()
+
+      assert.deepEqual(sm.destroyed, [sessionId])
+    })
+
+    it('a THROWING sync destroySession neither escapes refresh() nor leaves the mapping behind', async () => {
+      const sm = new FakeSessionManager()
+      sm.destroySessionLocked = undefined
       const task = addTask({ prompt: 'daily', ...recurring })
       const engine = newEngine({ sessionManager: sm })
       engine.start()
@@ -1620,6 +1688,18 @@ class FakeSessionManager extends EventEmitter {
 
   getSession(id) {
     return this.sessions.get(id) || null
+  }
+
+  /**
+   * Mirrors SessionManager.destroySessionLocked: async, and the entry is hidden
+   * from getSession() immediately. `lockedDestroyError` models a failing teardown.
+   */
+  destroySessionLocked(id) {
+    if (!this.sessions.has(id)) return Promise.resolve(false)
+    this.destroyed.push(id)
+    this.sessions.delete(id)
+    if (this.lockedDestroyError) return Promise.reject(this.lockedDestroyError)
+    return Promise.resolve(true)
   }
 
   /** Mirrors SessionManager.destroySession: false (no throw) for an unknown id. */
