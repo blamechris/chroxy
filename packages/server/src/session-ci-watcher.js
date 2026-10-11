@@ -82,7 +82,14 @@
  * and one sweep, and each tick surveys at most `maxSurveysPerTick` sessions,
  * sequentially, oldest-surveyed first:
  *
- *   - an ARMED session (CI known to be running) is due every tick;
+ *   - an ARMED session (CI known to be running) is due every tick — until it has
+ *     been UNDETERMINABLE for `DEFAULT_UNDETERMINABLE_BACKOFF_AFTER` sweeps in a
+ *     row (#7443), after which its survey gap doubles from two ticks up to a cap
+ *     of `discoveryIntervalMs`. The arm is KEPT throughout (a slow flap must still
+ *     close its transition — #7435) and any determinable reading restores
+ *     every-tick polling. Crossing the threshold logs once, and so does recovery;
+ *   - `reason`/`indeterminate` readings, not a thrown survey, are what count:
+ *     a throw is a defect in this module's own seam, logged on every occurrence;
  *   - any other session is due every `discoveryIntervalMs` — this is the
  *     discovery path that notices a PR opening in the first place.
  *
@@ -116,6 +123,28 @@ export const DEFAULT_DISCOVERY_INTERVAL_MS = 5 * 60_000
 
 /** Upper bound on surveys (git + gh subprocesses) started by one tick. */
 export const DEFAULT_MAX_SURVEYS_PER_TICK = 4
+
+/**
+ * Consecutive `'undeterminable'` SWEEP readings after which a session is demoted
+ * from every-tick to a capped backoff (#7443).
+ *
+ * An armed session is due every tick, and "undeterminable" (a `reason`, or the
+ * fork bail-outs' `indeterminate` marker) is right to hold the arm: a transient
+ * `gh` failure must not cancel a watch the user is waiting on (#7435). But
+ * nothing bounded how long "transient" could last, so an expired `gh` token or a
+ * lost repo cost three subprocesses and one or two GitHub API calls every
+ * `tickIntervalMs` forever. Past this many in a row the SURVEY CADENCE is
+ * relaxed — the arm is never dropped, and any determinable reading restores
+ * every-tick polling at once. Five consecutive failures is five minutes of
+ * ordinary 60s ticks: long enough that a blip never reaches it, short enough
+ * that a dead `gh` stops paying within minutes. Override per watcher with
+ * `undeterminableThreshold`.
+ *
+ * The backoff gap starts at two ticks and doubles with each further failure,
+ * capped at `discoveryIntervalMs` (the cadence an unarmed session already pays),
+ * so the worst case is never slower than discovering a PR in the first place.
+ */
+export const DEFAULT_UNDETERMINABLE_BACKOFF_AFTER = 5
 
 /** Cap on the PR title echoed into a notification body. */
 export const MAX_TITLE_CHARS = 120
@@ -329,6 +358,9 @@ export class SessionCiWatcher {
    * @param {number} [opts.tickIntervalMs]
    * @param {number} [opts.discoveryIntervalMs]
    * @param {number} [opts.maxSurveysPerTick]
+   * @param {number} [opts.undeterminableThreshold] - consecutive undeterminable
+   *   sweep readings before an armed session backs off (#7443). Defaults to
+   *   `DEFAULT_UNDETERMINABLE_BACKOFF_AFTER`.
    * @param {() => number} [opts.nowFn] - injectable clock.
    * @param {object} [opts.logger]
    */
@@ -343,6 +375,7 @@ export class SessionCiWatcher {
     tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
     discoveryIntervalMs = DEFAULT_DISCOVERY_INTERVAL_MS,
     maxSurveysPerTick = DEFAULT_MAX_SURVEYS_PER_TICK,
+    undeterminableThreshold = DEFAULT_UNDETERMINABLE_BACKOFF_AFTER,
     nowFn = Date.now,
     logger = defaultLog,
   } = {}) {
@@ -357,13 +390,15 @@ export class SessionCiWatcher {
     this._tickIntervalMs = tickIntervalMs
     this._discoveryIntervalMs = discoveryIntervalMs
     this._maxSurveysPerTick = maxSurveysPerTick
+    this._undeterminableThreshold = undeterminableThreshold
     this._now = nowFn
     this._log = logger
     this._timer = null
     this._stopped = false
     this._ticking = false
     /**
-     * sessionId → { lastSurveyedAt: number, armed: {number, headRefOid}|null }.
+     * sessionId → { lastSurveyedAt: number, armed: {number, headRefOid}|null,
+     * undeterminableStreak: number, lastUndeterminableReason: string|null }.
      * Bounded by the live session count — entries are pruned in `tick()` when a
      * session disappears, so a long-running daemon does not accumulate the ids
      * of every session it has ever seen.
@@ -387,10 +422,71 @@ export class SessionCiWatcher {
       // `now - 0 >= discoveryIntervalMs` only happens to be true because
       // Date.now() is large. An injected clock (or a mocked one starting near
       // zero) would otherwise silently never survey a new session.
-      s = { lastSurveyedAt: null, lastObservedAt: null, armed: null, lastFired: null }
+      //
+      // `undeterminableStreak` (#7443) counts consecutive `'undeterminable'`
+      // readings from the SWEEP; `lastUndeterminableReason` is only for the
+      // one log line when it crosses the threshold.
+      s = {
+        lastSurveyedAt: null,
+        lastObservedAt: null,
+        armed: null,
+        lastFired: null,
+        undeterminableStreak: 0,
+        lastUndeterminableReason: null,
+      }
       this._state.set(sessionId, s)
     }
     return s
+  }
+
+  /**
+   * Is an ARMED session due this tick? Always, until its undeterminable streak
+   * reaches the threshold (#7443); after that, only once the backoff gap since
+   * its last sweep survey has elapsed. The arm itself is untouched — this decides
+   * only WHEN the next survey runs, never whether the watch survives.
+   */
+  _armedIsDue(st, now) {
+    if (st.undeterminableStreak < this._undeterminableThreshold) return true
+    if (st.lastSurveyedAt === null) return true
+    // Gap = tick * 2^(failures past the threshold, counting the crossing one),
+    // capped at the discovery interval. The exponent is clamped so a very long
+    // streak cannot overflow to Infinity before the cap applies.
+    const pastThreshold = st.undeterminableStreak - this._undeterminableThreshold + 1
+    const gap = Math.min(this._tickIntervalMs * 2 ** Math.min(pastThreshold, 30), this._discoveryIntervalMs)
+    return now - st.lastSurveyedAt >= gap
+  }
+
+  /**
+   * Fold one reconcile outcome into the undeterminable streak (#7443).
+   *
+   * `countFailure: false` is the `observe()` path: a dashboard pull may RESET the
+   * streak (it is a real determinable reading) but never extend it, so a polling
+   * dashboard cannot demote the sweep. Logs once on crossing the threshold and
+   * once on recovering from it — never per survey.
+   */
+  _noteOutcome(sessionId, outcome, snapshot, { countFailure }) {
+    const st = this._stateFor(sessionId)
+    if (outcome === 'undeterminable') {
+      if (!countFailure) return
+      st.undeterminableStreak += 1
+      st.lastUndeterminableReason = snapshot?.reason
+        || 'a best-effort lookup failed (fork widening) and absence was not established'
+      if (st.undeterminableStreak === this._undeterminableThreshold) {
+        // warn when a watch is actually being slowed; info when nothing is armed
+        // (the session was already at discovery cadence, this is visibility only).
+        const level = st.armed ? 'warn' : 'info'
+        this._log?.[level]?.(
+          `ci-watch: ${sessionId} has been undeterminable for ${st.undeterminableStreak} consecutive surveys (${st.lastUndeterminableReason}); ` +
+          `${st.armed ? 'its armed watch is kept but ' : ''}surveying it less often until a survey succeeds`
+        )
+      }
+      return
+    }
+    if (st.undeterminableStreak >= this._undeterminableThreshold) {
+      this._log?.info?.(`ci-watch: ${sessionId} is determinable again after ${st.undeterminableStreak} undeterminable surveys; normal cadence restored`)
+    }
+    st.undeterminableStreak = 0
+    st.lastUndeterminableReason = null
   }
 
   /**
@@ -419,7 +515,7 @@ export class SessionCiWatcher {
       const now = this._now()
       const due = sessions.filter(s => {
         const st = this._stateFor(s.sessionId)
-        if (st.armed) return true
+        if (st.armed) return this._armedIsDue(st, now)
         // DUE-ness counts either kind of survey: a dashboard pull is a real
         // reading of the same repo, so it defers discovery just as the sweep's
         // own would, and the two do not spawn `gh` twice in a row.
@@ -474,7 +570,7 @@ export class SessionCiWatcher {
         // would push a notification and TYPE INTO A SESSION mid-shutdown.
         if (this._stopped) return
         try {
-          this._reconcile(sessionId, snapshot)
+          this._noteOutcome(sessionId, this._reconcile(sessionId, snapshot), snapshot, { countFailure: true })
         } catch (err) {
           this._log?.warn?.(`ci-watch: reconcile failed for ${sessionId}: ${getErrorMessage(err, 'unknown error')}`)
         }
@@ -616,7 +712,9 @@ export class SessionCiWatcher {
     // twice in a row. It does not defer an ARMED session — those are due every
     // tick regardless of either stamp.
     this._stateFor(sessionId).lastObservedAt = this._now()
-    return this._reconcile(sessionId, snapshot, { fire: false })
+    const outcome = this._reconcile(sessionId, snapshot, { fire: false })
+    this._noteOutcome(sessionId, outcome, snapshot, { countFailure: false })
+    return outcome
   }
 
   /**
