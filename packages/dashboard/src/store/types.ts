@@ -2409,8 +2409,8 @@ export interface ConnectionState {
   startOrchestrationRun: (opts: { preset?: string; epicPrompt?: string; cwd: string; title?: string; budgetUsd?: number; autoApprovePlan?: boolean; roles?: Record<string, { provider: string; model: string }> }) => string | null;
   /** #6691 (S-3c) — respond to a run gate. Returns the requestId (or null if not sent). */
   sendOrchestrationGateResponse: (runId: string, gateId: string, decision: 'approve' | 'reject' | 'revise' | 'skip', note?: string, budgetUsd?: number) => string | null;
-  /** #6691 (S-3c) — cancel/pause/resume a run. Returns the requestId (or null if not sent). */
-  sendOrchestrationRunAction: (runId: string, action: 'cancel' | 'pause' | 'resume') => string | null;
+  /** #6691 (S-3c) — cancel a run (the only run action; pause/resume were removed, #7140). Returns the requestId (or null if not sent). */
+  sendOrchestrationRunAction: (runId: string, action: 'cancel') => string | null;
   /** #6691 (S-3c) — annotate a run (baseline session + verdict quality). Returns the requestId (or null if not sent). */
   sendOrchestrationRunAnnotate: (runId: string, opts: { baselineSessionId?: string; verdictQuality?: string }) => string | null;
   /** #6871 — request the scheduled-tasks snapshot (registry + scheduler gate state). */

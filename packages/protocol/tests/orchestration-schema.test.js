@@ -2,11 +2,13 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   ServerOrchestrationRunDeltaSchema,
+  ServerOrchestrationActionAckSchema,
   RUN_STATUS_VALUES,
   RUN_NODE_STATUS_VALUES,
   RUN_GATE_KIND_VALUES,
   COMMITTEE_VERDICT_VALUES,
 } from '../src/schemas/server/orchestration.ts'
+import { OrchestrationRunActionSchema } from '../src/schemas/client.ts'
 
 // #6691 S-1 — the orchestration wire contract. These pin the canonical enum
 // value-arrays (the engine imports them, so a drift is a real contract break)
@@ -50,5 +52,27 @@ describe('ServerOrchestrationRunDeltaSchema runId consistency', () => {
 
   it('rejects a nested node whose runId disagrees with the delta', () => {
     assert.equal(ServerOrchestrationRunDeltaSchema.safeParse({ ...base, node: node('WRONG') }).success, false)
+  })
+})
+
+// #7140 — the engine has no user-held pause, so the wire must not carry the
+// verbs: a client must have no way to send an action the engine cannot serve.
+describe('orchestration run actions (#7140)', () => {
+  const msg = (action) => ({ type: 'orchestration_run_action', runId: 'r1', action })
+
+  it('accepts cancel (positive control)', () => {
+    assert.equal(OrchestrationRunActionSchema.safeParse(msg('cancel')).success, true)
+  })
+
+  it('rejects pause and resume', () => {
+    assert.equal(OrchestrationRunActionSchema.safeParse(msg('pause')).success, false)
+    assert.equal(OrchestrationRunActionSchema.safeParse(msg('resume')).success, false)
+  })
+
+  it('the ack never names pause/resume, but still acks cancel', () => {
+    const ack = (action) => ServerOrchestrationActionAckSchema.safeParse({ type: 'orchestration_action_ack', action, runId: 'r1' }).success
+    assert.equal(ack('cancel'), true)
+    assert.equal(ack('pause'), false)
+    assert.equal(ack('resume'), false)
   })
 })

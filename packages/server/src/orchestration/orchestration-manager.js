@@ -417,10 +417,13 @@ export class OrchestrationManager extends EventEmitter {
 
   /**
    * Wire-level run control (`orchestration_run_action`). `cancel` is the only
-   * action this engine implements: `pause`/`resume` are on the wire schema but
-   * have no user-driven implementation — `_pauseForBudget`/`_pauseForResources`
-   * are internal stalls the scheduler clears itself, not a pause a client can
-   * hold. Fail loudly rather than acking a no-op (#7140).
+   * action this engine implements, and the only one the wire schema carries
+   * (#7140). `pause`/`resume` have no user-driven implementation —
+   * `_pauseForBudget`/`_pauseForResources` are internal stalls the scheduler
+   * clears itself, not a pause a client can hold — so the schema no longer
+   * admits them. This refusal stays as the engine's own backstop for a caller
+   * that reaches it without the wire validator: fail loudly rather than ack a
+   * no-op.
    */
   async runAction(runId, action) {
     if (action === 'cancel') {

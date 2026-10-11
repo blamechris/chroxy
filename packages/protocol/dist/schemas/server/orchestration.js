@@ -17,7 +17,8 @@ import { z } from 'zod';
  * a later fast-follow.
  */
 // --- canonical enums (engine imports these) --------------------------------
-// Run lifecycle. `paused` = user-requested pause (orchestration_run_action),
+// Run lifecycle. `paused` is a status the run model can hold, but no client can
+// request it: `orchestration_run_action` carries `cancel` only (#7140). It stays
 // distinct from `budget_paused` so the UI can render the cause; `resource_paused`
 // (#6733) = the daemon's session pool is full, so the run cannot spawn its next
 // worker and has NOTHING in flight — it clears itself the moment a slot frees;
@@ -200,7 +201,7 @@ export const ServerOrchestrationRunDeltaSchema = z.object({
 export const ServerOrchestrationActionAckSchema = z.object({
     type: z.literal('orchestration_action_ack'),
     requestId: z.string().max(128).nullable().optional(),
-    action: z.enum(['start', 'gate_response', 'cancel', 'pause', 'resume', 'annotate']),
+    action: z.enum(['start', 'gate_response', 'cancel', 'annotate']),
     runId: z.string(),
     gateId: z.string().optional(),
 }).passthrough();

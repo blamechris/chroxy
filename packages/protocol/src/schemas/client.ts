@@ -2041,7 +2041,11 @@ export const OrchestrationGateResponseSchema = z.object({
 export const OrchestrationRunActionSchema = z.object({
   type: z.literal('orchestration_run_action'),
   runId: z.string().min(1).max(128),
-  action: z.enum(['cancel', 'pause', 'resume']),
+  // `cancel` is the only run control. The engine has no user-held pause, so
+  // `pause`/`resume` were removed (#7140): a client must not be able to send an
+  // action the engine cannot serve. An old client that still sends one is
+  // rejected here as INVALID_MESSAGE.
+  action: z.enum(['cancel']),
   requestId: z.string().max(128).optional(),
 })
 

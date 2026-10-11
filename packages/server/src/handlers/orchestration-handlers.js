@@ -209,9 +209,9 @@ function orchestration_run_action(ws, client, msg, ctx) {
     .then(() => manager(ctx).runAction(msg.runId, msg.action))
     .then(() => sendAck(ws, ctx, msg, msg.action, msg.runId))
     // 'unsupported' is a PERMANENT no — this engine will never serve the action
-    // (pause/resume, #7140) — as distinct from 'action-failed', which is "not
-    // this time". A client that cannot tell them apart has to keep offering a
-    // button that can never work.
+    // — as distinct from 'action-failed', which is "not this time". The wire
+    // schema admits `cancel` only (pause/resume were removed, #7140), so this is
+    // the backstop for a caller that skipped the validator.
     .catch((err) => orchestrationActionError(ws, ctx, msg,
       err?.code === 'ACTION_UNSUPPORTED' ? 'unsupported' : 'action-failed',
       getErrorMessage(err, `failed to ${msg.action} run`)))

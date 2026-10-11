@@ -67,17 +67,17 @@ describe('orchestration mutating senders (#6691 S-3c)', () => {
     useConnectionStore.setState({ socket })
     const s = useConnectionStore.getState()
     const g = s.sendOrchestrationGateResponse('run_1', 'g1', 'approve', undefined, 12)
-    const a = s.sendOrchestrationRunAction('run_1', 'pause')
+    const a = s.sendOrchestrationRunAction('run_1', 'cancel')
     const n = s.sendOrchestrationRunAnnotate('run_1', { baselineSessionId: 'sess_x' })
     expect(sent.map((m) => (m as { type: string }).type)).toEqual([
       'orchestration_gate_response', 'orchestration_run_action', 'orchestration_run_annotate',
     ])
     expect(sent[0]).toMatchObject({ runId: 'run_1', gateId: 'g1', decision: 'approve', budgetUsd: 12 })
-    expect(sent[1]).toMatchObject({ runId: 'run_1', action: 'pause' })
+    expect(sent[1]).toMatchObject({ runId: 'run_1', action: 'cancel' })
     expect(sent[2]).toMatchObject({ runId: 'run_1', baselineSessionId: 'sess_x' })
     const pend = useConnectionStore.getState().orchestrationPendingActions
     expect(pend[g!]).toMatchObject({ kind: 'gate_response' })
-    expect(pend[a!]).toMatchObject({ kind: 'pause' })
+    expect(pend[a!]).toMatchObject({ kind: 'cancel' })
     expect(pend[n!]).toMatchObject({ kind: 'annotate' })
   })
 

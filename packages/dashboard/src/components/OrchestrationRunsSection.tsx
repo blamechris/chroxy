@@ -373,7 +373,11 @@ function DetailPanel({ runId, onOpenSession, isSessionListed: sessionIsListed }:
   )
 }
 
-/** Cancel/pause/resume controls, gated by the run's current status. */
+/**
+ * Run controls, gated by the run's current status. Cancel is the only one: the
+ * engine has no user-held pause, so Pause/Resume buttons could only ever error
+ * (#7140).
+ */
 function RunControls({ run }: { run: RunDetail }) {
   const send = useConnectionStore((s) => s.sendOrchestrationRunAction)
   const pending = useConnectionStore((s) => s.orchestrationPendingActions)
@@ -383,21 +387,13 @@ function RunControls({ run }: { run: RunDetail }) {
   // hidden at terminal state AND while already cancelling (the cancel is
   // in-flight server-side — re-clicking is pointless)
   if (TERMINAL_STATUSES.has(run.status) || run.status === 'cancelling') return null
-  const act = (action: 'cancel' | 'pause' | 'resume') => {
-    if (action === 'cancel' && !window.confirm('Cancel this run? In-flight workers are stopped and their work auto-committed to their branches.')) return
+  const act = (action: 'cancel') => {
+    if (!window.confirm('Cancel this run? In-flight workers are stopped and their work auto-committed to their branches.')) return
     const id = send(run.runId, action)
     if (id) setReqId(id)
   }
-  const canPause = run.status === 'executing'
-  // `resource_paused` (#6733) is deliberately absent: the engine clears that
-  // stall itself the moment a session slot frees, so a Resume button would
-  // either no-op or race the engine. The warn-accented chip is the whole
-  // affordance — the operator's lever is closing a session, not this control.
-  const canResume = run.status === 'paused' || run.status === 'budget_paused' || run.status === 'suspended'
   return (
     <div className="cr-orch-run-controls" data-testid="orch-run-controls">
-      {canPause && <button type="button" data-testid="orch-action-pause" disabled={inFlight} onClick={() => act('pause')}>Pause</button>}
-      {canResume && <button type="button" data-testid="orch-action-resume" disabled={inFlight} onClick={() => act('resume')}>Resume</button>}
       <button type="button" className="cr-danger-btn" data-testid="orch-action-cancel" disabled={inFlight} onClick={() => act('cancel')}>Cancel run</button>
       {inFlight && <span className="cr-dim" data-testid="orch-action-pending">Sending…</span>}
     </div>
