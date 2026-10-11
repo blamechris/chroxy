@@ -3818,7 +3818,7 @@ function handleOrchestrationRunDelta(msg: Record<string, unknown>, get: MsgGet, 
 
 /**
  * #6691 (S-3) — `orchestration_action_ack`: terminal success echo for a mutating
- * orchestration action (start/gate_response/cancel/pause/resume/annotate).
+ * orchestration action (start/gate_response/cancel/annotate).
  * Clears the pending entry and records the result keyed by requestId. The
  * failure path arrives as `session_error{ORCHESTRATION_ACTION_FAILED}` instead.
  */

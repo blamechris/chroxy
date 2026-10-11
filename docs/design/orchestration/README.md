@@ -32,9 +32,8 @@ split the synthesized map" note still applies to whichever future PR adds the ov
 1. **Enums** — protocol (`schemas/server/orchestration.ts`) is the single source; the engine
    imports them. Run states: `created, planning, plan_review, executing, paused, budget_paused,
    resource_paused, synthesizing, cancelling, suspended, completed, failed, cancelled` (`paused` =
-   user-requested pause via `orchestration_run_action`; distinct from `budget_paused` so the UI can
-   render the cause — without it, reconciliation 10's `resume`-from-`paused` would be unserializable
-   in the strict wire enum. `resource_paused` (#6733) = the daemon's session pool is full so the run
+   a user-held pause, which no client can request: `orchestration_run_action` carries `cancel` only
+   (#7140); kept distinct from `budget_paused` so the UI can render the cause. `resource_paused` (#6733) = the daemon's session pool is full so the run
    cannot spawn its next worker and has nothing in flight; engine-cleared, not user-resumed).
    Subtask states: `pending,
    spawning, briefing, poa_review, executing, result_review, respawning, merging, conflict_fixup,
@@ -81,8 +80,9 @@ split the synthesized map" note still applies to whichever future PR adds the ov
    baselineSessionId?, verdictQuality?}`; terminal `orchestration_run_snapshot` carries optional
    `report{json, markdown}`. Dedicated `RunUsageSchema` (tokens + `costUsd` + `pricedCostUsd` +
    `effectiveUsd` + `unknownCostTurns`) + `meteringGaps` on RunDetail. (F16, F20)
-10. **Run actions** — `cancel | pause | resume`; engine gains `pauseRun`; `resume` valid from
-    `suspended | budget_paused | paused` with per-state guards. (F12)
+10. **Run actions** — `cancel` only. The designed `pause | resume` (engine `pauseRun`, `resume`
+    valid from `suspended | budget_paused | paused`) was never built, and the verbs were removed
+    from the wire (#7140). A budget stall is lifted through the `budget_overrun` gate. (F12)
 11. **Ownership** — `handlers/orchestration-handlers.js` + `ws-message-handlers.js` registration
     belong to S-2 (driven against a stub `ctx.services.orchestrationManager`); the engine (E-4)
     only implements that interface. Session badges (`orchestrationRunId/Role` on session_list)

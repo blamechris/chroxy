@@ -808,8 +808,6 @@ export declare const ServerOrchestrationActionAckSchema: z.ZodObject<{
     requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     action: z.ZodEnum<{
         start: "start";
-        pause: "pause";
-        resume: "resume";
         cancel: "cancel";
         gate_response: "gate_response";
         annotate: "annotate";

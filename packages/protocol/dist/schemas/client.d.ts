@@ -1381,8 +1381,6 @@ export declare const OrchestrationRunActionSchema: z.ZodObject<{
     type: z.ZodLiteral<"orchestration_run_action">;
     runId: z.ZodString;
     action: z.ZodEnum<{
-        pause: "pause";
-        resume: "resume";
         cancel: "cancel";
     }>;
     requestId: z.ZodOptional<z.ZodString>;
@@ -2214,8 +2212,6 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"orchestration_run_action">;
     runId: z.ZodString;
     action: z.ZodEnum<{
-        pause: "pause";
-        resume: "resume";
         cancel: "cancel";
     }>;
     requestId: z.ZodOptional<z.ZodString>;

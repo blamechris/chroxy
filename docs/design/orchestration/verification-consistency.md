@@ -24,7 +24,7 @@
 
 **F11. `orchestration_run_snapshot` name collision, push vs pull.** Engine §12 lists it among *emitted broadcast events*; surface defines it as the *reply* to `orchestration_run_detail_request`. **Resolution:** it's a pull-reply only (surface semantics); engine's push need is served by deltas.
 
-**F12. Run-action verbs without engine APIs.** Surface `orchestration_run_action: enum(['cancel','pause','resume'])`; engine's public API has `cancelRun/resumeRun` but **no pause**, and `resume` is overloaded (suspended-after-restart vs budget_paused vs user-pause). **Resolution:** add `pauseRun(runId)` to engine API (semantics = block new delegations, same as budget-pause path); document `resumeRun` as valid from `suspended|budget_paused|paused` with per-state guards.
+**F12. Run-action verbs without engine APIs.** Surface `orchestration_run_action: enum(['cancel','pause','resume'])`; engine's public API has `cancelRun/resumeRun` but **no pause**, and `resume` is overloaded (suspended-after-restart vs budget_paused vs user-pause). **Resolution:** add `pauseRun(runId)` to engine API (semantics = block new delegations, same as budget-pause path); document `resumeRun` as valid from `suspended|budget_paused|paused` with per-state guards. **Superseded (#7140):** neither was built; `pause`/`resume` were removed from the wire and `orchestration_run_action` carries `cancel` only.
 
 ## 2. GAPS / UNOWNED WORK
 

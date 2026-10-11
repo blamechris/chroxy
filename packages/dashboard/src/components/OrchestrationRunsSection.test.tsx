@@ -254,7 +254,7 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
     expect(gateResponseMock).toHaveBeenCalledWith('run_1', 'g2', 'approve', undefined, 12.5)
   })
 
-  it('RunControls: cancel confirms then sends; pause shown for an executing run', () => {
+  it('RunControls: cancel confirms then sends', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     resetStore({
       orchestrationRuns: snapshot([runSummary()]),
@@ -262,33 +262,48 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
       orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'executing' }), seq: 3 } },
     })
     render(<OrchestrationRunsSection />)
-    expect(screen.getByTestId('orch-action-pause')).toBeTruthy()
     fireEvent.click(screen.getByTestId('orch-action-cancel'))
     expect(confirmSpy).toHaveBeenCalled()
     expect(runActionMock).toHaveBeenCalledWith('run_1', 'cancel')
     confirmSpy.mockRestore()
   })
 
-  it('RunControls: resume shown for a paused run, hidden at terminal state', () => {
-    resetStore({
-      orchestrationRuns: snapshot([runSummary({ status: 'paused' })]),
-      selectedRunId: 'run_1',
-      orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'paused' }), seq: 3 } },
+  // #7140: the engine has no user-held pause and refuses `pause`/`resume`, so a
+  // button for either could only ever produce an error. Cancel is the only run
+  // control, for EVERY non-terminal status — including the ones that used to
+  // offer Resume (paused / budget_paused / suspended) and Pause (executing).
+  for (const status of [
+    'created', 'planning', 'plan_review', 'executing', 'paused', 'budget_paused',
+    'resource_paused', 'synthesizing', 'suspended',
+  ] as const) {
+    it(`#7140: a ${status} run offers Cancel and never Pause/Resume`, () => {
+      resetStore({
+        orchestrationRuns: snapshot([runSummary({ status })]),
+        selectedRunId: 'run_1',
+        orchestrationRunDetails: { run_1: { detail: runDetail({ status }), seq: 3 } },
+      })
+      render(<OrchestrationRunsSection />)
+      const controls = screen.getByTestId('orch-run-controls')
+      // POSITIVE CONTROL: the controls row really rendered for this status, so
+      // the absences below are not "nothing rendered at all".
+      expect(screen.getByTestId('orch-action-cancel')).toBeTruthy()
+      expect(screen.queryByTestId('orch-action-pause')).toBeNull()
+      expect(screen.queryByTestId('orch-action-resume')).toBeNull()
+      expect(Array.from(controls.querySelectorAll('button')).map((b) => b.textContent)).toEqual(['Cancel run'])
     })
-    const { rerender } = render(<OrchestrationRunsSection />)
-    fireEvent.click(screen.getByTestId('orch-action-resume'))
-    expect(runActionMock).toHaveBeenCalledWith('run_1', 'resume')
-    // terminal → no controls at all
+  }
+
+  it('RunControls: hidden at terminal state', () => {
     resetStore({
       orchestrationRuns: snapshot([runSummary({ status: 'completed' })]),
       selectedRunId: 'run_1',
       orchestrationRunDetails: { run_1: { detail: runDetail({ status: 'completed' }), seq: 9 } },
     })
-    rerender(<OrchestrationRunsSection />)
+    render(<OrchestrationRunsSection />)
     expect(screen.queryByTestId('orch-run-controls')).toBeNull()
   })
 
-  it('#6733: a resource_paused run renders a warn chip and NO Resume button', () => {
+  it('#6733: a resource_paused run renders a warn chip and Cancel only', () => {
     resetStore({
       orchestrationRuns: snapshot([runSummary({ status: 'resource_paused' })]),
       selectedRunId: 'run_1',
@@ -301,8 +316,7 @@ describe('OrchestrationRunsSection (#6691 S-3b)', () => {
     expect(chip.textContent).toBe('resource paused')
     // a stall the operator must notice — not the neutral in-flight accent
     expect(chip.getAttribute('data-accent')).toBe('warn')
-    // the engine clears this itself when a slot frees; a Resume button would
-    // either no-op or race it
+    // the engine clears this itself when a slot frees
     expect(screen.queryByTestId('orch-action-resume')).toBeNull()
     expect(screen.getByTestId('orch-action-cancel')).toBeTruthy()
   })

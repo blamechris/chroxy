@@ -91,7 +91,7 @@ export const OrchestrationGateResponseSchema = z.object({
 export const OrchestrationRunActionSchema = z.object({
   type: z.literal('orchestration_run_action'),
   runId: z.string().min(1).max(128),
-  action: z.enum(['cancel', 'pause', 'resume']),       // pause/resume = stop/allow NEW delegations; cancel = graceful stop
+  action: z.enum(['cancel']),                          // cancel = graceful stop. pause/resume were designed (stop/allow NEW delegations) but never built and were removed from the wire (#7140)
   requestId: z.string().max(128).optional(),
 })
 ```
@@ -228,7 +228,7 @@ export const ServerOrchestrationRunDeltaSchema = z.object({
 export const ServerOrchestrationActionAckSchema = z.object({
   type: z.literal('orchestration_action_ack'),
   requestId: z.string().max(128).nullable().optional(),
-  action: z.enum(['start','gate_response','cancel','pause','resume']),
+  action: z.enum(['start','gate_response','cancel','annotate']),
   runId: z.string(),                                           // for 'start': the newly-minted runId
   gateId: z.string().optional(),
 }).passthrough()
@@ -327,7 +327,7 @@ OrchestrationRunsSection.tsx        — tab body; header (eyebrow/title/Refresh/
 ├─ RunList.tsx                      — RunSummary rows: status pill, preset chip, node counts, budget mini-bar,
                                       pendingUserGates badge, cost via formatCostBadge/formatTokens (@chroxy/store-core,
                                       same imports as SidebarTokenView.tsx)
-└─ RunDetailPanel.tsx               — header: status, architect provider/model, cancel/pause/resume buttons (confirm on cancel)
+└─ RunDetailPanel.tsx               — header: status, architect provider/model, cancel button (confirm on cancel; pause/resume removed, #7140)
    ├─ RunBudgetMeter.tsx            — spentUsd vs capUsd bar + byRole/byModel table; REUSE store-core cost-format helpers;
                                       no client-side pricing tables — server-computed USD only (SidebarTokenView precedent)
    ├─ RunTree.tsx                   — node rows: status dot (reuse mission-control rollup styling from

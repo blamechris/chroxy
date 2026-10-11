@@ -1785,7 +1785,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return requestId;
   },
 
-  sendOrchestrationRunAction: (runId: string, action: 'cancel' | 'pause' | 'resume'): string | null => {
+  sendOrchestrationRunAction: (runId: string, action: 'cancel'): string | null => {
     const { socket } = get();
     if (!runId) return null;
     if (!socket || socket.readyState !== WebSocket.OPEN) return null;
