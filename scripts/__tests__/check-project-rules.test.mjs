@@ -1,12 +1,37 @@
+#!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import test from 'node:test'
+import { test as nodeTest } from 'node:test'
 import { DOC_CAP_BYTES, DOC_SEPARATOR, MACHINE_BUDGET_BYTES, MIN_MARGIN_BYTES } from '../check-project-rules.mjs'
 import { stageScript } from './helpers/stage-script.mjs'
+
+// Count actual completed cases as well as the node:test verdict. The roster
+// guard neuters these increments to prove a zero-case run cannot pass.
+const EXPECTED_CASES = 15
+let pass = 0
+let fail = 0
+function test(name, fn) {
+  return nodeTest(name, async t => {
+    try {
+      await fn(t)
+      pass++
+    } catch (err) {
+      fail++
+      throw err
+    }
+  })
+}
+process.once('beforeExit', () => {
+  const ran = pass + fail
+  if (ran !== EXPECTED_CASES) {
+    console.error(`HARNESS BROKEN: ran ${ran} cases, expected ${EXPECTED_CASES} — a case stopped executing`)
+    process.exitCode = 1
+  }
+})
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const SOURCE = readFileSync(join(REPO, 'AGENTS.md'), 'utf8')
@@ -181,4 +206,27 @@ test('failed Git inventory produces a failure, never an empty successful chain',
   const root = fixture(t)
   rmSync(join(root, '.git'), { recursive: true, force: true })
   red(root, 'cannot inventory project rules')
+})
+
+
+test('dangling nested rule and override symlinks cannot disappear from discovery', t => {
+  const root = fixture(t)
+  const directory = join(root, 'packages/nested')
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(join(directory, 'source.js'), '// inventoried source\n')
+  for (const ignored of [false, true]) {
+    writeFileSync(join(root, '.gitignore'), ignored ? 'packages/nested/AGENTS*\n' : '')
+    for (const name of ['AGENTS.md', 'AGENTS.override.md']) {
+      const path = join(directory, name)
+      symlinkSync(join(directory, 'missing-target.md'), path)
+      red(root, name === 'AGENTS.md' ? 'regular file' : 'unsupported project instruction layer')
+      rmSync(path)
+    }
+  }
+})
+
+test('discovery errors other than ENOENT fail rather than meaning an absent layer', t => {
+  const root = fixture(t)
+  writeFileSync(join(root, '.codex'), 'not a directory\n')
+  red(root, 'ENOTDIR')
 })

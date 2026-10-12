@@ -3,7 +3,7 @@
 // Live machine/config validation belongs to fleet-check and fresh-session probes.
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync } from 'node:fs'
+import { lstatSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isEntryPoint } from './lib/is-entry-point.mjs'
@@ -22,6 +22,16 @@ const PROJECT_SECTIONS = [
 const ADAPTERS = { 'CLAUDE.md': '@AGENTS.md\n', 'GEMINI.md': '@./AGENTS.md\n' }
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
+function pathExists(path) {
+  try {
+    lstatSync(path)
+    return true
+  } catch (err) {
+    if (err.code === 'ENOENT') return false
+    throw err
+  }
+}
+
 function readRule(path) {
   if (!lstatSync(path).isFile()) throw new Error(`${path}: rules must be a regular file, not a symlink or directory`)
   const bytes = readFileSync(path)
@@ -35,7 +45,7 @@ function inventory(root) {
     encoding: 'utf8', timeout: 10000, maxBuffer: 16 * 1024 * 1024,
   })
   if (run.error || run.status !== 0) throw new Error(`cannot inventory project rules: ${run.error?.message || run.stderr.trim() || `git exited ${run.status}`}`)
-  return [...new Set(run.stdout.split('\0').filter(Boolean))].filter(path => existsSync(join(root, path)))
+  return [...new Set(run.stdout.split('\0').filter(Boolean))].filter(path => pathExists(join(root, path)))
 }
 
 export function checkProjectRules({ root = ROOT, machinePath } = {}) {
@@ -55,7 +65,7 @@ export function checkProjectRules({ root = ROOT, machinePath } = {}) {
   for (const directory of directories) {
     for (const name of ['AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md', 'GEMINI.md', '.codex/config.toml', '.gemini/settings.json']) {
       const path = join(directory, name)
-      if (existsSync(join(root, path))) layers.add(path)
+      if (pathExists(join(root, path))) layers.add(path)
     }
   }
   const source = readRule(join(root, 'AGENTS.md'))
