@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import { tmpdir } from 'os'
 import { join, basename, extname, posix as posixPath, win32 as win32Path } from 'path'
 import { BaseSession, buildBaseSessionOpts, DEFAULT_RESULT_TIMEOUT_MS, reportInputAdmission } from './base-session.js'
+import { CODEX_APPSERVER_CUSTOMIZATION } from './provider-customization.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { nonNegInt, synthesizeModelUsage } from './usage-normalize.js'
@@ -146,6 +147,11 @@ const CODEX_FIRST_PARTY_NATIVE_BASE_URL = 'https://chatgpt.com/backend-api/codex
  * CodexSession's statics so both paths report identically.
  */
 export class CodexAppServerSession extends BaseSession {
+  static get customizationDescriptor() { return CODEX_APPSERVER_CUSTOMIZATION }
+
+  get providerBinaryVersion() { return this.codexVersion || 'unknown' }
+  get providerRuntimeCapabilities() { return this.codexCapabilities || {} }
+
   // -- Provider identity (delegated to CodexSession so both paths agree) --
   static get providerName() { return 'codex' }
   static get displayLabel() { return 'OpenAI Codex (app-server)' }

@@ -90,7 +90,7 @@ export { buildInputMessage } from './input.ts';
 export type { BuildInputMessageOptions } from './input.ts';
 export * from './schemas/index.ts';
 export type { ServerErrorEnvelopeMessage } from './schemas/server.ts';
-export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, ServerCancelActivityAckMessage, ServerBudgetResumeAckMessage, } from './schemas/server.ts';
+export type { ProviderRuntimeCapabilityState, ProviderCustomizationDescriptor, ProviderInstructionProjection, ProviderRuntimeInfo, ServerProviderRuntimeInfoMessage, ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, ServerCancelActivityAckMessage, ServerBudgetResumeAckMessage, } from './schemas/server.ts';
 export type { RepoVerdict, RepoTree, RepoStatus, HostStatusSummary, ServerHostStatusSnapshotMessage, } from './schemas/server.ts';
 export type { RunnerVerdict, RunnerServiceState, RunnerInfo, RepoRunners, RunnerStatusSummary, ServerRunnerStatusSnapshotMessage, } from './schemas/server.ts';
 export type { RepoMemoryCache, RepoMemoryReport, RepoMemoryStatus, RepoRelayRun, RepoRelayVerdict, RepoRelayStatus, IntegrationRepo, IntegrationStatusSummary, IntegrationCliStatus, ServerIntegrationStatusSnapshotMessage, } from './schemas/server.ts';

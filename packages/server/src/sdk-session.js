@@ -5,6 +5,7 @@ import { performance } from 'node:perf_hooks'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from './utils/agent-sdk-version.js'
+import { CLAUDE_SDK_CUSTOMIZATION } from './provider-customization.js'
 import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
@@ -209,6 +210,10 @@ export class SdkSession extends BaseSession {
   // for `isClaudeProvider()` (drives the createSession soft-fallback for stale
   // model ids + the shared models registry). Docker subclasses inherit it.
   static claudeFamily = true
+
+  static get customizationDescriptor() {
+    return CLAUDE_SDK_CUSTOMIZATION
+  }
 
   // #6769: cap on how long the end-of-turn getContextUsage() control request
   // may delay the `result` broadcast. The CLI answers in milliseconds when

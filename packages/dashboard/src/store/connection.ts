@@ -2644,6 +2644,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // IMPORTANT: use the module-level EMPTY_* constants (not inline [])
     // so useShallow sees stable references and avoids infinite re-renders.
     return {
+      providerRuntimeInfo: null,
       messages: get().messages,
       streamingMessageId: get().streamingMessageId,
       // #6302 — the flat-state fallback has no active session, so no optimistic

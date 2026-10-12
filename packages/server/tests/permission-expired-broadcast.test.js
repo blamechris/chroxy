@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * Integration: permission_expired must reach WS clients through the full
@@ -137,6 +138,7 @@ describe('permission_expired end-to-end broadcast (#2831)', () => {
         respondToQuestion() {}
         destroy() {}
       }
+      declareUnknownCustomization(FakePermExpSession)
       registerProvider('fake-permexp', FakePermExpSession)
 
       const tmpState = `/tmp/chroxy-permexp-${Date.now()}-${Math.random()}.json`

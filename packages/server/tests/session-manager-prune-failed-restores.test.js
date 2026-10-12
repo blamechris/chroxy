@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { SessionManager } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 // #7627 — a provider cheap enough to assert an auto-generated NAME against,
 // so the counter test can check the real outcome instead of restating the
@@ -17,6 +18,7 @@ class Noop7627 extends EventEmitter {
   static get capabilities() { return {} }
   start() {} destroy() {} sendMessage() {} interrupt() {} setModel() {} setPermissionMode() {}
 }
+declareUnknownCustomization(Noop7627)
 registerProvider('test-noop-7627', Noop7627)
 
 /**

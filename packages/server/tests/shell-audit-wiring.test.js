@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #5985 (epic #5982) — shell-audit WIRING. The trail's line content is
@@ -72,6 +73,7 @@ if (typeof mock.module !== 'function') {
   }
 
   before(() => {
+    declareUnknownCustomization(FakeUserShell, FakeNormal)
     registerProvider('test-audit-usershell', FakeUserShell)
     registerProvider('test-audit-normal', FakeNormal)
   })

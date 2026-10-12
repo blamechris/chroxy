@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager, formatIdleDuration } from '../src/session-manager.js'
 import { assertForwardingPattern, captureProviderOpts } from './helpers/provider-forwarding.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
@@ -1972,6 +1973,7 @@ describe('createSession failure cleanup (FM-03)', () => {
       setModel() {}
       setPermissionMode() {}
     }
+    declareUnknownCustomization(FailingProvider)
     registerProvider('test-failing', FailingProvider)
 
     assert.throws(
@@ -2007,6 +2009,7 @@ describe('createSession failure cleanup (FM-03)', () => {
       setModel() {}
       setPermissionMode() {}
     }
+    declareUnknownCustomization(FailingProvider2)
     registerProvider('test-failing2', FailingProvider2)
 
     assert.throws(
@@ -2038,6 +2041,7 @@ describe('createSession failure cleanup (FM-03)', () => {
       setModel() {}
       setPermissionMode() {}
     }
+    declareUnknownCustomization(FailingProvider3)
     registerProvider('test-failing3', FailingProvider3)
 
     assert.throws(
@@ -2073,6 +2077,7 @@ describe('#5316 (WP-2.2) — async start() rejection handling', () => {
     setModel() {}
     setPermissionMode() {}
   }
+  declareUnknownCustomization(AsyncFailProvider)
 
   // Let the rejected start() promise's microtask `.catch()` run.
   const tick = () => new Promise((r) => setImmediate(r))
@@ -2203,6 +2208,7 @@ describe('#1204 — _cleanupSessionMaps helper cleans all maps', () => {
       setModel() {}
       setPermissionMode() {}
     }
+    declareUnknownCustomization(MapPolluter)
     registerProvider('test-map-polluter', MapPolluter)
 
     assert.throws(
@@ -2245,6 +2251,7 @@ describe('#1202 — guard session.destroy() with try-catch', () => {
       setModel() {}
       setPermissionMode() {}
     }
+    declareUnknownCustomization(DoubleFailProvider)
     registerProvider('test-double-fail', DoubleFailProvider)
 
     assert.throws(
@@ -2278,6 +2285,7 @@ describe('#1202 — guard session.destroy() with try-catch', () => {
       setModel() {}
       setPermissionMode() {}
     }
+    declareUnknownCustomization(AsyncDoubleFailProvider)
     registerProvider('test-async-double-fail', AsyncDoubleFailProvider)
 
     // Should not throw synchronously
@@ -2404,6 +2412,7 @@ describe('#1141 — async start() rejection guard', () => {
       setModel() {}
       setPermissionMode() {}
     }
+    declareUnknownCustomization(AsyncFailingProvider)
     registerProvider('test-async-failing', AsyncFailingProvider)
 
     // createSession should NOT throw synchronously for async rejection
@@ -2506,6 +2515,7 @@ describe('Session ID generation (#1856)', () => {
       setModel() {}
       setPermissionMode() {}
     }
+    declareUnknownCustomization(TestProvider)
     registerProvider('test-session-id', TestProvider)
 
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })

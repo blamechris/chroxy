@@ -16,6 +16,7 @@ describe('createEmptyBaseSessionState', () => {
     const state = createEmptyBaseSessionState()
 
     expect(state).toEqual({
+      providerRuntimeInfo: null,
       messages: [],
       streamingMessageId: null,
       pendingClientMessageId: null,
@@ -163,8 +164,9 @@ describe('clearTransientSessionState (#7411)', () => {
 })
 
 describe('TRANSIENT_SESSION_SWEEP_FIELDS (#7411)', () => {
-  it('lists exactly the six cross-client all-sessions sweep fields', () => {
+  it('lists exactly the seven cross-client all-sessions sweep fields', () => {
     expect(TRANSIENT_SESSION_SWEEP_FIELDS).toEqual([
+      'providerRuntimeInfo',
       'streamingMessageId',
       'isPlanPending',
       'planAllowedPrompts',

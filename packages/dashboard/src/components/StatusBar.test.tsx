@@ -121,6 +121,27 @@ describe('StatusBar', () => {
     expect(badge.getAttribute('title')).toContain('API')
   })
 
+  it('shows version, unknowns, and instruction delivery details', () => {
+    render(<StatusBar provider="codex" providerRuntimeInfo={{
+      provider: 'codex', binaryVersion: '1.2.3', capabilities: [],
+      customization: {
+        nativeDiscovery: { state: 'unknown', files: ['AGENTS.md'], delivery: 'unknown', precedence: 'global-root-cwd' },
+        chroxyChannels: [{ channel: 'first-user-turn', lifetime: 'first-turn', content: ['skills'] }],
+        nativeSkills: 'unknown', runtimeToggles: false, toolConstraints: 'provider-runtime',
+        policyDecisions: true, memoryProjection: 'provider-native',
+        mcp: { discovery: 'unknown', toolCalls: 'unknown' },
+        byteBudgets: { nativeDocuments: 'unknown', chroxySkills: 1, projectInstructions: 'unsupported' },
+        egress: 'cloud',
+      },
+      projectInstructions: { status: 'unsupported', enforcement: 'instructional', compilerVersion: '1', budgetBytes: 0, totalBytes: 0, sources: [], rules: [], includedRequiredRuleIds: [] },
+    }} />)
+    const panel = screen.getByTestId('status-provider-panel')
+    expect(panel).toHaveTextContent('Binary: 1.2.3')
+    expect(panel).toHaveTextContent('Native instructions: unknown')
+    expect(panel).toHaveTextContent('Project policy: unsupported (instructional)')
+    expect(panel).toHaveTextContent('calls unknown')
+  })
+
   it('shows CLI provider badge with subscription tooltip', () => {
     render(<StatusBar provider="claude-cli" />)
     const badge = screen.getByTestId('status-provider')

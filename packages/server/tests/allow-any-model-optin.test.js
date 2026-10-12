@@ -10,6 +10,7 @@ import { SessionManager, ProviderModelNotSupportedError } from '../src/session-m
 import { registerProvider } from '../src/providers.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { createSpy, createMockSession, nsCtx } from './test-helpers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #6378 — `config.providers.allowAnyModel` opt-in. A static-allowlist provider
@@ -101,6 +102,7 @@ class Limited6378Session extends EventEmitter {
   setModel() { return false }
   setPermissionMode() { return false }
 }
+declareUnknownCustomization(Limited6378Session)
 registerProvider('test-6378-limited', Limited6378Session)
 
 let _tmp

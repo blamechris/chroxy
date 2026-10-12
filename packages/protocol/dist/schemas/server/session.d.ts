@@ -338,6 +338,249 @@ export declare const ServerSessionListSchema: z.ZodObject<{
     }, z.core.$loose>>;
 }, z.core.$strip>;
 /**
+ * #7745 / #7835: provider runtime identity and instruction-customization seam.
+ *
+ * This is deliberately separate from `session_list`: the latter is durable
+ * session metadata, while this frame describes the live provider adapter and
+ * (when the runtime reports them) the binary serving this process. A reconnect,
+ * tab switch, or late subscription gets a fresh frame from `sendSessionInfo`.
+ *
+ * Every vocabulary is finite and every collection/string is bounded. The
+ * descriptor is display/compilation evidence, not an authorization claim:
+ * `unknown` means the adapter cannot prove the behavior, and instruction
+ * channels remain instructional unless `toolConstraints` says a runtime gate
+ * exists.
+ */
+export declare const ProviderRuntimeCapabilityStateSchema: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+export declare const ProviderCustomizationDescriptorSchema: z.ZodObject<{
+    nativeDiscovery: z.ZodObject<{
+        state: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+        files: z.ZodArray<z.ZodEnum<{
+            "AGENTS.md": "AGENTS.md";
+            "AGENTS.override.md": "AGENTS.override.md";
+            "CLAUDE.md": "CLAUDE.md";
+            "CLAUDE.local.md": "CLAUDE.local.md";
+            "GEMINI.md": "GEMINI.md";
+            "provider-defined": "provider-defined";
+        }>>;
+        delivery: z.ZodEnum<{
+            unknown: "unknown";
+            none: "none";
+            "user-message": "user-message";
+            "provider-context": "provider-context";
+        }>;
+        precedence: z.ZodEnum<{
+            unknown: "unknown";
+            none: "none";
+            "provider-defined": "provider-defined";
+            "global-root-cwd": "global-root-cwd";
+            "global-project-subtree": "global-project-subtree";
+            "global-workspace-jit": "global-workspace-jit";
+        }>;
+    }, z.core.$strict>;
+    chroxyChannels: z.ZodArray<z.ZodObject<{
+        channel: z.ZodEnum<{
+            "system-append": "system-append";
+            "system-api": "system-api";
+            "first-user-turn": "first-user-turn";
+        }>;
+        lifetime: z.ZodEnum<{
+            "each-turn": "each-turn";
+            "process-start": "process-start";
+            "first-turn": "first-turn";
+        }>;
+        content: z.ZodArray<z.ZodEnum<{
+            skills: "skills";
+            "project-instructions": "project-instructions";
+            "session-preamble": "session-preamble";
+            "context-hint": "context-hint";
+        }>>;
+    }, z.core.$strict>>;
+    nativeSkills: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+    runtimeToggles: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+    toolConstraints: z.ZodEnum<{
+        unknown: "unknown";
+        none: "none";
+        "chroxy-runtime": "chroxy-runtime";
+        "provider-runtime": "provider-runtime";
+        instructional: "instructional";
+    }>;
+    policyDecisions: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+    memoryProjection: z.ZodEnum<{
+        unknown: "unknown";
+        none: "none";
+        "provider-native": "provider-native";
+        "chroxy-history": "chroxy-history";
+    }>;
+    mcp: z.ZodObject<{
+        discovery: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+        toolCalls: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+    }, z.core.$strict>;
+    byteBudgets: z.ZodObject<{
+        nativeDocuments: z.ZodUnion<readonly [z.ZodNumber, z.ZodEnum<{
+            unknown: "unknown";
+            unsupported: "unsupported";
+        }>]>;
+        chroxySkills: z.ZodUnion<readonly [z.ZodNumber, z.ZodEnum<{
+            unknown: "unknown";
+            unsupported: "unsupported";
+        }>]>;
+        projectInstructions: z.ZodUnion<readonly [z.ZodNumber, z.ZodEnum<{
+            unknown: "unknown";
+            unsupported: "unsupported";
+        }>]>;
+    }, z.core.$strict>;
+    egress: z.ZodEnum<{
+        local: "local";
+        unknown: "unknown";
+        cloud: "cloud";
+    }>;
+}, z.core.$strict>;
+export declare const ProviderInstructionProjectionSchema: z.ZodObject<{
+    status: z.ZodEnum<{
+        unknown: "unknown";
+        unsupported: "unsupported";
+        delivered: "delivered";
+    }>;
+    enforcement: z.ZodLiteral<"instructional">;
+    compilerVersion: z.ZodString;
+    budgetBytes: z.ZodNumber;
+    totalBytes: z.ZodNumber;
+    sources: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        sha256: z.ZodString;
+        bytes: z.ZodNumber;
+        endByte: z.ZodNumber;
+    }, z.core.$strict>>;
+    rules: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        sourceId: z.ZodString;
+        endByte: z.ZodNumber;
+    }, z.core.$strict>>;
+    includedRequiredRuleIds: z.ZodArray<z.ZodString>;
+}, z.core.$strict>;
+export declare const ServerProviderRuntimeInfoSchema: z.ZodObject<{
+    type: z.ZodLiteral<"provider_runtime_info">;
+    sessionId: z.ZodString;
+    provider: z.ZodString;
+    binaryVersion: z.ZodUnion<readonly [z.ZodString, z.ZodLiteral<"unknown">]>;
+    capabilities: z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        state: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+    }, z.core.$strict>>;
+    customization: z.ZodObject<{
+        nativeDiscovery: z.ZodObject<{
+            state: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+            files: z.ZodArray<z.ZodEnum<{
+                "AGENTS.md": "AGENTS.md";
+                "AGENTS.override.md": "AGENTS.override.md";
+                "CLAUDE.md": "CLAUDE.md";
+                "CLAUDE.local.md": "CLAUDE.local.md";
+                "GEMINI.md": "GEMINI.md";
+                "provider-defined": "provider-defined";
+            }>>;
+            delivery: z.ZodEnum<{
+                unknown: "unknown";
+                none: "none";
+                "user-message": "user-message";
+                "provider-context": "provider-context";
+            }>;
+            precedence: z.ZodEnum<{
+                unknown: "unknown";
+                none: "none";
+                "provider-defined": "provider-defined";
+                "global-root-cwd": "global-root-cwd";
+                "global-project-subtree": "global-project-subtree";
+                "global-workspace-jit": "global-workspace-jit";
+            }>;
+        }, z.core.$strict>;
+        chroxyChannels: z.ZodArray<z.ZodObject<{
+            channel: z.ZodEnum<{
+                "system-append": "system-append";
+                "system-api": "system-api";
+                "first-user-turn": "first-user-turn";
+            }>;
+            lifetime: z.ZodEnum<{
+                "each-turn": "each-turn";
+                "process-start": "process-start";
+                "first-turn": "first-turn";
+            }>;
+            content: z.ZodArray<z.ZodEnum<{
+                skills: "skills";
+                "project-instructions": "project-instructions";
+                "session-preamble": "session-preamble";
+                "context-hint": "context-hint";
+            }>>;
+        }, z.core.$strict>>;
+        nativeSkills: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+        runtimeToggles: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+        toolConstraints: z.ZodEnum<{
+            unknown: "unknown";
+            none: "none";
+            "chroxy-runtime": "chroxy-runtime";
+            "provider-runtime": "provider-runtime";
+            instructional: "instructional";
+        }>;
+        policyDecisions: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+        memoryProjection: z.ZodEnum<{
+            unknown: "unknown";
+            none: "none";
+            "provider-native": "provider-native";
+            "chroxy-history": "chroxy-history";
+        }>;
+        mcp: z.ZodObject<{
+            discovery: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+            toolCalls: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;
+        }, z.core.$strict>;
+        byteBudgets: z.ZodObject<{
+            nativeDocuments: z.ZodUnion<readonly [z.ZodNumber, z.ZodEnum<{
+                unknown: "unknown";
+                unsupported: "unsupported";
+            }>]>;
+            chroxySkills: z.ZodUnion<readonly [z.ZodNumber, z.ZodEnum<{
+                unknown: "unknown";
+                unsupported: "unsupported";
+            }>]>;
+            projectInstructions: z.ZodUnion<readonly [z.ZodNumber, z.ZodEnum<{
+                unknown: "unknown";
+                unsupported: "unsupported";
+            }>]>;
+        }, z.core.$strict>;
+        egress: z.ZodEnum<{
+            local: "local";
+            unknown: "unknown";
+            cloud: "cloud";
+        }>;
+    }, z.core.$strict>;
+    projectInstructions: z.ZodObject<{
+        status: z.ZodEnum<{
+            unknown: "unknown";
+            unsupported: "unsupported";
+            delivered: "delivered";
+        }>;
+        enforcement: z.ZodLiteral<"instructional">;
+        compilerVersion: z.ZodString;
+        budgetBytes: z.ZodNumber;
+        totalBytes: z.ZodNumber;
+        sources: z.ZodArray<z.ZodObject<{
+            id: z.ZodString;
+            sha256: z.ZodString;
+            bytes: z.ZodNumber;
+            endByte: z.ZodNumber;
+        }, z.core.$strict>>;
+        rules: z.ZodArray<z.ZodObject<{
+            id: z.ZodString;
+            sourceId: z.ZodString;
+            endByte: z.ZodNumber;
+        }, z.core.$strict>>;
+        includedRequiredRuleIds: z.ZodArray<z.ZodString>;
+    }, z.core.$strict>;
+}, z.core.$strict>;
+export type ProviderRuntimeCapabilityState = z.infer<typeof ProviderRuntimeCapabilityStateSchema>;
+export type ProviderCustomizationDescriptor = z.infer<typeof ProviderCustomizationDescriptorSchema>;
+export type ProviderInstructionProjection = z.infer<typeof ProviderInstructionProjectionSchema>;
+export type ProviderRuntimeInfo = Omit<z.infer<typeof ServerProviderRuntimeInfoSchema>, 'type' | 'sessionId'>;
+/**
  * Emitted when a session in the persisted state file could not be restored
  * at server startup (e.g. missing env var for a Codex/Gemini provider).
  *

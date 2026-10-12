@@ -1,4 +1,5 @@
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
+import { GEMINI_CUSTOMIZATION } from './provider-customization.js'
 import { buildBaseSessionOpts } from './base-session.js'
 import { synthesizeModelUsage } from './usage-normalize.js'
 import { homedir } from 'os'
@@ -118,6 +119,10 @@ export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
 }
 
 export class GeminiSession extends JsonlSubprocessSession {
+  static get customizationDescriptor() {
+    return GEMINI_CUSTOMIZATION
+  }
+
   // ------------------------------------------------------------------
   // Static provider identity — required by JsonlSubprocessSession
   // ------------------------------------------------------------------

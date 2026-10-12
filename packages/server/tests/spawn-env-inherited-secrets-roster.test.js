@@ -85,6 +85,7 @@ import { withEnv } from './test-helpers.js'
 import { buildSpawnEnv } from '../src/utils/spawn-env.js'
 import { defaultBuildEnv } from '../src/statusline.js'
 import { buildSafeBashEnv } from '../src/byok-tool-executor.js'
+import { buildInstructionGitEnv } from '../src/instruction-policy.js'
 import { stripComments } from '../scripts/lib/strip-comments.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -442,6 +443,7 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
       'user-shell-session.js',
       'byok-mcp-client.js',
       'statusline.js',
+      'instruction-policy.js',
       'byok-tool-executor.js', // #8113 — the Object.entries(process.env) miss
       'supervisor.js',
       'ws-file-ops/git.js',
@@ -474,6 +476,7 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
       'byok-tool-executor.js',
       'claude-tui-session.js',
       'daemon-commit.js', // #8324 — the git spawn that reads the commit the daemon started from
+      'instruction-policy.js',
       'statusline.js',
       'supervisor.js',
       'user-shell-session.js',
@@ -987,6 +990,21 @@ describe('discovery pattern coverage — one fixture per known copy-spelling (#8
 // ITS OWN test here directly, independent of section 2's static check.
 
 describe('behavioral proof: directly-callable builders actually strip ambient secrets (#8113)', () => {
+  it('instruction-policy.js buildInstructionGitEnv() strips ambient session secrets from its returned value', () => {
+    const env = buildInstructionGitEnv({
+      PATH: '/fixture/bin',
+      GIT_DIR: '/foreign/git-dir',
+      CHROXY_PORT: '19999',
+      CHROXY_HOOK_SECRET: 'ambient-foreign-session-secret',
+      CHROXY_TUI_CHILD: '1',
+    })
+    assert.equal(env.PATH, '/fixture/bin')
+    assert.equal(env.GIT_DIR, undefined)
+    assert.equal(env.CHROXY_PORT, undefined)
+    assert.equal(env.CHROXY_HOOK_SECRET, undefined)
+    assert.equal(env.CHROXY_TUI_CHILD, undefined)
+  })
+
   it('buildSpawnEnv("claude") strips an ambient CHROXY_PORT/CHROXY_HOOK_SECRET when called with no extras', () => {
     withEnv({ CHROXY_PORT: '19999', CHROXY_HOOK_SECRET: 'ambient-foreign-session-secret' }, () => {
       const env = buildSpawnEnv('claude')

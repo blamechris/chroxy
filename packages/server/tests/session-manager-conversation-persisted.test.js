@@ -8,6 +8,7 @@ import { SessionManager } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 import { pinTmpDaemonBase } from './helpers/pin-tmp-daemon-base.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #8418 — `conversationPersisted` (has claude ever saved this session's
@@ -50,6 +51,7 @@ class SilentProvider extends ReportingProvider {
     delete this.conversationPersisted
   }
 }
+declareUnknownCustomization(ReportingProvider)
 registerProvider('test-reporting-8418', ReportingProvider)
 registerProvider('test-silent-8418', SilentProvider)
 

@@ -274,6 +274,118 @@ export const ServerSessionListSchema = z.object({
 })
 
 /**
+ * #7745 / #7835: provider runtime identity and instruction-customization seam.
+ *
+ * This is deliberately separate from `session_list`: the latter is durable
+ * session metadata, while this frame describes the live provider adapter and
+ * (when the runtime reports them) the binary serving this process. A reconnect,
+ * tab switch, or late subscription gets a fresh frame from `sendSessionInfo`.
+ *
+ * Every vocabulary is finite and every collection/string is bounded. The
+ * descriptor is display/compilation evidence, not an authorization claim:
+ * `unknown` means the adapter cannot prove the behavior, and instruction
+ * channels remain instructional unless `toolConstraints` says a runtime gate
+ * exists.
+ */
+export const ProviderRuntimeCapabilityStateSchema = z.union([
+  z.boolean(),
+  z.literal('unknown'),
+])
+
+const ProviderInstructionByteBudgetSchema = z.union([
+  z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  z.enum(['unknown', 'unsupported']),
+])
+
+export const ProviderCustomizationDescriptorSchema = z.object({
+  nativeDiscovery: z.object({
+    state: ProviderRuntimeCapabilityStateSchema,
+    files: z.array(z.enum([
+      'AGENTS.md',
+      'AGENTS.override.md',
+      'CLAUDE.md',
+      'CLAUDE.local.md',
+      'GEMINI.md',
+      'provider-defined',
+    ])).max(10),
+    delivery: z.enum(['user-message', 'provider-context', 'none', 'unknown']),
+    precedence: z.enum([
+      'global-root-cwd',
+      'global-project-subtree',
+      'global-workspace-jit',
+      'provider-defined',
+      'none',
+      'unknown',
+    ]),
+  }).strict(),
+  chroxyChannels: z.array(z.object({
+    channel: z.enum(['system-append', 'system-api', 'first-user-turn']),
+    lifetime: z.enum(['each-turn', 'process-start', 'first-turn']),
+    content: z.array(z.enum([
+      'project-instructions',
+      'session-preamble',
+      'context-hint',
+      'skills',
+    ])).min(1).max(4),
+  }).strict()).max(4),
+  nativeSkills: ProviderRuntimeCapabilityStateSchema,
+  runtimeToggles: ProviderRuntimeCapabilityStateSchema,
+  toolConstraints: z.enum(['chroxy-runtime', 'provider-runtime', 'instructional', 'none', 'unknown']),
+  policyDecisions: ProviderRuntimeCapabilityStateSchema,
+  memoryProjection: z.enum(['provider-native', 'chroxy-history', 'none', 'unknown']),
+  mcp: z.object({
+    discovery: ProviderRuntimeCapabilityStateSchema,
+    toolCalls: ProviderRuntimeCapabilityStateSchema,
+  }).strict(),
+  byteBudgets: z.object({
+    nativeDocuments: ProviderInstructionByteBudgetSchema,
+    chroxySkills: ProviderInstructionByteBudgetSchema,
+    projectInstructions: ProviderInstructionByteBudgetSchema,
+  }).strict(),
+  egress: z.enum(['cloud', 'local', 'unknown']),
+}).strict()
+
+export const ProviderInstructionProjectionSchema = z.object({
+  status: z.enum(['delivered', 'unknown', 'unsupported']),
+  enforcement: z.literal('instructional'),
+  compilerVersion: z.string().min(1).max(16).regex(/^[A-Za-z0-9._-]+$/),
+  budgetBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  totalBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  sources: z.array(z.object({
+    id: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
+    sha256: z.string().length(64).regex(/^[a-f0-9]{64}$/),
+    bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    endByte: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  }).strict()).max(32),
+  rules: z.array(z.object({
+    id: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
+    sourceId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
+    endByte: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  }).strict()).max(128),
+  includedRequiredRuleIds: z.array(
+    z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
+  ).max(128),
+}).strict()
+
+export const ServerProviderRuntimeInfoSchema = z.object({
+  type: z.literal('provider_runtime_info'),
+  sessionId: z.string().min(1).max(256),
+  provider: z.string().min(1).max(128),
+  binaryVersion: z.union([z.string().min(1).max(128), z.literal('unknown')]),
+  capabilities: z.array(z.object({
+    name: z.string().min(1).max(96).regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
+    state: ProviderRuntimeCapabilityStateSchema,
+  }).strict()).max(64),
+  customization: ProviderCustomizationDescriptorSchema,
+  projectInstructions: ProviderInstructionProjectionSchema,
+}).strict()
+
+export type ProviderRuntimeCapabilityState = z.infer<typeof ProviderRuntimeCapabilityStateSchema>
+export type ProviderCustomizationDescriptor = z.infer<typeof ProviderCustomizationDescriptorSchema>
+export type ProviderInstructionProjection = z.infer<typeof ProviderInstructionProjectionSchema>
+export type ProviderRuntimeInfo = Omit<z.infer<typeof ServerProviderRuntimeInfoSchema>, 'type' | 'sessionId'>
+
+/**
  * Emitted when a session in the persisted state file could not be restored
  * at server startup (e.g. missing env var for a Codex/Gemini provider).
  *

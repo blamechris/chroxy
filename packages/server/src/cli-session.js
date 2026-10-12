@@ -19,6 +19,7 @@ import { ThinkingStreams } from './thinking-stream.js'
 import { CLAUDE_BINARY_CANDIDATES, resolveClaudeBinary } from './utils/claude-binary.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { prepareSpawn } from './utils/win-spawn.js'
+import { CLAUDE_CLI_CUSTOMIZATION } from './provider-customization.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { assertSafeArgvValue } from './utils/argv-safety.js'
@@ -211,6 +212,10 @@ export class CliSession extends BaseSession {
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   // DockerSession (docker-cli / docker) extends this and inherits it.
   static claudeFamily = true
+
+  static get customizationDescriptor() {
+    return CLAUDE_CLI_CUSTOMIZATION
+  }
 
   /**
    * Human-readable label shown in the startup banner and anywhere else the

@@ -19,6 +19,7 @@ import { getProvider, registerProvider } from '../src/providers.js'
 import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 import { SessionManager, ProviderModelNotSupportedError } from '../src/session-manager.js'
 import { createSpy, createMockSession, nsCtx } from './test-helpers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #7727 (CDX-3) — `CodexSession.getAllowedModels()` is TRI-STATE, and this file
@@ -426,6 +427,7 @@ class EmptyAllowlistSession extends EventEmitter {
   setModel() { return false }
   setPermissionMode() { return false }
 }
+declareUnknownCustomization(EmptyAllowlistSession)
 registerProvider('test-7727-empty-allowlist', EmptyAllowlistSession)
 
 describe('#7727 the empty array means OPPOSITE things at the two gates', () => {

@@ -15,7 +15,7 @@ import {
   registerAnthropicCompatibleProviders,
 } from '../src/anthropic-compatible-session.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
-import { getProvider } from '../src/providers.js'
+import { getProvider, validateProviderClass } from '../src/providers.js'
 import { OllamaSession } from '../src/ollama-session.js'
 import { validateConfig } from '../src/config.js'
 import { resetCachesForTest } from '../src/auth-probes.js'
@@ -369,6 +369,13 @@ describe('AnthropicCompatibleSession factory', () => {
     // cap, MCP teardown) flows to every configured endpoint for free.
     const Cls = createAnthropicCompatibleSessionClass(makeEntry())
     assert.ok(Cls.prototype instanceof ClaudeByokSession)
+  })
+
+  it('factory output carries a registration-valid conservative descriptor', () => {
+    const Cls = createAnthropicCompatibleSessionClass(makeEntry())
+    assert.doesNotThrow(() => validateProviderClass(Cls, 'configured-compatible'))
+    assert.equal(Cls.customizationDescriptor.egress, 'unknown')
+    assert.equal(Cls.customizationDescriptor.byteBudgets.nativeDocuments, 'unknown')
   })
 
   it('throws on entries missing the required fields', () => {

@@ -26,7 +26,7 @@ import { CodexAppServerSession } from './codex-app-server-session.js'
 import { UserShellSession } from './user-shell-session.js'
 import { registerProviderRegistry, thinkingLevelLegacyFallbackApplies } from './models.js'
 import { BILLING_CLASSES } from './billing-class.js'
-import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER, ProviderCustomizationDescriptorSchema } from '@chroxy/protocol'
 import {
   hasClaudeOAuthCreds,
   hasCodexOAuthCreds,
@@ -141,6 +141,72 @@ export function validateProviderClass(ProviderClass, name) {
       }
     }
   }
+  const customization = ProviderCustomizationDescriptorSchema.safeParse(
+    ProviderClass.customizationDescriptor,
+  )
+  if (!customization.success) {
+    const issue = customization.error.issues[0]
+    const path = issue?.path?.length ? ` at ${issue.path.join('.')}` : ''
+    throw new Error(`Provider '${name}' missing or invalid customization descriptor${path}: ${issue?.message || 'validation failed'}`)
+  }
+}
+
+/**
+ * Build the live provider-runtime frame payload for one session.
+ *
+ * The descriptor comes unchanged from the registration-validated class; its
+ * three byte-budget domains must never be folded together. Live binary facts
+ * and compiler projection metadata are session-specific. Runtime capability
+ * states are intentionally NOT merged into the existing boolean `capabilities`
+ * surface.
+ */
+export function getProviderRuntimeInfo(provider, session) {
+  const ProviderClass = session?.constructor
+  const customization = ProviderClass?.customizationDescriptor
+  const rawCapabilities = session?.providerRuntimeCapabilities
+  const capabilities = []
+  if (rawCapabilities && typeof rawCapabilities === 'object' && !Array.isArray(rawCapabilities)) {
+    for (const [name, state] of Object.entries(rawCapabilities)) {
+      if (!/^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(name)) continue
+      if (state !== true && state !== false && state !== 'unknown') continue
+      capabilities.push({ name, state })
+      if (capabilities.length >= 64) break
+    }
+  }
+  const unsupportedProjectInstructions = customization?.byteBudgets?.projectInstructions === 'unsupported'
+  const observedProjection = session?.providerInstructionProjection
+  const projectInstructions = !observedProjection
+    || (unsupportedProjectInstructions && observedProjection.status === 'unknown')
+      ? {
+        status: unsupportedProjectInstructions ? 'unsupported' : 'unknown',
+        enforcement: 'instructional',
+        compilerVersion: '1',
+        budgetBytes: typeof customization?.byteBudgets?.projectInstructions === 'number'
+          ? customization.byteBudgets.projectInstructions : 0,
+        totalBytes: 0,
+        sources: [], rules: [],
+        includedRequiredRuleIds: [],
+      }
+    : observedProjection
+  return {
+    provider: typeof provider === 'string' && provider.length > 0
+      ? provider
+      : (ProviderClass?.providerName || 'unknown'),
+    binaryVersion: typeof session?.providerBinaryVersion === 'string'
+      && session.providerBinaryVersion.length > 0
+      ? session.providerBinaryVersion
+      : 'unknown',
+    capabilities,
+    customization,
+    projectInstructions,
+  }
+}
+
+export function getProviderCustomizationRoster() {
+  return Object.fromEntries(Object.entries(PROVIDERS).map(([name, ProviderClass]) => [
+    name,
+    ProviderCustomizationDescriptorSchema.parse(ProviderClass.customizationDescriptor),
+  ]))
 }
 
 // #5555: validate every built-in against the ProviderSession contract at

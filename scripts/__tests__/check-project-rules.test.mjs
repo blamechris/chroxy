@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test as nodeTest } from 'node:test'
-import { DOC_CAP_BYTES, DOC_SEPARATOR, MACHINE_BUDGET_BYTES, MIN_MARGIN_BYTES } from '../check-project-rules.mjs'
+import { checkProjectRules, CHROXY_REQUIRED_PROJECT_RULE_IDS, DOC_CAP_BYTES, DOC_SEPARATOR, MACHINE_BUDGET_BYTES, MIN_MARGIN_BYTES } from '../check-project-rules.mjs'
 import { stageScript } from './helpers/stage-script.mjs'
 
 // Count actual completed cases as well as the node:test verdict. The roster
 // guard neuters these increments to prove a zero-case run cannot pass.
-const EXPECTED_CASES = 15
+const EXPECTED_CASES = 16
 let pass = 0
 let fail = 0
 function test(name, fn) {
@@ -46,6 +46,9 @@ function fixture(t) {
   writeFileSync(join(root, 'CLAUDE.md'), '@AGENTS.md\n')
   writeFileSync(join(root, 'GEMINI.md'), '@./AGENTS.md\n')
   stageScript(SCRIPT, join(root, 'scripts'))
+  const compilerTarget = join(root, 'packages/server/src/instruction-policy-compiler.js')
+  mkdirSync(dirname(compilerTarget), { recursive: true })
+  cpSync(join(REPO, 'packages/server/src/instruction-policy-compiler.js'), compilerTarget)
   return root
 }
 
@@ -73,6 +76,14 @@ test('committed project contract passes the real CLI and emits its success marke
   assert.equal(result.status, 0, result.stderr)
   assert.ok(result.stdout.includes('PROJECT_RULES_OK'))
   assert.ok(result.stdout.includes('separators=23 bytes'))
+})
+
+test('Chroxy required rule ids match the independently frozen policy roster', () => {
+  assert.deepEqual(CHROXY_REQUIRED_PROJECT_RULE_IDS, [
+    'project-overview', 'critical-dev-notes', 'prime-compatibility-and-authority',
+    'session-start-protocol', 'git-workflow', 'code-style', 'testing-conventions',
+    'architecture', 'dev-commands', 'ui-verification-with-maestro', 'repo-memory-mcp', 'reference',
+  ])
 })
 
 test('fixture staging refuses a missing dependency directory before copying the entry point', t => {
@@ -136,7 +147,7 @@ test('ignored nested instructions are still checked in inventoried project direc
   writeFileSync(join(directory, 'source.js'), '// project source\n')
   writeFileSync(join(root, '.gitignore'), 'packages/nested/AGENTS*\npackages/nested/.codex/\n')
   writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(DOC_CAP_BYTES))
-  red(root, 'below 2048')
+  red(root, "exceeds 98304 bytes")
   rmSync(join(directory, 'AGENTS.md'))
   writeFileSync(join(directory, 'AGENTS.override.md'), 'ignored override\n')
   red(root, 'unsupported project instruction layer')
@@ -146,22 +157,19 @@ test('ignored nested instructions are still checked in inventoried project direc
   red(root, 'unsupported project instruction layer')
 })
 
-test('nested chains include all ancestor files and exactly 23 bytes per separator', t => {
+test('nested chains include all ancestor files and the shared 23-byte separator', t => {
   const root = fixture(t)
   assert.equal(Buffer.byteLength(DOC_SEPARATOR), 23)
   const directory = join(root, 'packages/nested')
   mkdirSync(directory, { recursive: true })
   writeFileSync(join(root, 'packages/AGENTS.md'), 'Nested parent rules.\n')
-  const parentBytes = Buffer.byteLength('Nested parent rules.\n')
-  const boundary = DOC_CAP_BYTES - MACHINE_BUDGET_BYTES - Buffer.byteLength(SOURCE) - parentBytes -
-    3 * Buffer.byteLength(DOC_SEPARATOR) - MIN_MARGIN_BYTES
-  assert.ok(boundary > 0, 'fixture must leave room for an actual child rule')
-  writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(boundary))
-  const result = run(root)
-  assert.equal(result.status, 0, result.stderr)
-  assert.ok(result.stdout.includes(`packages/nested ${DOC_CAP_BYTES - MIN_MARGIN_BYTES}/${DOC_CAP_BYTES} bytes; margin=${MIN_MARGIN_BYTES}`))
-  writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(boundary + 1))
-  red(root, `margin ${MIN_MARGIN_BYTES - 1} is below ${MIN_MARGIN_BYTES}`)
+  writeFileSync(join(directory, 'AGENTS.md'), 'Child rules.\n')
+  const result = checkProjectRules({ root })
+  const nested = result.chains.find(chain => chain.directory === 'packages/nested')
+  assert.deepEqual(nested.files, ['AGENTS.md', 'packages/AGENTS.md', 'packages/nested/AGENTS.md'])
+  assert.ok(nested.margin >= MIN_MARGIN_BYTES)
+  writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(DOC_CAP_BYTES))
+  red(root, "source 'project:packages/nested/AGENTS.md'")
 })
 
 test('UTF-8 bytes, rather than JavaScript string length, consume the byte budget', t => {

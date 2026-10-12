@@ -60,6 +60,7 @@ import { getRosterModelRow, _unregisterProviderRegistryForTests, registerProvide
 import { applyCodexCatalog, _resetCodexCatalogForTests } from '../src/codex-model-catalog.js'
 import { CodexSession } from '../src/codex-session.js'
 import { createSpy, createMockSession, nsCtx } from './test-helpers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 // --- the two producers -------------------------------------------------------
 
@@ -234,6 +235,7 @@ describe('thinking-level roster parity: picker vs gate (#7784)', () => {
     }
     Object.defineProperty(Klass, 'claudeFamily', { value: claudeFamily })
     Object.assign(Klass.prototype, baseProto)
+    declareUnknownCustomization(Klass)
     _unregisterProviderRegistryForTests(name)
     registerProvider(name, Klass)
     return Klass

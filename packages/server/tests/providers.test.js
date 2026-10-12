@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, utimesSync, u
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest, validateProviderClass, getRegisteredProviderNames } from '../src/providers.js'
+import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest, validateProviderClass, getRegisteredProviderNames, getProviderCustomizationRoster } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { CodexSession } from '../src/codex-session.js'
@@ -61,6 +61,7 @@ describe('Provider Registry', () => {
 
   it('registerProvider + getProvider round-trip', () => {
     class TestProvider {
+      static get customizationDescriptor() { return CliSession.customizationDescriptor }
       sendMessage() {}
       interrupt() {}
       setModel() {}
@@ -70,6 +71,19 @@ describe('Provider Registry', () => {
     }
     registerProvider('test-roundtrip', TestProvider)
     assert.equal(getProvider('test-roundtrip'), TestProvider)
+  })
+
+  it('rejects a missing descriptor and derives a two-way descriptor roster from registration', () => {
+    class MissingDescriptor {
+      sendMessage() {}
+      interrupt() {}
+      setModel() {}
+      setPermissionMode() {}
+      start() {}
+      destroy() {}
+    }
+    assert.throws(() => registerProvider('test-missing-descriptor', MissingDescriptor), /missing or invalid customization descriptor/)
+    assert.deepEqual(Object.keys(getProviderCustomizationRoster()).sort(), getRegisteredProviderNames().sort())
   })
 
   // #5555: validateProviderClass was only invoked on the registerProvider()
@@ -883,6 +897,7 @@ describe('Provider Registry', () => {
     it('providers without a preflight credentials block are reported ready (opt-out)', () => {
       class NoPreflightProvider {
         static get capabilities() { return {} }
+        static get customizationDescriptor() { return CliSession.customizationDescriptor }
         // Intentionally no static get preflight() — opts out of credential checks
         sendMessage() {}
         interrupt() {}
@@ -1752,6 +1767,7 @@ describe('validateProviderClass — inProcessPermissions guard (#5379)', () => {
   // test isolates the inProcessPermissions check from the base-method check.
   function makeProviderClass({ inProcessPermissions, respondToPermission, respondToQuestion }) {
     class Stub {
+      static get customizationDescriptor() { return CliSession.customizationDescriptor }
       sendMessage() {}
       interrupt() {}
       setModel() {}

@@ -8,6 +8,7 @@ import { AgentConnectionRegistry, validateAgentConnections } from '../src/agent-
 import { validateConfig } from '../src/config.js'
 import { listProviders, registerProvider } from '../src/providers.js'
 import { SessionManager } from '../src/session-manager.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 class ConnectionFixtureSession extends EventEmitter {
   static agentConnectionRoutes = ['api', 'local']
@@ -32,6 +33,7 @@ class ConnectionFixtureSession extends EventEmitter {
 }
 
 const FIXTURE_RUNTIME = `connection-fixture-${process.pid}`
+declareUnknownCustomization(ConnectionFixtureSession)
 registerProvider(FIXTURE_RUNTIME, ConnectionFixtureSession)
 class VerifiedConnectionFixtureSession extends ConnectionFixtureSession {
   static agentConnectionRoutes = ['local', 'native']

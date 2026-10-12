@@ -9,6 +9,7 @@ import {
   agentCountTooltip,
 } from '../lib/status-tooltips'
 import { SidebarCostBadge, type CostBadgeMode } from './SidebarCostBadge'
+import type { ProviderRuntimeInfo } from '@chroxy/protocol'
 
 export interface StatusBarProps {
   cost?: number
@@ -59,6 +60,7 @@ export interface StatusBarProps {
   isBusy?: boolean
   agentCount?: number
   provider?: string
+  providerRuntimeInfo?: ProviderRuntimeInfo | null
   /**
    * #5184: human-readable model label (e.g. `Sonnet 4.6`) for the
    * `provider-model` badge mode. Optional — when absent the badge shows the
@@ -94,7 +96,7 @@ export const STATUS_OVER_BUDGET_THRESHOLD = 100
 export function StatusBar({
   cost, context, statusLine, contextPercent, contextTokens, contextEstimated,
   inputTokens, outputTokens, contextWindow,
-  isBusy, agentCount, provider, model, costBadgeMode,
+  isBusy, agentCount, provider, providerRuntimeInfo, model, costBadgeMode,
 }: StatusBarProps) {
   const prov = provider ? getProviderInfo(provider) : null
   // #6791: the user's own statusLine script output, ANSI-stripped and collapsed
@@ -147,15 +149,23 @@ export function StatusBar({
     <div className="status-bar" data-testid="status-bar">
     <div className="status-bar-group status-bar-left">
       {prov && (
-        <span
-          className="status-provider"
-          data-provider={prov.type}
-          title={prov.tooltip}
-          aria-label={prov.tooltip}
-          data-testid="status-provider"
-        >
-          {prov.short}
-        </span>
+        <details className="status-provider-details">
+          <summary
+            className="status-provider"
+            data-provider={prov.type}
+            title={`${prov.tooltip}. Open provider details.`}
+            aria-label={`${prov.tooltip}. Open provider details.`}
+            data-testid="status-provider"
+          >{prov.short}</summary>
+          <div className="status-provider-panel" data-testid="status-provider-panel">
+            <strong>{providerRuntimeInfo?.provider || provider}</strong>
+            <span>Binary: {providerRuntimeInfo?.binaryVersion || 'unknown'}</span>
+            <span>Native instructions: {String(providerRuntimeInfo?.customization.nativeDiscovery.state ?? 'unknown')} ({providerRuntimeInfo?.customization.nativeDiscovery.delivery || 'unknown'} delivery)</span>
+            <span>Project policy: {providerRuntimeInfo?.projectInstructions.status || 'unknown'} ({providerRuntimeInfo?.projectInstructions.enforcement || 'instructional'})</span>
+            <span>MCP: discovery {String(providerRuntimeInfo?.customization.mcp.discovery ?? 'unknown')}, calls {String(providerRuntimeInfo?.customization.mcp.toolCalls ?? 'unknown')}</span>
+            <span>Chroxy channels: {providerRuntimeInfo?.customization.chroxyChannels.map((channel) => `${channel.channel}/${channel.lifetime}`).join(', ') || 'none'}</span>
+          </div>
+        </details>
       )}
       {model && (
         <span className="status-model" data-testid="status-model" title={model}>

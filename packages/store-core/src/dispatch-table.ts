@@ -193,6 +193,7 @@ import {
   type PermissionModesByProvider,
 } from './permission-modes-by-provider'
 import { applyInputAcknowledgement, type InputDeliveryMap } from './input-delivery'
+import type { ProviderRuntimeInfo } from '@chroxy/protocol'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -215,6 +216,7 @@ import { applyInputAcknowledgement, type InputDeliveryMap } from './input-delive
  */
 export interface DispatchSessionBase {
   messages: ChatMessage[]
+  providerRuntimeInfo?: ProviderRuntimeInfo | null
   // `streamingMessageId` — read+cleared by message_queued's faked-fresh-turn
   // reconcile (#6291). Both clients' real `SessionState` carry it
   // (BaseSessionState).
@@ -668,6 +670,10 @@ export type DispatchCallbackPayload =
  * are intentionally omitted.
  */
 export interface DispatchMessageMap {
+  provider_runtime_info: {
+    type: 'provider_runtime_info'
+    sessionId: string
+  } & ProviderRuntimeInfo
   available_permission_modes: {
     type: 'available_permission_modes'
     modes?: unknown[]
@@ -1494,6 +1500,15 @@ function dispatchConversationId<S extends DispatchSessionBase>(
   if (sessionId && adapter.hasSession(sessionId)) {
     adapter.updateSession(sessionId, () => ({ conversationId } as Partial<S>))
   }
+}
+
+function dispatchProviderRuntimeInfo<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['provider_runtime_info'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  if (!adapter.hasSession(msg.sessionId)) return
+  const { type: _type, sessionId, ...providerRuntimeInfo } = msg
+  adapter.updateSession(sessionId, () => ({ providerRuntimeInfo } as Partial<S>))
 }
 
 /** `permission_rules_updated` — replace the target session's rule set. */
@@ -2675,6 +2690,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     budget_resumed: dispatchBudgetResumed,
     budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
+    provider_runtime_info: dispatchProviderRuntimeInfo,
     permission_rules_updated: dispatchPermissionRulesUpdated,
     confirm_permission_mode: dispatchConfirmPermissionMode,
     // --- slice 2 (epic #5556) ---
@@ -2790,6 +2806,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'budget_resumed',
   'budget_resume_ack',
   'conversation_id',
+  'provider_runtime_info',
   'permission_rules_updated',
   'confirm_permission_mode',
   // --- slice 2 (epic #5556) ---

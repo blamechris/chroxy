@@ -9,6 +9,7 @@ import { EnvironmentManager } from '../src/environment-manager.js'
 import { createDaemonSessionManager } from '../src/server-cli.js'
 import { sessionHandlers } from '../src/handlers/session-handlers.js'
 import { createSpy, makeSessionIndexCtx, nsCtx } from './test-helpers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #7552 — the session <-> environment association.
@@ -62,6 +63,7 @@ before(async () => {
     setModel() {}
     setPermissionMode() {}
   }
+  declareUnknownCustomization(EnvWiringProvider)
   registerProvider('test-env-wiring', EnvWiringProvider)
 })
 

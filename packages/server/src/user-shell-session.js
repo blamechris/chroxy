@@ -17,6 +17,7 @@
 import { realpathSync, existsSync } from 'fs'
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { USER_SHELL_CUSTOMIZATION } from './provider-customization.js'
 import { createLogger } from './logger.js'
 import { isWindows, defaultShell, killProcessTree } from './platform.js'
 import { CHROXY_SECRET_DENYLIST, stripInheritedChroxySecrets } from './utils/spawn-env.js'
@@ -77,6 +78,10 @@ export function resolveShell({
 }
 
 export class UserShellSession extends BaseSession {
+  static get customizationDescriptor() {
+    return USER_SHELL_CUSTOMIZATION
+  }
+
   static get displayLabel() {
     return 'Shell'
   }

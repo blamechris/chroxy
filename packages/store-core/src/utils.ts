@@ -65,6 +65,7 @@ export function filterThinking<T extends { id: string }>(messages: T[]): T[] {
 /** Create a fresh BaseSessionState with default values for all shared fields */
 export function createEmptyBaseSessionState(): BaseSessionState {
   return {
+    providerRuntimeInfo: null,
     messages: [],
     streamingMessageId: null,
     pendingClientMessageId: null,
@@ -154,9 +155,10 @@ export function createEmptyBaseSessionState(): BaseSessionState {
  * the store write entirely and avoid churning referential equality.
  */
 export function clearTransientSessionState(
-  ss: Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts'>,
-): Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts'>> {
-  const patch: Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts'>> = {}
+  ss: Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo'>,
+): Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo'>> {
+  const patch: Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo'>> = {}
+  if (ss.providerRuntimeInfo) patch.providerRuntimeInfo = null
   if (ss.streamingMessageId) patch.streamingMessageId = null
   if (ss.isPlanPending) {
     patch.isPlanPending = false
@@ -202,6 +204,7 @@ export function clearTransientSessionState(
  * undetected extra clear.
  */
 export const TRANSIENT_SESSION_SWEEP_FIELDS = [
+  'providerRuntimeInfo',
   'streamingMessageId',
   'isPlanPending',
   'planAllowedPrompts',

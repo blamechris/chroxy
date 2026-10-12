@@ -8,7 +8,7 @@ import type { ChatMessage } from './chat'
 // #6901: the Codex sandbox enum, single-sourced from the protocol package so the
 // client-side SessionInfo.codexSandbox field stays in lockstep with the wire
 // schema (ServerSessionListEntrySchema) and the create-time selector.
-import type { AgentConnection, CodexSandboxMode } from '@chroxy/protocol'
+import type { AgentConnection, CodexSandboxMode, ProviderRuntimeInfo } from '@chroxy/protocol'
 
 /**
  * Per-turn BILLING token counts from the most recent `result.usage` — the
@@ -403,6 +403,8 @@ export type SessionRole = 'primary' | 'observer' | 'unclaimed';
  * - Dashboard adds: terminalRawBuffer, selectedFilePath, thinkingLevel
  */
 export interface BaseSessionState {
+  /** Live provider/customization facts; refreshed on connect/switch/late join. */
+  providerRuntimeInfo: ProviderRuntimeInfo | null;
   messages: ChatMessage[];
   streamingMessageId: string | null;
   /**

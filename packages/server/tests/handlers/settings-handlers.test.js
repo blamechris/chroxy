@@ -10,6 +10,7 @@ import { PermissionRuleStore } from '../../src/permission-rule-store.js'
 import { registerProvider } from '../../src/providers.js'
 import { addLogListener, removeLogListener } from '../../src/logger.js'
 import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
+import { declareUnknownCustomization } from '../helpers/provider-customization.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
@@ -279,6 +280,7 @@ describe('settings-handlers', () => {
       }
 
       it('rejects a Claude model on a known non-Claude provider that declares no allowlist', () => {
+        declareUnknownCustomization(NoAllowlistNonClaudeSession)
         registerProvider('test-no-allowlist-nonclaude', NoAllowlistNonClaudeSession)
         const sessions = new Map()
         const session = createMockSession()
@@ -3089,6 +3091,7 @@ describe('settings-handlers', () => {
       }
 
       function inventedLevelSession(modelId = 'model-with-zzz') {
+        declareUnknownCustomization(InventedLevelProviderSession)
         registerProvider('test-invented-levels', InventedLevelProviderSession)
         const session = createMockSession()
         session.model = modelId
@@ -3165,6 +3168,7 @@ describe('settings-handlers', () => {
       }
 
       function legacyRosterSession() {
+        declareUnknownCustomization(LegacyRosterProviderSession)
         registerProvider('test-legacy-roster', LegacyRosterProviderSession)
         const session = createMockSession()
         session.model = 'claude-sonnet-4-6'
@@ -3234,6 +3238,7 @@ describe('settings-handlers', () => {
       }
 
       function noRosterNonClaudeSession(providerName = 'test-no-roster-non-claude') {
+        declareUnknownCustomization(NoRosterNonClaudeSession)
         registerProvider(providerName, NoRosterNonClaudeSession)
         const session = createMockSession()
         session.model = 'gpt-5-codex'
@@ -3276,6 +3281,7 @@ describe('settings-handlers', () => {
         class ThrowingNonClaudeSession extends NoRosterNonClaudeSession {
           static getFallbackModels() { throw new Error('catalog unavailable') }
         }
+        declareUnknownCustomization(ThrowingNonClaudeSession)
         registerProvider('test-throwing-non-claude', ThrowingNonClaudeSession)
         const session = createMockSession()
         session.model = 'gpt-5-codex'
@@ -3337,6 +3343,7 @@ describe('settings-handlers', () => {
         class ThrowingClaudeSession extends LegacyRosterProviderSession {
           static getModelMetadata() { throw new Error('lookup exploded') }
         }
+        declareUnknownCustomization(ThrowingClaudeSession)
         registerProvider('test-throwing-claude', ThrowingClaudeSession)
         const session = createMockSession()
         session.model = 'claude-sonnet-4-6'
@@ -3377,6 +3384,7 @@ describe('settings-handlers', () => {
           static getFallbackModels() { throw new Error('roster lookup exploded') }
         }
         class ClaudeWrapperSession { static claudeFamily = true }
+        declareUnknownCustomization(ThrowingRosterNonClaudeSession)
         registerProvider('test-throwing-roster-class', ThrowingRosterNonClaudeSession)
         const session = createMockSession()
         // Own property, so the mock's prototype chain is untouched while
@@ -3422,6 +3430,7 @@ describe('settings-handlers', () => {
       })
 
       it('validates against bootedModel when the operator set no explicit model', async () => {
+        declareUnknownCustomization(InventedLevelProviderSession)
         registerProvider('test-invented-levels', InventedLevelProviderSession)
         const session = createMockSession()
         session.model = null

@@ -148,6 +148,11 @@ export type { ServerErrorEnvelopeMessage } from './schemas/server.ts'
 // re-export makes `tsc --build` fail loudly if any alias is removed from
 // `./schemas/server.ts` (same rationale as the #4192 line above).
 export type {
+  ProviderRuntimeCapabilityState,
+  ProviderCustomizationDescriptor,
+  ProviderInstructionProjection,
+  ProviderRuntimeInfo,
+  ServerProviderRuntimeInfoMessage,
   ActivityKind,
   ActivityStatus,
   ActivityOutputRef,

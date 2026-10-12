@@ -3,6 +3,7 @@ import { getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { settlePush } from './push.js'
 import { terminalMirrorRecipient } from './handler-utils.js'
 import { broadcastRosterPerRecipient } from './roster-broadcast.js'
+import { getProviderRuntimeInfo } from './providers.js'
 
 const log = createLogger('ws-forwarding')
 
@@ -362,6 +363,25 @@ function setupSessionForwarding(normalizer, ctx) {
     }
     const result = normalizer.normalize(event, data, normCtx)
     if (!result) return
+
+    // #7745/#7835: creation/subscription can replay before an async provider
+    // handshake and project-policy compilation finish. Ready is the first
+    // generic event after those facts settle, so refresh the same bounded
+    // session-scoped snapshot used by sendSessionInfo. This is deliberately a
+    // separate frame: existing ready and boolean capability semantics stay
+    // unchanged, while the creating tab converges without a reselect.
+    if (event === 'ready') {
+      const entry = sessionManager.getSession(sessionId)
+      if (entry?.session) {
+        result.messages.push({
+          msg: {
+            type: 'provider_runtime_info',
+            sessionId,
+            ...getProviderRuntimeInfo(entry.provider, entry.session),
+          },
+        })
+      }
+    }
 
     // Handle delta buffering
     if (result.buffer) {

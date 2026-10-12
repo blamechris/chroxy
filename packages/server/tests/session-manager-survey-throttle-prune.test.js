@@ -9,6 +9,7 @@ import { sessionPrStatusHandlers } from '../src/handlers/session-pr-status-handl
 import { sessionPrThreadsHandlers } from '../src/handlers/session-pr-threads-handlers.js'
 import { _testTotalRecordCount } from '../src/handlers/survey-throttle.js'
 import { createSpy, nsCtx } from './test-helpers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #7450 / #8092 acceptance: the survey-throttle prune must reach EVERY
@@ -85,6 +86,7 @@ class DeadPtyProvider extends EventEmitter {
   setModel() {}
   setPermissionMode() {}
 }
+declareUnknownCustomization(NoopProvider, DeadPtyProvider)
 
 /** Let a rejected start() promise's microtask `.catch()` run. */
 const tick = () => new Promise((r) => setImmediate(r))

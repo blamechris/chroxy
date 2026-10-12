@@ -7,12 +7,20 @@ import { lstatSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isEntryPoint } from './lib/is-entry-point.mjs'
+import { compileInstructionPolicy, inspectInstructionSource, INSTRUCTION_SEPARATOR } from '../packages/server/src/instruction-policy-compiler.js'
 
 export const DOC_CAP_BYTES = 98304
 export const MACHINE_BUDGET_BYTES = 49152
 export const MIN_MARGIN_BYTES = 2048
 // Same serialization as fleet-check.py; count bytes, including separators.
 export const DOC_SEPARATOR = '\n\n--- project-doc ---\n\n'
+if (DOC_SEPARATOR !== INSTRUCTION_SEPARATOR) throw new Error('project-rule separator drifted from instruction compiler')
+
+export const CHROXY_REQUIRED_PROJECT_RULE_IDS = [
+  'project-overview', 'critical-dev-notes', 'prime-compatibility-and-authority',
+  'session-start-protocol', 'git-workflow', 'code-style', 'testing-conventions',
+  'architecture', 'dev-commands', 'ui-verification-with-maestro', 'repo-memory-mcp', 'reference',
+]
 
 const PROJECT_SECTIONS = [
   'Project Overview', 'Critical Dev Notes', 'PRIME Compatibility and Authority',
@@ -96,8 +104,18 @@ export function checkProjectRules({ root = ROOT, machinePath } = {}) {
       const directory = dirname(candidate.path)
       return directory === '.' || directory === target || target.startsWith(`${directory}/`)
     })
-    const bytes = machineBytes + selected.reduce((sum, rule) => sum + rule.bytes, 0) +
-      selected.length * Buffer.byteLength(DOC_SEPARATOR)
+    const sources = selected.map(rule => ({ id: `project:${rule.path}`, text: rule.text }))
+    const nestedIds = sources.slice(1).flatMap(item => inspectInstructionSource(item).requiredRuleIds)
+    const projection = compileInstructionPolicy({
+      sources,
+      targets: [{
+        id: `native:${target === '.' ? 'root' : target.replaceAll('/', '-')}`,
+        budgetBytes: DOC_CAP_BYTES,
+        reservedBytes: machineBytes,
+        requiredRuleIds: [...CHROXY_REQUIRED_PROJECT_RULE_IDS, ...nestedIds],
+      }],
+    })[`native:${target === '.' ? 'root' : target.replaceAll('/', '-')}`]
+    const bytes = machineBytes + projection.totalBytes
     const margin = DOC_CAP_BYTES - bytes
     if (margin < MIN_MARGIN_BYTES) throw new Error(`instruction chain ${target}: ${bytes}/${DOC_CAP_BYTES} bytes including separators; margin ${margin} is below ${MIN_MARGIN_BYTES}`)
     return { directory: target, bytes, margin, files: selected.map(rule => rule.path) }

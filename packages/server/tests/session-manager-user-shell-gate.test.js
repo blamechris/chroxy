@@ -8,6 +8,7 @@ import { SessionManager, UserShellDisabledError } from '../src/session-manager.j
 import { UserShellSession } from '../src/user-shell-session.js'
 import { readRegistry } from '../src/user-shell-registry.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #5985 (epic #5982) — the fail-closed gate for the embedded user-shell
@@ -42,6 +43,7 @@ class CaptureProvider extends EventEmitter {
   setModel() {}
   setPermissionMode() {}
 }
+declareUnknownCustomization(CaptureProvider)
 
 before(async () => {
   ({ registerProvider } = await import('../src/providers.js'))

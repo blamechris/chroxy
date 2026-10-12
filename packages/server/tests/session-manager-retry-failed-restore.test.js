@@ -7,6 +7,7 @@ import { EventEmitter } from 'node:events'
 
 import { SessionManager } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #7625 — SessionManager.retryFailedRestore(): the operator-triggered second
@@ -44,6 +45,7 @@ class Retry7625 extends EventEmitter {
   }
   destroy() {} sendMessage() {} interrupt() {} setModel() {} setPermissionMode() {}
 }
+declareUnknownCustomization(Retry7625)
 registerProvider('test-retry-7625', Retry7625)
 
 const DAY = 24 * 60 * 60 * 1000

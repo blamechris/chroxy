@@ -4,6 +4,7 @@ This is the authored project contract for every coding host. Edit `AGENTS.md`
 directly; `CLAUDE.md` and `GEMINI.md` import it. References to Claude, the
 `claude` CLI, or `.claude/` describe that tooling; apply the equivalent for your host.
 
+<!-- chroxy-required-rule:start project-overview -->
 ## Project Overview
 
 **Chroxy** is a remote terminal app for Claude Code. Run a lightweight daemon on your dev machine, connect from your phone via a secure tunnel. Get both a full terminal view and a clean chat-like UI that parses Claude Code's output into readable messages.
@@ -34,6 +35,8 @@ chroxy/
 - Claude-hooks works: `chroxy-hooks install` registers eight stateless emitters in Claude Code settings so plain (non-chroxy) sessions feed the daemon's notification pipeline — see `docs/guides/discord-notifications.md`
 - **Dev build required** — `expo-speech-recognition` native module means Expo Go no longer works. Use `npx expo run:ios` or `npx expo run:android`.
 
+<!-- chroxy-required-rule:end project-overview -->
+<!-- chroxy-required-rule:start critical-dev-notes -->
 ## Critical Dev Notes
 
 ### Node 22 Required
@@ -64,12 +67,16 @@ npx chroxy tunnel setup
 - [`docs/troubleshooting/session-token-mismatch.md`](docs/troubleshooting/session-token-mismatch.md) — how to enable the `[session-binding-*]` debug logs and correlate a `SESSION_TOKEN_MISMATCH` failure by `requestId` (runbook from the resolved #2832 investigation).
 - [`docs/troubleshooting/lan-discovery.md`](docs/troubleshooting/lan-discovery.md) — why the mobile app's "Scan Local Network" finds nothing on the same Wi-Fi (it's a **unicast /24 sweep**, not mDNS — router client/AP isolation blocks it) and the router-side fixes + manual/QR fallbacks (#6561).
 
+<!-- chroxy-required-rule:end critical-dev-notes -->
+<!-- chroxy-required-rule:start prime-compatibility-and-authority -->
 ## PRIME Compatibility and Authority
 
 The current user's scope, merge holds and host restrictions survive every skill invocation and resume. A skill cannot widen a review-only/draft-only task. Chroxy's explicitly selected PRIME backlog mission, gated synchronous squash merge, old-debt quota, build invariants and paused cost breaker remain in `.claude/commands/prime-directive.md` and `.claude/skill-profile.md`.
 
 Claude loads the compiled `.claude/skills/prime-directive/SKILL.md` through native `/prime-directive`. Other hosts must verify their own discovery; if unavailable, read that exact local artifact and disclose the manual fallback. Do not infer that this project contract loads machine-global Claude rules or registers slash skills. Preserve the run's owned branch, acceptance, holds, attempts and consumed limits; restored context is not new authority or a fresh budget. PRIME checkpoints continue within scope; NORMAL ends its selected package. Never refresh another active session's instructions as part of a repair.
 
+<!-- chroxy-required-rule:end prime-compatibility-and-authority -->
+<!-- chroxy-required-rule:start session-start-protocol -->
 ## Session Start Protocol
 
 **When user says "Resume" or "Let's start":**
@@ -148,6 +155,8 @@ next `/skill update`. **Registry follow-up:** the multi-target compile step shou
 registry's `generic/skill.md` so other repos inherit it (this repo's `/skill` is ahead of the
 template until then).
 
+<!-- chroxy-required-rule:end session-start-protocol -->
+<!-- chroxy-required-rule:start git-workflow -->
 ## Git Workflow
 
 ### Zero Attribution Policy
@@ -225,6 +234,8 @@ When `gh pr merge` fails with "not mergeable" or "base branch policy prohibits t
 2. **Check CI:** `gh pr checks {N}`. If any check is `FAILURE` or `PENDING`, fix the failing check or wait for pending checks, then retry.
 3. **Inspect review threads and general summaries at the current head.** Fix, remove or verify containment of blocking findings within authority and remaining limits. Reply and resolve only supported dispositions; keep unremedied blockers open. Recheck actual required approvals/checks rather than assuming threads are the only possible cause. Ask the owner only for a genuinely reserved prerequisite; routine thread cleanup remains the coordinator's work.
 
+<!-- chroxy-required-rule:end git-workflow -->
+<!-- chroxy-required-rule:start code-style -->
 ## Code Style
 
 ### Server (packages/server/)
@@ -265,6 +276,8 @@ A control whose visible box is smaller than 44pt and which has no `hitSlop` is a
 preference — all five issues above were filed and fixed as such. When you shrink a control's
 padding or font size, re-check the resulting box.
 
+<!-- chroxy-required-rule:end code-style -->
+<!-- chroxy-required-rule:start testing-conventions -->
 ## Testing Conventions
 
 ### Every guard must be proven to fail — see [`docs/false-safety-guards.md`](docs/false-safety-guards.md)
@@ -405,6 +418,8 @@ The CI lint (`packages/server/scripts/lint-session-opt-forwarding.sh`) now: (1) 
 
 **When adding a new BaseSession opt:** add it to the `BaseSession` constructor destructure AND to `BASE_SESSION_OPT_KEYS` (same PR) — every picker subclass then inherits it for free. If an opt deliberately should not propagate to a particular subclass (rare), add `// lint-ignore-opt-forwarding: <key>` immediately above the class declaration and explain why.
 
+<!-- chroxy-required-rule:end testing-conventions -->
+<!-- chroxy-required-rule:start architecture -->
 ## Architecture
 
 Server streams through `ws-server.js` → Cloudflare tunnel → mobile app / desktop dashboard:
@@ -423,6 +438,8 @@ For component tables, WS protocol messages, data flow diagrams, and file listing
 - [`docs/security/encryption-threat-model.md`](docs/security/encryption-threat-model.md) — transport-layer (key exchange + message encryption) threat model.
 - [`docs/security/spawned-binary-provenance.md`](docs/security/spawned-binary-provenance.md) — provider-binary integrity + macOS quarantine preflight (`verify-binary.js`) and the supply-chain threat model. Read this before touching `utils/verify-binary.js`, `utils/preflight.js`, `utils/resolve-binary.js`, or any provider `resolvedBinary`/spawn path.
 
+<!-- chroxy-required-rule:end architecture -->
+<!-- chroxy-required-rule:start dev-commands -->
 ## Dev Commands
 
 ```bash
@@ -470,6 +487,8 @@ This uploads to EAS cloud, builds (~10-15 min), and provides a download URL/QR c
 - `npx expo start --tunnel` fails on Android (ngrok URL triggers `IDN.toASCII` SSL error). Use LAN mode or preview builds instead.
 - First time opening the dev client, enter the Metro URL shown in terminal (e.g., `exp://192.168.x.x:8081`).
 
+<!-- chroxy-required-rule:end dev-commands -->
+<!-- chroxy-required-rule:start ui-verification-with-maestro -->
 ## UI Verification with Maestro
 
 Maestro E2E flows let agents verify app UI after code changes. Flows live in `packages/app/.maestro/`.
@@ -564,6 +583,8 @@ This keeps the app dependency-free (no debug menu, no URL scheme handler) and te
 - **Screenshots save to CWD** — always clean up after verification
 - **Device compatibility** — tested on iPhone 16 Pro (iOS 18.6), portrait only; iPad and Android are untested (tap coordinates may differ)
 
+<!-- chroxy-required-rule:end ui-verification-with-maestro -->
+<!-- chroxy-required-rule:start repo-memory-mcp -->
 ## Repo Memory MCP
 
 This repo has the `repo-memory` MCP server configured, with ~1,500 files pre-indexed (AST summaries) and a `post-merge` hook that keeps the cache warm. Use it to avoid re-reading files and save tokens — it is heavily underused (the cache is warm but agents rarely call it).
@@ -583,10 +604,13 @@ Read the full file (not just the summary) when you need exact implementation det
 
 Spawned subagents get a fresh context and **do not inherit this guidance** — when a skill or prompt launches an exploration/review subagent, repeat the exploration protocol in that subagent's prompt (the exploration-heavy skills already do). `get_token_report` summarizes savings; the `repo-memory report` CLI reads the same data at zero token cost.
 
+<!-- chroxy-required-rule:end repo-memory-mcp -->
+<!-- chroxy-required-rule:start reference -->
 ## Reference
 
 For detailed component tables, WebSocket protocol messages, file listings, and state management details: see [`docs/architecture/reference.md`](docs/architecture/reference.md)
 
+<!-- chroxy-required-rule:end reference -->
 ---
 
 *Last Updated: 2026-07-02*

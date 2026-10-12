@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * Plumbing tests for `skipPermissions` (#4208 / #4209).
@@ -48,6 +49,7 @@ class CaptureProvider extends EventEmitter {
   setModel() {}
   setPermissionMode() {}
 }
+declareUnknownCustomization(CaptureProvider)
 
 before(async () => {
   ({ registerProvider } = await import('../src/providers.js'))

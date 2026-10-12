@@ -126,6 +126,7 @@ import { createHash, randomBytes } from 'crypto'
 import { tmpdir } from 'os'
 import { isAbsolute, join, posix, resolve, sep } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
+import { BYOK_CUSTOMIZATION } from './provider-customization.js'
 import { sweepStaleOwnedDirs, ensureOwnedBaseDir, OWNER_PID_FILE } from './utils/stale-session-dirs.js'
 import {
   applyEdit,
@@ -405,6 +406,17 @@ export function normalizePostCreateCommand(value) {
 }
 
 export class DockerByokSession extends ClaudeByokSession {
+  static get customizationDescriptor() {
+    return {
+      ...BYOK_CUSTOMIZATION,
+      chroxyChannels: BYOK_CUSTOMIZATION.chroxyChannels.map((entry) => ({
+        ...entry,
+        content: entry.content.filter((content) => content !== 'project-instructions'),
+      })),
+      byteBudgets: { ...BYOK_CUSTOMIZATION.byteBudgets, projectInstructions: 'unsupported' },
+    }
+  }
+
   // #5891: declare Claude-family membership explicitly rather than inheriting it
   // from ClaudeByokSession. Docker-BYOK runs Claude/Anthropic-key models in a
   // container, so it IS Claude-family — its model ids take the soft-fallback path
