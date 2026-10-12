@@ -5,12 +5,13 @@ import { createLogger } from './logger.js'
 const log = createLogger('dev-preview')
 
 /**
- * Detects when Claude starts a localhost dev server and creates
- * an ephemeral Cloudflare quick tunnel so the phone can preview it.
+ * Manages ephemeral Cloudflare quick tunnels so the phone can preview a
+ * localhost dev server, and emits dev_preview events for the WS layer to
+ * broadcast.
  *
- * Listens to tool_result events from sessions, scans output for
- * localhost server patterns, spawns a secondary tunnel, and emits
- * a dev_preview event for the WS layer to broadcast.
+ * A preview is started only when one is explicitly requested. Session output,
+ * such as a tool_result that mentions a localhost port, never starts one: the
+ * WS layer does not pass tool results to this manager.
  *
  * Lifecycle:
  *   - One tunnel per (sessionId, port) pair
@@ -73,8 +74,9 @@ export class DevPreviewManager extends EventEmitter {
   }
 
   /**
-   * Handle a tool_result event from a session.
-   * If it contains a server start pattern, creates a preview tunnel.
+   * Scan tool_result text for a server start pattern and, if one is found,
+   * create a preview tunnel. The WS layer does not call this for session
+   * output; a preview opens only on an explicit request.
    */
   async handleToolResult(sessionId, result) {
     const port = this.detectPort(result)
