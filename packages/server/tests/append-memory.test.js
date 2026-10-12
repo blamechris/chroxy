@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, readFile, writeFile, symlink, realpath } from 'fs/promises'
 import { openSync, closeSync, constants as fsConstants } from 'fs'
 import { execFileSync, spawnSync } from 'child_process'
-import { join, resolve, dirname } from 'path'
+import { join, resolve, dirname, basename } from 'path'
 import { fileURLToPath } from 'url'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
@@ -93,7 +93,7 @@ describe('appendMemory handler', () => {
       process.env.CHROXY_CONFIG_DIR = join(fakeHome, '.chroxy')
       responses.length = 0
       await fileOps.readMemory(mockWs, dir)
-      const imported = responses[0].entries.find(entry => entry.scope === 'import' && entry.path.endsWith('/AGENTS.md'))
+      const imported = responses[0].entries.find(entry => entry.scope === 'import' && basename(entry.path) === 'AGENTS.md')
       assert.ok(imported?.content.endsWith('Shared memory reaches every host.\n'))
     } finally {
       for (const [key, value] of Object.entries(previous)) {
