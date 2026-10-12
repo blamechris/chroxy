@@ -350,11 +350,6 @@ function setupSessionForwarding(normalizer, ctx) {
     // list that reports the session's true state, which is still busy.
     if (event === 'error') queueTurnEndSessionList(sessionId)
 
-    // Dev server preview: scan tool_result events for localhost server patterns
-    if (event === 'tool_result' && data?.result) {
-      devPreview.handleToolResult(sessionId, data.result)
-    }
-
     const normCtx = {
       sessionId,
       mode: 'multi',
@@ -589,13 +584,6 @@ function setupCliForwarding(normalizer, ctx) {
     })
   }
 
-  // Dev server preview: scan tool_result events for localhost server patterns (legacy CLI)
-  // #5313 (WP-1.3): safeForward — a throw here must not unwind CliSession's emit().
-  cliSession.on('tool_result', safeForward('cli:tool_result', (data) => {
-    if (data?.result) {
-      devPreview.handleToolResult('__legacy__', data.result)
-    }
-  }))
   devPreview.on('dev_preview_started', safeForward('cli:dev_preview_started', ({ sessionId, port, url }) => {
     if (sessionId === '__legacy__') {
       broadcast({ type: 'dev_preview', port, url })
