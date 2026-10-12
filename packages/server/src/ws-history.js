@@ -6,7 +6,7 @@
  */
 import { toShortModelId, getRegistryForProvider, resolveRosterProvider } from './models.js'
 import { getPermissionModes } from './handler-utils.js'
-import { listProviders, getProvider, resolveDaemonDefaultProvider } from './providers.js'
+import { listProviders, getProvider, getProviderRuntimeInfo, resolveDaemonDefaultProvider } from './providers.js'
 import { createLogger } from './logger.js'
 import { streamKindOf, permissionOutcomeDecision } from './session-message-history.js'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
@@ -1336,6 +1336,12 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
   const entry = sessionManager?.getSession(sessionId)
   if (!entry) return
   const session = entry.session
+
+  send(ws, {
+    type: 'provider_runtime_info',
+    sessionId,
+    ...getProviderRuntimeInfo(entry.provider, session),
+  })
 
   if (session.isReady) {
     send(ws, { type: 'claude_ready', sessionId })

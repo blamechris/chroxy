@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
+import { sendSessionInfo } from '../src/ws-history.js'
 import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
 import { registerProviderRegistry, getRegistryForProvider, updateModels, resetModels, isClaudeProvider, resolveRosterProvider } from '../src/models.js'
 // Importing providers.js registers the real provider classes so
@@ -12,7 +13,7 @@ import { registerProviderRegistry, getRegistryForProvider, updateModels, resetMo
 // but the direct import documents why the parity tests below see the real
 // registry rather than an empty one.
 import '../src/providers.js'
-import { getRegisteredProviderNames, DEFAULT_PROVIDER } from '../src/providers.js'
+import { getProvider, getRegisteredProviderNames, DEFAULT_PROVIDER } from '../src/providers.js'
 
 /**
  * ws-forwarding.js unit tests (#1732, #2376)
@@ -73,6 +74,82 @@ function makeCtx(overrides = {}) {
 }
 
 describe('setupForwarding', () => {
+
+  it('refreshes the same session-scoped runtime snapshot on ready and for late joiners', () => {
+    class RuntimeSession {
+      static customizationDescriptor = getProvider('codex').customizationDescriptor
+      get providerBinaryVersion() { return this.version || 'unknown' }
+      get providerRuntimeCapabilities() { return this.runtimeCapabilities || {} }
+      get providerInstructionProjection() { return this.projection }
+    }
+    const unknownProjection = {
+      status: 'unknown', enforcement: 'instructional', compilerVersion: '1',
+      budgetBytes: 0, totalBytes: 0, sources: [], rules: [], includedRequiredRuleIds: [],
+    }
+    const sessionA = Object.assign(new RuntimeSession(), {
+      version: null,
+      runtimeCapabilities: { approvals: 'unknown' },
+      projection: unknownProjection,
+      isReady: false,
+      model: null,
+      bootedModel: null,
+      permissionMode: 'approve',
+    })
+    const sessionB = Object.assign(new RuntimeSession(), {
+      version: null,
+      runtimeCapabilities: {},
+      projection: unknownProjection,
+      isReady: false,
+      model: null,
+      bootedModel: null,
+      permissionMode: 'approve',
+    })
+    const entries = new Map([
+      ['sess-a', { provider: 'codex', session: sessionA }],
+      ['sess-b', { provider: 'codex', session: sessionB }],
+    ])
+    const ctx = makeCtx()
+    ctx.sessionManager.getSession = mock.fn(id => entries.get(id) || null)
+
+    const initial = []
+    sendSessionInfo({
+      sessionManager: ctx.sessionManager,
+      send: (_ws, frame) => initial.push(frame),
+      clients: new Map(),
+    }, {}, 'sess-a', { skipModels: true })
+    assert.equal(initial.find(frame => frame.type === 'provider_runtime_info').binaryVersion, 'unknown')
+
+    setupForwarding(ctx)
+    sessionA.version = '1.2.3'
+    sessionA.runtimeCapabilities = { approvals: true }
+    sessionA.projection = {
+      status: 'delivered', enforcement: 'instructional', compilerVersion: '1',
+      budgetBytes: 98304, totalBytes: 321,
+      sources: [{ id: 'project:AGENTS.md', sha256: '0'.repeat(64), bytes: 120, endByte: 321 }],
+      rules: [{ id: 'project-overview', sourceId: 'project:AGENTS.md', endByte: 321 }],
+      includedRequiredRuleIds: ['project-overview'],
+    }
+    ctx.sessionManager.emit('session_event', { sessionId: 'sess-a', event: 'ready', data: { model: 'codex' } })
+    const updates = ctx.broadcastToSession.mock.calls
+      .filter(call => call.arguments[1]?.type === 'provider_runtime_info')
+    assert.equal(updates.length, 1)
+    assert.equal(updates[0].arguments[0], 'sess-a')
+    assert.equal(updates[0].arguments[1].binaryVersion, '1.2.3')
+    assert.equal(updates[0].arguments[1].projectInstructions.status, 'delivered')
+    assert.equal('text' in updates[0].arguments[1].projectInstructions, false)
+    assert.equal('cwd' in updates[0].arguments[1], false)
+
+    const lateJoin = []
+    sendSessionInfo({
+      sessionManager: ctx.sessionManager,
+      send: (_ws, frame) => lateJoin.push(frame),
+      clients: new Map(),
+    }, {}, 'sess-a', { skipModels: true })
+    const lateRuntime = lateJoin.find(frame => frame.type === 'provider_runtime_info')
+    assert.equal(lateRuntime.binaryVersion, '1.2.3')
+    assert.equal(lateRuntime.projectInstructions.enforcement, 'instructional')
+    assert.equal(ctx.broadcastToSession.mock.calls.some(call => call.arguments[0] === 'sess-b' && call.arguments[1]?.type === 'provider_runtime_info'), false)
+  })
 
   // #7096 — the legacy-cli forwarder normalises with `sessionId: null`, and several
   // server schemas declare `sessionId: z.string().optional()` where `undefined` is legal

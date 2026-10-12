@@ -35,6 +35,7 @@
 
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
+import { declareUnknownCustomization } from './provider-customization.js'
 
 // Module-level buffer of providerOpts snapshots, one entry per
 // CapturingProvider instantiation. Reset between calls by
@@ -65,6 +66,7 @@ export class CapturingProvider extends EventEmitter {
   setModel() {}
   setPermissionMode() {}
 }
+declareUnknownCustomization(CapturingProvider)
 
 // providers.js's registry is process-global, so the FIRST test file to import
 // this helper registers the provider class and all subsequent imports become

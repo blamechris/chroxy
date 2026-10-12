@@ -12,6 +12,7 @@ import {
   CODEX_DEFAULT_SANDBOX,
 } from '../src/codex-session.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 // #6901: the ACTIVE/resolved codex sandbox mode is surfaced in session_list
 // (SessionInfo.codexSandbox) so a client can DISPLAY the current sandbox for a
@@ -98,6 +99,7 @@ before(async () => {
     setModel() {}
     setPermissionMode() {}
   }
+  declareUnknownCustomization(FakeCodexProvider, PlainProvider)
   registerProvider('test-fake-codex', FakeCodexProvider)
   registerProvider('test-plain', PlainProvider)
   registerProvider('test-codex-appserver', StubbedCodexAppServer)

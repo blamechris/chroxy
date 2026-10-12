@@ -11,6 +11,7 @@ import {
   ProviderModelNotSupportedError,
 } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * Unit tests for `_resolveCreateSessionPlan` (#6036) — the front-half SRP
@@ -63,6 +64,7 @@ class PlanFakeClaudeProvider extends PlanFakeSession {
   }
 }
 
+declareUnknownCustomization(PlanFakeSession)
 registerProvider('test-plan-fake-6036', PlanFakeSession)
 registerProvider('test-plan-model-limited-6036', PlanModelLimitedProvider)
 registerProvider('test-plan-fake-claude-6036', PlanFakeClaudeProvider)

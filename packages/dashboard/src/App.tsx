@@ -199,6 +199,9 @@ export function App() {
   const activeSessionProvider = useConnectionStore(s =>
     s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider ?? null,
   )
+  const activeProviderRuntimeInfo = useConnectionStore(s =>
+    s.activeSessionId ? s.sessionStates[s.activeSessionId]?.providerRuntimeInfo ?? null : null,
+  )
   // #6901: active session's resolved Codex sandbox mode (only codex sessions
   // carry it — session_list omits the field for every other provider). Drives
   // the read-only sandbox badge in the header settings dropdown so a running
@@ -2774,6 +2777,7 @@ export function App() {
         isBusy={busyProps.isBusy}
         agentCount={activeAgents.length}
         provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+        providerRuntimeInfo={activeProviderRuntimeInfo}
         modelLabel={activeModelLabel}
         costBadgeMode={costBadgeMode}
         devPreviews={devPreviews}

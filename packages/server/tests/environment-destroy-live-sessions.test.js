@@ -45,6 +45,7 @@ import {
   ENVIRONMENT_HAS_LIVE_SESSIONS,
 } from '../src/environments/destroy-with-sessions.js'
 import { createSpy, nsCtx } from './test-helpers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 before(async () => {
   const { registerProvider } = await import('../src/providers.js')
@@ -65,6 +66,7 @@ before(async () => {
     setModel() {}
     setPermissionMode() {}
   }
+  declareUnknownCustomization(DestroyGuardProvider)
   registerProvider('test-destroy-guard', DestroyGuardProvider)
 })
 

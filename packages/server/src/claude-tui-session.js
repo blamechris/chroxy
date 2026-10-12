@@ -33,6 +33,7 @@ import { stderrIndicatesUnknownResume } from './cli-session.js'
 // CONFIGURED server list discovered from the same ~/.claude.json / .mcp.json
 // sources Claude Code reads, labelled `configured` (not live).
 import { discoverConfiguredMcpServers } from './byok-mcp-config.js'
+import { CLAUDE_TUI_CUSTOMIZATION } from './provider-customization.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
@@ -235,6 +236,10 @@ export function withHookFsTimeout(promise, ms, label) {
 export const SINK_BASE_UNTRUSTED_CODE = 'SINK_BASE_UNTRUSTED'
 
 export class ClaudeTuiSession extends BaseSession {
+  static get customizationDescriptor() {
+    return CLAUDE_TUI_CUSTOMIZATION
+  }
+
   static agentConnectionRoutes = ['native']
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   // It was the DEFAULT_PROVIDER when #5855 made this membership load-bearing.

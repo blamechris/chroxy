@@ -1,4 +1,5 @@
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
+import { CODEX_EXEC_CUSTOMIZATION } from './provider-customization.js'
 import { buildBaseSessionOpts } from './base-session.js'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -527,6 +528,10 @@ export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
 }
 
 export class CodexSession extends JsonlSubprocessSession {
+  static get customizationDescriptor() {
+    return CODEX_EXEC_CUSTOMIZATION
+  }
+
   // ------------------------------------------------------------------
   // Static provider identity — required by JsonlSubprocessSession
   // ------------------------------------------------------------------

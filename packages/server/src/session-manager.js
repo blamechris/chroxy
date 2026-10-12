@@ -1821,6 +1821,10 @@ export class SessionManager extends EventEmitter {
       // default (#3200). Same string SessionManager uses to pick the
       // ProviderClass via getProvider() — the registry key.
       provider: resolvedProvider,
+      // #7835: production-created API BYOK sessions compile the authored
+      // project chain. Direct unit constructors remain explicit via their
+      // injectable loader seam and never touch a developer's real machine root.
+      loadProjectInstructions: true,
     }
     if (connectionResolution) {
       providerOpts.connectionAuthRoute = connectionResolution.definition.authRoute

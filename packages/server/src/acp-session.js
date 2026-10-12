@@ -52,6 +52,7 @@ import { registerProvider, getRegisteredProviderNames } from './providers.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { turnOutcomeField, outcomeFromAcpStopReason } from './turn-outcome.js'
 import { createLogger, loggerForSession } from './logger.js'
+import { ACP_CUSTOMIZATION } from './provider-customization.js'
 
 const log = createLogger('acp-session')
 
@@ -203,6 +204,8 @@ export function createAcpSessionClass(rawEntry) {
   })
 
   class AcpSession extends BaseSession {
+    static get customizationDescriptor() { return ACP_CUSTOMIZATION }
+
     static get providerName() { return entry.id }
     static get displayLabel() { return entry.label }
     // No `~/.claude`-style local data-dir dependency — pure stdio to the

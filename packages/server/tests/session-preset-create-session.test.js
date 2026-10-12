@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
 import { SessionPresetTrustStore } from '../src/session-preset-trust.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #5553 — createSession integration: the repo preamble folds into the
@@ -43,6 +44,7 @@ before(async () => {
     setPermissionMode() {}
     getPendingBackgroundShells() { return [] }
   }
+  declareUnknownCustomization(CapturingProvider)
   registerProvider('test-preset-capture', CapturingProvider)
 })
 

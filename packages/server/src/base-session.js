@@ -25,6 +25,7 @@ import { AGENT_DESCRIPTION_MAX } from './claude-stream-parser.js'
 import { sanitizeToolInput } from './redaction.js'
 import { isTurnTerminationReason, describeTurnTermination } from '@chroxy/protocol'
 import { isTurnOutcome } from './turn-outcome.js'
+import { PROJECT_INSTRUCTION_BUDGET_BYTES } from './provider-customization.js'
 
 const log = createLogger('base-session')
 
@@ -176,6 +177,7 @@ export const BASE_SESSION_OPT_KEYS = [
   'promptEvaluatorSkipPattern',
   'chroxyContextHint',
   'sessionPreamble',
+  'projectInstructions',
   'resultTimeoutMs',
   'hardTimeoutMs',
   'streamStallTimeoutMs',
@@ -291,6 +293,20 @@ function normalizeResultDuration(payload) {
 }
 
 export class BaseSession extends EventEmitter {
+  /** Binary version observed by this live runtime, or `unknown`. */
+  get providerBinaryVersion() {
+    return 'unknown'
+  }
+
+  /** Runtime-negotiated capability states; static UI capabilities are separate. */
+  get providerRuntimeCapabilities() {
+    return {}
+  }
+
+  get providerInstructionProjection() {
+    return this._projectInstructionProjection
+  }
+
   /**
    * Custom event names emitted by this provider class that should be proxied
    * by SessionManager in addition to the built-in PROXIED_EVENTS list.
@@ -369,6 +385,9 @@ export class BaseSession extends EventEmitter {
     // SESSION_PREAMBLE_MAX_LENGTH on construction. Empty string (or any
     // non-string input) is the byte-identical-to-pre-#4660 default.
     sessionPreamble,
+    // #7835: separately bounded required project policy. This does not share
+    // the 4k user-preamble or runtime-skill pruning budgets.
+    projectInstructions,
     // #3749 / #3884 / #3899: configurable SOFT-warning timeout (the
     // inactivity safety net). Subclasses arm this timer; when it fires
     // they emit an `inactivity_warning` event so the client can render
@@ -473,6 +492,19 @@ export class BaseSession extends EventEmitter {
     // smuggle in unbounded text. The runtime setter (setSessionPreamble)
     // does the same coercion and reports rejection on type mismatch.
     this.sessionPreamble = _coerceSessionPreambleOpt(sessionPreamble)
+    this.projectInstructions = typeof projectInstructions === 'string' ? projectInstructions : ''
+    const projectInstructionBytes = Buffer.byteLength(this.projectInstructions, 'utf8')
+    if (projectInstructionBytes > PROJECT_INSTRUCTION_BUDGET_BYTES) {
+      throw new Error(`projectInstructions exceeds ${PROJECT_INSTRUCTION_BUDGET_BYTES} UTF-8 bytes`)
+    }
+    this._projectInstructionProjection = {
+      status: this.projectInstructions ? 'delivered' : 'unknown',
+      enforcement: 'instructional',
+      compilerVersion: '1',
+      budgetBytes: this.projectInstructions ? PROJECT_INSTRUCTION_BUDGET_BYTES : 0,
+      totalBytes: projectInstructionBytes,
+      sources: [], rules: [], includedRequiredRuleIds: [],
+    }
 
     this._isBusy = false
     this._processReady = false
@@ -1859,20 +1891,44 @@ export class BaseSession extends EventEmitter {
    */
   _buildSystemPrompt() {
     const skillsText = typeof this._skillsText === 'string' ? this._skillsText : ''
-    // Order (#4660 + #3805): user preamble → chroxy hint → skills text.
-    // The user-authored preamble rides at the FRONT so it takes precedence
-    // over the canned chroxy hint and the skills bucket — those are
-    // chroxy-controlled context, the preamble is the user's voice.
+    // Order (#7835 + #4660 + #3805): verified required project policy → user
+    // preamble → chroxy hint → skills text. Required policy has its own budget
+    // and cannot be displaced by optional/prunable context. The user-authored
+    // preamble still precedes the canned hint and runtime-skills bucket.
     //
     // When BOTH the preamble is empty AND the chroxy hint is OFF, the
     // return value is byte-identical to pre-#3805 (skillsText only) so
     // existing users see no observable behaviour change. Each layer is
     // joined by `\n\n` so the model sees clean paragraph breaks.
     const parts = []
+    if (this.projectInstructions) parts.push(this.projectInstructions)
     if (this.sessionPreamble) parts.push(this.sessionPreamble)
     if (this.chroxyContextHint) parts.push(CHROXY_CONTEXT_HINT_TEXT)
     if (skillsText) parts.push(skillsText)
     return parts.length === 0 ? '' : parts.join('\n\n')
+  }
+
+  _installProjectInstructionProjection(projection) {
+    if (!projection) {
+      this.projectInstructions = ''
+      this._projectInstructionProjection = {
+        status: 'unknown', enforcement: 'instructional', compilerVersion: '1', budgetBytes: 0, totalBytes: 0,
+        sources: [], rules: [], includedRequiredRuleIds: [],
+      }
+      return
+    }
+    const bytes = Buffer.byteLength(projection.text, 'utf8')
+    if (bytes !== projection.totalBytes || bytes > projection.budgetBytes
+      || projection.budgetBytes > PROJECT_INSTRUCTION_BUDGET_BYTES) {
+      throw new Error('Invalid project-instruction projection byte metadata')
+    }
+    this.projectInstructions = projection.text
+    this._projectInstructionProjection = {
+      status: 'delivered', enforcement: 'instructional', compilerVersion: projection.compilerVersion,
+      budgetBytes: projection.budgetBytes, totalBytes: projection.totalBytes,
+      sources: projection.sources, rules: projection.rules,
+      includedRequiredRuleIds: projection.includedRequiredRuleIds,
+    }
   }
 
   /**

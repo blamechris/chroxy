@@ -585,9 +585,11 @@ a.dev-preview-chip__link:focus-visible {
 }
 
 .status-bar-left {
-  /* identity can truncate (model name) before the metrics group does */
+  /* The provider details panel is an absolute child that must paint below the
+     header. Keep truncation on the identity children themselves so opening
+     details cannot be clipped by this flex group. */
   flex-shrink: 1;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .status-bar-right {
@@ -7048,9 +7050,42 @@ button.sidebar-token-view-session-row:hover {
   font-size: var(--text-xs, 11px);
   border-radius: 3px;
   padding: 1px 6px;
-  cursor: help;
+  cursor: pointer;
+  min-height: 44px;
+  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   /* #5197: the SDK/provider tag stays fixed; only the cost text truncates. */
   flex-shrink: 0;
+}
+.status-provider-details { position: relative; }
+.status-provider-details > summary { list-style: none; }
+.status-provider-details > summary::-webkit-details-marker { display: none; }
+.status-provider-panel {
+  position: absolute;
+  z-index: 20;
+  top: 46px;
+  left: 0;
+  display: grid;
+  gap: 6px;
+  /* Reserve the status-row/anchor inset on both sides: the panel is left
+     anchored, so viewport width alone can still let its right edge escape. */
+  min-width: min(300px, calc(100vw - 48px));
+  max-width: calc(100vw - 48px);
+  box-sizing: border-box;
+  padding: 12px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  /* The panel starts 116px below the viewport top in the compact header;
+     reserve that anchor plus a 12px bottom inset on short viewports. */
+  max-height: min(70vh, 420px, calc(100dvh - 128px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .status-provider[data-provider="sdk"] {
   color: var(--accent-orange);

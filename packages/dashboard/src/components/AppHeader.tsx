@@ -111,6 +111,7 @@ export interface AppHeaderProps {
   isBusy: boolean
   agentCount: number
   provider?: string
+  providerRuntimeInfo?: ComponentProps<typeof StatusBar>['providerRuntimeInfo']
   modelLabel?: string
   costBadgeMode: ComponentProps<typeof StatusBar>['costBadgeMode']
   // Dev-server preview tunnels (#6790) — active session's live devPreviews
@@ -392,6 +393,7 @@ export function AppHeader(props: AppHeaderProps) {
           isBusy={props.isBusy}
           agentCount={props.agentCount}
           provider={props.provider}
+          providerRuntimeInfo={props.providerRuntimeInfo}
           // #5184: model label + Settings-driven badge mode. The mode is
           // always defined (store default `provider-model`), so the
           // StatusBar always renders the configurable badge in the app.

@@ -48,6 +48,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
 import { resolveOllamaBaseUrl, ollamaEnvOverride, refreshOllamaModels } from './ollama-tags.js'
 import { BILLING_CLASSES } from './billing-class.js'
+import { BYOK_CUSTOMIZATION, customizationWithEgress } from './provider-customization.js'
 
 // Compatibility re-export — resolution moved to ollama-tags.js (#5421).
 export { resolveOllamaBaseUrl }
@@ -77,6 +78,12 @@ const OLLAMA_FALLBACK_MODELS = Object.freeze([
 const OLLAMA_ZERO_PRICING = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
 
 export class OllamaSession extends ClaudeByokSession {
+  static get customizationDescriptor() {
+    // Localhost is the default, but both CHROXY_OLLAMA_BASE_URL and OLLAMA_HOST
+    // may point at a remote origin. The descriptor must not claim local-only.
+    return customizationWithEgress(BYOK_CUSTOMIZATION, 'unknown')
+  }
+
   static agentConnectionRoutes = ['local']
   // #5858: NOT Claude-family — Ollama rides ClaudeByokSession's agent loop but
   // serves locally-pulled models (getAllowedModels() returns null, #5418), so

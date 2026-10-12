@@ -18,6 +18,7 @@ import {
 } from '../src/codex-protocol-capabilities.js'
 import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { CodexAppServerClient } from '../src/codex-app-server-client.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 // #7724 (CDX-1) — the codex app-server version gate. Three invariants, each with
 // its own failure-direction proof:
@@ -345,6 +346,7 @@ describe('CodexAppServerClient — JSON-RPC error codes (#7724)', () => {
     setModel() {}
     setPermissionMode() {}
   }
+  declareUnknownCustomization(CodexRejectProvider)
 
   /**
    * A FRESH rejection per case, off the production client path.

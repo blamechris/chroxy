@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * Tests for monotonic session auto-naming counter (#2338).
@@ -37,6 +38,7 @@ before(async () => {
     setModel() {}
     setPermissionMode() {}
   }
+  declareUnknownCustomization(NoopProvider)
   registerProvider('test-noop-naming', NoopProvider)
 })
 

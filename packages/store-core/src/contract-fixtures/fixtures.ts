@@ -267,6 +267,38 @@ function sysMsg(content: string): Partial<ChatMessage> {
 // ---------------------------------------------------------------------------
 
 export const DISPATCH_FIXTURES: ContractFixture[] = [
+  {
+    name: 'provider_runtime_info preserves explicit unknown facts on its session',
+    type: 'provider_runtime_info',
+    init: { sessions: { s1: {} } },
+    message: {
+      type: 'provider_runtime_info', sessionId: 's1', provider: 'codex', binaryVersion: 'unknown',
+      capabilities: [{ name: 'mcp', state: 'unknown' }],
+      customization: {
+        nativeDiscovery: { state: 'unknown', files: ['AGENTS.md'], delivery: 'unknown', precedence: 'global-root-cwd' },
+        chroxyChannels: [{ channel: 'first-user-turn', lifetime: 'first-turn', content: ['skills'] }],
+        nativeSkills: 'unknown', runtimeToggles: false, toolConstraints: 'provider-runtime',
+        policyDecisions: true, memoryProjection: 'provider-native',
+        mcp: { discovery: 'unknown', toolCalls: 'unknown' },
+        byteBudgets: { nativeDocuments: 'unknown', chroxySkills: 65536, projectInstructions: 'unsupported' },
+        egress: 'cloud',
+      },
+      projectInstructions: { status: 'unsupported', enforcement: 'instructional', compilerVersion: '1', budgetBytes: 0, totalBytes: 0, sources: [], rules: [], includedRequiredRuleIds: [] },
+    },
+    expect: {
+      sessions: { s1: { providerRuntimeInfo: {
+        provider: 'codex', binaryVersion: 'unknown', capabilities: [{ name: 'mcp', state: 'unknown' }],
+        customization: {
+          nativeDiscovery: { state: 'unknown', files: ['AGENTS.md'], delivery: 'unknown', precedence: 'global-root-cwd' },
+          chroxyChannels: [{ channel: 'first-user-turn', lifetime: 'first-turn', content: ['skills'] }],
+          nativeSkills: 'unknown', runtimeToggles: false, toolConstraints: 'provider-runtime',
+          policyDecisions: true, memoryProjection: 'provider-native', mcp: { discovery: 'unknown', toolCalls: 'unknown' },
+          byteBudgets: { nativeDocuments: 'unknown', chroxySkills: 65536, projectInstructions: 'unsupported' }, egress: 'cloud',
+        },
+        projectInstructions: { status: 'unsupported', enforcement: 'instructional', compilerVersion: '1', budgetBytes: 0, totalBytes: 0, sources: [], rules: [], includedRequiredRuleIds: [] },
+      } } },
+    },
+  },
   // --- slice 1 (#6449) — terminal-mirror pass-through. Moved here from
   // SWITCH_FIXTURES: raw / raw_background / terminal_output now live in the
   // shared dispatch table, so contract.test.ts drives them through runDispatch

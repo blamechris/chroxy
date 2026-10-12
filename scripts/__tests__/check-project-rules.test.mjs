@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test as nodeTest } from 'node:test'
-import { DOC_CAP_BYTES, DOC_SEPARATOR, MACHINE_BUDGET_BYTES, MIN_MARGIN_BYTES } from '../check-project-rules.mjs'
+import { checkProjectRules, CHROXY_REQUIRED_PROJECT_RULE_IDS, DOC_CAP_BYTES, DOC_SEPARATOR, MACHINE_BUDGET_BYTES, MIN_MARGIN_BYTES } from '../check-project-rules.mjs'
 import { stageScript } from './helpers/stage-script.mjs'
 
 // Count actual completed cases as well as the node:test verdict. The roster
 // guard neuters these increments to prove a zero-case run cannot pass.
-const EXPECTED_CASES = 15
+const EXPECTED_CASES = 20
 let pass = 0
 let fail = 0
 function test(name, fn) {
@@ -46,6 +47,13 @@ function fixture(t) {
   writeFileSync(join(root, 'CLAUDE.md'), '@AGENTS.md\n')
   writeFileSync(join(root, 'GEMINI.md'), '@./AGENTS.md\n')
   stageScript(SCRIPT, join(root, 'scripts'))
+  const compilerTarget = join(root, 'packages/server/src/instruction-policy-compiler.js')
+  mkdirSync(dirname(compilerTarget), { recursive: true })
+  cpSync(join(REPO, 'packages/server/src/instruction-policy-compiler.js'), compilerTarget)
+  mkdirSync(join(root, 'packages/server/src/utils'), { recursive: true })
+  for (const name of ['componentwise-resolver.js', 'path-containment.js']) {
+    cpSync(join(REPO, 'packages/server/src/utils', name), join(root, 'packages/server/src/utils', name))
+  }
   return root
 }
 
@@ -73,6 +81,14 @@ test('committed project contract passes the real CLI and emits its success marke
   assert.equal(result.status, 0, result.stderr)
   assert.ok(result.stdout.includes('PROJECT_RULES_OK'))
   assert.ok(result.stdout.includes('separators=23 bytes'))
+})
+
+test('Chroxy required rule ids match the independently frozen policy roster', () => {
+  assert.deepEqual(CHROXY_REQUIRED_PROJECT_RULE_IDS, [
+    'project-overview', 'critical-dev-notes', 'prime-compatibility-and-authority',
+    'session-start-protocol', 'git-workflow', 'code-style', 'testing-conventions',
+    'architecture', 'dev-commands', 'ui-verification-with-maestro', 'repo-memory-mcp', 'reference',
+  ])
 })
 
 test('fixture staging refuses a missing dependency directory before copying the entry point', t => {
@@ -136,7 +152,7 @@ test('ignored nested instructions are still checked in inventoried project direc
   writeFileSync(join(directory, 'source.js'), '// project source\n')
   writeFileSync(join(root, '.gitignore'), 'packages/nested/AGENTS*\npackages/nested/.codex/\n')
   writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(DOC_CAP_BYTES))
-  red(root, 'below 2048')
+  red(root, "exceeds 98304 bytes")
   rmSync(join(directory, 'AGENTS.md'))
   writeFileSync(join(directory, 'AGENTS.override.md'), 'ignored override\n')
   red(root, 'unsupported project instruction layer')
@@ -146,22 +162,124 @@ test('ignored nested instructions are still checked in inventoried project direc
   red(root, 'unsupported project instruction layer')
 })
 
-test('nested chains include all ancestor files and exactly 23 bytes per separator', t => {
+test('nested chains include all ancestor files and the shared 23-byte separator', t => {
   const root = fixture(t)
   assert.equal(Buffer.byteLength(DOC_SEPARATOR), 23)
   const directory = join(root, 'packages/nested')
   mkdirSync(directory, { recursive: true })
   writeFileSync(join(root, 'packages/AGENTS.md'), 'Nested parent rules.\n')
-  const parentBytes = Buffer.byteLength('Nested parent rules.\n')
-  const boundary = DOC_CAP_BYTES - MACHINE_BUDGET_BYTES - Buffer.byteLength(SOURCE) - parentBytes -
-    3 * Buffer.byteLength(DOC_SEPARATOR) - MIN_MARGIN_BYTES
-  assert.ok(boundary > 0, 'fixture must leave room for an actual child rule')
-  writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(boundary))
-  const result = run(root)
-  assert.equal(result.status, 0, result.stderr)
-  assert.ok(result.stdout.includes(`packages/nested ${DOC_CAP_BYTES - MIN_MARGIN_BYTES}/${DOC_CAP_BYTES} bytes; margin=${MIN_MARGIN_BYTES}`))
-  writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(boundary + 1))
-  red(root, `margin ${MIN_MARGIN_BYTES - 1} is below ${MIN_MARGIN_BYTES}`)
+  writeFileSync(join(directory, 'AGENTS.md'), 'Child rules.\n')
+  const result = checkProjectRules({ root })
+  const nested = result.chains.find(chain => chain.directory === 'packages/nested')
+  assert.deepEqual(nested.files, ['AGENTS.md', 'packages/AGENTS.md', 'packages/nested/AGENTS.md'])
+  assert.ok(nested.margin >= MIN_MARGIN_BYTES)
+  writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(DOC_CAP_BYTES))
+  red(root, "source 'project:packages/nested/AGENTS.md'")
+})
+
+test('lexically early nested rules are compiled in root-to-target directory order', t => {
+  const root = fixture(t)
+  const parentText = 'NESTED DIRECTORY RULE\n'
+  const childText = 'DEEP NESTED DIRECTORY RULE\n'
+  mkdirSync(join(root, 'AAA/deeper'), { recursive: true })
+  writeFileSync(join(root, 'AAA/AGENTS.md'), parentText)
+  writeFileSync(join(root, 'AAA/deeper/AGENTS.md'), childText)
+
+  const result = checkProjectRules({ root })
+  const rootChain = result.chains.find(chain => chain.directory === '.')
+  const parentChain = result.chains.find(chain => chain.directory === 'AAA')
+  const childChain = result.chains.find(chain => chain.directory === 'AAA/deeper')
+
+  assert.deepEqual(parentChain.files, ['AGENTS.md', 'AAA/AGENTS.md'])
+  assert.deepEqual(parentChain.sourceIds, ['project:AGENTS.md', 'project:AAA/AGENTS.md'])
+  assert.ok(parentChain.bytes > rootChain.bytes + Buffer.byteLength(parentText))
+  assert.deepEqual(childChain.files, ['AGENTS.md', 'AAA/AGENTS.md', 'AAA/deeper/AGENTS.md'])
+  assert.deepEqual(childChain.sourceIds, ['project:AGENTS.md', 'project:AAA/AGENTS.md', 'project:AAA/deeper/AGENTS.md'])
+  assert.ok(childChain.bytes > parentChain.bytes + Buffer.byteLength(childText))
+})
+
+test('portable chains use bounded collision-resistant ids for space, Unicode, and long paths', t => {
+  const root = fixture(t)
+  const parts = ['My App', 'café', 'nested-' + 'x'.repeat(90)]
+  let directory = root
+  const files = ['AGENTS.md']
+  for (const [index, part] of parts.entries()) {
+    directory = join(directory, part)
+    mkdirSync(directory)
+    writeFileSync(join(directory, 'AGENTS.md'), `Nested path rule ${index}.\n`)
+    files.push(join(...parts.slice(0, index + 1), 'AGENTS.md'))
+  }
+  for (const collisionProbe of [join('a-b'), join('a', 'b')]) {
+    const probeDirectory = join(root, collisionProbe)
+    mkdirSync(probeDirectory, { recursive: true })
+    writeFileSync(join(probeDirectory, 'AGENTS.md'), `Collision probe ${collisionProbe}.\n`)
+  }
+  const unicodeName = 'café'
+  const literalHashName = `sha256-${createHash('sha256').update(unicodeName).digest('hex')}`
+  for (const collisionProbe of [unicodeName, literalHashName]) {
+    const probeDirectory = join(root, collisionProbe)
+    mkdirSync(probeDirectory, { recursive: true })
+    writeFileSync(join(probeDirectory, 'AGENTS.md'), `Hash identity probe ${collisionProbe}.\n`)
+  }
+  const result = checkProjectRules({ root })
+  const deepest = result.chains.find(chain => chain.directory === join(...parts))
+  assert.deepEqual(deepest.files, files)
+  assert.equal(new Set(result.chains.map(chain => chain.targetId)).size, result.chains.length)
+  assert.equal(new Set(deepest.sourceIds).size, deepest.sourceIds.length)
+  for (const id of [...deepest.sourceIds, deepest.targetId]) {
+    assert.match(id, /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/)
+    assert.ok(id.length <= 128)
+  }
+  assert.ok(deepest.sourceIds.slice(1).every(id => id.startsWith('project:sha256-')))
+  assert.ok(deepest.targetId.startsWith('native:sha256-'))
+  const unicodeTarget = result.chains.find(chain => chain.directory === unicodeName).targetId
+  const literalHashTarget = result.chains.find(chain => chain.directory === literalHashName).targetId
+  assert.notEqual(unicodeTarget, literalHashTarget)
+  assert.ok(unicodeTarget.startsWith('native:sha256-'))
+  assert.ok(literalHashTarget.startsWith('native:sha256-'))
+})
+
+test('explicit cwd checks a wholly ignored root-to-nested chain and refuses unsafe selections', t => {
+  const root = fixture(t)
+  const ignored = join(root, 'ignored', 'deeper')
+  mkdirSync(ignored, { recursive: true })
+  writeFileSync(join(root, '.gitignore'), 'ignored/\n')
+  writeFileSync(join(root, 'ignored', 'AGENTS.md'), 'IGNORED PARENT RULE\n')
+  writeFileSync(join(ignored, 'AGENTS.md'), 'IGNORED CWD RULE\n')
+
+  const defaultResult = checkProjectRules({ root })
+  assert.equal(defaultResult.coverage, 'git-inventory-directories')
+  assert.equal(defaultResult.chains.some(chain => chain.directory.startsWith('ignored')), false)
+
+  const selected = checkProjectRules({ root, cwd: ignored })
+  assert.equal(selected.coverage, 'selected-cwd:ignored/deeper')
+  const chain = selected.chains.find(item => item.directory === 'ignored/deeper')
+  assert.deepEqual(chain.files, ['AGENTS.md', 'ignored/AGENTS.md', 'ignored/deeper/AGENTS.md'])
+  assert.deepEqual(chain.sourceIds, [
+    'project:AGENTS.md', 'project:ignored/AGENTS.md', 'project:ignored/deeper/AGENTS.md',
+  ])
+  const cli = run(root, { args: ['--cwd', 'ignored/deeper'] })
+  assert.equal(cli.status, 0, cli.stderr)
+  assert.ok(cli.stdout.includes('coverage=selected-cwd:ignored/deeper'))
+
+  writeFileSync(join(ignored, 'AGENTS.md'), 'x'.repeat(DOC_CAP_BYTES))
+  red(root, 'exceeds 98304 bytes', { args: ['--cwd', 'ignored/deeper'] })
+  rmSync(join(ignored, 'AGENTS.md'))
+  symlinkSync(ignored, join(root, 'linked-cwd'))
+  red(root, 'uses a symlink', { args: ['--cwd', 'linked-cwd'] })
+  red(root, 'ENOENT', { args: ['--cwd', 'missing-cwd'] })
+})
+
+test('portable source validation preserves and counts a UTF-8 BOM', t => {
+  const root = fixture(t)
+  const plain = checkProjectRules({ root }).chains.find(chain => chain.directory === '.')
+  writeFileSync(join(root, 'AGENTS.md'), Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(SOURCE, 'utf8'),
+  ]))
+  const withBom = checkProjectRules({ root }).chains.find(chain => chain.directory === '.')
+  assert.equal(withBom.bytes, plain.bytes + 3)
+  assert.deepEqual(withBom.sourceIds, ['project:AGENTS.md'])
 })
 
 test('UTF-8 bytes, rather than JavaScript string length, consume the byte budget', t => {

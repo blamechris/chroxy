@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { registerProvider } from '../src/providers.js'
 import { SessionManager } from '../src/session-manager.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 // Stub session provider for testing
 class StubSession extends EventEmitter {
@@ -21,6 +22,7 @@ class StubSession extends EventEmitter {
   setPermissionMode() {}
 }
 StubSession.capabilities = {}
+declareUnknownCustomization(StubSession)
 
 registerProvider('test-cost', StubSession)
 

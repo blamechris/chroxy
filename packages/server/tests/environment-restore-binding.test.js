@@ -37,6 +37,7 @@ import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
 import { EnvironmentManager } from '../src/environment-manager.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 // Every construction of the stub provider, in order — the positive control for
 // the "loud failure" tests. Asserting only "the restore failed" would pass on a
@@ -74,6 +75,7 @@ before(async () => {
     setModel() {}
     setPermissionMode() {}
   }
+  declareUnknownCustomization(EnvRestoreProvider)
   registerProvider('test-env-restore', EnvRestoreProvider)
 })
 

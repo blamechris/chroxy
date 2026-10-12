@@ -17,6 +17,7 @@ import { GeminiSession } from '../src/gemini-session.js'
 import { CodexSession } from '../src/codex-session.js'
 import { CliSession } from '../src/cli-session.js'
 import { waitFor } from './test-helpers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * Pre-flight check integration tests for SessionManager.createSession.
@@ -70,6 +71,7 @@ class BaseFakeSession extends EventEmitter {
   setModel() { return false }
   setPermissionMode() { return false }
 }
+declareUnknownCustomization(BaseFakeSession)
 
 class MissingBinaryProvider extends BaseFakeSession {
   static get preflight() {

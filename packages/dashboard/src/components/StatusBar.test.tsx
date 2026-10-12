@@ -4,6 +4,23 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, cleanup } from '@testing-library/react'
 import { StatusBar } from './StatusBar'
+import type { ProviderRuntimeInfo } from '@chroxy/protocol'
+
+function runtimeInfo(capabilities: ProviderRuntimeInfo['capabilities']): ProviderRuntimeInfo {
+  return {
+    provider: 'codex', binaryVersion: '1.2.3', capabilities,
+    customization: {
+      nativeDiscovery: { state: 'unknown', files: ['AGENTS.md'], delivery: 'unknown', precedence: 'global-root-cwd' },
+      chroxyChannels: [{ channel: 'first-user-turn', lifetime: 'first-turn', content: ['skills'] }],
+      nativeSkills: 'unknown', runtimeToggles: false, toolConstraints: 'provider-runtime',
+      policyDecisions: true, memoryProjection: 'provider-native',
+      mcp: { discovery: 'unknown', toolCalls: 'unknown' },
+      byteBudgets: { nativeDocuments: 'unknown', chroxySkills: 1, projectInstructions: 'unsupported' },
+      egress: 'cloud',
+    },
+    projectInstructions: { status: 'unsupported', enforcement: 'instructional', compilerVersion: '1', budgetBytes: 0, totalBytes: 0, sources: [], rules: [], includedRequiredRuleIds: [] },
+  }
+}
 
 afterEach(cleanup)
 
@@ -119,6 +136,33 @@ describe('StatusBar', () => {
     expect(badge).toHaveTextContent('SDK')
     expect(badge.getAttribute('data-provider')).toBe('sdk')
     expect(badge.getAttribute('title')).toContain('API')
+  })
+
+  it('shows version, unknowns, and instruction delivery details', () => {
+    render(<StatusBar provider="codex" providerRuntimeInfo={runtimeInfo([])} />)
+    const panel = screen.getByTestId('status-provider-panel')
+    expect(panel).toHaveTextContent('Binary: 1.2.3')
+    expect(panel).toHaveTextContent('Observed capabilities: unknown (no handshake evidence)')
+    expect(panel).toHaveTextContent('Native instructions: unknown')
+    expect(panel).toHaveTextContent('Project policy: unsupported (instructional)')
+    expect(panel).toHaveTextContent('calls unknown')
+  })
+
+  it('shows true, false, and unknown observed capability states separately from customization', () => {
+    render(<StatusBar provider="codex" providerRuntimeInfo={runtimeInfo([
+      { name: 'approvalApi', state: true },
+      { name: 'turnSteering', state: false },
+      { name: 'mcpCallability', state: 'unknown' },
+    ])} />)
+    const panel = screen.getByTestId('status-provider-panel')
+    expect(panel).toHaveTextContent('Observed capabilities: approval api: true, turn steering: false, mcp callability: unknown')
+    expect(panel).toHaveTextContent('MCP: discovery unknown, calls unknown')
+  })
+
+  it('shows observed capabilities as unavailable before a runtime snapshot arrives', () => {
+    render(<StatusBar provider="codex" />)
+    expect(screen.getByTestId('status-provider-panel'))
+      .toHaveTextContent('Observed capabilities: unavailable (no runtime snapshot)')
   })
 
   it('shows CLI provider badge with subscription tooltip', () => {

@@ -21,7 +21,12 @@ import {
 } from '../src/ws-history.js'
 import { PERMISSION_MODES, getPermissionModes } from '../src/handler-utils.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
-import { MAX_SANE_DURATION_MS, DEFAULT_PROVIDER } from '@chroxy/protocol'
+import {
+  DEFAULT_PROVIDER,
+  MAX_SANE_DURATION_MS,
+  PROVIDER_BINARY_VERSION_MAX_LENGTH,
+  ServerProviderRuntimeInfoSchema,
+} from '@chroxy/protocol'
 import { getRegistryForProvider, _resetProviderRegistryCacheForTests } from '../src/models.js'
 // Importing providers.js triggers built-in provider registration, which in turn
 // calls registerProviderRegistry() so getRegistryForProvider('codex'/'gemini')
@@ -226,6 +231,7 @@ describe('_reserveEagerDerivationSlot — per-iteration budget (#5622)', () => {
 describe('sendPostAuthInfo — legacy available_models provider scoping (#6368)', () => {
   // Distinctive non-Claude provider so a Claude-vs-provider mix-up is obvious.
   class Stub6368Session {
+    static get customizationDescriptor() { return getProvider('claude-cli').customizationDescriptor }
     static claudeFamily = false
     static getFallbackModels() {
       return [{ id: 'stub-7b', label: 'Stub 7B', fullId: 'stub-7b', contextWindow: 8000 }]
@@ -298,6 +304,7 @@ describe('sendPostAuthInfo — legacy available_models provider scoping (#6368)'
 // that produced the rows is the same class of bug one layer over.
 describe('sendPostAuthInfo / sendSessionInfo — no roster is sent UNTAGGED (#7759)', () => {
   class Stub7759Session {
+    static get customizationDescriptor() { return getProvider('claude-cli').customizationDescriptor }
     static claudeFamily = false
     static getFallbackModels() {
       return [{ id: 'stub-7759', label: 'Stub 7759', fullId: 'stub-7759', contextWindow: 8000 }]
@@ -1808,6 +1815,63 @@ describe('sendSessionInfo', () => {
     sendSessionInfo(ctx, ws, 'sess-1')
     const readyMsg = ctx._sends.find(m => m.type === 'claude_ready')
     assert.ok(!readyMsg)
+  })
+
+  it('sends handshake-observed Codex runtime info through the late-join path', () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-1', name: 'Codex', cwd: '/alpha', provider: 'codex' },
+    ])
+    const session = sessionsMap.get('sess-1').session
+    Object.setPrototypeOf(session, CodexAppServerSession.prototype)
+    session.codexVersion = '1.2.3'
+    session.codexCapabilities = { mcp: 'unknown', approvals: true }
+    session.getPermissionRules = () => []
+    session.getPersistentPermissionRules = () => []
+    session.getMcpServersSnapshot = () => null
+    session.getActivitySnapshot = () => ({ type: 'activity_snapshot', entries: [] })
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, ws)
+
+    sendSessionInfo(ctx, ws, 'sess-1')
+    const frame = ctx._sends.find(message => message.type === 'provider_runtime_info')
+    assert.equal(frame.binaryVersion, '1.2.3')
+    assert.deepEqual(frame.capabilities, [
+      { name: 'mcp', state: 'unknown' },
+      { name: 'approvals', state: true },
+    ])
+    assert.equal(frame.customization.mcp.toolCalls, 'unknown')
+  })
+
+  it('maps an oversized parseable handshake version to unknown before emitting the wire frame', () => {
+    const { manager, sessionsMap } = createMockSessionManager([
+      { id: 'sess-1', name: 'Codex', cwd: '/alpha', provider: 'codex' },
+    ])
+    const session = sessionsMap.get('sess-1').session
+    Object.setPrototypeOf(session, CodexAppServerSession.prototype)
+    const oversized = `1.2.3-${'a'.repeat(152)}`
+    assert.equal(oversized.length, 158)
+    assert.ok(oversized.length > PROVIDER_BINARY_VERSION_MAX_LENGTH)
+    session._log = { info() {}, warn() {} }
+    session._captureHandshake({ userAgent: `codex/${oversized} (fixture)` })
+    assert.equal(session.codexVersion, oversized)
+    session.codexCapabilities = { mcp: 'unknown', approvals: true, sandbox: false }
+    session.getPermissionRules = () => []
+    session.getPersistentPermissionRules = () => []
+    session.getMcpServersSnapshot = () => null
+    session.getActivitySnapshot = () => ({ type: 'activity_snapshot', entries: [] })
+    const ctx = makeCtx({ sessionManager: manager })
+    registerClient(ctx, makeFakeWs())
+
+    sendSessionInfo(ctx, [...ctx.clients.keys()][0], 'sess-1')
+    const frame = ctx._sends.find(message => message.type === 'provider_runtime_info')
+    assert.equal(frame.binaryVersion, 'unknown')
+    assert.deepEqual(frame.capabilities, [
+      { name: 'mcp', state: 'unknown' },
+      { name: 'approvals', state: true },
+      { name: 'sandbox', state: false },
+    ])
+    assert.doesNotThrow(() => ServerProviderRuntimeInfoSchema.parse(frame))
   })
 
   it('sends model_changed with short model id', () => {
@@ -3898,6 +3962,7 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
    */
   function registerFakeProvider(name, { refreshModels } = {}) {
     class FakeProviderSession {
+      static get customizationDescriptor() { return getProvider('claude-cli').customizationDescriptor }
       sendMessage() {}
       interrupt() {}
       setModel() {}
@@ -4179,6 +4244,7 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
      */
     function registerSpawnGateFakeProvider(name) {
       class FakeCodexShapedSession {
+        static get customizationDescriptor() { return getProvider('codex').customizationDescriptor }
         sendMessage() {}
         interrupt() {}
         setModel() {}
@@ -4275,6 +4341,7 @@ describe('scheduleProviderModelsRefresh (#5421 / #5450)', () => {
     it('a missing-binary case degrades to null with no spawn attempt', async () => {
       const name = 'fake-spawn-gate-missing-8036'
       class MissingBinaryFake {
+        static get customizationDescriptor() { return getProvider('codex').customizationDescriptor }
         sendMessage() {}
         interrupt() {}
         setModel() {}

@@ -59,7 +59,7 @@
  *      brace-nesting stack and fall back to "search the rest of the file",
  *      reproducing the exact pre-#8114 bug from the inside of its own fix.
  *      A real parser has no such desync class.
- *   3. A BEHAVIORAL check directly calls the three builders that are plain,
+ *   3. A BEHAVIORAL check directly calls the four builders that are plain,
  *      side-effect-free functions (`buildSpawnEnv`, `defaultBuildEnv`,
  *      `buildSafeBashEnv`) with ambient secrets set, and asserts on their
  *      actual return value — proof that does not depend on reading the
@@ -82,9 +82,14 @@ import { join, dirname, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { withEnv } from './test-helpers.js'
-import { buildSpawnEnv } from '../src/utils/spawn-env.js'
+import {
+  buildSpawnEnv,
+  CHROXY_INHERITED_SESSION_ENV,
+  CHROXY_SECRET_DENYLIST,
+} from '../src/utils/spawn-env.js'
 import { defaultBuildEnv } from '../src/statusline.js'
 import { buildSafeBashEnv } from '../src/byok-tool-executor.js'
+import { buildInstructionGitEnv } from '../src/instruction-policy.js'
 import { stripComments } from '../scripts/lib/strip-comments.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -442,6 +447,7 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
       'user-shell-session.js',
       'byok-mcp-client.js',
       'statusline.js',
+      'instruction-policy.js',
       'byok-tool-executor.js', // #8113 — the Object.entries(process.env) miss
       'supervisor.js',
       'ws-file-ops/git.js',
@@ -474,6 +480,7 @@ describe('spawn-env inherited-secrets roster (#7360 / #8113)', () => {
       'byok-tool-executor.js',
       'claude-tui-session.js',
       'daemon-commit.js', // #8324 — the git spawn that reads the commit the daemon started from
+      'instruction-policy.js',
       'statusline.js',
       'supervisor.js',
       'user-shell-session.js',
@@ -980,13 +987,38 @@ describe('discovery pattern coverage — one fixture per known copy-spelling (#8
 // 3. Behavioral proof for the builders that are safe to call directly
 // ───────────────────────────────────────────────────────────────────────────
 //
-// These three calls do not depend on the source-text checks above at all —
+// These four calls do not depend on the source-text checks above at all —
 // they exercise the REAL exported function with a REAL ambient value and
 // assert on what actually comes back. Applying the #8113 decoy mutant
 // (`stripInheritedChroxySecrets({})`) to any of these three sources fails
 // ITS OWN test here directly, independent of section 2's static check.
 
 describe('behavioral proof: directly-callable builders actually strip ambient secrets (#8113)', () => {
+  it('instruction-policy.js strips canonical secrets, Windows aliases, and Git controls without mutating its parent', () => {
+    const parent = {
+      PATH: '/fixture/bin',
+      GIT_DIR: '/foreign/git-dir',
+      git_dir: '/foreign/lowercase-git-dir',
+      Git_Work_Tree: '/foreign/worktree',
+      GIT_CONFIG_COUNT: '1',
+    }
+    const blocked = [...CHROXY_SECRET_DENYLIST, ...CHROXY_INHERITED_SESSION_ENV]
+    for (const [index, key] of blocked.entries()) {
+      parent[key] = `canonical-${index}`
+      parent[key.toLowerCase()] = `lowercase-${index}`
+      parent[key[0] + key.slice(1).toLowerCase()] = `mixed-${index}`
+    }
+    const original = { ...parent }
+    const env = buildInstructionGitEnv(parent)
+    assert.equal(env.PATH, '/fixture/bin')
+    assert.deepEqual(parent, original)
+    const blockedFolded = new Set(blocked.map(key => key.toUpperCase()))
+    for (const key of Object.keys(env)) {
+      assert.ok(!key.toUpperCase().startsWith('GIT_'), key)
+      assert.ok(!blockedFolded.has(key.toUpperCase()), key)
+    }
+  })
+
   it('buildSpawnEnv("claude") strips an ambient CHROXY_PORT/CHROXY_HOOK_SECRET when called with no extras', () => {
     withEnv({ CHROXY_PORT: '19999', CHROXY_HOOK_SECRET: 'ambient-foreign-session-secret' }, () => {
       const env = buildSpawnEnv('claude')

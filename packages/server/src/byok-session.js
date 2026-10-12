@@ -17,6 +17,8 @@
 import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
 import { performance } from 'node:perf_hooks'
 import { BaseSession, buildBaseSessionOpts, reportInputAdmission } from './base-session.js'
+import { BYOK_CUSTOMIZATION } from './provider-customization.js'
+import { loadByokInstructionPolicy } from './instruction-policy.js'
 import { synthesizeModelUsage } from './usage-normalize.js'
 import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { createLogger } from './logger.js'
@@ -120,9 +122,38 @@ function boundMcpPromptExpansionText(text, cap = MCP_PROMPT_EXPANSION_DISPLAY_CA
   if (s.length <= cap) return { text: s, truncated: false }
   const sliceLen = Math.max(0, cap - MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX.length)
   return { text: `${s.slice(0, sliceLen)}${MCP_PROMPT_EXPANSION_TRUNCATION_SUFFIX}`, truncated: true }
+  }
+
+// Provider factories that add a layer above ClaudeByokSession must preserve
+// both the BaseSession contract and BYOK's own constructor-only options. The
+// BaseSession picker alone intentionally cannot know about MCP discovery or
+// project-instruction loading, so using it directly in a BYOK subclass would
+// silently drop those controls before ClaudeByokSession can consume them.
+export const BYOK_SESSION_LOCAL_OPT_KEYS = Object.freeze([
+  'mcpConfigPath',
+  'disabledMcpServers',
+  'mcpToolCallTimeoutMs',
+  'mcpStartCapMs',
+  '_mcpConfigFsync',
+  'loadProjectInstructions',
+  '_instructionPolicyLoader',
+  '_machineInstructionPath',
+  '_machineInstructionRoot',
+])
+
+export function buildByokSessionOpts(fullOpts = {}, overrides = {}) {
+  const picked = buildBaseSessionOpts(fullOpts)
+  for (const key of BYOK_SESSION_LOCAL_OPT_KEYS) {
+    if (key in fullOpts) picked[key] = fullOpts[key]
+  }
+  return { ...picked, ...overrides }
 }
 
 export class ClaudeByokSession extends BaseSession {
+  static get customizationDescriptor() {
+    return BYOK_CUSTOMIZATION
+  }
+
   static agentConnectionRoutes = ['api']
   static agentConnectionCredentialKey = 'ANTHROPIC_API_KEY'
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
@@ -355,6 +386,11 @@ export class ClaudeByokSession extends BaseSession {
     // Anthropic SDK client; lazily instantiated in start() so unit tests
     // can stub it via this._client = ... before start().
     this._client = null
+    this._instructionPolicyLoader = opts._instructionPolicyLoader || loadByokInstructionPolicy
+    this._loadProjectInstructions = opts.loadProjectInstructions === true || Boolean(opts._instructionPolicyLoader)
+    this._machineInstructionPath = opts._machineInstructionPath
+    this._machineInstructionRoot = opts._machineInstructionRoot
+    this._instructionPolicyLoaded = false
     // In-memory conversation history. Each entry is a Claude API message
     // ({ role: 'user'|'assistant', content: <string|array> }). The SDK
     // accepts either shape for user/assistant turns.
@@ -633,6 +669,22 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   async start() {
+    // API-driven BYOK providers have no vendor-native project-file discovery.
+    // Compile before client creation so malformed/over-budget policy cannot
+    // reach a model. Container cwd mapping is not yet verified.
+    if (this._loadProjectInstructions && !this._instructionPolicyLoaded && !this.constructor.capabilities?.containerized) {
+      const projection = await this._instructionPolicyLoader({
+        cwd: this.cwd,
+        ...(this._machineInstructionPath !== undefined
+          ? { machinePath: this._machineInstructionPath }
+          : {}),
+        ...(this._machineInstructionRoot !== undefined
+          ? { machineRoot: this._machineInstructionRoot }
+          : {}),
+      })
+      this._installProjectInstructionProjection(projection)
+      this._instructionPolicyLoaded = true
+    }
     if (this._client === null) {
       // Spike (BYOK direct) confirmed the SDK's standard constructor
       // works fine; baseURL defaults to api.anthropic.com.
@@ -2187,7 +2239,14 @@ export class ClaudeByokSession extends BaseSession {
         cwd: this.cwd,
         model: this.model || this._defaultModel,
         mcpConfigPath: null,
+        projectInstructions: this.projectInstructions,
       })
+      if (this.providerInstructionProjection?.status === 'delivered') {
+        child._installProjectInstructionProjection({
+          ...this.providerInstructionProjection,
+          text: this.projectInstructions,
+        })
+      }
       // Skip start()'s credential resolution — share the parent's client
       // so the child uses the same API key path. Also avoids a duplicate
       // credentials.json read which could rate-limit on disk for parallel

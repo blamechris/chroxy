@@ -1,6 +1,7 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { CLAUDE_CHANNEL_CUSTOMIZATION } from './provider-customization.js'
 import { ALLOWED_MODEL_IDS } from './models.js'
 import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BILLING_CLASSES } from './billing-class.js'
@@ -36,6 +37,10 @@ export const CLAUDE_CHANNEL_MIN_VERSION = '2.1.80'
  * permission-mode switch — those stay `false`, same gap `claude-tui` has.
  */
 export class ClaudeChannelSession extends BaseSession {
+  static get customizationDescriptor() {
+    return CLAUDE_CHANNEL_CUSTOMIZATION
+  }
+
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   static claudeFamily = true
 

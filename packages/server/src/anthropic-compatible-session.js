@@ -38,7 +38,7 @@
 
 import { readCredentialJsonField } from './credentials-file.js'
 import Anthropic from '@anthropic-ai/sdk'
-import { ClaudeByokSession } from './byok-session.js'
+import { ClaudeByokSession, buildByokSessionOpts } from './byok-session.js'
 import { validateAnthropicCompatibleProviders } from './anthropic-compatible-config.js'
 import { registerProvider, getRegisteredProviderNames } from './providers.js'
 import { getRegistryForProvider } from './models.js'
@@ -47,6 +47,7 @@ import { cachedResolveCredentialFile } from './auth-probes.js'
 import { createLogger } from './logger.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { configPath } from './config-dir.js'
+import { BYOK_CUSTOMIZATION, customizationWithEgress } from './provider-customization.js'
 
 const log = createLogger('anthropic-compatible')
 
@@ -289,6 +290,12 @@ export function createAnthropicCompatibleSessionClass(rawEntry, { blockLabel = '
     // soft-fall-back to claude).
     static claudeFamily = false
 
+    static get customizationDescriptor() {
+      // A configured compatible endpoint may be a local runtime, a cloud API,
+      // or a proxy. The adapter cannot infer egress from the URL spelling.
+      return customizationWithEgress(BYOK_CUSTOMIZATION, 'unknown')
+    }
+
     /** The validated config entry this class was built from (introspection/tests). */
     static get compatEntry() {
       return entry
@@ -462,8 +469,11 @@ export function createAnthropicCompatibleSessionClass(rawEntry, { blockLabel = '
     constructor(opts = {}) {
       // Force the registry name so the provider id on this session is
       // always the config entry's id — independent of whatever the
-      // embedder passed (mirrors DeepSeekSession / OllamaSession).
-      super({ ...opts, provider: entry.id })
+      // embedder passed (mirrors DeepSeekSession / OllamaSession). Keep a
+      // named intermediate so the session-opt lint can verify the complete
+      // object is spread while buildByokSessionOpts preserves BYOK-local opts.
+      const forwardedOpts = buildByokSessionOpts(opts)
+      super({ ...forwardedOpts, provider: entry.id })
     }
 
     /**

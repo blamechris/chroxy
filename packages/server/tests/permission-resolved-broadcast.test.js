@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * Integration: permission_resolved must reach WS clients through the full
@@ -172,6 +173,7 @@ describe('permission_resolved end-to-end broadcast (#3048)', () => {
         respondToQuestion() {}
         destroy() {}
       }
+      declareUnknownCustomization(FakePermResolvedSession)
       registerProvider('fake-permresolved', FakePermResolvedSession)
 
       const tmpState = `/tmp/chroxy-permresolved-${Date.now()}-${Math.random()}.json`

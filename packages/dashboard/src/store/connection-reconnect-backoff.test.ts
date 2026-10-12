@@ -318,6 +318,7 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
     const ws = await openConnected()
     type SweepField = (typeof TRANSIENT_SESSION_SWEEP_FIELDS)[number]
     const DIRTY: Record<SweepField, unknown> = {
+      providerRuntimeInfo: { provider: 'test' },
       streamingMessageId: 'msg-b',
       isPlanPending: true,
       planAllowedPrompts: ['go'],
@@ -326,6 +327,7 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
       primaryClientId: 'other-device',
     }
     const CLEAN: Record<SweepField, unknown> = {
+      providerRuntimeInfo: null,
       streamingMessageId: null,
       isPlanPending: false,
       planAllowedPrompts: [],
@@ -430,6 +432,7 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
  * happens to set it.
  */
 const ALL_SESSION_STATE_KEYS = {
+  providerRuntimeInfo: true,
   // BaseSessionState fields
   messages: true,
   streamingMessageId: true,
@@ -673,6 +676,7 @@ describe('disconnect() clears transient streaming/plan state on all sessions (#8
     await openConnected()
     type SweepField = (typeof TRANSIENT_SESSION_SWEEP_FIELDS)[number]
     const DIRTY: Record<SweepField, unknown> = {
+      providerRuntimeInfo: { provider: 'test' },
       streamingMessageId: 'msg-b',
       isPlanPending: true,
       planAllowedPrompts: ['go'],
@@ -681,6 +685,7 @@ describe('disconnect() clears transient streaming/plan state on all sessions (#8
       primaryClientId: 'other-device',
     }
     const CLEAN: Record<SweepField, unknown> = {
+      providerRuntimeInfo: null,
       streamingMessageId: null,
       isPlanPending: false,
       planAllowedPrompts: [],

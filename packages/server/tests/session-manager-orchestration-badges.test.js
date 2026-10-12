@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager } from '../src/session-manager.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 // #6691 (E-4 part 3b): createSession accepts an opaque `metadata` annotation and
 // listSessions() surfaces the orchestration badges (orchestrationRunId /
@@ -31,6 +32,7 @@ before(async () => {
     setModel() {}
     setPermissionMode() {}
   }
+  declareUnknownCustomization(NoopProvider)
   registerProvider('test-noop-badge', NoopProvider)
 })
 

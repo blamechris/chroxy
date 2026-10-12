@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { SessionManager } from '../src/session-manager.js'
 import { registerProvider } from '../src/providers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 /**
  * #6824 — persistence of the per-session parked (disabled) MCP server set.
@@ -47,6 +48,7 @@ class McpCaptureProvider extends EventEmitter {
   setModel() {}
   setPermissionMode() {}
 }
+declareUnknownCustomization(McpCaptureProvider)
 
 let registered = false
 function ensureProvider() {

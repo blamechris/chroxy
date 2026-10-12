@@ -141,6 +141,7 @@ type SweepFieldValues = Pick<SessionState, SweepFieldName>;
 // the app's onclose sweep actually clearing it — fails this test loudly
 // instead of silently passing.
 const DIRTY_VALUES: SweepFieldValues = {
+  providerRuntimeInfo: { provider: 'test' } as never,
   streamingMessageId: 'msg-b',
   isPlanPending: true,
   planAllowedPrompts: [{ tool: 'Bash', prompt: 'echo hi' }],
@@ -149,6 +150,7 @@ const DIRTY_VALUES: SweepFieldValues = {
   primaryClientId: 'other-device',
 };
 const CLEAN_VALUES: SweepFieldValues = {
+  providerRuntimeInfo: null,
   streamingMessageId: null,
   isPlanPending: false,
   planAllowedPrompts: [],
@@ -187,6 +189,7 @@ function dirtySessionState(): SessionState {
  * gains OR loses a key, independent of whether a factory happens to set it.
  */
 const ALL_BASE_SESSION_STATE_KEYS = {
+  providerRuntimeInfo: true,
   messages: true,
   streamingMessageId: true,
   pendingClientMessageId: true,

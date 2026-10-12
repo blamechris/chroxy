@@ -15,6 +15,7 @@ import { EventEmitter } from 'events'
 import { SessionManager, WorktreeError } from '../src/session-manager.js'
 import { GIT } from '../src/git.js'
 import { disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
+import { declareUnknownCustomization } from './helpers/provider-customization.js'
 
 // ---------------------------------------------------------------------------
 // Register a no-op stub provider (avoids importing real SDK/CLI sessions)
@@ -54,6 +55,7 @@ before(async () => {
     setPermissionMode(m) { this.permissionMode = m }
   }
 
+  declareUnknownCustomization(StubSession)
   registerProvider('stub-worktree', StubSession)
 
   // #5310 — a stub whose start() throws synchronously, to exercise the
