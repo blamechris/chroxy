@@ -628,7 +628,7 @@ function main() {
 // when a test imports this module for unit coverage of deriveDescription().
 //
 // The guard lives in scripts/lib/is-entry-point.mjs. It used to be inlined
-// here AND in gen-agents-md.mjs — two hand-maintained copies of the same
+// here AND in the retired project-rule generator — two copies of the same
 // fifteen lines, which is the duplication #7213 was filed to remove, recreated
 // one directory down (#7222). Without it, invoking this through a symlinked
 // path on macOS read false and the script exited 0 having compiled nothing

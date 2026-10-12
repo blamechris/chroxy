@@ -31,6 +31,38 @@ const WRITE_UNRESOLVABLE_REASONS = {
 const log = createLogger('ws')
 
 /**
+ * The supported authored layout has a thin CLAUDE.md importing cwd/AGENTS.md.
+ * Recognize only that entire adapter, never turn arbitrary @imports into writes.
+ * A bounded, symlink-refusing read cannot follow an external adapter or wait on
+ * a special file. Legacy project files (including in-bounds links) retain their
+ * existing append destination and the validation below.
+ */
+async function projectMemoryFilename(cwdReal) {
+  let fh
+  try {
+    fh = await openNoFollow(resolve(cwdReal, 'CLAUDE.md'), fsConstants.O_RDONLY)
+    const st = await fh.stat()
+    if (!st.isFile() || st.size > 64) return 'CLAUDE.md'
+    const buffer = Buffer.alloc(65)
+    let length = 0
+    while (length < buffer.length) {
+      const { bytesRead } = await fh.read(buffer, length, buffer.length - length, length)
+      if (!bytesRead) break
+      length += bytesRead
+    }
+    const content = buffer.subarray(0, length).toString('utf8').trim()
+    return content === '@AGENTS.md' || content === '@./AGENTS.md' ? 'AGENTS.md' : 'CLAUDE.md'
+  } catch (err) {
+    // Missing legacy files are created by append; existing links are validated
+    // by the unchanged realpath/containment pipeline rather than read here.
+    if (err.code === 'ENOENT' || err.code === 'ELOOP') return 'CLAUDE.md'
+    throw err
+  } finally {
+    await fh?.close()
+  }
+}
+
+/**
  * Longest `base` getDiff will hand to git. A revision is short — a full OID is
  * 40 characters and a ref name far less — so this rejects nothing legitimate,
  * and it bounds what could otherwise be spent per request: two `rev-parse`
@@ -533,10 +565,11 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
   }
 
   /**
-   * Append a single note line to the session cwd's project CLAUDE.md, creating
-   * the file if it doesn't exist (#6861, epic #6760).
+   * Append a single note line to the session cwd's project memory. Thin Claude
+   * adapters route to authored AGENTS.md; legacy CLAUDE.md files are created
+   * when absent (#6861, epic #6760).
    *
-   * The TARGET is chosen SERVER-side (`<cwd>/CLAUDE.md`) — the client sends only
+   * The TARGET is chosen SERVER-side (a fixed cwd filename) — the client sends only
    * the note text, never a path — so the write is path-confined BY CONSTRUCTION.
    * validatePathWithinCwd is still run for symlink-escape defence (a CLAUDE.md
    * symlinked out of the workspace is rejected), and the open goes through
@@ -570,7 +603,8 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
     let absPath = null
     try {
       const cwdReal = await resolveSessionCwd(sessionCwd)
-      const target = normalize(resolve(cwdReal, 'CLAUDE.md'))
+      const filename = await projectMemoryFilename(cwdReal)
+      const target = normalize(resolve(cwdReal, filename))
 
       // Resolve symlinks: if CLAUDE.md already exists, validate its real path;
       // if not, validate the lexical target (still inside cwd by construction).
@@ -581,6 +615,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         fileExists = true
       } catch (err) {
         if (err.code === 'ENOENT') {
+          if (filename === 'AGENTS.md') throw new Error('Authored project memory AGENTS.md is missing')
           resolvedTarget = target
         } else {
           // #8016 — a CLAUDE.md link whose target cannot be resolved: same
@@ -654,17 +689,22 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       const data = Buffer.from((needsLeadingNewline ? '\n' : '') + line + '\n', 'utf-8')
 
       // O_APPEND: atomic append at EOF (no lost-update / truncation window).
-      // O_CREAT (WITHOUT O_EXCL) opens-or-creates, so there is no EEXIST race to
-      // retry — a concurrent creator just means we append instead. openNoFollow
-      // keeps the symlink-escape defence on the final component, on win32 as
+      // Legacy files use O_CREAT without O_EXCL, so a concurrent creator just
+      // means we append instead. Authored rules must still exist at the open:
+      // a source removed by another operation must not be recreated as a note.
+      // openNoFollow keeps the symlink-escape defence on the final component, on win32 as
       // well as POSIX (#7280).
       {
         let fh
         try {
-          const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+          let flags = fsConstants.O_WRONLY | fsConstants.O_APPEND
+          if (filename !== 'AGENTS.md') flags |= fsConstants.O_CREAT
           fh = await openNoFollow(absPath, flags, 0o666)
           await fh.writeFile(data)
         } catch (openErr) {
+          if (openErr.code === 'ENOENT' && filename === 'AGENTS.md') {
+            throw new Error('Authored project memory AGENTS.md is missing')
+          }
           if (openErr.code === 'ELOOP') {
             sendFn(ws, {
               type: 'append_memory_result',

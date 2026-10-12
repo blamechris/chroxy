@@ -686,7 +686,9 @@ describe('#7280 source sweep — every O_NOFOLLOW open goes through the one help
   // multi-KB source slice carries the whole file as `actual` and has wedged the
   // runner (#7340, false-safety entry 17).
   const files = [
-    { name: 'ws-file-ops/reader.js', src: readerSrc, calls: 5 },
+    // Five existing read/write/append opens plus the bounded thin-adapter read,
+    // exercised by append-memory.test.js's authored/legacy/symlink cases.
+    { name: 'ws-file-ops/reader.js', src: readerSrc, calls: 6 },
     { name: 'ws-file-ops/memory.js', src: memorySrc, calls: 1 },
   ]
 

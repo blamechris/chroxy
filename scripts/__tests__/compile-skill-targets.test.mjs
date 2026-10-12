@@ -281,7 +281,7 @@ await test('detectUncompiledAgents flags an installed-but-unselected pi (~/.pi)'
 // So the tests below run the script for real, out of a temp fixture, and assert
 // on the ARTIFACT it wrote. Exit status alone cannot tell "compiled everything"
 // from "never ran": both are 0. The sibling coverage for the other consumer of
-// the shared guard is in gen-agents-md.test.mjs.
+// the shared guard is in check-project-rules.test.mjs.
 
 import { existsSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -524,9 +524,8 @@ await test('importing the module does NOT run its CLI (the other direction, #723
 // from what the compiler produces, and `catchup` had a source with no compiled
 // artifact at all, so that skill was not loadable.
 //
-// AGENTS.md — a generated mirror of the same class, and strictly less
-// load-bearing since it changes no agent's behaviour — has had this gate since
-// #6491. These are its counterpart.
+// The old generated project mirror had a counterpart gate since #6491.
+// AGENTS.md is now authored; only compiled skill artifacts need a drift check.
 //
 // Four of the tests below cover a way an artifact can be wrong that a naive
 // "do the bytes match?" check passes silently: an artifact that does not exist
@@ -590,7 +589,7 @@ const compileThenCheck = (ctx, targets = 'claude,gemini') => {
 // Every drift test asserts the MESSAGE, never the exit code alone. `node` exits
 // 1 for an uncaught module-load error too, and a guard reading false exits 0
 // having done nothing — so a bare status check cannot tell "the gate detected
-// drift" from "the gate never ran". Same reasoning as gen-agents-md.test.mjs's
+// drift" from "the gate never ran". Same reasoning as the project-rules CLI's
 // assertDetectedDrift, arrived at the same way (#7214).
 const assertDetected = (run, kind, file) => {
   assert(

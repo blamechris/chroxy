@@ -133,8 +133,9 @@ protection, protocol generation, app tests, cost scripts or a merge. Real host
 compaction, process crash recovery and successor acceptance require a separately
 authorized operational test. Fresh context plus disk state proves restoration
 logic, not those host lifecycle mechanisms. Native Gemini and Codex discovery are
-not covered. Generated mirrors are checked separately; AGENTS.md size remains a
-known cross-host delivery limit to check before adopting it elsewhere.
+not covered. Compiled skills are checked separately. Authored project rules, provider imports
+and the supported instruction byte budget are checked by `check-project-rules.mjs`;
+fresh-session host discovery remains separate evidence.
 
 ## Rollout and rollback
 
@@ -163,9 +164,9 @@ known cross-host delivery limit to check before adopting it elsewhere.
 
 ```sh
 node scripts/compile-skill-targets.mjs --check
-node scripts/gen-agents-md.mjs --check
+node scripts/check-project-rules.mjs
 node scripts/__tests__/compile-skill-targets.test.mjs
-node scripts/__tests__/gen-agents-md.test.mjs
+node scripts/__tests__/check-project-rules.test.mjs
 git diff --check
 ```
 

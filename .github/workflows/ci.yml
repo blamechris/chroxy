@@ -1946,11 +1946,14 @@ jobs:
         # --check is read-only and refuses those targets outright.
         run: node scripts/compile-skill-targets.mjs --check
 
-      - name: Check AGENTS.md is in sync with CLAUDE.md
-        # AGENTS.md is generated from CLAUDE.md (the single source of truth) so
-        # non-Claude agents get the same guidance. This gate fails if CLAUDE.md
-        # changed without regenerating, or if AGENTS.md was hand-edited.
-        run: node scripts/__tests__/gen-agents-md.test.mjs
+      - name: Check authored project rules, adapters and instruction byte budget
+        # Portable CI reserves 48 KiB for machine rules and 2 KiB below the
+        # supported 96 KiB cap, including Codex's inter-file separators.
+        # Live host loading is verified separately with fleet-check and fresh sessions.
+        run: node scripts/check-project-rules.mjs
+
+      - name: Run authored project rules guard regressions
+        run: node scripts/__tests__/check-project-rules.test.mjs
 
       - name: Run check-release-pr-subject.mjs tests
         run: node scripts/__tests__/check-release-pr-subject.test.mjs

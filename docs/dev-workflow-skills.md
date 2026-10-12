@@ -11,7 +11,7 @@ Chroxy's development workflow is driven by reusable slash commands. Their neutra
 ```
 /skill add <name>       # resolve from the registry → fetch generic/<name>.md →
                         #   fill its {{CUSTOMIZE}} markers from this repo's
-                        #   CLAUDE.md + .claude/skill-profile.md + code →
+                        #   AGENTS.md + .claude/skill-profile.md + code →
                         #   write .claude/commands/<name>.md → compile to native
                         #   targets → record in .claude/skills.lock
 /skill list             # what's installed
@@ -97,4 +97,4 @@ The [Pi Coding Agent](https://github.com/earendil-works/pi) has its own "skills"
 ## See also
 
 - [`docs/skills.md`](skills.md) — runtime skills (the user-facing, session-injected system).
-- `CLAUDE.md` → **Skills (pull-based registry)** — the contributor-facing operational detail (kept as the single source of truth; `AGENTS.md` is generated from it for agents that don't read `CLAUDE.md`).
+- `AGENTS.md` → **Skills (pull-based registry)** — the authored contributor-facing operational detail; `CLAUDE.md` and `GEMINI.md` import it.
