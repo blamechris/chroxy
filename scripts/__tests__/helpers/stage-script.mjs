@@ -9,16 +9,8 @@
 // single filename would die the same way on the next helper to be extracted.
 // Copying the whole directory stages the next sibling automatically.
 //
-// This is the one implementation FOR THE .mjs TEST FILES. gen-agents-md.test.mjs
-// grew it first and compile-skill-targets.test.mjs needed the identical thing
-// (#7236); a second hand-maintained copy of it is the shape #7213/#7222 were
-// filed to remove, recreated one directory down.
-//
-// It is deliberately not the only one in this directory: bump-version.test.sh's
-// `install_agents_generator()` stages the same script from shell and cannot
-// import this module. That copy now AGREES on the missing-lib case (#7256) —
-// it refuses too, before staging anything, rather than skipping the copy when
-// scripts/lib is absent.
+// This is the shared implementation for compiler and project-rules fixtures.
+// A second hand-maintained copy recreates the drift #7213/#7222 removed.
 
 import { cpSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -27,7 +19,7 @@ import { basename, dirname, join } from 'node:path'
  * Stage `scriptPath` and its sibling `lib/` into `destScriptsDir`.
  *
  * A missing sibling `lib/` throws rather than staging less than asked. Both
- * current callers import from it, so its absence means either the wrong path
+ * current scripts import from it, so its absence means either the wrong path
  * was passed or the helpers moved — and the alternative is a child process
  * dying with an ERR_MODULE_NOT_FOUND that names a temp path and not the cause.
  * "Could not stage it" is not the same as "there was nothing to stage".

@@ -58,7 +58,7 @@ STORE_CORE_PKG="$ROOT/packages/store-core/package.json"
 DASHBOARD_PKG="$ROOT/packages/dashboard/package.json"
 CLAUDE_HOOKS_PKG="$ROOT/packages/claude-hooks/package.json"
 DESIGN_TOKENS_PKG="$ROOT/packages/design-tokens/package.json"
-CLAUDE_MD="$ROOT/CLAUDE.md"
+AGENTS_MD="$ROOT/AGENTS.md"
 TAURI_CONF="$ROOT/packages/desktop/src-tauri/tauri.conf.json"
 CARGO_TOML="$ROOT/packages/desktop/src-tauri/Cargo.toml"
 ROOT_LOCK="$ROOT/package-lock.json"
@@ -73,7 +73,7 @@ CHANGELOG="$ROOT/CHANGELOG.md"
 # at all.
 export SERVER_PKG APP_PKG APP_JSON ROOT_PKG DESKTOP_PKG PROTOCOL_PKG \
   STORE_CORE_PKG DASHBOARD_PKG CLAUDE_HOOKS_PKG DESIGN_TOKENS_PKG \
-  CLAUDE_MD TAURI_CONF ROOT_LOCK
+  AGENTS_MD TAURI_CONF ROOT_LOCK
 
 # Clean up any orphan .tmp siblings created by the awk-into-place pattern
 # below. With `set -euo pipefail` an awk failure (disk full, killed process,
@@ -272,8 +272,8 @@ node -e '
   console.log("  workspace @chroxy/* dependency ranges -> " + range + " (" + n + " updated)");
 '
 
-# Update the two version references in CLAUDE.md's prose, then regenerate
-# AGENTS.md from it (#7183).
+# Update the two version references in the authored AGENTS.md (#7183).
+# Provider adapters import this file and need no generated copy.
 #
 # These are the first thing a session reads about "what version is this", and
 # they were wrong immediately after every release: at the 0.10.0 -> 0.11.0 bump
@@ -282,10 +282,14 @@ node -e '
 #
 # Only touched when the file is present, so the script still runs against a
 # minimal tree (the bump-version test fixtures build one).
-if [ -f "$CLAUDE_MD" ]; then
-  # CLAUDE_MD and NEW_VERSION reach node via the environment (exported
+if [ ! -f "$AGENTS_MD" ] && { [ -f "$ROOT/CLAUDE.md" ] || [ -f "$ROOT/GEMINI.md" ]; }; then
+  echo "Error: authored AGENTS.md is missing while a provider adapter exists" >&2
+  exit 1
+fi
+if [ -f "$AGENTS_MD" ]; then
+  # AGENTS_MD and NEW_VERSION reach node via the environment (exported
   # above), never interpolated into the -e program text — a path containing
-  # a single quote used to break out of the `'$CLAUDE_MD'` JS string literal
+  # a single quote used to break out of the `'$AGENTS_MD'` JS string literal
   # with a SyntaxError (#7237). The footer pattern's trailing `$` is a bare,
   # unescaped end-of-line regex anchor: with the program text now
   # single-quoted, the shell performs no backslash processing on it at all,
@@ -295,7 +299,7 @@ if [ -f "$CLAUDE_MD" ]; then
   # directly).
   node -e '
     const fs = require("fs");
-    const file = process.env.CLAUDE_MD;
+    const file = process.env.AGENTS_MD;
     const version = process.env.NEW_VERSION;
     let src = fs.readFileSync(file, "utf-8");
     const edits = [
@@ -305,7 +309,7 @@ if [ -f "$CLAUDE_MD" ]; then
       [/(^\*Version: )\d+\.\d+\.\d+(\*$)/m, version, "the Version footer"],
     ];
     // A pattern that matches NOTHING must fail, not be skipped. Skipping is a
-    // fail-open on the exact scenario this guards: if the CLAUDE.md line format
+    // fail-open on the exact scenario this guards: if the AGENTS.md line format
     // is reworded, the rewrite quietly does nothing, the script reports
     // success, and the version silently drifts again — which is how these two
     // lines got two releases stale in the first place.
@@ -327,122 +331,9 @@ if [ -f "$CLAUDE_MD" ]; then
         process.exit(1);
       }
     }
-    console.log("  CLAUDE.md version references -> " + version + " (" + edits.length + " line(s))");
+    console.log("  AGENTS.md version references -> " + version + " (" + edits.length + " line(s))");
   '
 
-  # AGENTS.md is generated from CLAUDE.md and CI (Scripts Tests) fails on drift,
-  # so regenerating here is not optional.
-  if [ -f "$ROOT/scripts/gen-agents-md.mjs" ]; then
-    node "$ROOT/scripts/gen-agents-md.mjs" >/dev/null
-    # Verify the postcondition instead of announcing it, and verify it in THIS
-    # script's frame of reference.
-    #
-    # `set -euo pipefail` catches only a NON-ZERO exit, and the defect class
-    # this regeneration exists to survive (#7198, #7214) is exit ZERO having
-    # done nothing — so in precisely the failure mode worth worrying about, an
-    # unconditional echo prints a success that is false and the release ships a
-    # stale AGENTS.md.
-    #
-    # Re-running the generator with --check does not close that, and believing
-    # it did is #7231. The generator derives its own ROOT from import.meta.url,
-    # not from anything this script passes, so --check reports on THE
-    # GENERATOR'S AGENTS.md — never "$ROOT/AGENTS.md", the file this script
-    # actually cares about. Write and check are then self-consistent by
-    # construction: they agree with each other whether or not the caller's
-    # mirror was touched. Demonstrated with the generator resolving to a
-    # different tree than $ROOT, the bump rewrote that tree's mirror, printed
-    # the success line, and exited 0 with $ROOT/AGENTS.md still stale.
-    #
-    # So compare here rather than asking the generator to grade itself: import
-    # the pure renderer, read BOTH files by absolute path under $ROOT, and diff
-    # them. Importing a module never runs its CLI branch, so the entry-point
-    # guard is not consulted at all — this cannot be defeated by that guard
-    # reading false, which is why it SUBSUMES the old exit-code/output check
-    # rather than stacking on it.
-    #
-    # $ROOT reaches node through the environment and is never interpolated into
-    # the -e source: a path containing a quote or a backslash would otherwise be
-    # spliced into the program text.
-    #
-    # The verification is gated on a SENTINEL LINE, not on the exit code, and
-    # that is not belt-and-braces — it is the only thing that makes this
-    # genuinely subsume the --check it replaced.
-    #
-    # The verifier `await import()`s the generator INTO ITS OWN PROCESS. A
-    # generator that declines to run via a module-scope `process.exit(0)` —
-    # `if (!isEntryPoint(import.meta.url)) process.exit(0)` is a perfectly
-    # plausible way to write the guard — therefore terminates THE VERIFIER with
-    # status 0. `if node …; then` takes the success branch, the reassuring line
-    # prints, and $ROOT/AGENTS.md is left stale: the exact false success this
-    # block exists to prevent, arriving through the import that was supposed to
-    # make it impossible.
-    #
-    # Requiring output the program can only produce by reaching its own last
-    # line closes it, because a process that exited early printed nothing. This
-    # is the same discriminator #7229 established for --check, kept rather than
-    # discarded — the first version of this fix dropped it, and #7234's review
-    # demonstrated the regression end-to-end against main.
-    agents_verify_out="$(CHROXY_BUMP_ROOT="$ROOT" node --input-type=module -e '
-      import { readFileSync } from "node:fs"
-      import { join } from "node:path"
-      import { pathToFileURL } from "node:url"
-      const root = process.env.CHROXY_BUMP_ROOT
-      // Not reachable from this script, which always sets it on the command
-      // itself — but every failure in here is a DIAGNOSTIC, and join(undefined)
-      // throws a TypeError that says nothing about what went wrong. The three
-      // defensive branches in this program (this, the renderAgentsMd typeof
-      // check, and the ENOENT catch) are all message quality rather than
-      // safety: the sentinel gate below means anything that ends the program
-      // early prints no AGENTS_IN_SYNC and therefore already fails closed.
-      if (!root) {
-        console.error("CHROXY_BUMP_ROOT is unset — the verifier has no tree to check")
-        process.exit(1)
-      }
-      const claudePath = join(root, "CLAUDE.md")
-      const agentsPath = join(root, "AGENTS.md")
-      const generator = pathToFileURL(join(root, "scripts", "gen-agents-md.mjs")).href
-      const { renderAgentsMd } = await import(generator)
-      if (typeof renderAgentsMd !== "function") {
-        console.error("gen-agents-md.mjs does not export renderAgentsMd")
-        process.exit(1)
-      }
-      const expected = renderAgentsMd(readFileSync(claudePath, "utf8"))
-      let actual
-      try {
-        actual = readFileSync(agentsPath, "utf8")
-      } catch (err) {
-        console.error(agentsPath + ": " + (err.code || err.message))
-        process.exit(1)
-      }
-      if (actual !== expected) {
-        console.error(agentsPath + " is not the render of " + claudePath)
-        process.exit(1)
-      }
-      console.log("AGENTS_IN_SYNC")
-    ' 2>&1)" || true
-    case "$agents_verify_out" in
-      *AGENTS_IN_SYNC*)
-        echo "  AGENTS.md regenerated from CLAUDE.md"
-        ;;
-      *)
-        echo "  ERROR: $ROOT/AGENTS.md is not in sync with $ROOT/CLAUDE.md" >&2
-        # Distinguish the three ways to get here, because they need different
-        # fixes and the previous wording blamed drift for all of them — a node
-        # syntax error, a missing module and an OOM all printed "the mirror did
-        # not end up regenerated".
-        if [ -z "$agents_verify_out" ]; then
-          echo "  The verifier produced no output at all — the generator ended the" >&2
-          echo "  process during import (a module-scope exit), so nothing was" >&2
-          echo "  compared (#7198 / #7214 / #7231)." >&2
-        else
-          echo "  verifier said: $agents_verify_out" >&2
-        fi
-        echo "  Regenerate with:" >&2
-        echo "    node $ROOT/scripts/gen-agents-md.mjs" >&2
-        exit 1
-        ;;
-    esac
-  fi
 fi
 
 # Update tauri.conf.json. Paths/version reach node via the environment,
