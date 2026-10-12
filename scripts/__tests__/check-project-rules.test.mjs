@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -11,7 +12,7 @@ import { stageScript } from './helpers/stage-script.mjs'
 
 // Count actual completed cases as well as the node:test verdict. The roster
 // guard neuters these increments to prove a zero-case run cannot pass.
-const EXPECTED_CASES = 19
+const EXPECTED_CASES = 20
 let pass = 0
 let fail = 0
 function test(name, fn) {
@@ -49,6 +50,10 @@ function fixture(t) {
   const compilerTarget = join(root, 'packages/server/src/instruction-policy-compiler.js')
   mkdirSync(dirname(compilerTarget), { recursive: true })
   cpSync(join(REPO, 'packages/server/src/instruction-policy-compiler.js'), compilerTarget)
+  mkdirSync(join(root, 'packages/server/src/utils'), { recursive: true })
+  for (const name of ['componentwise-resolver.js', 'path-containment.js']) {
+    cpSync(join(REPO, 'packages/server/src/utils', name), join(root, 'packages/server/src/utils', name))
+  }
   return root
 }
 
@@ -209,6 +214,13 @@ test('portable chains use bounded collision-resistant ids for space, Unicode, an
     mkdirSync(probeDirectory, { recursive: true })
     writeFileSync(join(probeDirectory, 'AGENTS.md'), `Collision probe ${collisionProbe}.\n`)
   }
+  const unicodeName = 'café'
+  const literalHashName = `sha256-${createHash('sha256').update(unicodeName).digest('hex')}`
+  for (const collisionProbe of [unicodeName, literalHashName]) {
+    const probeDirectory = join(root, collisionProbe)
+    mkdirSync(probeDirectory, { recursive: true })
+    writeFileSync(join(probeDirectory, 'AGENTS.md'), `Hash identity probe ${collisionProbe}.\n`)
+  }
   const result = checkProjectRules({ root })
   const deepest = result.chains.find(chain => chain.directory === join(...parts))
   assert.deepEqual(deepest.files, files)
@@ -220,6 +232,42 @@ test('portable chains use bounded collision-resistant ids for space, Unicode, an
   }
   assert.ok(deepest.sourceIds.slice(1).every(id => id.startsWith('project:sha256-')))
   assert.ok(deepest.targetId.startsWith('native:sha256-'))
+  const unicodeTarget = result.chains.find(chain => chain.directory === unicodeName).targetId
+  const literalHashTarget = result.chains.find(chain => chain.directory === literalHashName).targetId
+  assert.notEqual(unicodeTarget, literalHashTarget)
+  assert.ok(unicodeTarget.startsWith('native:sha256-'))
+  assert.ok(literalHashTarget.startsWith('native:sha256-'))
+})
+
+test('explicit cwd checks a wholly ignored root-to-nested chain and refuses unsafe selections', t => {
+  const root = fixture(t)
+  const ignored = join(root, 'ignored', 'deeper')
+  mkdirSync(ignored, { recursive: true })
+  writeFileSync(join(root, '.gitignore'), 'ignored/\n')
+  writeFileSync(join(root, 'ignored', 'AGENTS.md'), 'IGNORED PARENT RULE\n')
+  writeFileSync(join(ignored, 'AGENTS.md'), 'IGNORED CWD RULE\n')
+
+  const defaultResult = checkProjectRules({ root })
+  assert.equal(defaultResult.coverage, 'git-inventory-directories')
+  assert.equal(defaultResult.chains.some(chain => chain.directory.startsWith('ignored')), false)
+
+  const selected = checkProjectRules({ root, cwd: ignored })
+  assert.equal(selected.coverage, 'selected-cwd:ignored/deeper')
+  const chain = selected.chains.find(item => item.directory === 'ignored/deeper')
+  assert.deepEqual(chain.files, ['AGENTS.md', 'ignored/AGENTS.md', 'ignored/deeper/AGENTS.md'])
+  assert.deepEqual(chain.sourceIds, [
+    'project:AGENTS.md', 'project:ignored/AGENTS.md', 'project:ignored/deeper/AGENTS.md',
+  ])
+  const cli = run(root, { args: ['--cwd', 'ignored/deeper'] })
+  assert.equal(cli.status, 0, cli.stderr)
+  assert.ok(cli.stdout.includes('coverage=selected-cwd:ignored/deeper'))
+
+  writeFileSync(join(ignored, 'AGENTS.md'), 'x'.repeat(DOC_CAP_BYTES))
+  red(root, 'exceeds 98304 bytes', { args: ['--cwd', 'ignored/deeper'] })
+  rmSync(join(ignored, 'AGENTS.md'))
+  symlinkSync(ignored, join(root, 'linked-cwd'))
+  red(root, 'uses a symlink', { args: ['--cwd', 'linked-cwd'] })
+  red(root, 'ENOENT', { args: ['--cwd', 'missing-cwd'] })
 })
 
 test('portable source validation preserves and counts a UTF-8 BOM', t => {

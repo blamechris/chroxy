@@ -5,6 +5,7 @@ export const INSTRUCTION_SEPARATOR = '\n\n--- project-doc ---\n\n'
 export const REQUIRED_RULE_START = '<!-- chroxy-required-rule:start '
 export const REQUIRED_RULE_END = '<!-- chroxy-required-rule:end '
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/
+const HASH_IDENTITY = /^sha256-[a-f0-9]{64}$/
 const MAX_SOURCES = 32
 const MAX_TARGETS = 32
 const MAX_RULES = 128
@@ -18,10 +19,14 @@ function fail(message) { throw new Error(`Instruction policy: ${message}`) }
  */
 export function boundedInstructionIdentity(namespace, relativePath) {
   if (typeof namespace !== 'string' || !ID.test(namespace)) fail(`invalid identity namespace '${namespace || ''}'`)
-  if (typeof relativePath !== 'string' || relativePath.length === 0) fail('instruction identity path must be non-empty text')
+  if (typeof relativePath !== 'string' || relativePath.length === 0 || relativePath.includes('\0')) {
+    fail('instruction identity path must be non-empty portable text')
+  }
   const candidate = `${namespace}:${relativePath}`
-  if (ID.test(candidate)) return candidate
-  return `${namespace}:sha256-${createHash('sha256').update(relativePath, 'utf8').digest('hex')}`
+  if (ID.test(candidate) && !HASH_IDENTITY.test(relativePath)) return candidate
+  const digestInput = namespace.length <= 55 ? relativePath : `${namespace}\0${relativePath}`
+  const prefix = namespace.length <= 55 ? namespace : 'identity'
+  return `${prefix}:sha256-${createHash('sha256').update(digestInput, 'utf8').digest('hex')}`
 }
 
 function validText(text, label) {

@@ -3,11 +3,13 @@
 // Live machine/config validation belongs to fleet-check and fresh-session probes.
 
 import { spawnSync } from 'node:child_process'
-import { lstatSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isEntryPoint } from './lib/is-entry-point.mjs'
 import { boundedInstructionIdentity, compileInstructionPolicy, inspectInstructionSource, INSTRUCTION_SEPARATOR } from '../packages/server/src/instruction-policy-compiler.js'
+import { resolveTargetComponentwiseSync } from '../packages/server/src/utils/componentwise-resolver.js'
+import { isPathWithin } from '../packages/server/src/utils/path-containment.js'
 
 export const DOC_CAP_BYTES = 98304
 export const MACHINE_BUDGET_BYTES = 49152
@@ -58,6 +60,25 @@ function directoryDepth(directory) {
   return directory === '.' ? 0 : directory.split('/').filter(Boolean).length
 }
 
+function addSelectedCwdDirectories(root, rootInput, cwd, directories) {
+  const requestedInput = resolve(rootInput, cwd)
+  const requested = isPathWithin(requestedInput, rootInput)
+    ? resolve(root, relative(rootInput, requestedInput))
+    : realpathSync(requestedInput)
+  if (!isPathWithin(requested, root)) throw new Error(`selected cwd is outside project root`)
+  const rel = relative(root, requested) || '.'
+  const resolved = resolveTargetComponentwiseSync(root, rel)
+  if (!isPathWithin(resolved, root)) throw new Error('selected cwd resolves outside project root')
+  if (resolved !== requested) throw new Error('selected cwd uses a symlink and is unsupported')
+  if (!lstatSync(resolved).isDirectory()) throw new Error('selected cwd must be a directory')
+  let directory = rel
+  while (directory !== '.') {
+    directories.add(directory)
+    directory = dirname(directory)
+  }
+  return rel
+}
+
 function inventory(root) {
   const run = spawnSync('git', ['-C', root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], {
     encoding: 'utf8', timeout: 10000, maxBuffer: 16 * 1024 * 1024,
@@ -66,8 +87,9 @@ function inventory(root) {
   return [...new Set(run.stdout.split('\0').filter(Boolean))].filter(path => pathExists(join(root, path)))
 }
 
-export function checkProjectRules({ root = ROOT, machinePath } = {}) {
-  root = resolve(root)
+export function checkProjectRules({ root = ROOT, machinePath, cwd } = {}) {
+  const rootInput = resolve(root)
+  root = realpathSync(rootInput)
   const paths = inventory(root)
   // Include ignored instruction files in every directory of the project
   // inventory. Gitignore is not an instruction-loading boundary.
@@ -79,6 +101,7 @@ export function checkProjectRules({ root = ROOT, machinePath } = {}) {
       directory = dirname(directory)
     }
   }
+  const selectedCwd = cwd === undefined ? null : addSelectedCwdDirectories(root, rootInput, cwd, directories)
   const layers = new Set(paths)
   for (const directory of directories) {
     for (const name of ['AGENTS.md', 'AGENTS.override.md', 'CLAUDE.md', 'GEMINI.md', '.codex/config.toml', '.gemini/settings.json']) {
@@ -151,7 +174,12 @@ export function checkProjectRules({ root = ROOT, machinePath } = {}) {
       targetId,
     }
   })
-  return { chains, machineBytes, machineMeasured: Boolean(machinePath) }
+  return {
+    chains,
+    machineBytes,
+    machineMeasured: Boolean(machinePath),
+    coverage: selectedCwd === null ? 'git-inventory-directories' : `selected-cwd:${selectedCwd}`,
+  }
 }
 
 if (isEntryPoint(import.meta.url)) {
@@ -160,14 +188,14 @@ if (isEntryPoint(import.meta.url)) {
     const args = process.argv.slice(2)
     while (args.length) {
       const flag = args.shift()
-      if (!['--root', '--machine'].includes(flag) || !args.length || args[0].startsWith('--')) throw new Error(`unknown or incomplete option: ${flag}`)
-      const key = flag === '--root' ? 'root' : 'machinePath'
+      if (!['--root', '--machine', '--cwd'].includes(flag) || !args.length || args[0].startsWith('--')) throw new Error(`unknown or incomplete option: ${flag}`)
+      const key = flag === '--root' ? 'root' : flag === '--machine' ? 'machinePath' : 'cwd'
       if (options[key]) throw new Error(`duplicate option: ${flag}`)
       options[key] = args.shift()
     }
     const result = checkProjectRules(options)
     for (const chain of result.chains) console.log(`project-rules: ${chain.directory} ${chain.bytes}/${DOC_CAP_BYTES} bytes; margin=${chain.margin}`)
-    console.log(`PROJECT_RULES_OK: authored source and adapters verified; ${result.chains.length} chain(s); machine=${result.machineBytes} bytes (${result.machineMeasured ? 'measured' : 'portable budget'}); separators=${Buffer.byteLength(DOC_SEPARATOR)} bytes`)
+    console.log(`PROJECT_RULES_OK: authored source and adapters verified; ${result.chains.length} chain(s); coverage=${result.coverage}; machine=${result.machineBytes} bytes (${result.machineMeasured ? 'measured' : 'portable budget'}); separators=${Buffer.byteLength(DOC_SEPARATOR)} bytes`)
   } catch (err) {
     console.error(`::error::project-rules: ${err.message}`)
     process.exitCode = 1

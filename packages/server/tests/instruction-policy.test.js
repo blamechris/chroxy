@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { constants as fsConstants, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { tmpdir } from 'node:os'
@@ -8,12 +8,19 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  boundedInstructionIdentity,
   compileInstructionPolicy,
   discoverByokInstructionSources,
   inspectInstructionSource,
   loadByokInstructionPolicy,
   readRegularInstructionFile,
 } from '../src/instruction-policy.js'
+import { openNoFollow } from '../src/ws-file-ops/open-nofollow.js'
+import {
+  normalizeWindowsFinalPath,
+  parseLsofOpenedFilePath,
+  resolveOpenedFilePath,
+} from '../src/utils/opened-file-path.js'
 import { BYOK_SESSION_LOCAL_OPT_KEYS, ClaudeByokSession, buildByokSessionOpts } from '../src/byok-session.js'
 import { createAnthropicCompatibleSessionClass } from '../src/anthropic-compatible-session.js'
 import { createOpenAiCompatibleSessionClass } from '../src/openai-compatible-session.js'
@@ -30,6 +37,21 @@ const marked = (id, text = 'required text') =>
   `<!-- chroxy-required-rule:start ${id} -->\n${text}\n<!-- chroxy-required-rule:end ${id} -->`
 
 describe('instruction policy compiler', () => {
+  it('keeps hashed identities distinct from readable hash-shaped path literals', () => {
+    const unsafe = 'café'
+    const literal = `sha256-${createHash('sha256').update(unsafe).digest('hex')}`
+    const unsafeId = boundedInstructionIdentity('native', unsafe)
+    const literalId = boundedInstructionIdentity('native', literal)
+    assert.notEqual(unsafeId, literalId)
+    assert.match(unsafeId, /^native:sha256-[a-f0-9]{64}$/)
+    assert.match(literalId, /^native:sha256-[a-f0-9]{64}$/)
+    const longNamespaceId = boundedInstructionIdentity('n'.repeat(128), unsafe)
+    assert.match(longNamespaceId, /^identity:sha256-[a-f0-9]{64}$/)
+    assert.ok(longNamespaceId.length <= 128)
+    assert.equal(boundedInstructionIdentity('project', 'nested/AGENTS.md'), 'project:nested/AGENTS.md')
+    assert.throws(() => boundedInstructionIdentity('project', 'bad\0path'), /portable text/)
+  })
+
   it('rejects every unpaired surrogate while accepting pairs and whitespace', () => {
     for (const text of ['\uD800', '\uD801', '\uDBFF', '\uDC00', '\uDFFF']) {
       assert.throws(() => inspectInstructionSource({ id: 'bad', text }), /invalid UTF-16/)
@@ -141,6 +163,182 @@ describe('instruction policy compiler', () => {
 })
 
 describe('BYOK instruction discovery', () => {
+  it('resolves the actual opened descriptor path and fails closed on malformed probe output', async () => {
+    assert.equal(
+      parseLsofOpenedFilePath('p42\0\nf7\0n/tmp/opened file\0\n', { pid: 42, fd: 7 }),
+      '/tmp/opened file',
+    )
+    for (const stdout of [
+      'p41\0\nf7\0n/tmp/file\0\n',
+      'p42\0\nf8\0n/tmp/file\0\n',
+      'p42\0\nf7\0',
+      `p42\0\nf7\0n/${'x'.repeat(64 * 1024)}\0\n`,
+    ]) {
+      await assert.rejects(
+        resolveOpenedFilePath(7, {
+          platform: 'darwin',
+          pid: 42,
+          runProbe: async () => ({ stdout, stderr: '' }),
+        }),
+        /opened-file identity probe/,
+      )
+    }
+    await assert.rejects(
+      resolveOpenedFilePath(7, {
+        platform: 'darwin',
+        pid: 42,
+        runProbe: async () => { throw new Error('utility unavailable') },
+      }),
+      /utility unavailable/,
+    )
+    await assert.rejects(resolveOpenedFilePath(7, { platform: 'unsupported' }), /no supported opened-file path query/)
+    assert.equal(normalizeWindowsFinalPath('\\\\?\\C:\\Repo\\AGENTS.md'), 'C:\\Repo\\AGENTS.md')
+    assert.equal(normalizeWindowsFinalPath('\\\\?\\UNC\\server\\share\\AGENTS.md'), '\\\\server\\share\\AGENTS.md')
+    assert.equal(normalizeWindowsFinalPath('\\\\?\\unc\\Server\\Share\\AGENTS.md'), '\\\\Server\\Share\\AGENTS.md')
+
+    let windowsProbe
+    assert.equal(await resolveOpenedFilePath(7, {
+      platform: 'win32',
+      systemRoot: 'C:\\Windows',
+      runProbe: async (...args) => {
+        windowsProbe = args
+        return { stdout: '\\\\?\\C:\\Repo\\AGENTS.md', stderr: '' }
+      },
+    }), 'C:\\Repo\\AGENTS.md')
+    assert.deepEqual(windowsProbe[1].slice(0, 4), ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command'])
+    assert.equal(windowsProbe[1].includes('-ExecutionPolicy'), false)
+    assert.equal(windowsProbe[2].stdio[0], 7)
+  })
+
+  it('reads an ordinary source only after the host proves the opened descriptor path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-positive-'))
+    try {
+      const rootReal = realpathSync(root)
+      const path = join(rootReal, 'AGENTS.md')
+      writeFileSync(path, 'OPENED FILE POSITIVE')
+      assert.equal(await readRegularInstructionFile(path, { instructionRoot: rootReal }), 'OPENED FILE POSITIVE')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('accepts the actual Windows opened descriptor across canonical temp-path spelling and case', {
+    skip: process.platform !== 'win32' ? 'requires the Windows handle query' : false,
+  }, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-win-'))
+    let handle
+    try {
+      const rootReal = realpathSync(root)
+      const path = join(rootReal, 'AGENTS.md')
+      writeFileSync(path, 'WINDOWS OPENED FILE POSITIVE')
+      handle = await openNoFollow(path, fsConstants.O_RDONLY)
+      const openedPath = await resolveOpenedFilePath(handle.fd)
+      assert.equal(openedPath.toLowerCase(), realpathSync(path).toLowerCase())
+      assert.equal(
+        await readRegularInstructionFile(path.toUpperCase(), {
+          instructionRoot: rootReal,
+          expectedPath: path,
+        }),
+        'WINDOWS OPENED FILE POSITIVE',
+      )
+    } finally {
+      await handle?.close()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a restored-parent swap by the opened descriptor path before client construction', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-policy-parent-swap-')))
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-policy-parent-outside-')))
+    const parent = join(root, 'nested')
+    const parked = join(root, 'nested-safe')
+    const candidate = join(parent, 'AGENTS.md')
+    const outsideCandidate = join(outside, 'AGENTS.md')
+    let swaps = 0
+    mkdirSync(parent)
+    writeFileSync(candidate, 'SAFE POLICY')
+    writeFileSync(outsideCandidate, 'OFFROOT SENTINEL')
+
+    const swappingOpen = async (path, flags) => {
+      if (path !== candidate) return openNoFollow(path, flags)
+      swaps++
+      renameSync(parent, parked)
+      symlinkSync(outside, parent, process.platform === 'win32' ? 'junction' : 'dir')
+      let handle
+      try {
+        handle = await openNoFollow(path, flags)
+      } finally {
+        rmSync(parent)
+        renameSync(parked, parent)
+      }
+      return handle
+    }
+    const load = opts => loadByokInstructionPolicy({
+      ...opts,
+      resolveRepoRoot: async () => root,
+      openFile: swappingOpen,
+    })
+    try {
+      const safeSources = await discoverByokInstructionSources({
+        cwd: parent,
+        machinePath: null,
+        resolveRepoRoot: async () => root,
+      })
+      assert.deepEqual(safeSources.map(source => source.text), ['SAFE POLICY'])
+      await assert.rejects(
+        discoverByokInstructionSources({
+          cwd: parent,
+          machinePath: null,
+          resolveRepoRoot: async () => root,
+          openFile: swappingOpen,
+        }),
+        /opened outside its verified instruction path/,
+      )
+      assert.equal(swaps, 1)
+      assert.equal(readFileSync(candidate, 'utf8'), 'SAFE POLICY')
+
+      const session = new ClaudeByokSession({
+        cwd: parent,
+        _instructionPolicyLoader: load,
+        _machineInstructionPath: null,
+      })
+      await assert.rejects(session.start(), /opened outside its verified instruction path/)
+      assert.equal(swaps, 2)
+      assert.equal(session._client, null)
+      await session.destroy()
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('rechecks the opened descriptor path after the positional read', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-recheck-'))
+    const expected = join(root, 'AGENTS.md')
+    const outside = join(tmpdir(), 'outside-AGENTS.md')
+    let probe = 0
+    const handle = {
+      fd: 9,
+      async stat() { return { isFile: () => true, size: 4 } },
+      async read(buffer, offset, length, position) {
+        assert.equal(position, offset)
+        if (offset !== 0) return { bytesRead: 0 }
+        Buffer.from('safe').copy(buffer, offset, 0, length)
+        return { bytesRead: 4 }
+      },
+      async close() {},
+    }
+    try {
+      await assert.rejects(
+        readRegularInstructionFile(expected, {
+          instructionRoot: root,
+          openFile: async () => handle,
+          resolveOpenedPath: async () => ++probe === 1 ? expected : outside,
+        }),
+        /opened outside its verified instruction path/,
+      )
+      assert.equal(probe, 2)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
   it('loads machine, root, then nested authored sources and compiles them', async () => {
     const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-'))
     try {
@@ -228,7 +426,10 @@ describe('BYOK instruction discovery', () => {
       assert.equal(await loadByokInstructionPolicy({ cwd: root, machinePath: join(root, 'missing'), machineRoot: root, resolveRepoRoot: async () => root }), null)
       writeFileSync(join(root, 'target'), 'secret')
       symlinkSync(join(root, 'target'), join(root, 'AGENTS.md'))
-      await assert.rejects(discoverByokInstructionSources({ cwd: root, machinePath: null, resolveRepoRoot: async () => root }), /uses a symlink/)
+      await assert.rejects(
+        discoverByokInstructionSources({ cwd: root, machinePath: null, resolveRepoRoot: async () => root }),
+        /uses a symlink|escapes its instruction root/,
+      )
       rmSync(join(root, 'AGENTS.md'))
       writeFileSync(join(root, 'AGENTS.override.md'), 'override')
       await assert.rejects(discoverByokInstructionSources({ cwd: root, machinePath: null, resolveRepoRoot: async () => root }), /unsupported discovery override/)
@@ -239,7 +440,9 @@ describe('BYOK instruction discovery', () => {
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
-  it('refuses a FIFO promptly instead of blocking on read', async () => {
+  it('refuses a FIFO promptly instead of blocking on read', {
+    skip: process.platform === 'win32' ? 'POSIX FIFOs are unavailable on win32' : false,
+  }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-fifo-'))
     try {
       const made = spawnSync('mkfifo', [join(root, 'AGENTS.md')], { timeout: 1000 })

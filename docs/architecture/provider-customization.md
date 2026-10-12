@@ -42,6 +42,19 @@ Docker BYOK does not claim this delivery until its host/container cwd mapping is
 verified. Native Claude, Codex, Gemini, ACP, and shell drivers receive no extra
 compiled project copy.
 
+The loader binds every production source read to the path of the opened file
+descriptor, before and after the bounded positional read. Linux resolves the
+descriptor through procfs, macOS queries the descriptor through the fixed
+`/usr/sbin/lsof` system utility, and Windows passes the already-open descriptor
+as the helper's standard input and calls
+[`GetFinalPathNameByHandleW`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew)
+on [`GetStdHandle(STD_INPUT_HANDLE)`](https://learn.microsoft.com/windows/console/getstdhandle).
+The helper receives fixed code and arguments through Node's documented
+[`stdio` descriptor mapping](https://nodejs.org/download/release/latest-v22.x/docs/api/child_process.html#optionsstdio);
+it never reopens the user path or reads the source body. A missing, malformed,
+timed-out, or unsupported host probe refuses delivery rather than falling back
+to pathname-only checks.
+
 ## Consumer
 
 `provider_runtime_info` is emitted by the production session-info path on
@@ -74,3 +87,12 @@ and removing those marker lines reproduces the previous file byte-for-byte.
 
 Runtime skills use their existing independent prune budget. They are not
 required project policy and are not counted as native provider documents.
+
+The read-only portable project-rule guard checks root adapters plus instruction
+files in Git-inventoried directories by default. That inventory cannot discover
+a wholly ignored subtree. Operators checking a concrete working directory pass
+`--cwd <directory>`; the guard then validates that directory under the project
+root and checks its complete root-to-cwd chain, including ignored `AGENTS.md`
+files. Runtime BYOK loading always performs the concrete root-to-cwd check at
+session startup. Neither portable mode claims to prove a native provider's live,
+operator-configurable discovery behavior.

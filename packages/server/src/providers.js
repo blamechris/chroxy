@@ -26,7 +26,12 @@ import { CodexAppServerSession } from './codex-app-server-session.js'
 import { UserShellSession } from './user-shell-session.js'
 import { registerProviderRegistry, thinkingLevelLegacyFallbackApplies } from './models.js'
 import { BILLING_CLASSES } from './billing-class.js'
-import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER, ProviderCustomizationDescriptorSchema } from '@chroxy/protocol'
+import {
+  DEFAULT_PROVIDER,
+  PROVIDER_BINARY_VERSION_MAX_LENGTH,
+  USER_SHELL_PROVIDER,
+  ProviderCustomizationDescriptorSchema,
+} from '@chroxy/protocol'
 import {
   hasClaudeOAuthCreds,
   hasCodexOAuthCreds,
@@ -188,14 +193,17 @@ export function getProviderRuntimeInfo(provider, session) {
         includedRequiredRuleIds: [],
       }
     : observedProjection
+  const observedVersion = session?.providerBinaryVersion
+  const binaryVersion = typeof observedVersion === 'string'
+    && observedVersion.length > 0
+    && observedVersion.length <= PROVIDER_BINARY_VERSION_MAX_LENGTH
+      ? observedVersion
+      : 'unknown'
   return {
     provider: typeof provider === 'string' && provider.length > 0
       ? provider
       : (ProviderClass?.providerName || 'unknown'),
-    binaryVersion: typeof session?.providerBinaryVersion === 'string'
-      && session.providerBinaryVersion.length > 0
-      ? session.providerBinaryVersion
-      : 'unknown',
+    binaryVersion,
     capabilities,
     customization,
     projectInstructions,

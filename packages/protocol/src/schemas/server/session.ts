@@ -367,11 +367,13 @@ export const ProviderInstructionProjectionSchema = z.object({
   ).max(128),
 }).strict()
 
+export const PROVIDER_BINARY_VERSION_MAX_LENGTH = 128
+
 export const ServerProviderRuntimeInfoSchema = z.object({
   type: z.literal('provider_runtime_info'),
   sessionId: z.string().min(1).max(256),
   provider: z.string().min(1).max(128),
-  binaryVersion: z.union([z.string().min(1).max(128), z.literal('unknown')]),
+  binaryVersion: z.union([z.string().min(1).max(PROVIDER_BINARY_VERSION_MAX_LENGTH), z.literal('unknown')]),
   capabilities: z.array(z.object({
     name: z.string().min(1).max(96).regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
     state: ProviderRuntimeCapabilityStateSchema,

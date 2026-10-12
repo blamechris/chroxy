@@ -7,6 +7,7 @@ import { realpath } from 'fs/promises'
 import { openNoFollow } from './ws-file-ops/open-nofollow.js'
 import { isPathWithin } from './utils/path-containment.js'
 import { resolveTargetComponentwiseAsync } from './utils/componentwise-resolver.js'
+import { resolveOpenedFilePath } from './utils/opened-file-path.js'
 import { PROJECT_INSTRUCTION_BUDGET_BYTES } from './provider-customization.js'
 import {
   CHROXY_INHERITED_SESSION_ENV,
@@ -35,12 +36,39 @@ function fail(message) {
   throw new Error(`Instruction policy: ${message}`)
 }
 
+function sameInstructionPath(left, right) {
+  return process.platform === 'win32'
+    ? resolve(left).toLowerCase() === resolve(right).toLowerCase()
+    : resolve(left) === resolve(right)
+}
+
+async function verifyOpenedInstructionHandle(handle, {
+  instructionRoot,
+  expectedPath,
+  displayPath,
+  resolveOpenedPath,
+}) {
+  if (!instructionRoot) return
+  let openedPath
+  try {
+    openedPath = await resolveOpenedPath(handle.fd)
+  } catch (err) {
+    throw new Error(`Instruction source '${displayPath}' opened-file identity cannot be verified: ${err.message}`, { cause: err })
+  }
+  if (!isPathWithin(openedPath, instructionRoot) || !sameInstructionPath(openedPath, expectedPath)) {
+    fail(`source '${displayPath}' opened outside its verified instruction path`)
+  }
+}
+
 export async function readRegularInstructionFile(path, {
   optional = false,
   tracker,
   displayPath = path,
   maxBytes = MAX_SOURCE_BYTES,
   openFile = openNoFollow,
+  instructionRoot,
+  expectedPath = path,
+  resolveOpenedPath = resolveOpenedFilePath,
 } = {}) {
   let handle
   try {
@@ -53,13 +81,19 @@ export async function readRegularInstructionFile(path, {
     const stat = await handle.stat()
     if (!stat.isFile()) fail(`source '${displayPath}' is not a regular file`)
     if (stat.size > maxBytes) fail(`source '${displayPath}' exceeds ${maxBytes} bytes`)
+    await verifyOpenedInstructionHandle(handle, {
+      instructionRoot, expectedPath, displayPath, resolveOpenedPath,
+    })
     const buffer = Buffer.allocUnsafe(maxBytes + 1)
     let offset = 0
     while (offset < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, null)
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
       if (bytesRead === 0) break
       offset += bytesRead
     }
+    await verifyOpenedInstructionHandle(handle, {
+      instructionRoot, expectedPath, displayPath, resolveOpenedPath,
+    })
     if (offset > maxBytes) fail(`source '${displayPath}' grew beyond ${maxBytes} bytes while being read`)
     if (offset === 0) fail(`source '${displayPath}' is empty`)
     if (tracker) {
@@ -77,21 +111,13 @@ export async function readRegularInstructionFile(path, {
   }
 }
 
-async function refuseUnsupportedFile(path, label, displayPath) {
-  let handle
-  try {
-    handle = await openNoFollow(path, fsConstants.O_RDONLY)
-  } catch (err) {
-    if (err?.code === 'ENOENT') return
-    throw new Error(`Unsupported ${label} '${displayPath}' cannot be checked safely: ${err.message}`, { cause: err })
-  }
-  try {
-    const stat = await handle.stat()
-    if (!stat.isFile()) fail(`unsupported ${label} '${displayPath}' is not a regular file`)
-    fail(`unsupported ${label} '${displayPath}' must be removed or explicitly supported`)
-  } finally {
-    await handle.close()
-  }
+async function refuseUnsupportedFile(path, label, displayPath, readOptions) {
+  const text = await readRegularInstructionFile(path, {
+    optional: true,
+    displayPath,
+    ...readOptions,
+  })
+  if (text !== null) fail(`unsupported ${label} '${displayPath}' must be removed or explicitly supported`)
 }
 
 export function buildInstructionGitEnv(parentEnv = process.env) {
@@ -147,6 +173,8 @@ export async function discoverByokInstructionSources({
   machinePath = join(homedir(), '.fleet', 'AGENTS.md'),
   machineRoot = homedir(),
   resolveRepoRoot = defaultRepoRoot,
+  openFile = openNoFollow,
+  resolveOpenedPath = resolveOpenedFilePath,
 } = {}) {
   const cwdReal = await realpath(resolve(cwd || process.cwd()))
   const sources = []
@@ -160,7 +188,15 @@ export async function discoverByokInstructionSources({
     }
     const machineCandidate = join(machineRootReal, machineRelative)
     await verifyInstructionCandidate(machineRootReal, machineCandidate, 'machine:fleet')
-    const text = await readRegularInstructionFile(machineCandidate, { optional: true, tracker, displayPath: 'machine:fleet' })
+    const text = await readRegularInstructionFile(machineCandidate, {
+      optional: true,
+      tracker,
+      displayPath: 'machine:fleet',
+      instructionRoot: machineRootReal,
+      expectedPath: machineCandidate,
+      openFile,
+      resolveOpenedPath,
+    })
     if (text) sources.push({ id: 'machine:fleet', text })
   }
   const discoveredRoot = await resolveRepoRoot(cwdReal)
@@ -173,6 +209,7 @@ export async function discoverByokInstructionSources({
       await verifyInstructionCandidate(rootReal, override, overrideDisplay),
       'discovery override',
       overrideDisplay,
+      { instructionRoot: rootReal, expectedPath: override, openFile, resolveOpenedPath },
     )
     const codexConfig = join(dir, '.codex', 'config.toml')
     const configDisplay = relative(rootReal, codexConfig).split(sep).join('/')
@@ -180,11 +217,20 @@ export async function discoverByokInstructionSources({
       await verifyInstructionCandidate(rootReal, codexConfig, configDisplay),
       'discovery config',
       configDisplay,
+      { instructionRoot: rootReal, expectedPath: codexConfig, openFile, resolveOpenedPath },
     )
     const path = join(dir, 'AGENTS.md')
     const rel = relative(rootReal, path).split(sep).join('/')
     const candidate = await verifyInstructionCandidate(rootReal, path, rel)
-    const text = await readRegularInstructionFile(candidate, { optional: true, tracker, displayPath: rel })
+    const text = await readRegularInstructionFile(candidate, {
+      optional: true,
+      tracker,
+      displayPath: rel,
+      instructionRoot: rootReal,
+      expectedPath: candidate,
+      openFile,
+      resolveOpenedPath,
+    })
     if (text) {
       sources.push({ id: boundedInstructionIdentity('project', rel), text })
     }

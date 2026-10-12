@@ -459,6 +459,7 @@ export declare const ProviderInstructionProjectionSchema: z.ZodObject<{
     }, z.core.$strict>>;
     includedRequiredRuleIds: z.ZodArray<z.ZodString>;
 }, z.core.$strict>;
+export declare const PROVIDER_BINARY_VERSION_MAX_LENGTH = 128;
 export declare const ServerProviderRuntimeInfoSchema: z.ZodObject<{
     type: z.ZodLiteral<"provider_runtime_info">;
     sessionId: z.ZodString;

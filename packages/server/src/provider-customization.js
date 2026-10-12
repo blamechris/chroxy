@@ -23,6 +23,12 @@ const budgets = (projectInstructions = 'unsupported') => ({
 })
 const promptParts = ['session-preamble', 'context-hint', 'skills']
 const skillContent = ['skills']
+const NO_NATIVE_DISCOVERY = {
+  state: false,
+  files: [],
+  delivery: 'none',
+  precedence: 'none',
+}
 
 export const CLAUDE_CLI_CUSTOMIZATION = freezeDescriptor({
   nativeDiscovery: native('unknown', ['CLAUDE.md', 'CLAUDE.local.md'], 'user-message', 'global-project-subtree'),
@@ -77,7 +83,7 @@ export const CLAUDE_TUI_CUSTOMIZATION = freezeDescriptor({
 })
 
 export const BYOK_CUSTOMIZATION = freezeDescriptor({
-  nativeDiscovery: native(false, [], 'none', 'none'),
+  nativeDiscovery: NO_NATIVE_DISCOVERY,
   chroxyChannels: [
     { channel: 'system-api', lifetime: 'each-turn', content: ['project-instructions', ...promptParts] },
     { channel: 'first-user-turn', lifetime: 'first-turn', content: skillContent },
@@ -157,7 +163,7 @@ export const CLAUDE_CHANNEL_CUSTOMIZATION = freezeDescriptor({
 })
 
 export const USER_SHELL_CUSTOMIZATION = freezeDescriptor({
-  nativeDiscovery: native(false, [], 'none', 'none'),
+  nativeDiscovery: NO_NATIVE_DISCOVERY,
   chroxyChannels: [],
   nativeSkills: false,
   runtimeToggles: false,
