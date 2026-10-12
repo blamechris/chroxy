@@ -211,31 +211,30 @@ describe('BYOK instruction discovery', () => {
   })
 
   it('reads an ordinary source only after the host proves the opened descriptor path', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-positive-'))
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-positive-')))
     try {
-      const rootReal = realpathSync(root)
-      const path = join(rootReal, 'AGENTS.md')
+      const path = join(root, 'AGENTS.md')
       writeFileSync(path, 'OPENED FILE POSITIVE')
-      assert.equal(await readRegularInstructionFile(path, { instructionRoot: rootReal }), 'OPENED FILE POSITIVE')
+      assert.equal(await readRegularInstructionFile(path, { instructionRoot: root }), 'OPENED FILE POSITIVE')
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 
   it('accepts the actual Windows opened descriptor across canonical temp-path spelling and case', {
     skip: process.platform !== 'win32' ? 'requires the Windows handle query' : false,
   }, async () => {
-    const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-win-'))
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-win-')))
     let handle
     try {
-      const rootReal = realpathSync(root)
-      const path = join(rootReal, 'AGENTS.md')
+      const path = join(root, 'AGENTS.md')
       writeFileSync(path, 'WINDOWS OPENED FILE POSITIVE')
+      const expectedPath = realpathSync.native(path)
       handle = await openNoFollow(path, fsConstants.O_RDONLY)
       const openedPath = await resolveOpenedFilePath(handle.fd)
-      assert.equal(openedPath.toLowerCase(), realpathSync(path).toLowerCase())
+      assert.equal(openedPath.toLowerCase(), expectedPath.toLowerCase())
       assert.equal(
         await readRegularInstructionFile(path.toUpperCase(), {
-          instructionRoot: rootReal,
-          expectedPath: path,
+          instructionRoot: root,
+          expectedPath,
         }),
         'WINDOWS OPENED FILE POSITIVE',
       )
@@ -246,19 +245,22 @@ describe('BYOK instruction discovery', () => {
   })
 
   it('rejects a restored-parent swap by the opened descriptor path before client construction', async () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-policy-parent-swap-')))
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-policy-parent-outside-')))
-    const parent = join(root, 'nested')
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-policy-parent-swap-')))
+    const outside = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-policy-parent-outside-')))
+    const parentPath = join(root, 'nested')
     const parked = join(root, 'nested-safe')
-    const candidate = join(parent, 'AGENTS.md')
-    const outsideCandidate = join(outside, 'AGENTS.md')
     let swaps = 0
-    mkdirSync(parent)
-    writeFileSync(candidate, 'SAFE POLICY')
-    writeFileSync(outsideCandidate, 'OFFROOT SENTINEL')
+    mkdirSync(parentPath)
+    writeFileSync(join(parentPath, 'AGENTS.md'), 'SAFE POLICY')
+    writeFileSync(join(outside, 'AGENTS.md'), 'OFFROOT SENTINEL')
+    const parent = realpathSync.native(parentPath)
+    const candidate = realpathSync.native(join(parent, 'AGENTS.md'))
 
     const swappingOpen = async (path, flags) => {
-      if (path !== candidate) return openNoFollow(path, flags)
+      const isCandidate = process.platform === 'win32'
+        ? path.toLowerCase() === candidate.toLowerCase()
+        : path === candidate
+      if (!isCandidate) return openNoFollow(path, flags)
       swaps++
       renameSync(parent, parked)
       symlinkSync(outside, parent, process.platform === 'win32' ? 'junction' : 'dir')
@@ -311,9 +313,11 @@ describe('BYOK instruction discovery', () => {
   })
 
   it('rechecks the opened descriptor path after the positional read', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-recheck-'))
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-policy-opened-recheck-')))
     const expected = join(root, 'AGENTS.md')
     const outside = join(tmpdir(), 'outside-AGENTS.md')
+    writeFileSync(expected, 'safe')
+    const expectedReal = realpathSync.native(expected)
     let probe = 0
     const handle = {
       fd: 9,
@@ -331,7 +335,7 @@ describe('BYOK instruction discovery', () => {
         readRegularInstructionFile(expected, {
           instructionRoot: root,
           openFile: async () => handle,
-          resolveOpenedPath: async () => ++probe === 1 ? expected : outside,
+          resolveOpenedPath: async () => ++probe === 1 ? expectedReal : outside,
         }),
         /opened outside its verified instruction path/,
       )
