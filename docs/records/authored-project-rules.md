@@ -126,3 +126,29 @@ passed 48, and the harness-floor suite passed 42, including a neutered copy of
 the project-rules harness. Discovery mutations restoring dangling-link omission
 or suppressing `ENOTDIR` produced ordinary test failures in under five seconds.
 Final index-based verification is repeated after staging the complete correction.
+
+### Authored source disappearance
+
+The second runtime review found that an authored source removed by another
+operation after path validation could be recreated by the append's `O_CREAT`,
+containing only the new note. The append did not remove the original source;
+the defect was reporting success and manufacturing an incomplete replacement.
+
+The final write now uses `O_WRONLY | O_APPEND` for authored `AGENTS.md` without
+`O_CREAT`. Legacy `CLAUDE.md` retains its existing creation behavior. A final-open
+`ENOENT` for the authored target returns the existing missing-source diagnostic.
+The no-follow opens, confinement, symlink handling and atomic append behavior
+remain unchanged.
+
+A deterministic regression removes the authored source during validation and
+asserts an error, no recreated source, `created: false`, and unchanged Claude and
+Gemini adapters. A legacy disappearance case proves creation still works there.
+All seventeen targeted append cases passed. Restoring unconditional `O_CREAT`
+produced an ordinary failure in the disappearance regression in 3.39 seconds;
+the mutation was restored from a backup before the serial full-suite run.
+
+The second correction's serial server suite passed in 110.4 seconds: 21,140
+reported tests, 21,128 passed, twelve skipped, zero failed or cancelled, and the
+13,500-test reporting floor passed. ESLint and the no-follow/nonblocking custom
+lint passed. The authored instruction source, adapters, checker and skills are
+unchanged by this narrow runtime delta.

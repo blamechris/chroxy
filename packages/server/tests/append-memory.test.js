@@ -147,6 +147,43 @@ describe('appendMemory handler', () => {
     assert.equal(await readFile(join(dir, 'legacy.md'), 'utf8'), '# Legacy rules\nlegacy linked note\n')
   })
 
+  it('reports an authored source removed during validation without recreating it or changing adapters', async t => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-memory-authored-removed-'))
+    t.after(() => rm(dir, { recursive: true, force: true }))
+    const authored = join(dir, 'AGENTS.md')
+    await writeFile(authored, '# Authored project rules\n')
+    await writeFile(join(dir, 'CLAUDE.md'), '@AGENTS.md\n')
+    await writeFile(join(dir, 'GEMINI.md'), '@./AGENTS.md\n')
+    const racedOps = createReaderOps(mockSend, async () => dir, async () => {
+      // A separate operation removes the file after path resolution.
+      await rm(authored)
+      return { valid: true }
+    })
+    responses.length = 0
+    await racedOps.appendMemory(mockWs, 'note after removal', dir)
+    assert.equal(responses.length, 1)
+    assert.equal(responses[0].error, 'Authored project memory AGENTS.md is missing')
+    assert.equal(responses[0].created, false)
+    await assert.rejects(readFile(authored), { code: 'ENOENT' })
+    assert.equal(await readFile(join(dir, 'CLAUDE.md'), 'utf8'), '@AGENTS.md\n')
+    assert.equal(await readFile(join(dir, 'GEMINI.md'), 'utf8'), '@./AGENTS.md\n')
+  })
+
+  it('retains legacy creation when CLAUDE.md disappears during validation', async t => {
+    const dir = await mkdtemp(join(tmpdir(), 'chroxy-memory-legacy-removed-'))
+    t.after(() => rm(dir, { recursive: true, force: true }))
+    const legacy = join(dir, 'CLAUDE.md')
+    await writeFile(legacy, '# Legacy project rules\n')
+    const racedOps = createReaderOps(mockSend, async () => dir, async () => {
+      await rm(legacy)
+      return { valid: true }
+    })
+    responses.length = 0
+    await racedOps.appendMemory(mockWs, 'legacy note after removal', dir)
+    assert.equal(responses[0].error, null)
+    assert.equal(await readFile(legacy, 'utf8'), 'legacy note after removal\n')
+  })
+
   it('refuses authored-target symlink escapes and a symlink introduced after validation', { skip: SKIP_NO_SYMLINK }, async t => {
     const dir = await mkdtemp(join(tmpdir(), 'chroxy-memory-authored-link-'))
     const outsideDir = await mkdtemp(join(tmpdir(), 'chroxy-memory-authored-outside-'))

@@ -689,17 +689,22 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       const data = Buffer.from((needsLeadingNewline ? '\n' : '') + line + '\n', 'utf-8')
 
       // O_APPEND: atomic append at EOF (no lost-update / truncation window).
-      // O_CREAT (WITHOUT O_EXCL) opens-or-creates, so there is no EEXIST race to
-      // retry — a concurrent creator just means we append instead. openNoFollow
-      // keeps the symlink-escape defence on the final component, on win32 as
+      // Legacy files use O_CREAT without O_EXCL, so a concurrent creator just
+      // means we append instead. Authored rules must still exist at the open:
+      // a source removed by another operation must not be recreated as a note.
+      // openNoFollow keeps the symlink-escape defence on the final component, on win32 as
       // well as POSIX (#7280).
       {
         let fh
         try {
-          const flags = fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT
+          let flags = fsConstants.O_WRONLY | fsConstants.O_APPEND
+          if (filename !== 'AGENTS.md') flags |= fsConstants.O_CREAT
           fh = await openNoFollow(absPath, flags, 0o666)
           await fh.writeFile(data)
         } catch (openErr) {
+          if (openErr.code === 'ENOENT' && filename === 'AGENTS.md') {
+            throw new Error('Authored project memory AGENTS.md is missing')
+          }
           if (openErr.code === 'ELOOP') {
             sendFn(ws, {
               type: 'append_memory_result',
