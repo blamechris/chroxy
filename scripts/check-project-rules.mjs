@@ -7,7 +7,7 @@ import { lstatSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isEntryPoint } from './lib/is-entry-point.mjs'
-import { compileInstructionPolicy, inspectInstructionSource, INSTRUCTION_SEPARATOR } from '../packages/server/src/instruction-policy-compiler.js'
+import { boundedInstructionIdentity, compileInstructionPolicy, inspectInstructionSource, INSTRUCTION_SEPARATOR } from '../packages/server/src/instruction-policy-compiler.js'
 
 export const DOC_CAP_BYTES = 98304
 export const MACHINE_BUDGET_BYTES = 49152
@@ -43,9 +43,19 @@ function pathExists(path) {
 function readRule(path) {
   if (!lstatSync(path).isFile()) throw new Error(`${path}: rules must be a regular file, not a symlink or directory`)
   const bytes = readFileSync(path)
-  const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
   if (!text.trim()) throw new Error(`${path}: rules must not be empty`)
   return { bytes: bytes.length, text }
+}
+
+function projectDirectory(path) {
+  const normalized = path.replaceAll('\\', '/')
+  const separator = normalized.lastIndexOf('/')
+  return separator === -1 ? '.' : normalized.slice(0, separator) || '.'
+}
+
+function directoryDepth(directory) {
+  return directory === '.' ? 0 : directory.split('/').filter(Boolean).length
 }
 
 function inventory(root) {
@@ -77,7 +87,8 @@ export function checkProjectRules({ root = ROOT, machinePath } = {}) {
     }
   }
   const source = readRule(join(root, 'AGENTS.md'))
-  if (!source.text.startsWith('# Chroxy Development Notes\n') || /AUTO-GENERATED FROM CLAUDE\.md/.test(source.text)) {
+  const sourceForChecks = source.text.startsWith('\uFEFF') ? source.text.slice(1) : source.text
+  if (!sourceForChecks.startsWith('# Chroxy Development Notes\n') || /AUTO-GENERATED FROM CLAUDE\.md/.test(sourceForChecks)) {
     throw new Error('AGENTS.md must be the authored project source, not a generated mirror or import adapter')
   }
   for (const section of PROJECT_SECTIONS) {
@@ -99,26 +110,46 @@ export function checkProjectRules({ root = ROOT, machinePath } = {}) {
   const machineBytes = machinePath ? readRule(resolve(machinePath)).bytes : MACHINE_BUDGET_BYTES
   if (machineBytes > MACHINE_BUDGET_BYTES) throw new Error(`machine rules use ${machineBytes} bytes, above the supported ${MACHINE_BUDGET_BYTES}-byte machine budget`)
   const chains = records.map(record => {
-    const target = dirname(record.path)
+    const target = projectDirectory(record.path)
     const selected = records.filter(candidate => {
-      const directory = dirname(candidate.path)
+      const directory = projectDirectory(candidate.path)
       return directory === '.' || directory === target || target.startsWith(`${directory}/`)
+    }).sort((left, right) => {
+      const depth = directoryDepth(projectDirectory(left.path)) - directoryDepth(projectDirectory(right.path))
+      if (depth) return depth
+      const leftPath = left.path.replaceAll('\\', '/')
+      const rightPath = right.path.replaceAll('\\', '/')
+      return leftPath < rightPath ? -1 : leftPath > rightPath ? 1 : 0
     })
-    const sources = selected.map(rule => ({ id: `project:${rule.path}`, text: rule.text }))
+    const sources = selected.map(rule => ({
+      id: boundedInstructionIdentity('project', rule.path.replaceAll('\\', '/')),
+      text: rule.text,
+    }))
     const nestedIds = sources.slice(1).flatMap(item => inspectInstructionSource(item).requiredRuleIds)
+    const targetId = boundedInstructionIdentity(
+      'native',
+      target === '.' ? 'root' : target.replaceAll('\\', '/'),
+    )
     const projection = compileInstructionPolicy({
       sources,
       targets: [{
-        id: `native:${target === '.' ? 'root' : target.replaceAll('/', '-')}`,
+        id: targetId,
         budgetBytes: DOC_CAP_BYTES,
         reservedBytes: machineBytes,
         requiredRuleIds: [...CHROXY_REQUIRED_PROJECT_RULE_IDS, ...nestedIds],
       }],
-    })[`native:${target === '.' ? 'root' : target.replaceAll('/', '-')}`]
+    })[targetId]
     const bytes = machineBytes + projection.totalBytes
     const margin = DOC_CAP_BYTES - bytes
     if (margin < MIN_MARGIN_BYTES) throw new Error(`instruction chain ${target}: ${bytes}/${DOC_CAP_BYTES} bytes including separators; margin ${margin} is below ${MIN_MARGIN_BYTES}`)
-    return { directory: target, bytes, margin, files: selected.map(rule => rule.path) }
+    return {
+      directory: target,
+      bytes,
+      margin,
+      files: selected.map(rule => rule.path),
+      sourceIds: projection.sources.map(source => source.id),
+      targetId,
+    }
   })
   return { chains, machineBytes, machineMeasured: Boolean(machinePath) }
 }

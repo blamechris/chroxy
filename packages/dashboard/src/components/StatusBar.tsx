@@ -82,6 +82,23 @@ export interface StatusBarProps {
 // placeholder isn't a literal NBSP character in the source (easy to
 // miss / get auto-reformatted).
 const NBSP = '\u00A0'
+const MAX_VISIBLE_RUNTIME_CAPABILITIES = 64
+
+function readableCapabilityName(name: string): string {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .toLowerCase()
+}
+
+function runtimeCapabilitiesText(info: ProviderRuntimeInfo | null | undefined): string {
+  if (!info) return 'unavailable (no runtime snapshot)'
+  if (info.capabilities.length === 0) return 'unknown (no handshake evidence)'
+  const visible = info.capabilities.slice(0, MAX_VISIBLE_RUNTIME_CAPABILITIES)
+  const values = visible.map(({ name, state }) => `${readableCapabilityName(name)}: ${String(state)}`)
+  if (info.capabilities.length > visible.length) values.push(`+${info.capabilities.length - visible.length} more`)
+  return values.join(', ')
+}
 
 /**
  * #5065: thresholds for the header context meter — kept in sync with the
@@ -160,6 +177,7 @@ export function StatusBar({
           <div className="status-provider-panel" data-testid="status-provider-panel">
             <strong>{providerRuntimeInfo?.provider || provider}</strong>
             <span>Binary: {providerRuntimeInfo?.binaryVersion || 'unknown'}</span>
+            <span>Observed capabilities: {runtimeCapabilitiesText(providerRuntimeInfo)}</span>
             <span>Native instructions: {String(providerRuntimeInfo?.customization.nativeDiscovery.state ?? 'unknown')} ({providerRuntimeInfo?.customization.nativeDiscovery.delivery || 'unknown'} delivery)</span>
             <span>Project policy: {providerRuntimeInfo?.projectInstructions.status || 'unknown'} ({providerRuntimeInfo?.projectInstructions.enforcement || 'instructional'})</span>
             <span>MCP: discovery {String(providerRuntimeInfo?.customization.mcp.discovery ?? 'unknown')}, calls {String(providerRuntimeInfo?.customization.mcp.toolCalls ?? 'unknown')}</span>

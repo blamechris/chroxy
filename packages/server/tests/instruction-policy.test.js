@@ -6,6 +6,7 @@ import { once } from 'node:events'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   compileInstructionPolicy,
   discoverByokInstructionSources,
@@ -154,6 +155,70 @@ describe('BYOK instruction discovery', () => {
       const projection = await loadByokInstructionPolicy({ cwd: nested, machinePath: machine, machineRoot: root, resolveRepoRoot: async () => root })
       assert.ok(projection.text.indexOf('machine') < projection.text.indexOf('root-rule'))
       assert.ok(projection.text.indexOf('root-rule') < projection.text.indexOf('nested'))
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('uses bounded stable identities for real space, Unicode, and long nested paths', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-paths-'))
+    try {
+      const parts = ['My App', 'café', 'nested-' + 'x'.repeat(90)]
+      let directory = root
+      writeFileSync(join(root, 'AGENTS.md'), 'ROOT PATH POLICY')
+      for (const [index, part] of parts.entries()) {
+        directory = join(directory, part)
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'AGENTS.md'), `NESTED PATH POLICY ${index}`)
+      }
+      const sources = await discoverByokInstructionSources({
+        cwd: directory,
+        machinePath: null,
+        resolveRepoRoot: async () => root,
+      })
+      assert.equal(sources[0].id, 'project:AGENTS.md')
+      assert.equal(new Set(sources.map(source => source.id)).size, sources.length)
+      for (const source of sources) {
+        assert.match(source.id, /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/)
+        assert.ok(source.id.length <= 128)
+      }
+      assert.ok(sources.slice(1).every(source => source.id.startsWith('project:sha256-')))
+      assert.deepEqual(sources.map(source => source.text), [
+        'ROOT PATH POLICY', 'NESTED PATH POLICY 0', 'NESTED PATH POLICY 1', 'NESTED PATH POLICY 2',
+      ])
+      const projection = await loadByokInstructionPolicy({
+        cwd: directory,
+        machinePath: null,
+        resolveRepoRoot: async () => root,
+      })
+      assert.deepEqual(projection.includedRequiredRuleIds, sources.map(source => source.id))
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('preserves a UTF-8 BOM in delivered bytes, hashes, and bounds', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'chroxy-policy-bom-'))
+    try {
+      const raw = Buffer.concat([
+        Buffer.from([0xef, 0xbb, 0xbf]),
+        Buffer.from(marked('bom-rule', 'BOM POLICY'), 'utf8'),
+      ])
+      writeFileSync(join(root, 'AGENTS.md'), raw)
+      const sources = await discoverByokInstructionSources({
+        cwd: root,
+        machinePath: null,
+        resolveRepoRoot: async () => root,
+      })
+      assert.equal(sources[0].text.charCodeAt(0), 0xfeff)
+      assert.deepEqual(Buffer.from(sources[0].text, 'utf8'), raw)
+      assert.deepEqual(inspectInstructionSource(sources[0]).requiredRuleIds, ['bom-rule'])
+      const projection = await loadByokInstructionPolicy({
+        cwd: root,
+        machinePath: null,
+        resolveRepoRoot: async () => root,
+      })
+      assert.equal(projection.sources[0].bytes, raw.length)
+      assert.equal(projection.sources[0].sha256, createHash('sha256').update(raw).digest('hex'))
+      assert.ok(projection.text.endsWith(sources[0].text))
+      assert.equal(projection.sources[0].endByte, projection.totalBytes)
+      assert.equal(projection.totalBytes, Buffer.byteLength(projection.text, 'utf8'))
     } finally { rmSync(root, { recursive: true, force: true }) }
   })
 

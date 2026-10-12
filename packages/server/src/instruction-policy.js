@@ -8,12 +8,18 @@ import { openNoFollow } from './ws-file-ops/open-nofollow.js'
 import { isPathWithin } from './utils/path-containment.js'
 import { resolveTargetComponentwiseAsync } from './utils/componentwise-resolver.js'
 import { PROJECT_INSTRUCTION_BUDGET_BYTES } from './provider-customization.js'
-import { stripInheritedChroxySecrets } from './utils/spawn-env.js'
 import {
+  CHROXY_INHERITED_SESSION_ENV,
+  CHROXY_SECRET_DENYLIST,
+  stripInheritedChroxySecrets,
+} from './utils/spawn-env.js'
+import {
+  boundedInstructionIdentity,
   compileInstructionPolicy,
   inspectInstructionSource,
 } from './instruction-policy-compiler.js'
 export {
+  boundedInstructionIdentity,
   compileInstructionPolicy,
   inspectInstructionSource,
   INSTRUCTION_COMPILER_VERSION,
@@ -65,7 +71,7 @@ export async function readRegularInstructionFile(path, {
       }
     }
     const bytes = buffer.subarray(0, offset)
-    try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { fail(`source '${displayPath}' is not valid UTF-8`) }
+    try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) } catch { fail(`source '${displayPath}' is not valid UTF-8`) }
   } finally {
     await handle.close()
   }
@@ -90,7 +96,15 @@ async function refuseUnsupportedFile(path, label, displayPath) {
 
 export function buildInstructionGitEnv(parentEnv = process.env) {
   const entries = parentEnv === process.env ? Object.entries(process.env) : Object.entries(parentEnv)
-  const env = Object.fromEntries(entries.filter(([key]) => !key.startsWith('GIT_')))
+  const secretKeys = new Set(
+    [...CHROXY_SECRET_DENYLIST, ...CHROXY_INHERITED_SESSION_ENV].map(key => key.toUpperCase()),
+  )
+  const env = Object.fromEntries(entries.filter(([key]) => {
+    const folded = key.toUpperCase()
+    return !folded.startsWith('GIT_') && !secretKeys.has(folded)
+  }))
+  // Keep the canonical strip on the exact object returned to Git. The
+  // case-folded filter above additionally handles Windows aliases.
   stripInheritedChroxySecrets(env)
   return env
 }
@@ -172,7 +186,7 @@ export async function discoverByokInstructionSources({
     const candidate = await verifyInstructionCandidate(rootReal, path, rel)
     const text = await readRegularInstructionFile(candidate, { optional: true, tracker, displayPath: rel })
     if (text) {
-      sources.push({ id: `project:${rel}`, text })
+      sources.push({ id: boundedInstructionIdentity('project', rel), text })
     }
   }
   return sources

@@ -11,7 +11,7 @@ import { stageScript } from './helpers/stage-script.mjs'
 
 // Count actual completed cases as well as the node:test verdict. The roster
 // guard neuters these increments to prove a zero-case run cannot pass.
-const EXPECTED_CASES = 16
+const EXPECTED_CASES = 19
 let pass = 0
 let fail = 0
 function test(name, fn) {
@@ -170,6 +170,68 @@ test('nested chains include all ancestor files and the shared 23-byte separator'
   assert.ok(nested.margin >= MIN_MARGIN_BYTES)
   writeFileSync(join(directory, 'AGENTS.md'), 'x'.repeat(DOC_CAP_BYTES))
   red(root, "source 'project:packages/nested/AGENTS.md'")
+})
+
+test('lexically early nested rules are compiled in root-to-target directory order', t => {
+  const root = fixture(t)
+  const parentText = 'NESTED DIRECTORY RULE\n'
+  const childText = 'DEEP NESTED DIRECTORY RULE\n'
+  mkdirSync(join(root, 'AAA/deeper'), { recursive: true })
+  writeFileSync(join(root, 'AAA/AGENTS.md'), parentText)
+  writeFileSync(join(root, 'AAA/deeper/AGENTS.md'), childText)
+
+  const result = checkProjectRules({ root })
+  const rootChain = result.chains.find(chain => chain.directory === '.')
+  const parentChain = result.chains.find(chain => chain.directory === 'AAA')
+  const childChain = result.chains.find(chain => chain.directory === 'AAA/deeper')
+
+  assert.deepEqual(parentChain.files, ['AGENTS.md', 'AAA/AGENTS.md'])
+  assert.deepEqual(parentChain.sourceIds, ['project:AGENTS.md', 'project:AAA/AGENTS.md'])
+  assert.ok(parentChain.bytes > rootChain.bytes + Buffer.byteLength(parentText))
+  assert.deepEqual(childChain.files, ['AGENTS.md', 'AAA/AGENTS.md', 'AAA/deeper/AGENTS.md'])
+  assert.deepEqual(childChain.sourceIds, ['project:AGENTS.md', 'project:AAA/AGENTS.md', 'project:AAA/deeper/AGENTS.md'])
+  assert.ok(childChain.bytes > parentChain.bytes + Buffer.byteLength(childText))
+})
+
+test('portable chains use bounded collision-resistant ids for space, Unicode, and long paths', t => {
+  const root = fixture(t)
+  const parts = ['My App', 'café', 'nested-' + 'x'.repeat(90)]
+  let directory = root
+  const files = ['AGENTS.md']
+  for (const [index, part] of parts.entries()) {
+    directory = join(directory, part)
+    mkdirSync(directory)
+    writeFileSync(join(directory, 'AGENTS.md'), `Nested path rule ${index}.\n`)
+    files.push(join(...parts.slice(0, index + 1), 'AGENTS.md'))
+  }
+  for (const collisionProbe of [join('a-b'), join('a', 'b')]) {
+    const probeDirectory = join(root, collisionProbe)
+    mkdirSync(probeDirectory, { recursive: true })
+    writeFileSync(join(probeDirectory, 'AGENTS.md'), `Collision probe ${collisionProbe}.\n`)
+  }
+  const result = checkProjectRules({ root })
+  const deepest = result.chains.find(chain => chain.directory === join(...parts))
+  assert.deepEqual(deepest.files, files)
+  assert.equal(new Set(result.chains.map(chain => chain.targetId)).size, result.chains.length)
+  assert.equal(new Set(deepest.sourceIds).size, deepest.sourceIds.length)
+  for (const id of [...deepest.sourceIds, deepest.targetId]) {
+    assert.match(id, /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/)
+    assert.ok(id.length <= 128)
+  }
+  assert.ok(deepest.sourceIds.slice(1).every(id => id.startsWith('project:sha256-')))
+  assert.ok(deepest.targetId.startsWith('native:sha256-'))
+})
+
+test('portable source validation preserves and counts a UTF-8 BOM', t => {
+  const root = fixture(t)
+  const plain = checkProjectRules({ root }).chains.find(chain => chain.directory === '.')
+  writeFileSync(join(root, 'AGENTS.md'), Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(SOURCE, 'utf8'),
+  ]))
+  const withBom = checkProjectRules({ root }).chains.find(chain => chain.directory === '.')
+  assert.equal(withBom.bytes, plain.bytes + 3)
+  assert.deepEqual(withBom.sourceIds, ['project:AGENTS.md'])
 })
 
 test('UTF-8 bytes, rather than JavaScript string length, consume the byte budget', t => {

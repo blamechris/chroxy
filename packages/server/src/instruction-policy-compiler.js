@@ -11,6 +11,19 @@ const MAX_RULES = 128
 
 function fail(message) { throw new Error(`Instruction policy: ${message}`) }
 
+/**
+ * Build a schema-safe, deterministic identity from a portable relative path.
+ * Existing safe identities remain readable; paths whose characters or length
+ * cannot cross the protocol boundary use an opaque full SHA-256 identity.
+ */
+export function boundedInstructionIdentity(namespace, relativePath) {
+  if (typeof namespace !== 'string' || !ID.test(namespace)) fail(`invalid identity namespace '${namespace || ''}'`)
+  if (typeof relativePath !== 'string' || relativePath.length === 0) fail('instruction identity path must be non-empty text')
+  const candidate = `${namespace}:${relativePath}`
+  if (ID.test(candidate)) return candidate
+  return `${namespace}:sha256-${createHash('sha256').update(relativePath, 'utf8').digest('hex')}`
+}
+
 function validText(text, label) {
   if (typeof text !== 'string' || text.length === 0) fail(`${label} must be non-empty text`)
   for (let index = 0; index < text.length; index++) {
@@ -56,7 +69,11 @@ export function inspectInstructionSource(source) {
     const newline = source.text.indexOf('\n', cursor)
     const contentEnd = newline === -1 ? source.text.length : newline
     const lineEnd = newline === -1 ? source.text.length : newline + 1
-    const line = source.text.slice(cursor, contentEnd).replace(/\r$/, '')
+    const rawLine = source.text.slice(cursor, contentEnd).replace(/\r$/, '')
+    // TextDecoder is configured to preserve a UTF-8 BOM. Ignore it only while
+    // classifying the first line; source bytes, hashes, offsets, and delivery
+    // remain byte-for-byte unchanged.
+    const line = lineNumber === 1 && rawLine.startsWith('\uFEFF') ? rawLine.slice(1) : rawLine
     const explicitStart = line.match(/^<!-- chroxy-required-rule:start ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}) -->$/)
     const explicitEnd = line.match(/^<!-- chroxy-required-rule:end ([A-Za-z0-9][A-Za-z0-9._:/-]{0,127}) -->$/)
     const classified = line.match(/^<!--(?:floor|default):([A-Za-z0-9][A-Za-z0-9._:/-]{0,127})-->$/)

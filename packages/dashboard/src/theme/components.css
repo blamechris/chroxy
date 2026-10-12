@@ -7081,6 +7081,11 @@ button.sidebar-token-view-session-row:hover {
   border-radius: 6px;
   white-space: normal;
   overflow-wrap: anywhere;
+  /* The panel starts 116px below the viewport top in the compact header;
+     reserve that anchor plus a 12px bottom inset on short viewports. */
+  max-height: min(70vh, 420px, calc(100dvh - 128px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .status-provider[data-provider="sdk"] {
   color: var(--accent-orange);
