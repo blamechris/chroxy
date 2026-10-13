@@ -12,6 +12,19 @@ import { SettingsBar } from '../SettingsBar';
 import { formatCostBadge } from '@chroxy/store-core';
 import type { CumulativeUsage } from '@chroxy/store-core';
 
+// Dispose mounted headers before their asynchronous effects outlive Jest.
+const mountedTrees: renderer.ReactTestRenderer[] = [];
+function createTree(element: React.ReactElement) {
+  const tree = renderer.create(element);
+  mountedTrees.push(tree);
+  return tree;
+}
+afterEach(() => {
+  act(() => {
+    for (const tree of mountedTrees.splice(0)) tree.unmount();
+  });
+});
+
 function collectVisibleText(root: ReactTestInstance): string {
   return root.findAllByType(Text).map((node) => {
     const c = node.props.children;
@@ -89,7 +102,7 @@ describe('SettingsBar cost badge rendering (#4074)', () => {
   it('renders the badge when cumulativeUsage.costUsd > 0', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(
+      tree = createTree(
         <SettingsBar {...makeProps({ cumulativeUsage: { ...baseUsage, costUsd: 0.42, inputTokens: 1000 } })} />,
       );
     });
@@ -102,7 +115,7 @@ describe('SettingsBar cost badge rendering (#4074)', () => {
   it('hides the badge when costUsd === 0 (subscription-billed session)', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(
+      tree = createTree(
         <SettingsBar {...makeProps({ cumulativeUsage: { ...baseUsage, inputTokens: 10000, costUsd: 0 } })} />,
       );
     });
@@ -113,7 +126,7 @@ describe('SettingsBar cost badge rendering (#4074)', () => {
   it('hides the badge when cumulativeUsage is null (no result event yet)', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(<SettingsBar {...makeProps({ cumulativeUsage: null })} />);
+      tree = createTree(<SettingsBar {...makeProps({ cumulativeUsage: null })} />);
     });
     const root = tree!.root;
     expect(() => root.findByProps({ testID: 'session-cost-badge' })).toThrow();
@@ -122,7 +135,7 @@ describe('SettingsBar cost badge rendering (#4074)', () => {
   it('opens the breakdown sheet on tap', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(
+      tree = createTree(
         <SettingsBar
           {...makeProps({
             cumulativeUsage: {

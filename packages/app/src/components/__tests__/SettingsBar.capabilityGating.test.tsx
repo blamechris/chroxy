@@ -6,7 +6,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { Text } from 'react-native';
+import { Text, TouchableOpacity } from 'react-native';
 import { SettingsBar } from '../SettingsBar';
 
 function collectVisibleText(root: ReactTestInstance): string {
@@ -111,5 +111,33 @@ describe('SettingsBar capability gating (#5731)', () => {
     expect(text).toContain('Sonnet');
     expect(text).toContain('Plan');
     expect(text).not.toContain('fixed');
+  });
+});
+
+describe('SettingsBar target identity (#8260)', () => {
+  const aliases = [
+    { id: 'haiku', fullId: 'haiku', label: 'Haiku 4.5' },
+    { id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+    { id: 'haiku-4-5-20251001', fullId: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  ];
+  it('labels distinct aliases and pins, highlights exactly one, and sends the tapped selection ID', () => {
+    const setModel = jest.fn();
+    const tree = render(makeProps({ availableModels: aliases, activeModel: aliases[2].fullId, setModel, provider: 'claude-sdk' }));
+    const text = collectVisibleText(tree.root);
+    expect(text).toContain('Haiku 4.5 (provider alias)');
+    expect(text).toContain('Haiku 4.5 (pinned 4.5)');
+    expect(text).toContain('Haiku 4.5 (pinned 20251001)');
+    const chips = tree.root.findAllByType(TouchableOpacity).filter(node => node.props.testID?.startsWith('settings-model-'));
+    expect(chips.filter(node => node.props.accessibilityState.selected)).toHaveLength(1);
+    act(() => chips[1].props.onPress());
+    expect(setModel).toHaveBeenCalledWith('haiku-4-5');
+    act(() => tree.unmount());
+  });
+  it('uses display fallback without highlighting the family chip', () => {
+    const tree = render(makeProps({ availableModels: aliases, activeModel: 'claude-haiku-4-5-20251101', provider: 'claude-sdk' }));
+    expect(collectVisibleText(tree.root)).toContain('Haiku 4.5 (pinned 20251101)');
+    const chips = tree.root.findAllByType(TouchableOpacity).filter(node => node.props.testID?.startsWith('settings-model-') && node.props.accessibilityState?.selected === true);
+    expect(chips).toHaveLength(0);
+    act(() => tree.unmount());
   });
 });

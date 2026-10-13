@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView, Switch, TextInput, Linking } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
+import { findModelEntry, modelChoices, formatActiveModelLabel, resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge, stripAnsi } from '@chroxy/store-core';
 // #6901: single-source the Codex sandbox label/description for the read-only
@@ -352,8 +352,7 @@ export function SettingsBar({
   }
 
   if (activeModel) {
-    const modelInfo = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
-    summaryParts.push(modelInfo?.label || activeModel);
+    summaryParts.push(formatActiveModelLabel(availableModels, activeModel, defaultModelId, provider));
   }
   if (permissionMode) {
     const permInfo = availablePermissionModes.find((m) => m.id === permissionMode);
@@ -393,6 +392,9 @@ export function SettingsBar({
       );
     }
   }
+
+  const choices = modelChoices(availableModels);
+  const activeEntry = findModelEntry(availableModels, activeModel || defaultModelId);
 
   return (
     <View style={styles.container}>
@@ -521,14 +523,16 @@ export function SettingsBar({
               dashboard's `showModelPicker` / `readOnlyModel` split. */}
           {availableModels.length > 0 && modelSwitchSupported && (
                 <View style={styles.chipRow}>
-                  {availableModels.map((m) => {
-                    const isActive = activeModel === m.id || activeModel === m.fullId
-                      || (!activeModel && defaultModelId === m.id);
+                  {choices.map((m) => {
+                    const isActive = activeEntry != null && (m.fullId || m.id) === (activeEntry.fullId || activeEntry.id);
                     return (
                       <TouchableOpacity
                         key={m.id}
                         style={[styles.chip, isActive && styles.chipActive]}
                         onPress={() => setModel(m.id)}
+                        testID={`settings-model-${m.id}`}
+                        accessibilityRole="button"
+                        accessibilityState={{ selected: isActive }}
                         activeOpacity={0.7}
                       >
                         <Text style={[styles.chipText, isActive && styles.chipTextActive]}>
@@ -545,11 +549,10 @@ export function SettingsBar({
                 // active-match so a non-switching provider still shows its model.
                 const fixedId = activeModel || defaultModelId;
                 if (!fixedId) return null;
-                const fixed = availableModels.find((m) => m.id === fixedId || m.fullId === fixedId);
                 return (
                   <View style={styles.chipRow}>
                     <View style={[styles.chip, styles.chipReadOnly]} accessibilityRole="text">
-                      <Text style={styles.chipReadOnlyText}>{fixed?.label || fixedId} · fixed</Text>
+                      <Text style={styles.chipReadOnlyText}>{formatActiveModelLabel(availableModels, fixedId, defaultModelId, provider)} · fixed</Text>
                     </View>
                   </View>
                 );

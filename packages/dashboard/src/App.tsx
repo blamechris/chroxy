@@ -13,6 +13,7 @@ import {
   expandPasteMarkers,
   parseMemoryAppend,
   resolveContextWindow,
+  formatActiveModelLabel,
   contextOccupancyTokens,
   contextFillPercent,
   providerSupportsMultiQuestion,
@@ -2548,9 +2549,8 @@ export function App() {
   // so a model missing from `availableModels` still shows something.
   const activeModelLabel = useMemo(() => {
     if (!activeModel) return undefined
-    const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
-    return modelInfo?.label ?? activeModel
-  }, [activeModel, availableModels])
+    return formatActiveModelLabel(availableModels, activeModel, defaultModelId, activeSessionProvider)
+  }, [activeModel, availableModels, defaultModelId, activeSessionProvider])
 
   const isConnected = connectionPhase === 'connected'
   // Point the Cmd+Shift+L shortcut at the live QR handler, gated on connection

@@ -4,6 +4,19 @@ Add, relabel, or re-price a model **at runtime, with no Chroxy release** — by 
 
 > **Scope:** by default an entry applies to the **Claude registry** (`claude-sdk` / `claude-cli` / `claude-tui` / docker-wrapped Claude). Since [#6377](https://github.com/blamechris/chroxy/issues/6377) an entry can carry a **`provider` field** to target any other provider's registry instead (Gemini, Codex, DeepSeek, Ollama, config-driven endpoints) — see [Targeting a specific provider](#targeting-a-specific-provider-non-claude). **Labels, context windows, and new-model seeding work for every provider.** Overlay **`pricing`** is honored wherever the provider reports per-token cost — Claude (always) and **DeepSeek** ([#6381](https://github.com/blamechris/chroxy/issues/6381)); Ollama is intentionally `$0`, config-driven endpoints price via their own `pricing` / discovery, and Gemini/Codex don't report token cost so pricing is moot there.
 
+Claude's SDK discovery is a partial observation on each session initialization. Chroxy
+retains previously observed Claude targets across sessions and cache reloads, replacing
+metadata only for targets reported again. A release's static model table does not retire
+a previously reported alias, version or date. Explicit registry/cache reset clears those
+observations. Other providers continue replacing their discovered rosters.
+
+The picker keeps provider aliases, version pins, dated pins and 1M variants as separate
+choices when they name different provider targets. Repeated labels receive alias or pin
+descriptors; tapping still sends the original selection ID. Headers and status labels use
+the same formatter. An absent dated Claude running ID may borrow its matching version's
+label for display, but that never marks the undated choice as selected. An unresolved
+SDK `default` target is shown as **Provider default**.
+
 ## Location
 
 ```

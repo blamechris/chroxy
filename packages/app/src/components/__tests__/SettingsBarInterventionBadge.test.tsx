@@ -15,6 +15,19 @@ import {
 } from '../SettingsBar';
 import type { SessionIntervention } from '@chroxy/store-core';
 
+// Dispose mounted headers before their asynchronous effects outlive Jest.
+const mountedTrees: renderer.ReactTestRenderer[] = [];
+function createTree(element: React.ReactElement) {
+  const tree = renderer.create(element);
+  mountedTrees.push(tree);
+  return tree;
+}
+afterEach(() => {
+  act(() => {
+    for (const tree of mountedTrees.splice(0)) tree.unmount();
+  });
+});
+
 function collectVisibleText(root: ReactTestInstance): string {
   return root.findAllByType(Text).map((node) => {
     const c = node.props.children;
@@ -101,7 +114,7 @@ describe('SettingsBar intervention badge rendering (#4764)', () => {
   it('hides the badge when interventions is undefined', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(<SettingsBar {...makeProps({ interventions: undefined })} />);
+      tree = createTree(<SettingsBar {...makeProps({ interventions: undefined })} />);
     });
     const root = tree!.root;
     expect(() => root.findByProps({ testID: 'session-interventions-badge' })).toThrow();
@@ -110,7 +123,7 @@ describe('SettingsBar intervention badge rendering (#4764)', () => {
   it('hides the badge when interventions is empty', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(<SettingsBar {...makeProps({ interventions: [] })} />);
+      tree = createTree(<SettingsBar {...makeProps({ interventions: [] })} />);
     });
     const root = tree!.root;
     expect(() => root.findByProps({ testID: 'session-interventions-badge' })).toThrow();
@@ -122,7 +135,7 @@ describe('SettingsBar intervention badge rendering (#4764)', () => {
     ];
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(<SettingsBar {...makeProps({ interventions })} />);
+      tree = createTree(<SettingsBar {...makeProps({ interventions })} />);
     });
     const root = tree!.root;
     const badge = root.findByProps({ testID: 'session-interventions-badge' });
@@ -136,7 +149,7 @@ describe('SettingsBar intervention badge rendering (#4764)', () => {
     ];
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(<SettingsBar {...makeProps({ interventions })} />);
+      tree = createTree(<SettingsBar {...makeProps({ interventions })} />);
     });
     const root = tree!.root;
     const badge = root.findByProps({ testID: 'session-interventions-badge' });
@@ -146,7 +159,7 @@ describe('SettingsBar intervention badge rendering (#4764)', () => {
   it('updates the counter when the interventions prop grows', () => {
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(
+      tree = createTree(
         <SettingsBar
           {...makeProps({
             interventions: [
@@ -185,7 +198,7 @@ describe('SettingsBar intervention badge rendering (#4764)', () => {
     ];
     let tree: renderer.ReactTestRenderer | null = null;
     act(() => {
-      tree = renderer.create(<SettingsBar {...makeProps({ interventions })} />);
+      tree = createTree(<SettingsBar {...makeProps({ interventions })} />);
     });
     const root = tree!.root;
     const badge = root.findByProps({ testID: 'session-interventions-badge' });

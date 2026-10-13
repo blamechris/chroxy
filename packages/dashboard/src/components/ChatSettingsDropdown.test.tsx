@@ -427,3 +427,15 @@ describe('ChatSettingsDropdown', () => {
     })
   })
 })
+
+describe('model presentation (#8260)', () => {
+  it('shows Provider default for an unresolved SDK sentinel', () => {
+    renderDropdown({ availableModels: [{ id: 'default', fullId: 'default', label: 'Default' }], activeModel: 'default', defaultModelId: 'default' })
+    expect(screen.getByTestId('chat-settings-trigger').textContent).toBe('Provider default')
+  })
+  it('shows a dated running model using a display-only family label', () => {
+    renderDropdown({ availableModels: [{ id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' }], activeModel: 'claude-haiku-4-5-20251101', providerLabel: 'claude-sdk' })
+    expect(screen.getByTestId('chat-settings-trigger').textContent).toBe('Haiku 4.5 (pinned 20251101)')
+    expect(screen.getByTestId('chat-settings-trigger').title).toContain('claude-haiku-4-5-20251101')
+  })
+})

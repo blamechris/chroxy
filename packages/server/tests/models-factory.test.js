@@ -294,43 +294,18 @@ describe('disk cache (loadCache / saveCache)', () => {
     assert.ok(existsSync(nested))
   })
 
-  // #3162: cached entries whose family/version stem isn't in FALLBACK_MODELS
-  // must be dropped on load, otherwise retired model ids surface in the
-  // picker and selecting them fails the API call. Affects CLI-only users
-  // most because the SDK's supportedModels() never refreshes the cache.
-  it('loadCache drops stale entries whose stem is not in FALLBACK_MODELS', () => {
-    writeFileSync(cachePath, JSON.stringify({
-      models: [
-        { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 }, // retired
-        { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
-        { id: 'sonnet-4-6', fullId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', contextWindow: 200_000 },
-      ],
-      defaultModelId: 'sonnet-4-6',
-    }))
+  it('loadCache preserves previously discovered Claude versions absent from the static table (#8260)', () => {
+    const rows = [
+      { id: 'haiku', fullId: 'haiku', label: 'Haiku 4.5', contextWindow: 200_000 },
+      { id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5', contextWindow: 200_000 },
+      { id: 'haiku-4-5-20251001', fullId: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', contextWindow: 200_000 },
+    ]
+    writeFileSync(cachePath, JSON.stringify({ models: rows, defaultModelId: 'haiku' }))
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
-    const loaded = r.getModels().map(m => m.fullId)
-    assert.ok(!loaded.includes('claude-opus-4-6'), `retired claude-opus-4-6 should be dropped, got ${loaded.join(',')}`)
-    assert.ok(loaded.includes('claude-opus-4-8'), 'current claude-opus-4-8 should be kept')
-    assert.ok(loaded.includes('claude-sonnet-4-6'), 'current claude-sonnet-4-6 should be kept')
-    // FALLBACK_MODELS includes haiku-4-5 — it should be merged in even though
-    // the cache didn't have it, so the picker always has the canonical aliases.
-    assert.ok(loaded.includes('claude-haiku-4-5'), 'fallback claude-haiku-4-5 should be merged in')
-    assert.equal(r.getDefaultModelId(), 'sonnet-4-6')
-  })
-
-  it('loadCache returns false when every cached entry is stale (no stem match)', () => {
-    writeFileSync(cachePath, JSON.stringify({
-      models: [
-        { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 },
-        { id: 'sonnet-3-5', fullId: 'claude-sonnet-3-5-20240620', label: 'Sonnet 3.5', contextWindow: 200_000 },
-      ],
-    }))
-    const r = createModelsRegistry()
-    const before = r.getModels()
-    assert.equal(r.loadCache(cachePath), false, 'all-stale cache should be treated as missing')
-    // Registry state untouched — still at FALLBACK_MODELS
-    assert.deepEqual(r.getModels(), before)
+    for (const row of rows) assert.equal(r.resolveModelId(row.id), row.fullId)
+    r.updateModels([{ value: 'claude-sonnet-5-5', displayName: 'Default (Sonnet)' }])
+    for (const row of rows) assert.ok(r.getModels().some(m => m.fullId === row.fullId))
   })
 
   it('loadCache keeps dated and [1m] variants whose stem matches a FALLBACK family', () => {
@@ -347,13 +322,13 @@ describe('disk cache (loadCache / saveCache)', () => {
     assert.ok(loaded.includes('claude-opus-4-8[1m]'), '[1m] variant of current opus-4-8 should be kept')
   })
 
-  it('loadCache discards a defaultModelId that points to a stale entry', () => {
+  it('loadCache discards a defaultModelId that points to an absent entry', () => {
     writeFileSync(cachePath, JSON.stringify({
       models: [
         { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 },
         { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
       ],
-      defaultModelId: 'opus-4-6',
+      defaultModelId: 'missing-model',
     }))
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
@@ -377,31 +352,19 @@ describe('disk cache (loadCache / saveCache)', () => {
     const loaded = r.getModels().map(m => m.fullId)
     assert.ok(loaded.includes('claude-sonnet-4-20250514'), 'dated sonnet-4 should be kept (family in FALLBACK)')
     assert.ok(loaded.includes('claude-opus-4-20250514'), 'dated opus-4 should be kept (family in FALLBACK)')
-    assert.ok(!loaded.includes('claude-sonnet-3-20240620'), 'dated sonnet-3 should be dropped (sonnet-3 family retired)')
+    assert.ok(loaded.includes('claude-sonnet-3-20240620'), 'static family changes do not retire discovered dated IDs')
   })
 
-  // After pruning, loadCache should write the cleaned list back to disk so
-  // subsequent startups don't re-filter the same stale entries. Otherwise
-  // CLI-only users (no updateModels() refresh path) keep paying the filter
-  // cost forever and the disk file never heals.
-  it('loadCache persists the cleaned list to disk when stale entries are pruned', () => {
+  it('loadCache heals an absent default without dropping discovered targets', () => {
     writeFileSync(cachePath, JSON.stringify({
-      models: [
-        { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 },
-        { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
-      ],
+      models: [{ id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6' }],
+      defaultModelId: 'absent',
     }))
-    const beforeMtime = statSync(cachePath).mtimeMs
-
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
-
-    // The on-disk file should now have been rewritten without the retired entry.
-    const afterRaw = JSON.parse(readFileSync(cachePath, 'utf-8'))
-    const afterIds = afterRaw.models.map(m => m.fullId)
-    assert.ok(!afterIds.includes('claude-opus-4-6'), 'disk file should no longer contain claude-opus-4-6')
-    assert.ok(afterIds.includes('claude-opus-4-8'), 'disk file should still contain claude-opus-4-8')
-    assert.ok(statSync(cachePath).mtimeMs >= beforeMtime, 'disk file should have been touched')
+    const saved = JSON.parse(readFileSync(cachePath, 'utf-8'))
+    assert.equal(saved.defaultModelId, null)
+    assert.ok(saved.models.some(m => m.fullId === 'claude-opus-4-6'))
   })
 
   // No-op load (nothing pruned, nothing changed) should NOT touch the disk.
@@ -882,7 +845,7 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
   })
 })
 
-describe('loadCache stale prune is scoped to the Claude registry (#7723)', () => {
+describe('loadCache retains well-formed provider observations (#7723 / #8260)', () => {
   let dir
   let cachePath
 
@@ -966,8 +929,8 @@ describe('loadCache stale prune is scoped to the Claude registry (#7723)', () =>
       'a key only the table carries still fills in')
   })
 
-  it('the Claude registry STILL drops a retired claude family', () => {
-    // Scoping the prune must not have weakened it where it applies.
+  it('the Claude registry preserves discovered families missing from the static seed (#8260)', () => {
+    // A pinned release table cannot declare a previously reported target retired.
     writeFileSync(cachePath, JSON.stringify({
       models: [
         { id: 'sonnet-3-5', fullId: 'claude-sonnet-3-5-20240620', label: 'Sonnet 3.5', contextWindow: 200_000 },
@@ -978,14 +941,13 @@ describe('loadCache stale prune is scoped to the Claude registry (#7723)', () =>
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
     const loaded = r.getModels().map((m) => m.fullId)
-    assert.ok(!loaded.includes('claude-sonnet-3-5-20240620'),
-      `the retired sonnet-3-5 family should be dropped, got ${loaded.join(',')}`)
+    assert.ok(loaded.includes('claude-sonnet-3-5-20240620'),
+      `the previously discovered family should be retained, got ${loaded.join(',')}`)
     assert.ok(loaded.includes('claude-sonnet-4-6'), 'the current family should be kept')
   })
 
-  it('a registry seeded with the Claude roster itself prunes too', () => {
-    // The discriminator is the ROSTER, not the provider name: a registry handed
-    // the Claude roster gets the Claude grammar.
+  it('a registry seeded with the Claude roster also preserves reported targets', () => {
+    // The discriminator is the roster itself, rather than a provider name.
     writeFileSync(cachePath, JSON.stringify({
       models: [
         { id: 'sonnet-3-5', fullId: 'claude-sonnet-3-5-20240620', label: 'Sonnet 3.5', contextWindow: 200_000 },
@@ -995,8 +957,8 @@ describe('loadCache stale prune is scoped to the Claude registry (#7723)', () =>
     const r = createModelsRegistry({ fallbackModels: FALLBACK_MODELS })
     assert.equal(r.loadCache(cachePath), true)
     const loaded = r.getModels().map((m) => m.fullId)
-    assert.ok(!loaded.includes('claude-sonnet-3-5-20240620'),
-      `the retired family should be dropped, got ${loaded.join(',')}`)
+    assert.ok(loaded.includes('claude-sonnet-3-5-20240620'),
+      `the previously discovered family should be retained, got ${loaded.join(',')}`)
   })
 
   it('a non-Claude registry still drops entries missing the identity fields', () => {

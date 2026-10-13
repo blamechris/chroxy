@@ -392,36 +392,6 @@ export function canonicalStringify(value) {
 }
 
 /**
- * Decompose a Claude model fullId into its `family` (e.g. `claude-opus-4`)
- * and optional numeric `minor` (e.g. `7` for `claude-opus-4-7`). Used by
- * `loadCache()` to detect retired model versions in the disk cache (#3162):
- *
- *   `claude-opus-4-7`            → { family: 'claude-opus-4', minor: 7 }
- *   `claude-opus-4-7[1m]`        → { family: 'claude-opus-4', minor: 7 }
- *   `claude-opus-4-7-20251201`   → { family: 'claude-opus-4', minor: 7 }
- *   `claude-sonnet-4-20250514`   → { family: 'claude-sonnet-4', minor: null }
- *   `claude-sonnet-4-6`          → { family: 'claude-sonnet-4', minor: 6 }
- *
- * `loadCache()` keeps cached entries whose family is present in
- * `FALLBACK_MODELS` and (when minor is known) whose minor matches a fallback
- * minor for the same family. SDK-reported dated ids like
- * `claude-sonnet-4-20250514` carry no minor and pass through on family
- * match — the API still accepts them. Family/major-only retirement (e.g.
- * sonnet 3 family removed entirely) is caught by the family-not-in-fallback
- * branch.
- */
-function modelFamilyAndMinor(fullId) {
-  if (typeof fullId !== 'string') return { family: '', minor: null }
-  let stripped = fullId.endsWith(ONE_M_SUFFIX) ? fullId.slice(0, -ONE_M_SUFFIX.length) : fullId
-  stripped = stripped.replace(/-\d{8,}$/, '')
-  const m = stripped.match(/^(claude-[a-z]+-\d+)(?:-(\d+))?$/)
-  if (m) {
-    return { family: m[1], minor: m[2] ? parseInt(m[2], 10) : null }
-  }
-  return { family: stripped, minor: null }
-}
-
-/**
  * Derive a human-readable label from a stripped model ID.
  * E.g. "opus-4-5-20251101" → "Opus 4.5", "sonnet-4-20250514" → "Sonnet 4",
  * "opus-4-7[1m]" → "Opus 4.7 (1M)"
@@ -562,7 +532,7 @@ function parseLearnedContextWindows(raw) {
  * @param {Map} [hooks.overlay] - User-extensible overlay (fullId → entry; see
  *   loadModelsOverlayResult). Overlay entries SEED the registry like a
  *   FALLBACK_MODELS row, so a brand-new model id appears with no code change
- *   and survives loadCache()'s family prune. The default Claude registry gets
+ *   and survives loadCache(). The default Claude registry gets
  *   the module-level `defaultOverlay`; pass `new Map()` to opt out.
  */
 export function createModelsRegistry(hooks = {}) {
@@ -579,15 +549,9 @@ export function createModelsRegistry(hooks = {}) {
   // check — the roster IS the thing each rule was written against, and a
   // provider that passes its own list is by construction not it.
   //
-  // Three rules read it:
+  // Claude partial-discovery reconciliation and `[1m]` synthesis use it.
+  // Other providers publish replacement rosters, including on cache load.
   //
-  //  - #7723 `loadCache()`'s stale-entry prune reads a CLAUDE grammar:
-  //    `modelFamilyAndMinor` matches `claude-<family>-<major>[-<minor>]` and
-  //    the filter keeps only families present in the fallback roster. Against a
-  //    NON-Claude roster that grammar degenerates to "keep only ids literally
-  //    in the static seed", so a discovered `gpt-5.5` is written by
-  //    `saveCache()` and deleted on the next boot — taking its learned context
-  //    window with it.
   //  - #7761 `updateModels()`'s #3075 union re-adds every static fallback row a
   //    refresh omitted. Its premise ("`supportedModels()` under-reports") is a
   //    Claude-SDK fact; against a provider whose catalogue IS the producer's
@@ -1280,6 +1244,7 @@ export function createModelsRegistry(hooks = {}) {
             const match = label.match(/^Default\s*\((.+)\)$/)
             if (match) label = match[1]
           }
+          if (fullId === 'default' && (!label || /^(?:default|recommended)$/i.test(label))) label = 'Provider default'
           if (!label || /^recommended$/i.test(label)) {
             label = providerMeta?.label || humanizeModelId(derivedId)
           }
@@ -1330,6 +1295,23 @@ export function createModelsRegistry(hooks = {}) {
         }
         return converted
       }
+
+      // #8260: Claude supportedModels() is a partial observation on EACH
+      // session init, not a retirement signal. Keep previously reported targets
+      // (including the cache-warmed boot), with fresh metadata winning by value.
+      // Overlay-only rows are excluded: removing an operator declaration must
+      // still remove that row. Other providers retain replacement semantics.
+      const fresh = new Map(converted.map(m => [m.fullId, m]))
+      const reported = new Map()
+      if (isClaudeRegistry) {
+        for (const m of activeModels) {
+          if (providerReportedFullIds.has(m.fullId)) {
+            reported.set(m.fullId, fresh.get(m.fullId) ?? m)
+          }
+        }
+      }
+      for (const [fullId, m] of fresh) reported.set(fullId, m)
+      converted.splice(0, converted.length, ...reported.values())
 
       // Merge fallback entries that the SDK omitted so the picker stays
       // useful when the CLI under-reports (#3075 — observed on Opus 4.7,
@@ -1505,8 +1487,8 @@ export function createModelsRegistry(hooks = {}) {
       // short alias `opus`) still match — else the first converted entry.
       // Warn so the regex miss surfaces in logs.
       if (nextDefault === null && converted.length > 0) {
-        let picked = null
-        for (const preferredShortId of ['opus', 'sonnet']) {
+        let picked = isClaudeRegistry && reported.has(toFullIdMap.get(defaultModelId)) ? defaultModelId : null
+        for (const preferredShortId of picked ? [] : ['opus', 'sonnet']) {
           const fb = fallbackModels.find((m) => m.id === preferredShortId)
           if (!fb) continue
           const match = converted.find((m) => m.fullId === fb.fullId)
@@ -1517,11 +1499,14 @@ export function createModelsRegistry(hooks = {}) {
         log.warn(`updateModels: no SDK entry matched the /^default\\b/i displayName regex — falling back to '${picked}' as the default model. The SDK's "Default (…)" marker may have changed shape.`)
       }
 
-      // #5932: remember the raw SDK list so a later overlay hot-reload can
-      // re-merge against it (AC2). Store the original input, not `converted`,
-      // so the re-merge re-derives ids/labels/windows from the new fallback
-      // exactly as the original call did.
-      lastSdkModels = sdkModels
+      // Keep provider observations for overlay reloads. Claude retains its
+      // reconciled provider rows (never declaration-only rows); other providers
+      // retain the raw replacement snapshot. Re-derive against the new overlay.
+      lastSdkModels = isClaudeRegistry
+        ? converted.filter(m => providerReportedFullIds.has(m.fullId)).map(m => ({
+          ...m, value: m.fullId, displayName: m.id === nextDefault ? `Default (${m.label})` : m.label,
+        }))
+        : sdkModels
       applyModels(converted, nextDefault)
       return converted
     },
@@ -1655,23 +1640,11 @@ export function createModelsRegistry(hooks = {}) {
         prunedLearnedContextWindows()
         const learnedWasPruned = learnedContextWindows.size < learnedCountBeforePrune
 
-        // Filter out cached entries whose family is no longer in
-        // FALLBACK_MODELS, OR whose minor version was superseded (#3162).
-        // FALLBACK_MODELS is version-pinned per release, so it's the
-        // authoritative set of currently-supported families/minors.
-        // Date-suffixed SDK ids (e.g. `claude-sonnet-4-20250514`) carry no
-        // explicit minor and pass through on family match — the API still
-        // accepts them. Family-only retirement (e.g. sonnet 3 dropped
-        // entirely) is caught by the family-not-in-fallback branch.
-        // CLI-only users never have updateModels() called, so without
-        // this filter a stale cache lingers indefinitely.
-        const fallbackByFamily = new Map()
-        for (const fb of fallbackModels) {
-          const { family, minor } = modelFamilyAndMinor(fb.fullId)
-          if (!family) continue
-          if (!fallbackByFamily.has(family)) fallbackByFamily.set(family, new Set())
-          if (minor !== null) fallbackByFamily.get(family).add(minor)
-        }
+        // #8260: a release-pinned static table is not evidence that Claude
+        // stopped accepting a discovered target. Preserve well-formed cached
+        // aliases, pinned versions and dates across reconnect/restart. Resetting
+        // the registry/cache explicitly clears observations; partial discovery
+        // never retires them. Non-Claude migration rules below are unchanged.
 
         // #7776 re-review (the critical) — a payload written by a PRE-FIX
         // build holds `discovered ∪ statics` in `models`, because that is what
@@ -1701,7 +1674,8 @@ export function createModelsRegistry(hooks = {}) {
           && payloadSchemaVersion < MODELS_CACHE_SCHEMA_VERSION
 
         const valid = parsed.models.filter(m =>
-          m && typeof m.id === 'string' && typeof m.fullId === 'string',
+          m && typeof m.id === 'string' && m.id.trim() !== ''
+            && typeof m.fullId === 'string' && m.fullId.trim() !== '',
         )
         const models = valid
           .filter(m => {
@@ -1727,10 +1701,7 @@ export function createModelsRegistry(hooks = {}) {
               if (migrateLegacyStaticSeed && staticFallbackFullIds.has(m.fullId)) return false
               return true
             }
-            const { family, minor } = modelFamilyAndMinor(m.fullId)
-            if (!fallbackByFamily.has(family)) return false
-            if (minor === null) return true
-            return fallbackByFamily.get(family).has(minor)
+            return true
           })
           .map(m => {
             // #4434: when the cached label is missing/empty (older cache
@@ -1760,7 +1731,7 @@ export function createModelsRegistry(hooks = {}) {
         const droppedStaleCount = valid.length - models.length
         if (droppedStaleCount > 0) {
           const droppedReason = isClaudeRegistry
-            ? 'not in FALLBACK_MODELS'
+            ? 'invalid identity'
             : (migrateLegacyStaticSeed
               ? 'carrying the Claude-only [1m] id convention or a pre-#7776 static-seed row (one-time cache migration)'
               : 'carrying the Claude-only [1m] id convention')
