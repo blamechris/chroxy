@@ -36,6 +36,13 @@ export class DevPreviewManager extends EventEmitter {
     return entry.session
   }
 
+  _status(request, state, reason) {
+    request.state = state
+    const message = { type: 'dev_preview_status', sessionId: request.sessionId, requestId: request.requestId, port: request.port, state, ...(reason ? { reason } : {}) }
+    request.send(message)
+    if (request.client) this.emit('dev_preview_status', message)
+  }
+
   async openPreview(client, { sessionId, port, requestId }, send) {
     let request
     try {
@@ -48,26 +55,33 @@ export class DevPreviewManager extends EventEmitter {
       this._usedRequestIds.add(requestId)
       request = { requestId, sessionId, port, clientId: client.id, client, session, cwd: session.cwd, controller: new AbortController(), send }
       this._requests.set(requestId, request)
+      this._status(request, 'checking', 'Checking the local HTTP service')
       const permissions = new PermissionManager({ timeoutMs: this._permissionTimeoutMs, cwd: session.cwd })
       request.permissions = permissions
       permissions.on('permission_request', data => send(buildPermissionRequestMessage({ ...data, sessionId })))
-      permissions.on('permission_resolved', data => send({ type: 'permission_resolved', sessionId, ...data }))
+      permissions.on('permission_resolved', data => {
+        send({ type: 'permission_resolved', sessionId, ...data })
+        if (data.decision !== 'allow') this._status(request, data.reason === 'user' ? 'denied' : 'cancelled', data.reason === 'timeout' ? 'Consent expired; request a new preview' : data.reason === 'user' ? 'Preview consent denied' : request.endReason || 'Preview request cancelled')
+      })
       request.pin = await this._pinTarget({ port, cwd: session.cwd, signal: request.controller.signal })
       request.pin.socket.once('close', () => { request.controller.abort()
-      void this.closePreview(sessionId, port) })
+      void this.closePreview(sessionId, port, 'HTTP service connection ended; request a new preview') })
       this._assertLive(request)
       const target = request.pin.target
+      this._status(request, 'awaiting_consent', 'Review the consent prompt before publication')
       const granted = await permissions.requestExplicitConsent({
         requestId, clientId: client.id, tool: 'dev_preview', signal: request.controller.signal,
         input: { target, exposure: PREVIEW_EXPOSURE, explicitConsent: true, nonDelegable: true },
         description: `Publish HTTP service ${target.command} (PID ${target.pid}) at http://127.0.0.1:${port}, directory ${target.cwd}. ${PREVIEW_EXPOSURE} Allow once for this connection?`,
       })
       if (!granted) return
+      this._status(request, 'opening', 'Consent allowed. Creating the public HTTP preview; DNS may take time to become ready')
       this._assertLive(request)
       await request.pin.verify()
       this._assertLive(request)
       await this._createPreviewTunnel(request)
     } catch (err) {
+      if (request?.state !== 'stop_failed') this._status(request || { sessionId, port, requestId, send }, 'failed', err.message)
       send({ type: 'session_error', sessionId, code: 'DEV_PREVIEW_REFUSED', recoverable: true, message: err.message })
     } finally {
       if (request) {
@@ -110,35 +124,42 @@ export class DevPreviewManager extends EventEmitter {
       })
       await pin.verify()
       this._assertLive(request)
-      record.tunnel = this._tunnelFactory({ port: record.proxy.port, config: { ...this._tunnelConfig, unixSocket: record.proxy.socketPath } })
-      record.tunnel.once('tunnel_lost', () => { void this.closePreview(sessionId, port) })
+      record.tunnel = this._tunnelFactory({ config: { ...this._tunnelConfig, unixSocket: record.proxy.socketPath, previewIngress: record.proxy.ingress } })
+      record.tunnel.once('tunnel_lost', () => { void this.closePreview(sessionId, port, 'Public tunnel connection ended; request a new preview') })
       const { httpUrl } = await record.tunnel.start()
       await pin.verify()
       this._assertLive(request)
       if (record.closing) throw new Error('Preview closed during startup')
       record.url = httpUrl
       this.emit('dev_preview_started', { sessionId, port, url: httpUrl, target: pin.target, exposure: PREVIEW_EXPOSURE })
+      this._status(request, 'active', 'HTTP preview URL created. DNS and public connectivity may take time to become ready')
       record.monitor = setInterval(() => {
         void (async () => {
           if (request.cwd !== request.session.cwd || this._assertAuthority(request.client, sessionId) !== request.session) throw new Error('Preview session changed')
           await pin.verify()
-        })().catch(() => this.closePreview(sessionId, port))
+        })().catch(() => this.closePreview(sessionId, port, 'HTTP service ownership or session changed; request a new preview'))
       }, 2000)
       record.monitor.unref?.()
     } catch (err) {
       const proxySettlement = Promise.resolve(record.proxy?.close()).catch(error => error)
       pin.close()
-      await this.closePreview(sessionId, port)
+      await this.closePreview(sessionId, port, 'Preview could not open')
       await proxySettlement
       throw err
     }
   }
 
-  async closePreview(sessionId, port) {
-    this._requestsForPort(sessionId, port)?.controller.abort()
+  async closePreview(sessionId, port, reason = 'Preview closed by client') {
+    const pending = this._requestsForPort(sessionId, port)
+    if (pending) {
+      pending.endReason = reason
+      pending.controller.abort()
+    }
     const record = this._getTunnel(sessionId, port)
     if (!record) return
     if (record.closing) return record.closing
+    record.request.endReason = reason
+    this._status(record.request, 'closing', 'Closing the HTTP preview')
     record.request.controller.abort()
     clearInterval(record.monitor)
     record.pin.close()
@@ -151,25 +172,33 @@ export class DevPreviewManager extends EventEmitter {
         this._tunnels.get(sessionId)?.delete(port)
         if (this._tunnels.get(sessionId)?.size === 0) this._tunnels.delete(sessionId)
         this.emit('dev_preview_stopped', { sessionId, port })
+        this._status(record.request, 'closed', reason)
       } catch (err) {
         const error = err?.message || String(err)
         log.error(`Preview on port ${port} remains tracked: ${error}`)
         this.emit('dev_preview_stop_failed', { sessionId, port, error })
+        this._status(record.request, 'stop_failed', `Preview remains tracked: ${error}`)
       } finally { record.closing = null }
     })()
     return record.closing
   }
 
   async closeClient(clientId) {
-    for (const request of this._requests.values()) if (request.clientId === clientId) request.controller.abort()
+    for (const request of this._requests.values()) if (request.clientId === clientId) {
+      request.endReason = 'Requesting client disconnected'
+      request.controller.abort()
+    }
     const closing = []
-    for (const [sessionId, ports] of this._tunnels) for (const [port, record] of ports) if (record.request.clientId === clientId) closing.push(this.closePreview(sessionId, port))
+    for (const [sessionId, ports] of this._tunnels) for (const [port, record] of ports) if (record.request.clientId === clientId) closing.push(this.closePreview(sessionId, port, 'Requesting client disconnected'))
     await Promise.all(closing)
   }
 
   async closeSession(sessionId) {
-    for (const request of this._requests.values()) if (request.sessionId === sessionId) request.controller.abort()
-    await Promise.all([...(this._tunnels.get(sessionId)?.keys() || [])].map(port => this.closePreview(sessionId, port)))
+    for (const request of this._requests.values()) if (request.sessionId === sessionId) {
+      request.endReason = 'Session ended'
+      request.controller.abort()
+    }
+    await Promise.all([...(this._tunnels.get(sessionId)?.keys() || [])].map(port => this.closePreview(sessionId, port, 'Session ended')))
   }
 
   async closeAll() {

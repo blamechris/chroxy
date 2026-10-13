@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm, lstat, unlink, rmdir } from 'node:fs/promises'
+import { mkdtemp, rm, lstat, unlink, rmdir, writeFile, chmod, rename } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,9 @@ import { DevPreviewManager } from '../src/dev-preview.js'
 import { PermissionManager } from '../src/permission-manager.js'
 import { pinPreviewTarget, assertPreviewPort } from '../src/preview-target.js'
 import { PreviewTunnelAdapter } from '../src/tunnel/preview.js'
+import { CloudflareTunnelAdapter } from '../src/tunnel/cloudflare.js'
+import { WsServer } from '../src/ws-server.js'
+import { createMockSessionManager } from './test-helpers.js'
 import { ClientMessageSchema, ServerPermissionRequestSchema } from '@chroxy/protocol'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
@@ -232,13 +235,15 @@ function getHttp(port, path) {
 }
 
 describe('real loopback service', () => {
-  it('proves accepting peer, proxies two requests on one connection, then closes', { timeout: 15_000 }, async () => {
+  it('proves accepting peer, proxies two requests on one connection, then closes', { timeout: 15_000, skip: !['darwin', 'linux'].includes(process.platform) }, async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'preview-test-'))
     const service = await startService(cwd)
     let proxyPort
     let creations = 0
+    let ingress
     const session = { cwd }
     const manager = new DevPreviewManager({ getSession: () => ({ session }), tunnelFactory: ({ config }) => { proxyPort = config.unixSocket
+    ingress = config.previewIngress
     creations++
     const tunnel = new EventEmitter()
     tunnel.start = async () => ({ httpUrl: 'https://fixture.trycloudflare.com' })
@@ -260,6 +265,47 @@ describe('real loopback service', () => {
       assert.equal(creations, 1, JSON.stringify(sent.filter(m => m.type === 'session_error')))
       assert.deepEqual(await getHttp(proxyPort, '/first'), { status: 200, body: 'preview-fixture:/first' })
       assert.deepEqual(await getHttp(proxyPort, '/second'), { status: 200, body: 'preview-fixture:/second' })
+      const adapter = new PreviewTunnelAdapter({ config: { previewIngress: ingress } })
+      const spawnOriginal = CloudflareTunnelAdapter.prototype._spawnCloudflared
+      let spawned = 0
+      CloudflareTunnelAdapter.prototype._spawnCloudflared = () => {
+        spawned++
+        return new EventEmitter()
+      }
+      try {
+        const argv = adapter._quickTunnelArguments()
+        adapter._spawnCloudflared(argv, {})
+        assert.equal(spawned, 1, 'valid owned configuration reaches spawn')
+        for (const bytes of ['', '{}', JSON.stringify({ ingress: [{ service: 'http://127.0.0.1:1' }] })]) {
+          await writeFile(ingress.path, bytes)
+          assert.throws(() => adapter._spawnCloudflared(argv, {}), /configuration changed/)
+          assert.equal(spawned, 1, 'invalid configuration cannot spawn')
+        }
+        await writeFile(ingress.path, ingress.bytes)
+        await chmod(ingress.path, 0o644)
+        assert.throws(() => adapter._spawnCloudflared(argv, {}), /configuration changed/)
+        await chmod(ingress.path, 0o600)
+        await rename(ingress.path, ingress.path + '.held')
+        try {
+          assert.throws(() => adapter._spawnCloudflared(argv, {}), /ENOENT/)
+          await writeFile(ingress.path, ingress.bytes, { mode: 0o600 })
+          assert.throws(() => adapter._spawnCloudflared(argv, {}), /configuration changed/)
+          await unlink(ingress.path)
+        } finally { await rename(ingress.path + '.held', ingress.path) }
+        for (const key of ['directory', 'socket']) {
+          adapter.config.previewIngress = { ...ingress, [key]: { ...ingress[key], ino: -1 } }
+          assert.throws(() => adapter._spawnCloudflared(argv, {}), /ownership changed/)
+        }
+        adapter.config.previewIngress = ingress
+        assert.throws(() => adapter._spawnCloudflared([...argv, '--url', 'http://127.0.0.1:1'], {}), /arguments changed/)
+        assert.equal(spawned, 1)
+        adapter._spawnCloudflared(argv, {})
+        assert.equal(spawned, 2, 'restored owned configuration reaches spawn')
+      } finally {
+        CloudflareTunnelAdapter.prototype._spawnCloudflared = spawnOriginal
+        await writeFile(ingress.path, ingress.bytes)
+        await chmod(ingress.path, 0o600)
+      }
       await service.close()
       await manager.closeAll()
       assert.equal(manager.getActivePreviews('s1').length, 0)
@@ -331,7 +377,7 @@ describe('bounded tunnel settlement', () => {
   })
 })
 
-it('a private Unix HTTP origin stays ended after proxy exit and TCP service replacement', { timeout: 15_000 }, async () => {
+it('a private Unix HTTP origin stays ended after proxy exit and TCP service replacement', { timeout: 15_000, skip: !['darwin', 'linux'].includes(process.platform) }, async () => {
   const cwd = await mkdtemp(join(tmpdir(), 'preview-origin-'))
   const service = await startService(cwd)
   const module = fileURLToPath(new URL('../src/preview-target.js', import.meta.url))
@@ -371,14 +417,88 @@ it('a private Unix HTTP origin stays ended after proxy exit and TCP service repl
     if (path) {
       const socket = await lstat(path).catch(() => null)
       if (socket?.isSocket() && socket.uid === process.getuid()) await unlink(path)
+      const config = join(path.slice(0, path.lastIndexOf('/')), 'ingress.json')
+      const owner = await lstat(config).catch(() => null)
+      if (owner?.isFile() && owner.uid === process.getuid()) await unlink(config)
       await rmdir(path.slice(0, path.lastIndexOf('/')))
     }
     await rm(cwd, { recursive: true, force: true })
   }
 })
 
-it('preview tunnel arguments require a private Unix origin', () => {
-  const tunnel = new PreviewTunnelAdapter({ config: { unixSocket: '/tmp/preview-fixture/origin.sock' } })
-  assert.deepEqual(tunnel._quickTunnelArguments(), ['tunnel', '--url', 'http://localhost', '--unix-socket', '/tmp/preview-fixture/origin.sock', '--no-autoupdate'])
-  assert.throws(() => new PreviewTunnelAdapter({ port: 3100 })._quickTunnelArguments(), /private Unix origin/)
+it('preview tunnel arguments select the private ingress and Quick dispatch', () => {
+  const tunnel = new PreviewTunnelAdapter({ config: { previewIngress: { path: '/tmp/preview-fixture/ingress.json' } } })
+  assert.deepEqual(tunnel._quickTunnelArguments(), ['tunnel', '--config', '/tmp/preview-fixture/ingress.json', '--hello-world', '--no-autoupdate'])
+  assert.equal(tunnel._quickTunnelArguments().includes('--url'), false)
+  assert.equal(tunnel._quickTunnelArguments().includes('--unix-socket'), false)
+  assert.throws(() => new PreviewTunnelAdapter({ port: 3100 })._quickTunnelArguments(), /private Unix ingress/)
+})
+
+it('unsupported ownership inspection refuses before consent or tunnel creation', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+  const f = fixture({ pinTarget: pinPreviewTarget })
+  try {
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    await f.open()
+    assert.equal(f.creations(), 0)
+    assert.equal(f.sent.some(msg => msg.type === 'permission_request'), false)
+    assert.ok(f.sent.some(msg => msg.type === 'session_error' && msg.message.includes('requires macOS or Linux')))
+  } finally { Object.defineProperty(process, 'platform', descriptor) }
+})
+
+it('reports request, consent, opening, active and automatic end with its reason', async () => {
+  const f = fixture()
+  const opening = f.open()
+  await tick()
+  f.allow()
+  await opening
+  f.tunnel.emit('tunnel_lost')
+  await tick()
+  const states = f.sent.filter(m => m.type === 'dev_preview_status')
+  assert.deepEqual(states.map(m => m.state), ['checking', 'awaiting_consent', 'opening', 'active', 'closing', 'closed'])
+  assert.ok(states.every(m => m.requestId === 'request-a' && m.port === 3100))
+  assert.ok(states.at(-1).reason.includes('tunnel connection ended'))
+})
+
+it('schema and restart refusals settle the admitted request by its original ID', async () => {
+  const { manager } = createMockSessionManager([{ id: 's1', cwd: '/tmp/preview-fixture' }])
+  const server = new WsServer({ port: 0, apiToken: 'fixture-only', sessionManager: manager })
+  const ws = {}
+  const sent = []
+  server.clients.set(ws, { id: 'human', authenticated: true, isPrimaryToken: true, authToken: 'fixture-only', rateLimitKey: 'fixture', activeSessionId: 's1' })
+  server._send = (_ws, msg) => sent.push(msg)
+  try {
+    const request = { type: 'open_dev_preview', sessionId: 's1', requestId: 'bad-port', port: -1 }
+    await server._handleMessage(ws, request)
+    const invalid = sent.find(m => m.type === 'dev_preview_status')
+    assert.ok(invalid, 'invalid preview admission must receive a correlated terminal status')
+    assert.equal(invalid.requestId, 'bad-port')
+    assert.equal(invalid.state, 'failed')
+    assert.equal(invalid.port, undefined, 'use the client admission record for malformed ports')
+    sent.length = 0
+    server._draining = true
+    await server._handleMessage(ws, { ...request, port: 3100, requestId: 'draining' })
+    assert.equal(sent[0].requestId, 'draining')
+    assert.equal(sent[0].state, 'failed')
+    assert.equal(server._devPreview._requests.size, 0)
+  } finally {
+    server.clients.clear()
+    await server.close()
+  }
+})
+
+it('authority, stale-session and protected-port refusals leave a terminal request status', async () => {
+  for (const scenario of ['paired', 'nonprimary', 'stale-session', 'protected-port']) {
+    const f = fixture()
+    if (scenario === 'paired') f.client.boundSessionId = 's1'
+    if (scenario === 'nonprimary') f.client.isPrimaryToken = false
+    if (scenario === 'stale-session') f.manager._getSession = () => null
+    if (scenario === 'protected-port') f.request.port = 5432
+    await f.open()
+    const state = f.sent.find(m => m.type === 'dev_preview_status')
+    assert.equal(state.state, 'failed', scenario)
+    assert.equal(state.requestId, f.request.requestId)
+    assert.equal(f.sent.some(m => m.type === 'permission_request'), false)
+    assert.equal(f.creations(), 0)
+  }
 })

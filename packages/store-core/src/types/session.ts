@@ -311,6 +311,13 @@ export interface DevPreview {
   exposure?: string;
 }
 
+export interface DevPreviewRequestState {
+  requestId: string;
+  port: number;
+  state: 'checking' | 'awaiting_consent' | 'opening' | 'active' | 'denied' | 'cancelled' | 'failed' | 'closing' | 'closed' | 'stop_failed';
+  reason?: string;
+}
+
 /**
  * #5937 (epic #5935) — one entry in a session's server-authoritative
  * outgoing-message queue: a follow-up the OWNER sent while the session was
@@ -646,6 +653,7 @@ export interface BaseSessionState {
   statusLine: string | null;
   mcpServers: McpServer[];
   devPreviews: DevPreview[];
+  devPreviewRequests?: DevPreviewRequestState[];
   // #3899 — most recent soft inactivity warning for this session, or null
   // when none is outstanding. Both the dashboard and mobile app dispatch
   // the shared `handleInactivityWarning` to populate this slot, and clear

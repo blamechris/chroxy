@@ -202,7 +202,7 @@ function handleOpenDevPreview(ws, client, msg, ctx) {
 
 function handleCloseDevPreview(ws, client, msg, ctx) {
   const previewSessionId = msg.sessionId || client.activeSessionId
-  // Enforce session binding
+  // Preview controls require an authenticated, unbound primary-token client.
   if (client.boundSessionId || client.isPrimaryToken !== true || !client.authToken) return
   if (previewSessionId && typeof msg.port === 'number') {
     ctx.services.devPreview.closePreview(previewSessionId, msg.port)

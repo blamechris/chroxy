@@ -485,6 +485,9 @@ function setupSessionForwarding(normalizer, ctx) {
   }
 
   // Dev server preview: broadcast tunnel start/stop to clients
+  devPreview.on('dev_preview_status', safeForward('dev_preview_status', ({ sessionId, ...message }) => {
+    broadcastToSession(sessionId, message)
+  }))
   devPreview.on('dev_preview_started', safeForward('dev_preview_started', ({ sessionId, port, url, target, exposure }) => {
     broadcastToSession(sessionId, { type: 'dev_preview', port, url, ...(target ? { target, exposure } : {}) })
   }))
@@ -584,6 +587,9 @@ function setupCliForwarding(normalizer, ctx) {
     })
   }
 
+  devPreview.on('dev_preview_status', safeForward('cli:dev_preview_status', ({ sessionId, ...message }) => {
+    if (sessionId === '__legacy__') broadcast({ ...message, sessionId })
+  }))
   devPreview.on('dev_preview_started', safeForward('cli:dev_preview_started', ({ sessionId, port, url, target, exposure }) => {
     if (sessionId === '__legacy__') {
       broadcast({ type: 'dev_preview', port, url, ...(target ? { target, exposure } : {}) })

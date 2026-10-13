@@ -43,6 +43,7 @@ import {
 } from '../../src/permission-manager.js'
 import { isFlooredTarget, PROTECTED_PATH_INPUT_FIELDS } from '../../src/permission-floor.js'
 import { BUILTIN_TOOLS } from '../../src/byok-tools.js'
+import { EventNormalizer } from '../../src/event-normalizer.js'
 import { createMockSessionManager, createMockSession, createSpy } from '../test-helpers.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -585,7 +586,7 @@ describe('CLI: --allow-command-approvals end to end (real subprocess, #7973)', (
       const first = await client.callTool({ name: 'chroxy_get_events', arguments: { sessionId } })
       const cursor = first.structuredContent.cursor
       const waitingPromise = client.callTool({ name: 'chroxy_get_events', arguments: { sessionId, cursor, waitMs: 1000 } })
-      manager.emit('session_event', { sessionId, event: 'permission_request', data: { requestId: 'bash-pending-default', tool: 'Bash', input: { command: 'ls' }, remainingMs: 5000, floored: false } })
+      manager.emit('session_event', { sessionId, event: 'permission_request', data: { requestId: 'bash-pending-default', tool: 'Bash', input: { command: 'ls' }, remainingMs: 5000, floored: false, explicitConsent: false, nonDelegable: false } })
       const seen = await waitingPromise
       assert.ok(JSON.stringify(seen.structuredContent).includes('bash-pending-default'))
 
@@ -620,7 +621,7 @@ describe('CLI: --allow-command-approvals end to end (real subprocess, #7973)', (
       const first = await client.callTool({ name: 'chroxy_get_events', arguments: { sessionId } })
       const cursor = first.structuredContent.cursor
       const waitingPromise = client.callTool({ name: 'chroxy_get_events', arguments: { sessionId, cursor, waitMs: 1000 } })
-      manager.emit('session_event', { sessionId, event: 'permission_request', data: { requestId: 'bash-pending', tool: 'Bash', input: { command: 'ls' }, remainingMs: 5000, floored: false } })
+      manager.emit('session_event', { sessionId, event: 'permission_request', data: { requestId: 'bash-pending', tool: 'Bash', input: { command: 'ls' }, remainingMs: 5000, floored: false, explicitConsent: false, nonDelegable: false } })
       const seen = await waitingPromise
       assert.ok(JSON.stringify(seen.structuredContent).includes('bash-pending'))
 
@@ -634,6 +635,19 @@ describe('CLI: --allow-command-approvals end to end (real subprocess, #7973)', (
 })
 
 describe('explicit consent metadata', () => {
+  for (const [label, flags] of [['unknown', {}], ['explicit', { explicitConsent: true, nonDelegable: true }], ['ordinary', { explicitConsent: false, nonDelegable: false }]]) {
+    it(`preserves ${label} policy through normalization and unattended response`, async () => {
+      const { client, sent } = readyClient({ ownedSessions: new Set(['sess-a']) })
+      try {
+        const message = new EventNormalizer().normalize('permission_request', { requestId: 'normalized', tool: 'Read', input: {}, floored: false, ...flags }, { sessionId: 'sess-a' }).messages[0].msg
+        client._trackPermissionObservation({ ...message, sessionId: 'sess-a' })
+        const result = await client.respondPermission('sess-a', 'normalized', 'allow')
+        assert.equal(sent.length, label === 'ordinary' ? 1 : 0)
+        assert.equal(result.status, label === 'ordinary' ? 'uncertain' : 'rejected')
+        if (label !== 'ordinary') assert.equal(result.reason, 'not_delegable')
+      } finally { await client.close() }
+    })
+  }
   for (const flags of [{ explicitConsent: true, nonDelegable: true }, { explicitConsent: true, nonDelegable: false }, { explicitConsent: false, nonDelegable: true }, {}]) {
     it(`refuses unattended allow when consent is required or unknown: ${JSON.stringify(flags)}`, async () => {
       const { client, sent } = readyClient()

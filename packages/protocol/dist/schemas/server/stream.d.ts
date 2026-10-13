@@ -568,6 +568,25 @@ export declare const ServerPermissionAuditResultSchema: z.ZodObject<{
         firstAt: z.ZodOptional<z.ZodNumber>;
     }, z.core.$loose>>;
 }, z.core.$strip>;
+export declare const ServerDevPreviewStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"dev_preview_status">;
+    sessionId: z.ZodString;
+    requestId: z.ZodString;
+    port: z.ZodOptional<z.ZodNumber>;
+    state: z.ZodEnum<{
+        failed: "failed";
+        cancelled: "cancelled";
+        active: "active";
+        denied: "denied";
+        checking: "checking";
+        awaiting_consent: "awaiting_consent";
+        opening: "opening";
+        closing: "closing";
+        closed: "closed";
+        stop_failed: "stop_failed";
+    }>;
+    reason: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 /**
  * Single validated builder for the `permission_request` wire message (#6031).
  *

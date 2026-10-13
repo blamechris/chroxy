@@ -72,6 +72,8 @@ describe('buildPermissionRequestMessage (#6031)', () => {
       assert.ok(!('remainingMs' in msg))
       // The binding field clients fall back on: absent, never null.
       assert.ok(!('sessionId' in msg))
+      assert.ok(!('explicitConsent' in msg))
+      assert.ok(!('nonDelegable' in msg))
     })
 
     it('passes input through as-is without re-redacting (shape guard only)', () => {
@@ -154,6 +156,11 @@ describe('buildPermissionRequestMessage (#6031)', () => {
   })
 
   describe('malformed input is rejected', () => {
+    for (const flags of [{ explicitConsent: null }, { explicitConsent: 'false' }, { nonDelegable: 0 }]) {
+      it(`rejects malformed policy metadata ${JSON.stringify(flags)}`, () => {
+        assert.throws(() => buildPermissionRequestMessage({ requestId: 'policy', tool: 'Read', input: {}, floored: false, ...flags }), /invalid permission_request/)
+      })
+    }
     it('throws when requestId is missing', () => {
       assert.throws(
         () => buildPermissionRequestMessage({ tool: 'Bash', input: {} }),

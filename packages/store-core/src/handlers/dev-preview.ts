@@ -10,8 +10,17 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
-import type { DevPreview } from '../types'
+import type { DevPreview, DevPreviewRequestState } from '../types'
+import { ServerDevPreviewStatusSchema } from '@chroxy/protocol/schemas'
 import { resolveSessionId } from './_shared'
+
+export function parseDevPreviewStatus(msg: unknown) {
+  return ServerDevPreviewStatusSchema.safeParse(msg)
+}
+
+export function isDevPreviewPending(request?: DevPreviewRequestState): boolean {
+  return !!request && ['checking', 'awaiting_consent', 'opening', 'active', 'closing', 'stop_failed'].includes(request.state)
+}
 
 // ---------------------------------------------------------------------------
 // dev_preview / dev_preview_stopped

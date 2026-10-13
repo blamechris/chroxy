@@ -443,6 +443,7 @@ function _isSecureRequest(req) {
  *   { type: 'statusline_output', sessionId, text, active?, truncated? } — #6791: rendered stdout of the user's own Claude Code statusLine script (active:false + empty text clears it)
  *   { type: 'dev_preview', port, url, target?, exposure?, sessionId } — approved HTTP preview opened
  *   { type: 'dev_preview_stopped', port, sessionId }    — dev server preview tunnel closed
+ *   { type: 'dev_preview_status', sessionId, requestId, port, state, reason? } — explicit HTTP preview request lifecycle
  *   { type: 'web_task_created', task }                  — cloud task launched
  *   { type: 'web_task_updated', task }                  — cloud task status changed
  *   { type: 'web_task_error', taskId?, message, code?, boundSessionId?, boundSessionName? } — cloud task error
@@ -2661,6 +2662,7 @@ export class WsServer {
 
     // During drain, only allow permission_response and user_question_response
     if (this._draining && msg.type !== 'permission_response' && msg.type !== 'user_question_response') {
+      this._sendPreviewRefusal(ws, msg, 'Server is restarting; reconnect before requesting a preview')
       if (msg.type === 'input') {
         this._send(ws, { type: 'server_status', message: 'Server is restarting, please wait...' })
       }
@@ -2673,6 +2675,7 @@ export class WsServer {
       const details = parsed.error.issues.map(i => i.message).join(', ')
       log.warn(`[${correlationId}] Invalid message from ${client.id}: ${details}`)
       this._send(ws, { type: 'error', code: 'INVALID_MESSAGE', correlationId, details })
+      this._sendPreviewRefusal(ws, msg, 'Invalid preview request; check the service port and reconnect to this session')
       return
     }
     const validatedMsg = parsed.data
@@ -2759,6 +2762,11 @@ export class WsServer {
    * matches — prevents cross-session info leakage and bandwidth waste.
    * Pass a custom filter to override the default recipient selection when needed.
    */
+  _sendPreviewRefusal(ws, msg, reason) {
+    if (msg.type !== 'open_dev_preview' || typeof msg.requestId !== 'string' || !msg.requestId || msg.requestId.length > 128 || typeof msg.sessionId !== 'string' || !msg.sessionId || msg.sessionId.length > 256) return
+    this._send(ws, { type: 'dev_preview_status', sessionId: msg.sessionId, requestId: msg.requestId, state: 'failed', reason })
+  }
+
   _broadcastToSession(sessionId, message, filter) {
     this._broadcaster._broadcastToSession(sessionId, message, filter)
   }

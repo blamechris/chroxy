@@ -206,6 +206,7 @@ export type {
   ServerError,
   ServerErrorAction,
   DevPreview,
+  DevPreviewRequestState,
   WebTask,
   WebFeatureStatus,
   ConversationSummary,
@@ -1227,3 +1228,5 @@ export type { HunkRange, HunkDecisions, PermissionEditedInput } from './hunk-dif
 // and the mobile app's nav header so both clients derive a worktree
 // session's human-readable repo name the same way.
 export { abbreviateCwd, repoDisplayName, sessionGroupKey } from './repo-label'
+
+export { isDevPreviewPending } from './handlers/dev-preview'

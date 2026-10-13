@@ -1,5 +1,5 @@
 import { CloudflareTunnelAdapter } from './cloudflare.js'
-import { isAbsolute } from 'node:path'
+import { assertPreviewIngress } from '../preview-ingress.js'
 
 function waitForExit(proc, milliseconds) {
   if (proc.exitCode != null || proc.signalCode != null) return Promise.resolve(true)
@@ -22,6 +22,8 @@ export class PreviewTunnelAdapter extends CloudflareTunnelAdapter {
   }
 
   _spawnCloudflared(argv, opts) {
+    assertPreviewIngress(this.config.previewIngress)
+    if (JSON.stringify(argv) !== JSON.stringify(this._quickTunnelArguments())) throw new Error('Preview ingress arguments changed')
     const proc = super._spawnCloudflared(argv, opts)
     this._children.add(proc)
     proc.once('close', () => this._children.delete(proc))
@@ -38,8 +40,9 @@ export class PreviewTunnelAdapter extends CloudflareTunnelAdapter {
   }
 
   _quickTunnelArguments() {
-    if (typeof this.config.unixSocket !== 'string' || !isAbsolute(this.config.unixSocket)) throw new Error('Preview requires a private Unix origin')
-    return ['tunnel', '--url', 'http://localhost', '--unix-socket', this.config.unixSocket, '--no-autoupdate']
+    if (!this.config.previewIngress?.path) throw new Error('Preview requires a private Unix ingress configuration')
+    // Quick dispatch needs this flag; the private ingress selects the origin.
+    return ['tunnel', '--config', this.config.previewIngress.path, '--hello-world', '--no-autoupdate']
   }
 
   async stop() {

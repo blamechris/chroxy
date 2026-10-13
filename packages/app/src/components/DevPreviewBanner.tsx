@@ -2,19 +2,24 @@ import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, Linking, StyleSheet, TextInput } from 'react-native';
 import { COLORS } from '../constants/colors';
 import type { DevPreview } from '../store/types';
+import { isDevPreviewPending, type DevPreviewRequestState } from '@chroxy/store-core';
 
 interface DevPreviewBannerProps {
   previews: DevPreview[];
   onClose: (port: number) => void;
   onOpen?: (port: number) => boolean;
+  requests?: DevPreviewRequestState[];
 }
 
-export function DevPreviewBanner({ previews, onClose, onOpen }: DevPreviewBannerProps) {
+export function DevPreviewBanner({ previews, onClose, onOpen, requests }: DevPreviewBannerProps) {
   const [expanded, setExpanded] = useState(false);
   const [port, setPort] = useState('');
-  const [sent, setSent] = useState(false);
+  const [sentPort, setSentPort] = useState<number | null>(null);
+  const [error, setError] = useState('');
   const value = Number(port);
   const valid = /^\d+$/.test(port) && value >= 1024 && value <= 65535;
+  const status = requests?.find(request => request.port === sentPort);
+  const pending = sentPort !== null && (status ? isDevPreviewPending(status) : requests === undefined);
   if (previews.length === 0 && !onOpen) return null;
 
   return (
@@ -23,9 +28,11 @@ export function DevPreviewBanner({ previews, onClose, onOpen }: DevPreviewBanner
       {expanded && <View>
         <Text style={styles.url}>HTTP only; no WebSockets or reconnect. Service must run in this session directory on 127.0.0.1. Primary token required.</Text>
         <Text style={styles.url}>Public URL; Chroxy adds no authentication. Review the service and Allow once in the consent prompt.</Text>
-        <TextInput style={styles.portInput} value={port} keyboardType="number-pad" accessibilityLabel="Preview service port" testID="dev-preview-port" placeholder="Service port" placeholderTextColor={COLORS.textMuted} onChangeText={text => { setPort(text); setSent(false); }} />
-        <TouchableOpacity style={styles.requestButton} disabled={!valid} accessibilityLabel="Request preview consent" testID="dev-preview-request" onPress={() => { if (valid && onOpen?.(value)) setSent(true); }}><Text style={styles.label}>Request preview consent</Text></TouchableOpacity>
-        {sent && <TouchableOpacity style={styles.requestButton} accessibilityLabel="Cancel preview" testID="dev-preview-cancel" onPress={() => { onClose(value); setSent(false); }}><Text style={styles.label}>Cancel preview</Text></TouchableOpacity>}
+        <TextInput style={styles.portInput} value={port} keyboardType="number-pad" accessibilityLabel="Preview service port" testID="dev-preview-port" placeholder="Service port" placeholderTextColor={COLORS.textMuted} onChangeText={setPort} />
+        <TouchableOpacity style={styles.requestButton} disabled={!valid || pending} accessibilityLabel="Request preview consent" testID="dev-preview-request" onPress={() => { if (valid && !pending) { const admitted = onOpen?.(value); if (admitted) setSentPort(value); setError(admitted ? '' : 'Preview request was not sent. Reconnect to this session and try again.'); } }}><Text style={styles.label}>Request preview consent</Text></TouchableOpacity>
+        {!!error && <Text accessibilityRole="alert" testID="dev-preview-request-error" style={styles.url}>{error}</Text>}
+        {sentPort !== null && <Text testID="dev-preview-request-status" style={styles.url}>Port {sentPort}: {status?.reason || (status ? `HTTP preview ${status.state.replace('_', ' ')}` : requests !== undefined ? 'Connection changed. HTTP preview status is unconfirmed; reconnect before requesting a new preview.' : 'Request sent. Review the consent prompt before publication.')}</Text>}
+        {pending && <TouchableOpacity style={styles.requestButton} disabled={status?.state === 'closing'} accessibilityLabel={status?.state === 'active' || status?.state === 'stop_failed' ? 'Close preview' : 'Cancel preview'} testID="dev-preview-cancel" onPress={() => onClose(sentPort!)}><Text style={styles.label}>{status?.state === 'active' || status?.state === 'stop_failed' ? 'Close preview' : 'Cancel preview'}</Text></TouchableOpacity>}
       </View>}
       {previews.map((preview) => (
         <View key={preview.port} style={styles.banner}>

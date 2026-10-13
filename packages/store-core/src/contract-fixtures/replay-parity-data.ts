@@ -1439,7 +1439,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "input": {
               "command": "rm -rf build"
             },
-            "remainingMs": 120000
+            "remainingMs": 120000,
+            "explicitConsent": false,
+            "nonDelegable": false
           }
         ],
         [
@@ -1519,7 +1521,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "input": {
               "command": "rm -rf build"
             },
-            "remainingMs": 120000
+            "remainingMs": 120000,
+            "explicitConsent": false,
+            "nonDelegable": false
           }
         ],
         [
@@ -1597,7 +1601,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "input": {
               "command": "rm -rf build"
             },
-            "remainingMs": 120000
+            "remainingMs": 120000,
+            "explicitConsent": false,
+            "nonDelegable": false
           }
         ],
         [

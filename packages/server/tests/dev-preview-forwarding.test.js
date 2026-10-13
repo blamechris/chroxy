@@ -24,6 +24,22 @@ const PORT_MENTIONS = [
   ['a "started on" line with a date', 'build started on 2026-09-26'],
 ]
 
+for (const mode of ['multi', 'legacy']) {
+  it(`forwards the original request lifecycle and ended reason in ${mode} mode`, () => {
+    const { ctx, devPreview } = mode === 'multi' ? makeMultiSessionCtx() : makeLegacyCtx()
+    const sessionId = mode === 'multi' ? 'sess-1' : '__legacy__'
+    const message = { type: 'dev_preview_status', sessionId, requestId: 'r1', port: 3100, state: 'closed', reason: 'HTTP service connection ended' }
+    devPreview.emit('dev_preview_status', message)
+    const call = mode === 'multi' ? ctx.broadcastToSession.mock.calls.at(-1).arguments : ctx.broadcast.mock.calls.at(-1).arguments
+    const frame = mode === 'multi' ? call[1] : call[0]
+    assert.equal(frame.requestId, 'r1')
+    assert.equal(frame.state, 'closed')
+    assert.equal(frame.reason, message.reason)
+    if (mode === 'multi') assert.equal(call[0], sessionId)
+    else assert.equal(frame.sessionId, sessionId)
+  })
+}
+
 function makeDevPreview() {
   const devPreview = new DevPreviewManager()
   devPreview._createPreviewTunnel = mock.fn()

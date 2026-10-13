@@ -1,4 +1,5 @@
 import { DevPreviewRequest } from './DevPreviewRequest'
+import type { DevPreviewRequestState } from '@chroxy/store-core'
 import type { ComponentProps } from 'react'
 import { ChatSettingsDropdown } from './ChatSettingsDropdown'
 import { NotificationsWidget } from './NotificationsWidget'
@@ -119,6 +120,8 @@ export interface AppHeaderProps {
   // (explicitly requested and approved HTTP services). Empty array
   // renders nothing; DevPreviewChip self-gates.
   devPreviews: DevPreview[]
+  previewSessionId?: string | null
+  devPreviewRequests?: DevPreviewRequestState[]
   onCloseDevPreview: (port: number) => void
   onOpenDevPreview?: (port: number) => boolean
   // #7344 — the active session's pull-request / CI status. Null before the
@@ -248,7 +251,7 @@ export function AppHeader(props: AppHeaderProps) {
       </div>
       <div className="header-right">
         {/* Approved previews show the target port and the close control. */}
-        <DevPreviewRequest onOpen={props.onOpenDevPreview} onClose={props.onCloseDevPreview} />
+        <DevPreviewRequest key={props.previewSessionId} requests={props.devPreviewRequests} onOpen={props.onOpenDevPreview} onClose={props.onCloseDevPreview} />
         <DevPreviewChip previews={props.devPreviews} onClose={props.onCloseDevPreview} />
         {/* #7344 — the session's PR + CI state. Before this the only signal that
             CI was running at all was prose the agent typed, so the user could

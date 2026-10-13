@@ -370,6 +370,7 @@ export function App() {
     interventions,
     // #6790: active dev-server preview tunnels for the header DevPreviewChip.
     devPreviews,
+    devPreviewRequests,
     // #6791: the user's own statusLine script output, shown as an additive
     // strip in the header StatusBar.
     statusLine,
@@ -2782,6 +2783,8 @@ export function App() {
         modelLabel={activeModelLabel}
         costBadgeMode={costBadgeMode}
         devPreviews={devPreviews}
+        devPreviewRequests={devPreviewRequests}
+        previewSessionId={activeSessionId}
         onCloseDevPreview={closeDevPreview}
         onOpenDevPreview={openDevPreview}
         sessionPrStatus={sessionPrStatus}

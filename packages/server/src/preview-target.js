@@ -4,6 +4,7 @@ import { realpath, mkdtemp, lstat, rmdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { connect } from 'node:net'
 import http from 'node:http'
+import { createPreviewIngress, removePreviewIngress } from './preview-ingress.js'
 
 const exec = promisify(execFile)
 const PROTECTED_PORTS = new Set([22, 80, 443, 3306, 5432, 6379, 8765, 9200, 11434, 27017])
@@ -171,20 +172,25 @@ export async function createPinnedPreviewProxy(pin, verifyLive) {
     connections.add(socket)
     socket.once('close', () => connections.delete(socket))
   })
+  let ingress
   try {
     await new Promise((resolve, reject) => {
       server.once('error', reject)
       server.listen(socketPath, resolve)
     })
+    ingress = await createPreviewIngress(socketPath, identity)
   } catch (err) {
     pin.close()
     agent.destroy()
+    for (const socket of connections) socket.destroy()
+    await new Promise(resolve => server.close(resolve))
     await rmdir(directory)
     throw err
   }
   let closing
   return {
     socketPath,
+    ingress,
     close() {
       if (closing) return closing
       pin.close()
@@ -195,6 +201,7 @@ export async function createPinnedPreviewProxy(pin, verifyLive) {
           try {
             const current = await lstat(directory)
             if (current.dev !== identity.dev || current.ino !== identity.ino || !current.isDirectory()) throw new Error('Preview origin directory identity changed; cleanup refused')
+            await removePreviewIngress(ingress)
             await rmdir(directory)
             resolve()
           } catch (err) { reject(err) }
