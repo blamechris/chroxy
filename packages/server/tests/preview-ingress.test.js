@@ -22,12 +22,12 @@ async function attempt(saved) {
     fs.readFileSync = (...args) => { if (typeof args[0] === 'number') reads++; return read(...args) }
     syncBuiltinESMExports()
     CloudflareTunnelAdapter.prototype._spawnCloudflared = () => { spawned++; return new EventEmitter() }
-    const adapter = new PreviewTunnelAdapter({ config: { previewIngress: JSON.parse(process.argv[1]) } })
+    const adapter = new PreviewTunnelAdapter({ config: { previewIngress: JSON.parse(process.env.CHROXY_TEST_PREVIEW_INGRESS) } })
     try { adapter._spawnCloudflared(adapter._quickTunnelArguments(), {}) } catch (caught) { error = caught.message }
     console.log(JSON.stringify({ reads, spawned, error }))
   `
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--import', new URL('./_setup.mjs', import.meta.url).href, '--input-type=module', '-e', source, JSON.stringify(saved)], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, ['--import', new URL('./_setup.mjs', import.meta.url).href, '--input-type=module', '-e', source], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CHROXY_TEST_PREVIEW_INGRESS: JSON.stringify(saved) } })
     let stdout = '', stderr = '', timedOut = false
     child.stdout.on('data', data => { stdout += data })
     child.stderr.on('data', data => { stderr += data })
