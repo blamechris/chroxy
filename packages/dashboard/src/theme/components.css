@@ -4533,7 +4533,22 @@ button.sidebar-token-view-session-row:hover {
 
 .perm-buttons {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+/* #8587 — permission decisions are time-sensitive primary actions. Keep the
+ * visible hit box at the repo's 44px floor on both axes, including the wider
+ * session/project-scoped actions. The row wraps, and long labels may wrap
+ * inside their button, so narrow dashboards do not trade accessibility for
+ * horizontal overflow. */
+.perm-buttons > button {
+  min-width: 44px;
+  min-height: 44px;
+  max-width: 100%;
+  box-sizing: border-box;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .permission-prompt button {

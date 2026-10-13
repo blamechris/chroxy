@@ -6,6 +6,8 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import fs from 'node:fs'
+import path from 'node:path'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PlanApproval } from './PlanApproval'
 import type { PermissionDecision } from '../store/types'
@@ -88,6 +90,55 @@ vi.mock('../store/connection', () => ({
 afterEach(() => {
   cleanup()
   resetMockStore()
+})
+
+describe('PermissionPrompt action layout (#8587)', () => {
+  it('gives every decision a 44x44 floor and wraps the action row', () => {
+    const style = document.createElement('style')
+    style.textContent = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+    document.head.appendChild(style)
+
+    try {
+      render(
+        <PermissionPrompt
+          requestId="req-targets"
+          tool="Write"
+          description="write the file"
+          remainingMs={60000}
+          onRespond={vi.fn()}
+        />
+      )
+
+      const row = document.querySelector('.perm-buttons')
+      expect(row, 'permission action row did not render').not.toBeNull()
+      const actions = Array.from(row!.querySelectorAll('button'))
+      expect(actions.map((button) => button.textContent?.trim())).toEqual([
+        'Allow',
+        'Allow for Session',
+        'Always allow',
+        'Deny',
+      ])
+      expect(getComputedStyle(row!).flexWrap).toBe('wrap')
+
+      for (const action of actions) {
+        const computed = getComputedStyle(action)
+        const minWidth = Number.parseFloat(computed.minWidth)
+        const minHeight = Number.parseFloat(computed.minHeight)
+        expect(
+          minWidth >= 44,
+          `${action.textContent}: min-width resolved to ${JSON.stringify(computed.minWidth)}`,
+        ).toBe(true)
+        expect(
+          minHeight >= 44,
+          `${action.textContent}: min-height resolved to ${JSON.stringify(computed.minHeight)}`,
+        ).toBe(true)
+        expect(computed.maxWidth).toBe('100%')
+        expect(computed.whiteSpace).toBe('normal')
+      }
+    } finally {
+      style.remove()
+    }
+  })
 })
 
 describe('PermissionPrompt', () => {
