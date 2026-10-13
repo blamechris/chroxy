@@ -307,6 +307,8 @@ export interface McpServer {
 export interface DevPreview {
   port: number;
   url: string;
+  target?: { host: string; port: number; pid: number; command: string; cwd: string; started: string };
+  exposure?: string;
 }
 
 /**

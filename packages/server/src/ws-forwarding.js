@@ -485,8 +485,8 @@ function setupSessionForwarding(normalizer, ctx) {
   }
 
   // Dev server preview: broadcast tunnel start/stop to clients
-  devPreview.on('dev_preview_started', safeForward('dev_preview_started', ({ sessionId, port, url }) => {
-    broadcastToSession(sessionId, { type: 'dev_preview', port, url })
+  devPreview.on('dev_preview_started', safeForward('dev_preview_started', ({ sessionId, port, url, target, exposure }) => {
+    broadcastToSession(sessionId, { type: 'dev_preview', port, url, ...(target ? { target, exposure } : {}) })
   }))
   devPreview.on('dev_preview_stopped', safeForward('dev_preview_stopped', ({ sessionId, port }) => {
     broadcastToSession(sessionId, { type: 'dev_preview_stopped', port })
@@ -495,7 +495,7 @@ function setupSessionForwarding(normalizer, ctx) {
   // (and the exposed local port) may still be live. Surface it as a per-session
   // error banner (reusing `session_error`, like the checkpoint/persist failure
   // paths) so the user can verify / kill cloudflared instead of assuming the
-  // port is closed. recoverable:true — informational; the slot is already freed.
+  // port is closed. The slot stays tracked until child exit is confirmed.
   devPreview.on('dev_preview_stop_failed', safeForward('dev_preview_stop_failed', ({ sessionId, port, error }) => {
     if (!sessionId) return
     broadcastToSession(sessionId, {
@@ -584,9 +584,9 @@ function setupCliForwarding(normalizer, ctx) {
     })
   }
 
-  devPreview.on('dev_preview_started', safeForward('cli:dev_preview_started', ({ sessionId, port, url }) => {
+  devPreview.on('dev_preview_started', safeForward('cli:dev_preview_started', ({ sessionId, port, url, target, exposure }) => {
     if (sessionId === '__legacy__') {
-      broadcast({ type: 'dev_preview', port, url })
+      broadcast({ type: 'dev_preview', port, url, ...(target ? { target, exposure } : {}) })
     }
   }))
   devPreview.on('dev_preview_stopped', safeForward('cli:dev_preview_stopped', ({ sessionId, port }) => {

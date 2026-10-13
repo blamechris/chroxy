@@ -823,6 +823,7 @@ export function App() {
   const markAllSessionNotificationsRead = useConnectionStore(s => s.markAllSessionNotificationsRead)
   // #6790 — dismiss an active dev-server preview tunnel from the header chip.
   const closeDevPreview = useConnectionStore(s => s.closeDevPreview)
+  const openDevPreview = useConnectionStore(s => s.openDevPreview)
   // #7344 — the active session's pull-request / CI status for the header chip.
   // Selected by session id rather than through getActiveSessionState(), because
   // the snapshot lives in its own session-keyed slice (a reply can land after a
@@ -2782,6 +2783,7 @@ export function App() {
         costBadgeMode={costBadgeMode}
         devPreviews={devPreviews}
         onCloseDevPreview={closeDevPreview}
+        onOpenDevPreview={openDevPreview}
         sessionPrStatus={sessionPrStatus}
         sessionPrStatusLoading={sessionPrStatusLoading}
         onRefreshSessionPrStatus={refreshSessionPrStatus}

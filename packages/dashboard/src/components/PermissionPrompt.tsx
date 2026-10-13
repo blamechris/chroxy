@@ -335,6 +335,14 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         )}
       </div>
 
+      {tool === 'dev_preview' && toolInput && (
+        <div className="dev-preview-consent" data-testid="dev-preview-consent">
+          <strong>Allow once for this connection</strong>
+          <pre>{JSON.stringify(toolInput.target, null, 2)}</pre>
+          <p>{String(toolInput.exposure || 'Public HTTP URL. No authentication added. No WebSockets or reconnect.')}</p>
+        </div>
+      )}
+
       {/* #7939: MCP spawn-trust prompts name which config scope the server
           came from. The repo-provided `.mcp.json` case gets the distinct
           `perm-mcp-source-repo` class (attacker-influenceable content —

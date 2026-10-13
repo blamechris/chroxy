@@ -1014,6 +1014,12 @@ export declare const CloseDevPreviewSchema: z.ZodObject<{
     port: z.ZodNumber;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const OpenDevPreviewSchema: z.ZodObject<{
+    type: z.ZodLiteral<"open_dev_preview">;
+    sessionId: z.ZodString;
+    port: z.ZodNumber;
+    requestId: z.ZodString;
+}, z.core.$strict>;
 export declare const LaunchWebTaskSchema: z.ZodObject<{
     type: z.ZodLiteral<"launch_web_task">;
     prompt: z.ZodString;
@@ -1878,6 +1884,11 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     port: z.ZodNumber;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"open_dev_preview">;
+    sessionId: z.ZodString;
+    port: z.ZodNumber;
+    requestId: z.ZodString;
+}, z.core.$strict>, z.ZodObject<{
     type: z.ZodLiteral<"launch_web_task">;
     prompt: z.ZodString;
     cwd: z.ZodOptional<z.ZodString>;

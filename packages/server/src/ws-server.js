@@ -387,7 +387,7 @@ function _isSecureRequest(req) {
  *   { type: 'available_models', models: [...], provider?, defaultModel? } — models the active provider accepts
  *   { type: 'permission_input', requestId, found, tool?, input?, error? } — #6543 (IDE P3 feature B) reply to a `get_permission_input` pull: the FULL secret-redacted tool input for a pending permission (the `permission_request` broadcast truncates `input` at ~10K), so a client can build a per-hunk pre-write diff. `found:false` (+ `error`) when the request is unknown / already resolved / owned by another session — the handler is session-bound (a client only gets input for a permission its session owns).
  *   { type: 'permission_audit_result', entries } — #6772 reply to a `query_permission_audit` pull: recent permission audit entries (mode changes / session-rule changes / allow-deny decisions) matching the query's optional sessionId/auditType/since/limit. Consumed by the dashboard's per-session "Permission history" view.
- *   { type: 'permission_request', requestId, tool, description, input, remainingMs, floored } — permission prompt (`floored` #7968: the permission-floor verdict)
+ *   { type: 'permission_request', requestId, tool, description, input, remainingMs, floored, explicitConsent?, nonDelegable? } — permission prompt and consent policy
  *   { type: 'permission_resolved', decision, requestId?, toolUseId?, reason?, scope?, sessionId? } — a pending permission prompt was resolved (broadcast so every client drops its card). `requestId` names a tool-permission prompt; `toolUseId` instead names a superseded AskUserQuestion (#8470), never both. `reason` says why (#8374: 'stopped' vs a user deny); `scope: 'session'` marks an "Allow for Session" answer (#8517)
  *   { type: 'confirm_permission_mode', mode, warning } — server challenges auto mode (client must re-send with confirmed: true)
  *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated
@@ -441,7 +441,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'statusline_output', sessionId, text, active?, truncated? } — #6791: rendered stdout of the user's own Claude Code statusLine script (active:false + empty text clears it)
- *   { type: 'dev_preview', port, url, sessionId }       — dev server preview tunnel opened
+ *   { type: 'dev_preview', port, url, target?, exposure?, sessionId } — approved HTTP preview opened
  *   { type: 'dev_preview_stopped', port, sessionId }    — dev server preview tunnel closed
  *   { type: 'web_task_created', task }                  — cloud task launched
  *   { type: 'web_task_updated', task }                  — cloud task status changed
@@ -1388,7 +1388,8 @@ export class WsServer {
     }
 
     // Dev server preview tunneling
-    this._devPreview = new DevPreviewManager()
+    this._devPreview = new DevPreviewManager({ daemonPort: port, authRequired, getSession: id => this.sessionManager?.getSession(id),
+      tunnelConfig: { binaryProvenance: this.sessionManager?._binaryProvenanceOptions?.() } })
 
     // Web task manager (Claude Code Web cloud delegation). #8039: pass
     // sessionManager so every spawn (feature detection, launch, teleport)
@@ -3094,6 +3095,7 @@ export class WsServer {
 
   /** Handle cleanup when an authenticated client disconnects or is terminated */
   _handleClientDeparture(departingClient) {
+    void this._devPreview.closeClient(departingClient.id)
     // #5563: vacate primary for every session this client owned. Promotion
     // policy is NOBODY-UNTIL-CLAIM — we clear the slot (broadcast null) rather
     // than auto-promote an observer, so a backgrounded viewer is never silently
@@ -3324,6 +3326,10 @@ export class WsServer {
   }
 
   /** Graceful shutdown */
+  settleDevPreviews() {
+    return this._devPreview.closeAll()
+  }
+
   close() {
     if (this._daemonUpdate && this._daemonUpdateChangeHandler && typeof this._daemonUpdate.off === 'function') {
       this._daemonUpdate.off('change', this._daemonUpdateChangeHandler)
@@ -3403,9 +3409,9 @@ export class WsServer {
     this._clientManager.clearAllPrimary()
     this._normalizer.destroy()
 
-    // Clean up all dev preview tunnels (fire-and-forget; close() is synchronous
-    // by contract, and tunnel process cleanup is best-effort before exit)
-    void this._devPreview.closeAll()
+    // Socket teardown remains immediate; callers can await confirmed preview
+    // child settlement before exiting the daemon.
+    const previewSettlement = this._devPreview.closeAll()
 
     // Clean up web task manager
     this._webTaskManager.destroy()
@@ -3427,5 +3433,6 @@ export class WsServer {
       this._approvalServer = null
       removeShellApprovalInfo()
     }
+    return previewSettlement
   }
 }

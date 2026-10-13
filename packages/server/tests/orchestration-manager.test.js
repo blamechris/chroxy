@@ -589,7 +589,7 @@ test('gate denies an architect Bash request (never ignores it)', async () => {
     await mgr.startRun(rec.runId)
     await gated // plan done; architect session still owned (destroyed at synthesis)
     const arch = sm.created.find((c) => c.opts.metadata?.orchestrationRole === 'architect').session
-    sm.emit('session_event', { sessionId: arch.sessionId, event: 'permission_request', data: { requestId: 'rq', tool: 'Bash', input: { command: 'ls' } } })
+    sm.emit('session_event', { sessionId: arch.sessionId, event: 'permission_request', data: { explicitConsent: false, nonDelegable: false, requestId: 'rq', tool: 'Bash', input: { command: 'ls' } } })
     assert.deepEqual(arch.permissionResponses, [{ requestId: 'rq', decision: 'deny' }])
   } finally {
     cleanup()

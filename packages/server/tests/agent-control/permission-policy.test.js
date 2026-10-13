@@ -82,8 +82,8 @@ function readyClient(opts = {}) {
   return { client, sent }
 }
 
-function observe(client, { requestId, sessionId, tool, floored }) {
-  client._trackPermissionObservation({ type: 'permission_request', requestId, sessionId, tool, floored })
+function observe(client, { requestId, sessionId, tool, floored, explicitConsent = false, nonDelegable = false }) {
+  client._trackPermissionObservation({ type: 'permission_request', requestId, sessionId, tool, floored, explicitConsent, nonDelegable })
 }
 
 describe('shared exclusion-set identity (#7973)', () => {
@@ -92,8 +92,8 @@ describe('shared exclusion-set identity (#7973)', () => {
     assert.equal(COMMAND_TOOLS, CANONICAL_COMMAND_TOOLS, 'COMMAND_TOOLS must be the SAME object (import identity), not an equal-valued copy')
   })
 
-  it('NOT_DELEGABLE_TOOLS contains exactly mcp_spawn and request_permissions', () => {
-    assert.deepEqual([...NOT_DELEGABLE_TOOLS].sort(), ['mcp_spawn', 'request_permissions'])
+  it('NOT_DELEGABLE_TOOLS contains the explicit human-decision tools', () => {
+    assert.deepEqual([...NOT_DELEGABLE_TOOLS].sort(), ['dev_preview', 'mcp_spawn', 'request_permissions'])
   })
 
   // The roster is sourced from what each provider actually hands
@@ -380,7 +380,7 @@ describe('not-delegable tools: mcp_spawn / request_permissions refused regardles
   let client
   afterEach(async () => { if (client) { await client.close(); client = null } })
 
-  for (const tool of ['mcp_spawn', 'request_permissions']) {
+  for (const tool of ['dev_preview', 'mcp_spawn', 'request_permissions']) {
     it(`refuses allow for ${tool} even when floored:false and the session is owned`, async () => {
       ;({ client } = readyClient({ ownedSessions: new Set(['sess-a']) }))
       observe(client, { requestId: 'r1', sessionId: 'sess-a', tool, floored: false })
@@ -630,5 +630,24 @@ describe('CLI: --allow-command-approvals end to end (real subprocess, #7973)', (
     } finally {
       await transport.close().catch(() => {})
     }
+  })
+})
+
+describe('explicit consent metadata', () => {
+  for (const flags of [{ explicitConsent: true, nonDelegable: true }, { explicitConsent: true, nonDelegable: false }, { explicitConsent: false, nonDelegable: true }, {}]) {
+    it(`refuses unattended allow when consent is required or unknown: ${JSON.stringify(flags)}`, async () => {
+      const { client, sent } = readyClient()
+      client._ownedSessions.add('sess-a')
+      client._trackPermissionObservation({ type: 'permission_request', requestId: 'r1', sessionId: 'sess-a', tool: 'Read', floored: false, ...flags })
+      const result = await client.respondPermission('sess-a', 'r1', 'allow')
+      assert.equal(result.reason, 'not_delegable')
+      assert.equal(sent.length, 0)
+    })
+  }
+  it('refuses preview Allow even if an older sender omits its metadata', async () => {
+    const { client, sent } = readyClient(); client._ownedSessions.add('sess-a')
+    observe(client, { requestId: 'r1', sessionId: 'sess-a', tool: 'dev_preview', floored: false })
+    assert.equal((await client.respondPermission('sess-a', 'r1', 'allow')).reason, 'not_delegable')
+    assert.equal(sent.length, 0)
   })
 })

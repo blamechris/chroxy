@@ -765,7 +765,7 @@ export async function emergencyCleanup({
   // String(err?.message || err) so a non-Error throw (e.g. a Symbol) can't make
   // the log-formatting itself throw and break this best-effort teardown chain.
   try { if (tunnel) await tunnel.stop() } catch (err) { logger?.warn?.(`emergencyCleanup: tunnel.stop failed: ${String(err?.message || err)}`) }
-  try { wsServer?.close() } catch (err) { logger?.warn?.(`emergencyCleanup: wsServer.close failed: ${String(err?.message || err)}`) }
+  try { await wsServer?.close() } catch (err) { logger?.warn?.(`emergencyCleanup: wsServer.close failed: ${String(err?.message || err)}`) }
   try { mdnsService?.stop?.() } catch {}
   try { bonjourInstance?.destroy?.() } catch {}
   try { tokenManager?.destroy() } catch {}

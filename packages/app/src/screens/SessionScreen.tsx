@@ -447,6 +447,7 @@ export function SessionScreen() {
     return id && s.sessionStates[id] ? s.sessionStates[id].devPreviews : EMPTY_DEV_PREVIEWS;
   });
   const closeDevPreview = useConnectionStore((s) => s.closeDevPreview);
+  const openDevPreview = useConnectionStore((s) => s.openDevPreview);
   const webFeatures = useConnectionStore((s) => s.webFeatures);
   const isEncrypted = useConnectionLifecycleStore((s) => s.isEncrypted);
   const timeoutWarning = useConnectionStore((s) => s.timeoutWarning);
@@ -1743,7 +1744,7 @@ export function SessionScreen() {
       )}
 
       {/* Dev server preview banner */}
-      <DevPreviewBanner previews={devPreviews} onClose={closeDevPreview} />
+      <DevPreviewBanner previews={devPreviews} onClose={closeDevPreview} onOpen={openDevPreview} />
 
       {/* Web tasks panel (Claude Code Web cloud delegation) */}
       {webTasks.length > 0 && (

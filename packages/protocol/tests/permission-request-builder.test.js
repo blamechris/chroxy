@@ -41,6 +41,8 @@ describe('buildPermissionRequestMessage (#6031)', () => {
         remainingMs: 300_000,
         sessionId: 'sess-abc',
         floored: true,
+        explicitConsent: false,
+        nonDelegable: false,
       })
       assert.equal(msg.type, 'permission_request')
       assert.equal(ServerPermissionRequestSchema.safeParse(msg).success, true)
@@ -53,6 +55,8 @@ describe('buildPermissionRequestMessage (#6031)', () => {
         remainingMs: 300_000,
         sessionId: 'sess-abc',
         floored: true,
+        explicitConsent: false,
+        nonDelegable: false,
       })
     })
 

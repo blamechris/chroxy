@@ -196,10 +196,14 @@ function handleTeleportWebTask(ws, client, msg, ctx) {
   })
 }
 
+function handleOpenDevPreview(ws, client, msg, ctx) {
+  void ctx.services.devPreview.openPreview(client, msg, data => ctx.transport.send(ws, data))
+}
+
 function handleCloseDevPreview(ws, client, msg, ctx) {
   const previewSessionId = msg.sessionId || client.activeSessionId
   // Enforce session binding
-  if (client.boundSessionId && client.boundSessionId !== previewSessionId) return
+  if (client.boundSessionId || client.isPrimaryToken !== true || !client.authToken) return
   if (previewSessionId && typeof msg.port === 'number') {
     ctx.services.devPreview.closePreview(previewSessionId, msg.port)
   }
@@ -463,6 +467,7 @@ export const featureHandlers = {
   list_web_tasks: handleListWebTasks,
   teleport_web_task: handleTeleportWebTask,
   close_dev_preview: handleCloseDevPreview,
+  open_dev_preview: handleOpenDevPreview,
   create_environment: handleCreateEnvironment,
   list_environments: handleListEnvironments,
   destroy_environment: handleDestroyEnvironment,

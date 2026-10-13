@@ -52,6 +52,8 @@ export function handleDevPreview(
   const preview: DevPreview = {
     port: msg.port as number,
     url: msg.url as string,
+    ...(msg.target ? { target: msg.target as DevPreview['target'] } : {}),
+    ...(typeof msg.exposure === 'string' ? { exposure: msg.exposure } : {}),
   }
   return {
     sessionId: resolveSessionId(msg, activeSessionId),

@@ -1,406 +1,384 @@
-import { describe, it, beforeEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter, once } from 'node:events'
+import { spawn } from 'node:child_process'
+import { mkdtemp, rm, lstat, unlink, rmdir } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import http from 'node:http'
 import { DevPreviewManager } from '../src/dev-preview.js'
+import { PermissionManager } from '../src/permission-manager.js'
+import { pinPreviewTarget, assertPreviewPort } from '../src/preview-target.js'
+import { PreviewTunnelAdapter } from '../src/tunnel/preview.js'
+import { ClientMessageSchema, ServerPermissionRequestSchema } from '@chroxy/protocol'
 
-describe('DevPreviewManager', () => {
-  let manager
+const tick = () => new Promise(resolve => setImmediate(resolve))
+function fixture(options = {}) {
+  const session = { cwd: '/tmp/preview-fixture', permissionMode: 'auto' }
+  const client = { id: 'client-a', authenticated: true, isPrimaryToken: true, authToken: 'fixture-only', activeSessionId: 's1' }
+  const socket = new EventEmitter()
+  socket.destroyed = false
+  const pin = { socket, target: Object.freeze({ host: '127.0.0.1', port: 3100, pid: 100, command: 'fixture', cwd: session.cwd, started: 'fixture-generation' }), verify: async () => { if (socket.destroyed) throw new Error('Connection ended') }, close: () => { socket.destroyed = true } }
+  let creations = 0
+  const tunnel = new EventEmitter()
+  tunnel.start = async () => ({ httpUrl: 'https://fixture.trycloudflare.com' })
+  tunnel.stop = async () => {}
+  const manager = new DevPreviewManager({ daemonPort: 9911, permissionTimeoutMs: 200, getSession: () => ({ session }), pinTarget: async () => pin, createProxy: async () => ({ port: 5100, close() {} }), tunnelFactory: () => { creations++
+  return tunnel }, ...options })
+  const sent = []
+  const request = { sessionId: 's1', port: 3100, requestId: 'request-a' }
+  const open = () => manager.openPreview(client, request, msg => sent.push(msg))
+  const allow = (extra = {}, caller = client) => manager.respondToConsent(caller, { requestId: request.requestId, decision: 'allow', ...extra })
+  return { session, client, manager, socket, pin, tunnel, sent, request, open, allow, creations: () => creations }
+}
 
-  beforeEach(() => {
-    manager = new DevPreviewManager()
+describe('explicit preview lifecycle', () => {
+  it('prompts with target and posture; human Allow publishes exactly once', async () => {
+    const f = fixture()
+    const opening = f.open()
+    await tick()
+    assert.equal(f.creations(), 0)
+    const prompt = f.sent.find(m => m.type === 'permission_request')
+    assert.ok(ServerPermissionRequestSchema.safeParse(prompt).success)
+    assert.equal(prompt.explicitConsent, true)
+    assert.equal(prompt.nonDelegable, true)
+    assert.equal(prompt.input.target.host, '127.0.0.1')
+    assert.ok(prompt.description.includes('adds no authentication'))
+    assert.ok(prompt.input.exposure.includes('no WebSockets'))
+    f.allow()
+    f.allow()
+    await opening
+    assert.equal(f.creations(), 1)
+    await f.open()
+    assert.equal(f.creations(), 1)
+    await f.manager.closeAll()
   })
-
-  describe('detectPort', () => {
-    it('detects "listening on port XXXX"', () => {
-      assert.equal(manager.detectPort('Server listening on port 3000'), 3000)
-    })
-
-    it('detects "listening at port XXXX"', () => {
-      assert.equal(manager.detectPort('App listening at port 8080'), 8080)
-    })
-
-    it('detects "http://localhost:XXXX"', () => {
-      assert.equal(manager.detectPort('Started at http://localhost:5173'), 5173)
-    })
-
-    it('detects "http://127.0.0.1:XXXX"', () => {
-      assert.equal(manager.detectPort('Server running on http://127.0.0.1:4000'), 4000)
-    })
-
-    it('detects Vite-style "Local: http://localhost:XXXX"', () => {
-      assert.equal(manager.detectPort('  Local:   http://localhost:5173/'), 5173)
-    })
-
-    it('detects "ready on 0.0.0.0:XXXX"', () => {
-      assert.equal(manager.detectPort('Server ready on 0.0.0.0:3000'), 3000)
-    })
-
-    it('detects "started on port XXXX"', () => {
-      assert.equal(manager.detectPort('Express started on port 4567'), 4567)
-    })
-
-    it('detects "server is running on port XXXX"', () => {
-      assert.equal(manager.detectPort('Server is running on port 8000'), 8000)
-    })
-
-    it('detects "running on localhost:XXXX"', () => {
-      assert.equal(manager.detectPort('App running on localhost:3001'), 3001)
-    })
-
-    it('detects "serving on port XXXX"', () => {
-      assert.equal(manager.detectPort('Static files serving on port 9000'), 9000)
-    })
-
-    it('returns null for non-matching text', () => {
-      assert.equal(manager.detectPort('Hello world'), null)
-    })
-
-    it('returns null for null/undefined input', () => {
-      assert.equal(manager.detectPort(null), null)
-      assert.equal(manager.detectPort(undefined), null)
-    })
-
-    it('returns null for empty string', () => {
-      assert.equal(manager.detectPort(''), null)
-    })
-
-    it('ignores well-known non-dev ports', () => {
-      assert.equal(manager.detectPort('listening on port 22'), null)
-      assert.equal(manager.detectPort('listening on port 80'), null)
-      assert.equal(manager.detectPort('listening on port 443'), null)
-    })
-
-    it('ignores ports below 1024', () => {
-      assert.equal(manager.detectPort('listening on port 80'), null)
-    })
-
-    it('ignores database ports', () => {
-      assert.equal(manager.detectPort('PostgreSQL listening on port 5432'), null)
-      assert.equal(manager.detectPort('MySQL listening on port 3306'), null)
-      assert.equal(manager.detectPort('Redis listening on port 6379'), null)
-    })
-
-    it('handles multi-line output and matches first pattern', () => {
-      const output = `
-        Building...
-        Done in 1.2s
-        Local:   http://localhost:5173
-        Network: http://192.168.1.5:5173
-      `
-      assert.equal(manager.detectPort(output), 5173)
-    })
+  it('forwards the configured binary policy when starting the preview adapter', async () => {
+    const config = { binaryProvenance: { mode: 'block' } }
+    const f = fixture({ tunnelConfig: config })
+    let options
+    f.manager._tunnelFactory = opts => { options = opts
+    return f.tunnel }
+    const opening = f.open()
+    await tick()
+    f.allow()
+    await opening
+    assert.equal(options.config.binaryProvenance, config.binaryProvenance)
+    await f.manager.closeAll()
   })
-
-  describe('_createPreviewTunnel — pre-registration', () => {
-    it('registers the tunnel before start() resolves', async () => {
-      let tunnelInMapDuringStart = false
-      const fakeTunnel = {
-        start: async () => {
-          // At call time the tunnel should already be in _tunnels
-          tunnelInMapDuringStart = manager._getTunnel('sess-1', 3000) === fakeTunnel
-          return { httpUrl: 'https://test.trycloudflare.com', wsUrl: 'wss://test.trycloudflare.com' }
-        },
-        stop: async () => {},
-        url: null,
-      }
-      // Inject the fake tunnel by overriding CloudflareTunnelAdapter constructor via monkey-patch
-      manager._createPreviewTunnel = async function(sessionId, port) {
-        const tunnel = fakeTunnel
-        if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
-        this._tunnels.get(sessionId).set(port, tunnel)
-        const { httpUrl } = await tunnel.start()
-        if (this._getTunnel(sessionId, port) !== tunnel) {
-          try { await tunnel.stop() } catch { /* ignore */ }
-          return
-        }
-        this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
-      }.bind(manager)
-
-      await manager.handleToolResult('sess-1', 'listening on port 3000')
-      assert.equal(tunnelInMapDuringStart, true)
+  for (const mode of ['default', 'auto', 'bypassPermissions', 'acceptEdits', 'plan']) {
+    it(`requires explicit consent in ${mode}, broad rules and pending flips`, async () => {
+      const f = fixture()
+      f.session.permissionMode = mode
+      const opening = f.open()
+      await tick()
+      const pm = f.manager._requests.get('request-a').permissions
+      pm.setRules([{ tool: 'Read', decision: 'allow' }, { tool: 'Write', decision: 'allow' }])
+      pm.autoAllowPending()
+      await tick()
+      assert.equal(pm.hasPendingPrompt(), true)
+      assert.throws(() => pm.setRules([{ tool: 'dev_preview', decision: 'allow' }]))
+      assert.equal(f.creations(), 0)
+      assert.equal(pm.respondToPermission('request-a', 'allow'), false)
+      assert.equal(pm.respondToPermission('request-a', 'allowAlways'), false)
+      f.allow()
+      await opening
+      assert.equal(f.creations(), 1)
+      await f.manager.closeAll()
     })
-
-    it('stops tunnel immediately if session is destroyed during startup', async () => {
-      let stopped = false
-      let resolveStart
-      const startPromise = new Promise(resolve => { resolveStart = resolve })
-
-      const fakeTunnel = {
-        start: () => startPromise,
-        stop: async () => { stopped = true },
-        url: null,
-      }
-
-      // Use a real-ish _createPreviewTunnel that pre-registers then awaits
-      const _origCreate = manager._createPreviewTunnel.bind(manager)
-      manager._createPreviewTunnel = async function(sessionId, port) {
-        const tunnel = fakeTunnel
-        if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
-        this._tunnels.get(sessionId).set(port, tunnel)
-        try {
-          const { httpUrl } = await tunnel.start()
-          if (this._getTunnel(sessionId, port) !== tunnel) {
-            try { await tunnel.stop() } catch { /* ignore */ }
-            return
-          }
-          this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
-        } catch (_err) {
-          const sessionTunnels = this._tunnels.get(sessionId)
-          if (sessionTunnels) {
-            sessionTunnels.delete(port)
-            if (sessionTunnels.size === 0) this._tunnels.delete(sessionId)
-          }
-          try { await tunnel.stop() } catch { /* ignore */ }
-        }
-      }.bind(manager)
-
-      // Start tunnel creation (will hang waiting for startPromise)
-      const createPromise = manager.handleToolResult('sess-1', 'listening on port 3000')
-
-      // Tunnel is now pre-registered — destroy the session while start() is pending
-      await manager.closeSession('sess-1')
-
-      // Now let start() resolve
-      resolveStart({ httpUrl: 'https://test.trycloudflare.com', wsUrl: 'wss://test' })
-      await createPromise
-
-      assert.equal(stopped, true, 'tunnel.stop() must be called when session destroyed during startup')
-      assert.equal(manager._tunnels.has('sess-1'), false, 'session entry must be removed')
+  }
+  for (const scenario of ['deny', 'timeout', 'disconnect', 'destroy', 'changed target', 'changed directory', 'cancel']) {
+    it(`${scenario} settles without publication`, async () => {
+      const f = fixture({ permissionTimeoutMs: 40 })
+      const opening = f.open()
+      await tick()
+      if (scenario === 'deny') f.allow({ decision: 'deny' })
+      if (scenario === 'disconnect') await f.manager.closeClient(f.client.id)
+      if (scenario === 'destroy') await f.manager.closeSession('s1')
+      if (scenario === 'cancel') await f.manager.closePreview('s1', 3100)
+      if (scenario === 'changed target') { f.pin.verify = async () => { throw new Error('Changed target') }
+      f.allow() }
+      if (scenario === 'changed directory') { f.session.cwd = '/tmp/other-fixture'
+      f.allow() }
+      await opening
+      assert.equal(f.creations(), 0)
+      f.allow()
+      assert.equal(f.creations(), 0)
+      assert.equal(f.socket.destroyed, true)
     })
-
-    it('cleans up _tunnels entry on start() failure', async () => {
-      const fakeTunnel = {
-        start: async () => { throw new Error('cloudflared not found') },
-        stop: async () => {},
-        url: null,
-      }
-
-      manager._createPreviewTunnel = async function(sessionId, port) {
-        const tunnel = fakeTunnel
-        if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
-        this._tunnels.get(sessionId).set(port, tunnel)
-        try {
-          await tunnel.start()
-        } catch (err) {
-          const sessionTunnels = this._tunnels.get(sessionId)
-          if (sessionTunnels) {
-            sessionTunnels.delete(port)
-            if (sessionTunnels.size === 0) this._tunnels.delete(sessionId)
-          }
-          this.emit('dev_preview_error', { sessionId, port, error: err.message })
-        }
-      }.bind(manager)
-
-      const errors = []
-      manager.on('dev_preview_error', (data) => errors.push(data))
-
-      await manager.handleToolResult('sess-1', 'listening on port 3000')
-
-      assert.equal(manager._tunnels.has('sess-1'), false, 'failed tunnel must be removed from _tunnels')
-      assert.equal(errors.length, 1)
-      assert.equal(errors[0].port, 3000)
+  }
+  for (const extra of [{ decision: 'allowAlways' }, { scope: 'session' }, { editedInput: {} }]) {
+    it(`refuses modified grants ${JSON.stringify(extra)}`, async () => {
+      const f = fixture()
+      const opening = f.open()
+      await tick()
+      f.allow(extra)
+      await tick()
+      assert.equal(f.creations(), 0)
+      f.allow({ decision: 'deny' })
+      await opening
     })
-
-    it('closeSession finds tunnel registered before start() completes', async () => {
-      // Verify that closeSession can stop a tunnel that is mid-startup
-      let stopped = false
-      let resolveStart
-      const startPromise = new Promise(resolve => { resolveStart = resolve })
-
-      const fakeTunnel = {
-        start: () => startPromise,
-        stop: async () => { stopped = true },
-        url: null,
-      }
-
-      manager._createPreviewTunnel = async function(sessionId, port) {
-        const tunnel = fakeTunnel
-        if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
-        this._tunnels.get(sessionId).set(port, tunnel)
-        try {
-          const { httpUrl } = await tunnel.start()
-          if (this._getTunnel(sessionId, port) !== tunnel) {
-            try { await tunnel.stop() } catch { /* ignore */ }
-            return
-          }
-          this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
-        } catch { /* ignore */ }
-      }.bind(manager)
-
-      const createPromise = manager.handleToolResult('sess-2', 'listening on port 4000')
-
-      // closeSession must be able to find and stop the tunnel before start() resolves
-      const tunnelBeforeStart = manager._getTunnel('sess-2', 4000)
-      assert.equal(tunnelBeforeStart, fakeTunnel, 'tunnel should be in _tunnels before start() resolves')
-
-      await manager.closeSession('sess-2')
-      assert.equal(stopped, true, 'closeSession must stop mid-startup tunnel')
-
-      resolveStart({ httpUrl: 'https://test.trycloudflare.com', wsUrl: 'wss://test' })
-      await createPromise
-    })
+  }
+  it('another connection or reconnect cannot use an outstanding grant', async () => {
+    const f = fixture()
+    const opening = f.open()
+    await tick()
+    f.allow({}, { ...f.client, id: 'client-b' })
+    f.allow({}, { ...f.client })
+    await tick()
+    assert.equal(f.creations(), 0)
+    await f.manager.closeClient(f.client.id)
+    await opening
+    f.allow({}, { ...f.client, id: 'reconnected' })
+    assert.equal(f.creations(), 0)
   })
-
-  describe('handleToolResult', () => {
-    it('emits dev_preview_started for detected port (mocked)', async () => {
-      // Replace _createPreviewTunnel to avoid real cloudflared
-      let capturedArgs = null
-      manager._createPreviewTunnel = async (sessionId, port) => {
-        capturedArgs = { sessionId, port }
-      }
-
-      await manager.handleToolResult('sess-1', 'Server listening on port 3000')
-      assert.deepEqual(capturedArgs, { sessionId: 'sess-1', port: 3000 })
-    })
-
-    it('does nothing for non-matching output', async () => {
-      let called = false
-      manager._createPreviewTunnel = async () => { called = true }
-
-      await manager.handleToolResult('sess-1', 'npm install completed')
-      assert.equal(called, false)
-    })
-
-    it('does not create duplicate tunnels for same session+port', async () => {
-      let callCount = 0
-      manager._createPreviewTunnel = async (sessionId, port) => {
-        callCount++
-        // Simulate having a tunnel
-        if (!manager._tunnels.has(sessionId)) manager._tunnels.set(sessionId, new Map())
-        manager._tunnels.get(sessionId).set(port, { url: 'https://test.trycloudflare.com' })
-      }
-
-      await manager.handleToolResult('sess-1', 'listening on port 3000')
-      await manager.handleToolResult('sess-1', 'listening on port 3000')
-      assert.equal(callCount, 1)
-    })
-
-    it('allows different ports for same session', async () => {
-      let ports = []
-      manager._createPreviewTunnel = async (sessionId, port) => {
-        ports.push(port)
-        if (!manager._tunnels.has(sessionId)) manager._tunnels.set(sessionId, new Map())
-        manager._tunnels.get(sessionId).set(port, { url: `https://test${port}.trycloudflare.com` })
-      }
-
-      await manager.handleToolResult('sess-1', 'listening on port 3000')
-      await manager.handleToolResult('sess-1', 'listening on port 5173')
-      assert.deepEqual(ports, [3000, 5173])
-    })
+  it('refuses no-auth mode even when a client supplies a token string', async () => {
+    const f = fixture({ authRequired: false })
+    await f.open()
+    assert.equal(f.creations(), 0)
+    assert.equal(f.sent.some(m => m.type === 'permission_request'), false)
   })
-
-  describe('getActivePreviews', () => {
-    it('returns empty array for unknown session', () => {
-      assert.deepEqual(manager.getActivePreviews('unknown'), [])
+  for (const overrides of [{ boundSessionId: 's1' }, { boundSessionId: 's2' }, { isPrimaryToken: false }, { authenticated: false }, { authToken: undefined }, { activeSessionId: 's2' }]) {
+    it(`refuses unauthorized request ${JSON.stringify(overrides)}`, async () => {
+      const f = fixture()
+      Object.assign(f.client, overrides)
+      await f.open()
+      assert.equal(f.creations(), 0)
+      assert.equal(f.sent.some(m => m.type === 'permission_request'), false)
     })
-
-    it('returns active previews', () => {
-      manager._tunnels.set('sess-1', new Map([
-        [3000, { url: 'https://a.trycloudflare.com' }],
-        [5173, { url: 'https://b.trycloudflare.com' }],
-      ]))
-
-      const previews = manager.getActivePreviews('sess-1')
-      assert.equal(previews.length, 2)
-      assert.equal(previews[0].port, 3000)
-      assert.equal(previews[0].url, 'https://a.trycloudflare.com')
-    })
+  }
+  it('cancels while proxy creation is pending', async () => {
+    let finish
+    const f = fixture({ createProxy: () => new Promise(resolve => { finish = resolve }) })
+    const opening = f.open()
+    await tick()
+    f.allow()
+    await tick()
+    await f.manager.closePreview('s1', 3100)
+    let closed = false
+    finish({ port: 5100, close() { closed = true } })
+    await opening
+    assert.equal(f.creations(), 0)
+    assert.equal(closed, true)
   })
-
-  describe('closePreview', () => {
-    it('removes a specific tunnel and emits event', async () => {
-      let stopped = false
-      manager._tunnels.set('sess-1', new Map([
-        [3000, { stop: async () => { stopped = true }, url: 'https://a.trycloudflare.com' }],
-      ]))
-
-      let emitted = null
-      manager.on('dev_preview_stopped', (data) => { emitted = data })
-
-      await manager.closePreview('sess-1', 3000)
-      assert.equal(stopped, true)
-      assert.deepEqual(emitted, { sessionId: 'sess-1', port: 3000 })
-      assert.deepEqual(manager.getActivePreviews('sess-1'), [])
-    })
-
-    it('does nothing for non-existent tunnel', async () => {
-      await manager.closePreview('sess-1', 3000) // should not throw
-    })
+  it('close during startup publishes no URL', async () => {
+    const f = fixture()
+    let finishStart
+    f.tunnel.start = () => new Promise(resolve => { finishStart = resolve })
+    const opening = f.open()
+    await tick()
+    f.allow()
+    await tick()
+    await f.manager.closeClient(f.client.id)
+    finishStart({ httpUrl: 'https://fixture.trycloudflare.com' })
+    await opening
+    assert.equal(f.manager.getActivePreviews('s1').length, 0)
   })
-
-  describe('closeSession', () => {
-    it('closes all tunnels for a session', async () => {
-      let stoppedPorts = []
-      manager._tunnels.set('sess-1', new Map([
-        [3000, { stop: async () => { stoppedPorts.push(3000) }, url: 'https://a.trycloudflare.com' }],
-        [5173, { stop: async () => { stoppedPorts.push(5173) }, url: 'https://b.trycloudflare.com' }],
-      ]))
-
-      await manager.closeSession('sess-1')
-      assert.deepEqual(stoppedPorts.sort(), [3000, 5173])
-      assert.equal(manager._tunnels.has('sess-1'), false)
-    })
+  it('retains failed settlement without falsely publishing stopped', async () => {
+    const f = fixture()
+    const opening = f.open()
+    await tick()
+    f.allow()
+    await opening
+    const stopped = []
+    const failed = []
+    f.manager.on('dev_preview_stopped', data => stopped.push(data))
+    f.manager.on('dev_preview_stop_failed', data => failed.push(data))
+    f.tunnel.stop = async () => { throw new Error('Exit unconfirmed') }
+    await f.manager.closePreview('s1', 3100)
+    assert.equal(stopped.length, 0)
+    assert.equal(failed.length, 1)
+    assert.equal(f.manager.getActivePreviews('s1').length, 1)
+    f.tunnel.stop = async () => {}
+    await f.manager.closeAll()
+    assert.equal(stopped.length, 1)
   })
+})
 
-  describe('closeAll', () => {
-    it('closes tunnels across all sessions', async () => {
-      let stopped = []
-      manager._tunnels.set('sess-1', new Map([
-        [3000, { stop: async () => { stopped.push('sess-1:3000') }, url: 'https://a.trycloudflare.com' }],
-      ]))
-      manager._tunnels.set('sess-2', new Map([
-        [8080, { stop: async () => { stopped.push('sess-2:8080') }, url: 'https://b.trycloudflare.com' }],
-      ]))
+describe('permission and protocol boundaries', () => {
+  it('requires strict session, port and requestId with no arbitrary target', () => {
+    const request = { type: 'open_dev_preview', sessionId: 's1', port: 3100, requestId: 'r1' }
+    assert.ok(ClientMessageSchema.safeParse(request).success)
+    for (const changed of [{ host: 'localhost' }, { url: 'http://localhost:3100' }, { port: 1 }, { port: 3100.5 }, { sessionId: '' }, { requestId: '' }]) assert.equal(ClientMessageSchema.safeParse({ ...request, ...changed }).success, false)
+  })
+  it('generic admission cannot approve publication in any mode', async () => {
+    const pm = new PermissionManager()
+    for (const mode of ['auto', 'bypassPermissions', 'acceptEdits', 'default']) assert.equal((await pm.handlePermission('dev_preview', {}, null, mode)).behavior, 'deny')
+  })
+  it('refuses protected and daemon ports and accepts an ordinary dev port', () => {
+    for (const port of [22, 80, 443, 5432, 8765, 11434, 9911, 0, 65536]) assert.throws(() => assertPreviewPort(port, 9911))
+    assertPreviewPort(3100, 9911)
+  })
+})
 
+async function startService(cwd, host = '127.0.0.1', listenPort = 0) {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `import http from 'node:http'; const server=http.createServer((req,res)=>res.end('preview-fixture:'+req.url)); server.keepAliveTimeout=60000; server.listen(${listenPort}, ${JSON.stringify(host)},()=>console.log(server.address().port)); process.on('SIGTERM',()=>{server.closeAllConnections();server.close(()=>process.exit(0))});`], { cwd, env: {}, stdio: ['ignore', 'pipe', 'pipe'] })
+  let raw = ''
+  const port = await new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error('Fixture startup timed out')), 3000)
+  child.stdout.on('data', data => { raw += data
+  if (raw.includes('\n')) { clearTimeout(timer)
+  resolve(Number(raw.trim())) } })
+  child.once('error', reject) })
+  return { child, port, async close() { if (child.exitCode != null) return
+  const exited = once(child, 'close')
+  child.kill('SIGTERM')
+  await exited } }
+}
+function getHttp(port, path) {
+  return new Promise((resolve, reject) => { http.get({ host: '127.0.0.1', ...(typeof port === 'string' ? { socketPath: port } : { port }), path }, res => { let body = ''
+  res.on('data', data => { body += data })
+  res.on('end', () => resolve({ status: res.statusCode, body })) }).on('error', reject) })
+}
+
+describe('real loopback service', () => {
+  it('proves accepting peer, proxies two requests on one connection, then closes', { timeout: 15_000 }, async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'preview-test-'))
+    const service = await startService(cwd)
+    let proxyPort
+    let creations = 0
+    const session = { cwd }
+    const manager = new DevPreviewManager({ getSession: () => ({ session }), tunnelFactory: ({ config }) => { proxyPort = config.unixSocket
+    creations++
+    const tunnel = new EventEmitter()
+    tunnel.start = async () => ({ httpUrl: 'https://fixture.trycloudflare.com' })
+    tunnel.stop = async () => {}
+    return tunnel } })
+    const client = { id: 'human', authenticated: true, isPrimaryToken: true, authToken: 'fixture-only', activeSessionId: 's1' }
+    const sent = []
+    try {
+      let approve
+      const prompt = new Promise(resolve => { approve = resolve })
+      const opening = manager.openPreview(client, { sessionId: 's1', port: service.port, requestId: 'real-r1' }, msg => { sent.push(msg)
+      if (msg.type === 'permission_request' || msg.type === 'session_error') approve(msg) })
+      const consent = await prompt
+      assert.equal(consent.type, 'permission_request', consent.message)
+      assert.equal(consent.input.target.pid, service.child.pid)
+      assert.equal(creations, 0)
+      manager.respondToConsent(client, { requestId: 'real-r1', decision: 'allow' })
+      await opening
+      assert.equal(creations, 1, JSON.stringify(sent.filter(m => m.type === 'session_error')))
+      assert.deepEqual(await getHttp(proxyPort, '/first'), { status: 200, body: 'preview-fixture:/first' })
+      assert.deepEqual(await getHttp(proxyPort, '/second'), { status: 200, body: 'preview-fixture:/second' })
+      await service.close()
       await manager.closeAll()
-      assert.deepEqual(stopped.sort(), ['sess-1:3000', 'sess-2:8080'])
-      assert.equal(manager._tunnels.size, 0)
-    })
+      assert.equal(manager.getActivePreviews('s1').length, 0)
+      await assert.rejects(getHttp(proxyPort, '/closed'))
+    } finally { await manager.closeAll()
+    await service.close()
+    await rm(cwd, { recursive: true, force: true }) }
   })
-
-  // #5731 — closePreview must NOT signal a clean stop when tunnel.stop() fails;
-  // the public tunnel (exposed port) may still be live, so it surfaces a
-  // dev_preview_stop_failed event instead of silently swallowing the error.
-  describe('closePreview stop-failure (#5731)', () => {
-    it('emits dev_preview_stop_failed AND dev_preview_stopped when stop() throws, and frees the slot', async () => {
-      const events = []
-      manager.on('dev_preview_stop_failed', (e) => events.push({ type: 'stop_failed', ...e }))
-      manager.on('dev_preview_stopped', (e) => events.push({ type: 'stopped', ...e }))
-      manager._tunnels.set('sess-1', new Map([
-        [3000, { stop: async () => { throw new Error('cloudflared kill failed') }, url: 'https://a.trycloudflare.com' }],
-      ]))
-
-      await manager.closePreview('sess-1', 3000)
-
-      const failed = events.find((e) => e.type === 'stop_failed')
-      assert.ok(failed, 'dev_preview_stop_failed must be emitted on a stop() failure')
-      assert.equal(failed.sessionId, 'sess-1')
-      assert.equal(failed.port, 3000)
-      assert.match(failed.error, /cloudflared kill failed/)
-      assert.ok(events.find((e) => e.type === 'stopped'), 'dev_preview_stopped still emitted so the UI updates')
-      assert.equal(manager._tunnels.has('sess-1'), false, 'tracking slot is freed even on stop failure')
+  for (const variant of ['different directory', 'network listener']) {
+    it(`refuses ${variant} before consent`, { timeout: 10_000 }, async () => {
+      const cwd = await mkdtemp(join(tmpdir(), 'preview-target-'))
+      const service = await startService(cwd, variant === 'network listener' ? '0.0.0.0' : '127.0.0.1')
+      try { await assert.rejects(pinPreviewTarget({ port: service.port, cwd: variant === 'different directory' ? tmpdir() : cwd })) } finally { await service.close()
+      await rm(cwd, { recursive: true, force: true }) }
     })
+  }
+})
 
-    it('emits only dev_preview_stopped (no stop_failed) on a clean stop', async () => {
-      const events = []
-      manager.on('dev_preview_stop_failed', (e) => events.push({ type: 'stop_failed', ...e }))
-      manager.on('dev_preview_stopped', (e) => events.push({ type: 'stopped', ...e }))
-      manager._tunnels.set('sess-1', new Map([
-        [3000, { stop: async () => {}, url: 'https://a.trycloudflare.com' }],
-      ]))
-
-      await manager.closePreview('sess-1', 3000)
-
-      assert.equal(events.filter((e) => e.type === 'stop_failed').length, 0, 'no stop_failed on a clean stop')
-      assert.equal(events.filter((e) => e.type === 'stopped').length, 1)
-      assert.equal(manager._tunnels.has('sess-1'), false)
-    })
-
-    it('is a no-op for an unknown tunnel', async () => {
-      const events = []
-      manager.on('dev_preview_stop_failed', () => events.push('failed'))
-      manager.on('dev_preview_stopped', () => events.push('stopped'))
-      await manager.closePreview('nope', 9999)
-      assert.equal(events.length, 0)
-    })
+describe('bounded tunnel settlement', () => {
+  it('reports the HTTP preview authentication posture explicitly', () => {
+    const tunnel = new PreviewTunnelAdapter({ port: 5100 })
+    assert.ok(tunnel._quickTunnelExposureMessage('https://fixture.trycloudflare.com').includes('adds no authentication'))
   })
+  it('waits for confirmed child close', async () => {
+    const tunnel = new PreviewTunnelAdapter({ port: 5100 })
+    const proc = new EventEmitter()
+    proc.exitCode = null
+    proc.signalCode = null
+    proc.kill = () => { setImmediate(() => proc.emit('close', 0))
+    return true }
+    tunnel._children.add(proc)
+    proc.once('close', () => tunnel._children.delete(proc))
+    tunnel.process = proc
+    const stopping = tunnel.stop()
+    assert.equal(tunnel.process, proc)
+    await stopping
+    assert.equal(tunnel.process, null)
+    assert.equal(tunnel._children.size, 0)
+  })
+  it('escalates to KILL and confirms settlement', { timeout: 7000 }, async () => {
+    const tunnel = new PreviewTunnelAdapter({ port: 5100 })
+    const proc = new EventEmitter()
+    proc.exitCode = null
+    proc.signalCode = null
+    const signals = []
+    proc.kill = signal => { signals.push(signal)
+    if (signal === 'SIGKILL') setImmediate(() => proc.emit('close', null, signal))
+    return true }
+    tunnel._children.add(proc)
+    proc.once('close', () => tunnel._children.delete(proc))
+    tunnel.process = proc
+    await tunnel.stop()
+    assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
+    assert.equal(tunnel.process, null)
+  })
+  it('reports failure and retains an unconfirmed child', { timeout: 7000 }, async () => {
+    const tunnel = new PreviewTunnelAdapter({ port: 5100 })
+    const proc = new EventEmitter()
+    proc.exitCode = null
+    proc.signalCode = null
+    proc.kill = () => true
+    tunnel._children.add(proc)
+    tunnel.process = proc
+    await assert.rejects(tunnel.stop(), /could not be confirmed/)
+    assert.equal(tunnel.process, proc)
+    assert.equal(tunnel._children.size, 1)
+    proc.exitCode = 0
+    await tunnel.stop()
+  })
+})
+
+it('a private Unix HTTP origin stays ended after proxy exit and TCP service replacement', { timeout: 15_000 }, async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'preview-origin-'))
+  const service = await startService(cwd)
+  const module = fileURLToPath(new URL('../src/preview-target.js', import.meta.url))
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `import { pinPreviewTarget, createPinnedPreviewProxy } from ${JSON.stringify(module)}; const pin=await pinPreviewTarget({port:${service.port},cwd:${JSON.stringify(cwd)}}); const proxy=await createPinnedPreviewProxy(pin,async()=>{}); console.log(proxy.socketPath);`], { cwd, env: {}, stdio: ['ignore', 'pipe', 'pipe'] })
+  let path
+  let replacement
+  try {
+    path = await new Promise((resolve, reject) => {
+      let data = ''
+      const timer = setTimeout(() => reject(new Error('Unix origin fixture startup timed out')), 4000)
+      child.stdout.on('data', chunk => { data += chunk
+      if (data.includes('\n')) { clearTimeout(timer)
+      resolve(data.trim()) } })
+      child.once('error', err => { clearTimeout(timer)
+      reject(err) })
+      child.once('close', () => { clearTimeout(timer)
+      reject(new Error('Unix origin fixture closed before readiness')) })
+    })
+    const directory = path.slice(0, path.lastIndexOf('/'))
+    const owner = await lstat(directory)
+    assert.equal(owner.uid, process.getuid())
+    assert.equal(owner.mode & 0o777, 0o700)
+    assert.equal((await getHttp(path, '/first')).body, 'preview-fixture:/first')
+    const exited = once(child, 'close')
+    child.kill('SIGKILL')
+    await exited
+    await service.close()
+    replacement = await startService(cwd, '127.0.0.1', service.port)
+    assert.equal((await getHttp(replacement.port, '/replacement')).body, 'preview-fixture:/replacement')
+    await assert.rejects(getHttp(path, '/ended'))
+  } finally {
+    if (child.exitCode == null && child.signalCode == null) { const exited = once(child, 'close')
+    child.kill('SIGKILL')
+    await exited }
+    await service.close()
+    await replacement?.close()
+    if (path) {
+      const socket = await lstat(path).catch(() => null)
+      if (socket?.isSocket() && socket.uid === process.getuid()) await unlink(path)
+      await rmdir(path.slice(0, path.lastIndexOf('/')))
+    }
+    await rm(cwd, { recursive: true, force: true })
+  }
+})
+
+it('preview tunnel arguments require a private Unix origin', () => {
+  const tunnel = new PreviewTunnelAdapter({ config: { unixSocket: '/tmp/preview-fixture/origin.sock' } })
+  assert.deepEqual(tunnel._quickTunnelArguments(), ['tunnel', '--url', 'http://localhost', '--unix-socket', '/tmp/preview-fixture/origin.sock', '--no-autoupdate'])
+  assert.throws(() => new PreviewTunnelAdapter({ port: 3100 })._quickTunnelArguments(), /private Unix origin/)
 })

@@ -657,6 +657,8 @@ export const ServerPermissionRequestSchema = z.object({
   // MCP, #7854, should treat "field missing" as "cannot tell — do not allow
   // unattended", not as "not floored").
   floored: z.boolean().optional(),
+  explicitConsent: z.boolean().optional(),
+  nonDelegable: z.boolean().optional(),
 })
 
 /**
@@ -992,6 +994,8 @@ export function buildPermissionRequestMessage(fields: {
   input: unknown
   // #7968: REQUIRED for the same reason as `input` above — see the doc comment.
   floored: boolean
+  explicitConsent?: boolean
+  nonDelegable?: boolean
   description?: string
   remainingMs?: number
   sessionId?: string
@@ -1006,6 +1010,8 @@ export function buildPermissionRequestMessage(fields: {
     // states no verdict (undefined/null) gets `true`, never an absent key and
     // never `false`. A wrong-typed value still reaches the schema and throws.
     floored: fields.floored ?? true,
+    explicitConsent: fields.explicitConsent ?? false,
+    nonDelegable: fields.nonDelegable ?? false,
   }
   // Omit optional fields when absent so the wire shape stays identical to the
   // hand-built literals (clients fall back to the active session when
