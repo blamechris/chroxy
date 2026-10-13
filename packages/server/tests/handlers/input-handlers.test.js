@@ -453,6 +453,43 @@ describe('input-handlers', () => {
       assert.equal(ctx.runtime.inputDedupRecords.get('s1').has('uncertain-replay'), true)
     })
 
+    it('forwards terminal uncertain admission after admission_pending without committing history or retrying', async () => {
+      const sessions = new Map(), session = createMockSession()
+      let finish, admissionCallback
+      session.sendMessage = createSpy(async (_prompt, _attachments, options) => {
+        admissionCallback = options.onInputAdmission
+        await new Promise(resolve => { finish = resolve })
+        admissionCallback({ status: 'uncertain', delivery: 'unknown', retrySafe: false, reason: 'turn_start_uncertain', message: 'Native acknowledgement lost; the turn may have started.' })
+      })
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions), client = makeClient({ activeSessionId: 's1', clientCapabilities: new Set(['input_context_v1']) })
+      const ws = makeWs(), message = {
+        data: 'one native input', clientMessageId: 'native-uncertain-final',
+        context: { version: 1, items: [{ id: 'clip-1', kind: 'text', mediaType: 'text/plain', sizeBytes: 8, lifetime: 'one_turn', provenance: { source: 'clipboard' }, content: { type: 'text', text: 'selected' } }] },
+      }
+      await inputHandlers.input(ws, client, message, ctx)
+      assert.equal(ctx._sent.filter(m => m.type === 'input_ack').at(-1).reason, 'admission_pending')
+      finish(); await new Promise(resolve => setImmediate(resolve))
+      const acks = ctx._sent.filter(m => m.type === 'input_ack')
+      assert.deepEqual(acks.map(m => m.reason), ['admission_pending', 'turn_start_uncertain'])
+      const final = acks.at(-1)
+      assert.equal(final.clientMessageId, message.clientMessageId)
+      assert.equal(final.sessionId, 's1')
+      assert.equal(final.status, 'uncertain')
+      assert.equal(final.delivery, 'unknown')
+      assert.equal(final.retrySafe, false)
+      assert.equal(final.message, 'Native acknowledgement lost; the turn may have started.')
+      assert.equal(final.context, undefined, 'uncertainty must never attest context acceptance')
+      admissionCallback({ status: 'accepted', delivery: 'dispatch_started' })
+      assert.equal(ctx._sent.filter(m => m.type === 'input_ack').length, 2, 'terminal result cannot later become definitely forwarded')
+      assert.equal(ctx.sessions.sessionManager.recordUserInput.callCount, 0)
+      assert.equal(ctx.transport.updatePrimary.callCount, 0)
+      assert.equal(ctx._broadcasts.filter(m => m.type === 'user_input').length, 0)
+      await inputHandlers.input(ws, client, message, ctx)
+      assert.equal(session.sendMessage.callCount, 1, 'retained uncertainty must suppress same-id dispatch')
+      assert.equal(ctx._sent.at(-1).reason, 'delivery_uncertain')
+    })
+
     it('reports an uninstrumented adapter as uncertain and suppresses automatic replay (#7822 review)', async () => {
       const sessions = new Map()
       const session = createMockSession()

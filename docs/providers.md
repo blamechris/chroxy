@@ -41,7 +41,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `claude-tui` | `claude` (Claude Code CLI, interactive TUI) | `claude` CLI login (rejects `ANTHROPIC_API_KEY` — strips it from spawn env) | Deferred to `claude` TUI | Subscription login only | Persistent PTY, one warmup per session; permission hook via HTTP; deliver-on-complete (no live streaming); bills as interactive subscription. The default from #5819 until #8266. |
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` / `GOOGLE_API_KEY`, **or** `gemini login` OAuth | `gemini-2.5-pro` | Google AI Studio API key or a `gemini login` session | No permissions, no plan mode, no resume, no attachments |
-| `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY`, **or** `codex login` OAuth | CLI default (`~/.codex/config.toml`) | OpenAI API key or a `codex login` session | **Default (app-server, #6616):** approvals + permission-mode switching + attachments (image vision + document/file references) + intra-session memory; no plan mode, no resume yet. Opt out with `CHROXY_CODEX_APPSERVER=0` → legacy `codex exec` (no permissions, no attachments) |
+| `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY`, **or** `codex login` OAuth | CLI default (`~/.codex/config.toml`) | OpenAI API key or a `codex login` session | **Default (app-server, #6616):** approvals + permission-mode switching + attachments (image vision + document/file references) + intra-session memory; native restart resume on the verified driver contract (see below); no plan mode. Opt out with `CHROXY_CODEX_APPSERVER=0` → legacy `codex exec` (no permissions, no attachments) |
 | `claude-byok` | `@anthropic-ai/sdk` (npm) → Anthropic Messages API | `ANTHROPIC_API_KEY` (or `anthropicApiKey` in `~/.chroxy/credentials.json`) | `claude-opus-4-8` | Anthropic API key (per-token billing) | No `claude` binary — Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP); no cross-restart resume (#4047) |
 | `deepseek` | `@anthropic-ai/sdk` → DeepSeek's Anthropic-compatible endpoint | `DEEPSEEK_API_KEY` (or `deepseekApiKey` in `~/.chroxy/credentials.json`); `DEEPSEEK_BASE_URL` (optional endpoint override) | `deepseek-chat` | DeepSeek API key (per-token billing) | Subclass of `claude-byok` — same agent loop with DeepSeek credentials, endpoint, and pricing |
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
@@ -266,6 +266,30 @@ It is **not a strict superset of `claude-tui`** — see [Known limits →
 ## Codex
 
 OpenAI's Codex CLI wrapper.
+
+### Native restart continuity
+
+The app-server driver persists its native thread identity and resumes that same
+thread after a clean, idle daemon restart. It verifies the owning machine,
+process owner, native store, working directory, full sandbox policy, approval
+reviewer, model and reasoning effort before accepting input. Resume sends no
+model, effort or instruction override and never rebuilds native context from the
+displayed Chroxy history.
+
+The initial compatibility contract is Codex **0.154.0** on macOS or Linux with a
+verifiable OS machine identity. Other binary versions may create fresh sessions,
+but native restart continuity remains unknown until their contract is verified.
+A missing native thread, changed ownership, unknown policy or incompatible
+settings leaves the original conversation in failed-restore attention state.
+Retry uses its original native identity; creating a replacement requires an
+explicit new-session action. Older Codex state files without a native locator
+cannot recover upstream context from their display history.
+
+A completed idle restart does not replay old prompts. Input acknowledgements
+retain their **process** deduplication scope; an unacknowledged dispatch across
+an arbitrary crash is not automatically retried or described as exactly once.
+The legacy driver selected by `CHROXY_CODEX_APPSERVER=0` does not restore an
+app-server native locator.
 
 ### Install
 

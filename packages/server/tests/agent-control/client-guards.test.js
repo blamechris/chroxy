@@ -458,6 +458,38 @@ describe('input_ack correlation edge cases', () => {
     assert.notEqual(result.reason, 'admission_pending')
   })
 
+  it('sendInput receives terminal provider uncertainty promptly through the real handler and never retries', async () => {
+    const { manager, sessionsMap } = createMockSessionManager([{ id: 'probe-a', name: 'Probe A', cwd: '/tmp', provider: 'codex' }])
+    sessionsMap.get('probe-a').session.sendMessage = createSpy(async (_prompt, _attachments, options) => {
+      await new Promise(resolve => setTimeout(resolve, 20))
+      options.onInputAdmission({ status: 'uncertain', delivery: 'unknown', retrySafe: false, reason: 'turn_start_uncertain', message: 'Native acknowledgement lost; the turn may have started.' })
+    })
+    manager.recordUserInput = createSpy()
+    server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
+    const originalSend = server._handlerCtx.transport.send, acks = []
+    server._handlerCtx.transport.send = (ws, msg) => {
+      if (msg.type === 'input_ack') acks.push(msg)
+      originalSend(ws, msg)
+    }
+    const port = await startServerAndGetPort(server)
+    client = new AgentControlClient({ url: `ws://127.0.0.1:${port}`, token: 'fixture-token-only', requestTimeoutMs: 500, silent: true, ownedSessions: new Set(['probe-a']) })
+    await client.connect()
+    const result = await client.sendInput('probe-a', 'fixture work', { clientMessageId: 'native-final-uncertain' })
+    assert.deepEqual(acks.map(m => m.reason), ['admission_pending', 'turn_start_uncertain'])
+    assert.equal(result.reason, 'turn_start_uncertain', 'must receive the provider final result instead of timing out')
+    assert.equal(result.ackTimedOut, undefined)
+    assert.equal(result.status, 'uncertain')
+    assert.equal(result.delivery, 'unknown')
+    assert.equal(result.retrySafe, false)
+    assert.equal(result.message, 'Native acknowledgement lost; the turn may have started.')
+    assert.equal(client._pendingInputAcks.size, 0, 'final result clears the real waiter and its deadline')
+    assert.equal(sessionsMap.get('probe-a').session.sendMessage.callCount, 1)
+    assert.equal(manager.recordUserInput.callCount, 0)
+    const replay = await client.sendInput('probe-a', 'fixture work', { clientMessageId: 'native-final-uncertain' })
+    assert.equal(replay.reason, 'delivery_uncertain')
+    assert.equal(sessionsMap.get('probe-a').session.sendMessage.callCount, 1, 'same retained id never starts another native turn')
+  })
+
   it('sendInput resolves with status:"uncertain" (never throws) on a timeout with no ack', async () => {
     const { manager } = createMockSessionManager([{ id: 'probe-a', name: 'Probe A', cwd: '/tmp', provider: 'claude-cli' }])
     server = new EncryptedWsServer({ port: 0, apiToken: 'fixture-token-only', sessionManager: manager, authRequired: true })
