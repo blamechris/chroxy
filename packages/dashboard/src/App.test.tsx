@@ -323,6 +323,7 @@ vi.mock('./store/connection', () => {
     return state
   }
   useConnectionStore.getState = () => ({ ...baseState, ...stateOverrides })
+  useConnectionStore.subscribe = vi.fn(() => vi.fn())
   // #6287 — useChatKeyboard (mounted by App) calls these rule-eligibility helpers
   // at render to decide whether the permission shortcut offers allow-for-session.
   // Stub them false in the smoke harness (real coverage lives in

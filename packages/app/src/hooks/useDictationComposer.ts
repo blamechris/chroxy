@@ -71,6 +71,8 @@ export interface UseDictationComposerReturn {
    * pending message used voice, then clears the flag.
    */
   consumeUsedVoice: () => boolean;
+  /** Restore the voice-origin marker when a local send is refused. */
+  restoreUsedVoice: () => void;
 }
 
 export function useDictationComposer(
@@ -146,5 +148,9 @@ export function useDictationComposer(
     return used;
   }, []);
 
-  return { handleChangeText, handleMicPress, consumeUsedVoice };
+  const restoreUsedVoice = useCallback(() => {
+    usedVoiceRef.current = true;
+  }, []);
+
+  return { handleChangeText, handleMicPress, consumeUsedVoice, restoreUsedVoice };
 }

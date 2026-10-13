@@ -17,6 +17,7 @@ export interface InputDeliveryRecord {
   sessionId: string | null
   status: InputDeliveryStatus
   delivery: 'dispatch_started' | 'queued' | 'evaluation_held' | 'not_dispatched' | 'unknown'
+  retrySafe: boolean
   pendingContextItemIds: string[]
   acceptedAt?: number
   retentionExpiresAt?: number
@@ -29,6 +30,13 @@ export type InputDeliveryMap = Record<string, InputDeliveryRecord>
 
 export const MAX_INPUT_DELIVERY_RECORDS = 128
 
+/** Only this acknowledgement proves that the provider did not start the input. */
+export function isRetrySafeNotDispatched(record: InputDeliveryRecord | undefined): boolean {
+  return record?.status === 'rejected'
+    && record.delivery === 'not_dispatched'
+    && record.retrySafe === true
+}
+
 function bounded(records: InputDeliveryMap): InputDeliveryMap {
   const entries = Object.entries(records)
   if (entries.length <= MAX_INPUT_DELIVERY_RECORDS) return records
@@ -40,7 +48,7 @@ function bounded(records: InputDeliveryMap): InputDeliveryMap {
 export function beginInputDelivery(
   current: InputDeliveryMap | undefined,
   clientMessageId: string,
-  context: InputContextEnvelope,
+  context?: InputContextEnvelope,
   now = Date.now(),
   sessionId: string | null = null,
 ): InputDeliveryMap {
@@ -52,7 +60,8 @@ export function beginInputDelivery(
       sessionId,
       status: 'uncertain',
       delivery: 'unknown',
-      pendingContextItemIds: context.items.filter((item) => item.lifetime === 'one_turn').map((item) => item.id),
+      retrySafe: false,
+      pendingContextItemIds: context?.items.filter((item) => item.lifetime === 'one_turn').map((item) => item.id) ?? [],
       updatedAt: now,
     },
   })
@@ -77,6 +86,7 @@ export function applyInputAcknowledgement(current: InputDeliveryMap | undefined,
       sessionId: ack.sessionId,
       status: ack.status,
       delivery: ack.delivery,
+      retrySafe: ack.retrySafe,
       pendingContextItemIds: (previous?.pendingContextItemIds ?? []).filter((id) => !acceptedIds.has(id)),
       ...(ack.acceptedAt === undefined ? {} : { acceptedAt: ack.acceptedAt }),
       ...(ack.retentionExpiresAt === undefined ? {} : { retentionExpiresAt: ack.retentionExpiresAt }),
@@ -98,6 +108,7 @@ export function cancelInputDelivery(current: InputDeliveryMap | undefined, clien
       ...previous,
       status: 'cancelled',
       delivery: 'not_dispatched',
+      retrySafe: false,
       pendingContextItemIds: [],
       updatedAt: Date.now(),
     },

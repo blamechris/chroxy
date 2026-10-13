@@ -435,6 +435,12 @@ describe('useConnectionStore', () => {
   // faking a new turn; per-item cancel sends cancel_queued + optimistically
   // clears the local entry.
   describe('#5939 queued send-while-busy', () => {
+    const sdkSession = {
+      sessionId: 's1', name: 'SDK', cwd: '/tmp', type: 'cli' as const,
+      hasTerminal: false, model: null, permissionMode: null, isBusy: false,
+      createdAt: 0, conversationId: null, provider: 'claude-sdk',
+    }
+
     it('queues a send while the turn is in progress: optimistic bubble + pending queue entry, no new-turn fake', async () => {
       const { useConnectionStore, createEmptySessionState } = await import('./connection');
       const send = vi.fn();
@@ -442,6 +448,7 @@ describe('useConnectionStore', () => {
       useConnectionStore.setState({
         socket: openSocket,
         activeSessionId: 's1',
+        sessions: [sdkSession],
         sessionStates: { s1: { ...createEmptySessionState(), streamingMessageId: 'm-live', messages: [], queuedMessages: [] } },
       });
 
@@ -471,6 +478,7 @@ describe('useConnectionStore', () => {
       useConnectionStore.setState({
         socket: openSocket,
         activeSessionId: 's1',
+        sessions: [sdkSession],
         sessionStates: { s1: { ...createEmptySessionState(), streamingMessageId: null, isIdle: true, messages: [], queuedMessages: [] } },
       });
       const previewAttachments = [
@@ -492,6 +500,7 @@ describe('useConnectionStore', () => {
       useConnectionStore.setState({
         socket: openSocket,
         activeSessionId: 's1',
+        sessions: [sdkSession],
         sessionStates: {
           s1: {
             ...createEmptySessionState(),
@@ -526,6 +535,7 @@ describe('useConnectionStore', () => {
       useConnectionStore.setState({
         socket: openSocket,
         activeSessionId: 's1',
+        sessions: [sdkSession],
         sessionStates: { s1: { ...createEmptySessionState(), isIdle: false, streamingMessageId: null, messages: [], queuedMessages: [] } },
       });
 
@@ -546,6 +556,7 @@ describe('useConnectionStore', () => {
       useConnectionStore.setState({
         socket: openSocket,
         activeSessionId: 's1',
+        sessions: [sdkSession],
         sessionStates: { s1: { ...createEmptySessionState(), streamingMessageId: null, messages: [], queuedMessages: [] } },
       });
 

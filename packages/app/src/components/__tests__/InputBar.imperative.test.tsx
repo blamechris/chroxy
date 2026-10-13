@@ -42,6 +42,31 @@ function getTextInput(tree: renderer.ReactTestRenderer): ReactTestInstance {
 }
 
 describe('InputBar imperative draft ownership (#5556)', () => {
+  it('keeps editing enabled but inhibits both send paths during native startup', () => {
+    const ref = React.createRef<InputBarHandle>();
+    const onSend = jest.fn();
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar
+          ref={ref}
+          {...baseProps}
+          onChangeText={noop}
+          onSend={onSend}
+          sendInhibited
+          sendStatus="Session initializing — your draft is kept."
+        />,
+      );
+    });
+    act(() => { getTextInput(tree).props.onChangeText('first prompt'); });
+    expect(getTextInput(tree).props.editable).toBe(true);
+    expect(getTextInput(tree).props.onSubmitEditing).toBeUndefined();
+    expect(tree.root.findByProps({ testID: 'chat-send-button' }).props.disabled).toBe(true);
+    expect(tree.root.findByProps({ testID: 'composer-send-status' }).props.children).toBe('Session initializing — your draft is kept.');
+    expect(ref.current?.getValue()).toBe('first prompt');
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it('round-trips draft via getValue/setValue/clear on the ref', () => {
     const ref = React.createRef<InputBarHandle>();
     let tree!: renderer.ReactTestRenderer;

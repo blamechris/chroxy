@@ -4,6 +4,7 @@ import {
   applyInputAcknowledgement,
   beginInputDelivery,
   cancelInputDelivery,
+  isRetrySafeNotDispatched,
 } from './input-delivery'
 import { buildInputMessage } from '@chroxy/protocol'
 
@@ -21,6 +22,24 @@ const context = {
 }
 
 describe('input delivery contract (#7822)', () => {
+  it('tracks ordinary sends and retains retry safety only from the correlated ack', () => {
+    const started = beginInputDelivery({}, 'user-plain', undefined, 10, 's1')
+    expect(started['user-plain']).toMatchObject({
+      status: 'uncertain', retrySafe: false, pendingContextItemIds: [],
+    })
+
+    const rejected = applyInputAcknowledgement(started, {
+      type: 'input_ack', sessionId: 's1', clientMessageId: 'user-plain',
+      status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+      dedupScope: 'process', reason: 'not_runnable',
+    })
+    expect(rejected['user-plain']).toMatchObject({
+      status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+    })
+    expect(isRetrySafeNotDispatched(rejected['user-plain'])).toBe(true)
+    expect(isRetrySafeNotDispatched(started['user-plain'])).toBe(false)
+  })
+
   it('serializes selected context through the protocol shape without inventing another id', () => {
     const message = buildInputMessage({
       input: 'compare',

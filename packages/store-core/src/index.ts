@@ -74,6 +74,7 @@ export {
   beginInputDelivery,
   applyInputAcknowledgement,
   cancelInputDelivery,
+  isRetrySafeNotDispatched,
   MAX_INPUT_DELIVERY_RECORDS,
 } from './input-delivery'
 export type {
@@ -81,6 +82,10 @@ export type {
   InputDeliveryRecord,
   InputDeliveryStatus,
 } from './input-delivery'
+export { deriveComposerReadiness } from './composer-readiness'
+export type { ComposerReadiness } from './composer-readiness'
+export { recoverRejectedComposer } from './composer-recovery'
+export type { ComposerRecoveryResult } from './composer-recovery'
 export { buildInputMessage } from '@chroxy/protocol'
 // #7376: the shared wording for a tool cut off by a terminated turn, re-exported
 // so the dashboard and the mobile app import it beside the `toolResultTerminatedReason`

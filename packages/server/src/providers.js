@@ -204,6 +204,7 @@ export function getProviderRuntimeInfo(provider, session) {
       ? provider
       : (ProviderClass?.providerName || 'unknown'),
     binaryVersion,
+    inputRequiresReady: ProviderClass?.inputRequiresReady === true,
     capabilities,
     customization,
     projectInstructions,

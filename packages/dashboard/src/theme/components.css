@@ -6936,6 +6936,27 @@ button.sidebar-token-view-session-row:hover {
   max-width: 100%;
 }
 
+.input-bar-send-status {
+  width: 100%;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.composer-recovery {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-primary);
+}
+
+.composer-recovery span { flex: 1; }
+.composer-recovery button { min-height: 44px; }
+
 /* Chat redesign #6391 (slice 5): always-visible Enter-mode keyhint. Muted and
    small, sits inline before the action buttons — no extra row, so the composer
    height never churns. Tokens only (ratchet-clean).

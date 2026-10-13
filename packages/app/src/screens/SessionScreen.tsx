@@ -30,7 +30,7 @@ import type { SessionIntervention } from '@chroxy/store-core';
 // of truth for which message types compact mode hides. Converging mobile onto
 // it (instead of a hand-maintained duplicate of the same tool_use/thinking
 // check) keeps dashboard and mobile from silently drifting.
-import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect, approvePlanWithAcceptEdits, isHiddenInCompactMode } from '@chroxy/store-core';
+import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect, approvePlanWithAcceptEdits, isHiddenInCompactMode, deriveComposerReadiness, recoverRejectedComposer } from '@chroxy/store-core';
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
@@ -293,6 +293,17 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id ? s.sessions.find((sess) => sess.sessionId === id)?.provider ?? null : null;
   });
+  const activeProviderRuntimeInfo = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id ? s.sessionStates[id]?.providerRuntimeInfo ?? null : null;
+  });
+  const composerReadiness = useMemo(
+    () => deriveComposerReadiness(
+      activeProviderRuntimeInfo,
+      activeSessionProvider && activeSessionProvider !== 'codex' ? false : undefined,
+    ),
+    [activeProviderRuntimeInfo, activeSessionProvider],
+  );
   // #6901 — active session's resolved Codex sandbox mode (only codex sessions
   // carry it in session_list). Drives the read-only sandbox badge in the
   // SettingsBar. Display-only: changing it needs a new session.
@@ -824,6 +835,7 @@ export function SessionScreen() {
     // #5556 — read the draft from the InputBar ref (it owns the value now).
     const draft = inputRef.current?.getValue() ?? '';
     if (!draft.trim() && !hasAttachments) return;
+    if (!composerReadiness.canSend) return false;
     // #5938 — capture busy state at send time. A send mid-turn no longer bails
     // out: it queues (the bubble renders with a "Queued" badge and the server
     // flushes it when the current turn completes) rather than starting a fresh
@@ -841,12 +853,6 @@ export function SessionScreen() {
     const blockMap = new Map(pastedTextBlocks.map(b => [b.id, b.content]));
     const expanded = blockMap.size > 0 ? expandPasteMarkers(draft, blockMap) : draft;
     const text = expanded.trim();
-    inputRef.current?.clear();
-    // Clear paste state alongside the input — neither persists across sends.
-    setPastedTextBlocks([]);
-    pastedTextNextIdRef.current = 0;
-    setInspectedPastedTextId(null);
-
     // Detect & prefix for Claude Code Web tasks — check before addUserMessage
     // to avoid adding a thinking indicator for fire-and-forget operations
     if (text && text.startsWith('&') && !hasTerminal && !hasAttachments) {
@@ -870,7 +876,11 @@ export function SessionScreen() {
           return;
         }
         launchWebTask(webPrompt, sessionCwd || undefined);
-        return;
+        inputRef.current?.clear();
+        setPastedTextBlocks([]);
+        pastedTextNextIdRef.current = 0;
+        setInspectedPastedTextId(null);
+        return true;
       }
     }
 
@@ -885,17 +895,21 @@ export function SessionScreen() {
         const sent = useConnectionStore.getState().appendMemory(memory.note);
         if (sent === false) {
           // #6308/#6309 — disconnected: appendMemory is NOT offline-queued, so
-          // restore the draft (the input was cleared above) and surface a notice
-          // rather than silently losing the note.
-          inputRef.current?.setValue(text);
+          // Keep the untouched draft and surface a notice rather than silently
+          // losing the note.
           useConnectionStore.getState().addMessage({
             id: `memory-fail-${Date.now()}`,
             type: 'system',
             content: 'Not connected — memory note not saved. Try again once reconnected.',
             timestamp: Date.now(),
           });
+          return false;
         }
-        return;
+        inputRef.current?.clear();
+        setPastedTextBlocks([]);
+        pastedTextNextIdRef.current = 0;
+        setInspectedPastedTextId(null);
+        return true;
       }
     }
 
@@ -909,23 +923,40 @@ export function SessionScreen() {
     // dedup by id against the existing optimistic copy (issue #2902).
     const clientMessageId = nextMessageId('user');
 
-    if (viewMode === 'chat' || viewMode === 'files') {
-      addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments, { clientMessageId, queued: busy });
-    }
-
-    // Clear plan approval card — user has responded (whether approving or giving feedback)
-    if (isPlanPending) clearPlanState();
-
     // Build wire attachments (with base64 data) for the server
     const wire = hasAttachments ? toWireAttachments(pendingAttachments) : undefined;
-
-    // Clear pending attachments (frees base64 memory)
-    if (hasAttachments) setPendingAttachments([]);
 
     // PTY sessions: append CR so text + submit arrive as a single atomic write.
     // CLI sessions: the server handles the full message directly (no CR needed).
     const isVoice = consumeUsedVoice();
     const result = sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire, { isVoice, clientMessageId });
+    if (result === false) {
+      if (isVoice) restoreUsedVoice();
+      return false;
+    }
+    if (activeSessionId) {
+      if (pendingComposerSubmissionsRef.current.size >= 128) {
+        const oldest = pendingComposerSubmissionsRef.current.keys().next().value;
+        if (oldest) pendingComposerSubmissionsRef.current.delete(oldest);
+      }
+      pendingComposerSubmissionsRef.current.set(clientMessageId, {
+        clientMessageId,
+        sessionId: activeSessionId,
+        draft,
+        attachments: [...pendingAttachments],
+        pastedBlocks: [...pastedTextBlocks],
+      });
+    }
+
+    if (viewMode === 'chat' || viewMode === 'files') {
+      addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments, { clientMessageId, queued: busy });
+    }
+    if (isPlanPending) clearPlanState();
+    inputRef.current?.clear();
+    setPastedTextBlocks([]);
+    pastedTextNextIdRef.current = 0;
+    setInspectedPastedTextId(null);
+    if (hasAttachments) setPendingAttachments([]);
     if (result === 'queued') {
       const { addMessage } = useConnectionStore.getState();
       addMessage({
@@ -934,14 +965,8 @@ export function SessionScreen() {
         content: 'Message queued — waiting for reconnection...',
         timestamp: Date.now(),
       });
-    } else if (result === false && busy && (viewMode === 'chat' || viewMode === 'files')) {
-      // #6451 — the send AND the offline-enqueue both failed (queue full), so no
-      // server message_queued/dequeued will reconcile the optimistic 'Queued'
-      // badge we added when busy — roll it back so it doesn't linger forever.
-      // (enqueueMessage already surfaced a 'couldn't queue' system message via
-      // notifyQueueFailure, so we don't add a duplicate notice here.)
-      useConnectionStore.getState().clearOptimisticQueuedMessage(clientMessageId);
     }
+    return true;
   };
   // Refresh the live implementation each render, then expose a stable wrapper.
   const handleSendRef = useRef(handleSendImpl);
@@ -1121,6 +1146,50 @@ export function SessionScreen() {
   // treated as a paste and collapsed to an inline marker.
   type PastedTextBlock = { id: number; content: string };
   const [pastedTextBlocks, setPastedTextBlocks] = useState<PastedTextBlock[]>([]);
+  type ComposerSubmission = {
+    clientMessageId: string;
+    sessionId: string;
+    draft: string;
+    attachments: Attachment[];
+    pastedBlocks: PastedTextBlock[];
+  };
+  const pendingComposerSubmissionsRef = useRef<Map<string, ComposerSubmission>>(new Map());
+  const [composerRecovery, setComposerRecovery] = useState<ComposerSubmission | null>(null);
+
+  const restoreComposerSubmission = useCallback((submission: ComposerSubmission): boolean => {
+    if (activeSessionId !== submission.sessionId) return false;
+    if ((inputRef.current?.getValue() ?? '').length > 0 || pendingAttachments.length > 0) return false;
+    inputRef.current?.setValue(submission.draft);
+    setPendingAttachments(submission.attachments);
+    setPastedTextBlocks(submission.pastedBlocks);
+    setComposerRecovery(null);
+    return true;
+  }, [activeSessionId, pendingAttachments.length]);
+
+  const composerRecoveryOriginalExists = composerRecovery
+    ? sessions.some((session) => session.sessionId === composerRecovery.sessionId)
+    : false;
+  const restoreComposerRecovery = useCallback((): boolean => {
+    if (!composerRecovery || !activeSessionId) return false;
+    if (composerRecoveryOriginalExists && activeSessionId !== composerRecovery.sessionId) return false;
+    return restoreComposerSubmission(composerRecoveryOriginalExists
+      ? composerRecovery
+      : { ...composerRecovery, sessionId: activeSessionId });
+  }, [activeSessionId, composerRecovery, composerRecoveryOriginalExists, restoreComposerSubmission]);
+
+  useEffect(() => useConnectionStore.subscribe((state) => {
+    for (const [clientMessageId, submission] of pendingComposerSubmissionsRef.current) {
+      const delivery = state.sessionStates[submission.sessionId]?.inputDeliveries[clientMessageId];
+      if (!delivery || delivery.status === 'uncertain') continue;
+      pendingComposerSubmissionsRef.current.delete(clientMessageId);
+      const result = recoverRejectedComposer(delivery, submission, {
+        originalSessionActive: state.activeSessionId === submission.sessionId,
+        composerUnchanged: (inputRef.current?.getValue() ?? '').length === 0 && pendingAttachments.length === 0,
+        restore: restoreComposerSubmission,
+      });
+      if (result === 'offer') setComposerRecovery(submission);
+    }
+  }), [pendingAttachments.length, restoreComposerSubmission]);
   const pastedTextNextIdRef = useRef(0);
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null);
 
@@ -1146,7 +1215,7 @@ export function SessionScreen() {
   // recognition is a real user keystroke, so the hook re-anchors unconditionally
   // on each one — a mid-recognition manual edit is preserved and the next
   // transcript appends after it instead of overwriting it.
-  const { handleChangeText, handleMicPress, consumeUsedVoice } = useDictationComposer({
+  const { handleChangeText, handleMicPress, consumeUsedVoice, restoreUsedVoice } = useDictationComposer({
     inputRef,
     isRecognizing,
     transcript,
@@ -1881,6 +1950,37 @@ export function SessionScreen() {
           counter. */}
       <CheckInChip />
 
+      {composerRecovery && (
+        <View style={styles.composerRecovery} testID="composer-recovery" accessibilityRole="alert">
+          <Text style={styles.composerRecoveryText}>
+            {composerRecoveryOriginalExists
+              ? 'Message was not sent; the draft was kept for its original session.'
+              : 'Message was not sent and its session closed; restore the kept draft here.'}
+          </Text>
+          <TouchableOpacity
+            style={styles.composerRecoveryButton}
+            onPress={restoreComposerRecovery}
+            disabled={!activeSessionId
+              || (composerRecoveryOriginalExists && activeSessionId !== composerRecovery.sessionId)
+              || (inputRef.current?.getValue() ?? '').length > 0 || pendingAttachments.length > 0}
+            accessibilityRole="button"
+            accessibilityLabel={composerRecoveryOriginalExists ? 'Restore unsent draft' : 'Restore draft here'}
+          >
+            <Text style={styles.composerRecoveryButtonText}>
+              {composerRecoveryOriginalExists ? 'Restore' : 'Restore here'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.composerRecoveryButton}
+            onPress={() => setComposerRecovery(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss unsent draft"
+          >
+            <Text style={styles.composerRecoveryButtonText}>Dismiss</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Input area */}
       <InputBar
         ref={inputRef}
@@ -1898,6 +1998,12 @@ export function SessionScreen() {
         hasTerminal={hasTerminal}
         bottomPadding={bottomPadding}
         disabled={connectionPhase !== 'connected'}
+        sendInhibited={connectionPhase === 'connected' && !composerReadiness.canSend}
+        sendStatus={connectionPhase === 'connected' && !composerReadiness.canSend
+          ? (composerReadiness.status === 'initializing'
+              ? 'Session initializing — your draft is kept.'
+              : 'Session synchronizing — your draft is kept.')
+          : undefined}
         disabledPlaceholder={viewingCachedSession ? 'Offline — viewing cached history' : connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
         slashCommands={slashCommands}
         activityState={activityState}
@@ -1963,6 +2069,32 @@ export function SessionScreen() {
 }
 
 const styles = StyleSheet.create({
+  composerRecovery: {
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.backgroundSecondary,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.borderPrimary,
+  },
+  composerRecoveryText: {
+    flex: 1,
+    color: COLORS.textMuted,
+    fontSize: 12,
+  },
+  composerRecoveryButton: {
+    minWidth: 48,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  composerRecoveryButtonText: {
+    color: COLORS.accentBlue,
+    fontSize: 13,
+    fontWeight: '600',
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.backgroundPrimary,

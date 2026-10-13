@@ -1886,7 +1886,7 @@ export interface ConnectionState {
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   // #6453 — canonical WIRE attachment type (was an inline loose shape with a
   // `[key: string]: string` index); the dashboard sends both file_ref + image.
-  sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean; previewAttachments?: MessageAttachment[]; context?: InputContextEnvelope }) => 'sent' | 'queued' | 'uncertain' | false;
+  sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean; clientMessageId?: string; previewAttachments?: MessageAttachment[]; context?: InputContextEnvelope }) => 'sent' | 'queued' | 'uncertain' | false;
   // #6861 — `#`-prefix composer quick-append: send the note to the server, which
   // appends it to the session cwd's project CLAUDE.md and acks with
   // `append_memory_result`. Not offline-queued; returns false when disconnected.

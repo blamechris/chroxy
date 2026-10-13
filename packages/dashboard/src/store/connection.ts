@@ -206,6 +206,7 @@ import {
   buildInputMessage,
   beginInputDelivery,
   cancelInputDelivery,
+  deriveComposerReadiness,
   // #7411 — shared streaming/plan transient-state clear, single-sourced so
   // the app and dashboard onclose sweeps can't drift apart on this trio
   // again (the app's used to sweep only the active session).
@@ -4202,18 +4203,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendInput: (input, wireAttachments, options) => {
-    const { socket, activeSessionId, serverCapabilities } = get();
+    const { socket, activeSessionId, serverCapabilities, sessions } = get();
 
     // An older server would accept InputSchema's passthrough field and silently
     // drop the selected context. Gate before the optimistic user bubble so the
     // caller can keep the one-shot selection for an actionable retry.
     if (options?.context && serverCapabilities.inputContextV1 !== true) return false;
 
+    const active = get().getActiveSessionState();
+    const activeProvider = sessions.find(session => session.sessionId === activeSessionId)?.provider
+    const readiness = deriveComposerReadiness(
+      active.providerRuntimeInfo,
+      activeProvider && activeProvider !== 'codex' ? false : undefined,
+    )
+    if (!readiness.canSend) return false
+
     // Generate a stable messageId once and use it for both the optimistic
     // UI entry and the wire payload. The server adopts it verbatim as the
     // history entry's messageId, which lets reconnect-replay dedup by id
     // instead of (content, timestamp) equality (issue #2902).
-    const clientMessageId = nextMessageId('user');
+    const clientMessageId = options?.clientMessageId || nextMessageId('user');
 
     // #5939 / #5952: a send while the turn is in progress is QUEUED by the
     // server, not concurrently force-sent. Reflect that optimistically — render
@@ -4233,7 +4242,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // expression must keep mirroring the InputBar's own `isStreaming || isBusy`
     // (the #5952 invariant above), and a clause the InputBar does not have would
     // re-open exactly the gap that invariant closed. See lib/session-busy.
-    const active = get().getActiveSessionState();
     const busy = isSessionBusy(active);
 
     // Show user message immediately (optimistic update + thinking indicator, or
@@ -4250,12 +4258,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clientMessageId,
       context: options?.context,
     });
-    if (options?.context && activeSessionId) {
+    if (activeSessionId) {
       updateSession(activeSessionId, (session) => ({
         inputDeliveries: beginInputDelivery(
           session.inputDeliveries,
           clientMessageId,
-          options.context!,
+          options?.context,
           Date.now(),
           activeSessionId,
         ),

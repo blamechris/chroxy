@@ -1942,6 +1942,41 @@ function mkStartedSession(extraOpts = {}, responses = {}) {
 }
 
 describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
+  it('#8593 keeps inputReady false through native startup and never auto-dispatches a refused first prompt', async () => {
+    let resolveInitialize
+    const { s, cleanup, client, calls } = mkStartedSession({}, { 'thread/start': THREAD_START_ECHO })
+    client.initialize = (params) => {
+      calls.push(['initialize', params])
+      return new Promise(resolve => { resolveInitialize = resolve })
+    }
+    const admissions = []
+    s.on('error', () => {})
+    try {
+      const starting = s.start()
+      assert.equal(s.providerRuntimeCapabilities.inputReady, false)
+      await s.sendMessage('first prompt', undefined, { onInputAdmission: value => admissions.push(value) })
+      assert.deepEqual(admissions, [{
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        reason: 'not_runnable', message: 'The provider session is not started.',
+      }])
+      assert.equal(calls.some(([method]) => method === 'turn/start'), false)
+
+      resolveInitialize({ userAgent: 'codex_cli_rs/0.154.0 (x) chroxy' })
+      await starting
+      assert.equal(s.providerRuntimeCapabilities.inputReady, true)
+      assert.equal(calls.filter(([method]) => method === 'turn/start').length, 0,
+        'becoming ready changes affordance only; it never replays the refused prompt')
+
+      await s.sendMessage('explicit retry')
+      assert.equal(calls.filter(([method]) => method === 'turn/start').length, 1)
+      assert.equal(s.providerRuntimeCapabilities.inputReady, true,
+        'busy established sessions remain input-admissible for follow-up queuing')
+    } finally {
+      s.destroy()
+      cleanup()
+    }
+  })
+
   it('verifies a native connection through account/read before thread/start', async () => {
     const { s, cleanup, calls } = mkStartedSession(
       { connectionAuthRoute: 'native', connectionChildEnv: { PATH: '/native' } },

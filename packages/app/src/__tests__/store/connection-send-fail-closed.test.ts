@@ -109,6 +109,23 @@ describe('#7822 — mobile selected-context delivery', () => {
   });
 });
 
+describe('#8593 — mobile composer startup readiness', () => {
+  it('refuses unresolved app-server input before wire, offline queue, or delivery mutation', () => {
+    const socket = liveSocket();
+    seedSession({ providerRuntimeInfo: null, inputDeliveries: {} } as Partial<SessionState>);
+    useConnectionStore.setState({
+      sessions: [{ sessionId: 'sess-1', name: 'Codex', provider: 'codex' }], socket,
+    } as never);
+
+    expect(useConnectionStore.getState().sendInput('kept', undefined, {
+      clientMessageId: 'mobile-startup-1',
+    })).toBe(false);
+    expect(socket.send).not.toHaveBeenCalled();
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(0);
+    expect(activeState().inputDeliveries).toEqual({});
+  });
+});
+
 describe('#6308 — sendCancelQueued does not lie on a closing socket', () => {
   let warn: jest.SpyInstance;
   beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { ServerProviderRuntimeInfoSchema } from '../dist/index.js'
 
 const frame = {
-  type: 'provider_runtime_info', sessionId: 's1', provider: 'codex', binaryVersion: 'unknown',
+  type: 'provider_runtime_info', sessionId: 's1', provider: 'codex', binaryVersion: 'unknown', inputRequiresReady: true,
   capabilities: [{ name: 'mcp', state: 'unknown' }],
   customization: {
     nativeDiscovery: { state: 'unknown', files: ['AGENTS.md'], delivery: 'unknown', precedence: 'global-root-cwd' },
@@ -23,6 +23,11 @@ const frame = {
 describe('provider_runtime_info schema', () => {
   it('round-trips explicit unknown states', () => {
     assert.deepEqual(ServerProviderRuntimeInfoSchema.parse(frame), frame)
+  })
+
+  it('defaults the new static readiness trait off for older runtime frames', () => {
+    const { inputRequiresReady: _removed, ...olderFrame } = frame
+    assert.equal(ServerProviderRuntimeInfoSchema.parse(olderFrame).inputRequiresReady, false)
   })
 
   it('rejects an unknown capability state and unknown top-level fields', () => {

@@ -193,7 +193,7 @@ import {
   mergePermissionModesByProvider,
   type PermissionModesByProvider,
 } from './permission-modes-by-provider'
-import { applyInputAcknowledgement, type InputDeliveryMap } from './input-delivery'
+import { applyInputAcknowledgement, isRetrySafeNotDispatched, type InputDeliveryMap } from './input-delivery'
 import type { ProviderRuntimeInfo } from '@chroxy/protocol'
 import { parseDevPreviewStatus } from './handlers/dev-preview'
 
@@ -2786,9 +2786,21 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     message_dequeued: dispatchQueuedMessages<S>(handleMessageDequeued),
     input_ack: (msg, adapter) => {
       if (!adapter.hasSession(msg.sessionId)) return
-      adapter.updateSession(msg.sessionId, (session) => ({
-        inputDeliveries: applyInputAcknowledgement(session.inputDeliveries ?? {}, msg),
-      }) as Partial<S>)
+      adapter.updateSession(msg.sessionId, (session) => {
+        const inputDeliveries = applyInputAcknowledgement(session.inputDeliveries ?? {}, msg)
+        const delivery = inputDeliveries[msg.clientMessageId]
+        if (!isRetrySafeNotDispatched(delivery)) return { inputDeliveries } as Partial<S>
+        const ownedPendingTurn = session.pendingClientMessageId === msg.clientMessageId
+        return {
+          inputDeliveries,
+          messages: session.messages.filter(message =>
+            message.id !== msg.clientMessageId && (!ownedPendingTurn || message.id !== 'thinking')),
+          queuedMessages: session.queuedMessages?.filter(item => item.clientMessageId !== msg.clientMessageId),
+          ...(ownedPendingTurn
+            ? { streamingMessageId: null, pendingClientMessageId: null, isIdle: true }
+            : {}),
+        } as Partial<S>
+      })
     },
     // --- user_question (#5618) — byte-identical append + notify ---
     user_question: dispatchUserQuestion,

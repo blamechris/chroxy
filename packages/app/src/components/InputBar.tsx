@@ -54,7 +54,7 @@ export interface InputBarProps {
    * without holding the draft in its own render-scope state.
    */
   onChangeText: (text: string, prevText: string) => void;
-  onSend: () => void;
+  onSend: () => void | boolean;
   onInterrupt: () => void;
   onKeyPress: (key: string) => void;
   onClearTerminal: () => void;
@@ -76,6 +76,9 @@ export interface InputBarProps {
   bottomPadding: number;
   disabled?: boolean;
   disabledPlaceholder?: string;
+  /** Inhibit submission without disabling draft editing or attachments. */
+  sendInhibited?: boolean;
+  sendStatus?: string;
   slashCommands?: SlashCommand[];
   /**
    * Chat redesign #6391 (mobile): current chat-activity state, used to tint the
@@ -154,6 +157,8 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
   bottomPadding,
   disabled,
   disabledPlaceholder,
+  sendInhibited = false,
+  sendStatus,
   slashCommands = [],
   activityState = 'idle',
   queuedCount = 0,
@@ -423,6 +428,11 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
           ))}
         </ScrollView>
       )}
+      {sendStatus ? (
+        <Text style={styles.sendStatus} accessibilityRole="text" testID="composer-send-status">
+          {sendStatus}
+        </Text>
+      ) : null}
       <View style={styles.inputRow}>
         <TouchableOpacity
           style={styles.enterModeToggle}
@@ -444,7 +454,7 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
           // When enterToSend is false, multiline is true so onSubmitEditing never fires.
           // #5938 — Enter sends EVEN while streaming now; onSend routes a
           // mid-turn message to the outgoing queue (the send-while-busy path).
-          onSubmitEditing={enterToSend && !disabled ? onSend : undefined}
+          onSubmitEditing={enterToSend && !disabled && !sendInhibited ? onSend : undefined}
           blurOnSubmit={false}
           multiline={!enterToSend}
           autoCapitalize={viewMode === 'chat' ? 'sentences' : 'none'}
@@ -518,12 +528,12 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
           </TouchableOpacity>
         )}
         <TouchableOpacity
-          style={[styles.sendButton, disabled && styles.sendButtonDisabled]}
+          style={[styles.sendButton, (disabled || sendInhibited) && styles.sendButtonDisabled]}
           onPress={onSend}
-          disabled={disabled}
+          disabled={disabled || sendInhibited}
           accessibilityRole="button"
           accessibilityLabel={turnActive ? 'Queue message' : 'Send message'}
-          accessibilityState={a11yDisabled}
+          accessibilityState={(disabled || sendInhibited) ? { disabled: true } : undefined}
           testID="chat-send-button"
         >
           <Icon name="arrowUp" size={20} color={COLORS.textPrimary} />
@@ -741,6 +751,13 @@ const styles = StyleSheet.create({
     gap: 8,
     alignItems: 'center',
   },
+  sendStatus: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    lineHeight: 17,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+  },
   enterModeToggle: {
     width: 28,
     height: 28,
@@ -785,17 +802,17 @@ const styles = StyleSheet.create({
   },
   sendButton: {
     backgroundColor: COLORS.accentBlue,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
   },
   interruptButton: {
     backgroundColor: COLORS.accentRed,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     alignItems: 'center',
     justifyContent: 'center',
   },

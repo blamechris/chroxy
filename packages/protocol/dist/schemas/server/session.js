@@ -355,6 +355,10 @@ export const ServerProviderRuntimeInfoSchema = z.object({
     sessionId: z.string().min(1).max(256),
     provider: z.string().min(1).max(128),
     binaryVersion: z.union([z.string().min(1).max(PROVIDER_BINARY_VERSION_MAX_LENGTH), z.literal('unknown')]),
+    // Static adapter trait. Only drivers whose native process must finish
+    // startup before accepting input set this; live admission is `inputReady` in
+    // the session-scoped capability list below.
+    inputRequiresReady: z.boolean().optional().default(false),
     capabilities: z.array(z.object({
         name: z.string().min(1).max(96).regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
         state: ProviderRuntimeCapabilityStateSchema,

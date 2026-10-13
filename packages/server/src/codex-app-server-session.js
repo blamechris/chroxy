@@ -148,9 +148,18 @@ const CODEX_FIRST_PARTY_NATIVE_BASE_URL = 'https://chatgpt.com/backend-api/codex
  */
 export class CodexAppServerSession extends BaseSession {
   static get customizationDescriptor() { return CODEX_APPSERVER_CUSTOMIZATION }
+  static get inputRequiresReady() { return true }
 
   get providerBinaryVersion() { return this.codexVersion || 'unknown' }
-  get providerRuntimeCapabilities() { return this.codexCapabilities || {} }
+  get providerRuntimeCapabilities() {
+    return {
+      ...(this.codexCapabilities || {}),
+      // This is the exact admission boundary used by sendMessage below. Busy is
+      // deliberately excluded: an established busy session accepts follow-ups
+      // through BaseSession's existing outgoing queue.
+      inputReady: Boolean(this._processReady && this._client),
+    }
+  }
 
   // -- Provider identity (delegated to CodexSession so both paths agree) --
   static get providerName() { return 'codex' }

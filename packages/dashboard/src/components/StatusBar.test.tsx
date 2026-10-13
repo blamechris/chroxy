@@ -8,7 +8,7 @@ import type { ProviderRuntimeInfo } from '@chroxy/protocol'
 
 function runtimeInfo(capabilities: ProviderRuntimeInfo['capabilities']): ProviderRuntimeInfo {
   return {
-    provider: 'codex', binaryVersion: '1.2.3', capabilities,
+    provider: 'codex', binaryVersion: '1.2.3', inputRequiresReady: true, capabilities,
     customization: {
       nativeDiscovery: { state: 'unknown', files: ['AGENTS.md'], delivery: 'unknown', precedence: 'global-root-cwd' },
       chroxyChannels: [{ channel: 'first-user-turn', lifetime: 'first-turn', content: ['skills'] }],

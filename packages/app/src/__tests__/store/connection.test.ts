@@ -23,6 +23,20 @@ import {
 import { createMockConnectionContext } from '../../test-utils/mock-connection-context';
 import { createKeyPair } from '@chroxy/store-core';
 
+const sdkSession = (sessionId: string, name = 'SDK') => ({
+  sessionId,
+  name,
+  cwd: '/tmp',
+  type: 'cli' as const,
+  hasTerminal: false,
+  model: null,
+  permissionMode: null,
+  isBusy: false,
+  createdAt: 0,
+  conversationId: null,
+  provider: 'claude-sdk',
+});
+
 // Reset store between tests
 beforeEach(() => {
   clearAllCallbacks();
@@ -396,6 +410,11 @@ describe('message queue', () => {
     // Clear queue by calling disconnect, then reset state
     useConnectionStore.getState().disconnect();
     useConnectionLifecycleStore.setState({ connectionPhase: 'disconnected' });
+    // Offline SDK sends remain queueable. A session missing from the roster is
+    // now deliberately treated as synchronizing until its provider facts land.
+    useConnectionStore.setState({
+      sessions: [sdkSession('default')],
+    });
   });
 
   it('queues input when socket is not connected', () => {
@@ -2134,6 +2153,7 @@ describe('inactivityWarning cleanup (#3899)', () => {
     useConnectionStore.setState({
       socket: null,
       activeSessionId: 's-active',
+      sessions: [sdkSession('s-active')],
       sessionStates: {
         's-active': { ...createEmptySessionState(), inactivityWarning: { ...WARNING } },
       },
@@ -2151,6 +2171,10 @@ describe('inactivityWarning cleanup (#3899)', () => {
     useConnectionStore.setState({
       socket: null,
       activeSessionId: 's-active',
+      sessions: [
+        sdkSession('s-active'),
+        sdkSession('s-other', 'Other SDK'),
+      ],
       sessionStates: {
         's-active': { ...createEmptySessionState(), inactivityWarning: { ...WARNING } },
         's-other': { ...createEmptySessionState(), inactivityWarning: { ...WARNING } },

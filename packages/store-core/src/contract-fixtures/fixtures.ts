@@ -272,7 +272,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     type: 'provider_runtime_info',
     init: { sessions: { s1: {} } },
     message: {
-      type: 'provider_runtime_info', sessionId: 's1', provider: 'codex', binaryVersion: 'unknown',
+      type: 'provider_runtime_info', sessionId: 's1', provider: 'codex', binaryVersion: 'unknown', inputRequiresReady: true,
       capabilities: [{ name: 'mcp', state: 'unknown' }],
       customization: {
         nativeDiscovery: { state: 'unknown', files: ['AGENTS.md'], delivery: 'unknown', precedence: 'global-root-cwd' },
@@ -287,7 +287,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     },
     expect: {
       sessions: { s1: { providerRuntimeInfo: {
-        provider: 'codex', binaryVersion: 'unknown', capabilities: [{ name: 'mcp', state: 'unknown' }],
+        provider: 'codex', binaryVersion: 'unknown', inputRequiresReady: true, capabilities: [{ name: 'mcp', state: 'unknown' }],
         customization: {
           nativeDiscovery: { state: 'unknown', files: ['AGENTS.md'], delivery: 'unknown', precedence: 'global-root-cwd' },
           chroxyChannels: [{ channel: 'first-user-turn', lifetime: 'first-turn', content: ['skills'] }],

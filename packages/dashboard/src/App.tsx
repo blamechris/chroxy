@@ -29,6 +29,9 @@ import {
   selectPermissionModesForProvider,
   // #8461 — the System tab excludes turn-outcome chips (they belong to the chat).
   isSystemTabMessage,
+  deriveComposerReadiness,
+  recoverRejectedComposer,
+  nextMessageId,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -203,6 +206,13 @@ export function App() {
   )
   const activeProviderRuntimeInfo = useConnectionStore(s =>
     s.activeSessionId ? s.sessionStates[s.activeSessionId]?.providerRuntimeInfo ?? null : null,
+  )
+  const composerReadiness = useMemo(
+    () => deriveComposerReadiness(
+      activeProviderRuntimeInfo,
+      activeSessionProvider && activeSessionProvider !== 'codex' ? false : undefined,
+    ),
+    [activeProviderRuntimeInfo, activeSessionProvider],
   )
   // #6901: active session's resolved Codex sandbox mode (only codex sessions
   // carry it — session_list omits the field for every other provider). Drives
@@ -2012,6 +2022,58 @@ export function App() {
   const pastedTextNextIdRef = useRef<Map<string, number>>(new Map())
   const [pastedTextBlocks, setPastedTextBlocks] = useState<PastedTextBlock[]>([])
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null)
+  type ComposerSubmission = {
+    clientMessageId: string
+    sessionId: string
+    text: string
+    files: FileAttachment[]
+    images: ImageAttachment[]
+    pastedBlocks: PastedTextBlock[]
+  }
+  const pendingComposerSubmissionsRef = useRef<Map<string, ComposerSubmission>>(new Map())
+  const [composerRecovery, setComposerRecovery] = useState<ComposerSubmission | null>(null)
+
+  const restoreComposerSubmission = useCallback((submission: ComposerSubmission): boolean => {
+    if (activeSessionId !== submission.sessionId) return false
+    const currentDraft = inputDraftsRef.current.get(submission.sessionId) ?? ''
+    if (currentDraft.length > 0 || fileAttachments.length > 0 || imageAttachments.length > 0) return false
+    inputDraftsRef.current.set(submission.sessionId, submission.text)
+    pastedTextBlocksRef.current.set(submission.sessionId, submission.pastedBlocks)
+    setInputDraftValue(submission.text)
+    setPastedTextBlocks(submission.pastedBlocks)
+    setFileAttachments(submission.files)
+    setImageAttachments(submission.images)
+    setComposerRecovery(null)
+    return true
+  }, [activeSessionId, fileAttachments.length, imageAttachments.length])
+
+  const composerRecoveryOriginalExists = composerRecovery
+    ? sessions.some(session => session.sessionId === composerRecovery.sessionId)
+    : false
+  const restoreComposerRecovery = useCallback((): boolean => {
+    if (!composerRecovery || !activeSessionId) return false
+    if (composerRecoveryOriginalExists && activeSessionId !== composerRecovery.sessionId) return false
+    return restoreComposerSubmission(composerRecoveryOriginalExists
+      ? composerRecovery
+      : { ...composerRecovery, sessionId: activeSessionId })
+  }, [activeSessionId, composerRecovery, composerRecoveryOriginalExists, restoreComposerSubmission])
+
+  useEffect(() => {
+    return useConnectionStore.subscribe((state) => {
+      for (const [clientMessageId, submission] of pendingComposerSubmissionsRef.current) {
+        const delivery = state.sessionStates[submission.sessionId]?.inputDeliveries[clientMessageId]
+        if (!delivery || delivery.status === 'uncertain') continue
+        pendingComposerSubmissionsRef.current.delete(clientMessageId)
+        const result = recoverRejectedComposer(delivery, submission, {
+          originalSessionActive: state.activeSessionId === submission.sessionId,
+          composerUnchanged: (inputDraftsRef.current.get(submission.sessionId) ?? '').length === 0
+            && fileAttachments.length === 0 && imageAttachments.length === 0,
+          restore: restoreComposerSubmission,
+        })
+        if (result === 'offer') setComposerRecovery(submission)
+      }
+    })
+  }, [fileAttachments.length, imageAttachments.length, restoreComposerSubmission])
 
   // #8268 — composer drafts live in these refs and attachments in state, none of it
   // persisted, so the stale-bundle auto-reload must know about them. Read through a
@@ -2124,6 +2186,7 @@ export function App() {
 
   // Handlers
   const handleSend = useCallback((text: string, files?: FileAttachment[]) => {
+    if (!composerReadiness.canSend) return false
     const allFiles = files || fileAttachments
     // #6861 — `#`-prefix quick-append. A leading `# ` (hash + space) routes the
     // note to the project CLAUDE.md instead of sending a chat turn. Skipped when
@@ -2141,14 +2204,14 @@ export function App() {
           // KEEP the draft (don't clear) and surface a notice rather than
           // silently losing the note.
           addInfoNotification('Not connected — memory note not saved. Try again once reconnected.')
-          return
+          return false
         }
         const memSid = activeSessionId
         if (memSid) evictSessionComposerState(memSid)
         setInputDraftValue('')
         setPastedTextBlocks([])
         setInspectedPastedTextId(null)
-        return
+        return true
       }
     }
     const wire = toWireAttachments(
@@ -2169,11 +2232,27 @@ export function App() {
       imageAttachments.length > 0 ? imageAttachments : undefined,
       allFiles.length > 0 ? allFiles : undefined,
     )
+    const clientMessageId = nextMessageId('user')
     const sendResult = sendInput(
       expanded,
       wire.length > 0 ? wire : undefined,
-      previews.length > 0 ? { previewAttachments: previews } : undefined,
+      { clientMessageId, ...(previews.length > 0 ? { previewAttachments: previews } : {}) },
     )
+    if (sendResult === false) return false
+    if (sid) {
+      if (pendingComposerSubmissionsRef.current.size >= 128) {
+        const oldest = pendingComposerSubmissionsRef.current.keys().next().value
+        if (oldest) pendingComposerSubmissionsRef.current.delete(oldest)
+      }
+      pendingComposerSubmissionsRef.current.set(clientMessageId, {
+        clientMessageId,
+        sessionId: sid,
+        text: inputDraftsRef.current.get(sid) ?? text,
+        files: [...allFiles],
+        images: [...imageAttachments],
+        pastedBlocks: [...blocks],
+      })
+    }
     // #6295 — parity with the mobile app (SessionScreen handleSend): when the
     // socket is closed the send falls through to the offline queue and returns
     // 'queued'. Surface a transient info notice so the operator knows the
@@ -2197,7 +2276,8 @@ export function App() {
     setInputDraftValue('')
     setPastedTextBlocks([])
     setInspectedPastedTextId(null)
-  }, [sendInput, appendMemory, addInfoNotification, fileAttachments, imageAttachments, activeSessionId, isPtyProvider])
+    return true
+  }, [sendInput, appendMemory, addInfoNotification, fileAttachments, imageAttachments, activeSessionId, isPtyProvider, composerReadiness.canSend])
 
   const handleInterrupt = useCallback(() => {
     sendInterrupt()
@@ -3263,11 +3343,35 @@ export function App() {
                 actionable affordance. */}
             <CheckInChip />
 
+            {composerRecovery && (
+              <div className="composer-recovery" role="alert" data-testid="composer-recovery">
+                <span>{composerRecoveryOriginalExists
+                  ? 'Message was not sent; the draft was kept for its original session.'
+                  : 'Message was not sent and its session closed; restore the kept draft here.'}</span>
+                <button
+                  type="button"
+                  onClick={restoreComposerRecovery}
+                  disabled={!activeSessionId
+                    || (composerRecoveryOriginalExists && activeSessionId !== composerRecovery.sessionId)
+                    || inputDraftValue.length > 0 || fileAttachments.length > 0 || imageAttachments.length > 0}
+                >
+                  {composerRecoveryOriginalExists ? 'Restore unsent draft' : 'Restore draft here'}
+                </button>
+                <button type="button" onClick={() => setComposerRecovery(null)}>Dismiss</button>
+              </div>
+            )}
+
             {/* Input bar */}
             <InputBar
               onSend={handleSend}
               onInterrupt={handleInterrupt}
               disabled={!isConnected}
+              sendInhibited={isConnected && !composerReadiness.canSend}
+              sendStatus={isConnected && !composerReadiness.canSend
+                ? (composerReadiness.status === 'initializing'
+                    ? 'Session initializing — your draft is kept.'
+                    : 'Session synchronizing — your draft is kept.')
+                : undefined}
               isBusy={busyProps.isBusy}
               isStreaming={busyProps.isStreaming}
               chatActivityState={chatActivity.state}
