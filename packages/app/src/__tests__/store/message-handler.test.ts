@@ -7598,3 +7598,123 @@ describe('session_pr_status mobile dispatch', () => {
     expect(Object.keys(store.getState().sessionStates)).toEqual(['s1']);
   });
 });
+
+// #8240: use the actual WS handlers, and inspect the rendered projection after
+// every frame, including the prefix/tail overlap before full replay commits.
+describe('stable user input delivery and replay projection (#8240)', () => {
+  let store: ReturnType<typeof createMockStore>;
+  const state = () => store.getState() as any;
+  const messages = (sessionId = 's1') => state().sessionStates[sessionId].messages;
+  const setup = (held: any[] = []) => {
+    resetAllHandlerState();
+    resetReplayReconcile();
+    store = createMockStore({
+      activeSessionId: 's1', myClientId: 'me',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any, { sessionId: 's2', name: 'S2' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: held },
+        s2: { ...createEmptySessionState() },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+  };
+  const frame = (message: Record<string, unknown>) => {
+    _testMessageHandler.handle(message);
+    for (const sessionId of ['s1', 's2']) {
+      const view = buildChatViewMessages(messages(sessionId), null);
+      const ids = view.chatMessages.map(message => message.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      const groupIds = view.displayGroups.flatMap(group => group.type === 'single'
+        ? [group.message.id] : group.messages.map(message => message.id));
+      expect(new Set(groupIds).size).toBe(groupIds.length);
+    }
+  };
+  const live = (overrides: Record<string, unknown> = {}) => frame({
+    type: 'user_input', sessionId: 's1', clientId: 'other',
+    messageId: 'input-1', text: 'same prompt', timestamp: 1, ...overrides,
+  });
+  const start = (fullHistory: boolean) => frame({ type: 'history_replay_start', sessionId: 's1', fullHistory });
+  const replay = (overrides: Record<string, unknown> = {}) => frame({
+    type: 'message', messageType: 'user_input', sessionId: 's1',
+    messageId: 'input-1', content: 'same prompt', timestamp: 1, historySeq: 1, ...overrides,
+  });
+  const end = () => frame({ type: 'history_replay_end', sessionId: 's1', latestSeq: 1 });
+  afterEach(() => {
+    clearDeltaBuffers();
+    resetAllHandlerState();
+    resetReplayReconcile();
+  });
+
+  it('deduplicates repeated live IDs in their session but keeps different IDs and sessions', () => {
+    setup();
+    live();
+    live();
+    expect(messages()).toHaveLength(1);
+
+    live({ messageId: 'input-2' });
+    live({ sessionId: 's2' });
+    expect(messages().map((message: any) => message.id)).toEqual(['input-1', 'input-2']);
+    expect(messages('s2').map((message: any) => message.id)).toEqual(['input-1']);
+
+
+  });
+
+  it('keeps optimistic input visible once throughout full replay and retains the authoritative tail', () => {
+    const optimistic = { id: 'input-1', type: 'user_input', content: 'optimistic prompt', timestamp: 0 };
+    setup([optimistic]);
+    start(true);
+    live(); // the cached prefix already owns this live delivery
+    expect(messages()).toEqual([optimistic]);
+    replay({ content: 'authoritative prompt', timestamp: 2 });
+    expect(messages()).toHaveLength(2); // storage still owns both until replay_end
+    expect(messages()[0]).toBe(optimistic);
+    const view = buildChatViewMessages(messages(), null);
+    expect(view.chatMessages).toHaveLength(1);
+    expect(view.chatMessages[0]).toMatchObject({ id: 'input-1', content: 'authoritative prompt', timestamp: 2 });
+    expect(view.storeMsgMap.get('input-1')).toBe(messages()[1]);
+    live();
+    expect(messages()).toHaveLength(2);
+    end();
+    expect(messages()).toEqual([expect.objectContaining({ id: 'input-1', content: 'authoritative prompt', timestamp: 2 })]);
+    live();
+    expect(messages()).toHaveLength(1);
+
+  });
+
+  it('keeps one daemon wake across delta replay and repeated live deliveries', () => {
+    setup();
+    live({ source: 'daemon', clientId: undefined });
+    start(false);
+    replay();
+    live({ source: 'daemon', clientId: undefined });
+    end();
+    live({ source: 'daemon', clientId: undefined });
+    expect(messages()).toHaveLength(1);
+
+  });
+
+  it('ignores a live echo of an input first received by replay', () => {
+    setup();
+    start(true);
+    replay();
+    live();
+    expect(messages()).toHaveLength(1);
+    end();
+    live();
+    expect(messages()).toHaveLength(1);
+
+  });
+
+  it('keeps a fresh live wake delivered during full replay when history repeats its ID', () => {
+    setup([{ id: 'old-input', type: 'user_input', content: 'older', timestamp: 0 }]);
+    start(true);
+    live({ source: 'daemon', clientId: undefined });
+    replay();
+    live({ source: 'daemon', clientId: undefined });
+    expect(messages().filter((message: any) => message.id === 'input-1')).toHaveLength(1);
+    end();
+    expect(messages().map((message: any) => message.id)).toEqual(['input-1']);
+
+  });
+});

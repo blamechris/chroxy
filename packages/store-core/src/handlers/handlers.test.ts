@@ -6651,6 +6651,24 @@ describe('handleUserQuestion', () => {
 // handleUserInput
 // ---------------------------------------------------------------------------
 describe('handleUserInput', () => {
+  it('skips a repeated stable id in the resolved session before returning side effects (#8240)', () => {
+    const held: ChatMessage[] = [{ id: 'input-1', type: 'user_input', content: 'hello', timestamp: 1 }]
+    const getMessages = (sessionId: string) => sessionId === 's1' ? held : []
+    const frame = { messageId: 'input-1', text: 'hello', sessionId: 's1', clientId: 'them' }
+    expect(handleUserInput(frame, 'me', 's2', getMessages)).toBeNull()
+    expect(handleUserInput({ ...frame, sessionId: undefined }, 'me', 's1', getMessages)).toBeNull()
+    expect(handleUserInput({ ...frame, sessionId: 's2' }, 'me', 's1', getMessages)?.sessionId).toBe('s2')
+    expect(handleUserInput({ ...frame, messageId: 'input-2' }, 'me', 's1', getMessages)?.chatMessage.id).toBe('input-2')
+  })
+
+  it('keeps legacy inputs without stable ids even when their text repeats (#8240)', () => {
+    const held: ChatMessage[] = [{ id: 'input-1', type: 'user_input', content: 'hello', timestamp: 1 }]
+    const frame = { text: 'hello', sessionId: 's1', clientId: 'them' }
+    const first = handleUserInput(frame, 'me', 's1', () => held)!
+    const second = handleUserInput(frame, 'me', 's1', () => [...held, first.chatMessage])!
+    expect(second.chatMessage.id).not.toBe(first.chatMessage.id)
+  })
+
   it('returns null when parseUserInputMessage returns null (own client echo)', () => {
     const out = handleUserInput(
       { clientId: 'me', text: 'hello', sessionId: 'sess-1' },

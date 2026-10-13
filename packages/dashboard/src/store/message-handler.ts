@@ -5970,7 +5970,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
     case 'user_input': {
       // Server broadcasts user_input to all OTHER clients when someone sends a message.
       // Skip if it came from this client (we already show it via optimistic UI).
-      const userInput = sharedUserInput(msg, get().myClientId, get().activeSessionId);
+      const userInput = sharedUserInput(msg, get().myClientId, get().activeSessionId,
+        (sessionId) => get().sessionStates[sessionId]?.messages ?? []);
       if (!userInput) break;
       // #8301: the daemon wrote this turn (the CI wake), not a person. Optional on
       // the wire: absent for typed input and for an older server.
