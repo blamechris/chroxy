@@ -284,9 +284,9 @@ describe('ChatSettingsDropdown', () => {
       expect(screen.getByTestId('active-model-badge').textContent).toContain('opus')
     })
 
-    it('badge falls back to "Default" when readOnlyModel is an empty string', () => {
+    it('badge falls back to "Provider default" when readOnlyModel is an empty string', () => {
       renderDropdown({ availableModels: [], readOnlyModel: '' })
-      expect(screen.getByTestId('active-model-badge').textContent).toMatch(/default/i)
+      expect(screen.getByTestId('active-model-badge').textContent).toBe('Provider default')
     })
 
     it('does NOT render the badge when the picker is shown (availableModels non-empty)', () => {

@@ -34,6 +34,12 @@ describe('model presentation (#8260)', () => {
     expect(formatActiveModelLabel(models, null)).toBe('Provider default')
     expect(formatActiveModelLabel(models, null, 'haiku')).toBe('Default (Haiku 4.5 (provider alias))')
   })
+  it('matches the default by provider target when accepted aliases share a target', () => {
+    const shared = [{ id: 'a', fullId: 'same-target', label: 'Shared' }, { id: 'b', fullId: 'same-target', label: 'Shared' }]
+    expect(formatActiveModelLabel(shared, 'b', 'a')).toBe('Default (Shared)')
+    expect(formatActiveModelLabel(shared, 'same-target', 'a')).toBe('Default (Shared)')
+    expect(modelChoices(shared)).toHaveLength(1)
+  })
   it('formats absent dated running IDs without selecting an undated row', () => {
     const dated = 'claude-haiku-4-5-20251101'
     expect(findModelEntry(models, dated)).toBeUndefined()

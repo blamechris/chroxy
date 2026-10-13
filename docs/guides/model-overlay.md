@@ -8,7 +8,10 @@ Claude's SDK discovery is a partial observation on each session initialization. 
 retains previously observed Claude targets across sessions and cache reloads, replacing
 metadata only for targets reported again. A release's static model table does not retire
 a previously reported alias, version or date. Explicit registry/cache reset clears those
-observations. Other providers continue replacing their discovered rosters.
+observations. Overlay-only entries and their synthesized 1M variants stay out of
+the model cache and disappear when their declaration is removed. A variant the
+provider explicitly reports remains a provider observation. Other providers
+continue replacing their discovered rosters.
 
 The picker keeps provider aliases, version pins, dated pins and 1M variants as separate
 choices when they name different provider targets. Repeated labels receive alias or pin

@@ -60,7 +60,9 @@ export function formatActiveModelLabel(
   if (entry) {
     const label = modelChoices(models).find(m => (m.fullId || m.id) === (entry.fullId || entry.id))?.label ?? baseLabel(entry)
     const defaultEntry = findModelEntry(models, defaultModelId)
-    return defaultEntry === entry && label !== 'Provider default' ? `Default (${label})` : label
+    const isDefault = defaultEntry != null
+      && (defaultEntry.fullId || defaultEntry.id) === (entry.fullId || entry.id)
+    return isDefault && label !== 'Provider default' ? `Default (${label})` : label
   }
   if (selected === 'default') return 'Provider default'
   if (isClaudeBackedProvider(provider)) {

@@ -559,7 +559,8 @@ export function App() {
       showModelPicker: caps?.modelSwitch !== false,
       // #4464: render a non-interactive badge in the picker's slot when the
       // active provider permanently lacks mid-session model switching (TUI).
-      readOnlyModel: caps?.modelSwitch === false ? activeModel : null,
+      readOnlyModel: caps?.modelSwitch === false
+        ? formatActiveModelLabel(availableModels, activeModel, defaultModelId, activeSessionProvider) : null,
       showPermissionMode: caps?.permissionModeSwitch !== false,
       // #8084: the active provider's `planMode` capability (claude-tui reports
       // `false` — claude-tui-session.js). Gates BOTH the "Plan" option in the
@@ -585,7 +586,7 @@ export function App() {
       // highlight.
       highlightThinkingKeywords: !!caps?.thinkingKeywords,
     }
-  }, [activeSessionProvider, availableProviders, activeModel, activeModelThinkingLevels])
+  }, [activeSessionProvider, availableProviders, activeModel, activeModelThinkingLevels, availableModels, defaultModelId])
 
   // #8084 — hide the "Plan" entry from the permission-mode dropdown when the
   // active provider's capability says it cannot honour plan mode
@@ -3317,6 +3318,7 @@ export function App() {
         // equivalent field on the auth_ok-time `sessionCwd` fallback).
         repoCwd={activeSessionCwd != null ? activeSessionRepoCwd : undefined}
         model={activeModel || undefined}
+        modelLabel={activeModelLabel}
         cost={sessionCost ?? undefined}
         context={formatContext(contextOccupancy)}
         contextPercent={contextPercent}

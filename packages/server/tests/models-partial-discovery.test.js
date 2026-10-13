@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createModelsRegistry } from '../src/models.js'
@@ -54,12 +54,79 @@ describe('Claude partial discovery (#8260)', () => {
     assert.equal(rows[0].contextWindow, 333_333)
   })
   it('operator-only declarations remain removable after partial discovery', () => {
-    const r = createModelsRegistry({ overlay: new Map([['claude-custom-7', { label: 'Custom', shortId: 'custom' }]]) })
+    const r = createModelsRegistry({ overlay: new Map([['claude-custom-7', { fullId: 'claude-custom-7', label: 'Custom', shortId: 'custom' }]]) })
     r.updateModels(aliases)
     assert.ok(r.getModels().some(m => m.id === 'custom'))
     r.applyOverlay(new Map())
     assert.ok(!r.getModels().some(m => m.id === 'custom'))
     for (const value of aliases.map(m => m.value)) assert.ok(r.getModels().some(m => m.fullId === value))
+  })
+  it('removes a construction overlay after cache warm-up before any SDK refresh', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-overlay-cache-8260-'))
+    try {
+      const cache = join(dir, 'models.json')
+      const fullId = 'claude-custom-7'
+      const real = { id: 'haiku-4-5-20251001', fullId: aliases[2].value, label: 'Provider label', contextWindow: 333_333 }
+      writeFileSync(cache, JSON.stringify({ models: [real], defaultModelId: real.id }))
+      const r = createModelsRegistry({ overlay: new Map([[fullId, { fullId, label: 'Custom', shortId: 'custom' }]]) })
+      assert.equal(r.loadCache(cache), true)
+      assert.ok(r.getModels().some(m => m.fullId === fullId))
+      r.applyOverlay(new Map())
+      assert.ok(!r.getModels().some(m => m.fullId === fullId))
+      assert.ok(!r.getAllowedModelIds().has(fullId))
+      assert.ok(!r.getAllowedModelIds().has('custom'))
+      assert.deepEqual(r.getModels().find(m => m.fullId === real.fullId), real)
+      assert.equal(r.getDefaultModelId(), real.id)
+      assert.equal(r.saveCache(cache), true)
+      const saved = JSON.parse(readFileSync(cache, 'utf-8'))
+      assert.ok(!saved.models.some(m => m.fullId === fullId))
+      assert.deepEqual(saved.models.find(m => m.fullId === real.fullId), real)
+      assert.equal(saved.defaultModelId, real.id)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+  it('withholds an overlay-only synthesized 1M variant from cache and removes it with its base', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-overlay-variant-8260-'))
+    try {
+      const cache = join(dir, 'models.json')
+      const fullId = 'claude-custom-7'
+      const variant = `${fullId}[1m]`
+      const r = createModelsRegistry({ overlay: new Map([[fullId, { fullId, label: 'Custom', shortId: 'custom', contextWindow: 1_000_000 }]]) })
+      r.updateModels(aliases)
+      const synthesized = r.getModels().find(m => m.fullId === variant)
+      assert.ok(synthesized)
+      assert.equal(synthesized.provenance, undefined)
+      assert.equal(r.saveCache(cache), true)
+      const saved = JSON.parse(readFileSync(cache, 'utf-8'))
+      assert.ok(!saved.models.some(m => m.fullId === fullId || m.fullId === variant))
+      r.applyOverlay(new Map())
+      assert.ok(!r.getModels().some(m => m.fullId === fullId || m.fullId === variant))
+      assert.ok(!r.getAllowedModelIds().has(variant))
+      const restarted = createModelsRegistry()
+      assert.equal(restarted.loadCache(cache), true)
+      restarted.updateModels([aliases[2]])
+      assert.ok(!restarted.getModels().some(m => m.fullId === fullId || m.fullId === variant))
+      assert.ok(!restarted.getAllowedModelIds().has(variant))
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+  it('retains an explicitly provider-reported 1M variant after the base declaration is removed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-reported-variant-8260-'))
+    try {
+      const cache = join(dir, 'models.json')
+      const fullId = 'claude-custom-7'
+      const variant = `${fullId}[1m]`
+      const r = createModelsRegistry({ overlay: new Map([[fullId, { fullId, label: 'Custom', contextWindow: 1_000_000 }]]) })
+      r.updateModels(aliases)
+      r.updateModels([{ value: variant, displayName: 'Provider variant', contextWindow: 1_000_000, provenance: 'discovered' }])
+      r.applyOverlay(new Map())
+      assert.equal(r.getModels().find(m => m.fullId === variant)?.label, 'Provider variant')
+      assert.ok(r.getAllowedModelIds().has(variant))
+      assert.equal(r.saveCache(cache), true)
+      const restarted = createModelsRegistry()
+      assert.equal(restarted.loadCache(cache), true)
+      restarted.updateModels([aliases[2]])
+      assert.equal(restarted.getModels().find(m => m.fullId === variant)?.label, 'Provider variant')
+      assert.ok(restarted.getAllowedModelIds().has(variant))
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   })
   it('non-Claude discovery remains a replacement', () => {
     const r = createModelsRegistry({ fallbackModels: [], deriveId: id => id, hasDiscoverySeam: true })

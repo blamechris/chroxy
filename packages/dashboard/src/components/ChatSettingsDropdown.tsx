@@ -60,7 +60,8 @@ export interface ChatSettingsDropdownProps {
   // when the active provider doesn't expose a mid-session model switch
   // (today: claude TUI — see claude-tui-session.js capability.modelSwitch=false).
   // Passing a string here causes the badge to render in the picker's slot
-  // showing that id (or "Default" when empty). Null hides any model UI —
+  // showing the caller's formatted label (or "Provider default" when empty).
+  // The actual target remains in activeModel for its tooltip. Null hides model UI —
   // same as today's "availableModels=[]" behaviour for the transient
   // provider-switch case where we don't want a flash of a stale label.
   readOnlyModel?: string | null
@@ -215,7 +216,7 @@ export function ChatSettingsDropdown({
           aria-label={modelTitle}
           role="status"
         >
-          {readOnlyModel || 'Default'}
+          {readOnlyModel || 'Provider default'}
         </span>
       )}
 

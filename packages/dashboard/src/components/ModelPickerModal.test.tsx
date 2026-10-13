@@ -183,3 +183,11 @@ describe('model target identity (#8260)', () => {
     expect(screen.getAllByRole('option').filter(row => row.getAttribute('aria-selected') === 'true')).toHaveLength(0)
   })
 })
+
+it('marks one shared-target row as active and default when different accepted aliases name it (#8260)', () => {
+  renderModal({ availableModels: [{ id: 'a', fullId: 'same-target', label: 'Shared' }, { id: 'b', fullId: 'same-target', label: 'Shared' }], activeModel: 'b', defaultModelId: 'a' })
+  expect(screen.getAllByRole('option')).toHaveLength(1)
+  const row = screen.getByTestId('model-picker-item-a')
+  expect(row.getAttribute('aria-selected')).toBe('true')
+  expect(row.textContent).toContain('Shared (default)')
+})

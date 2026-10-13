@@ -4778,3 +4778,33 @@ describe('#8123 — sidebar groups worktree sessions under their repo', () => {
     expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
   })
 })
+
+describe('model labels across actual dashboard callers (#8260)', () => {
+  const cases = [
+    { provider: 'claude-sdk', model: 'claude-haiku-4-5-20251101', label: 'Haiku 4.5 (pinned 20251101)', modelSwitch: true },
+    { provider: 'claude-sdk', model: 'default', label: 'Provider default', modelSwitch: true },
+    { provider: 'claude-tui', model: 'claude-haiku-4-5-20251101', label: 'Haiku 4.5 (pinned 20251101)', modelSwitch: false },
+    { provider: 'claude-tui', model: 'default', label: 'Provider default', modelSwitch: false },
+  ]
+  it.each(cases)('keeps header and footer consistent for $provider / $model with the actual target tooltip', ({ provider, model, label, modelSwitch }) => {
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null, provider }],
+      activeSessionId: 's1',
+      availableProviders: [{ name: provider, label: provider, capabilities: { modelSwitch, permissionModeSwitch: false } }],
+      modelsByProvider: { [provider]: { models: [
+        { id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+        { id: 'default', fullId: 'default', label: 'Default' },
+      ], defaultModelId: 'default' } },
+      getActiveSessionState: () => ({ messages: [], streamingMessageId: null, activeModel: model, permissionMode: null, contextUsage: null, sessionCost: null, isIdle: true, activeAgents: [], isPlanPending: false }),
+    }
+    const { container } = render(<App />)
+    const header = screen.getByTestId(modelSwitch ? 'chat-settings-trigger' : 'active-model-badge')
+    const footer = container.querySelector('.footer-model')!
+    expect(header.textContent).toBe(label)
+    expect(footer.textContent).toBe(label)
+    expect(header.getAttribute('title')).toContain(model)
+    expect(footer.getAttribute('title')).toContain(model)
+    if (!modelSwitch) expect(screen.queryByTestId('chat-settings-trigger')).toBeNull()
+  })
+})

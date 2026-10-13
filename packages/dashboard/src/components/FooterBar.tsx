@@ -37,6 +37,8 @@ export interface FooterBarProps {
    */
   repoCwd?: string | null
   model?: string
+  /** Human-readable label; `model` remains the actual target in the tooltip. */
+  modelLabel?: string
   cost?: number
   context?: string
   contextPercent?: number | null
@@ -127,6 +129,7 @@ export function FooterBar({
   cwd,
   repoCwd,
   model,
+  modelLabel,
   cost,
   context,
   contextPercent,
@@ -303,7 +306,7 @@ export function FooterBar({
             title={modelTip}
             aria-label={modelTip}
           >
-            {model}
+            {modelLabel || model}
           </span>
         )}
         {cost != null && (

@@ -743,6 +743,9 @@ export function createModelsRegistry(hooks = {}) {
    * test on the id itself (#7799 round 2).
    */
   let providerReportedFullIds = new Set()
+  // Synthesized variants inherit the declaration-only base's lifetime, while
+  // a variant explicitly reported by the provider has its own authority.
+  const declarationVariantBases = new Map()
 
   /**
    * True for a row that is in the roster ONLY because the operator's overlay
@@ -789,7 +792,10 @@ export function createModelsRegistry(hooks = {}) {
    * out whether its id is in the static seed or not.
    */
   function isUnpersistableDeclaredRow(fullId) {
-    return overlayDeclaredFullIds.has(fullId) && !providerReportedFullIds.has(fullId)
+    if (providerReportedFullIds.has(fullId)) return false
+    const base = declarationVariantBases.get(fullId)
+    return overlayDeclaredFullIds.has(fullId)
+      || (base !== undefined && !providerReportedFullIds.has(base))
   }
 
   /**
@@ -1435,6 +1441,9 @@ export function createModelsRegistry(hooks = {}) {
           const variantFullId = `${m.fullId}${ONE_M_SUFFIX}`
           if (seenFullIds.has(variantFullId)) continue
           const variantId = `${m.id}${ONE_M_SUFFIX}`
+          if (isUnpersistableDeclaredRow(m.fullId)) {
+            declarationVariantBases.set(variantFullId, m.fullId)
+          }
           // Consult the metadata hook first so a registry that supplies one
           // gets its authoritative label instead of the humanizeModelId
           // mangling (#4441 follow-up to #4438). `getRegistryForProvider`
@@ -1572,6 +1581,7 @@ export function createModelsRegistry(hooks = {}) {
       // nothing a provider reported, so every declared row is declaration-only
       // again until the next refresh or cache load.
       providerReportedFullIds = new Set()
+      declarationVariantBases.clear()
       // #7888 re-review — the line above is exactly what makes an overlay
       // override of a base row declaration-only again: without a strip
       // between here and `activeModels`, a row that HAD lost `provenance`
@@ -1767,7 +1777,10 @@ export function createModelsRegistry(hooks = {}) {
         // whose seed is a recommendation list rather than a roster claim
         // (`unionsStaticFallbacks`, ollama). Both are read through
         // `unionableSeedRows()`; neither is a provider-name check.
-        const seenFullIds = new Set(models.map(m => m.fullId))
+        // Retain only rows actually read from disk. The seed union below must
+        // never turn a construction-time overlay declaration into an observation.
+        const cachedModels = [...models]
+        const seenFullIds = new Set(cachedModels.map(m => m.fullId))
         // #7799 round 2 — same provenance record as the `updateModels` copy,
         // taken BEFORE the union: a cache file is what a provider reported, so
         // the rows read off disk carry provider provenance and the ones this
@@ -1816,7 +1829,7 @@ export function createModelsRegistry(hooks = {}) {
         applyModels(models, nextDefault)
         // #5932: remember the cache-applied list so an overlay reload in the
         // CLI-only window (no SDK refresh yet) preserves these entries.
-        lastCacheModels = models
+        lastCacheModels = cachedModels
         // Treat the loaded state as the last-saved baseline so subsequent
         // saveCache() calls only hit disk when the registry actually drifts.
         // Since #7799 round 3 the baseline is taken over the PERSISTABLE rows —
