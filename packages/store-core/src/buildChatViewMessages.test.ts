@@ -39,6 +39,7 @@ describe('buildChatViewMessages', () => {
     expect(out.chatMessages.map(m => m.id)).toEqual(['other', 'input-1', 'reply-1'])
     expect(out.chatMessages.find(m => m.id === 'input-1')?.content).toBe('recorded')
     expect(out.storeMsgMap.get('input-1')).toBe(authoritative)
+    expect([...out.storeMsgMap.keys()]).toEqual(['other', 'input-1', 'reply-1'])
     expect(out.displayGroups.flatMap(g => g.type === 'single' ? [g.message.id] : g.messages.map(m => m.id))).toEqual(['other', 'input-1', 'reply-1'])
     expect(out.chatTailMessageId).toBe('reply-1')
     expect(messages).toEqual(snapshot)

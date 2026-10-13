@@ -271,7 +271,6 @@ export function buildChatViewMessages(
   // A full replay keeps its cached prefix until replay_end while appending the
   // authoritative tail. Project one row per id, preferring the latest copy at
   // its latest position, without changing the array reconciliation will swap.
-  const latestById = new Map(storeMessages.map(message => [message.id, message]))
   const lastIndexById = new Map(storeMessages.map((message, index) => [message.id, index]))
   const visibleMessages = storeMessages.filter((message, index) => lastIndexById.get(message.id) === index)
   // Filter out `system` events — they belong on the System tab. When the #6799
@@ -343,9 +342,10 @@ export function buildChatViewMessages(
   // O(1) lookup map for renderMessage — keyed by store id, value is the
   // original ChatMessage so the renderer can inspect fields the
   // ChatViewMessage shape doesn't carry (toolInput, requestId,
-  // questions, etc.). Built from the unfiltered storeMessages so callers
-  // can look up system events too.
-  const storeMsgMap = latestById
+  // questions, etc.). Include hidden system events in the same latest-position
+  // order as the visible rows: downstream grouping uses iteration order to
+  // locate hidden turn boundaries, and mobile reinserts compaction markers.
+  const storeMsgMap = new Map(visibleMessages.map(message => [message.id, message]))
 
   // #4615 / #5793: track which `type: 'prompt'` bubbles have been
   // invalidated by a subsequent retryable AskUserQuestion teardown error.

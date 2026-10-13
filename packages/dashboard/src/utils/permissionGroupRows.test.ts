@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { ChatMessage } from '@chroxy/store-core'
+import { buildChatViewMessages } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import { collapseResolvedPermissionRuns, permissionGroupRowId } from './permissionGroupRows'
 
@@ -177,6 +178,31 @@ describe('collapseResolvedPermissionRuns -- a turn boundary on a hidden message 
     const rows = msgs.filter((m) => m.type !== 'system').map((m) => (m.type === 'tool_use' ? toolRow(m) : rowOf(m)))
     return collapseResolvedPermissionRuns(rows, mapOf(msgs))
   }
+
+  it('keeps the replay tail boundary between identical recorded permissions while the prefix remains (#8240)', () => {
+    const boundary = sys({ id: 'end', turnBoundary: true, timestamp: 2 })
+    const cachedSecond = resolved('p2', { timestamp: 3 })
+    const replayedFirst = resolved('p1', { timestamp: 1 })
+    const replayedSecond = resolved('p2', { timestamp: 3 })
+    // Full replay retains its old prefix and appends p1 / end / p2. The map
+    // must iterate in the tail's latest-position order, not first-seen id order.
+    const messages = [boundary, cachedSecond, replayedFirst, { ...boundary }, replayedSecond]
+    const view = buildChatViewMessages(messages, null)
+    const result = collapseResolvedPermissionRuns(view.chatMessages, view.storeMsgMap, view.chatToolGroupPayloads)
+    expect(view.chatMessages.map(row => row.id)).toEqual(['p1', 'p2'])
+    expect(result.groups.size).toBe(0)
+    expect(result.rows.map(row => row.id)).toEqual(['p1', 'p2'])
+    expect([...view.storeMsgMap.keys()]).toEqual(['p1', 'end', 'p2'])
+    expect(view.storeMsgMap.get('p2')).toBe(replayedSecond)
+    expect(view.storeMsgMap.get('p1')?.toolInput).toEqual({ command: 'npm view @chroxy/server version' })
+    expect(view.storeMsgMap.get('p2')?.toolInput).toEqual({ command: 'npm view @chroxy/server version' })
+    expect(messages).toHaveLength(5)
+
+    // Positive control: these recorded inputs group when there is no boundary.
+    const sameTurn = buildChatViewMessages(messages.map(message => ({ ...message, turnBoundary: false })), null)
+    const grouped = collapseResolvedPermissionRuns(sameTurn.chatMessages, sameTurn.storeMsgMap, sameTurn.chatToolGroupPayloads)
+    expect(grouped.groups.get(permissionGroupRowId('p1'))).toEqual(['p1', 'p2'])
+  })
 
   it('P, T, [hidden system + boundary], P, T does NOT fold across the turn', () => {
     const { groups } = run([resolved('p1'), tool('t2'), sys({ turnBoundary: true }), resolved('p3'), tool('t4')])

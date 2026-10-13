@@ -344,6 +344,7 @@ export function ChatView({
   // `stalledPromptIds` (#4615) flow straight through.
   const {
     displayGroups: baseDisplayGroups,
+    storeMsgMap,
     chatTailMessageId,
     stalledPromptIds,
   } = useMemo(
@@ -360,12 +361,13 @@ export function ChatView({
   // sits between, the marker conveys nothing.
   //
   // Reinsert only the `compactMetadata`-carrying subset, in timestamp order.
-  // This reads the same `messages` array the component is handed, so SessionScreen
-  // must let those through its own filter for any of it to run (#7186). See
+  // Use the shared latest-copy projection so full replay's preserved prefix
+  // cannot reinsert the same marker twice. SessionScreen must let compaction
+  // messages through its own filter for any of it to run (#7186). See
   // insertCompactionMarkers's doc comment for the full placement rationale.
   const displayGroups = useMemo(
-    () => insertCompactionMarkers(baseDisplayGroups, messages),
-    [baseDisplayGroups, messages],
+    () => insertCompactionMarkers(baseDisplayGroups, [...storeMsgMap.values()]),
+    [baseDisplayGroups, storeMsgMap],
   );
 
   // #5517: map every message id (and each id inside an activity group) to its
