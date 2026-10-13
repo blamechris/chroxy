@@ -141,6 +141,8 @@ type SweepFieldValues = Pick<SessionState, SweepFieldName>;
 // the app's onclose sweep actually clearing it — fails this test loudly
 // instead of silently passing.
 const DIRTY_VALUES: SweepFieldValues = {
+  devPreviews: [{ port: 3100, url: 'https://fixture.trycloudflare.com' }],
+  devPreviewRequests: [{ port: 3100, requestId: 'r1', state: 'awaiting_consent' }],
   providerRuntimeInfo: { provider: 'test' } as never,
   streamingMessageId: 'msg-b',
   isPlanPending: true,
@@ -150,6 +152,8 @@ const DIRTY_VALUES: SweepFieldValues = {
   primaryClientId: 'other-device',
 };
 const CLEAN_VALUES: SweepFieldValues = {
+  devPreviews: [],
+  devPreviewRequests: [],
   providerRuntimeInfo: null,
   streamingMessageId: null,
   isPlanPending: false,
@@ -228,6 +232,7 @@ const ALL_BASE_SESSION_STATE_KEYS = {
   statusLine: true,
   mcpServers: true,
   devPreviews: true,
+  devPreviewRequests: true,
   inactivityWarning: true,
   interventions: true,
   queuedMessages: true,

@@ -91,7 +91,7 @@ export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'Agent', 'WebFetch', 'W
 // consult this EXACT Set (identity, not an equal-valued copy) rather than
 // hand-rolling independent, driftable copies of "which tools are too
 // high-authority for an unattended approver to ever say yes to."
-export const NOT_DELEGABLE_TOOLS = new Set(['mcp_spawn', 'request_permissions'])
+export const NOT_DELEGABLE_TOOLS = new Set(['mcp_spawn', 'request_permissions', 'dev_preview'])
 
 // #7973 — tools that execute an arbitrary, caller-supplied command/shell
 // string. The protected-path floor (`isFlooredTarget`, permission-floor.js)
@@ -743,6 +743,7 @@ export class PermissionManager extends EventEmitter {
    * @returns {Promise<{behavior: string, updatedInput?: Object, message?: string, updatedPermissions?: Array}>}
    */
   handlePermission(toolName, input, signal, permissionMode, suggestions = undefined, sourceToolUseId = undefined) {
+    if (toolName === 'dev_preview') return Promise.resolve({ behavior: 'deny', message: 'Preview publication requires a client-bound explicit consent request' })
     if (toolName === 'AskUserQuestion') {
       return this._handleAskUserQuestion(input, signal, sourceToolUseId)
     }
@@ -860,6 +861,8 @@ export class PermissionManager extends EventEmitter {
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
         floored: protectedTarget,
+        explicitConsent: false,
+        nonDelegable: NOT_DELEGABLE_TOOLS.has(toolName),
         // #8348: the identifying field of the RAW input, redacted, for the
         // session's permission transcript. Not on the wire (the request builder
         // picks its fields), and read from the raw input because the broadcast
@@ -1084,6 +1087,9 @@ export class PermissionManager extends EventEmitter {
       this._logWarn(`No pending permission for ${requestId}`)
       return false
     }
+    // Explicit consent has its own client-bound response route. Generic
+    // responders, durable grants and edited inputs cannot approve it.
+    if (pending.explicitConsent === true && decision !== 'deny') return false
     // #6543: capture the tool name BEFORE deleting the last-permission data, so
     // the editedInput whitelist knows which content field(s) are substitutable.
     const toolName = this._lastPermissionData.get(requestId)?.tool
@@ -1381,7 +1387,7 @@ export class PermissionManager extends EventEmitter {
       // missing lookup the same as a not-delegable tool (leave it genuinely
       // pending for a human) rather than assume it is safe to allow.
       const lastData = this._lastPermissionData.get(requestId)
-      if (!lastData || NOT_DELEGABLE_TOOLS.has(lastData.tool)) {
+      if (pending.explicitConsent === true || !lastData || NOT_DELEGABLE_TOOLS.has(lastData.tool)) {
         preservedNotDelegable += 1
         continue
       }
@@ -1469,6 +1475,49 @@ export class PermissionManager extends EventEmitter {
         ...stoppedToolUseField(requestReason, clearedUserAnswer.sourceToolUseId),
       })
     }
+  }
+
+  /** Request one-time human consent without mode, rule or durable-grant shortcuts. */
+  requestExplicitConsent({ requestId, clientId, tool, input, description, signal }) {
+    if (!requestId || !clientId || !NOT_DELEGABLE_TOOLS.has(tool)) throw new Error('Invalid explicit consent request')
+    if (signal?.aborted || this._pendingPermissions.has(requestId)) return Promise.resolve(false)
+    return new Promise((resolve) => {
+      const finish = (allowed, reason) => {
+        if (!this._pendingPermissions.has(requestId)) return
+        this._pendingPermissions.delete(requestId)
+        this._lastPermissionData.delete(requestId)
+        this._clearPermissionTimer(requestId)
+        signal?.removeEventListener('abort', abort)
+        this.emit('permission_resolved', { requestId, decision: allowed ? 'allow' : 'deny', reason })
+        resolve(allowed)
+      }
+      const abort = () => finish(false, 'cancelled')
+      const payload = {
+        requestId, tool, input: sanitizeToolInput(input), description: describeComposedText(description),
+        remainingMs: this._timeoutMs, createdAt: Date.now(), floored: true,
+        explicitConsent: true, nonDelegable: true,
+      }
+      this._pendingPermissions.set(requestId, {
+        input, suggestions: [], explicitConsent: true, clientId,
+        finish,
+        resolve: result => {
+          signal?.removeEventListener('abort', abort)
+          resolve(result?.behavior === 'allow')
+        },
+      })
+      this._lastPermissionData.set(requestId, payload)
+      signal?.addEventListener('abort', abort, { once: true })
+      this._permissionTimers.set(requestId, setTimeout(() => finish(false, 'timeout'), this._timeoutMs))
+      this.emit('permission_request', payload)
+    })
+  }
+
+  respondToExplicitConsent(requestId, decision, { clientId, editedInput, scope } = {}) {
+    const pending = this._pendingPermissions.get(requestId)
+    if (pending?.explicitConsent !== true || pending.clientId !== clientId) return false
+    if (!['allow', 'deny'].includes(decision) || editedInput !== undefined || scope !== undefined) return false
+    pending.finish(decision === 'allow', 'user')
+    return true
   }
 
   /**
@@ -1595,6 +1644,8 @@ export class PermissionManager extends EventEmitter {
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
         floored: isFlooredTarget('mcp_spawn', input, this._cwd),
+        explicitConsent: false,
+        nonDelegable: true,
         // #8348: for the permission transcript (see handlePermission). The
         // shown description is already redacted and clipped.
         recordDescription: shownDescription,

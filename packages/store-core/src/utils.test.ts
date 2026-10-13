@@ -56,6 +56,7 @@ describe('createEmptyBaseSessionState', () => {
       statusLine: null,
       mcpServers: [],
       devPreviews: [],
+      devPreviewRequests: [],
       inactivityWarning: null,
       // #4653: chroxy-side intervention ring — empty array on init,
       // populated by multi_question_intervention events.
@@ -164,8 +165,10 @@ describe('clearTransientSessionState (#7411)', () => {
 })
 
 describe('TRANSIENT_SESSION_SWEEP_FIELDS (#7411)', () => {
-  it('lists exactly the seven cross-client all-sessions sweep fields', () => {
+  it('lists the cross-client all-sessions sweep fields', () => {
     expect(TRANSIENT_SESSION_SWEEP_FIELDS).toEqual([
+      'devPreviews',
+      'devPreviewRequests',
       'providerRuntimeInfo',
       'streamingMessageId',
       'isPlanPending',

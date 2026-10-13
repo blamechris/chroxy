@@ -12,6 +12,7 @@
  *   { type: 'shutdown' }       — Immediate graceful shutdown
  *   { type: 'drain', timeout } — Drain in-flight work, serialize state, then ack
  */
+import { exitAfterPreviewCleanup } from './server-cli/preview-shutdown.js'
 import { existsSync, readFileSync } from 'fs'
 import { isEntryPoint } from './utils/is-entry-point.js'
 import { mergeConfig } from './config.js'
@@ -98,7 +99,7 @@ function gracefulExit(code, reason) {
   _shuttingDown = true
   flushAndDestroy(_sessionManager, _wsServer, reason, log)
   // 100ms defer lets the broadcastShutdown frame + socket close flush first.
-  setTimeout(() => process.exit(code), 100)
+  exitAfterPreviewCleanup(_wsServer, { exit: () => process.exit(code), log })
 }
 
 async function main() {

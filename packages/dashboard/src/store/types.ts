@@ -2256,6 +2256,7 @@ export interface ConnectionState {
 
   // Dev server preview
   closeDevPreview: (port: number) => void;
+  openDevPreview: (port: number) => boolean;
 
   // Web tasks (Claude Code Web)
   launchWebTask: (prompt: string, cwd?: string) => 'sent' | false;

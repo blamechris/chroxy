@@ -19,6 +19,7 @@
 //     (importing it here would be circular). `exit` / `exitDelayMs` are injected
 //     so tests can drive shutdown + onFatal without killing the test process.
 
+import { exitAfterPreviewCleanup } from './preview-shutdown.js'
 import { removeConnectionInfo as defaultRemoveConnectionInfo } from '../connection-info.js'
 import { getSharedPool as defaultGetSharedPool, isPoolEnabled as defaultIsPoolEnabled } from '../docker-byok-pool.js'
 
@@ -168,7 +169,7 @@ export class ServerOrchestrator {
         log.error(`Failed to drain docker-byok pool: ${err?.message || err}`)
       }
     }
-    this._wsServer.close()
+    await this._wsServer.close()
     if (this._tunnel) await this._tunnel.stop()
     this._removeConnectionInfo()
     this._exit(0)
@@ -183,13 +184,13 @@ export class ServerOrchestrator {
     const log = this._log
     if (this._shuttingDown) {
       log.error(`${kind} during shutdown: ${err?.stack || err}`)
-      setTimeout(() => this._exit(1), this._exitDelayMs)
+      exitAfterPreviewCleanup(this._wsServer, { exit: () => this._exit(1), delayMs: this._exitDelayMs, log })
       return
     }
     this._shuttingDown = true
     log.error(`${kind}: ${err?.stack || err}`)
     this._emergencyCleanupSync({ kind, tunnel: this._tunnel, wsServer: this._wsServer, sessionManager: this._sessionManager })
-    setTimeout(() => this._exit(1), this._exitDelayMs)
+    exitAfterPreviewCleanup(this._wsServer, { exit: () => this._exit(1), delayMs: this._exitDelayMs, log })
   }
 
   /** Register the signal + crash handlers on `process`. */

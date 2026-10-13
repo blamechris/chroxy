@@ -945,8 +945,8 @@ export class AgentControlClient extends EventEmitter {
     // says — checked before the allowlist/floor gates below so one of these
     // is never merely reported as "not_allowlisted" or "floor_unknown" (see
     // the doc comment above).
-    if (decision === 'allow' && NOT_DELEGABLE_TOOLS.has(observed.tool)) {
-      return { status: 'rejected', requestId, sessionId, reason: 'not_delegable', message: `'${observed.tool}' can never be approved by an external planner, regardless of the protected-path floor — mcp_spawn persists a permanent binary-trust grant (#4462) and codex's request_permissions is a sandbox-scope escalation; both require a human decision. \`deny\` is still permitted; the prompt stays pending for a human otherwise.` }
+    if (decision === 'allow' && (NOT_DELEGABLE_TOOLS.has(observed.tool) || observed.explicitConsent !== false || observed.nonDelegable !== false)) {
+      return { status: 'rejected', requestId, sessionId, reason: 'not_delegable', message: `This request requires explicit human consent or its consent metadata is unknown. An external planner cannot approve it; deny is still permitted.` }
     }
     // Gate 3: the allowlist (#7975, S3). A tool must be affirmatively known
     // to be one the floor can inspect (FLOOR_ALLOWLISTED_TOOLS), or a
@@ -1343,7 +1343,8 @@ export class AgentControlClient extends EventEmitter {
       // for the not_delegable / command-tool gates in respondPermission —
       // same "read straight off what was observed" discipline as `floored`.
       const tool = typeof msg.tool === 'string' ? msg.tool : undefined
-      this._observedPermissions.set(msg.requestId, { sessionId: msg.sessionId, seenAt: Date.now(), floored, tool })
+      this._observedPermissions.set(msg.requestId, { sessionId: msg.sessionId, seenAt: Date.now(), floored, tool,
+        explicitConsent: msg.explicitConsent, nonDelegable: msg.nonDelegable })
     } else if ((msg.type === 'permission_resolved' || msg.type === 'permission_expired') && typeof msg.requestId === 'string') {
       this._observedPermissions.delete(msg.requestId)
     }

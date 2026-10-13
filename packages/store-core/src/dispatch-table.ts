@@ -52,6 +52,7 @@ import type {
   SessionInfo,
   AgentInfo,
   DevPreview,
+  DevPreviewRequestState,
   PendingBackgroundShell,
   BusyReason,
   QueuedSessionMessage,
@@ -194,6 +195,7 @@ import {
 } from './permission-modes-by-provider'
 import { applyInputAcknowledgement, type InputDeliveryMap } from './input-delivery'
 import type { ProviderRuntimeInfo } from '@chroxy/protocol'
+import { parseDevPreviewStatus } from './handlers/dev-preview'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -253,6 +255,7 @@ export interface DispatchSessionBase {
   busyReason?: BusyReason | null
   backgroundShellCount?: number
   devPreviews?: DevPreview[]
+  devPreviewRequests?: DevPreviewRequestState[]
   // --- outgoing-message queue mirror (#5937) ---
   // `queuedMessages` — read+rewritten by message_queued / message_dequeued.
   // Both clients' real `SessionState` carry this array (BaseSessionState).
@@ -943,6 +946,14 @@ export interface DispatchMessageMap {
     sessionId?: string
     port?: number
     url?: string
+  }
+  dev_preview_status: {
+    type: 'dev_preview_status'
+    sessionId?: string
+    requestId: string
+    port?: number
+    state: DevPreviewRequestState['state']
+    reason?: string
   }
   dev_preview_stopped: {
     type: 'dev_preview_stopped'
@@ -2727,6 +2738,15 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // the app gains coverage via runDispatch for free.
     thinking_level_changed: sessionPatchDispatcher<S>(handleThinkingLevelChangedPatch),
     session_cost_threshold_crossed: dispatchSessionCostThresholdCrossed,
+    dev_preview_status: (msg, adapter) => {
+      if (!parseDevPreviewStatus(msg).success) return
+      if (!msg.sessionId || !adapter.hasSession(msg.sessionId)) return
+      adapter.updateSession(msg.sessionId, ss => {
+        const port = msg.port ?? ss.devPreviewRequests?.find(r => r.requestId === msg.requestId)?.port
+        if (port === undefined) return {}
+        return { devPreviewRequests: [...(ss.devPreviewRequests ?? []).filter(r => r.port !== port), { requestId: msg.requestId, port, state: msg.state, reason: msg.reason }] } as Partial<S>
+      })
+    },
     dev_preview: dispatchDevPreview,
     dev_preview_stopped: dispatchDevPreviewStopped,
     web_feature_status: dispatchWebFeatureStatus,
@@ -2840,6 +2860,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'statusline_output',
   'session_cost_threshold_crossed',
   'dev_preview',
+  'dev_preview_status',
   'dev_preview_stopped',
   'web_feature_status',
   'web_task_list',

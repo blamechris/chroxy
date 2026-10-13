@@ -115,6 +115,7 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     statusLine: null,
     mcpServers: [],
     devPreviews: [],
+    devPreviewRequests: [],
     inactivityWarning: null,
     // #4653: empty ring for chroxy-side interventions. Never null so the
     // dashboard's `.length`/`map` call sites don't need a guard.
@@ -155,9 +156,12 @@ export function createEmptyBaseSessionState(): BaseSessionState {
  * the store write entirely and avoid churning referential equality.
  */
 export function clearTransientSessionState(
-  ss: Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo'>,
-): Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo'>> {
-  const patch: Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo'>> = {}
+  ss: Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests'>,
+): Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests'>> {
+  const patch: Partial<Pick<BaseSessionState, 'streamingMessageId' | 'isPlanPending' | 'planAllowedPrompts' | 'providerRuntimeInfo' | 'devPreviews' | 'devPreviewRequests'>> = {}
+  // The original client owns this consent lifetime; disconnected frames cannot confirm closure.
+  if (ss.devPreviews?.length) patch.devPreviews = []
+  if (ss.devPreviewRequests?.length) patch.devPreviewRequests = []
   if (ss.providerRuntimeInfo) patch.providerRuntimeInfo = null
   if (ss.streamingMessageId) patch.streamingMessageId = null
   if (ss.isPlanPending) {
@@ -204,6 +208,8 @@ export function clearTransientSessionState(
  * undetected extra clear.
  */
 export const TRANSIENT_SESSION_SWEEP_FIELDS = [
+  'devPreviews',
+  'devPreviewRequests',
   'providerRuntimeInfo',
   'streamingMessageId',
   'isPlanPending',

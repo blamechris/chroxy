@@ -56,7 +56,7 @@ describe('permission routing (real server-side resolver)', () => {
     // event (#7968); the real normalizer carries it onto the wire. This test is
     // about routing through the server resolver, so it emits an ordinary one —
     // floored-e2e.test.js drives the verdict from a real PermissionManager.
-    manager.emit('session_event', { sessionId: 'perm-a', event: 'permission_request', data: { requestId: 'real-pending', tool: 'Read', input: { file_path: '/tmp/fixture' }, remainingMs: 5000, floored: false } })
+    manager.emit('session_event', { sessionId: 'perm-a', event: 'permission_request', data: { requestId: 'real-pending', tool: 'Read', input: { file_path: '/tmp/fixture' }, remainingMs: 5000, floored: false, explicitConsent: false, nonDelegable: false } })
     const seen = await waiting
     assert.ok(seen.events.some((e) => e.type === 'permission_request' && e.data.requestId === 'real-pending'))
     assert.equal(server._permissionSessionMap.get('real-pending'), 'perm-a')
@@ -126,7 +126,7 @@ describe('permission routing (real server-side resolver)', () => {
     try {
       const first = await client.getEvents('perm-a')
       const waiting = client.getEvents('perm-a', { cursor: first.cursor, waitMs: 500 })
-      manager.emit('session_event', { sessionId: 'perm-a', event: 'permission_request', data: { requestId: 'same-request', tool: 'Read', input: { file_path: '/tmp/fixture' }, remainingMs: 5000, floored: false } })
+      manager.emit('session_event', { sessionId: 'perm-a', event: 'permission_request', data: { requestId: 'same-request', tool: 'Read', input: { file_path: '/tmp/fixture' }, remainingMs: 5000, floored: false, explicitConsent: false, nonDelegable: false } })
       assert.ok((await waiting).events.some((e) => e.type === 'permission_request'))
 
       const responses = await Promise.all([

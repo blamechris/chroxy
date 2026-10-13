@@ -154,6 +154,14 @@ export function renderPermissionDetail(tool?: string, toolInput?: Record<string,
 
   const toolName = tool.toLowerCase();
 
+  if (toolName === 'dev_preview') {
+    return <View style={styles.permDetailBlock} testID="dev-preview-consent">
+      <Text style={styles.permDetailCode}>Allow once for this connection</Text>
+      <Text selectable style={styles.permDetailCode}>{JSON.stringify(toolInput.target, null, 2)}</Text>
+      <Text style={styles.permDetailCode}>{String(toolInput.exposure || 'Public HTTP URL. No authentication added. No WebSockets or reconnect.')}</Text>
+    </View>;
+  }
+
   // Bash: syntax-highlighted command
   if (toolName === 'bash' && typeof toolInput.command === 'string') {
     return (

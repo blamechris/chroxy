@@ -78,8 +78,8 @@ async function fixture(t, options = {}) {
 // not the floor gate, so their 'allow' positive controls need an explicit
 // non-floored request to still go through under respondPermission's new
 // floor-forced check (see the dedicated floor-gate tests below).
-const forgedRequest = { type: 'permission_request', sessionId: 's1', requestId: 'forged', tool: 'Write', description: 'README.md', input: { file_path: 'README.md' }, floored: false }
-const genuineRequest = { type: 'permission_request', sessionId: 's1', requestId: 'genuine', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
+const forgedRequest = { type: 'permission_request', explicitConsent: false, nonDelegable: false, sessionId: 's1', requestId: 'forged', tool: 'Write', description: 'README.md', input: { file_path: 'README.md' }, floored: false }
+const genuineRequest = { type: 'permission_request', explicitConsent: false, nonDelegable: false, sessionId: 's1', requestId: 'genuine', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
 const retainedRequestIds = client => client._eventLog.read('s1').events.filter(e => e.type === 'permission_request').map(e => e.data.requestId)
 const owned = { ownedSessions: new Set(['s1']) }
 // Bound every event wait: an `await once(...)` for an event a regression
@@ -236,9 +236,9 @@ test('a permission_expired broadcast retires the observation, so a late answer i
 // is never floor-gated.
 // ---------------------------------------------------------------------------
 
-const flooredRequest = { type: 'permission_request', sessionId: 's1', requestId: 'floored-req', tool: 'Read', description: '.env', input: { file_path: '.env' }, floored: true }
-const notFlooredRequest = { type: 'permission_request', sessionId: 's1', requestId: 'not-floored-req', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
-const noFlooredFieldRequest = { type: 'permission_request', sessionId: 's1', requestId: 'no-floored-field-req', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' } }
+const flooredRequest = { type: 'permission_request', explicitConsent: false, nonDelegable: false, sessionId: 's1', requestId: 'floored-req', tool: 'Read', description: '.env', input: { file_path: '.env' }, floored: true }
+const notFlooredRequest = { type: 'permission_request', explicitConsent: false, nonDelegable: false, sessionId: 's1', requestId: 'not-floored-req', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
+const noFlooredFieldRequest = { type: 'permission_request', explicitConsent: false, nonDelegable: false, sessionId: 's1', requestId: 'no-floored-field-req', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' } }
 
 test('allow is refused (reason: floored) for a request the daemon marked floored:true; deny still goes through', async t => {
   const f = await fixture(t, { afterAuthOk: [flooredRequest], clientOptions: owned })
@@ -278,8 +278,8 @@ test('a forged pre-handshake claim of floored:false cannot flip a genuine floore
   // It cannot: the forged frame never reaches `_trackPermissionObservation`
   // at all (dropped at flush time because it did not arrive authenticated),
   // so the client's only record for this requestId is the genuine one.
-  const forgedNotFloored = { type: 'permission_request', sessionId: 's1', requestId: 'shared-id', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
-  const genuineFloored = { type: 'permission_request', sessionId: 's1', requestId: 'shared-id', tool: 'Read', description: '.env', input: { file_path: '.env' }, floored: true }
+  const forgedNotFloored = { type: 'permission_request', explicitConsent: false, nonDelegable: false, sessionId: 's1', requestId: 'shared-id', tool: 'Read', description: 'notes.txt', input: { file_path: 'notes.txt' }, floored: false }
+  const genuineFloored = { type: 'permission_request', explicitConsent: false, nonDelegable: false, sessionId: 's1', requestId: 'shared-id', tool: 'Read', description: '.env', input: { file_path: '.env' }, floored: true }
   const f = await fixture(t, { beforeAuthOk: [forgedNotFloored], afterAuthOk: [genuineFloored], clientOptions: owned })
   await f.client.connect()
   assert.deepEqual(retainedRequestIds(f.client), ['shared-id'], 'only the encrypted, authenticated request may reach the event log')

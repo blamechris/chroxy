@@ -87,7 +87,7 @@ function makeCtx({ sessions = ['sess-a', 'sess-b'], history = HISTORY, sdk = {},
     getSessionManager: () => manager,
     ...(registerPermissionRoute ? { registerPermissionRoute } : {}),
   })
-  return { clients: new Map(), sessionManager: manager, send, permissions, _sends: sends, permissionSessionMap }
+  return { clients: new Map(), sessionManager: manager, send, permissions, pendingPermissions, _sends: sends, permissionSessionMap }
 }
 
 function registerClient(ctx, ws) {
@@ -97,6 +97,26 @@ function registerClient(ctx, ws) {
 }
 
 const settle = () => new Promise((r) => setImmediate(r))
+
+describe('saved consent policy replay', () => {
+  for (const flags of [{}, { explicitConsent: false, nonDelegable: false }, { explicitConsent: true, nonDelegable: true }]) {
+    it(`preserves SDK and hook policy fields ${JSON.stringify(flags)}`, () => {
+      const entry = sdkEntry('saved-sdk')
+      Object.assign(entry.data[1], flags)
+      const ctx = makeCtx({ sdk: { 'sess-a': [entry] }, hooks: [{ requestId: 'saved-hook', owner: 'sess-a' }] })
+      Object.assign(ctx.pendingPermissions.get('saved-hook').data, flags)
+      try {
+        ctx.permissions.resendPendingPermissions(makeFakeWs())
+        const frames = permFrames(ctx._sends)
+        assert.equal(frames.length, 2)
+        for (const frame of frames) {
+          assert.equal(frame.explicitConsent, flags.explicitConsent)
+          assert.equal(frame.nonDelegable, flags.nonDelegable)
+        }
+      } finally { ctx.permissions.destroy() }
+    })
+  }
+})
 const afterEnd = (sends) => {
   const endIdx = sends.findIndex((m) => m.type === 'history_replay_end')
   return { endIdx, tail: endIdx >= 0 ? sends.slice(endIdx + 1) : [] }

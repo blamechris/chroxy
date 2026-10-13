@@ -291,11 +291,19 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
   }
 
   /** Start a Quick Tunnel (random URL, no account needed) */
+  _quickTunnelExposureMessage(url) {
+    return `Quick tunnel is publicly reachable at ${url} — endpoints are bearer-token gated, ` +
+      'but anyone with this URL can fingerprint the server via /health and attempt auth. ' +
+      'Use --tunnel none to disable remote access, or --tunnel named for a stable domain you control.'
+  }
+
+  _quickTunnelArguments() {
+    return ['tunnel', '--url', `http://localhost:${this.port}`, '--no-autoupdate']
+  }
+
   async _startQuickTunnel() {
     return new Promise((resolve, reject) => {
-      const argv = [
-        'tunnel', '--url', `http://localhost:${this.port}`, '--no-autoupdate',
-      ]
+      const argv = this._quickTunnelArguments()
       const spawnOpts = {
         stdio: ['ignore', 'pipe', 'pipe'],
       }
@@ -327,11 +335,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           // public trycloudflare.com URL. Every endpoint stays bearer-token
           // gated, but anyone who learns the URL can fingerprint the server
           // via /health and attempt auth/pairing — make that visible once.
-          log.warn(
-            `Quick tunnel is publicly reachable at ${this.url} — endpoints are bearer-token gated, ` +
-            'but anyone with this URL can fingerprint the server via /health and attempt auth. ' +
-            'Use --tunnel none to disable remote access, or --tunnel named for a stable domain you control.'
-          )
+          log.warn(this._quickTunnelExposureMessage(this.url))
 
           resolve({ httpUrl: this.url, wsUrl })
         }

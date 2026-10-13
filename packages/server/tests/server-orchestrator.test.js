@@ -216,3 +216,14 @@ describe('ServerOrchestrator — install', () => {
     }
   })
 })
+
+it('awaits preview settlement before normal daemon exit', async () => {
+  let settle
+  const { orchestrator, exits } = build({ wsServer: { broadcastShutdown() {}, close: () => new Promise(resolve => { settle = resolve }) } })
+  const shuttingDown = orchestrator.shutdown('SIGTERM')
+  await tick()
+  assert.deepEqual(exits, [])
+  settle()
+  await shuttingDown
+  assert.deepEqual(exits, [0])
+})

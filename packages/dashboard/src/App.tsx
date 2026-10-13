@@ -370,6 +370,7 @@ export function App() {
     interventions,
     // #6790: active dev-server preview tunnels for the header DevPreviewChip.
     devPreviews,
+    devPreviewRequests,
     // #6791: the user's own statusLine script output, shown as an additive
     // strip in the header StatusBar.
     statusLine,
@@ -823,6 +824,7 @@ export function App() {
   const markAllSessionNotificationsRead = useConnectionStore(s => s.markAllSessionNotificationsRead)
   // #6790 — dismiss an active dev-server preview tunnel from the header chip.
   const closeDevPreview = useConnectionStore(s => s.closeDevPreview)
+  const openDevPreview = useConnectionStore(s => s.openDevPreview)
   // #7344 — the active session's pull-request / CI status for the header chip.
   // Selected by session id rather than through getActiveSessionState(), because
   // the snapshot lives in its own session-keyed slice (a reply can land after a
@@ -2781,7 +2783,10 @@ export function App() {
         modelLabel={activeModelLabel}
         costBadgeMode={costBadgeMode}
         devPreviews={devPreviews}
+        devPreviewRequests={devPreviewRequests}
+        previewSessionId={activeSessionId}
         onCloseDevPreview={closeDevPreview}
+        onOpenDevPreview={openDevPreview}
         sessionPrStatus={sessionPrStatus}
         sessionPrStatusLoading={sessionPrStatusLoading}
         onRefreshSessionPrStatus={refreshSessionPrStatus}

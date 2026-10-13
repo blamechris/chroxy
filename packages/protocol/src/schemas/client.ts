@@ -1263,6 +1263,13 @@ export const CloseDevPreviewSchema = z.object({
   sessionId: z.string().max(256).optional(),
 })
 
+export const OpenDevPreviewSchema = z.object({
+  type: z.literal('open_dev_preview'),
+  sessionId: z.string().min(1).max(256),
+  port: z.number().int().min(1024).max(65535),
+  requestId: z.string().min(1).max(128),
+}).strict()
+
 // -- Web task schemas --
 
 export const LaunchWebTaskSchema = z.object({
@@ -2135,6 +2142,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   CreateCheckpointSchema,
   DeleteCheckpointSchema,
   CloseDevPreviewSchema,
+  OpenDevPreviewSchema,
   LaunchWebTaskSchema,
   ListWebTasksSchema,
   TeleportWebTaskSchema,

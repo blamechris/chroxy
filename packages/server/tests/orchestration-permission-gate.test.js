@@ -16,7 +16,7 @@ function mkStub() {
     sessions.set(id, { session })
     return session
   }
-  sm.req = (id, data) => sm.emit('session_event', { sessionId: id, event: 'permission_request', data })
+  sm.req = (id, data) => sm.emit('session_event', { sessionId: id, event: 'permission_request', data: { explicitConsent: false, nonDelegable: false, ...data } })
   return { sm, add, sessions }
 }
 
@@ -230,4 +230,13 @@ describe('OrchestrationPermissionGate', () => {
     sm.req('s1', { requestId: 'r1', toolName: 'Bash' })
     assert.equal(s.responses.length, 0, 'no longer listening after dispose')
   })
+})
+
+it('preserves explicit and unknown consent prompts for a human', () => {
+  const { sm, add } = mkStub(); const session = add('s1')
+  gate = new OrchestrationPermissionGate({ sessionManager: sm, isOwnedSession: () => true, policyForSession: () => 'implement', bashAllowlist: ['npm test'] })
+  sm.req('s1', { requestId: 'preview', tool: 'dev_preview', input: {}, explicitConsent: true, nonDelegable: true })
+  sm.req('s1', { requestId: 'marked', tool: 'Bash', input: { command: 'npm test' }, explicitConsent: true, nonDelegable: true })
+  sm.emit('session_event', { sessionId: 's1', event: 'permission_request', data: { requestId: 'older', tool: 'Bash', input: { command: 'npm test' } } })
+  assert.deepEqual(session.responses, [])
 })

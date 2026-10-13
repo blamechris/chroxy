@@ -589,7 +589,7 @@ describe('close_dev_preview handler', () => {
       { id: 'sess-1', name: 'Test', cwd: '/tmp' },
     ])
     ctx = createMockCtx(manager)
-    client = { id: 'client-A', activeSessionId: 'sess-1' }
+    client = { id: 'client-A', activeSessionId: 'sess-1', isPrimaryToken: true, authToken: 'fixture-only' }
     ws = {}
   })
 

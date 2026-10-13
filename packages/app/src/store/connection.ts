@@ -672,6 +672,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   terminalBuffer: '',
   terminalRawBuffer: '',
 
+  openDevPreview: (port: number) => {
+    const { socket, activeSessionId } = get();
+    if (!socket || socket.readyState !== WebSocket.OPEN || !activeSessionId) return false;
+    const requestId = `preview-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const sent = wsSend(socket, { type: 'open_dev_preview', sessionId: activeSessionId, port, requestId });
+    if (sent) updateSession(activeSessionId, ss => ({ devPreviewRequests: [...(ss.devPreviewRequests ?? []).filter(r => r.port !== port), { port, requestId, state: 'checking', reason: 'Request sent. Checking the local HTTP service.' }] }));
+    return sent;
+  },
+
   closeDevPreview: (port: number) => {
     const { activeSessionId } = get();
     sendIfOpen({ type: 'close_dev_preview', port, sessionId: activeSessionId });

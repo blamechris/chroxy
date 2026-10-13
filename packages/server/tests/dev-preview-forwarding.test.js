@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { setupForwarding } from '../src/ws-forwarding.js'
 import { EventNormalizer } from '../src/event-normalizer.js'
+import { DevPreviewManager } from '../src/dev-preview.js'
 
 /**
  * Dev previews open only on an explicit request. Session output, such as a
@@ -13,20 +14,42 @@ import { EventNormalizer } from '../src/event-normalizer.js'
  * (session-manager `session_event`) and the legacy single-CLI path.
  */
 
-// Tool output that the old text scan read as "a dev server started".
+// Ordinary tool output remains display data.
 const PORT_MENTIONS = [
+  ['a source fixture', 'assert.equal(url, "http://localhost:3100")'],
+  ['an RPM measurement', 'fan running at 3000 RPM'],
   ['a bare localhost URL', 'ready - open http://localhost:5173 in your browser'],
   ['a Vite-style Local line', '  VITE v5.0.0  ready in 312 ms\n\n  Local:   http://localhost:3000/'],
   ['a "listening on port" line', 'Express server listening on port 9200'],
   ['a "started on" line with a date', 'build started on 2026-09-26'],
 ]
 
+for (const mode of ['multi', 'legacy']) {
+  it(`forwards the original request lifecycle and ended reason in ${mode} mode`, () => {
+    const { ctx, devPreview } = mode === 'multi' ? makeMultiSessionCtx() : makeLegacyCtx()
+    const sessionId = mode === 'multi' ? 'sess-1' : '__legacy__'
+    const message = { type: 'dev_preview_status', sessionId, requestId: 'r1', port: 3100, state: 'closed', reason: 'HTTP service connection ended' }
+    devPreview.emit('dev_preview_status', message)
+    const call = mode === 'multi' ? ctx.broadcastToSession.mock.calls.at(-1).arguments : ctx.broadcast.mock.calls.at(-1).arguments
+    const frame = mode === 'multi' ? call[1] : call[0]
+    assert.equal(frame.requestId, 'r1')
+    assert.equal(frame.state, 'closed')
+    assert.equal(frame.reason, message.reason)
+    if (mode === 'multi') assert.equal(call[0], sessionId)
+    else assert.equal(frame.sessionId, sessionId)
+  })
+}
+
 function makeDevPreview() {
-  const devPreview = new EventEmitter()
-  devPreview.handleToolResult = mock.fn()
-  devPreview.closeSession = mock.fn()
-  devPreview.closeAll = mock.fn()
-  return devPreview
+  const devPreview = new DevPreviewManager()
+  devPreview._createPreviewTunnel = mock.fn()
+  mock.method(devPreview, 'closeSession')
+  return new Proxy(devPreview, {
+    get(target, key, receiver) {
+      if (key === 'handleToolResult') return (...args) => { target._createPreviewTunnel(...args); throw new Error('Session output reached preview inference') }
+      return Reflect.get(target, key, receiver)
+    },
+  })
 }
 
 function makeMultiSessionCtx() {
@@ -95,7 +118,7 @@ describe('dev previews open only on an explicit request', () => {
         assert.ok(forwarded, 'the tool_result is still forwarded to the session')
         assert.equal(forwarded.arguments[1].result, result)
 
-        assert.equal(devPreview.handleToolResult.mock.callCount(), 0,
+        assert.equal(devPreview._createPreviewTunnel.mock.callCount(), 0,
           'tool output must not be handed to the preview manager')
         assert.deepEqual(previewMessages(ctx.broadcastToSession), [])
         assert.deepEqual(previewMessages(ctx.broadcast), [])
@@ -113,7 +136,7 @@ describe('dev previews open only on an explicit request', () => {
         })
       })
 
-      assert.equal(devPreview.handleToolResult.mock.callCount(), 0)
+      assert.equal(devPreview._createPreviewTunnel.mock.callCount(), 0)
       assert.deepEqual(previewMessages(ctx.broadcastToSession), [])
     })
 
@@ -159,7 +182,7 @@ describe('dev previews open only on an explicit request', () => {
         assert.ok(forwarded, 'the tool_result is still forwarded to clients')
         assert.equal(forwarded.arguments[0].result, result)
 
-        assert.equal(devPreview.handleToolResult.mock.callCount(), 0,
+        assert.equal(devPreview._createPreviewTunnel.mock.callCount(), 0,
           'tool output must not be handed to the preview manager')
         assert.deepEqual(previewMessages(ctx.broadcast), [])
       })

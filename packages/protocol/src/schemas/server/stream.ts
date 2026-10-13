@@ -657,6 +657,8 @@ export const ServerPermissionRequestSchema = z.object({
   // MCP, #7854, should treat "field missing" as "cannot tell — do not allow
   // unattended", not as "not floored").
   floored: z.boolean().optional(),
+  explicitConsent: z.boolean().optional(),
+  nonDelegable: z.boolean().optional(),
 })
 
 /**
@@ -943,6 +945,15 @@ export const ServerPermissionAuditResultSchema = z.object({
   entries: z.array(ServerPermissionAuditEntrySchema),
 })
 
+export const ServerDevPreviewStatusSchema = z.object({
+  type: z.literal('dev_preview_status'),
+  sessionId: z.string(),
+  requestId: z.string().min(1),
+  port: z.number().int().min(1024).max(65535).optional(),
+  state: z.enum(['checking', 'awaiting_consent', 'opening', 'active', 'denied', 'cancelled', 'failed', 'closing', 'closed', 'stop_failed']),
+  reason: z.string().optional(),
+})
+
 /**
  * Single validated builder for the `permission_request` wire message (#6031).
  *
@@ -992,6 +1003,8 @@ export function buildPermissionRequestMessage(fields: {
   input: unknown
   // #7968: REQUIRED for the same reason as `input` above — see the doc comment.
   floored: boolean
+  explicitConsent?: boolean
+  nonDelegable?: boolean
   description?: string
   remainingMs?: number
   sessionId?: string
@@ -1013,6 +1026,9 @@ export function buildPermissionRequestMessage(fields: {
   if (fields.description !== undefined) msg.description = fields.description
   if (fields.remainingMs !== undefined) msg.remainingMs = fields.remainingMs
   if (fields.sessionId !== undefined) msg.sessionId = fields.sessionId
+  // An absent policy verdict stays unknown. Only its source may state false.
+  if (fields.explicitConsent !== undefined) msg.explicitConsent = fields.explicitConsent
+  if (fields.nonDelegable !== undefined) msg.nonDelegable = fields.nonDelegable
 
   const result = ServerPermissionRequestSchema.safeParse(msg)
   if (!result.success) {

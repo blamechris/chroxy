@@ -318,6 +318,8 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
     const ws = await openConnected()
     type SweepField = (typeof TRANSIENT_SESSION_SWEEP_FIELDS)[number]
     const DIRTY: Record<SweepField, unknown> = {
+      devPreviews: [{ port: 3100, url: 'https://fixture.trycloudflare.com' }],
+      devPreviewRequests: [{ port: 3100, requestId: 'r1', state: 'awaiting_consent' }],
       providerRuntimeInfo: { provider: 'test' },
       streamingMessageId: 'msg-b',
       isPlanPending: true,
@@ -327,6 +329,8 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
       primaryClientId: 'other-device',
     }
     const CLEAN: Record<SweepField, unknown> = {
+      devPreviews: [],
+      devPreviewRequests: [],
       providerRuntimeInfo: null,
       streamingMessageId: null,
       isPlanPending: false,
@@ -474,6 +478,7 @@ const ALL_SESSION_STATE_KEYS = {
   statusLine: true,
   mcpServers: true,
   devPreviews: true,
+  devPreviewRequests: true,
   inactivityWarning: true,
   interventions: true,
   queuedMessages: true,
@@ -676,6 +681,8 @@ describe('disconnect() clears transient streaming/plan state on all sessions (#8
     await openConnected()
     type SweepField = (typeof TRANSIENT_SESSION_SWEEP_FIELDS)[number]
     const DIRTY: Record<SweepField, unknown> = {
+      devPreviews: [{ port: 3100, url: 'https://fixture.trycloudflare.com' }],
+      devPreviewRequests: [{ port: 3100, requestId: 'r1', state: 'awaiting_consent' }],
       providerRuntimeInfo: { provider: 'test' },
       streamingMessageId: 'msg-b',
       isPlanPending: true,
@@ -685,6 +692,8 @@ describe('disconnect() clears transient streaming/plan state on all sessions (#8
       primaryClientId: 'other-device',
     }
     const CLEAN: Record<SweepField, unknown> = {
+      devPreviews: [],
+      devPreviewRequests: [],
       providerRuntimeInfo: null,
       streamingMessageId: null,
       isPlanPending: false,

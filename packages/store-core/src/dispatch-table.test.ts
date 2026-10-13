@@ -2747,6 +2747,17 @@ describe('shared dispatch table', () => {
   })
 
   describe('dev_preview / dev_preview_stopped', () => {
+    it('updates a request lifecycle by original port and rejects malformed status', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } } })
+      for (const state of ['awaiting_consent', 'opening', 'active', 'closed'] as const) {
+        dispatch(env, { type: 'dev_preview_status', sessionId: 's1', port: 3100, requestId: 'r1', state, reason: `Preview ${state}` })
+        expect(env.sessions.s1.devPreviewRequests).toEqual([{ port: 3100, requestId: 'r1', state, reason: `Preview ${state}` }])
+      }
+      dispatch(env, { type: 'dev_preview_status', sessionId: 's1', port: 3100, requestId: 'r1', state: 'unknown' } as never)
+      expect(env.sessions.s1.devPreviewRequests).toEqual([{ port: 3100, requestId: 'r1', state: 'closed', reason: 'Preview closed' }])
+      dispatch(env, { type: 'dev_preview_status', sessionId: 's1', requestId: 'r1', state: 'failed', reason: 'Invalid preview request' })
+      expect(env.sessions.s1.devPreviewRequests).toEqual([{ port: 3100, requestId: 'r1', state: 'failed', reason: 'Invalid preview request' }])
+    })
     it('adds a dev-preview entry deduped by port', () => {
       const env = makeAdapter({
         sessions: { s1: { sessionId: 's1', messages: [], devPreviews: [] } },

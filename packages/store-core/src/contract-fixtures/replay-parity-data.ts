@@ -1439,7 +1439,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "input": {
               "command": "rm -rf build"
             },
-            "remainingMs": 120000
+            "remainingMs": 120000,
+            "explicitConsent": false,
+            "nonDelegable": false
           }
         ],
         [
@@ -1474,6 +1476,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "remainingMs": 120000,
           "floored": true,
+          "explicitConsent": false,
+          "nonDelegable": false,
           "sessionId": "s1"
         },
         {
@@ -1517,7 +1521,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "input": {
               "command": "rm -rf build"
             },
-            "remainingMs": 120000
+            "remainingMs": 120000,
+            "explicitConsent": false,
+            "nonDelegable": false
           }
         ],
         [
@@ -1551,6 +1557,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "remainingMs": 120000,
           "floored": true,
+          "explicitConsent": false,
+          "nonDelegable": false,
           "sessionId": "s1"
         },
         {
@@ -1593,7 +1601,9 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
             "input": {
               "command": "rm -rf build"
             },
-            "remainingMs": 120000
+            "remainingMs": 120000,
+            "explicitConsent": false,
+            "nonDelegable": false
           }
         ],
         [
@@ -1627,6 +1637,8 @@ export const REPLAY_PARITY_DATA = /* json:start */ {
           },
           "remainingMs": 120000,
           "floored": true,
+          "explicitConsent": false,
+          "nonDelegable": false,
           "sessionId": "s1"
         },
         {

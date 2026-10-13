@@ -680,6 +680,8 @@ Object.assign(EVENT_MAP, {
         // agent-control) reads as clearance to `allow` unattended — so
         // "unknown" must become `true` here, never `false`.
         floored: data.floored !== false,
+        explicitConsent: data.explicitConsent,
+        nonDelegable: data.nonDelegable,
       }),
     }],
     registrations: [{ map: 'permission', key: data.requestId, value: ctx.sessionId }],

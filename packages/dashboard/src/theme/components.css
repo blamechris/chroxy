@@ -511,6 +511,8 @@
 }
 
 .dev-preview-chip__link {
+  min-height: 44px;
+  min-width: 44px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -538,8 +540,8 @@ a.dev-preview-chip__link:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   margin-left: 2px;
   background: transparent;
@@ -14702,3 +14704,13 @@ a.session-ci-chip__pr:focus-visible {
   font-weight: 600;
   outline: none;
 }
+.dev-preview-request { position: relative; }
+.dev-preview-request > summary { min-height: 44px; min-width: 44px; display: flex; align-items: center; cursor: pointer; padding: 0 10px; }
+.dev-preview-request form { position: absolute; right: 0; z-index: 100; width: min(340px, 85vw); padding: 16px; background: var(--bg-secondary); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); }
+.dev-preview-request input, .dev-preview-request button { min-height: 44px; min-width: 44px; margin: 4px; }
+.dev-preview-request input { max-width: 120px; padding: 3px 6px; border-radius: var(--radius-xs); border: 1px solid var(--border-subtle); background: var(--bg-input); color: var(--text-primary); font-family: var(--font-mono); }
+.dev-preview-request button { padding: 3px 10px; border-radius: var(--radius-pill); border: 1px solid var(--border-subtle); background: transparent; color: var(--text-secondary); font-weight: 600; cursor: pointer; }
+.dev-preview-request button[type='submit'] { border-color: var(--accent-green); color: var(--accent-green); }
+.dev-preview-request button:disabled { opacity: 0.5; cursor: not-allowed; }
+.dev-preview-request input:focus-visible, .dev-preview-request button:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.dev-preview-consent { white-space: pre-wrap; overflow-wrap: anywhere; margin: 12px 0; }

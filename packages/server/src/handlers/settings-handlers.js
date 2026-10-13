@@ -446,6 +446,7 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
 function handlePermissionResponse(ws, client, msg, ctx) {
   const { requestId, decision } = msg
   if (!requestId || !decision) return
+  if (ctx.services?.devPreview?.respondToConsent(client, msg)) return
 
   // #5373: the binding check + SDK-vs-legacy dispatch + audit are delegated to
   // the shared permission-resolver (also used by the HTTP handler in

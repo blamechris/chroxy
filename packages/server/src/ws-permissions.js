@@ -14,6 +14,7 @@ import { sanitizeToolInput, describeByNamedField, describeToolInput } from './re
 import { isFlooredTarget } from './permission-floor.js'
 import { buildPermissionRequestMessage } from '@chroxy/protocol'
 import { isBoundClient } from './environments/authority.js'
+import { NOT_DELEGABLE_TOOLS } from './permission-manager.js'
 
 const log = createLogger('ws')
 
@@ -390,6 +391,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         input: sanitizedInput,
         remainingMs: 300_000,
         floored,
+        explicitConsent: false,
+        nonDelegable: NOT_DELEGABLE_TOOLS.has(tool),
         // #5667: carry the owning session so clients route the prompt to the
         // session that actually asked, instead of falling back to whatever tab
         // is focused. Matches the resend-on-reconnect (line ~485) and SDK
@@ -482,7 +485,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // #7968: stash the SAME floor verdict computed above so a reconnect
         // resend (resendPendingPermissions' legacy-HTTP branch) replays it
         // rather than re-deriving (or silently dropping) it.
-        data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now(), floored },
+        data: { requestId, tool, description, input: sanitizedInput, remainingMs: 300_000, createdAt: Date.now(), floored, explicitConsent: false, nonDelegable: NOT_DELEGABLE_TOOLS.has(tool) },
       })
       } catch (err) {
         // #5313 (WP-1.3): see the try at the top of this end callback.
@@ -922,6 +925,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
                   // re-evaluate against; the entry already carries the answer).
                   // Fail-closed: a stash with no verdict replays as floored.
                   floored: permData.floored !== false,
+                  explicitConsent: permData.explicitConsent,
+                  nonDelegable: permData.nonDelegable,
                 }))
               } catch (err) {
                 log.warn(`Skipping malformed pending permission ${requestId} on resend: ${err?.message ?? err}`)
@@ -979,6 +984,8 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
             // creation time (handlePermissionRequest above) — never re-derived.
             // Fail-closed: a stash with no verdict replays as floored.
             floored: pending.data.floored !== false,
+            explicitConsent: pending.data.explicitConsent,
+            nonDelegable: pending.data.nonDelegable,
           }))
         } catch (err) {
           log.warn(`Skipping malformed pending legacy permission ${requestId} on resend: ${err?.message ?? err}`)

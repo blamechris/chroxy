@@ -1,3 +1,5 @@
+import { DevPreviewRequest } from './DevPreviewRequest'
+import type { DevPreviewRequestState } from '@chroxy/store-core'
 import type { ComponentProps } from 'react'
 import { ChatSettingsDropdown } from './ChatSettingsDropdown'
 import { NotificationsWidget } from './NotificationsWidget'
@@ -115,10 +117,13 @@ export interface AppHeaderProps {
   modelLabel?: string
   costBadgeMode: ComponentProps<typeof StatusBar>['costBadgeMode']
   // Dev-server preview tunnels (#6790) — active session's live devPreviews
-  // (server-detected localhost dev server, auto-tunneled). Empty array
+  // (explicitly requested and approved HTTP services). Empty array
   // renders nothing; DevPreviewChip self-gates.
   devPreviews: DevPreview[]
+  previewSessionId?: string | null
+  devPreviewRequests?: DevPreviewRequestState[]
   onCloseDevPreview: (port: number) => void
+  onOpenDevPreview?: (port: number) => boolean
   // #7344 — the active session's pull-request / CI status. Null before the
   // first snapshot lands; SessionCiChip self-gates on it.
   sessionPrStatus: ServerSessionPrStatusMessage | null
@@ -245,11 +250,8 @@ export function AppHeader(props: AppHeaderProps) {
         />
       </div>
       <div className="header-right">
-        {/* #6790 — active dev-server preview tunnels for this session. The
-            server auto-detects a localhost dev server and opens a Cloudflare
-            tunnel; this chip is the only dashboard surface that makes the
-            resulting URL discoverable (previously only visible by scrolling
-            raw tool output). Self-gates on an empty devPreviews array. */}
+        {/* Approved previews show the target port and the close control. */}
+        <DevPreviewRequest key={props.previewSessionId} requests={props.devPreviewRequests} onOpen={props.onOpenDevPreview} onClose={props.onCloseDevPreview} />
         <DevPreviewChip previews={props.devPreviews} onClose={props.onCloseDevPreview} />
         {/* #7344 — the session's PR + CI state. Before this the only signal that
             CI was running at all was prose the agent typed, so the user could

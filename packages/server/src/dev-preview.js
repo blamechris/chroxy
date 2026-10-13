@@ -1,229 +1,214 @@
-import { EventEmitter } from 'events'
-import { CloudflareTunnelAdapter } from './tunnel/cloudflare.js'
+import { EventEmitter } from 'node:events'
+import { buildPermissionRequestMessage } from '@chroxy/protocol'
+import { PermissionManager } from './permission-manager.js'
+import { PreviewTunnelAdapter } from './tunnel/preview.js'
+import { assertPreviewPort, pinPreviewTarget, createPinnedPreviewProxy } from './preview-target.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('dev-preview')
 
-/**
- * Manages ephemeral Cloudflare quick tunnels so the phone can preview a
- * localhost dev server, and emits dev_preview events for the WS layer to
- * broadcast.
- *
- * A preview is started only when one is explicitly requested. Session output,
- * such as a tool_result that mentions a localhost port, never starts one: the
- * WS layer does not pass tool results to this manager.
- *
- * Lifecycle:
- *   - One tunnel per (sessionId, port) pair
- *   - Auto-cleanup when session is destroyed
- *   - Manual close via closePreview()
- *
- * Events emitted:
- *   dev_preview_started     { sessionId, port, url }
- *   dev_preview_stopped     { sessionId, port }
- *   dev_preview_error       { sessionId, port, error }   — tunnel START failure
- *   dev_preview_stop_failed { sessionId, port, error }   — tunnel STOP failure (#5731)
- */
+export const PREVIEW_EXPOSURE = 'Public Cloudflare URL; anyone with the URL can reach this service. Chroxy adds no authentication. HTTP only: no WebSockets or automatic reconnect.'
 
-// Patterns that indicate a dev server started on localhost
-const SERVER_PATTERNS = [
-  // "listening on port 3000", "listening at port 8080"
-  /listening\s+(?:on|at)\s+(?:port\s+)?(\d{2,5})/i,
-  // "http://localhost:3000", "http://127.0.0.1:5173"
-  /https?:\/\/(?:localhost|127\.0\.0\.1):(\d{2,5})/i,
-  // "Local:   http://localhost:5173"  (Vite)
-  /Local:\s+https?:\/\/(?:localhost|127\.0\.0\.1):(\d{2,5})/i,
-  // "ready on 0.0.0.0:3000", "started on port 8080"
-  /(?:ready|started|running|serving)\s+(?:on|at)\s+(?:(?:0\.0\.0\.0|localhost|127\.0\.0\.1):)?(?:port\s+)?(\d{2,5})/i,
-  // "Server is running on port 3000"
-  /server\s+is\s+running\s+on\s+port\s+(\d{2,5})/i,
-]
-
-// Ports to ignore (common non-dev-server ports)
-const IGNORED_PORTS = new Set([22, 80, 443, 5432, 3306, 6379, 27017])
-
-// Reasonable dev server port range
-const MIN_PORT = 1024
-const MAX_PORT = 65535
-
+/** Explicit, one-shot, client-bound previews of an immutable HTTP connection. */
 export class DevPreviewManager extends EventEmitter {
-  constructor() {
+  constructor({ daemonPort, authRequired = true, getSession, pinTarget = pinPreviewTarget, createProxy = createPinnedPreviewProxy, tunnelFactory = opts => new PreviewTunnelAdapter(opts), tunnelConfig = {}, permissionTimeoutMs } = {}) {
     super()
-    // Map<string, Map<number, CloudflareTunnelAdapter>>  sessionId -> port -> tunnel
+    this._daemonPort = daemonPort
+    this._authRequired = authRequired
+    this._getSession = getSession
+    this._pinTarget = pinTarget
+    this._createProxy = createProxy
+    this._tunnelFactory = tunnelFactory
+    this._tunnelConfig = tunnelConfig
+    this._permissionTimeoutMs = permissionTimeoutMs
+    this._requests = new Map()
     this._tunnels = new Map()
-    // Set<string> of "sessionId:port" keys currently being started (prevent duplicates)
-    this._starting = new Set()
+    this._usedRequestIds = new Set()
   }
 
-  /**
-   * Detect localhost server port from tool result text.
-   * Returns the port number if found, null otherwise.
-   */
-  detectPort(text) {
-    if (!text || typeof text !== 'string') return null
-    for (const pattern of SERVER_PATTERNS) {
-      const match = text.match(pattern)
-      if (match) {
-        const port = parseInt(match[1], 10)
-        if (port >= MIN_PORT && port <= MAX_PORT && !IGNORED_PORTS.has(port)) {
-          return port
-        }
-      }
+  _assertAuthority(client, sessionId) {
+    if (this._authRequired !== true || client?.authenticated !== true || client.isPrimaryToken !== true || client.boundSessionId || !client.authToken) {
+      throw new Error('Preview publication requires the primary-token client')
     }
-    return null
+    if (client.activeSessionId !== sessionId && !client.subscribedSessionIds?.has(sessionId)) throw new Error('Open this session before requesting its preview')
+    const entry = this._getSession?.(sessionId)
+    if (!entry?.session || !entry.session.cwd) throw new Error('Preview requires a live local session with a directory')
+    return entry.session
   }
 
-  /**
-   * Scan tool_result text for a server start pattern and, if one is found,
-   * create a preview tunnel. The WS layer does not call this for session
-   * output; a preview opens only on an explicit request.
-   */
-  async handleToolResult(sessionId, result) {
-    const port = this.detectPort(result)
-    if (!port) return
+  _status(request, state, reason) {
+    request.state = state
+    const message = { type: 'dev_preview_status', sessionId: request.sessionId, requestId: request.requestId, port: request.port, state, ...(reason ? { reason } : {}) }
+    request.send(message)
+    if (request.client) this.emit('dev_preview_status', message)
+  }
 
-    // Already have a tunnel for this session+port
-    if (this._getTunnel(sessionId, port)) return
-
-    // Already starting one
-    const key = `${sessionId}:${port}`
-    if (this._starting.has(key)) return
-    this._starting.add(key)
-
+  async openPreview(client, { sessionId, port, requestId }, send) {
+    let request
     try {
-      await this._createPreviewTunnel(sessionId, port)
+      const session = this._assertAuthority(client, sessionId)
+      assertPreviewPort(port, this._daemonPort)
+      if (typeof requestId !== 'string' || !requestId || this._usedRequestIds.has(requestId)) throw new Error('Preview request already used; request a new preview')
+      if (this._usedRequestIds.size >= 10_000) throw new Error('Preview request limit reached; restart the daemon before requesting another preview')
+      if (this._requests.size >= 32) throw new Error('Too many pending previews')
+      if (this._requestsForPort(sessionId, port) || this._getTunnel(sessionId, port)) throw new Error('This port already has a pending or active preview')
+      this._usedRequestIds.add(requestId)
+      request = { requestId, sessionId, port, clientId: client.id, client, session, cwd: session.cwd, controller: new AbortController(), send }
+      this._requests.set(requestId, request)
+      this._status(request, 'checking', 'Checking the local HTTP service')
+      const permissions = new PermissionManager({ timeoutMs: this._permissionTimeoutMs, cwd: session.cwd })
+      request.permissions = permissions
+      permissions.on('permission_request', data => send(buildPermissionRequestMessage({ ...data, sessionId })))
+      permissions.on('permission_resolved', data => {
+        send({ type: 'permission_resolved', sessionId, ...data })
+        if (data.decision !== 'allow') this._status(request, data.reason === 'user' ? 'denied' : 'cancelled', data.reason === 'timeout' ? 'Consent expired; request a new preview' : data.reason === 'user' ? 'Preview consent denied' : request.endReason || 'Preview request cancelled')
+      })
+      request.pin = await this._pinTarget({ port, cwd: session.cwd, signal: request.controller.signal })
+      request.pin.socket.once('close', () => { request.controller.abort()
+      void this.closePreview(sessionId, port, 'HTTP service connection ended; request a new preview') })
+      this._assertLive(request)
+      const target = request.pin.target
+      this._status(request, 'awaiting_consent', 'Review the consent prompt before publication')
+      const granted = await permissions.requestExplicitConsent({
+        requestId, clientId: client.id, tool: 'dev_preview', signal: request.controller.signal,
+        input: { target, exposure: PREVIEW_EXPOSURE, explicitConsent: true, nonDelegable: true },
+        description: `Publish HTTP service ${target.command} (PID ${target.pid}) at http://127.0.0.1:${port}, directory ${target.cwd}. ${PREVIEW_EXPOSURE} Allow once for this connection?`,
+      })
+      if (!granted) return
+      this._status(request, 'opening', 'Consent allowed. Creating the public HTTP preview; DNS may take time to become ready')
+      this._assertLive(request)
+      await request.pin.verify()
+      this._assertLive(request)
+      await this._createPreviewTunnel(request)
+    } catch (err) {
+      if (request?.state !== 'stop_failed') this._status(request || { sessionId, port, requestId, send }, 'failed', err.message)
+      send({ type: 'session_error', sessionId, code: 'DEV_PREVIEW_REFUSED', recoverable: true, message: err.message })
     } finally {
-      this._starting.delete(key)
-    }
-  }
-
-  /**
-   * Create a preview tunnel for the given session and port.
-   *
-   * The tunnel object is registered in _tunnels BEFORE start() is called so
-   * that closeSession() can find and stop it even if destruction races the
-   * 30-second startup window (preventing zombie cloudflared processes).
-   */
-  async _createPreviewTunnel(sessionId, port) {
-    const tunnel = new CloudflareTunnelAdapter({ port, mode: 'quick' })
-
-    // Register before starting so closeSession() can reach it during startup
-    if (!this._tunnels.has(sessionId)) {
-      this._tunnels.set(sessionId, new Map())
-    }
-    this._tunnels.get(sessionId).set(port, tunnel)
-
-    try {
-      const { httpUrl } = await tunnel.start()
-      log.info(`Tunnel started for session ${sessionId} port ${port}: ${httpUrl}`)
-
-      // Check whether the session was destroyed while we were waiting for start()
-      if (this._getTunnel(sessionId, port) !== tunnel) {
-        // Session was closed during startup — stop the tunnel immediately
-        log.info(`Session ${sessionId} destroyed during tunnel startup, stopping port ${port}`)
-        try { await tunnel.stop() } catch { /* ignore */ }
-        return
+      if (request) {
+        this._requests.delete(requestId)
+        if (!this._getTunnel(sessionId, port)) request.pin?.close()
       }
-
-      log.info(`Tunnel started for session ${sessionId} port ${port}: ${httpUrl}`)
-      this.emit('dev_preview_started', { sessionId, port, url: httpUrl })
-    } catch (err) {
-      log.error(`Failed to create tunnel for port ${port}: ${err.message}`)
-      this.emit('dev_preview_error', { sessionId, port, error: err.message })
-      // Remove the placeholder entry left by pre-registration
-      const sessionTunnels = this._tunnels.get(sessionId)
-      if (sessionTunnels) {
-        sessionTunnels.delete(port)
-        if (sessionTunnels.size === 0) this._tunnels.delete(sessionId)
-      }
-      // Clean up failed tunnel
-      try { await tunnel.stop() } catch { /* ignore */ }
     }
   }
 
-  /**
-   * Close a specific preview tunnel.
-   */
-  async closePreview(sessionId, port) {
-    const tunnel = this._getTunnel(sessionId, port)
-    if (!tunnel) return
+  _assertLive(request) {
+    if (request.controller.signal.aborted || this._requests.get(request.requestId) !== request || this._assertAuthority(request.client, request.sessionId) !== request.session) {
+      throw new Error('Preview request is no longer live')
+    }
+    if (request.cwd !== request.session.cwd) throw new Error('Session directory changed; request a new preview')
+  }
 
-    // #5731: capture (don't swallow) a stop() failure. The previous code
-    // signalled a clean stop unconditionally — if tunnel.stop() threw, the
-    // public tunnel (and thus the exposed local port) could still be live while
-    // the user was told it was shut down.
-    let stopError = null
+  respondToConsent(client, msg) {
+    const request = this._requests.get(msg.requestId)
+    if (!request) return this._usedRequestIds.has(msg.requestId)
     try {
-      await tunnel.stop()
-    } catch (err) {
-      stopError = err
-    }
-
-    // Drop our tracking entry regardless: the tunnel handle is unusable for a
-    // retry whether or not stop() succeeded, so keeping it would only wedge the
-    // port slot. The UI still gets dev_preview_stopped so it doesn't show a
-    // phantom live preview.
-    const sessionTunnels = this._tunnels.get(sessionId)
-    if (sessionTunnels) {
-      sessionTunnels.delete(port)
-      if (sessionTunnels.size === 0) this._tunnels.delete(sessionId)
-    }
-
-    if (stopError) {
-      // Surface it so the user can verify / kill cloudflared manually instead of
-      // assuming the port is no longer exposed. Normalize the message — a promise
-      // rejection isn't guaranteed to be an Error (could be a string/null), so
-      // `.message` alone can drop the actual detail.
-      const stopMsg = stopError?.message || String(stopError)
-      log.error(`Failed to stop tunnel for session ${sessionId} port ${port}: ${stopMsg}${stopError?.stack ? '\n' + stopError.stack : ''}`)
-      this.emit('dev_preview_stop_failed', { sessionId, port, error: stopMsg })
-    } else {
-      log.info(`Tunnel stopped for session ${sessionId} port ${port}`)
-    }
-    this.emit('dev_preview_stopped', { sessionId, port })
+      this._assertLive(request)
+      if (client !== request.client || client.id !== request.clientId) return true
+      request.permissions.respondToExplicitConsent(msg.requestId, msg.decision, { clientId: client.id, editedInput: msg.editedInput, scope: msg.scope })
+    } catch { request.controller.abort() }
+    return true
   }
 
-  /**
-   * Close all preview tunnels for a session.
-   */
+  _requestsForPort(sessionId, port) {
+    return [...this._requests.values()].find(r => r.sessionId === sessionId && r.port === port)
+  }
+
+  async _createPreviewTunnel(request) {
+    const { sessionId, port, pin } = request
+    const record = { request, pin, tunnel: null, proxy: null, url: null, closing: null }
+    if (!this._tunnels.has(sessionId)) this._tunnels.set(sessionId, new Map())
+    this._tunnels.get(sessionId).set(port, record)
+    try {
+      record.proxy = await this._createProxy(pin, async () => {
+        if (request.controller.signal.aborted || request.cwd !== request.session.cwd || this._assertAuthority(request.client, sessionId) !== request.session) throw new Error('Preview ended')
+      })
+      await pin.verify()
+      this._assertLive(request)
+      record.tunnel = this._tunnelFactory({ config: { ...this._tunnelConfig, unixSocket: record.proxy.socketPath, previewIngress: record.proxy.ingress } })
+      record.tunnel.once('tunnel_lost', () => { void this.closePreview(sessionId, port, 'Public tunnel connection ended; request a new preview') })
+      const { httpUrl } = await record.tunnel.start()
+      await pin.verify()
+      this._assertLive(request)
+      if (record.closing) throw new Error('Preview closed during startup')
+      record.url = httpUrl
+      this.emit('dev_preview_started', { sessionId, port, url: httpUrl, target: pin.target, exposure: PREVIEW_EXPOSURE })
+      this._status(request, 'active', 'HTTP preview URL created. DNS and public connectivity may take time to become ready')
+      record.monitor = setInterval(() => {
+        void (async () => {
+          if (request.cwd !== request.session.cwd || this._assertAuthority(request.client, sessionId) !== request.session) throw new Error('Preview session changed')
+          await pin.verify()
+        })().catch(() => this.closePreview(sessionId, port, 'HTTP service ownership or session changed; request a new preview'))
+      }, 2000)
+      record.monitor.unref?.()
+    } catch (err) {
+      const proxySettlement = Promise.resolve(record.proxy?.close()).catch(error => error)
+      pin.close()
+      await this.closePreview(sessionId, port, 'Preview could not open')
+      await proxySettlement
+      throw err
+    }
+  }
+
+  async closePreview(sessionId, port, reason = 'Preview closed by client') {
+    const pending = this._requestsForPort(sessionId, port)
+    if (pending) {
+      pending.endReason = reason
+      pending.controller.abort()
+    }
+    const record = this._getTunnel(sessionId, port)
+    if (!record) return
+    if (record.closing) return record.closing
+    record.request.endReason = reason
+    this._status(record.request, 'closing', 'Closing the HTTP preview')
+    record.request.controller.abort()
+    clearInterval(record.monitor)
+    record.pin.close()
+    const proxySettlement = Promise.resolve(record.proxy?.close()).catch(error => error)
+    record.closing = (async () => {
+      try {
+        await record.tunnel?.stop()
+        const proxyError = await proxySettlement
+        if (proxyError) throw proxyError
+        this._tunnels.get(sessionId)?.delete(port)
+        if (this._tunnels.get(sessionId)?.size === 0) this._tunnels.delete(sessionId)
+        this.emit('dev_preview_stopped', { sessionId, port })
+        this._status(record.request, 'closed', reason)
+      } catch (err) {
+        const error = err?.message || String(err)
+        log.error(`Preview on port ${port} remains tracked: ${error}`)
+        this.emit('dev_preview_stop_failed', { sessionId, port, error })
+        this._status(record.request, 'stop_failed', `Preview remains tracked: ${error}`)
+      } finally { record.closing = null }
+    })()
+    return record.closing
+  }
+
+  async closeClient(clientId) {
+    for (const request of this._requests.values()) if (request.clientId === clientId) {
+      request.endReason = 'Requesting client disconnected'
+      request.controller.abort()
+    }
+    const closing = []
+    for (const [sessionId, ports] of this._tunnels) for (const [port, record] of ports) if (record.request.clientId === clientId) closing.push(this.closePreview(sessionId, port, 'Requesting client disconnected'))
+    await Promise.all(closing)
+  }
+
   async closeSession(sessionId) {
-    const sessionTunnels = this._tunnels.get(sessionId)
-    if (!sessionTunnels) return
-
-    const ports = [...sessionTunnels.keys()]
-    for (const port of ports) {
-      await this.closePreview(sessionId, port)
+    for (const request of this._requests.values()) if (request.sessionId === sessionId) {
+      request.endReason = 'Session ended'
+      request.controller.abort()
     }
+    await Promise.all([...(this._tunnels.get(sessionId)?.keys() || [])].map(port => this.closePreview(sessionId, port, 'Session ended')))
   }
 
-  /**
-   * Close all preview tunnels.
-   */
   async closeAll() {
-    const sessionIds = [...this._tunnels.keys()]
-    for (const sessionId of sessionIds) {
-      await this.closeSession(sessionId)
-    }
+    for (const request of this._requests.values()) request.controller.abort()
+    await Promise.all([...this._tunnels.keys()].map(sessionId => this.closeSession(sessionId)))
   }
 
-  /**
-   * Get active previews for a session.
-   * Returns [{ port, url }] for client display.
-   */
   getActivePreviews(sessionId) {
-    const sessionTunnels = this._tunnels.get(sessionId)
-    if (!sessionTunnels) return []
-
-    const previews = []
-    for (const [port, tunnel] of sessionTunnels) {
-      if (tunnel.url) {
-        previews.push({ port, url: tunnel.url })
-      }
-    }
-    return previews
+    return [...(this._tunnels.get(sessionId)?.entries() || [])].filter(([, r]) => r.url).map(([port, r]) => ({ port, url: r.url, target: r.pin.target, exposure: PREVIEW_EXPOSURE }))
   }
 
-  _getTunnel(sessionId, port) {
-    return this._tunnels.get(sessionId)?.get(port) ?? null
-  }
+  _getTunnel(sessionId, port) { return this._tunnels.get(sessionId)?.get(port) ?? null }
 }

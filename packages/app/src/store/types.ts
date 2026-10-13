@@ -798,6 +798,7 @@ export interface WebTaskActions {
   listWebTasks: () => void;
   teleportWebTask: (taskId: string) => void;
   closeDevPreview: (port: number) => void;
+  openDevPreview: (port: number) => boolean;
 }
 
 /**

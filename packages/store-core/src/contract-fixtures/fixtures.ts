@@ -1505,6 +1505,13 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
 
   // 18. dev_preview_stopped — remove by port
   {
+    name: 'dev_preview_status preserves the request lifecycle and reason',
+    type: 'dev_preview_status',
+    init: { sessions: { s1: {} } },
+    message: { type: 'dev_preview_status', sessionId: 's1', port: 3100, requestId: 'r1', state: 'closed', reason: 'HTTP service connection ended' },
+    expect: { sessions: { s1: { devPreviewRequests: [{ port: 3100, requestId: 'r1', state: 'closed', reason: 'HTTP service connection ended' }] } } },
+  },
+  {
     name: 'dev_preview_stopped removes the dev-preview entry matching the stopped port',
     type: 'dev_preview_stopped',
     init: {

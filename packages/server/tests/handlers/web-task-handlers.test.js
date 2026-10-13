@@ -235,7 +235,7 @@ describe('web-task-handlers', () => {
   describe('close_dev_preview', () => {
     it('calls devPreview.closePreview with sessionId and port', () => {
       const ctx = makeCtx()
-      const client = makeClient({ activeSessionId: 's1' })
+      const client = makeClient({ activeSessionId: 's1', isPrimaryToken: true, authToken: 'fixture-only' })
 
       webTaskHandlers.close_dev_preview(makeWs(), client, { port: 3000 }, ctx)
 
