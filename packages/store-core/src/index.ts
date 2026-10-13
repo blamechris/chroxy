@@ -82,9 +82,9 @@ export type {
   InputDeliveryRecord,
   InputDeliveryStatus,
 } from './input-delivery'
-export { deriveComposerReadiness } from './composer-readiness'
+export { deriveComposerReadiness, providerInputReadinessFallback } from './composer-readiness'
 export type { ComposerReadiness } from './composer-readiness'
-export { recoverRejectedComposer } from './composer-recovery'
+export { recoverRejectedComposer, ComposerRecoveryQueue } from './composer-recovery'
 export type { ComposerRecoveryResult } from './composer-recovery'
 export { buildInputMessage } from '@chroxy/protocol'
 // #7376: the shared wording for a tool cut off by a terminated turn, re-exported

@@ -277,3 +277,57 @@ describe('useDictationComposer (#5573 mid-recognition re-anchor)', () => {
     expect(h.api.current!.consumeUsedVoice()).toBe(false);
   });
 });
+
+// A rejected stopped-dictation draft must carry its original voice marker on
+// the next explicit send. The shared acknowledgement helper controls whether
+// the draft and marker may be restored at all.
+import { recoverRejectedComposer, ComposerRecoveryQueue } from '@chroxy/store-core';
+
+it('recovers stopped dictation voice metadata only with the successfully restored draft', () => {
+  const inputRef = makeInputRef();
+  const h = renderHarness(baseProps({ inputRef, isRecognizing: true, transcript: 'spoken draft' }));
+  h.update(baseProps({ inputRef, isRecognizing: false, transcript: 'spoken draft' }));
+  const snapshot = { clientMessageId: 'voice-1', sessionId: 's1', draft: inputRef.current!.getValue(), isVoice: h.api.current!.consumeUsedVoice() };
+  expect(snapshot.isVoice).toBe(true);
+  inputRef.current!.clear();
+  const queue = new ComposerRecoveryQueue<typeof snapshot>();
+  const ack = { clientMessageId: snapshot.clientMessageId, sessionId: 's1', status: 'rejected' as const,
+    delivery: 'not_dispatched' as const, retrySafe: true, pendingContextItemIds: [], updatedAt: 1 };
+  const restore = jest.fn((draft: typeof snapshot) => {
+    if (inputRef.current!.getValue().length > 0) return false;
+    inputRef.current!.setValue(draft.draft);
+    h.api.current!.restoreUsedVoice(draft.isVoice);
+    queue.retain(draft, true);
+    return true;
+  });
+  inputRef.current!.setValue('newer draft');
+  expect(recoverRejectedComposer(ack, snapshot, { originalSessionActive: true, composerUnchanged: true, restore })).toBe('offer');
+  expect(h.api.current!.consumeUsedVoice()).toBe(false);
+  expect(inputRef.current!.getValue()).toBe('newer draft');
+  inputRef.current!.clear();
+  expect(recoverRejectedComposer(ack, snapshot, { originalSessionActive: true, composerUnchanged: true, restore })).toBe('restored');
+  expect(inputRef.current!.getValue()).toBe('spoken draft');
+  expect(h.api.current!.consumeUsedVoice()).toBe(true);
+  expect(h.api.current!.consumeUsedVoice()).toBe(false);
+  queue.releaseRestored('s1');
+  expect(queue.hasWork).toBe(false);
+  for (const record of [{ ...ack, retrySafe: false }, { ...ack, status: 'accepted' as const }, { ...ack, status: 'uncertain' as const }]) {
+    inputRef.current!.clear();
+    restore.mockClear();
+    expect(recoverRejectedComposer(record, snapshot, { originalSessionActive: true, composerUnchanged: true, restore })).toBe('ignored');
+    expect(restore).not.toHaveBeenCalled();
+    expect(h.api.current!.consumeUsedVoice()).toBe(false);
+  }
+  h.unmount();
+});
+
+it('observes a dictation edit as voice without consuming its marker', () => {
+  const onDraftChange = jest.fn();
+  const inputRef = makeInputRef();
+  const h = renderHarness(baseProps({ inputRef, onDraftChange, isRecognizing: true, transcript: 'voice edit' }));
+  expect(onDraftChange).toHaveBeenLastCalledWith('voice edit', true);
+  typeInto(inputRef, h.api, 'voice edit plus typing');
+  expect(onDraftChange).toHaveBeenLastCalledWith('voice edit plus typing', true);
+  expect(h.api.current!.consumeUsedVoice()).toBe(true);
+  h.unmount();
+});

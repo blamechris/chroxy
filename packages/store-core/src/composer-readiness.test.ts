@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ProviderRuntimeInfo } from '@chroxy/protocol'
-import { deriveComposerReadiness } from './composer-readiness'
+import { deriveComposerReadiness, providerInputReadinessFallback } from './composer-readiness'
 
 function runtime(
   inputRequiresReady: boolean,
@@ -48,5 +48,19 @@ describe('deriveComposerReadiness', () => {
     expect(deriveComposerReadiness(runtime(true, 'unknown'))).toEqual({ canSend: false, status: 'initializing' })
     expect(deriveComposerReadiness(runtime(true))).toEqual({ canSend: false, status: 'initializing' })
     expect(deriveComposerReadiness(runtime(true, true))).toEqual({ canSend: true, status: 'ready' })
+  })
+})
+
+describe('provider startup compatibility', () => {
+  it.each(['claude-cli', 'claude-sdk', 'claude-tui', 'claude-channel', 'claude-byok', 'deepseek', 'ollama', 'gemini', 'user-shell'])('keeps %s input available before the informational frame', provider => {
+    expect(deriveComposerReadiness(null, providerInputReadinessFallback(provider)).canSend).toBe(true)
+    // A runtime trait overrides the compatibility fallback for every provider.
+    expect(deriveComposerReadiness(runtime(true, false), providerInputReadinessFallback(provider)).canSend).toBe(false)
+  })
+  it.each(['codex', 'codex-appserver', null, undefined])('waits for current runtime facts for %s', provider => {
+    const fallback = providerInputReadinessFallback(provider)
+    expect(deriveComposerReadiness(null, fallback).canSend).toBe(false)
+    expect(deriveComposerReadiness(runtime(false), fallback).canSend).toBe(true)
+    expect(deriveComposerReadiness(runtime(true, true), fallback).canSend).toBe(true)
   })
 })

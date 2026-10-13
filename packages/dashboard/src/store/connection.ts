@@ -207,6 +207,7 @@ import {
   beginInputDelivery,
   cancelInputDelivery,
   deriveComposerReadiness,
+  providerInputReadinessFallback,
   // #7411 — shared streaming/plan transient-state clear, single-sourced so
   // the app and dashboard onclose sweeps can't drift apart on this trio
   // again (the app's used to sweep only the active session).
@@ -2840,6 +2841,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     retireSocket(existing);
     if (liveSocket !== existing) retireSocket(liveSocket);
     liveSocket = null;
+    // Every new socket must obtain its own session readiness snapshot, including
+    // direct reconnects whose retired socket no longer runs onclose.
+    sweepTransientSessionState(get);
     // #8268 — the daemon that served this page (or, in the desktop app, a loopback
     // daemon) is this machine's own process: an update restarts it for minutes, and
     // giving up there loses the session view after every update. Retry with no cap,
@@ -4214,7 +4218,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const activeProvider = sessions.find(session => session.sessionId === activeSessionId)?.provider
     const readiness = deriveComposerReadiness(
       active.providerRuntimeInfo,
-      activeProvider && activeProvider !== 'codex' ? false : undefined,
+      providerInputReadinessFallback(activeProvider),
     )
     if (!readiness.canSend) return false
 

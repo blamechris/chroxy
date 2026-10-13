@@ -30,7 +30,9 @@ import {
   // #8461 — the System tab excludes turn-outcome chips (they belong to the chat).
   isSystemTabMessage,
   deriveComposerReadiness,
+  providerInputReadinessFallback,
   recoverRejectedComposer,
+  ComposerRecoveryQueue,
   nextMessageId,
   type SessionInfo,
 } from '@chroxy/store-core'
@@ -210,7 +212,7 @@ export function App() {
   const composerReadiness = useMemo(
     () => deriveComposerReadiness(
       activeProviderRuntimeInfo,
-      activeSessionProvider && activeSessionProvider !== 'codex' ? false : undefined,
+      providerInputReadinessFallback(activeSessionProvider),
     ),
     [activeProviderRuntimeInfo, activeSessionProvider],
   )
@@ -1940,8 +1942,16 @@ export function App() {
   const [inputDraftValue, setInputDraftValue] = useState('')
   const handleDraftChange = useCallback((text: string) => {
     setInputDraftValue(text)
-    if (activeSessionId) inputDraftsRef.current.set(activeSessionId, text)
-  }, [activeSessionId])
+    if (activeSessionId) {
+      inputDraftsRef.current.set(activeSessionId, text)
+      // Keep the latest unsent edit recoverable across server-driven pruning.
+      recoveredComposersRef.current.updateRestored(activeSessionId, snapshot =>
+        text.length > 0 || fileAttachments.length > 0 || imageAttachments.length > 0
+          ? { ...snapshot, text, pastedBlocks: pastedTextBlocksRef.current.get(activeSessionId) ?? [],
+              files: [...fileAttachments], images: [...imageAttachments] }
+          : null)
+    }
+  }, [activeSessionId, fileAttachments, imageAttachments])
 
   // #6628 — edit a still-queued follow-up before it flushes. Cancel-and-reopen:
   // cancel the queued entry FIRST (its own optimistic-drop clears the bubble +
@@ -2032,6 +2042,7 @@ export function App() {
   }
   const pendingComposerSubmissionsRef = useRef<Map<string, ComposerSubmission>>(new Map())
   const [composerRecovery, setComposerRecovery] = useState<ComposerSubmission | null>(null)
+  const recoveredComposersRef = useRef(new ComposerRecoveryQueue<ComposerSubmission>())
 
   const restoreComposerSubmission = useCallback((submission: ComposerSubmission): boolean => {
     if (activeSessionId !== submission.sessionId) return false
@@ -2039,13 +2050,23 @@ export function App() {
     if (currentDraft.length > 0 || fileAttachments.length > 0 || imageAttachments.length > 0) return false
     inputDraftsRef.current.set(submission.sessionId, submission.text)
     pastedTextBlocksRef.current.set(submission.sessionId, submission.pastedBlocks)
+    pastedTextNextIdRef.current.set(submission.sessionId, Math.max(0, ...submission.pastedBlocks.map(block => block.id)))
+    recoveredComposersRef.current.retain(submission, true)
     setInputDraftValue(submission.text)
     setPastedTextBlocks(submission.pastedBlocks)
     setFileAttachments(submission.files)
     setImageAttachments(submission.images)
-    setComposerRecovery(null)
+    setComposerRecovery(recoveredComposersRef.current.offer)
     return true
   }, [activeSessionId, fileAttachments.length, imageAttachments.length])
+
+  useEffect(() => {
+    if (!activeSessionId) return
+    recoveredComposersRef.current.updateRestored(activeSessionId, snapshot =>
+      snapshot.text.length > 0 || fileAttachments.length > 0 || imageAttachments.length > 0
+        ? { ...snapshot, files: [...fileAttachments], images: [...imageAttachments] }
+        : null)
+  }, [activeSessionId, fileAttachments, imageAttachments])
 
   const composerRecoveryOriginalExists = composerRecovery
     ? sessions.some(session => session.sessionId === composerRecovery.sessionId)
@@ -2070,7 +2091,10 @@ export function App() {
             && fileAttachments.length === 0 && imageAttachments.length === 0,
           restore: restoreComposerSubmission,
         })
-        if (result === 'offer') setComposerRecovery(submission)
+        if (result === 'offer') {
+          recoveredComposersRef.current.retain(submission)
+          setComposerRecovery(recoveredComposersRef.current.offer)
+        }
       }
     })
   }, [fileAttachments.length, imageAttachments.length, restoreComposerSubmission])
@@ -2079,7 +2103,9 @@ export function App() {
   // persisted, so the stale-bundle auto-reload must know about them. Read through a
   // ref so the probe registers once and always sees the latest values.
   const unsavedComposerRef = useRef<() => boolean>(() => false)
-  unsavedComposerRef.current = () => composerHasUnsavedWork({
+  unsavedComposerRef.current = () => pendingComposerSubmissionsRef.current.size > 0
+    || recoveredComposersRef.current.hasWork
+    || composerHasUnsavedWork({
     drafts: inputDraftsRef.current.values(),
     pastedBlocks: pastedTextBlocksRef.current.values(),
     fileAttachments,
@@ -2096,7 +2122,8 @@ export function App() {
   // refs themselves are stable and the helper has no other deps — adding
   // useCallback here would only buy a stable identity that no consumer
   // currently requires.
-  const evictSessionComposerState = (sessionId: string) => {
+  const evictSessionComposerState = (sessionId: string, preserveRecovery = false) => {
+    if (!preserveRecovery) recoveredComposersRef.current.releaseRestored(sessionId)
     inputDraftsRef.current.delete(sessionId)
     pastedTextBlocksRef.current.delete(sessionId)
     pastedTextNextIdRef.current.delete(sessionId)
@@ -2123,23 +2150,33 @@ export function App() {
   // on a single Set build.
   useEffect(() => {
     const liveIds = new Set(sessions.map(s => s.sessionId))
+    // Some explicit composer actions (paste removal, queued edit, CI prefill)
+    // write the draft ref directly. Capture the live value before eviction too.
+    for (const [id, text] of inputDraftsRef.current) {
+      recoveredComposersRef.current.updateRestored(id, snapshot =>
+        text.length > 0 || snapshot.files.length > 0 || snapshot.images.length > 0
+          ? { ...snapshot, text, pastedBlocks: pastedTextBlocksRef.current.get(id) ?? [] }
+          : null)
+    }
+    recoveredComposersRef.current.prune(liveIds)
+    setComposerRecovery(recoveredComposersRef.current.offer)
     for (const id of inputDraftsRef.current.keys()) {
-      if (!liveIds.has(id)) evictSessionComposerState(id)
+      if (!liveIds.has(id)) evictSessionComposerState(id, true)
     }
     // pastedTextBlocksRef / pastedTextNextIdRef may hold ids without a
     // matching draft entry (paste-without-typing), so they need their own
     // pass. The helper is idempotent so re-evicting an id that was already
     // removed above is a no-op.
     for (const id of pastedTextBlocksRef.current.keys()) {
-      if (!liveIds.has(id)) evictSessionComposerState(id)
+      if (!liveIds.has(id)) evictSessionComposerState(id, true)
     }
     for (const id of pastedTextNextIdRef.current.keys()) {
-      if (!liveIds.has(id)) evictSessionComposerState(id)
+      if (!liveIds.has(id)) evictSessionComposerState(id, true)
     }
     // #7423: sending clears the draft entry while this ref still holds the text
     // that was sent, so it can outlive its draft and needs its own pass too.
     for (const id of ciPrefillStagedRef.current.keys()) {
-      if (!liveIds.has(id)) evictSessionComposerState(id)
+      if (!liveIds.has(id)) evictSessionComposerState(id, true)
     }
   }, [sessions])
 
@@ -3357,7 +3394,10 @@ export function App() {
                 >
                   {composerRecoveryOriginalExists ? 'Restore unsent draft' : 'Restore draft here'}
                 </button>
-                <button type="button" onClick={() => setComposerRecovery(null)}>Dismiss</button>
+                <button type="button" onClick={() => {
+                  recoveredComposersRef.current.dismiss(composerRecovery.clientMessageId)
+                  setComposerRecovery(recoveredComposersRef.current.offer)
+                }}>Dismiss</button>
               </div>
             )}
 

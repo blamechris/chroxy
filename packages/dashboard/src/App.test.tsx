@@ -194,6 +194,7 @@ import { persistSidebarRepoNames } from './store/persistence'
 let stateOverrides: Record<string, unknown> = {}
 
 // Mock the store module — return default state merged with overrides
+const recoverySubscriptions = vi.hoisted(() => new Set<(state: any) => void>())
 vi.mock('./store/connection', () => {
   const baseState = {
     connectionPhase: 'disconnected',
@@ -323,7 +324,7 @@ vi.mock('./store/connection', () => {
     return state
   }
   useConnectionStore.getState = () => ({ ...baseState, ...stateOverrides })
-  useConnectionStore.subscribe = vi.fn(() => vi.fn())
+  useConnectionStore.subscribe = vi.fn((cb) => { recoverySubscriptions.add(cb); return () => { recoverySubscriptions.delete(cb) } })
   // #6287 — useChatKeyboard (mounted by App) calls these rule-eligibility helpers
   // at render to decide whether the permission shortcut offers allow-for-session.
   // Stub them false in the smoke harness (real coverage lives in
@@ -341,6 +342,7 @@ vi.mock('zustand/react/shallow', () => ({
 }))
 
 beforeEach(() => {
+  recoverySubscriptions.clear()
   stateOverrides = {}
   capturedOnRestart = null
   // #7344 — reset so each case only sees the auto-pull it triggered.
@@ -4828,5 +4830,222 @@ describe('null active-model default presentation (#8260)', () => {
     expect(header.title).toContain('claude-haiku-4-5')
     expect(footer.getAttribute('title')).toContain('claude-haiku-4-5')
     expect(setModel).not.toHaveBeenCalled()
+  })
+})
+
+import { useConnectionStore as reviewStore } from './store/connection'
+
+describe('#8593 actual App recovery', () => {
+  function setup() {
+    vi.mocked(reviewStore.subscribe).mockClear()
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput,
+      sessions: [{ sessionId: 's1', name: 'One', cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null }],
+      sessionStates: { s1: { messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} } } }
+    const view = render(<App />)
+    return { sendInput, view, box: screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement }
+  }
+  function reject(sendInput: ReturnType<typeof vi.fn>, active = 's1') {
+    const id = sendInput.mock.calls[0]![2].clientMessageId
+    const delivery = { clientMessageId: id, sessionId: 's1', status: 'rejected', delivery: 'not_dispatched', retrySafe: true, pendingContextItemIds: [], updatedAt: 1 }
+    const state = { ...reviewStore.getState(), activeSessionId: active, sessionStates: { s1: { messages: [], activeAgents: [], isIdle: true, inputDeliveries: { [id]: delivery } } } }
+    act(() => {
+      for (const callback of recoverySubscriptions) callback(state)
+    })
+  }
+  it('preserves restored paste A when a new paste B is appended before resend', () => {
+    const { box, sendInput } = setup()
+    const a = 'ORIGINAL-A\n'.repeat(30), b = 'NEW-B\n'.repeat(30)
+    const paste = (text: string) => fireEvent.paste(box, { clipboardData: { files: [], items: [], getData: (t: string) => t === 'text/plain' ? text : '' } })
+    paste(a)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(sendInput.mock.calls[0]![0]).toBe(a)
+    reject(sendInput)
+    expect(box.value).toContain('Pasted text #1')
+    box.setSelectionRange(box.value.length, box.value.length)
+    paste(b)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(String(sendInput.mock.calls[1]![0]).includes('ORIGINAL-A'), 'resend must preserve original pasted content').toBe(true)
+    expect(sendInput.mock.calls[1]![0]).toContain('NEW-B')
+  })
+})
+
+describe('#8593 actual App session lifecycle', () => {
+  const session = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null })
+  const ss = () => ({ messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} })
+  it('keeps the proven unsent snapshot available if the restored original is then pruned', () => {
+    vi.mocked(reviewStore.subscribe).mockClear()
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput, sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+    const { rerender } = render(<App />)
+    const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+    fireEvent.change(box, { target: { value: 'valuable rejected draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    const id = sendInput.mock.calls[0]![2].clientMessageId
+    const delivery = { clientMessageId: id, sessionId: 's1', status: 'rejected', delivery: 'not_dispatched', retrySafe: true, pendingContextItemIds: [], updatedAt: 1 }
+    const state = { ...reviewStore.getState(), sessionStates: { s1: { ...ss(), inputDeliveries: { [id]: delivery } }, s2: ss() } }
+    act(() => { for (const callback of recoverySubscriptions) callback(state) })
+    expect(box.value).toBe('valuable rejected draft')
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2', sessions: [session('s2')], sessionStates: { s2: ss() } }
+    rerender(<App />)
+    expect(Boolean(screen.queryByTestId('composer-recovery')), 'closed-session snapshot must still be offered').toBe(true)
+  })
+  it('offers a snapshot when a render-stale restore callback refuses the newly active origin', () => {
+    vi.mocked(reviewStore.subscribe).mockClear()
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput, sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+    const { rerender } = render(<App />)
+    const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+    fireEvent.change(box, { target: { value: 'valuable rejected draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    const id = sendInput.mock.calls[0]![2].clientMessageId
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    const delivery = { clientMessageId: id, sessionId: 's1', status: 'rejected', delivery: 'not_dispatched', retrySafe: true, pendingContextItemIds: [], updatedAt: 1 }
+    // The store switches back to s1 then receives the ack before React commits s1.
+    stateOverrides = { ...stateOverrides, activeSessionId: 's1', sessionStates: { s1: { ...ss(), inputDeliveries: { [id]: delivery } }, s2: ss() } }
+    act(() => { for (const callback of recoverySubscriptions) callback(reviewStore.getState()) })
+    rerender(<App />)
+    expect(box.value === 'valuable rejected draft' || Boolean(screen.queryByTestId('composer-recovery')), 'failed restore must retain an offer').toBe(true)
+  })
+})
+
+it('#8593 actual App counts a retained recovery snapshot as unsaved work', async () => {
+  vi.mocked(reviewStore.subscribe).mockClear()
+  const { hasUnsavedWork } = await import('./utils/unsaved-work')
+  const session = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null })
+  const ss = () => ({ messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} })
+  const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+  stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput, sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+  const { rerender } = render(<App />)
+  const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+  fireEvent.change(box, { target: { value: 'valuable rejected draft' } })
+  fireEvent.keyDown(box, { key: 'Enter' })
+  const id = sendInput.mock.calls[0]![2].clientMessageId
+  stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+  rerender(<App />)
+  const delivery = { clientMessageId: id, sessionId: 's1', status: 'rejected', delivery: 'not_dispatched', retrySafe: true, pendingContextItemIds: [], updatedAt: 1 }
+  stateOverrides = { ...stateOverrides, sessionStates: { s1: { ...ss(), inputDeliveries: { [id]: delivery } }, s2: ss() } }
+  act(() => { for (const callback of recoverySubscriptions) callback(reviewStore.getState()) })
+  expect(Boolean(screen.queryByTestId('composer-recovery'))).toBe(true)
+  expect(box.value).toBe('')
+  expect(hasUnsavedWork(), 'recovery snapshot must inhibit automatic stale-bundle reload').toBe(true)
+})
+
+describe('#8593 retained composer lifecycle', () => {
+  const session = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null })
+  const ss = () => ({ messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} })
+  function setup() {
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput,
+      sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+    const view = render(<App />)
+    return { ...view, sendInput, box: screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement }
+  }
+  function acknowledge(sendInput: ReturnType<typeof vi.fn>, index = 0, sessionId = 's1', status = 'rejected', retrySafe = true) {
+    const id = sendInput.mock.calls[index]![2].clientMessageId
+    const state = reviewStore.getState()
+    stateOverrides = { ...stateOverrides, sessionStates: { ...state.sessionStates,
+      [sessionId]: { ...ss(), inputDeliveries: { [id]: { clientMessageId: id, sessionId,
+        status, delivery: status === 'rejected' ? 'not_dispatched' : 'unknown', retrySafe, pendingContextItemIds: [], updatedAt: 1 } } } } }
+    act(() => { for (const callback of recoverySubscriptions) callback(reviewStore.getState()) })
+  }
+  it('offers the edited recovered draft with both paste blocks after origin pruning and restores here once', () => {
+    const { box, sendInput, rerender } = setup()
+    const a = 'ORIGINAL-A\n'.repeat(30), b = 'NEW-B\n'.repeat(30), c = 'LAST-C\n'.repeat(30)
+    const paste = (text: string) => {
+      box.setSelectionRange(box.value.length, box.value.length)
+      fireEvent.paste(box, { clipboardData: { files: [], items: [], getData: (kind: string) => kind === 'text/plain' ? text : '' } })
+    }
+    paste(a)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    acknowledge(sendInput)
+    paste(b)
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2', sessions: [session('s2')], sessionStates: { s2: ss() } }
+    rerender(<App />)
+    expect(box.value).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Restore draft here' }))
+    expect(box.value).toContain('#1')
+    expect(box.value).toContain('#2')
+    paste(c)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(sendInput.mock.calls).toHaveLength(2)
+    expect(sendInput.mock.calls[1]![0]).toBe(a + b + c)
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+  })
+  it('keeps an explicit paste removal when a recovered draft is later pruned', () => {
+    const { box, sendInput, rerender } = setup()
+    const pasted = 'REMOVE-ME\n'.repeat(30)
+    fireEvent.paste(box, { clipboardData: { files: [], items: [], getData: (kind: string) => kind === 'text/plain' ? pasted : '' } })
+    fireEvent.change(box, { target: { value: 'keep this text ' + box.value } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    acknowledge(sendInput)
+    fireEvent.click(screen.getByRole('button', { name: /Remove Pasted text #1/ }))
+    expect(box.value).toBe('keep this text ')
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2', sessions: [session('s2')], sessionStates: { s2: ss() } }
+    rerender(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore draft here' }))
+    expect(box.value).toBe('keep this text ')
+    expect(screen.queryByRole('button', { name: /Remove Pasted text/ })).toBeNull()
+    expect(sendInput.mock.calls).toHaveLength(1)
+  })
+  it('counts pending and offered work in the actual probe, then releases on dismissal', async () => {
+    const { hasUnsavedWork } = await import('./utils/unsaved-work')
+    const { box, sendInput, rerender } = setup()
+    fireEvent.change(box, { target: { value: 'kept draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(hasUnsavedWork()).toBe(true)
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    acknowledge(sendInput)
+    expect(hasUnsavedWork()).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(hasUnsavedWork()).toBe(false)
+  })
+  it('offers after pruning before the acknowledgement, and accepted explicit resend releases retained work', async () => {
+    const { hasUnsavedWork } = await import('./utils/unsaved-work')
+    const { box, sendInput, rerender } = setup()
+    fireEvent.change(box, { target: { value: 'draft from removed session' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2', sessions: [session('s2')], sessionStates: { s2: ss() } }
+    rerender(<App />)
+    acknowledge(sendInput)
+    expect(box.value).toBe('')
+    expect(hasUnsavedWork()).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore draft here' }))
+    expect(box.value).toBe('draft from removed session')
+    expect(sendInput.mock.calls).toHaveLength(1)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(sendInput.mock.calls).toHaveLength(2)
+    acknowledge(sendInput, 1, 's2', 'accepted')
+    expect(hasUnsavedWork()).toBe(false)
+  })
+  it('keeps each of two rejected submissions until it is individually dismissed', () => {
+    const { box, sendInput, rerender } = setup()
+    fireEvent.change(box, { target: { value: 'first draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    fireEvent.change(box, { target: { value: 'second draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    fireEvent.change(box, { target: { value: 'newer draft' } })
+    acknowledge(sendInput)
+    acknowledge(sendInput, 1, 's2')
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(Boolean(screen.queryByTestId('composer-recovery'))).toBe(true)
+    fireEvent.change(box, { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Restore unsent draft' }))
+    expect(box.value).toBe('second draft')
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+    expect(sendInput.mock.calls).toHaveLength(2)
+  })
+  it.each([['uncertain', true], ['accepted', true], ['rejected', false]])('never restores or offers %s acknowledgement with retrySafe=%s', (status, retrySafe) => {
+    const { box, sendInput } = setup()
+    fireEvent.change(box, { target: { value: 'original draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    acknowledge(sendInput, 0, 's1', status as string, retrySafe as boolean)
+    expect(box.value).toBe('')
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+    expect(sendInput.mock.calls).toHaveLength(1)
   })
 })

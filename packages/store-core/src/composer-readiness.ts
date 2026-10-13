@@ -7,7 +7,7 @@ export type ComposerReadiness = {
 
 /**
  * Derive input admissibility from the current socket's session-scoped runtime
- * snapshot. Socket-close handling clears providerRuntimeInfo in both clients,
+ * snapshot. Every new connection epoch clears providerRuntimeInfo in both clients,
  * so a cached ready value cannot authorize a reconnect or another tab.
  */
 export function deriveComposerReadiness(
@@ -24,4 +24,13 @@ export function deriveComposerReadiness(
   return inputReady === true
     ? { canSend: true, status: 'ready' }
     : { canSend: false, status: 'initializing' }
+}
+
+/** Compatibility until the runtime frame arrives. Codex can select either the
+ * native or legacy driver, so it waits for that driver fact; all other current
+ * providers retain their established startup/queue behavior. Runtime traits
+ * always take precedence when present, including config-registered providers.
+ */
+export function providerInputReadinessFallback(provider: string | null | undefined): false | undefined {
+  return provider && provider !== 'codex' && provider !== 'codex-appserver' ? false : undefined
 }

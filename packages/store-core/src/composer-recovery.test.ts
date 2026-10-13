@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { recoverRejectedComposer } from './composer-recovery'
+import { recoverRejectedComposer, ComposerRecoveryQueue } from './composer-recovery'
 import type { InputDeliveryRecord } from './input-delivery'
 
 function delivery(overrides: Partial<InputDeliveryRecord>): InputDeliveryRecord {
@@ -45,5 +45,51 @@ describe('recoverRejectedComposer', () => {
       })).toBe('ignored')
     }
     expect(restore).not.toHaveBeenCalled()
+  })
+})
+
+it('retains an offer when the committed-render restore callback refuses', () => {
+  const restore = vi.fn(() => false)
+  expect(recoverRejectedComposer(delivery({ status: 'rejected', delivery: 'not_dispatched', retrySafe: true }), 'draft', {
+    originalSessionActive: true, composerUnchanged: true, restore,
+  })).toBe('offer')
+  expect(restore).toHaveBeenCalledOnce()
+})
+
+describe('ComposerRecoveryQueue lifecycle', () => {
+  const a = { clientMessageId: 'a', sessionId: 'origin', draft: 'draft A' }
+  const b = { clientMessageId: 'b', sessionId: 'other', draft: 'draft B' }
+  it('retains edited auto-restoration through pruning without duplicating an offer', () => {
+    const queue = new ComposerRecoveryQueue<typeof a>()
+    queue.retain(a, true)
+    expect(queue.offer).toBeNull()
+    expect(queue.hasWork).toBe(true)
+    queue.updateRestored('origin', snapshot => ({ ...snapshot, draft: 'edited A' }))
+    queue.prune(new Set(['other']))
+    expect(queue.offer?.draft).toBe('edited A')
+    queue.prune(new Set(['other']))
+    queue.dismiss('a')
+    expect(queue.offer).toBeNull()
+    expect(queue.hasWork).toBe(false)
+  })
+  it('keeps multiple rejected drafts in FIFO order through restores and dismissals', () => {
+    const queue = new ComposerRecoveryQueue<typeof a>()
+    queue.retain(a)
+    queue.retain(b)
+    expect(queue.offer).toEqual(a)
+    queue.retain(a, true)
+    expect(queue.offer).toEqual(b)
+    queue.releaseRestored('origin')
+    expect(queue.offer).toEqual(b)
+    queue.dismiss('b')
+    expect(queue.hasWork).toBe(false)
+  })
+  it('releases an intentional clear without removing another outstanding offer', () => {
+    const queue = new ComposerRecoveryQueue<typeof a>()
+    queue.retain(a, true)
+    queue.retain(b)
+    queue.updateRestored('origin', () => null)
+    queue.prune(new Set())
+    expect(queue.offer).toEqual(b)
   })
 })

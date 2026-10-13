@@ -30,7 +30,7 @@ import type { SessionIntervention } from '@chroxy/store-core';
 // of truth for which message types compact mode hides. Converging mobile onto
 // it (instead of a hand-maintained duplicate of the same tool_use/thinking
 // check) keeps dashboard and mobile from silently drifting.
-import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect, approvePlanWithAcceptEdits, isHiddenInCompactMode, deriveComposerReadiness, recoverRejectedComposer } from '@chroxy/store-core';
+import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect, approvePlanWithAcceptEdits, isHiddenInCompactMode, deriveComposerReadiness, providerInputReadinessFallback, recoverRejectedComposer, ComposerRecoveryQueue } from '@chroxy/store-core';
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
@@ -300,7 +300,7 @@ export function SessionScreen() {
   const composerReadiness = useMemo(
     () => deriveComposerReadiness(
       activeProviderRuntimeInfo,
-      activeSessionProvider && activeSessionProvider !== 'codex' ? false : undefined,
+      providerInputReadinessFallback(activeSessionProvider),
     ),
     [activeProviderRuntimeInfo, activeSessionProvider],
   );
@@ -877,6 +877,7 @@ export function SessionScreen() {
         }
         launchWebTask(webPrompt, sessionCwd || undefined);
         inputRef.current?.clear();
+        setRecoveryComposerOccupied(false);
         setPastedTextBlocks([]);
         pastedTextNextIdRef.current = 0;
         setInspectedPastedTextId(null);
@@ -906,6 +907,7 @@ export function SessionScreen() {
           return false;
         }
         inputRef.current?.clear();
+        setRecoveryComposerOccupied(false);
         setPastedTextBlocks([]);
         pastedTextNextIdRef.current = 0;
         setInspectedPastedTextId(null);
@@ -945,6 +947,7 @@ export function SessionScreen() {
         draft,
         attachments: [...pendingAttachments],
         pastedBlocks: [...pastedTextBlocks],
+        isVoice,
       });
     }
 
@@ -953,6 +956,11 @@ export function SessionScreen() {
     }
     if (isPlanPending) clearPlanState();
     inputRef.current?.clear();
+    setRecoveryComposerOccupied(false);
+    if (restoredComposerOwnerRef.current) {
+      recoveredComposersRef.current.dismiss(restoredComposerOwnerRef.current.clientMessageId);
+      restoredComposerOwnerRef.current = null;
+    }
     setPastedTextBlocks([]);
     pastedTextNextIdRef.current = 0;
     setInspectedPastedTextId(null);
@@ -1152,9 +1160,13 @@ export function SessionScreen() {
     draft: string;
     attachments: Attachment[];
     pastedBlocks: PastedTextBlock[];
+    isVoice: boolean;
   };
   const pendingComposerSubmissionsRef = useRef<Map<string, ComposerSubmission>>(new Map());
   const [composerRecovery, setComposerRecovery] = useState<ComposerSubmission | null>(null);
+  const recoveredComposersRef = useRef(new ComposerRecoveryQueue<ComposerSubmission>());
+  const restoredComposerOwnerRef = useRef<{ sessionId: string; clientMessageId: string } | null>(null);
+  const [recoveryComposerOccupied, setRecoveryComposerOccupied] = useState(false);
 
   const restoreComposerSubmission = useCallback((submission: ComposerSubmission): boolean => {
     if (activeSessionId !== submission.sessionId) return false;
@@ -1162,7 +1174,12 @@ export function SessionScreen() {
     inputRef.current?.setValue(submission.draft);
     setPendingAttachments(submission.attachments);
     setPastedTextBlocks(submission.pastedBlocks);
-    setComposerRecovery(null);
+    pastedTextNextIdRef.current = Math.max(0, ...submission.pastedBlocks.map(block => block.id));
+    restoreUsedVoice(submission.isVoice);
+    recoveredComposersRef.current.retain(submission, true);
+    restoredComposerOwnerRef.current = { sessionId: submission.sessionId, clientMessageId: submission.clientMessageId };
+    setRecoveryComposerOccupied(submission.draft.length > 0);
+    setComposerRecovery(recoveredComposersRef.current.offer);
     return true;
   }, [activeSessionId, pendingAttachments.length]);
 
@@ -1187,9 +1204,26 @@ export function SessionScreen() {
         composerUnchanged: (inputRef.current?.getValue() ?? '').length === 0 && pendingAttachments.length === 0,
         restore: restoreComposerSubmission,
       });
-      if (result === 'offer') setComposerRecovery(submission);
+      if (result === 'offer') {
+        setRecoveryComposerOccupied((inputRef.current?.getValue() ?? '').length > 0);
+        recoveredComposersRef.current.retain(submission);
+        setComposerRecovery(recoveredComposersRef.current.offer);
+      }
     }
   }), [pendingAttachments.length, restoreComposerSubmission]);
+  useEffect(() => {
+    const owner = restoredComposerOwnerRef.current;
+    if (owner) {
+      // Read the actual locally owned draft immediately before roster pruning.
+      recoveredComposersRef.current.updateRestored(owner.sessionId, snapshot => ({
+        ...snapshot, draft: inputRef.current?.getValue() ?? snapshot.draft,
+        pastedBlocks: [...pastedTextBlocks], attachments: [...pendingAttachments],
+      }));
+    }
+    recoveredComposersRef.current.prune(new Set(sessions.map(session => session.sessionId)));
+    setRecoveryComposerOccupied((inputRef.current?.getValue() ?? '').length > 0);
+    setComposerRecovery(recoveredComposersRef.current.offer);
+  }, [sessions]);
   const pastedTextNextIdRef = useRef(0);
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null);
 
@@ -1215,6 +1249,16 @@ export function SessionScreen() {
   // recognition is a real user keystroke, so the hook re-anchors unconditionally
   // on each one — a mid-recognition manual edit is preserved and the next
   // transcript appends after it instead of overwriting it.
+  const handleComposerDraftChange = useCallback((text: string, isVoice: boolean) => {
+    const owner = restoredComposerOwnerRef.current;
+    if (owner) recoveredComposersRef.current.updateRestored(owner.sessionId, snapshot => ({ ...snapshot, isVoice }));
+    if (owner && text.length === 0 && pendingAttachments.length === 0) {
+      recoveredComposersRef.current.releaseRestored(owner.sessionId);
+      restoredComposerOwnerRef.current = null;
+      restoreUsedVoice(false);
+    }
+    if (composerRecovery) setRecoveryComposerOccupied(text.length > 0);
+  }, [composerRecovery, pendingAttachments.length]);
   const { handleChangeText, handleMicPress, consumeUsedVoice, restoreUsedVoice } = useDictationComposer({
     inputRef,
     isRecognizing,
@@ -1222,6 +1266,7 @@ export function SessionScreen() {
     startListening,
     stopListening,
     onPasteCollapsed: handlePasteCollapsed,
+    onDraftChange: handleComposerDraftChange,
   });
 
   const handleRemovePastedText = useCallback((id: number) => {
@@ -1962,7 +2007,7 @@ export function SessionScreen() {
             onPress={restoreComposerRecovery}
             disabled={!activeSessionId
               || (composerRecoveryOriginalExists && activeSessionId !== composerRecovery.sessionId)
-              || (inputRef.current?.getValue() ?? '').length > 0 || pendingAttachments.length > 0}
+              || recoveryComposerOccupied || pendingAttachments.length > 0}
             accessibilityRole="button"
             accessibilityLabel={composerRecoveryOriginalExists ? 'Restore unsent draft' : 'Restore draft here'}
           >
@@ -1972,7 +2017,10 @@ export function SessionScreen() {
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.composerRecoveryButton}
-            onPress={() => setComposerRecovery(null)}
+            onPress={() => {
+              recoveredComposersRef.current.dismiss(composerRecovery.clientMessageId);
+              setComposerRecovery(recoveredComposersRef.current.offer);
+            }}
             accessibilityRole="button"
             accessibilityLabel="Dismiss unsent draft"
           >
