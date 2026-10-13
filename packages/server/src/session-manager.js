@@ -12,6 +12,7 @@ import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFo
 import { GIT } from './git.js'
 import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
 import { resolveJsonlPath, readConversationHistoryWithMetaAsync } from './jsonl-reader.js'
+import { NATIVE_RESUME_DRIVER, nativeRestoreError } from './codex-native-resume.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration, isOperatorTimeoutInRange } from './duration.js'
 import { SessionLockManager } from './session-lock.js'
@@ -1768,7 +1769,7 @@ export class SessionManager extends EventEmitter {
    *   it (#6743).
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, nativeResume, conversationPersisted, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, codexSandbox, environmentId, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, disabledMcpServers, bootedModel, messageCounter, skipPermissions, agentCommId, metadata = null, skipPersist = false, preserveId, isRestore = false } = {}) {
     // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
     // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
     // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
@@ -1808,6 +1809,12 @@ export class SessionManager extends EventEmitter {
       verifiedBinary,
     } = plan
 
+    if (nativeResume && (!isRestore || ProviderClass.nativeResumeDriver !== NATIVE_RESUME_DRIVER)) {
+      throw nativeRestoreError('DRIVER_INCOMPATIBLE', 'saved native state cannot be routed into another provider or driver')
+    }
+    if (isRestore && resolvedProvider === 'codex' && ProviderClass.nativeResumeDriver !== NATIVE_RESUME_DRIVER && !resumeSessionId) {
+      throw nativeRestoreError('LOCATOR_MISSING', 'this saved Codex state has no native resume identity; create a new session explicitly')
+    }
     const providerOpts = {
       cwd: resolvedCwd,
       model: resolvedModel,
@@ -1815,6 +1822,11 @@ export class SessionManager extends EventEmitter {
       port: this._port,
       apiToken: this._apiToken,
       resumeSessionId: resumeSessionId || null,
+      ...(ProviderClass.nativeResumeDriver === NATIVE_RESUME_DRIVER ? {
+        nativeResume: isRestore ? nativeResume || null : null,
+        isRestore,
+        nativeResumePersist: () => this._flushPersistOrWarn(sessionId),
+      } : {}),
       transforms: this._transforms,
       // Provider id flows into BaseSession so the skills loader can apply
       // the `providers:` filter (#3198) and pick a per-provider injection
@@ -2461,7 +2473,10 @@ export class SessionManager extends EventEmitter {
         // "Credit spend", subscription → "Included (subscription)").
         billingClass,
         agentConnection: entry.agentConnection,
-        capabilities: ProviderClass.capabilities || {},
+        capabilities: {
+          ...(ProviderClass.capabilities || {}),
+          ...(ProviderClass.nativeResumeDriver === NATIVE_RESUME_DRIVER ? { resume: entry.session.providerRuntimeCapabilities?.nativeResume === true } : {}),
+        },
         worktree: entry.worktreePath != null,
         repoCwd: entry.worktreeRepoDir || null,
         isolation: entry.isolation || 'none',
@@ -3026,6 +3041,8 @@ export class SessionManager extends EventEmitter {
         id,
         sdkSessionId: (typeof entry.session.resumeSessionId !== 'undefined' ? entry.session.resumeSessionId : null),
         conversationId: entry.session.resumeSessionId || null,
+        nativeResume: entry.session.nativeResumeState || null,
+        ...(typeof entry.session.getCodexSandbox === 'function' ? { codexSandbox: entry.session.getCodexSandbox() } : {}),
         // #8418: has the provider's conversation ever been SAVED (claude-tui: a
         // turn completed, or the transcript was seen on disk)? `sdkSessionId`
         // alone cannot say: claude-tui mints and serializes its id before claude
@@ -3352,6 +3369,8 @@ export class SessionManager extends EventEmitter {
       model: saved.model,
       permissionMode: saved.permissionMode,
       resumeSessionId: saved.sdkSessionId,
+      nativeResume: saved.nativeResume || null,
+      codexSandbox: saved.codexSandbox || undefined,
       // #8418: only a literal `true` counts; a hand-edited or older file restores
       // as "unknown", exactly as before this field existed.
       conversationPersisted: saved.conversationPersisted === true ? true : undefined,
@@ -4088,7 +4107,7 @@ export class SessionManager extends EventEmitter {
     if (!entry || entry._destroying) return { entries: [], source: 'ring', truncated: false }
 
     const conversationId = entry.session.resumeSessionId
-    if (conversationId) {
+    if (conversationId && entry.session.constructor.nativeResumeDriver !== NATIVE_RESUME_DRIVER) {
       try {
         const filePath = resolveJsonlPath(entry.cwd, conversationId)
         const { messages, truncated } = await readConversationHistoryWithMetaAsync(filePath)

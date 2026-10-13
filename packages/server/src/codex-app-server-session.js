@@ -17,6 +17,7 @@ import { maybeRatchetContextWindow } from './utils/context-window-learn.js'
 import { getRegistryForProvider } from './models.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { createLogger, loggerForSession } from './logger.js'
+import { NATIVE_RESUME_DRIVER, NATIVE_RESUME_VERSION, nativeRestoreError, nativeMachineId, bindNativeOwnership, validateLocator, validateEcho, policyNoBroader, writeBindings, resumeParams, sandboxMode } from './codex-native-resume.js'
 
 // Image extensions codex can attach for VISION via a `localImage` input item.
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'])
@@ -150,7 +151,21 @@ export class CodexAppServerSession extends BaseSession {
   static get customizationDescriptor() { return CODEX_APPSERVER_CUSTOMIZATION }
 
   get providerBinaryVersion() { return this.codexVersion || 'unknown' }
-  get providerRuntimeCapabilities() { return this.codexCapabilities || {} }
+  get providerRuntimeCapabilities() { return { ...(this.codexCapabilities || {}), nativeResume: this._nativeResumeCapability } }
+  static get nativeResumeDriver() { return NATIVE_RESUME_DRIVER }
+
+  get nativeResumeState() {
+    if (!this._nativeLocator) return this._nativeResumeSaved ? structuredClone(this._nativeResumeSaved) : null
+    return {
+      ...structuredClone(this._nativeLocator),
+      permissionMode: this.permissionMode,
+      model: { requested: this.model || null, observed: this.bootedModel, provider: this._nativeLocator.model.provider },
+      effort: { requested: this._reasoningEffortOverride, observed: this._bootedReasoningEffort },
+      settingsVerified: !this._nativeSettingsUnverified,
+      skillsPrepended: this._skillsPrepended,
+      threadTotals: this._threadTotals ? { ...this._threadTotals } : null,
+    }
+  }
 
   // -- Provider identity (delegated to CodexSession so both paths agree) --
   static get providerName() { return 'codex' }
@@ -200,7 +215,7 @@ export class CodexAppServerSession extends BaseSession {
       modelSwitch: true,
       permissionModeSwitch: true, // mode drives approvalPolicy + PermissionManager
       planMode: false,
-      resume: false, // matches exec CodexSession; app-server resume is a follow-up
+      resume: false, // per-session projection becomes true only after verified native resume
       terminal: false,
       // #7730 — codex has a REAL reasoning control, and this is the driver that
       // can reach it: `model/list` advertises `supportedReasoningEfforts` per
@@ -243,6 +258,14 @@ export class CodexAppServerSession extends BaseSession {
       provider: opts.provider || 'codex',
       model: opts.model || null,
     }))
+    this._nativeResumeSaved = opts.nativeResume || null
+    this._nativeRestore = opts.isRestore === true || this._nativeResumeSaved !== null
+    this._nativeLocator = null
+    this._nativeResumeCapability = 'unknown'
+    this._nativeSettingsUnverified = false
+    this._nativeHostResolver = typeof opts.nativeHostResolver === 'function' ? opts.nativeHostResolver : nativeMachineId
+    this._nativeOwnerResolver = typeof opts.nativeOwnerResolver === 'function' ? opts.nativeOwnerResolver : () => process.getuid?.()
+    this._nativeResumePersist = typeof opts.nativeResumePersist === 'function' ? opts.nativeResumePersist : null
     this._connectionAuthRoute = opts.connectionAuthRoute || null
     this._connectionChildEnv = opts.connectionChildEnv && typeof opts.connectionChildEnv === 'object'
       ? { ...opts.connectionChildEnv }
@@ -438,6 +461,23 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   async start() {
+    try { return await this._startAppServer() }
+    catch (err) {
+      this._processReady = false
+      this._nativeResumeCapability = false
+      this._nativeLocator = null // retain original recipe if restore was rejected
+      try { this._client?.kill() } catch { /* already stopped */ }
+      if (this._nativeRestore && !String(err?.code || '').startsWith('CODEX_NATIVE_')) {
+        const failed = nativeRestoreError('REJECTED', 'the original native thread could not be resumed; retry it or explicitly create a new session')
+        failed.cause = err
+        throw failed
+      }
+      throw err
+    }
+  }
+
+  async _startAppServer() {
+    if (this._nativeRestore) validateLocator(this._nativeResumeSaved, this.permissionMode)
     // #6929 review — resolve AND STORE here, the actual `thread/start` apply
     // site, so getCodexSandbox() can report what this thread really got instead
     // of re-resolving the env (and potentially drifting from it) on every call.
@@ -493,7 +533,13 @@ export class CodexAppServerSession extends BaseSession {
     }
     this._captureHandshake(init)
     const actualAuthRoute = await this._verifyConnectionAuthRoute()
-    const started = await this._client.request('thread/start', this._buildThreadParams(sandbox))
+    if (this._nativeRestore) this._verifyNativeOwnership(init)
+    const started = await this._client.request(
+      this._nativeRestore ? 'thread/resume' : 'thread/start',
+      this._nativeRestore ? this._buildResumeParams() : this._buildThreadParams(sandbox),
+    )
+    if (this._nativeRestore) this._verifyNativeResume(started, init)
+    if (typeof started?.thread?.id !== 'string' || !started.thread.id) throw nativeRestoreError('THREAD_INVALID', 'native thread identity was missing')
     this._verifyStartedConnectionRoute(started, actualAuthRoute)
     this._threadId = started?.thread?.id || null
     // #7729 — the `thread/start` RESPONSE echoes the model codex actually
@@ -506,14 +552,18 @@ export class CodexAppServerSession extends BaseSession {
     // `ready`, so the very first `thinking_level_changed` replay names the
     // operator's real `~/.codex/config.toml` setting rather than nothing.
     this._captureBootedReasoningEffort(started)
-    // #6608 — do NOT set this.resumeSessionId in Phase 1: capabilities.resume is
-    // false, and SessionManager persists resumeSessionId as the conversationId to
-    // resume on restart. Leaving it null keeps the two consistent. The live thread
-    // id is tracked on this._threadId (used for turn/start + interrupt). Wiring
-    // real app-server resume (thread/resume) is a follow-up.
+    if (!this._nativeRestore) this._captureNativeStart(started, init)
+    if (this._nativeLocator) {
+      this.resumeSessionId = this._threadId
+      if (this._nativeRestore && !this._nativeResumePersist) throw nativeRestoreError('PERSIST_UNAVAILABLE', 'durable native state writer is unavailable')
+      if (this._nativeResumePersist && this._nativeResumePersist() !== true) {
+        throw nativeRestoreError('PERSIST_FAILED', 'native identity could not be saved before readiness')
+      }
+      if (this._nativeRestore) this._nativeResumeCapability = true
+    }
     this._log = loggerForSession('codex-app-server', this._threadId || 'no-thread')
     this._processReady = true
-    ;(this._log || log).info(`codex app-server ready (thread=${this._threadId} sandbox=${sandbox})`)
+    ;(this._log || log).info(`codex app-server ready (thread=${this._threadId} sandbox=${this.getCodexSandbox()})`)
     // #7726 — ask THIS binary for its own model roster, on the client that is
     // already up. Fire-and-forget on purpose: a wedged or old binary must not
     // delay `ready`, and every failure path inside leaves the previous catalog
@@ -525,6 +575,83 @@ export class CodexAppServerSession extends BaseSession {
     // pick; `bootedModel` is what it picked. Same precedence as
     // session-manager's session_info render, so the two cannot disagree.
     this.emit('ready', { model: this._effectiveModelId() })
+  }
+
+  _buildResumeParams() { return resumeParams(this._nativeResumeSaved) }
+
+  _nativeOwnership(init) {
+    return bindNativeOwnership({ cwd: this.cwd, codexHome: init?.codexHome, machineId: this._nativeHostResolver(), ownerId: this._nativeOwnerResolver() })
+  }
+
+  _verifyNativeOwnership(init) {
+    const saved = this._nativeResumeSaved
+    if (this.codexVersion !== NATIVE_RESUME_VERSION) throw nativeRestoreError('VERSION_UNVERIFIED', 'this serving binary has not verified the saved resume contract')
+    const current = this._nativeOwnership(init)
+    for (const key of ['hostBinding', 'storeBinding', 'codexHome', 'cwdBinding', 'cwd']) {
+      if (current[key] !== saved[key]) throw nativeRestoreError('OWNERSHIP_MISMATCH', 'the native store, machine owner or working directory has moved')
+    }
+    const writes = writeBindings(saved.sandboxPolicy, current.cwd, this._buildChildEnv())
+    if (JSON.stringify(writes) !== JSON.stringify(saved.writeBindings)) throw nativeRestoreError('WRITE_OWNERSHIP_MISMATCH', 'saved writable roots or temporary directory ownership has changed')
+  }
+
+  _verifyNativeResume(started, init) {
+    this._verifyNativeOwnership(init)
+    const echo = validateEcho(started), saved = this._nativeResumeSaved
+    if (echo.thread.id !== saved.threadId) throw nativeRestoreError('THREAD_MISMATCH', 'native runtime returned a different thread identity')
+    const echoedOwnership = bindNativeOwnership({ cwd: echo.cwd, codexHome: init.codexHome, machineId: this._nativeHostResolver(), ownerId: this._nativeOwnerResolver() })
+    if (echoedOwnership.cwdBinding !== saved.cwdBinding) throw nativeRestoreError('CWD_MISMATCH', 'native runtime returned a different working directory')
+    if (!policyNoBroader(echo.sandbox, saved.sandboxPolicy, saved.cwd)) throw nativeRestoreError('POLICY_BROADER', 'native sandbox rights are broader or unknown')
+    if (echo.model !== saved.model.observed || echo.modelProvider !== saved.model.provider || echo.reasoningEffort !== saved.effort.observed) throw nativeRestoreError('SETTINGS_MISMATCH', 'native model or reasoning effort changed while restoring')
+    this.model = saved.model.requested
+    this._reasoningEffortOverride = saved.effort.requested
+    this._skillsPrepended = saved.skillsPrepended
+    this._threadTotals = saved.threadTotals ? { ...saved.threadTotals } : null
+    this._nativeUsageBaselineUnknown = saved.threadTotals === null
+    this._resolvedCodexSandbox = sandboxMode(echo.sandbox)
+    this._nativeLocator = {
+      ...structuredClone(saved), sandboxMode: sandboxMode(echo.sandbox), sandboxPolicy: structuredClone(echo.sandbox),
+      writeBindings: writeBindings(echo.sandbox, saved.cwd, this._buildChildEnv()), binaryVersion: this.codexVersion,
+    }
+  }
+
+  _captureNativeStart(started, init) {
+    try {
+      if (this.codexVersion !== NATIVE_RESUME_VERSION) throw nativeRestoreError('VERSION_UNVERIFIED', 'native restart continuity is not verified for this binary version')
+      const echo = validateEcho(started), ownership = this._nativeOwnership(init)
+      const actualCwd = bindNativeOwnership({ cwd: echo.cwd, codexHome: init.codexHome, machineId: this._nativeHostResolver(), ownerId: this._nativeOwnerResolver() })
+      if (actualCwd.cwdBinding !== ownership.cwdBinding || sandboxMode(echo.sandbox) !== this._resolvedCodexSandbox) throw nativeRestoreError('POLICY_MISMATCH', 'native cwd or sandbox differs from the requested boundary')
+      this._nativeLocator = {
+        schemaVersion: 1, provider: 'codex', driver: NATIVE_RESUME_DRIVER, binaryVersion: this.codexVersion,
+        threadId: echo.thread.id, ...ownership,
+        sandboxMode: sandboxMode(echo.sandbox), sandboxPolicy: structuredClone(echo.sandbox),
+        writeBindings: writeBindings(echo.sandbox, ownership.cwd, this._buildChildEnv()),
+        approvalPolicy: echo.approvalPolicy, approvalsReviewer: echo.approvalsReviewer, permissionMode: this.permissionMode,
+        model: { requested: this.model || null, observed: echo.model, provider: echo.modelProvider },
+        effort: { requested: this._reasoningEffortOverride, observed: echo.reasoningEffort },
+        skillsPrepended: false, threadTotals: null, settingsVerified: true,
+      }
+    } catch (err) {
+      this._nativeResumeCapability = 'unknown'
+      ;(this._log || log).warn(`Codex native restart continuity unavailable (${err.code || 'CODEX_NATIVE_UNVERIFIED'}): ${err.message}`)
+    }
+  }
+
+  // A successful turn admits explicit choices, but it is not a settings echo.
+  // Observe native metadata; an unavailable echo leaves restart visibly blocked.
+  async _observeNativeSettings() {
+    if (!this._nativeLocator || !this._nativeSettingsUnverified) return
+    try {
+      const observedCounter = this._messageCounter
+      const response = await this._client.request('thread/read', { threadId: this._threadId, includeTurns: false })
+      if (observedCounter !== this._messageCounter || this._isBusy) return
+      const thread = response?.thread
+      if (thread?.id !== this._threadId || !this._readModelId(thread.model) || !Object.hasOwn(thread, 'reasoningEffort')) return
+      if (!(thread.reasoningEffort === null || this._readModelId(thread.reasoningEffort))) return
+      this.bootedModel = thread.model
+      this._bootedReasoningEffort = thread.reasoningEffort
+      this._nativeSettingsUnverified = false
+      this._nativeResumePersist?.()
+    } catch { /* retain unverified state rather than invent a settings echo */ }
   }
 
   /**
@@ -666,11 +793,11 @@ export class CodexAppServerSession extends BaseSession {
       this.agentConnection.model = { ...this.agentConnection.model, resolved: echoed }
     }
     if (echoed) {
-      ;(this._log || log).info(`codex resolved model=${echoed} (thread/start echo)`)
+      ;(this._log || log).info(`codex resolved model=${echoed} (native thread echo)`)
     } else if (carried) {
-      ;(this._log || log).warn(`codex thread/start carried no model echo; keeping ${carried} (restored before start)`)
+      ;(this._log || log).warn(`codex native thread carried no model echo; keeping ${carried} (restored before start)`)
     } else {
-      ;(this._log || log).warn('codex thread/start carried no model echo; the session model stays unknown rather than guessed')
+      ;(this._log || log).warn('codex native thread carried no model echo; the session model stays unknown rather than guessed')
     }
     return this.bootedModel
   }
@@ -758,7 +885,7 @@ export class CodexAppServerSession extends BaseSession {
     const echoed = nonEmpty(started?.reasoningEffort) ?? nonEmpty(started?.thread?.reasoningEffort)
     this._bootedReasoningEffort = echoed ?? null
     if (this._bootedReasoningEffort) {
-      ;(this._log || log).info(`codex resolved reasoning effort=${this._bootedReasoningEffort} (thread/start echo)`)
+      ;(this._log || log).info(`codex resolved reasoning effort=${this._bootedReasoningEffort} (native thread echo)`)
     }
     return this._bootedReasoningEffort
   }
@@ -928,13 +1055,18 @@ export class CodexAppServerSession extends BaseSession {
     ;(this._log || log).info(`codex app-server turn start (msg=${messageId} thread=${this._threadId} inputItems=${input.length})`)
     try {
       const res = await this._client.request('turn/start', this._buildTurnParams(input))
-      reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
       this._skillsPrepended = true
+      this._nativeSettingsUnverified = this._nativeSettingsUnverified || !!((this.model && this.model !== this.bootedModel) || (this._reasoningEffortOverride && this._reasoningEffortOverride !== this._bootedReasoningEffort))
+      reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
       if (this._activeTurn && !this._activeTurn.turnId) this._activeTurn.turnId = res?.turn?.id || null
     } catch (err) {
-      reportInputAdmission(sendOptions, {
+      const refused = typeof err?.jsonRpcCode === 'number'
+      reportInputAdmission(sendOptions, refused ? {
         status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
         reason: 'turn_start_failed', message: 'The provider rejected the turn before it started.',
+      } : {
+        status: 'uncertain', delivery: 'unknown', retrySafe: false,
+        reason: 'turn_start_uncertain', message: 'The native turn acknowledgement was lost; it may have started. Check the original session before explicitly resending.',
       })
       // turn/start itself failed (dead server, bad thread) — fail this turn.
       this._failTurn(`Codex turn failed to start: ${err.message}`)
@@ -1477,7 +1609,7 @@ export class CodexAppServerSession extends BaseSession {
     const total = params?.tokenUsage?.total
     if (!total || typeof total !== 'object') return this._usageBreakdown(params)
     const base = this._turnBaselineTotals
-    if (!base || typeof base !== 'object') return total
+    if (!base || typeof base !== 'object') return this._nativeUsageBaselineUnknown ? this._usageBreakdown(params) : total
     const delta = (key) => nonNegInt(nonNegInt(total[key]) - nonNegInt(base[key]))
     return {
       totalTokens: delta('totalTokens'),
@@ -1576,6 +1708,7 @@ export class CodexAppServerSession extends BaseSession {
     // would mis-report a LATER genuine error as a clean `stopped` (#4881 race).
     this._clearIntentionalStop()
     this._clearMessageState()
+    this._observeNativeSettings()
     this._maybeDequeue()
   }
 

@@ -303,6 +303,9 @@ export class BaseSession extends EventEmitter {
     return {}
   }
 
+  /** Provider-owned restart locator; generic persistence never reconstructs it. */
+  get nativeResumeState() { return null }
+
   get providerInstructionProjection() {
     return this._projectInstructionProjection
   }

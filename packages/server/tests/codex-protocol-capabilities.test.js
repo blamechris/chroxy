@@ -31,6 +31,7 @@ import { declareUnknownCustomization } from './helpers/provider-customization.js
 const LIVE_0_154 = 'chroxy-probe/0.154.0 (Mac OS 26.6.2; arm64) unknown (chroxy-probe; 0)'
 
 const USER_AGENT_TABLE = [
+  { name: 'installed desktop originator', ua: 'Codex Desktop/0.154.0 (Mac OS 27.0.1; arm64) dumb (chroxy; 1)', version: '0.154.0', originator: 'Codex Desktop' },
   { name: 'live 0.154.0 handshake', ua: LIVE_0_154, version: '0.154.0', originator: 'chroxy-probe' },
   { name: 'floor release', ua: 'codex/0.128.0 (Linux 6.8.0; x86_64) unknown (codex_cli_rs; 0)', version: '0.128.0', originator: 'codex' },
   { name: 'below the floor', ua: 'codex/0.100.3 (Mac OS 15.0; arm64) unknown', version: '0.100.3', originator: 'codex' },
