@@ -142,7 +142,23 @@ describe('SessionCiChip', () => {
     render(<SessionCiChip status={status({ pr: null, checks: null, merge: null, reason: 'no GitHub remote' })} onRefresh={vi.fn()} />)
     const chip = screen.getByTestId('session-ci-chip')
     expect(chip.textContent).toContain('CI unavailable')
-    expect(chip.getAttribute('title')).toBe('no GitHub remote')
+    expect(screen.getByTestId('session-ci-chip-reason').textContent).toBe('no GitHub remote')
+  })
+
+  it('shows a quiet neutral No repo state outside a git repository', () => {
+    render(<SessionCiChip status={status({ branch: null, repo: null, pr: null, checks: null, merge: null, reason: 'session working directory is not a git repository' })} onRefresh={vi.fn()} onPrefill={vi.fn()} />)
+    const chip = screen.getByTestId('session-ci-chip')
+    expect(chip.textContent).toContain('No repo')
+    expect(chip.textContent).not.toContain('CI unavailable')
+    expect(chip.dataset.tone).toBe('neutral')
+    expect(screen.queryByTestId('session-ci-chip-prefill')).toBeNull()
+  })
+
+  it('shows a survey failure reason without needing a hover', () => {
+    const reason = 'gh pr list failed: authentication required'
+    render(<SessionCiChip status={status({ pr: null, checks: null, merge: null, reason })} onRefresh={vi.fn()} />)
+    expect(screen.getByTestId('session-ci-chip').textContent).toContain('CI unavailable')
+    expect(screen.getByTestId('session-ci-chip-reason').textContent).toBe(reason)
   })
 
   it('renders the PR number as a link, and refuses a non-http(s) URL', () => {

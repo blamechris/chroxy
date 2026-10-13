@@ -276,6 +276,9 @@ export interface ProviderInfo {
 }
 
 export interface SessionState extends BaseSessionState {
+  /** Live PR/CI snapshot; kept with its session so tab switches cannot mix readings. */
+  prStatus?: import('@chroxy/protocol').ServerSessionPrStatusMessage;
+
   activityState: SessionActivity;
   sessionRules?: PermissionRule[];
   // #6771: durable per-project rules ("always allow / deny"), tagged
@@ -715,6 +718,7 @@ export interface FileGitDiffActions {
   setGitBranchesCallback: (cb: ((result: GitBranchesResult) => void) | null) => void;
   setGitStageCallback: (cb: ((result: GitStageResult) => void) | null) => void;
   setGitCommitCallback: (cb: ((result: GitCommitResult) => void) | null) => void;
+  requestSessionPrStatus: () => boolean;
   requestGitStatus: () => void;
   requestGitBranches: () => void;
   // Return false when the socket is closed (frame not sent) so callers can

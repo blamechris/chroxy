@@ -74,6 +74,8 @@ export const DEFAULT_PROVIDER = 'claude-sdk';
  * + a WS primary-token check — see `docs/security/bearer-token-authority.md`.
  */
 export const USER_SHELL_PROVIDER = 'user-shell';
+/** Shared survey reason classified as quiet No repo by both CI chips (#8584). */
+export const SESSION_PR_NOT_A_REPO_REASON = 'session working directory is not a git repository';
 /**
  * #5835 / #5839: the fixed grid size of the claude-tui PTY. The server spawns
  * the TUI at this size and the dashboard renders the live mirror at exactly this

@@ -1230,3 +1230,5 @@ export type { HunkRange, HunkDecisions, PermissionEditedInput } from './hunk-dif
 export { abbreviateCwd, repoDisplayName, sessionGroupKey } from './repo-label'
 
 export { isDevPreviewPending } from './handlers/dev-preview'
+
+export { describeNoPrStatus, formatChecks, formatMergeState } from './ci-presentation'
