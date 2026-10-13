@@ -292,6 +292,9 @@ describe('real loopback service', () => {
           assert.throws(() => adapter._spawnCloudflared(argv, {}), /configuration changed/)
           await unlink(ingress.path)
         } finally { await rename(ingress.path + '.held', ingress.path) }
+        adapter.config.previewIngress = { ...ingress, file: { ...ingress.file, ino: -1 } }
+        assert.throws(() => adapter._spawnCloudflared(argv, {}), /configuration changed/)
+        assert.equal(spawned, 1, 'changed config identity cannot spawn')
         for (const key of ['directory', 'socket']) {
           adapter.config.previewIngress = { ...ingress, [key]: { ...ingress[key], ino: -1 } }
           assert.throws(() => adapter._spawnCloudflared(argv, {}), /ownership changed/)

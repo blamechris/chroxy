@@ -35,12 +35,13 @@ export function assertPreviewIngress(saved) {
   const directory = lstatSync(dirname(saved.path))
   const socket = lstatSync(saved.socketPath)
   if (!sameFile(directory, saved.directory) || !directory.isDirectory() || directory.uid !== process.getuid() || (directory.mode & 0o777) !== 0o700 || !sameFile(socket, saved.socket) || !socket.isSocket() || socket.uid !== directory.uid) throw new Error('Preview origin ownership changed')
-  const fd = openSync(saved.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const fd = openSync(saved.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const file = fstatSync(fd)
+    if (!sameFile(file, saved.file) || !file.isFile() || file.uid !== directory.uid || (file.mode & 0o777) !== 0o600) throw new Error('Preview ingress configuration changed')
     const bytes = readFileSync(fd, 'utf8')
     const expected = JSON.stringify({ ingress: [{ service: `unix:${saved.socketPath}` }] }) + '\n'
-    if (!sameFile(file, saved.file) || !file.isFile() || file.uid !== directory.uid || (file.mode & 0o777) !== 0o600 || saved.bytes !== expected || bytes !== expected) throw new Error('Preview ingress configuration changed')
+    if (saved.bytes !== expected || bytes !== expected) throw new Error('Preview ingress configuration changed')
   } finally {
     closeSync(fd)
   }
