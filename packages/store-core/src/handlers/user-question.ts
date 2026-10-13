@@ -347,17 +347,22 @@ export interface UserInputPayload {
  *
  * Returns `null` when `parseUserInputMessage` returns null — i.e. when the
  * message originated from this client (already shown via optimistic UI) or
- * when no target session can be resolved.
+ * when no target session can be resolved, or when its stable id is already
+ * held by that session. Live echoes check the whole session, including the
+ * preserved prefix during a full replay; replay entries still use their own
+ * tail-scoped dedup cache so the authoritative copy survives reconciliation.
  */
 export function handleUserInput(
   msg: Record<string, unknown>,
   myClientId: string | null,
   activeSessionId: string | null,
+  getSessionMessages: (sessionId: string) => readonly ChatMessage[] = () => [],
 ): UserInputPayload | null {
   const parsed = parseUserInputMessage(msg, myClientId, activeSessionId)
   if (!parsed) return null
   const { sessionId: parsedSessionId, ...parsedMsg } = parsed
   const stableId = typeof msg.messageId === 'string' ? msg.messageId : undefined
+  if (stableId && getSessionMessages(parsedSessionId).some(message => message.id === stableId)) return null
   const chatMessage: ChatMessage = {
     id: stableId || nextMessageId('user_input'),
     ...parsedMsg,

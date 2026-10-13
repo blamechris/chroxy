@@ -268,10 +268,15 @@ export function buildChatViewMessages(
   options: BuildChatViewMessagesOptions = {},
 ): ChatViewPipelineResult {
   const { hideToolAndThinking = false } = options
+  // A full replay keeps its cached prefix until replay_end while appending the
+  // authoritative tail. Project one row per id, preferring the latest copy at
+  // its latest position, without changing the array reconciliation will swap.
+  const lastIndexById = new Map(storeMessages.map((message, index) => [message.id, index]))
+  const visibleMessages = storeMessages.filter((message, index) => lastIndexById.get(message.id) === index)
   // Filter out `system` events — they belong on the System tab. When the #6799
   // compact filter is on, also drop tool_use + thinking session-wide (before
   // grouping, so no `tool_group` collapse row forms for a run of hidden tools).
-  const chatFilteredMessages = storeMessages.filter(m => {
+  const chatFilteredMessages = visibleMessages.filter(m => {
     // #7326: a turn-outcome marker is the one `system` row that belongs in the
     // chat flow -- "this reply was cut off" means nothing on a separate tab,
     // away from the turn it describes.
@@ -325,7 +330,7 @@ export function buildChatViewMessages(
   // #7326: the tail is the last REAL row. A turn-outcome marker trails every
   // truncated / refused / stopped turn, and counting it would move the tail off
   // a final tool run, collapsing the group #4305/#4309 keep expanded.
-  const markerIds = new Set(storeMessages.filter(isTurnOutcomeMarker).map((m) => m.id))
+  const markerIds = new Set(visibleMessages.filter(isTurnOutcomeMarker).map((m) => m.id))
   let chatTailMessageId: string | null = null
   for (let i = chatMessages.length - 1; i >= 0; i--) {
     if (!markerIds.has(chatMessages[i]!.id)) {
@@ -337,9 +342,10 @@ export function buildChatViewMessages(
   // O(1) lookup map for renderMessage — keyed by store id, value is the
   // original ChatMessage so the renderer can inspect fields the
   // ChatViewMessage shape doesn't carry (toolInput, requestId,
-  // questions, etc.). Built from the unfiltered storeMessages so callers
-  // can look up system events too.
-  const storeMsgMap = new Map(storeMessages.map(m => [m.id, m]))
+  // questions, etc.). Include hidden system events in the same latest-position
+  // order as the visible rows: downstream grouping uses iteration order to
+  // locate hidden turn boundaries, and mobile reinserts compaction markers.
+  const storeMsgMap = new Map(visibleMessages.map(message => [message.id, message]))
 
   // #4615 / #5793: track which `type: 'prompt'` bubbles have been
   // invalidated by a subsequent retryable AskUserQuestion teardown error.
@@ -357,8 +363,8 @@ export function buildChatViewMessages(
   // plus the multi-select / multi-question codes — see
   // isRetryableAskUserQuestionError); prompts before it are dead and suppressed.
   let lastRetryableErrorIndex = -1
-  for (let i = storeMessages.length - 1; i >= 0; i -= 1) {
-    const m = storeMessages[i]!
+  for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+    const m = visibleMessages[i]!
     if (m.type === 'error' && isRetryableAskUserQuestionError(m.code)) {
       lastRetryableErrorIndex = i
       break
@@ -366,7 +372,7 @@ export function buildChatViewMessages(
   }
   if (lastRetryableErrorIndex >= 0) {
     for (let i = 0; i < lastRetryableErrorIndex; i += 1) {
-      const m = storeMessages[i]!
+      const m = visibleMessages[i]!
       if (m.type === 'prompt' && !m.answered) stalledPromptIds.add(m.id)
     }
   }

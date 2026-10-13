@@ -29,6 +29,44 @@ function msg(partial: Partial<ChatMessage> & { id: string; type: ChatMessage['ty
 }
 
 describe('buildChatViewMessages', () => {
+  it('projects the authoritative replay tail once per id without changing reconciliation storage (#8240)', () => {
+    const cached = msg({ id: 'input-1', type: 'user_input', content: 'optimistic', timestamp: 1 })
+    const authoritative = msg({ id: 'input-1', type: 'user_input', content: 'recorded', timestamp: 3 })
+    const reply = msg({ id: 'reply-1', type: 'response', content: 'done', timestamp: 4 })
+    const messages = [cached, msg({ id: 'other', type: 'user_input', content: 'recorded', timestamp: 2 }), authoritative, reply]
+    const snapshot = [...messages]
+    const out = buildChatViewMessages(messages, null)
+    expect(out.chatMessages.map(m => m.id)).toEqual(['other', 'input-1', 'reply-1'])
+    expect(out.chatMessages.find(m => m.id === 'input-1')?.content).toBe('recorded')
+    expect(out.storeMsgMap.get('input-1')).toBe(authoritative)
+    expect([...out.storeMsgMap.keys()]).toEqual(['other', 'input-1', 'reply-1'])
+    expect(out.displayGroups.flatMap(g => g.type === 'single' ? [g.message.id] : g.messages.map(m => m.id))).toEqual(['other', 'input-1', 'reply-1'])
+    expect(out.chatTailMessageId).toBe('reply-1')
+    expect(messages).toEqual(snapshot)
+    expect(messages[0]).toBe(cached)
+  })
+
+  it('deduplicates before tool grouping and prompt suppression so derived views agree (#8240)', () => {
+    const freshPrompt = msg({ id: 'prompt-1', type: 'prompt', content: 'new question' })
+    const firstTool = msg({ id: 'tool-1', type: 'tool_use', content: 'old' })
+    const latestTool = msg({ id: 'tool-1', type: 'tool_use', content: 'new' })
+    const messages = [
+      firstTool,
+      msg({ id: 'prompt-1', type: 'prompt', content: 'old question' }),
+      msg({ id: 'error-1', type: 'error', code: 'ASK_USER_QUESTION_STALL', content: 'expired' }),
+      freshPrompt,
+      latestTool,
+      msg({ id: 'tool-2', type: 'tool_use', content: 'second tool' }),
+    ]
+    const out = buildChatViewMessages(messages, null)
+    expect(out.stalledPromptIds.has('prompt-1')).toBe(false)
+    expect(out.storeMsgMap.get('prompt-1')).toBe(freshPrompt)
+    const payload = [...out.chatToolGroupPayloads.values()][0]!
+    expect(payload.messages.map(m => m.id)).toEqual(['tool-1', 'tool-2'])
+    expect(payload.messages[0]).toBe(latestTool)
+    expect(new Set(out.chatMessages.map(m => m.id)).size).toBe(out.chatMessages.length)
+  })
+
   it('returns empty derivations for empty input', () => {
     const out = buildChatViewMessages([], null)
     expect(out.chatMessages).toEqual([])

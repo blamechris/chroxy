@@ -2793,7 +2793,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
     // --- User input echoed from other clients ---
 
     case 'user_input': {
-      const userInput = sharedUserInput(msg, get().myClientId, get().activeSessionId);
+      const userInput = sharedUserInput(msg, get().myClientId, get().activeSessionId, getSessionMessages);
       if (!userInput) break;
       updateSession(userInput.sessionId, (ss) => ({
         messages: [...ss.messages, userInput.chatMessage],
