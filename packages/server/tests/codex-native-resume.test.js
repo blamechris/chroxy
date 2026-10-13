@@ -306,7 +306,8 @@ describe('native durable readiness and transport admission', () => {
     const f = fixture()
     try {
       const locator = await saved(f), s = f.session({ nativeResume: locator, isRestore: true })
-      s.on('error', () => {})
+      const errors = []
+      s.on('error', error => { errors.push(error) })
       await s.start()
       const c = f.clients.at(-1), original = c.request
       c.request = async (method, params) => {
@@ -318,6 +319,9 @@ describe('native durable readiness and transport admission', () => {
       assert.equal(admission.status, 'uncertain')
       assert.equal(admission.delivery, 'unknown')
       assert.equal(admission.retrySafe, false)
+      assert.equal(errors.at(-1).code, 'turn_start_uncertain')
+      assert.ok(/may have started/.test(errors.at(-1).message), 'visible error must preserve upstream uncertainty')
+      assert.equal(/failed to start/.test(errors.at(-1).message), false)
       assert.equal(rpc(f).filter(([method]) => method === 'turn/start').length, 1)
       await s.destroy()
     } finally { f.cleanup() }

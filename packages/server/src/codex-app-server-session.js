@@ -1061,15 +1061,20 @@ export class CodexAppServerSession extends BaseSession {
       if (this._activeTurn && !this._activeTurn.turnId) this._activeTurn.turnId = res?.turn?.id || null
     } catch (err) {
       const refused = typeof err?.jsonRpcCode === 'number'
-      reportInputAdmission(sendOptions, refused ? {
+      const admission = refused ? {
         status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
         reason: 'turn_start_failed', message: 'The provider rejected the turn before it started.',
       } : {
         status: 'uncertain', delivery: 'unknown', retrySafe: false,
         reason: 'turn_start_uncertain', message: 'The native turn acknowledgement was lost; it may have started. Check the original session before explicitly resending.',
-      })
-      // turn/start itself failed (dead server, bad thread) — fail this turn.
-      this._failTurn(`Codex turn failed to start: ${err.message}`)
+      }
+      reportInputAdmission(sendOptions, admission)
+      // Only an explicit native refusal proves this turn did not start.
+      // A transport loss must keep its uncertainty visible to every caller.
+      this._failTurn(
+        refused ? `Codex turn failed to start: ${err.message}` : admission.message,
+        refused ? {} : { code: admission.reason },
+      )
     }
   }
 

@@ -859,7 +859,8 @@ async function handleInput(ws, client, msg, ctx) {
     const accepted = (status === 'accepted' && delivery === 'dispatch_started') ||
       (status === 'queued' && delivery === 'queued')
     const rejected = status === 'rejected' && delivery === 'not_dispatched'
-    if (!accepted && !rejected) return
+    const uncertain = status === 'uncertain' && delivery === 'unknown'
+    if (!accepted && !rejected && !uncertain) return
 
     admissionFinal = true
     inputRecord.status = status
@@ -868,6 +869,19 @@ async function handleInput(ws, client, msg, ctx) {
       inputRecord.acceptedAt = typeof ctx.now === 'function' ? ctx.now() : Date.now()
       sendInputAck(ws, ctx, inputRecord)
       commitForwardedEffects()
+      return
+    }
+
+    if (uncertain) {
+      // A lost native acknowledgement is terminal uncertainty, not definite
+      // dispatch. Retain the reservation so the same id cannot be retried.
+      sendInputAck(ws, ctx, inputRecord, {
+        retrySafe: false,
+        reason: typeof admission.reason === 'string' ? admission.reason : 'provider_admission_uncertain',
+        message: typeof admission.message === 'string'
+          ? admission.message
+          : 'Provider admission is uncertain; inspect the original session before explicitly resending.',
+      })
       return
     }
 
