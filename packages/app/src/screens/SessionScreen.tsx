@@ -48,6 +48,7 @@ import { SessionPanels } from '../components/SessionPanels';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
+import { SessionCiChip } from '../components/SessionCiChip';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { SessionTimeoutBanner } from '../components/SessionTimeoutBanner';
 import { StdinDisabledBanner } from '../components/StdinDisabledBanner';
@@ -178,6 +179,11 @@ export function SessionScreen() {
   const lastResultCost = useConnectionStore(selectLastResultCost);
   const lastResultDuration = useConnectionStore(selectLastResultDuration);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
+  const prStatus = useConnectionStore((s) => s.activeSessionId ? s.sessionStates[s.activeSessionId]?.prStatus ?? null : null);
+  const requestSessionPrStatus = useConnectionStore((s) => s.requestSessionPrStatus);
+  useEffect(() => {
+    if (activeSessionId && connectionPhase === 'connected') requestSessionPrStatus();
+  }, [activeSessionId, connectionPhase, requestSessionPrStatus]);
 
   // #5654 — view-mode / panel-visibility state (chat compact filter and the
   // three modal panels) is owned by useSessionViewState. The compact-filter
@@ -1744,6 +1750,8 @@ export function SessionScreen() {
         />
       )}
 
+      {/* Pull-request and CI status */}
+      <SessionCiChip status={prStatus} onRefresh={requestSessionPrStatus} disabled={connectionPhase !== 'connected'} />
       {/* Dev server preview banner */}
       <DevPreviewBanner key={activeSessionId} requests={devPreviewRequests} previews={devPreviews} onClose={closeDevPreview} onOpen={openDevPreview} />
 

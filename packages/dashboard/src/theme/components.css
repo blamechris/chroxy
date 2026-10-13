@@ -14432,6 +14432,8 @@ button.sidebar-token-view-session-row:hover {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+  max-width: 100%;
   /* 44px is the tap-target floor this repo holds on every surface (WCAG 2.1
      SC 2.5.5), stricter than WCAG 2.2 AA's 24px. */
   min-height: 44px;
@@ -14490,6 +14492,13 @@ a.session-ci-chip__pr:focus-visible {
 
 .session-ci-chip__label {
   color: var(--text-secondary);
+}
+
+.session-ci-chip__reason {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 32rem;
+  color: var(--text-muted);
 }
 
 .session-ci-chip__merge {

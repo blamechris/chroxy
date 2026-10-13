@@ -2331,3 +2331,21 @@ describe('claimPrimary wire payload (#5589 / #5281)', () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+// #8584: the request is explicitly scoped to the active session.
+describe('requestSessionPrStatus', () => {
+  it('sends the active session id and refuses an absent session or closed socket', () => {
+    setEncryptionState(null);
+    const sent: string[] = [];
+    const socket = { readyState: 1, send: (frame: string) => sent.push(frame) } as unknown as WebSocket;
+    useConnectionStore.setState({ activeSessionId: 'ci-session', socket });
+    _testMessageHandler.setContext(createMockConnectionContext({ socket }));
+    expect(useConnectionStore.getState().requestSessionPrStatus()).toBe(true);
+    expect(JSON.parse(sent[0])).toEqual({ type: 'session_pr_status_request', sessionId: 'ci-session' });
+    useConnectionStore.setState({ activeSessionId: null });
+    expect(useConnectionStore.getState().requestSessionPrStatus()).toBe(false);
+    useConnectionStore.setState({ activeSessionId: 'ci-session', socket: null });
+    expect(useConnectionStore.getState().requestSessionPrStatus()).toBe(false);
+    expect(sent).toHaveLength(1);
+  });
+});

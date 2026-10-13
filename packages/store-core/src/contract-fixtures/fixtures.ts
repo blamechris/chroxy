@@ -2185,7 +2185,28 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
 // driver strips those before comparing (see each suite's `normalize`).
 // ---------------------------------------------------------------------------
 
+const CI_BACKGROUND_CONTROL = {
+  type: 'session_pr_status', sessionId: 's2', generatedAt: '2026-10-12T00:00:00Z',
+  branch: 'other', repo: null, pr: null, checks: null, merge: null, reason: null,
+}
+const CI_NO_REPO_SNAPSHOT = {
+  type: 'session_pr_status', sessionId: 's1', generatedAt: '2026-10-13T00:00:00Z',
+  branch: null, repo: null, pr: null, checks: null, merge: null,
+  reason: 'session working directory is not a git repository',
+}
+
 export const SWITCH_FIXTURES: ContractFixture[] = [
+  {
+    name: 'session_pr_status attributes a background reading to its own session',
+    type: 'session_pr_status',
+    init: { activeSessionId: 's2', sessions: { s1: {}, s2: { prStatus: CI_BACKGROUND_CONTROL } } },
+    message: CI_NO_REPO_SNAPSHOT,
+    divergent: {
+      reason: 'Mobile keeps CI with its existing per-session state; the dashboard keeps its established session-id keyed PR status map.',
+      app: { sessions: { s1: { prStatus: CI_NO_REPO_SNAPSHOT }, s2: { prStatus: CI_BACKGROUND_CONTROL } } },
+      dashboard: { flat: { sessionPrStatus: { s1: CI_NO_REPO_SNAPSHOT } } },
+    },
+  },
   {
     // The `message` envelope carries the real bubble type in `messageType`
     // (here 'response'); `content` and `timestamp` are required by the shared

@@ -202,7 +202,7 @@ import { PROTOCOL_VERSION } from '@chroxy/protocol';
 // store-core reducer so a malformed payload is dropped, not crashed on (same
 // pattern the dashboard feeder uses). Resolved via the jest moduleNameMapper
 // `^@chroxy/protocol/schemas$` and the protocol package's `./schemas` export.
-import { ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerPermissionInputSchema } from '@chroxy/protocol/schemas';
+import { ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerPermissionInputSchema, ServerSessionPrStatusSchema } from '@chroxy/protocol/schemas';
 import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
@@ -4128,6 +4128,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       const parsed = ServerPermissionInputSchema.safeParse(msg);
       if (!parsed.success) return;
       set({ permissionInputs: { ...get().permissionInputs, [parsed.data.requestId]: parsed.data } });
+      return;
+    }
+
+    case 'session_pr_status': {
+      const parsed = ServerSessionPrStatusSchema.safeParse(msg);
+      if (!parsed.success || !parsed.data.sessionId) return;
+      updateSession(parsed.data.sessionId, () => ({ prStatus: parsed.data }));
       return;
     }
 

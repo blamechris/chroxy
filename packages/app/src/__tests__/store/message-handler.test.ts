@@ -7577,3 +7577,24 @@ describe('checkpoint_restored (session-creating) post-restore notice (#6808)', (
     expect(messages.filter((m) => m.type === 'system')).toHaveLength(1);
   });
 });
+
+// #8584: the reading belongs to its session, even after the user switches tabs.
+describe('session_pr_status mobile dispatch', () => {
+  const snapshot = { type: 'session_pr_status', sessionId: 's1', generatedAt: '2026-10-13T00:00:00Z', branch: 'x', repo: null, pr: null, checks: null, merge: null, reason: 'session working directory is not a git repository' };
+  it('files a valid snapshot under its own session rather than the active tab', () => {
+    const store = createMockStore({ activeSessionId: 's2', sessionStates: { s1: createEmptySessionState(), s2: createEmptySessionState() } });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    _testMessageHandler.handle(snapshot);
+    expect(store.getState().sessionStates.s1.prStatus).toEqual(snapshot);
+    expect(store.getState().sessionStates.s2.prStatus).toBeUndefined();
+  });
+  it.each([{ ...snapshot, checks: 'green' }, { ...snapshot, sessionId: null }, { ...snapshot, sessionId: 'destroyed' }])('drops malformed or unattributable snapshots', message => {
+    const store = createMockStore({ activeSessionId: 's1', sessionStates: { s1: createEmptySessionState() } });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockConnectionContext());
+    _testMessageHandler.handle(message);
+    expect(store.getState().sessionStates.s1.prStatus).toBeUndefined();
+    expect(Object.keys(store.getState().sessionStates)).toEqual(['s1']);
+  });
+});

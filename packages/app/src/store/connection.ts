@@ -2531,6 +2531,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setGitStageCallback: (cb) => { setImperativeCallback('gitStage', cb); },
   setGitCommitCallback: (cb) => { setImperativeCallback('gitCommit', cb); },
 
+  requestSessionPrStatus: () => {
+    const sessionId = get().activeSessionId;
+    return !!sessionId && sendIfOpen({ type: 'session_pr_status_request', sessionId });
+  },
+
   requestGitStatus: () => {
     sendIfOpen({ type: 'git_status' });
   },
