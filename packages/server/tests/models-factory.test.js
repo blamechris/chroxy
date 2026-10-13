@@ -1045,18 +1045,26 @@ describe('the Claude-only rules in updateModels are scoped to the Claude registr
   // three `[1m]` rows are the synthesis. Key ORDER is part of the assertion —
   // this goes on the wire as `available_models`, and the point of the gate is
   // that the Claude path does not move by one byte.
-  const CLAUDE_SNAPSHOT_BEFORE_THE_GATE = [
+  const CLAUDE_SNAPSHOT = [
     { id: 'opus-4-8', label: 'Opus 4.8', fullId: 'claude-opus-4-8', contextWindow: 1000000 },
     { id: 'mega-1', label: 'Mega', fullId: 'claude-mega-1', contextWindow: 2000000 },
     { id: 'sonnet-4-6', label: 'Sonnet 4.6', fullId: 'claude-sonnet-4-6', contextWindow: 200000 },
     { id: 'fable-5', label: 'Fable 5', fullId: 'claude-fable-5', contextWindow: 1000000 },
     { id: 'haiku-4-5', label: 'Haiku 4.5', fullId: 'claude-haiku-4-5', contextWindow: 200000 },
+    { id: 'sonnet-5-5', label: 'Sonnet 5.5', fullId: 'claude-sonnet-5-5', contextWindow: 1000000 },
+    { id: 'opus-5-5', label: 'Opus 5.5', fullId: 'claude-opus-5-5', contextWindow: 1000000 },
+    { id: 'fable-5-1', label: 'Fable 5.1', fullId: 'claude-fable-5-1', contextWindow: 1000000 },
+    { id: 'haiku-5-5', label: 'Haiku 5.5', fullId: 'claude-haiku-5-5', contextWindow: 1000000 },
     { id: 'opus-4-8[1m]', label: 'Opus 4.8 (1M)', fullId: 'claude-opus-4-8[1m]', contextWindow: 1000000 },
     { id: 'mega-1[1m]', label: 'Mega 1 (1M)', fullId: 'claude-mega-1[1m]', contextWindow: 1000000 },
     { id: 'fable-5[1m]', label: 'Fable 5 (1M)', fullId: 'claude-fable-5[1m]', contextWindow: 1000000 },
+    { id: 'sonnet-5-5[1m]', label: 'Sonnet 5.5 (1M)', fullId: 'claude-sonnet-5-5[1m]', contextWindow: 1000000 },
+    { id: 'opus-5-5[1m]', label: 'Opus 5.5 (1M)', fullId: 'claude-opus-5-5[1m]', contextWindow: 1000000 },
+    { id: 'fable-5-1[1m]', label: 'Fable 5.1 (1M)', fullId: 'claude-fable-5-1[1m]', contextWindow: 1000000 },
+    { id: 'haiku-5-5[1m]', label: 'Haiku 5.5 (1M)', fullId: 'claude-haiku-5-5[1m]', contextWindow: 1000000 },
   ]
 
-  it('the Claude registry still unions an omitted fallback row AND still mints claude-*[1m] — byte-identical', () => {
+  it('the Claude registry unions the exact current fallback roster and still mints claude-*[1m]', () => {
     // #7765 review — `createModelsRegistry()` with no hooks IS the shape the
     // production Claude registry has (`defaultRegistry`, models.js), so this
     // snapshot is on the real Claude path and not on a lookalike. The other end
@@ -1073,8 +1081,8 @@ describe('the Claude-only rules in updateModels are scoped to the Claude registr
     ])
     assert.equal(
       JSON.stringify(registry.getModels()),
-      JSON.stringify(CLAUDE_SNAPSHOT_BEFORE_THE_GATE),
-      'the Claude path must not move by one byte — same rows, same order, same keys',
+      JSON.stringify(CLAUDE_SNAPSHOT),
+      'the Claude path must match the approved catalog — same rows, same order, same keys',
     )
     // …stated as directions too, so the intent survives a future roster edit
     // that legitimately re-captures the snapshot above.

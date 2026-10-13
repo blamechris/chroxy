@@ -28,7 +28,8 @@ export const ONE_M_SUFFIX = '[1m]'
 
 // Opus gained a 1M context window at 4.6. `[major, minor]` of the first opus
 // release with a 1M window — opus at or above this (and any future opus major)
-// is treated as 1M; earlier opus and every other family default to 200k. The
+// is treated as 1M; unknown non-Opus windows default to 200k. Known catalog
+// windows are resolved before this heuristic. The
 // SDK's authoritative modelUsage.contextWindow overrides this after turn 1, so a
 // wrong cold-start guess only ever surfaces for the first turn.
 const OPUS_ONE_M_MIN_VERSION = Object.freeze([4, 6])
@@ -44,8 +45,9 @@ const OPUS_VERSION_RE = /opus-(\d{1,2})(?!\d)(?:[-.](\d{1,2})(?!\d))?/
 
 /**
  * Static context-window heuristic used at cold start before the SDK reports.
- * Opus 4.6+ has 1M (matched by family + version, so new minors/majors inherit it
- * without a code change); most other Claude models have 200k. Any id carrying the
+ * Known catalog windows take precedence, including date-pinned forms. Opus
+ * 4.6+ has 1M (matched by family + version, so new minors/majors inherit it
+ * without a code change); unknown non-Opus models have 200k. Any id carrying the
  * explicit `[1m]` CLI suffix is a 1M-context variant regardless of the base
  * model. The SDK sends authoritative values in
  * `SDKResultSuccess.modelUsage[*].contextWindow` after each turn — registries
@@ -58,6 +60,9 @@ const OPUS_VERSION_RE = /opus-(\d{1,2})(?!\d)(?:[-.](\d{1,2})(?!\d))?/
 export function resolveClaudeContextWindow(fullId) {
   if (typeof fullId !== 'string') return DEFAULT_CONTEXT_WINDOW
   if (fullId.endsWith(ONE_M_SUFFIX)) return 1_000_000
+  const headId = fullId.replace(/-\d{8,}$/, '')
+  const knownWindow = MODEL_METADATA.find(m => m.fullId === headId)?.contextWindow
+  if (knownWindow !== undefined) return knownWindow
   const m = OPUS_VERSION_RE.exec(fullId)
   if (m) {
     const major = Number(m[1])
@@ -100,7 +105,7 @@ export function claudeDeriveId(fullId) {
 //     still surfaces the newer chip in the picker (#3075).
 //   contextWindow — OPTIONAL. When set it overrides the cold-start heuristic
 //     for that known model (symmetric with the on-disk overlay in
-//     computeFallbackModels); when absent (the case for every row today) it is
+//     computeFallbackModels); when absent it is
 //     derived via resolveClaudeContextWindow(fullId), so the derivation is
 //     byte-identical to the prior CLAUDE_FALLBACK_MODELS literals.
 //   pricing — base Anthropic rates in USD per million tokens
@@ -165,6 +170,68 @@ const MODEL_METADATA = Object.freeze([
   Object.freeze({
     shortId: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5',
     pricing: { input: 1.00, output: 5.00, cacheRead: 0.10, cacheWrite: 1.25 },
+  }),
+  // Current models are additional explicit choices (#8585). Keep the existing
+  // family aliases above pinned: changing them would silently change saved
+  // sessions and configured defaults. supportedModels() still supplies the
+  // producer's default; this catalog does not choose one.
+  // Model IDs/windows: https://platform.claude.com/docs/en/models/overview
+  // Rates: https://platform.claude.com/docs/en/about-claude/pricing (2026-10-12)
+  Object.freeze({
+    shortId: 'sonnet-5-5', label: 'Sonnet 5.5', fullId: 'claude-sonnet-5-5',
+    contextWindow: 1_000_000,
+    pricing: { input: 2.00, output: 10.00, cacheRead: 0.10, cacheWrite: 2.50 },
+    oneM: {
+      input: 2.00, output: 10.00, cacheRead: 0.10, cacheWrite: 2.50,
+      longContext: {
+        thresholdInputTokens: 200_000,
+        input: 2.00, output: 10.00, cacheRead: 0.10, cacheWrite: 2.50,
+      },
+    },
+  }),
+  Object.freeze({
+    shortId: 'opus-5-5', label: 'Opus 5.5', fullId: 'claude-opus-5-5',
+    contextWindow: 1_000_000,
+    pricing: { input: 4.00, output: 20.00, cacheRead: 0.20, cacheWrite: 5.00 },
+    oneM: {
+      input: 4.00, output: 20.00, cacheRead: 0.20, cacheWrite: 5.00,
+      longContext: {
+        thresholdInputTokens: 200_000,
+        input: 4.00, output: 20.00, cacheRead: 0.20, cacheWrite: 5.00,
+      },
+    },
+  }),
+  Object.freeze({
+    shortId: 'fable-5-1', label: 'Fable 5.1', fullId: 'claude-fable-5-1',
+    contextWindow: 1_000_000,
+    pricing: { input: 10.00, output: 50.00, cacheRead: 0.25, cacheWrite: 12.50 },
+    oneM: {
+      input: 10.00, output: 50.00, cacheRead: 0.25, cacheWrite: 12.50,
+      longContext: {
+        thresholdInputTokens: 200_000,
+        input: 10.00, output: 50.00, cacheRead: 0.25, cacheWrite: 12.50,
+      },
+    },
+  }),
+  Object.freeze({
+    shortId: 'haiku-5-5', label: 'Haiku 5.5', fullId: 'claude-haiku-5-5',
+    contextWindow: 1_000_000,
+    // Haiku's prompt-length tier applies to the base ID too. The threshold
+    // counts all input categories, including cache reads and writes.
+    pricing: {
+      input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125,
+      longContext: {
+        thresholdInputTokens: 100_000,
+        input: 0.50, output: 2.50, cacheRead: 0.05, cacheWrite: 0.625,
+      },
+    },
+    oneM: {
+      input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125,
+      longContext: {
+        thresholdInputTokens: 100_000,
+        input: 0.50, output: 2.50, cacheRead: 0.05, cacheWrite: 0.625,
+      },
+    },
   }),
 ])
 

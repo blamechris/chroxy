@@ -33,6 +33,10 @@ const FALLBACK_MODELS_SNAPSHOT = [
   { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8', contextWindow: 1_000_000 },
   { id: 'fable', label: 'Fable', fullId: 'claude-fable-5', contextWindow: 1_000_000 },
   { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: 200_000 },
+  { id: 'sonnet-5-5', label: 'Sonnet 5.5', fullId: 'claude-sonnet-5-5', contextWindow: 1_000_000 },
+  { id: 'opus-5-5', label: 'Opus 5.5', fullId: 'claude-opus-5-5', contextWindow: 1_000_000 },
+  { id: 'fable-5-1', label: 'Fable 5.1', fullId: 'claude-fable-5-1', contextWindow: 1_000_000 },
+  { id: 'haiku-5-5', label: 'Haiku 5.5', fullId: 'claude-haiku-5-5', contextWindow: 1_000_000 },
 ]
 
 // CLAUDE_PRICING_USD_PER_MTOK snapshot. Fable is back (GA, #6219 revert) with
@@ -69,7 +73,7 @@ describe('#5930 model-metadata consolidation is a pure restructure', () => {
   it('FALLBACK_MODELS preserves the exact roster + order', () => {
     assert.deepStrictEqual(
       FALLBACK_MODELS.map((m) => m.id),
-      ['sonnet', 'opus', 'fable', 'haiku'],
+      ['sonnet', 'opus', 'fable', 'haiku', 'sonnet-5-5', 'opus-5-5', 'fable-5-1', 'haiku-5-5'],
     )
   })
 
