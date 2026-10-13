@@ -2304,7 +2304,7 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
       // own `(thread/start echo)` line on the same response and is not this
       // test's subject.
       assert.deepEqual(lines.filter(([, m]) => MODEL_BOOT_LOG.test(m)), [
-        ['warn', 'codex thread/start carried no model echo; keeping gpt-5-restored (restored before start)'],
+        ['warn', 'codex native thread carried no model echo; keeping gpt-5-restored (restored before start)'],
       ], 'a cannot-read over a carried value still warns, and names what it kept')
     } finally {
       carried.s.destroy()
@@ -2318,7 +2318,7 @@ describe('CodexAppServerSession — start() over a stub client (#7729)', () => {
     try {
       await echoed.s.start()
       assert.deepEqual(echoLines.filter(([, m]) => MODEL_BOOT_LOG.test(m)), [
-        ['info', 'codex resolved model=gpt-5.5 (thread/start echo)'],
+        ['info', 'codex resolved model=gpt-5.5 (native thread echo)'],
       ], 'a real echo is the only thing that may be logged as one')
     } finally {
       echoed.s.destroy()

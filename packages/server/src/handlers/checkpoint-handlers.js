@@ -7,6 +7,7 @@ import { realpathSync } from 'fs'
 import { sendSessionError, broadcastFocusChanged, buildSessionTokenMismatchPayload } from '../handler-utils.js'
 import { createLogger } from '../logger.js'
 import { isBoundClient } from '../environments/authority.js'
+import { NATIVE_RESUME_DRIVER } from '../codex-native-resume.js'
 
 const log = createLogger('ws')
 
@@ -237,7 +238,9 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
 
     // #6767: 'files' mode reverts only the working tree — the current session and
     // conversation continue, so there is no new session and nothing to re-home.
-    if (mode === 'files') {
+    // Native threads also keep that session when 'both' falls back to files;
+    // their ids cannot seed the legacy conversation-resume recipe below.
+    if (mode === 'files' || (filesOnly && origSession?.constructor?.nativeResumeDriver === NATIVE_RESUME_DRIVER)) {
       ctx.transport.send(ws, {
         type: 'checkpoint_restored',
         checkpointId: checkpoint.id,

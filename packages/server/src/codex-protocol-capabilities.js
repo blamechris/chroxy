@@ -71,7 +71,7 @@ export const CAPABILITY_NAMES = Object.freeze(Object.keys(CAPABILITY_MIN_VERSION
 // dotted-numeric run inside its platform parens ("Mac OS 26.6.2"), so an
 // unanchored scan happily reports the OS version as the codex version for any
 // userAgent whose leading token has none.
-const USER_AGENT_RE = /^\s*(\S+?)\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/
+const USER_AGENT_RE = /^\s*((?:Codex Desktop|\S+?))\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?=\s|$)/
 
 const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/
 
