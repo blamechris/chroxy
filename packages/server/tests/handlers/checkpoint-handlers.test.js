@@ -882,3 +882,28 @@ describe('checkpoint-handlers', () => {
     })
   })
 })
+
+describe('native fallback guard preserves SDK checkpoint semantics', () => {
+  for (const boundary of [null, 'sdk-boundary']) it(`keeps SDK Both restoration ${boundary ? 'with a genuine fork' : 'using its legacy resume recipe'}`, async () => {
+    const sessions = new Map(), original = createMockSession(), replacement = createMockSession()
+    original.resumeSessionId = 'sdk-original'; original.supportsConversationFork = true
+    original.forkConversation = createSpy(async () => 'sdk-forked')
+    assert.equal(original.constructor.nativeResumeDriver, undefined, 'positive control must not use the native driver marker')
+    sessions.set('sdk-session', { session: original, name: 'SDK', cwd: '/tmp' })
+    sessions.set('restored-session-id', { session: replacement, name: 'Rewind SDK', cwd: '/tmp' })
+    const ctx = makeCtx(sessions), cp = { id: 'sdk-cp', name: 'SDK checkpoint', cwd: '/tmp', resumeSessionId: 'sdk-original', boundaryMessageId: boundary }
+    ctx.services.checkpointManager.getCheckpoint = createSpy(() => cp)
+    ctx.services.checkpointManager.restoreCheckpoint = createSpy(async () => cp)
+    const ws = makeWs(), viewerWs = makeWs(), owner = makeClient({ id: 'sdk-owner', authenticated: true }), viewer = makeClient({ id: 'sdk-viewer', authenticated: true })
+    ctx.clientManager.addClient(ws, owner); ctx.clientManager.addClient(viewerWs, viewer)
+    ctx.clientManager.setActiveSession(owner, 'sdk-session'); ctx.clientManager.setActiveSession(viewer, 'sdk-session')
+    await checkpointHandlers.restore_checkpoint(ws, owner, { checkpointId: 'sdk-cp', mode: 'both' }, ctx)
+    assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1)
+    assert.equal(ctx.sessions.sessionManager.createSession.calls[0][0].resumeSessionId, boundary ? 'sdk-forked' : 'sdk-original')
+    assert.equal(original.forkConversation.callCount, boundary ? 1 : 0)
+    assert.equal(owner.activeSessionId, 'restored-session-id'); assert.equal(viewer.activeSessionId, 'restored-session-id')
+    const restored = ctx._sent.find(message => message.type === 'checkpoint_restored')
+    assert.equal(restored.newSessionId, 'restored-session-id')
+    assert.equal(restored.filesOnly, !boundary)
+  })
+})

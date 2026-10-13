@@ -1039,8 +1039,8 @@ export class CodexAppServerSession extends BaseSession {
     this._armResultTimeout()
 
     // #6606 review — mirror the exec path: prepend the combined skills prefix on
-    // the FIRST turn so runtime skills reach codex. The flag flips only AFTER
-    // turn/start succeeds, so a failed first turn still retries with the skills.
+    // the FIRST turn so runtime skills reach codex. An acknowledgement or a
+    // completed turn proves admission; a refused first turn retries the skills.
     let text = prompt || ''
     if (!this._skillsPrepended) {
       const combined = typeof this._buildCombinedSkillsPrefix === 'function' ? this._buildCombinedSkillsPrefix() : ''
@@ -1053,14 +1053,20 @@ export class CodexAppServerSession extends BaseSession {
     const input = this._buildTurnInput(text, attachments, messageId)
 
     ;(this._log || log).info(`codex app-server turn start (msg=${messageId} thread=${this._threadId} inputItems=${input.length})`)
+    const dispatchedTurn = this._activeTurn
+    const turnParams = this._buildTurnParams(input)
+    const previouslyUnverified = this._nativeSettingsUnverified
+    // Freeze the choices actually sent, before notifications can complete this
+    // turn or setters select a different choice for the next one.
+    this._nativeSettingsUnverified = previouslyUnverified || !!((turnParams.model && turnParams.model !== this.bootedModel) || (turnParams.effort && turnParams.effort !== this._bootedReasoningEffort))
     try {
-      const res = await this._client.request('turn/start', this._buildTurnParams(input))
+      const res = await this._client.request('turn/start', turnParams)
       this._skillsPrepended = true
-      this._nativeSettingsUnverified = this._nativeSettingsUnverified || !!((this.model && this.model !== this.bootedModel) || (this._reasoningEffortOverride && this._reasoningEffortOverride !== this._bootedReasoningEffort))
       reportInputAdmission(sendOptions, { status: 'accepted', delivery: 'dispatch_started' })
-      if (this._activeTurn && !this._activeTurn.turnId) this._activeTurn.turnId = res?.turn?.id || null
+      if (this._activeTurn === dispatchedTurn && !dispatchedTurn.turnId) dispatchedTurn.turnId = res?.turn?.id || null
     } catch (err) {
       const refused = typeof err?.jsonRpcCode === 'number'
+      if (refused && this._activeTurn === dispatchedTurn) this._nativeSettingsUnverified = previouslyUnverified
       const admission = refused ? {
         status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
         reason: 'turn_start_failed', message: 'The provider rejected the turn before it started.',
@@ -1681,6 +1687,9 @@ export class CodexAppServerSession extends BaseSession {
   _finishTurn(turn) {
     if (!this._activeTurn) return
     const t = this._activeTurn
+    // Completion can precede the RPC acknowledgement. Persist first-turn skills
+    // admission before result listeners save the now-completed native session.
+    this._skillsPrepended = true
     this._clearResultTimeout()
     if (t.didStreamStart) this.emit('stream_end', { messageId: t.messageId })
     this._emitResult(
