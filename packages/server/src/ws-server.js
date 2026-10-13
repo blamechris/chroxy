@@ -2656,6 +2656,7 @@ export class WsServer {
       const { allowed, retryAfterMs } = this._rateLimiter.check(client.rateLimitKey)
       if (!allowed) {
         this._send(ws, { type: 'rate_limited', retryAfterMs, message: 'Too many messages. Please slow down.' })
+        this._sendPreviewRefusal(ws, msg, 'Preview request was not admitted. Wait for the message limit to reset, then request a new preview')
         return
       }
     }
