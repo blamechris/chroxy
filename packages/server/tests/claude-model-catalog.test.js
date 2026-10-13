@@ -50,11 +50,19 @@ describe('claude-model-catalog (#6201 OCP characterization)', () => {
   it('prices exactly the intended keys — fable GA, no unverified-pricing $0 (#6219 revert)', () => {
     assert.deepEqual(Object.keys(CLAUDE_PRICING_USD_PER_MTOK).sort(), [
       'claude-fable-5',
+      'claude-fable-5-1',
+      'claude-fable-5-1[1m]',
       'claude-fable-5[1m]',
       'claude-haiku-4-5',
+      'claude-haiku-5-5',
+      'claude-haiku-5-5[1m]',
       'claude-opus-4-8',
       'claude-opus-4-8[1m]',
+      'claude-opus-5-5',
+      'claude-opus-5-5[1m]',
       'claude-sonnet-4-6',
+      'claude-sonnet-5-5',
+      'claude-sonnet-5-5[1m]',
     ])
     // Fable is a 1M model, so it carries an explicit `claude-fable-5[1m]` key.
     // Its pricing is FLAT — the [1m] rates and the longContext tier equal the
@@ -86,6 +94,10 @@ describe('claude-model-catalog (#6201 OCP characterization)', () => {
       { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8', contextWindow: 1_000_000 },
       { id: 'fable', label: 'Fable', fullId: 'claude-fable-5', contextWindow: 1_000_000 },
       { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: 200_000 },
+      { id: 'sonnet-5-5', label: 'Sonnet 5.5', fullId: 'claude-sonnet-5-5', contextWindow: 1_000_000 },
+      { id: 'opus-5-5', label: 'Opus 5.5', fullId: 'claude-opus-5-5', contextWindow: 1_000_000 },
+      { id: 'fable-5-1', label: 'Fable 5.1', fullId: 'claude-fable-5-1', contextWindow: 1_000_000 },
+      { id: 'haiku-5-5', label: 'Haiku 5.5', fullId: 'claude-haiku-5-5', contextWindow: 1_000_000 },
     ])
     assert.ok(Object.isFrozen(CLAUDE_FALLBACK_MODELS))
     for (const m of CLAUDE_FALLBACK_MODELS) assert.ok(Object.isFrozen(m), `${m.id} frozen`)

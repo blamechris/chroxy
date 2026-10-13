@@ -184,7 +184,7 @@ describe('createModelsRegistry(providerHooks)', () => {
   it('backward compat: no args => Claude-style defaults (FALLBACK_MODELS, claude- stripping)', () => {
     const r = createModelsRegistry()
     const ids = r.getModels().map(m => m.id).sort()
-    assert.deepEqual(ids, ['fable', 'haiku', 'opus', 'sonnet']) // #6219 revert — fable is GA again
+    assert.deepEqual(ids, ['fable', 'fable-5-1', 'haiku', 'haiku-5-5', 'opus', 'opus-5-5', 'sonnet', 'sonnet-5-5'])
     const converted = r.updateModels([
       { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
     ])

@@ -24,7 +24,7 @@ describe('FALLBACK_MODELS (default registry)', () => {
 
   it('contains sonnet, opus, haiku, and fable aliases', () => {
     const ids = FALLBACK_MODELS.map(m => m.id).sort()
-    assert.deepEqual(ids, ['fable', 'haiku', 'opus', 'sonnet']) // #6219 revert — fable is GA again
+    assert.deepEqual(ids, ['fable', 'fable-5-1', 'haiku', 'haiku-5-5', 'opus', 'opus-5-5', 'sonnet', 'sonnet-5-5'])
   })
 
   it('each entry has id, label, fullId, and contextWindow', () => {
@@ -79,10 +79,11 @@ describe('resolveClaudeContextWindow (#5931 — version-aware opus heuristic)', 
     assert.equal(resolveClaudeContextWindow('claude-opus-4-8-20251201'), 1_000_000)
   })
 
-  it('defaults non-opus families to 200k', () => {
+  it('defaults unlisted non-opus windows to 200k and honors known catalog windows', () => {
     assert.equal(resolveClaudeContextWindow('claude-sonnet-4-6'), DEFAULT_CONTEXT_WINDOW)
     assert.equal(resolveClaudeContextWindow('claude-haiku-4-5'), DEFAULT_CONTEXT_WINDOW)
-    assert.equal(resolveClaudeContextWindow('claude-fable-5'), DEFAULT_CONTEXT_WINDOW)
+    assert.equal(resolveClaudeContextWindow('claude-fable-5'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-sonnet-99-1'), DEFAULT_CONTEXT_WINDOW)
   })
 
   it('honors the explicit [1m] CLI suffix regardless of family', () => {

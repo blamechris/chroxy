@@ -156,9 +156,8 @@ export function computePromptCostUsd(usage, pricing) {
   const outputTokens = Number(usage.output_tokens) || 0
   const cacheReadTokens = Number(usage.cache_read_input_tokens) || 0
   const cacheWriteTokens = Number(usage.cache_creation_input_tokens) || 0
-  // Select base or long-context rates. Only `[1m]`-variant entries carry
-  // a `longContext` block, so default-window models always use the
-  // top-level rates.
+  // Select rates for the whole prompt. A model may tier its base ID too
+  // (Haiku 5.5), so the pricing entry, rather than an ID suffix, decides.
   let rates = pricing
   if (pricing.longContext) {
     const totalInput = inputTokens + cacheReadTokens + cacheWriteTokens
