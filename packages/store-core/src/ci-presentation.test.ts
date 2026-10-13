@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { describeNoPrStatus } from './ci-presentation'
-import type { ServerSessionPrStatusMessage } from '@chroxy/protocol'
+import { SESSION_PR_NOT_A_REPO_REASON, type ServerSessionPrStatusMessage } from '@chroxy/protocol'
 
 describe('no-PR presentation', () => {
   const snapshot = (reason: string | null) => ({ reason }) as ServerSessionPrStatusMessage
   it('uses No repo only for the explicit non-repository reason', () => {
     expect(describeNoPrStatus(snapshot('session working directory is not a git repository'))).toEqual({ label: 'No repo', reason: null })
+  })
+  it('classifies the shared server reason as No repo', () => {
+    expect(describeNoPrStatus(snapshot(SESSION_PR_NOT_A_REPO_REASON))).toEqual({ label: 'No repo', reason: null })
   })
   it('keeps missing snapshots distinct from a verified no-PR result', () => {
     expect(describeNoPrStatus(snapshot(null))).toEqual({ label: 'No PR', reason: null })

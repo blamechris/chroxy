@@ -1,4 +1,4 @@
-import type { ServerSessionPrStatusMessage } from '@chroxy/protocol'
+import { SESSION_PR_NOT_A_REPO_REASON, type ServerSessionPrStatusMessage } from '@chroxy/protocol'
 
 /**
  * Short label for the check rollup.
@@ -61,7 +61,7 @@ export function formatMergeState(merge: ServerSessionPrStatusMessage['merge']): 
 
 /** Labels a no-PR snapshot without treating a non-repository folder as an outage. */
 export function describeNoPrStatus(status: ServerSessionPrStatusMessage): { label: string; reason: string | null } {
-  if (status.reason === 'session working directory is not a git repository') {
+  if (status.reason === SESSION_PR_NOT_A_REPO_REASON) {
     return { label: 'No repo', reason: null }
   }
   return status.reason !== null

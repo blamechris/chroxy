@@ -18,7 +18,11 @@ import {
   isIndeterminate,
   UNUSABLE_ROW_REASON,
 } from '../src/session-pr-status.js'
-import { ServerSessionPrStatusSchema } from '@chroxy/protocol'
+import { ServerSessionPrStatusSchema, SESSION_PR_NOT_A_REPO_REASON } from '@chroxy/protocol'
+
+it('exports the protocol no-repository reason used by both CI chips', () => {
+  assert.equal(NOT_A_REPO_REASON, SESSION_PR_NOT_A_REPO_REASON)
+})
 
 /**
  * Tests for the session → pull-request / CI status survey (#7344).

@@ -71,6 +71,7 @@
  *   - `_now()` — returns a `Date` (defaults to `new Date()`).
  */
 
+import { SESSION_PR_NOT_A_REPO_REASON as NOT_A_REPO_REASON } from '@chroxy/protocol'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { parseGithubOwnerRepo } from './control-room/survey.js'
@@ -102,7 +103,7 @@ export const FORK_QUERY_LIMIT = 30
 export const NO_CWD_REASON = 'session has no working directory'
 
 /** Reason when the session's cwd is not inside a git repository. */
-export const NOT_A_REPO_REASON = 'session working directory is not a git repository'
+export { NOT_A_REPO_REASON }
 
 /** Reason when the session's cwd no longer exists (e.g. a reaped worktree). */
 export const CWD_MISSING_REASON = 'session working directory no longer exists'
