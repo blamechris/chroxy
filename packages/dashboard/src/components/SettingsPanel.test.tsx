@@ -3196,3 +3196,27 @@ describe('SettingsPanel — notification permission row (#7351)', () => {
     expect(screen.getByTestId('notification-permission-denied').textContent).toMatch(/in your OS/i)
   })
 })
+
+describe('Session Defaults model identity (#8260)', () => {
+  const models = [
+    { id: 'haiku', fullId: 'haiku', label: 'Haiku 4.5' },
+    { id: 'pin', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+    { id: 'same-pin', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+    { id: 'date', fullId: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+    { id: 'long', fullId: 'claude-haiku-4-5[1m]', label: 'Haiku 4.5' },
+  ]
+  it('labels distinct targets, displays the representative of a saved alias, and preserves opaque persisted IDs until a user change', () => {
+    const setDefaultModel = vi.fn()
+    setMockState({ defaultProvider: 'claude-sdk', defaultModel: 'same-pin', setDefaultModel,
+      availableProviders: [{ name: 'claude-sdk' }], modelsByProvider: { 'claude-sdk': { models, defaultModelId: 'haiku' } } })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    const select = screen.getByLabelText('Default model') as HTMLSelectElement
+    expect(Array.from(select.options).map(m => m.text)).toEqual(['Server default', 'Haiku 4.5 (provider alias)', 'Haiku 4.5 (pinned 4.5)', 'Haiku 4.5 (pinned 20251001)', 'Haiku 4.5 (pinned 4.5, 1M)'])
+    expect(select.value).toBe('pin')
+    expect(setDefaultModel).not.toHaveBeenCalled()
+    fireEvent.change(select, { target: { value: 'date' } })
+    expect(setDefaultModel).toHaveBeenCalledWith('date')
+    fireEvent.change(select, { target: { value: 'long' } })
+    expect(setDefaultModel).toHaveBeenLastCalledWith('long')
+  })
+})

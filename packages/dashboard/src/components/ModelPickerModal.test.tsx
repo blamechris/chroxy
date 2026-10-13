@@ -160,3 +160,34 @@ describe('ModelPickerModal (#6220)', () => {
     expect(onClose).not.toHaveBeenCalled()
   })
 })
+
+describe('model target identity (#8260)', () => {
+  const aliases = [
+    { id: 'haiku', fullId: 'haiku', label: 'Haiku 4.5' },
+    { id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+    { id: 'haiku-4-5-20251001', fullId: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  ]
+  it('names every distinct target and sends its original selection ID', () => {
+    const onSelect = vi.fn()
+    renderModal({ availableModels: aliases, activeModel: aliases[2]!.fullId, defaultModelId: null, onSelect })
+    expect(screen.getByTestId('model-picker-item-haiku').textContent).toContain('provider alias')
+    expect(screen.getByTestId('model-picker-item-haiku-4-5').textContent).toContain('pinned 4.5')
+    expect(screen.getByTestId('model-picker-item-haiku-4-5-20251001').textContent).toContain('pinned 20251001')
+    expect(screen.getAllByRole('option').filter(row => row.getAttribute('aria-selected') === 'true')).toHaveLength(1)
+    expect(screen.getByTestId('model-picker-item-haiku-4-5-20251001').getAttribute('aria-selected')).toBe('true')
+    fireEvent.click(screen.getByTestId('model-picker-item-haiku-4-5'))
+    expect(onSelect).toHaveBeenCalledWith('haiku-4-5')
+  })
+  it('never highlights a family substitute for an absent dated running ID', () => {
+    renderModal({ availableModels: aliases, activeModel: 'claude-haiku-4-5-20251101', defaultModelId: 'haiku' })
+    expect(screen.getAllByRole('option').filter(row => row.getAttribute('aria-selected') === 'true')).toHaveLength(0)
+  })
+})
+
+it('marks one shared-target row as active and default when different accepted aliases name it (#8260)', () => {
+  renderModal({ availableModels: [{ id: 'a', fullId: 'same-target', label: 'Shared' }, { id: 'b', fullId: 'same-target', label: 'Shared' }], activeModel: 'b', defaultModelId: 'a' })
+  expect(screen.getAllByRole('option')).toHaveLength(1)
+  const row = screen.getByTestId('model-picker-item-a')
+  expect(row.getAttribute('aria-selected')).toBe('true')
+  expect(row.textContent).toContain('Shared (default)')
+})

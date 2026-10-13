@@ -7217,6 +7217,12 @@ describe('multi_question_intervention handler (#4764)', () => {
 // SKIPS the 3 connect-time list requests; against an old server (no flag) it
 // requests them as before. The list_* refresh paths stay live.
 describe('auth_bootstrap (#5555)', () => {
+  afterEach(() => {
+    // auth_ok starts a real heartbeat; dispose it before the next mock context.
+    resetAllHandlerState();
+    _testResetStore();
+  });
+
   function sentTypes(ctx: ConnectionContext) {
     return (ctx.socket.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0]).type);
   }

@@ -13,6 +13,8 @@ import {
   expandPasteMarkers,
   parseMemoryAppend,
   resolveContextWindow,
+  formatActiveModelLabel,
+  modelDisplayTarget,
   contextOccupancyTokens,
   contextFillPercent,
   providerSupportsMultiQuestion,
@@ -558,7 +560,8 @@ export function App() {
       showModelPicker: caps?.modelSwitch !== false,
       // #4464: render a non-interactive badge in the picker's slot when the
       // active provider permanently lacks mid-session model switching (TUI).
-      readOnlyModel: caps?.modelSwitch === false ? activeModel : null,
+      readOnlyModel: caps?.modelSwitch === false
+        ? formatActiveModelLabel(availableModels, activeModel, defaultModelId, activeSessionProvider) : null,
       showPermissionMode: caps?.permissionModeSwitch !== false,
       // #8084: the active provider's `planMode` capability (claude-tui reports
       // `false` — claude-tui-session.js). Gates BOTH the "Plan" option in the
@@ -584,7 +587,7 @@ export function App() {
       // highlight.
       highlightThinkingKeywords: !!caps?.thinkingKeywords,
     }
-  }, [activeSessionProvider, availableProviders, activeModel, activeModelThinkingLevels])
+  }, [activeSessionProvider, availableProviders, activeModel, activeModelThinkingLevels, availableModels, defaultModelId])
 
   // #8084 — hide the "Plan" entry from the permission-mode dropdown when the
   // active provider's capability says it cannot honour plan mode
@@ -2547,10 +2550,11 @@ export function App() {
   // mode. Prefer the server-supplied `label`; fall back to the raw model id
   // so a model missing from `availableModels` still shows something.
   const activeModelLabel = useMemo(() => {
-    if (!activeModel) return undefined
-    const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
-    return modelInfo?.label ?? activeModel
-  }, [activeModel, availableModels])
+    if (!activeModel && !defaultModelId) return undefined
+    return formatActiveModelLabel(availableModels, activeModel, defaultModelId, activeSessionProvider)
+  }, [activeModel, availableModels, defaultModelId, activeSessionProvider])
+
+  const activeModelDisplayTarget = modelDisplayTarget(availableModels, activeModel, defaultModelId)
 
   const isConnected = connectionPhase === 'connected'
   // Point the Cmd+Shift+L shortcut at the live QR handler, gated on connection
@@ -2731,6 +2735,7 @@ export function App() {
         showModelPicker={dropdownFlags.showModelPicker}
         availableModels={availableModels}
         activeModel={activeModel}
+        modelTooltipTarget={activeModelDisplayTarget}
         defaultModelId={defaultModelId}
         onModelChange={setModel}
         readOnlyModel={dropdownFlags.readOnlyModel}
@@ -3316,7 +3321,8 @@ export function App() {
         // #8123: only meaningful for the active-session cwd above (no
         // equivalent field on the auth_ok-time `sessionCwd` fallback).
         repoCwd={activeSessionCwd != null ? activeSessionRepoCwd : undefined}
-        model={activeModel || undefined}
+        model={activeModelDisplayTarget || undefined}
+        modelLabel={activeModelLabel}
         cost={sessionCost ?? undefined}
         context={formatContext(contextOccupancy)}
         contextPercent={contextPercent}

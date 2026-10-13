@@ -50,6 +50,7 @@ export interface AppHeaderProps {
   showModelPicker: boolean
   availableModels: ComponentProps<typeof ChatSettingsDropdown>['availableModels']
   activeModel: ComponentProps<typeof ChatSettingsDropdown>['activeModel']
+  modelTooltipTarget?: ComponentProps<typeof ChatSettingsDropdown>['modelTooltipTarget']
   defaultModelId: ComponentProps<typeof ChatSettingsDropdown>['defaultModelId']
   onModelChange: ComponentProps<typeof ChatSettingsDropdown>['onModelChange']
   readOnlyModel: ComponentProps<typeof ChatSettingsDropdown>['readOnlyModel']
@@ -229,6 +230,7 @@ export function AppHeader(props: AppHeaderProps) {
         <ChatSettingsDropdown
           availableModels={props.showModelPicker ? props.availableModels : []}
           activeModel={props.activeModel}
+          modelTooltipTarget={props.modelTooltipTarget}
           defaultModelId={props.defaultModelId}
           onModelChange={props.onModelChange}
           readOnlyModel={props.readOnlyModel}

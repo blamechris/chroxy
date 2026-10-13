@@ -243,8 +243,7 @@ describe('#7728 — the mobile store keys model rosters by provider', () => {
 
     const sent: string[] = [];
     const { tree } = renderBarFor(store.getState(), (id) => sent.push(id));
-    const chip = tree.root.findAllByType(TouchableOpacity)
-      .find((n) => collectVisibleText(n).includes('GPT-5.5'));
+    const chip = tree.root.findByProps({ testID: 'settings-model-gpt-5.5' });
     expect(chip).toBeDefined();
     act(() => { chip!.props.onPress(); });
     expect(sent).toEqual(['gpt-5.5']);

@@ -11,6 +11,7 @@
  * non-selectable row.
  */
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
+import { findModelEntry, modelChoices } from '@chroxy/store-core'
 import { Modal } from './Modal'
 import type { ModelInfo } from '../store/types'
 import { isImeComposing } from '../utils/ime'
@@ -47,24 +48,15 @@ export function ModelPickerModal({
     if (open) setQuery('')
   }, [open])
 
-  // Resolve the active model to its short id the same way the status bar does
-  // (it can arrive as a short id OR a full id) so the checkmark lands on the
-  // right row (#5628).
-  const activeId = useMemo(() => {
-    const entry = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel)
-    return entry?.id ?? activeModel ?? null
-  }, [availableModels, activeModel])
-
+  const choices = useMemo(() => modelChoices(availableModels), [availableModels])
+  const activeEntry = findModelEntry(availableModels, activeModel || defaultModelId)
+  const defaultEntry = findModelEntry(availableModels, defaultModelId)
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return availableModels
-    return availableModels.filter(
-      (m) =>
-        m.label?.toLowerCase().includes(q) ||
-        m.id.toLowerCase().includes(q) ||
-        m.fullId?.toLowerCase().includes(q),
-    )
-  }, [availableModels, query])
+    if (!q) return choices
+    return choices.filter(m => m.label.toLowerCase().includes(q)
+      || m.id.toLowerCase().includes(q) || m.fullId?.toLowerCase().includes(q))
+  }, [choices, query])
 
   const handleSelect = useCallback(
     (id: string) => {
@@ -151,8 +143,8 @@ export function ModelPickerModal({
             </div>
           ) : (
             filtered.map((m) => {
-              const isDefault = defaultModelId != null && m.id === defaultModelId
-              const isActive = m.id === activeId
+              const isDefault = defaultEntry != null && (m.fullId || m.id) === (defaultEntry.fullId || defaultEntry.id)
+              const isActive = activeEntry != null && (m.fullId || m.id) === (activeEntry.fullId || activeEntry.id)
               const disabled = (m as PickerModel).disabled === true
               return (
                 <button

@@ -6,7 +6,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { Text } from 'react-native';
+import { Text, TouchableOpacity } from 'react-native';
 import { SettingsBar } from '../SettingsBar';
 
 function collectVisibleText(root: ReactTestInstance): string {
@@ -111,5 +111,49 @@ describe('SettingsBar capability gating (#5731)', () => {
     expect(text).toContain('Sonnet');
     expect(text).toContain('Plan');
     expect(text).not.toContain('fixed');
+  });
+});
+
+describe('SettingsBar target identity (#8260)', () => {
+  const aliases = [
+    { id: 'haiku', fullId: 'haiku', label: 'Haiku 4.5' },
+    { id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' },
+    { id: 'haiku-4-5-20251001', fullId: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5' },
+  ];
+  it('labels distinct aliases and pins, highlights exactly one, and sends the tapped selection ID', () => {
+    const setModel = jest.fn();
+    const tree = render(makeProps({ availableModels: aliases, activeModel: aliases[2].fullId, setModel, provider: 'claude-sdk' }));
+    const text = collectVisibleText(tree.root);
+    expect(text).toContain('Haiku 4.5 (provider alias)');
+    expect(text).toContain('Haiku 4.5 (pinned 4.5)');
+    expect(text).toContain('Haiku 4.5 (pinned 20251001)');
+    const chips = tree.root.findAllByType(TouchableOpacity).filter(node => node.props.testID?.startsWith('settings-model-'));
+    expect(chips.filter(node => node.props.accessibilityState.selected)).toHaveLength(1);
+    act(() => chips[1].props.onPress());
+    expect(setModel).toHaveBeenCalledWith('haiku-4-5');
+    act(() => tree.unmount());
+  });
+  it('uses display fallback without highlighting the family chip', () => {
+    const tree = render(makeProps({ availableModels: aliases, activeModel: 'claude-haiku-4-5-20251101', provider: 'claude-sdk' }));
+    expect(collectVisibleText(tree.root)).toContain('Haiku 4.5 (pinned 20251101)');
+    const chips = tree.root.findAllByType(TouchableOpacity).filter(node => node.props.testID?.startsWith('settings-model-') && node.props.accessibilityState?.selected === true);
+    expect(chips).toHaveLength(0);
+    act(() => tree.unmount());
+  });
+});
+
+describe('SettingsBar null active-model default (#8260)', () => {
+  it.each([true, false])('shows the known default in collapsed and expanded states with modelSwitch=%s without setting a model', (modelSwitchSupported) => {
+    const setModel = jest.fn();
+    const props = makeProps({ activeModel: null, defaultModelId: 'haiku', availableModels: [{ id: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' }], modelSwitchSupported, setModel, provider: 'claude-sdk', expanded: false });
+    const tree = render(props);
+    expect(collectVisibleText(tree.root)).toContain('Default (Haiku 4.5)');
+    expect(tree.root.findAll(node => node.props.accessibilityHint === 'Model target: claude-haiku-4-5').length).toBeGreaterThan(0);
+    act(() => tree.update(<SettingsBar {...(props as unknown as React.ComponentProps<typeof SettingsBar>)} expanded />));
+    const expandedModel = tree.root.findByProps({ testID: modelSwitchSupported ? 'settings-model-haiku' : 'settings-fixed-model' });
+    expect(collectVisibleText(expandedModel)).toContain('Default (Haiku 4.5)');
+    expect(expandedModel.props.accessibilityHint).toBe('Model target: claude-haiku-4-5');
+    expect(setModel).not.toHaveBeenCalled();
+    act(() => tree.unmount());
   });
 });

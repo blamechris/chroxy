@@ -9,6 +9,7 @@
  * likewise clipping-immune.
  */
 import { useEffect, useMemo, useState } from 'react'
+import { findModelEntry, formatActiveModelLabel } from '@chroxy/store-core'
 import type { ModelInfo } from '../store/types'
 import type { PermissionMode } from '@chroxy/store-core'
 // #6901: single-source the sandbox label/description from protocol's
@@ -39,9 +40,7 @@ function buildActiveModelTooltip(
   availableModels: ModelInfo[],
   activeModel: string | null,
 ): string {
-  const info = availableModels.find(
-    m => m.id === activeModel || m.fullId === activeModel,
-  )
+  const info = findModelEntry(availableModels, activeModel)
   const display = info?.fullId || info?.id || activeModel
   if (!display) {
     return 'Active model. Click the model picker in the header to switch.'
@@ -55,13 +54,15 @@ function buildActiveModelTooltip(
 export interface ChatSettingsDropdownProps {
   availableModels: ModelInfo[]
   activeModel: string | null
+  modelTooltipTarget?: string | null
   defaultModelId: string | null
   onModelChange: (id: string) => void
   // #4464: render a non-interactive pill instead of the model <select>
   // when the active provider doesn't expose a mid-session model switch
   // (today: claude TUI — see claude-tui-session.js capability.modelSwitch=false).
   // Passing a string here causes the badge to render in the picker's slot
-  // showing that id (or "Default" when empty). Null hides any model UI —
+  // showing the caller's formatted label (or "Provider default" when empty).
+  // The actual target remains in activeModel for its tooltip. Null hides model UI —
   // same as today's "availableModels=[]" behaviour for the transient
   // provider-switch case where we don't want a flash of a stale label.
   readOnlyModel?: string | null
@@ -111,6 +112,7 @@ export interface ChatSettingsDropdownProps {
 export function ChatSettingsDropdown({
   availableModels,
   activeModel,
+  modelTooltipTarget,
   defaultModelId,
   onModelChange,
   availablePermissionModes,
@@ -166,37 +168,11 @@ export function ChatSettingsDropdown({
   // #3888: hover tooltip on the active-model pill so users can see the full
   // model id and its context window without expanding the dropdown.
   const modelTitle = useMemo(
-    () => buildActiveModelTooltip(availableModels, activeModel),
-    [availableModels, activeModel],
+    () => buildActiveModelTooltip(availableModels, modelTooltipTarget || activeModel || defaultModelId),
+    [availableModels, modelTooltipTarget, activeModel, defaultModelId],
   )
 
-  // #5628: the session's active model arrives as either a short id ('fable')
-  // or a full id ('claude-fable-5'), but the <option> values are short ids
-  // (m.id). A native <select> whose `value` matches no <option> silently
-  // renders the FIRST option — so a full-id activeModel made the header show
-  // "Default (Sonnet 4.6)" even while the status bar (which dual-matches on
-  // id||fullId) showed the real model. Resolve the active model the same way
-  // the status bar does, then drive the <select> off the resolved short id so
-  // it matches its option. `activeEntry` is null for a model not in the list
-  // (e.g. unknown/unbroadcast) — we then render a synthetic option carrying the
-  // raw id so the picker degrades to the real id rather than misrendering as
-  // "Default" (#5631 graceful-degradation).
-  const activeEntry = useMemo(
-    () => availableModels.find(m => m.id === activeModel || m.fullId === activeModel) ?? null,
-    [availableModels, activeModel],
-  )
-  // The <option> value that represents the active model: its short id when
-  // known, else the raw activeModel string (matched by the synthetic option).
-  const activeOptionValue = activeEntry?.id ?? activeModel ?? ''
-  // True only when the active model genuinely IS the server default — compared
-  // on the normalized short id so a full-id activeModel still resolves.
-  const activeIsDefault = defaultModelId != null && activeOptionValue === defaultModelId
-  // Label shown in the trigger button (and for the "Default (…)" form): the
-  // default model's label, falling back to the first model, then 'recommended'.
-  const defaultLabel =
-    (defaultModelId
-      ? availableModels.find((m) => m.id === defaultModelId)?.label
-      : availableModels[0]?.label) ?? 'recommended'
+  const activeLabel = formatActiveModelLabel(availableModels, activeModel, defaultModelId, providerLabel)
 
   return (
     <>
@@ -215,7 +191,7 @@ export function ChatSettingsDropdown({
             aria-label={modelTitle}
             aria-haspopup="dialog"
           >
-            {activeIsDefault ? `Default (${defaultLabel})` : (activeEntry?.label ?? activeModel ?? `Default (${defaultLabel})`)}
+            {activeLabel}
           </button>
           <ModelPickerModal
             open={pickerOpen}
@@ -242,7 +218,7 @@ export function ChatSettingsDropdown({
           aria-label={modelTitle}
           role="status"
         >
-          {readOnlyModel || 'Default'}
+          {readOnlyModel || 'Provider default'}
         </span>
       )}
 
