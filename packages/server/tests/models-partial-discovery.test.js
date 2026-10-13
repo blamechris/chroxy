@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createModelsRegistry } from '../src/models.js'
+import { createModelsRegistry, FALLBACK_MODELS } from '../src/models.js'
 
 const aliases = [
   { value: 'haiku', displayName: 'Haiku 4.5' },
@@ -126,6 +126,79 @@ describe('Claude partial discovery (#8260)', () => {
       restarted.updateModels([aliases[2]])
       assert.equal(restarted.getModels().find(m => m.fullId === variant)?.label, 'Provider variant')
       assert.ok(restarted.getAllowedModelIds().has(variant))
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+  it('restores persistence of a static 1M variant after its override is removed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-static-variant-8260-'))
+    try {
+      const cache = join(dir, 'models.json')
+      const base = FALLBACK_MODELS.find(m => m.id === 'opus')
+      assert.ok(base.contextWindow >= 1_000_000)
+      const variant = `${base.fullId}[1m]`
+      const r = createModelsRegistry({ overlay: new Map([[base.fullId, { fullId: base.fullId, label: 'Override', contextWindow: 1_000_000 }]]) })
+      r.updateModels([aliases[0]])
+      r.applyOverlay(new Map())
+      assert.ok(r.getModels().some(m => m.fullId === variant))
+      assert.equal(r.saveCache(cache), true)
+      const saved = JSON.parse(readFileSync(cache, 'utf-8'))
+      assert.ok(saved.models.some(m => m.fullId === variant))
+      const restarted = createModelsRegistry()
+      assert.equal(restarted.loadCache(cache), true)
+      assert.ok(restarted.getModels().some(m => m.fullId === variant))
+      assert.ok(restarted.getAllowedModelIds().has(variant))
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+  it('round-trips a learned declaration-only variant window without persisting its row, then prunes it when the base is removed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-learned-variant-8260-'))
+    try {
+      const cache = join(dir, 'models.json')
+      const base = 'claude-custom-7'
+      const variant = `${base}[1m]`
+      const overlay = new Map([[base, { fullId: base, label: 'Custom', contextWindow: 1_000_000 }]])
+      const r = createModelsRegistry({ overlay })
+      r.updateModels([aliases[0]])
+      assert.equal(r.updateContextWindow(variant, 777_777), true)
+      assert.equal(r.saveCache(cache), true)
+      const saved = JSON.parse(readFileSync(cache, 'utf-8'))
+      assert.ok(!saved.models.some(m => m.fullId === variant))
+      assert.equal(saved.learnedContextWindows[variant], 777_777)
+      r.applyOverlay(new Map())
+      r.applyOverlay(overlay)
+      assert.equal(r.getModels().find(m => m.fullId === variant)?.contextWindow, 1_000_000)
+      const restarted = createModelsRegistry({ overlay })
+      assert.equal(restarted.loadCache(cache), true)
+      restarted.updateModels([aliases[0]])
+      assert.equal(restarted.getModels().find(m => m.fullId === variant)?.contextWindow, 777_777)
+      assert.equal(restarted.saveCache(cache), true)
+      assert.ok(!JSON.parse(readFileSync(cache, 'utf-8')).models.some(m => m.fullId === variant))
+      // Prune at load before any synthesis relationship has been reconstructed.
+      const removedAtBoot = createModelsRegistry()
+      assert.equal(removedAtBoot.loadCache(cache), true)
+      assert.equal(JSON.parse(readFileSync(cache, 'utf-8')).learnedContextWindows[variant], undefined)
+      removedAtBoot.updateModels([aliases[0]])
+      assert.ok(!removedAtBoot.getModels().some(m => m.fullId === variant))
+      restarted.applyOverlay(new Map())
+      assert.equal(restarted.saveCache(cache), true)
+      assert.equal(JSON.parse(readFileSync(cache, 'utf-8')).learnedContextWindows[variant], undefined)
+      assert.ok(!restarted.getModels().some(m => m.fullId === variant))
+      restarted.applyOverlay(overlay)
+      assert.equal(restarted.getModels().find(m => m.fullId === variant)?.contextWindow, 1_000_000)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+  it('preserves a valid legacy-v2 custom observation without guessing its provenance', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-legacy-observation-8260-'))
+    try {
+      const cache = join(dir, 'models.json')
+      const real = { id: 'custom', fullId: 'claude-custom-7', label: 'Provider custom', contextWindow: 333_333 }
+      writeFileSync(cache, JSON.stringify({ v: 2, models: [real], defaultModelId: 'custom' }))
+      const r = createModelsRegistry()
+      assert.equal(r.loadCache(cache), true)
+      r.updateModels([aliases[0]])
+      assert.deepEqual(r.getModels().find(m => m.fullId === real.fullId), real)
+      assert.ok(r.getAllowedModelIds().has(real.id))
+      assert.equal(r.getDefaultModelId(), real.id)
+      assert.equal(r.saveCache(cache), true)
+      assert.deepEqual(JSON.parse(readFileSync(cache, 'utf-8')).models.find(m => m.fullId === real.fullId), real)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
   it('non-Claude discovery remains a replacement', () => {

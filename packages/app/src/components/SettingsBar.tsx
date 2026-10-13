@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView, Switch, TextInput, Linking } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { findModelEntry, modelChoices, formatActiveModelLabel, resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
+import { findModelEntry, modelDisplayTarget, modelChoices, formatActiveModelLabel, resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge, stripAnsi } from '@chroxy/store-core';
 // #6901: single-source the Codex sandbox label/description for the read-only
@@ -351,7 +351,7 @@ export function SettingsBar({
     summaryParts.push(serverMode);
   }
 
-  if (activeModel) {
+  if (activeModel || defaultModelId) {
     summaryParts.push(formatActiveModelLabel(availableModels, activeModel, defaultModelId, provider));
   }
   if (permissionMode) {
@@ -395,10 +395,12 @@ export function SettingsBar({
 
   const choices = modelChoices(availableModels);
   const activeEntry = findModelEntry(availableModels, activeModel || defaultModelId);
+  const displayTarget = modelDisplayTarget(availableModels, activeModel, defaultModelId);
 
   return (
     <View style={styles.container}>
-      <TouchableOpacity onPress={onToggle} style={styles.summaryRow} activeOpacity={0.7}>
+      <TouchableOpacity onPress={onToggle} style={styles.summaryRow} activeOpacity={0.7}
+        accessibilityHint={displayTarget ? `Model target: ${displayTarget}` : undefined}>
         <View
           style={[styles.statusDot, { backgroundColor: isIdle ? COLORS.accentGreen : COLORS.accentOrange }]}
           accessibilityLabel={isIdle ? 'Agent idle' : 'Agent busy'}
@@ -533,10 +535,11 @@ export function SettingsBar({
                         testID={`settings-model-${m.id}`}
                         accessibilityRole="button"
                         accessibilityState={{ selected: isActive }}
+                        accessibilityHint={`Model target: ${m.fullId || m.id}`}
                         activeOpacity={0.7}
                       >
                         <Text style={[styles.chipText, isActive && styles.chipTextActive]}>
-                          {m.label}
+                          {!activeModel && isActive ? formatActiveModelLabel(availableModels, activeModel, defaultModelId, provider) : m.label}
                         </Text>
                       </TouchableOpacity>
                     );
@@ -551,7 +554,8 @@ export function SettingsBar({
                 if (!fixedId) return null;
                 return (
                   <View style={styles.chipRow}>
-                    <View style={[styles.chip, styles.chipReadOnly]} accessibilityRole="text">
+                    <View style={[styles.chip, styles.chipReadOnly]} accessibilityRole="text" testID="settings-fixed-model"
+                      accessibilityHint={displayTarget ? `Model target: ${displayTarget}` : undefined}>
                       <Text style={styles.chipReadOnlyText}>{formatActiveModelLabel(availableModels, fixedId, defaultModelId, provider)} · fixed</Text>
                     </View>
                   </View>

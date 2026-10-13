@@ -8,6 +8,14 @@ export function findModelEntry(models: readonly ModelInfo[], model: string | nul
   return models.find(m => m.id === model) ?? models.find(m => m.fullId === model)
 }
 
+/** Effective target for labels/tooltips only; never writes a model selection. */
+export function modelDisplayTarget(models: readonly ModelInfo[], model: string | null | undefined, defaultModelId?: string | null): string | null {
+  const selected = model || defaultModelId
+  if (!selected) return null
+  const entry = findModelEntry(models, selected)
+  return entry?.fullId || entry?.id || selected
+}
+
 function baseLabel(model: ModelInfo): string {
   const unresolved = (model.fullId || model.id) === 'default'
     && (!model.label || /^(?:default(?:\s*\(default\))?|recommended)$/i.test(model.label))

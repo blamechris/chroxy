@@ -14,6 +14,7 @@ import {
   parseMemoryAppend,
   resolveContextWindow,
   formatActiveModelLabel,
+  modelDisplayTarget,
   contextOccupancyTokens,
   contextFillPercent,
   providerSupportsMultiQuestion,
@@ -2549,9 +2550,11 @@ export function App() {
   // mode. Prefer the server-supplied `label`; fall back to the raw model id
   // so a model missing from `availableModels` still shows something.
   const activeModelLabel = useMemo(() => {
-    if (!activeModel) return undefined
+    if (!activeModel && !defaultModelId) return undefined
     return formatActiveModelLabel(availableModels, activeModel, defaultModelId, activeSessionProvider)
   }, [activeModel, availableModels, defaultModelId, activeSessionProvider])
+
+  const activeModelDisplayTarget = modelDisplayTarget(availableModels, activeModel, defaultModelId)
 
   const isConnected = connectionPhase === 'connected'
   // Point the Cmd+Shift+L shortcut at the live QR handler, gated on connection
@@ -2732,6 +2735,7 @@ export function App() {
         showModelPicker={dropdownFlags.showModelPicker}
         availableModels={availableModels}
         activeModel={activeModel}
+        modelTooltipTarget={activeModelDisplayTarget}
         defaultModelId={defaultModelId}
         onModelChange={setModel}
         readOnlyModel={dropdownFlags.readOnlyModel}
@@ -3317,7 +3321,7 @@ export function App() {
         // #8123: only meaningful for the active-session cwd above (no
         // equivalent field on the auth_ok-time `sessionCwd` fallback).
         repoCwd={activeSessionCwd != null ? activeSessionRepoCwd : undefined}
-        model={activeModel || undefined}
+        model={activeModelDisplayTarget || undefined}
         modelLabel={activeModelLabel}
         cost={sessionCost ?? undefined}
         context={formatContext(contextOccupancy)}

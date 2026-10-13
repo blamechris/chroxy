@@ -31,6 +31,8 @@ import {
   // default PROVIDER's OWN roster (evidence side: what it offers has to be
   // what create-time will accept, and an untagged roster proves nothing).
   selectOwnModelsForProvider,
+  modelChoices,
+  findModelEntry,
 } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import { isMacPlatform } from '../utils/platform'
@@ -1172,6 +1174,14 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     [modelsByProvider, effectiveProvider],
   )
 
+  const defaultModelChoices = useMemo(() => modelChoices(availableModels), [availableModels])
+  // Normalize only the displayed value. Keep the persisted accepted alias until
+  // the user actually chooses a model, and keep sending original option IDs.
+  const savedDefaultEntry = findModelEntry(availableModels, defaultModel)
+  const defaultModelOption = savedDefaultEntry
+    ? defaultModelChoices.find(m => (m.fullId || m.id) === (savedDefaultEntry.fullId || savedDefaultEntry.id))?.id ?? defaultModel
+    : defaultModel
+
   const handleSelectTheme = useCallback((themeId: string) => {
     setTheme(themeId)
     applyTheme(getThemeById(themeId))
@@ -1280,11 +1290,11 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                 <select
                   id="default-model"
                   aria-label="Default model"
-                  value={defaultModel}
+                  value={defaultModelOption}
                   onChange={handleModelChange}
                 >
                   <option value="">Server default</option>
-                  {availableModels.map(m => (
+                  {defaultModelChoices.map(m => (
                     <option key={m.id} value={m.id}>{m.label}</option>
                   ))}
                 </select>

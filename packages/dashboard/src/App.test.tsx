@@ -4808,3 +4808,24 @@ describe('model labels across actual dashboard callers (#8260)', () => {
     if (!modelSwitch) expect(screen.queryByTestId('chat-settings-trigger')).toBeNull()
   })
 })
+
+describe('null active-model default presentation (#8260)', () => {
+  it.each([true, false])('shows the same known default and target in header/footer when modelSwitch=%s without setting the model', (modelSwitch) => {
+    const provider = modelSwitch ? 'claude-sdk' : 'claude-tui'
+    const setModel = vi.fn()
+    stateOverrides = { connectionPhase: 'connected', setModel,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null, provider }],
+      activeSessionId: 's1', availableProviders: [{ name: provider, capabilities: { modelSwitch, permissionModeSwitch: false } }],
+      modelsByProvider: { [provider]: { models: [{ id: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' }], defaultModelId: 'haiku' } },
+      getActiveSessionState: () => ({ messages: [], streamingMessageId: null, activeModel: null, permissionMode: null, contextUsage: null, sessionCost: null, isIdle: true, activeAgents: [], isPlanPending: false }) }
+    const { container } = render(<App />)
+    const header = screen.getByTestId(modelSwitch ? 'chat-settings-trigger' : 'active-model-badge')
+    const footer = container.querySelector('.footer-model')!
+    expect(header.textContent).toBe('Default (Haiku 4.5)')
+    expect(footer, 'known default must remain visible in the footer').not.toBeNull()
+    expect(footer.textContent).toBe('Default (Haiku 4.5)')
+    expect(header.title).toContain('claude-haiku-4-5')
+    expect(footer.getAttribute('title')).toContain('claude-haiku-4-5')
+    expect(setModel).not.toHaveBeenCalled()
+  })
+})

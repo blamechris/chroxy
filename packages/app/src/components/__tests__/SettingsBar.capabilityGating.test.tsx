@@ -141,3 +141,19 @@ describe('SettingsBar target identity (#8260)', () => {
     act(() => tree.unmount());
   });
 });
+
+describe('SettingsBar null active-model default (#8260)', () => {
+  it.each([true, false])('shows the known default in collapsed and expanded states with modelSwitch=%s without setting a model', (modelSwitchSupported) => {
+    const setModel = jest.fn();
+    const props = makeProps({ activeModel: null, defaultModelId: 'haiku', availableModels: [{ id: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' }], modelSwitchSupported, setModel, provider: 'claude-sdk', expanded: false });
+    const tree = render(props);
+    expect(collectVisibleText(tree.root)).toContain('Default (Haiku 4.5)');
+    expect(tree.root.findAll(node => node.props.accessibilityHint === 'Model target: claude-haiku-4-5').length).toBeGreaterThan(0);
+    act(() => tree.update(<SettingsBar {...(props as unknown as React.ComponentProps<typeof SettingsBar>)} expanded />));
+    const expandedModel = tree.root.findByProps({ testID: modelSwitchSupported ? 'settings-model-haiku' : 'settings-fixed-model' });
+    expect(collectVisibleText(expandedModel)).toContain('Default (Haiku 4.5)');
+    expect(expandedModel.props.accessibilityHint).toBe('Model target: claude-haiku-4-5');
+    expect(setModel).not.toHaveBeenCalled();
+    act(() => tree.unmount());
+  });
+});

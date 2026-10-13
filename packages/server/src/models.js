@@ -743,9 +743,16 @@ export function createModelsRegistry(hooks = {}) {
    * test on the id itself (#7799 round 2).
    */
   let providerReportedFullIds = new Set()
-  // Synthesized variants inherit the declaration-only base's lifetime, while
-  // a variant explicitly reported by the provider has its own authority.
-  const declarationVariantBases = new Map()
+  // Resolve current declaration ownership structurally, including at load time
+  // before synthesis. Removing an override restores the static base's authority.
+  function declaringModelId(fullId) {
+    if (overlayDeclaredFullIds.has(fullId)) return fullId
+    if (isClaudeRegistry && fullId.endsWith(ONE_M_SUFFIX)) {
+      const base = fullId.slice(0, -ONE_M_SUFFIX.length)
+      if (overlayDeclaredFullIds.has(base)) return base
+    }
+    return null
+  }
 
   /**
    * True for a row that is in the roster ONLY because the operator's overlay
@@ -793,9 +800,8 @@ export function createModelsRegistry(hooks = {}) {
    */
   function isUnpersistableDeclaredRow(fullId) {
     if (providerReportedFullIds.has(fullId)) return false
-    const base = declarationVariantBases.get(fullId)
-    return overlayDeclaredFullIds.has(fullId)
-      || (base !== undefined && !providerReportedFullIds.has(base))
+    const declaration = declaringModelId(fullId)
+    return declaration !== null && !providerReportedFullIds.has(declaration)
   }
 
   /**
@@ -1033,8 +1039,8 @@ export function createModelsRegistry(hooks = {}) {
   }
 
   /**
-   * #7810 — `learnedContextWindows` entries whose fullId the overlay no
-   * longer declares are pruned here, mutating the map in place, so the map
+   * #7810 — learned entries whose direct declaration or synthesized-variant
+   * base the overlay no longer declares are pruned here, so the map
    * cannot grow without bound across overlay edits and a deleted
    * declaration's learned window cannot resurrect the row it belonged to
    * (the same invariant `isUnpersistableDeclaredRow` upholds for the row
@@ -1044,7 +1050,12 @@ export function createModelsRegistry(hooks = {}) {
    */
   function prunedLearnedContextWindows() {
     for (const fullId of learnedContextWindows.keys()) {
-      if (!overlayDeclaredFullIds.has(fullId)) learnedContextWindows.delete(fullId)
+      if (declaringModelId(fullId) === null) {
+        learnedContextWindows.delete(fullId)
+        // A measured declaration-only window must not survive removal through
+        // the live ratchet map and reappear if the same declaration is re-added.
+        if (!providerReportedFullIds.has(fullId)) contextWindowOverrides.delete(fullId)
+      }
     }
     return learnedContextWindows
   }
@@ -1143,6 +1154,7 @@ export function createModelsRegistry(hooks = {}) {
       const map = newOverlay instanceof Map ? newOverlay : new Map()
       currentOverlay = map // #6381: keep getOverlayPricing in sync with reloads
       fallbackModels = computeFallbackModels(map)
+      prunedLearnedContextWindows()
       if (lastSdkModels) {
         registry.updateModels(lastSdkModels)
       } else if (lastCacheModels) {
@@ -1441,9 +1453,6 @@ export function createModelsRegistry(hooks = {}) {
           const variantFullId = `${m.fullId}${ONE_M_SUFFIX}`
           if (seenFullIds.has(variantFullId)) continue
           const variantId = `${m.id}${ONE_M_SUFFIX}`
-          if (isUnpersistableDeclaredRow(m.fullId)) {
-            declarationVariantBases.set(variantFullId, m.fullId)
-          }
           // Consult the metadata hook first so a registry that supplies one
           // gets its authoritative label instead of the humanizeModelId
           // mangling (#4441 follow-up to #4438). `getRegistryForProvider`
@@ -1459,7 +1468,9 @@ export function createModelsRegistry(hooks = {}) {
             id: variantId,
             label: providerMeta?.label || humanizeModelId(variantId),
             fullId: variantFullId,
-            contextWindow: 1_000_000,
+            contextWindow: contextWindowOverrides.get(variantFullId)
+              ?? learnedContextWindows.get(variantFullId)
+              ?? 1_000_000,
           }, providerMeta, m))
           seenFullIds.add(variantFullId)
           // Drift detection (#4106 + #4116). Two failure modes both lose
@@ -1581,7 +1592,6 @@ export function createModelsRegistry(hooks = {}) {
       // nothing a provider reported, so every declared row is declaration-only
       // again until the next refresh or cache load.
       providerReportedFullIds = new Set()
-      declarationVariantBases.clear()
       // #7888 re-review — the line above is exactly what makes an overlay
       // override of a base row declaration-only again: without a strip
       // between here and `activeModels`, a row that HAD lost `provenance`

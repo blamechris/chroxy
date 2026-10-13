@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { findModelEntry, modelChoices, formatActiveModelLabel } from './model-display'
+import { findModelEntry, modelChoices, formatActiveModelLabel, modelDisplayTarget } from './model-display'
 import { mergeModelsByProvider, selectModelsForProvider } from './models-by-provider'
 
 const models = [
@@ -39,6 +39,12 @@ describe('model presentation (#8260)', () => {
     expect(formatActiveModelLabel(shared, 'b', 'a')).toBe('Default (Shared)')
     expect(formatActiveModelLabel(shared, 'same-target', 'a')).toBe('Default (Shared)')
     expect(modelChoices(shared)).toHaveLength(1)
+  })
+  it('resolves a null active model to the known default target for display only', () => {
+    const roster = [{ id: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' }]
+    expect(modelDisplayTarget(roster, null, 'haiku')).toBe('claude-haiku-4-5')
+    expect(formatActiveModelLabel(roster, null, 'haiku')).toBe('Default (Haiku 4.5)')
+    expect(findModelEntry(roster, null)).toBeUndefined()
   })
   it('formats absent dated running IDs without selecting an undated row', () => {
     const dated = 'claude-haiku-4-5-20251101'

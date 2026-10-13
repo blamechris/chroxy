@@ -54,6 +54,7 @@ function buildActiveModelTooltip(
 export interface ChatSettingsDropdownProps {
   availableModels: ModelInfo[]
   activeModel: string | null
+  modelTooltipTarget?: string | null
   defaultModelId: string | null
   onModelChange: (id: string) => void
   // #4464: render a non-interactive pill instead of the model <select>
@@ -111,6 +112,7 @@ export interface ChatSettingsDropdownProps {
 export function ChatSettingsDropdown({
   availableModels,
   activeModel,
+  modelTooltipTarget,
   defaultModelId,
   onModelChange,
   availablePermissionModes,
@@ -166,8 +168,8 @@ export function ChatSettingsDropdown({
   // #3888: hover tooltip on the active-model pill so users can see the full
   // model id and its context window without expanding the dropdown.
   const modelTitle = useMemo(
-    () => buildActiveModelTooltip(availableModels, activeModel),
-    [availableModels, activeModel],
+    () => buildActiveModelTooltip(availableModels, modelTooltipTarget || activeModel || defaultModelId),
+    [availableModels, modelTooltipTarget, activeModel, defaultModelId],
   )
 
   const activeLabel = formatActiveModelLabel(availableModels, activeModel, defaultModelId, providerLabel)

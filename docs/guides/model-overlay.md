@@ -20,6 +20,38 @@ the same formatter. An absent dated Claude running ID may borrow its matching ve
 label for display, but that never marks the undated choice as selected. An unresolved
 SDK `default` target is shown as **Provider default**.
 
+## Resetting stale model-cache entries
+
+Older schema-v2 caches may contain a row added only by a past overlay declaration.
+They do not identify whether that row came from an actual provider observation or
+from the older overlay-union bug. Chroxy preserves valid cached rows rather than
+assuming provenance and deleting a genuine model. New overlay-only rows and their
+synthesized variants no longer enter the model cache.
+
+If a stale declaration-only choice remains after you remove its overlay entry,
+explicitly reset the affected model cache:
+
+1. Stop the daemon, including the desktop-managed server, so it cannot rewrite the
+   cache while you move it.
+2. Back up the specific cache file by renaming it. For the default Claude registry:
+
+   ```sh
+   model_cache_path="$HOME/.chroxy/models-cache.json"
+   mv -i "$model_cache_path" "$model_cache_path.before-reset-$(date -u +%Y%m%dT%H%M%SZ)"
+   ```
+
+   If you configured an absolute `CHROXY_CONFIG_DIR`, use that directory in the
+   path instead. For a non-Claude registry, use its `models-cache.PROVIDER.json`
+   file rather than the Claude cache. Do not move `models.json`, `config.json`,
+   credentials, identity keys, or session state.
+3. Restart the server normally. The registry starts from its static models and
+   current overlay, then repopulates observations through discovery.
+
+This explicit reset clears that registry's cached model observations and learned
+context windows. Keep the backup if you need to recover them. It does not change
+saved default selections or the current overlay declarations; a saved selection
+must still be offered by the selected provider before a new session uses it.
+
 ## Location
 
 ```
@@ -61,7 +93,7 @@ A JSON **object keyed by the model's full id**. Every field except the key is op
 
 - **A new full id** (not already known) is **seeded like a built-in model**: it shows up in the dashboard/mobile picker, resolves by both its full and short id, and **lands in the allowlist** so `set_model` and session creation accept it — no release.
 - **An existing id** has its `label` / `contextWindow` / `shortId` overridden (overlay wins over the static heuristic) — **including after a provider refresh that stops reporting the id** ([#7777](https://github.com/blamechris/chroxy/issues/7777)). Where the provider *does* still report the model, its own values win: the overlay is how you add or keep a row, not how you relabel one the binary currently serves.
-- **Declaring an id keeps it in the picker.** On a provider whose roster is its own discovery answer (codex and the config-driven endpoints), Chroxy drops shipped-but-no-longer-reported models from the picker ([#7761](https://github.com/blamechris/chroxy/issues/7761)) — *unless* your overlay names the id. That is keyed on the entry's **presence**, whatever the entry does: a cosmetic relabel, a `contextWindow` tweak, or a `pricing`-only entry all count as "this model exists, offer it", so an entry you wrote to re-price a model will also keep that model listed once the provider retires it. Delete the entry to let it drop again — including after a restart: a row that is in the picker **only because your entry names it** is held out of the model cache, so there is nothing on disk for the next boot to serve it from. **Its learned context window is not cached either** — a declared-only row is rebuilt at every boot from your entry plus Chroxy's own heuristic, so a window a live turn measured is replaced on each restart and the first turn after a restart runs against the heuristic. Pin `contextWindow` in the entry if you need it stable. This bites hardest on a provider with no discovery seam (gemini, deepseek), where nothing ever reports a roster and so a declared row can never acquire provider provenance; [#7810](https://github.com/blamechris/chroxy/issues/7810) tracks persisting learned windows for such ids separately from the row. (A model the provider *does* still report is cached like any other row, learned context window included — it keeps its place in the picker whether or not your entry names it, so deleting the entry takes nothing away. This holds even in the window where the roster came from the cache and no refresh has landed yet: a hot overlay reload cannot push your `label` / `contextWindow` onto such a row — the cached, provider-reported copy always wins for an id the cache already carries ([#7808](https://github.com/blamechris/chroxy/issues/7808)).)
+- **Declaring an id keeps it in the picker.** On a provider whose roster is its own discovery answer (codex and the config-driven endpoints), Chroxy drops shipped-but-no-longer-reported models from the picker ([#7761](https://github.com/blamechris/chroxy/issues/7761)) — *unless* your overlay names the id. That is keyed on the entry's **presence**, whatever the entry does: a cosmetic relabel, a `contextWindow` tweak, or a `pricing`-only entry all count as "this model exists, offer it", so an entry you wrote to re-price a model will also keep that model listed once the provider retires it. Delete the entry to let it drop again — including after a restart: a row that is in the picker **only because your entry names it** is held out of the model cache, so there is nothing on disk for the next boot to serve it from. **Learned context windows are cached separately from the withheld model rows.** A measured window survives restart while its direct declaration or synthesized variant's base remains declared; removing that declaration removes the learned window too. This preserves measurements without allowing an overlay-only model choice to outlive its declaration. (A model the provider *does* still report is cached like any other row, learned context window included — it keeps its place in the picker whether or not your entry names it, so deleting the entry takes nothing away. This holds even in the window where the roster came from the cache and no refresh has landed yet: a hot overlay reload cannot push your `label` / `contextWindow` onto such a row — the cached, provider-reported copy always wins for an id the cache already carries ([#7808](https://github.com/blamechris/chroxy/issues/7808)).)
 - **Pricing precedence:** overlay `pricing` (matched on the resolved full id) > the built-in pricing table > `null`. A missing `pricing` block does *not* shadow the built-in table.
 - **Live SDK values still win** for the context window: when the Agent SDK reports a model, its values are consulted ahead of the overlay row, so the overlay never pins a stale window over fresh SDK data.
 
