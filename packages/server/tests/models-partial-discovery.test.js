@@ -76,12 +76,12 @@ describe('Claude partial discovery (#8260)', () => {
       assert.ok(!r.getAllowedModelIds().has(fullId))
       assert.ok(!r.getAllowedModelIds().has('custom'))
       assert.deepEqual(r.getModels().find(m => m.fullId === real.fullId), real)
-      assert.equal(r.getDefaultModelId(), real.id)
+      assert.equal(r.getDefaultModelId(), 'sonnet-5-5')
       assert.equal(r.saveCache(cache), true)
       const saved = JSON.parse(readFileSync(cache, 'utf-8'))
       assert.ok(!saved.models.some(m => m.fullId === fullId))
       assert.deepEqual(saved.models.find(m => m.fullId === real.fullId), real)
-      assert.equal(saved.defaultModelId, real.id)
+      assert.equal(saved.defaultModelId, 'sonnet-5-5')
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
   it('withholds an overlay-only synthesized 1M variant from cache and removes it with its base', () => {
@@ -196,7 +196,7 @@ describe('Claude partial discovery (#8260)', () => {
       r.updateModels([aliases[0]])
       assert.deepEqual(r.getModels().find(m => m.fullId === real.fullId), real)
       assert.ok(r.getAllowedModelIds().has(real.id))
-      assert.equal(r.getDefaultModelId(), real.id)
+      assert.equal(r.getDefaultModelId(), 'sonnet-5-5')
       assert.equal(r.saveCache(cache), true)
       assert.deepEqual(JSON.parse(readFileSync(cache, 'utf-8')).models.find(m => m.fullId === real.fullId), real)
     } finally { rmSync(dir, { recursive: true, force: true }) }

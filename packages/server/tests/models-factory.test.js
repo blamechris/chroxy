@@ -54,13 +54,13 @@ describe('createModelsRegistry', () => {
     assert.ok(registry.getAllowedModelIds().has('test-model'))
   })
 
-  it('detects SDK default model from displayName', () => {
+  it('keeps Chroxy default while normalizing SDK displayName', () => {
     const registry = createModelsRegistry()
     registry.updateModels([
       { value: 'claude-sonnet-4-20250514', displayName: 'Default (recommended)', description: '' },
       { value: 'claude-opus-4-20250514', displayName: 'Opus', description: '' },
     ])
-    assert.equal(registry.getDefaultModelId(), 'sonnet-4-20250514')
+    assert.equal(registry.getDefaultModelId(), 'sonnet-5-5')
     // Strips the Default prefix and derives readable label from model ID
     assert.equal(registry.getModels()[0].label, 'Sonnet 4')
     // Non-Default displayName passes through unchanged
@@ -68,16 +68,13 @@ describe('createModelsRegistry', () => {
   })
 
   it('falls back to a deterministic default when no model has the Default prefix (#5631)', () => {
-    // Before #5631 this returned null (the regex was the only path). Now
-    // updateModels picks a deterministic fallback — the opus family (merged
-    // in from FALLBACK_MODELS) — and warns, so registry drift is visible
-    // instead of leaving the picker with no default at all.
+    // SDK marker drift does not change Chroxy's selected default.
     const registry = createModelsRegistry()
     registry.updateModels([
       { value: 'claude-sonnet-4', displayName: 'Sonnet', description: '' },
     ])
-    // opus is always merged from FALLBACK_MODELS, so it wins the preference.
-    assert.equal(registry.getDefaultModelId(), 'opus-4-8') // #6219 — opus head 4-7 → 4-8
+    // Sonnet is present even when the SDK under-reports the current catalog.
+    assert.equal(registry.getDefaultModelId(), 'sonnet-5-5')
   })
 
   it('picks the first converted entry when no opus/sonnet family is present (#5631)', () => {
@@ -95,14 +92,14 @@ describe('createModelsRegistry', () => {
     assert.equal(registry.getDefaultModelId(), 'zeta-9')
   })
 
-  it('resets defaultModelId on resetModels', () => {
+  it('restores Chroxy default on resetModels', () => {
     const registry = createModelsRegistry()
     registry.updateModels([
       { value: 'claude-test', displayName: 'Default (recommended)', description: '' },
     ])
     assert.ok(registry.getDefaultModelId())
     registry.resetModels()
-    assert.equal(registry.getDefaultModelId(), null)
+    assert.equal(registry.getDefaultModelId(), 'sonnet-5-5')
   })
 
   it('resetModels restores defaults', () => {
@@ -236,7 +233,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     // + synthesized [1m] variants) rather than collapsing back to the SDK shape.
     assert.equal(r2.getModels().length, r1Models.length)
     assert.equal(r2.getModels()[0].fullId, 'claude-sonnet-4-6')
-    assert.equal(r2.getDefaultModelId(), 'sonnet-4-6')
+    assert.equal(r2.getDefaultModelId(), 'sonnet-5-5')
   })
 
   it('loadCache returns false on missing file and leaves registry unchanged', () => {
@@ -332,7 +329,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     }))
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
-    assert.equal(r.getDefaultModelId(), null, 'stale default should be discarded')
+    assert.equal(r.getDefaultModelId(), 'sonnet-5-5', 'Chroxy policy replaces the stale upstream default')
   })
 
   // SDK-reported ids commonly use the `claude-{family}-{major}-{date}` shape
@@ -363,7 +360,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
     const saved = JSON.parse(readFileSync(cachePath, 'utf-8'))
-    assert.equal(saved.defaultModelId, null)
+    assert.equal(saved.defaultModelId, 'sonnet-5-5')
     assert.ok(saved.models.some(m => m.fullId === 'claude-opus-4-6'))
   })
 

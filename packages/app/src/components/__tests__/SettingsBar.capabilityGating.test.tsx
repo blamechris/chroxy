@@ -157,3 +157,26 @@ describe('SettingsBar null active-model default (#8260)', () => {
     act(() => tree.unmount());
   });
 });
+
+it('shows and selects Chroxy Sonnet 5.5 Default alongside upstream Default and Fable (#8603)', () => {
+  const setModel = jest.fn();
+  const tree = render(makeProps({
+    activeModel: null,
+    defaultModelId: 'sonnet-5-5',
+    availableModels: [
+      { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+      { id: 'default', fullId: 'default', label: 'Fable 5.1' },
+      { id: 'fable-5-1', fullId: 'claude-fable-5-1', label: 'Fable 5.1' },
+    ],
+    provider: 'claude-sdk',
+    setModel,
+  }));
+  const chip = tree.root.findByProps({ testID: 'settings-model-sonnet-5-5' });
+  expect(collectVisibleText(chip)).toContain('Default (Sonnet 5.5)');
+  expect(chip.props.accessibilityHint).toBe('Model target: claude-sonnet-5-5');
+  act(() => chip.props.onPress());
+  expect(setModel).toHaveBeenCalledWith('sonnet-5-5');
+  expect(tree.root.findByProps({ testID: 'settings-model-default' })).toBeDefined();
+  expect(tree.root.findByProps({ testID: 'settings-model-fable-5-1' })).toBeDefined();
+  act(() => tree.unmount());
+});

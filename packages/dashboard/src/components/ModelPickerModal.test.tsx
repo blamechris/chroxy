@@ -191,3 +191,22 @@ it('marks one shared-target row as active and default when different accepted al
   expect(row.getAttribute('aria-selected')).toBe('true')
   expect(row.textContent).toContain('Shared (default)')
 })
+
+it('selects Chroxy Sonnet 5.5 Default while keeping the upstream Default and Fable choices (#8603)', () => {
+  const onSelect = vi.fn()
+  renderModal({
+    availableModels: [
+      { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+      { id: 'default', fullId: 'default', label: 'Fable 5.1' },
+      { id: 'fable-5-1', fullId: 'claude-fable-5-1', label: 'Fable 5.1' },
+    ],
+    activeModel: null,
+    defaultModelId: 'sonnet-5-5',
+    onSelect,
+  })
+  expect(screen.getByTestId('model-picker-item-sonnet-5-5').textContent).toContain('Sonnet 5.5 (default)')
+  fireEvent.click(screen.getByTestId('model-picker-item-sonnet-5-5'))
+  expect(onSelect).toHaveBeenCalledWith('sonnet-5-5')
+  expect(screen.getByTestId('model-picker-item-default')).toBeInTheDocument()
+  expect(screen.getByTestId('model-picker-item-fable-5-1')).toBeInTheDocument()
+})
