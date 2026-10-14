@@ -708,6 +708,7 @@ function applySettledCredential(ctx: ConnectionContext, credential: SettledCrede
   ctx.savedConnection = persistVerifiedConnection(rotation ? ctx.savedConnection?.url ?? ctx.url : ctx.url, credential.token, credential.pin, ctx.savedConnection);
   getStore().setState({ socket: ctx.socket });
   useConnectionLifecycleStore.getState().setConnectionPhase('connected');
+  flushPushRegistration(ctx);
 }
 
 export function setConnectionContext(ctx: ConnectionContext | null): void {
@@ -1589,18 +1590,26 @@ function pushSessionNotification(
 // Push token registration
 // ---------------------------------------------------------------------------
 
-async function registerPushToken(socket: WebSocket): Promise<void> {
+const pendingPushTokens = new WeakMap<ConnectionContext, string>();
+
+function flushPushRegistration(ctx: ConnectionContext): void {
+  const token = pendingPushTokens.get(ctx);
+  if (!token) return;
+  // The application socket is published only by completed admission.
+  if (ctx !== _connectionContext || getStore().getState().socket !== ctx.socket || ctx.socket.readyState !== WebSocket.OPEN) return;
+  pendingPushTokens.delete(ctx);
+  wsSend(ctx.socket, { type: 'register_push_token', token });
+  // Keep Settings bound to the device registration sent on this connection.
+  getStore().setState({ pushToken: token });
+  console.log('[push] Registered push token with server');
+}
+
+async function registerPushToken(ctx: ConnectionContext): Promise<void> {
   try {
     const token = await registerForPushNotifications();
-    if (token && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'register_push_token', token });
-      // #4543: mirror the resolved token into the store so the
-      // SettingsScreen can address THIS device's entry in the
-      // `notification_prefs.devices` map. Without this mirror the
-      // per-device toggle row would never know which key to patch and
-      // would have to render disabled forever.
-      getStore().setState({ pushToken: token });
-      console.log('[push] Registered push token with server');
+    if (token) {
+      pendingPushTokens.set(ctx, token);
+      flushPushRegistration(ctx);
     }
   } catch (err) {
     console.log('[push] Push registration skipped:', err);
@@ -2284,7 +2293,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         applySettledCredential(ctx, settlement.authenticate(eagerPinToPersist));
       }
       // Register push token (async, non-blocking)
-      void registerPushToken(ctx.socket);
+      void registerPushToken(ctx);
       break;
     }
 

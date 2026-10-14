@@ -37,11 +37,6 @@ const connectionSource = fs.readFileSync(
   'utf-8',
 );
 
-const messageHandlerSource = fs.readFileSync(
-  path.resolve(__dirname, '../../store/message-handler.ts'),
-  'utf-8',
-);
-
 describe('SettingsScreen — per-device opt-in/out section (#4543)', () => {
   it('selects pushToken from the connection store as the per-device key source', () => {
     // The Expo push token is the addressing key for THIS device's entry
@@ -137,16 +132,7 @@ describe('connection.ts — per-device action wiring (#4543)', () => {
   });
 });
 
-describe('message-handler.ts — push token round-trip (#4543)', () => {
-  it('mirrors the registered push token into the connection store', () => {
-    // The token returned from registerForPushNotifications() MUST be
-    // assigned to the store so the SettingsScreen can address THIS device's
-    // override entry; without the mirror the screen never knows which key
-    // it's patching. We anchor on the resolved `token` variable being
-    // forwarded into setState so a refactor that decouples the await from
-    // the setState (separate fn, hook etc.) still trips this guard.
-    expect(messageHandlerSource).toMatch(
-      /await\s+registerForPushNotifications\(\)[\s\S]{0,800}setState\(\s*\{\s*pushToken:\s*token\s*\}\s*\)/,
-    );
-  });
-});
+// Registration-to-pushToken behavior is exercised through production connect,
+// handshake, admission and async notification callbacks in
+// store/connection-paired-reconnect.test.ts. Its early/retired/refused controls
+// and encrypted/plaintext positives also cover the Settings device-key sink.

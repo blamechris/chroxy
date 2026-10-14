@@ -278,7 +278,7 @@ describe('dashboard message-handler dispatch', () => {
     })
 
     it('#5281 ③ PR 2 — adopts a paired sessionToken and persists it on the active server', () => {
-      store = createMockStore(baseState({ activeServerId: 'srv_paired' }))
+      store = createMockStore(baseState({ activeServerId: 'srv_paired', serverRegistry: [{ id: 'srv_paired', name: 'Paired', wsUrl: 'wss://t', token: '', lastConnectedAt: null }] }))
       setStore(store)
       const pairedCtx = ctx() as any
       handleMessage(
@@ -302,6 +302,15 @@ describe('dashboard message-handler dispatch', () => {
       expect(state.savedConnection.token).toBe('sess-tok-xyz')
       // …and written back to the registry entry for reconnects.
       expect(state._updateServerCalls).toEqual([{ serverId: 'srv_paired', patch: { token: 'sess-tok-xyz' } }])
+    })
+
+    it('direct admission does not assign an unrelated selected registry entry', () => {
+      store = createMockStore(baseState({ activeServerId: 'srv_remote', serverRegistry: [{ id: 'srv_remote', name: 'Remote', wsUrl: 'wss://remote.example.test/ws', token: 'fixture-remote', lastConnectedAt: null }] }))
+      setStore(store)
+      const directCtx = ctx()
+      handleMessage({ type: 'auth_ok', encryption: 'disabled' }, directCtx)
+      expect((store.getState() as any)._updateServerCalls).toEqual([])
+      expect(store.getState().serverRegistry?.[0]?.token).toBe('fixture-remote')
     })
 
     it('does not touch the registry on a normal token auth (no sessionToken)', () => {

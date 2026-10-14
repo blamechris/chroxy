@@ -5,6 +5,10 @@
  * fetch + WebSocket mocks.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { renderHook } from '@testing-library/react'
+import { useTauriEvents } from '../hooks/useTauriEvents'
+import * as tauriBridge from '../utils/tauri-bridge'
+import { getAuthToken } from '../utils/auth'
 
 const store: Record<string, string> = {}
 const localStorageMock = {
@@ -16,7 +20,7 @@ const localStorageMock = {
   key: (i: number) => Object.keys(store)[i] ?? null,
 }
 Object.defineProperty(globalThis, 'localStorage', { value: localStorageMock, writable: true })
-vi.mock('../utils/auth', () => ({ getAuthToken: () => null }))
+vi.mock('../utils/auth', () => ({ getAuthToken: vi.fn(() => null) }))
 
 class MockWebSocket {
   static OPEN = 1
@@ -60,6 +64,7 @@ function lastSent(ws: MockWebSocket): Record<string, unknown> {
 
 beforeEach(() => {
   MockWebSocket.instances = []
+  vi.mocked(getAuthToken).mockReturnValue(null)
   for (const k of Object.keys(store)) delete store[k]
   useConnectionStore.setState({ serverRegistry: [], activeServerId: null, connectionPhase: 'disconnected', wsUrl: null })
 })
@@ -264,4 +269,133 @@ it('keeps a superseded socket from changing the current owned credentials', asyn
   expect(useConnectionStore.getState().apiToken).toBe('fixture-current');
   expect(useConnectionStore.getState().serverRegistry.find(s => s.id === original.id)?.token).toBe('fixture-original');
   expect(useConnectionStore.getState().serverRegistry.find(s => s.id === current.id)?.token).toBe('fixture-current');
+});
+
+it('an ordinary desktop local-ready dial preserves the unrelated selected registry credential', async () => {
+  const entry = useConnectionStore.getState().addServer('Remote', 'wss://remote.example.test/ws', 'fixture-remote');
+  useConnectionStore.setState({ activeServerId: entry.id });
+  useConnectionStore.getState().connect('ws://127.0.0.1:8765/ws', 'fixture-local');
+  const socket = await socketFor('127.0.0.1');
+  socket.onopen?.();
+  socket.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', encryption: 'disabled' }) });
+  expect(useConnectionStore.getState().apiToken).toBe('fixture-local');
+  expect(useConnectionStore.getState().serverRegistry.find(s => s.id === entry.id)?.token).toBe('fixture-remote');
+});
+
+const { loadServerRegistry } = await import('./server-registry');
+it('matching registry direct admission updates and persists only its owned token', async () => {
+  const entry = useConnectionStore.getState().addServer('Local', 'ws://127.0.0.1:8765/ws', 'fixture-previous');
+  useConnectionStore.setState({ activeServerId: entry.id });
+  useConnectionStore.getState().connect(entry.wsUrl, 'fixture-current');
+  const socket = await socketFor('127.0.0.1'); socket.onopen?.();
+  socket.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', encryption: 'disabled' }) });
+  expect(useConnectionStore.getState().apiToken).toBe('fixture-current');
+  expect(loadServerRegistry().find(s => s.id === entry.id)?.token).toBe('fixture-current');
+});
+it('unrelated registry retains its credential after persistence reload', async () => {
+  const entry = useConnectionStore.getState().addServer('Remote', 'wss://remote.example.test/ws', 'fixture-remote');
+  useConnectionStore.setState({ activeServerId: entry.id });
+  useConnectionStore.getState().connect('ws://127.0.0.1:8765/ws', 'fixture-local');
+  const socket = await socketFor('127.0.0.1'); socket.onopen?.();
+  const context = getConnectionContext();
+  expect(context?.identityTarget?.savedConnection).toBeNull();
+  socket.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', encryption: 'disabled' }) });
+  expect(loadServerRegistry().find(s => s.id === entry.id)?.token).toBe('fixture-remote');
+});
+it('local admission with no active registry preserves remote entry', async () => {
+  const entry = useConnectionStore.getState().addServer('Remote', 'wss://remote.example.test/ws', 'fixture-remote');
+  useConnectionStore.getState().connect('ws://127.0.0.1:8765/ws', 'fixture-local');
+  const socket = await socketFor('127.0.0.1'); socket.onopen?.();
+  socket.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', encryption: 'disabled' }) });
+  expect(useConnectionStore.getState().apiToken).toBe('fixture-local');
+  expect(loadServerRegistry().find(s => s.id === entry.id)?.token).toBe('fixture-remote');
+});
+
+it('encrypted local admission preserves an unrelated pinned registry record', async () => {
+  const remote = createSigningKeyPair();
+  const local = createSigningKeyPair();
+  const exchange = createKeyPair();
+  const entry = useConnectionStore.getState().addServer('Remote', 'wss://remote.example.test/ws', 'fixture-remote');
+  useConnectionStore.getState().updateServer(entry.id, { pinnedIdentityKey: remote.publicKey });
+  useConnectionStore.setState({ activeServerId: entry.id });
+  useConnectionStore.getState().connect('ws://127.0.0.1:8765/ws', 'fixture-local');
+  const socket = await socketFor('127.0.0.1'); socket.onopen?.();
+  expect(getConnectionContext()?.identityTarget?.pinnedIdentityKey).toBeNull();
+  socket.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', encryption: 'required', serverPublicKey: exchange.publicKey,
+    serverKeySig: signExchangeKey(exchange.publicKey, local.secretKey, { domainSeparated: true }), capabilities: { authBootstrap: true } }) });
+  expect(getEncryptionState()).not.toBeNull();
+  expect(useConnectionStore.getState().apiToken).toBe('fixture-local');
+  const persisted = loadServerRegistry().find(s => s.id === entry.id);
+  expect({ token: persisted?.token, pin: persisted?.pinnedIdentityKey }).toEqual({ token: 'fixture-remote', pin: remote.publicKey });
+});
+
+it('desktop server_ready uses its local endpoint while a remote registry is selected', async () => {
+  const entry = useConnectionStore.getState().addServer('Remote', 'wss://remote.example.test/ws', 'fixture-remote');
+  useConnectionStore.setState({ activeServerId: entry.id });
+  const originalLocation = window.location;
+  Object.defineProperty(window, 'location', { configurable: true, value: new URL('http://127.0.0.1:8765/dashboard') });
+  let ready!: (event: { payload: { port: number; token: string; url: string } }) => void;
+  const listen = vi.fn(async (name: string, callback: typeof ready) => {
+    if (name === 'server_ready') ready = callback;
+    return () => {};
+  });
+  const spy = vi.spyOn(tauriBridge, 'getTauriListen').mockReturnValue(listen as unknown as ReturnType<typeof tauriBridge.getTauriListen>);
+  const hook = renderHook(() => useTauriEvents());
+  try {
+    ready({ payload: { port: 8765, token: 'fixture-local', url: 'http://127.0.0.1:8765/dashboard' } });
+    const socket = await socketFor('127.0.0.1');
+    socket.onopen?.();
+    expect(lastSent(socket).token).toBe('fixture-local');
+    receive(socket, { type: 'auth_ok', encryption: 'disabled' });
+    expect(getConnectionContext()?.serverId).toBeNull();
+    expect(useConnectionStore.getState().activeServerId).toBeNull();
+    expect(loadServerRegistry().find(s => s.id === entry.id)?.token).toBe('fixture-remote');
+    receive(socket, { type: 'token_rotated', token: 'fixture-local-current' });
+    expect(getConnectionContext()?.token).toBe('fixture-local-current');
+    expect(loadServerRegistry().find(s => s.id === entry.id)?.token).toBe('fixture-remote');
+    const previousCount = MockWebSocket.instances.length;
+    useConnectionStore.getState().retryConnection();
+    for (let i = 0; i < 50 && MockWebSocket.instances.length === previousCount; i++) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    const retried = MockWebSocket.instances[previousCount]!;
+    expect(retried).toBeDefined();
+    expect(retried.url).toBe('ws://127.0.0.1:8765/ws');
+    retried.onopen?.();
+    expect(lastSent(retried).token).toBe('fixture-local-current');
+    expect(getConnectionContext()?.serverId).toBeNull();
+    expect(loadServerRegistry().find(s => s.id === entry.id)?.token).toBe('fixture-remote');
+  } finally {
+    hook.unmount();
+    spy.mockRestore();
+    Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
+  }
+});
+
+it('manual local retry retains the origin fallback before admission', async () => {
+  const originalLocation = window.location;
+  Object.defineProperty(window, 'location', { configurable: true, value: new URL('http://127.0.0.1:8765/dashboard') });
+  vi.mocked(getAuthToken).mockReturnValue('fixture-origin');
+  try {
+    useConnectionStore.getState().retryConnection();
+    const socket = await socketFor('127.0.0.1');
+    socket.onopen?.();
+    expect(lastSent(socket).token).toBe('fixture-origin');
+    expect(getConnectionContext()?.serverId).toBeNull();
+  } finally {
+    Object.defineProperty(window, 'location', { configurable: true, value: originalLocation });
+  }
+});
+
+it('manual retry does not borrow an admitted context retired by a new direct dial', async () => {
+  useConnectionStore.getState().connect('ws://127.0.0.1:8765/ws', 'fixture-local');
+  const socket = await socketFor('127.0.0.1');
+  socket.onopen?.();
+  receive(socket, { type: 'auth_ok', encryption: 'disabled' });
+  const initialCount = MockWebSocket.instances.length;
+  vi.mocked(fetch).mockImplementationOnce(() => new Promise(() => {}));
+  useConnectionStore.getState().connect('ws://127.0.0.1:8765/ws', 'fixture-pending');
+  useConnectionStore.getState().retryConnection();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(MockWebSocket.instances).toHaveLength(initialCount);
 });

@@ -1,3 +1,4 @@
+jest.mock('../../notifications', () => ({ registerForPushNotifications: jest.fn(async () => 'fixture-push-registration'), sendLocalNotification: jest.fn() }));
 /** #8602: exercise production connect → auth/pair → auth_ok → drop → next auth. */
 jest.mock('expo-secure-store', () => ({
   getItemAsync: jest.fn(() => Promise.resolve('dev-id-123')),
@@ -8,7 +9,7 @@ jest.mock('expo-secure-store', () => ({
 import * as SecureStore from 'expo-secure-store';
 import nacl from 'tweetnacl';
 import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
-import { createKeyPair, encrypt, DIRECTION_SERVER } from '../../utils/crypto';
+import { createKeyPair, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '../../utils/crypto';
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { setPendingPairingId, setPendingPairingIdentityKey, getConnectionContext, getEncryptionState, resetReconnectAttempt, loadConnection, saveConnection } from '../../store/message-handler';
@@ -532,4 +533,207 @@ it('serializes connection metadata writes while an earlier save is pending', asy
     await Promise.all([first, next]);
   }
   expect((await loadConnection())?.pinnedIdentityKey).toBe('fixture-current-pin');
+});
+
+it('ordinary pending discrete exchange holds mobile push registration until crypto is ready', async () => {
+  setPendingPairingId('fixture-one-use-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true, authBootstrap: true } });
+  await flushPromises();
+  expect(sent(socket, 'key_exchange').publicKey).toBeDefined();
+  expect(getEncryptionState()).toBeNull();
+  const applicationFrames = socket.send.mock.calls.map(([raw]: [string]) => JSON.parse(raw)).filter((message: Record<string, unknown>) => !['pair','auth','key_exchange'].includes(message.type as string)).map((message: Record<string, unknown>) => message.type);
+  expect(applicationFrames).toEqual([]);
+  expect(useConnectionStore.getState().pushToken).toBeNull();
+});
+
+it('ordinary completed discrete exchange encrypts mobile push registration', async () => {
+  setPendingPairingId('fixture-one-use-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true, authBootstrap: true } });
+  const exchange = createKeyPair();
+  frame(socket, { type: 'key_exchange_ok', publicKey: exchange.publicKey });
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED, credentialConfirmation: true });
+  await flushPromises();
+  expect(getEncryptionState()).not.toBeNull();
+  const messages = socket.send.mock.calls.map(([raw]: [string]) => JSON.parse(raw));
+  expect(messages.some((message: Record<string, unknown>) => message.type === 'encrypted')).toBe(true);
+  expect(messages.some((message: Record<string, unknown>) => message.type === 'register_push_token')).toBe(false);
+});
+
+it('pending trusted pairing holds delayed normal push registration before signed exchange', async () => {
+  const notifications = jest.requireMock('../../notifications');
+  let release!: (value: string) => void;
+  notifications.registerForPushNotifications.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+  const exchange = signedExchange();
+  setPendingPairingIdentityKey(exchange.identityKey);
+  setPendingPairingId('fixture-one-use-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true, authBootstrap: true } });
+  expect(socket.send.mock.calls.map(([raw]: [string]) => JSON.parse(raw).type)).toEqual(['pair', 'key_exchange']);
+  expect(useConnectionStore.getState().socket).toBeNull();
+  release('fixture-push-registration'); await flushPromises();
+  expect(getEncryptionState()).toBeNull();
+  expect(useConnectionStore.getState().socket).toBeNull();
+  expect(socket.send.mock.calls.map(([raw]: [string]) => JSON.parse(raw).type)).toEqual(['pair', 'key_exchange']);
+});
+it('trusted signed exchange and credential confirmation encrypt delayed normal push registration', async () => {
+  const notifications = jest.requireMock('../../notifications');
+  let release!: (value: string) => void;
+  notifications.registerForPushNotifications.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+  const exchange = signedExchange();
+  setPendingPairingIdentityKey(exchange.identityKey); setPendingPairingId('fixture-one-use-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true, authBootstrap: true } });
+  frame(socket, { type: 'key_exchange_ok', publicKey: exchange.publicKey, serverKeySig: exchange.serverKeySig });
+  expect(useConnectionStore.getState().socket).toBeNull();
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED, credentialConfirmation: true });
+  expect(useConnectionStore.getState().socket).toBe(socket);
+  release('fixture-push-registration'); await flushPromises();
+  const enc = getEncryptionState()!;
+  const { decrypt, DIRECTION_CLIENT } = jest.requireActual('../../utils/crypto');
+  const envelopes = socket.send.mock.calls.map(([raw]: [string]) => JSON.parse(raw)).filter((msg: Record<string, unknown>) => msg.type === 'encrypted');
+  expect(envelopes.map((msg: Record<string, unknown>, index: number) => decrypt(msg, enc.sharedKey, index, DIRECTION_CLIENT).type)).toContain('register_push_token');
+  expect(socket.send.mock.calls.map(([raw]: [string]) => JSON.parse(raw).type)).not.toContain('register_push_token');
+});
+
+function pushRegistrations(socket: FakeSocket): Record<string, unknown>[] {
+  const state = getEncryptionState();
+  return socket.send.mock.calls.map(([raw]: [string]) => {
+    const msg = JSON.parse(raw);
+    return msg.type === 'encrypted' && state ? decrypt(msg, state.sharedKey, msg.n, DIRECTION_CLIENT) : msg;
+  }).filter((msg: Record<string, unknown>) => msg.type === 'register_push_token');
+}
+
+it('flushes an early registration result once paired admission completes', async () => {
+  setPendingPairingId('fixture-one-use-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true } });
+  await flushPromises();
+  expect(pushRegistrations(socket)).toEqual([]);
+  expect(useConnectionStore.getState().pushToken).toBeNull();
+  const exchange = createKeyPair();
+  frame(socket, { type: 'key_exchange_ok', publicKey: exchange.publicKey });
+  expect(pushRegistrations(socket)).toEqual([]);
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED, credentialConfirmation: true });
+  expect(pushRegistrations(socket)).toEqual([{ type: 'register_push_token', token: 'fixture-push-registration' }]);
+  encryptedFrame(socket, { type: 'token_rotated', token: 'fixture-rotation' });
+  expect(pushRegistrations(socket)).toHaveLength(1);
+  expect(useConnectionStore.getState().pushToken).toBe('fixture-push-registration');
+});
+
+it('registers on an admitted supported plaintext connection', async () => {
+  const socket = await dial(MANUAL);
+  frame(socket, { type: 'auth_ok', encryption: 'disabled' });
+  await flushPromises();
+  expect(pushRegistrations(socket)).toEqual([{ type: 'register_push_token', token: 'fixture-push-registration' }]);
+});
+
+it('registers on an admitted direct encrypted connection', async () => {
+  const exchange = createKeyPair();
+  const socket = await dial(MANUAL);
+  frame(socket, { type: 'auth_ok', encryption: 'required', serverPublicKey: exchange.publicKey });
+  await flushPromises();
+  expect(pushRegistrations(socket)).toEqual([{ type: 'register_push_token', token: 'fixture-push-registration' }]);
+  expect(socket.send.mock.calls.map(([raw]: [string]) => JSON.parse(raw).type)).not.toContain('register_push_token');
+});
+
+it('ignores an asynchronous registration result from a replaced admitted socket', async () => {
+  const notifications = jest.requireMock('../../notifications');
+  let release!: (value: string) => void;
+  notifications.registerForPushNotifications.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+  const previous = await dial(MANUAL);
+  frame(previous, { type: 'auth_ok', encryption: 'disabled' });
+  const current = await dial('fixture-current');
+  frame(current, { type: 'auth_ok', encryption: 'disabled' });
+  await flushPromises();
+  // A retired transport may still report OPEN while its close completes.
+  previous.readyState = WebSocket.OPEN;
+  release('fixture-previous-registration');
+  await flushPromises();
+  expect(pushRegistrations(previous)).toEqual([]);
+  expect(pushRegistrations(current)).toEqual([{ type: 'register_push_token', token: 'fixture-push-registration' }]);
+  expect(useConnectionStore.getState().pushToken).toBe('fixture-push-registration');
+});
+
+it('ignores an asynchronous registration result after disconnect', async () => {
+  const notifications = jest.requireMock('../../notifications');
+  let release!: (value: string) => void;
+  notifications.registerForPushNotifications.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+  const socket = await dial(MANUAL);
+  frame(socket, { type: 'auth_ok', encryption: 'disabled' });
+  useConnectionStore.getState().disconnect();
+  socket.readyState = WebSocket.OPEN;
+  release('fixture-retired-registration');
+  await flushPromises();
+  expect(pushRegistrations(socket)).toEqual([]);
+});
+
+it('does not register a delayed result when the discrete identity is refused', async () => {
+  const notifications = jest.requireMock('../../notifications');
+  let release!: (value: string) => void;
+  notifications.registerForPushNotifications.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+  const expected = signedExchange();
+  const other = signedExchange();
+  setPendingPairingIdentityKey(expected.identityKey);
+  setPendingPairingId('fixture-one-use-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true } });
+  frame(socket, { type: 'key_exchange_ok', publicKey: other.publicKey, serverKeySig: other.serverKeySig });
+  release('fixture-delayed-registration');
+  await flushPromises();
+  expect(pushRegistrations(socket)).toEqual([]);
+  expect(useConnectionStore.getState().socket).toBeNull();
+});
+
+it('ignores a delayed registration result when its admitted transport is closed', async () => {
+  const notifications = jest.requireMock('../../notifications');
+  let release!: (value: string) => void;
+  notifications.registerForPushNotifications.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+  const socket = await dial(MANUAL);
+  frame(socket, { type: 'auth_ok', encryption: 'disabled' });
+  socket.readyState = 3;
+  release('fixture-closed-registration');
+  await flushPromises();
+  expect(pushRegistrations(socket)).toEqual([]);
+  expect(useConnectionStore.getState().pushToken).toBeNull();
+});
+
+it('ignores a delayed result after the admitted socket is unpublished', async () => {
+  const notifications = jest.requireMock('../../notifications');
+  let release!: (value: string) => void;
+  notifications.registerForPushNotifications.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+  const socket = await dial(MANUAL);
+  frame(socket, { type: 'auth_ok', encryption: 'disabled' });
+  useConnectionStore.setState({ socket: null });
+  release('fixture-unpublished-registration');
+  await flushPromises();
+  expect(pushRegistrations(socket)).toEqual([]);
+  expect(useConnectionStore.getState().pushToken).toBeNull();
+});
+
+it('keeps an old OPEN registration callback isolated while a replacement awaits admission', async () => {
+  const notifications = jest.requireMock('../../notifications');
+  let release!: (value: string) => void;
+  notifications.registerForPushNotifications.mockImplementationOnce(() => new Promise<string>(resolve => { release = resolve; }));
+  const previous = await dial(MANUAL);
+  frame(previous, { type: 'auth_ok', encryption: 'required', serverPublicKey: createKeyPair().publicKey });
+  expect(getEncryptionState()).not.toBeNull();
+  const previousSendCount = previous.send.mock.calls.length;
+  setPendingPairingId('fixture-current-pair-id');
+  const current = await dial('');
+  frame(current, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true } });
+  expect(getEncryptionState()).toBeNull();
+  const exchange = createKeyPair();
+  frame(current, { type: 'key_exchange_ok', publicKey: exchange.publicKey });
+  expect(getEncryptionState()).not.toBeNull();
+  expect(useConnectionStore.getState().socket).toBeNull();
+  previous.readyState = WebSocket.OPEN;
+  release('fixture-previous-registration');
+  await flushPromises();
+  expect(previous.send.mock.calls).toHaveLength(previousSendCount);
+  expect(pushRegistrations(current)).toEqual([]);
+  expect(useConnectionStore.getState().pushToken).toBeNull();
+  encryptedFrame(current, { type: 'auth_bootstrap', sessionToken: ISSUED, credentialConfirmation: true });
+  expect(pushRegistrations(current)).toEqual([{ type: 'register_push_token', token: 'fixture-push-registration' }]);
 });

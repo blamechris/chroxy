@@ -1,4 +1,4 @@
-import { captureConnectionIdentity, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
+import { captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -918,7 +918,7 @@ export function getConnectionContext(): ConnectionContext | null {
 function identityTargetFor(ctx: ConnectionContext) {
   if (!ctx.identityTarget) {
     const state = getStore().getState();
-    const entry = state.serverRegistry?.find(s => s.id === (ctx.serverId ?? state.activeServerId));
+    const entry = state.serverRegistry?.find(s => s.id === (ctx.serverId === undefined ? state.activeServerId : ctx.serverId));
     const saved = entry ? { url: entry.wsUrl, token: entry.token, pinnedIdentityKey: entry.pinnedIdentityKey } : state.savedConnection;
     ctx.identityTarget = captureConnectionIdentity(ctx.url, saved, getPendingPairingIdentityKey());
   }
@@ -4760,7 +4760,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       const settlement = new CredentialSettlement(ctx.token, auth, ctx.isPairing);
       credentialSettlements.set(ctx, settlement);
       if (!settlement.paired) clearHandshakeTimer();
-      if (ctx.serverId === undefined) ctx.serverId = get().activeServerId;
+      if (ctx.serverId === undefined) ctx.serverId = get().serverRegistry?.find(s => s.id === get().activeServerId && connectionMatchesEndpoint({ url: s.wsUrl, token: s.token }, ctx.url))?.id ?? null;
       if (!settlement.supported) {
         clearHandshakeTimer();
         setPendingPairingIdentityKey(null);
