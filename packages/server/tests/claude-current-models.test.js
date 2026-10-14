@@ -73,12 +73,12 @@ describe('#8585 current Claude choices without changing defaults', () => {
     })
   }
 
-  it('preserves legacy aliases and the producer-reported default across discovery', () => {
+  it('preserves legacy aliases while Chroxy selects its new-session default', () => {
     const registry = createModelsRegistry({ overlay: new Map() })
-    assert.equal(registry.getDefaultModelId(), null)
+    assert.equal(registry.getDefaultModelId(), 'sonnet-5-5')
     registry.updateModels([{ value: 'claude-fable-5', displayName: 'Default (Fable 5)' }])
-    assert.equal(registry.getDefaultModelId(), 'fable-5')
-    assert.equal(registry.getModels().find(m => m.id === registry.getDefaultModelId()).label, 'Fable 5')
+    assert.equal(registry.getDefaultModelId(), 'sonnet-5-5')
+    assert.equal(registry.getModels().find(m => m.id === registry.getDefaultModelId()).label, 'Sonnet 5.5')
     for (const [alias, fullId] of Object.entries(LEGACY_ALIASES)) {
       assert.equal(registry.resolveModelId(alias), fullId)
       assert.ok(registry.getAllowedModelIds().has(fullId))
@@ -86,10 +86,10 @@ describe('#8585 current Claude choices without changing defaults', () => {
     assert.equal(new Set(CLAUDE_FALLBACK_MODELS.map(m => m.fullId)).size, CLAUDE_FALLBACK_MODELS.length)
   })
 
-  it('preserves the existing fallback default when discovery supplies no default marker', () => {
+  it('uses the Chroxy default when discovery supplies no default marker', () => {
     const registry = createModelsRegistry({ overlay: new Map() })
     registry.updateModels(CURRENT.map(m => ({ value: m.fullId, displayName: m.label })))
-    assert.equal(registry.resolveModelId(registry.getDefaultModelId()), 'claude-opus-4-8')
+    assert.equal(registry.resolveModelId(registry.getDefaultModelId()), 'claude-sonnet-5-5')
   })
 
   it('Haiku prices every input category at the 100K boundary on base and [1m] forms', () => {

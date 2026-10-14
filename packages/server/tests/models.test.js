@@ -1009,14 +1009,8 @@ describe('disallowed models (#6219 revert)', () => {
   })
 
   it('the #6232 dangling-default guard is retained though currently unreachable (nothing gets filtered)', () => {
-    // #6232's original scenario (SDK marks the disallowed model "Default", it
-    // gets filtered by applyModels()'s disallow check, defaultModelId would
-    // otherwise dangle) can't be reproduced anymore: DISALLOWED_MODEL_IDS is
-    // frozen empty, so applyModels() never filters anything and the guard's
-    // "defaultPresent" branch is a no-op for every input today. What IS still
-    // true post-revert: marking fable "Default" resolves the registry's
-    // default TO fable — proving nothing strips it before defaultModelId is
-    // set (the guard's precondition — a disallowed default — never fires).
+    // Fable stays available when upstream calls it Default; Chroxy keeps
+    // its own new-session default independently of the empty disallow set.
     updateModels([
       { value: 'claude-fable-5', displayName: 'Default (Fable 5)', description: '' },
       { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
@@ -1024,13 +1018,7 @@ describe('disallowed models (#6219 revert)', () => {
     const def = getDefaultModelId()
     const fullIds = getModels().map((m) => m.fullId)
     assert.ok(fullIds.includes('claude-fable-5'), 'fable is allowed again and stays in the list')
-    // The default resolves to a model that is actually in the list — and
-    // since nothing filtered fable out, that model IS fable (the one marked
-    // "Default"), not a re-picked stand-in.
     assert.ok(def != null && getModels().some((m) => m.id === def || m.fullId === def), 'default resolves to a present model')
-    // Default registry has no getModelMetadata() hook, so the SDK-derived id
-    // strips only the `claude-` prefix (like `opus-4-6` elsewhere) rather than
-    // using the fallback's static `fable` short alias.
-    assert.equal(def, 'fable-5', 'default resolves to the fable entry — the guard never fires because nothing is disallowed')
+    assert.equal(def, 'sonnet-5-5', 'Chroxy selects Sonnet without removing Fable')
   })
 })

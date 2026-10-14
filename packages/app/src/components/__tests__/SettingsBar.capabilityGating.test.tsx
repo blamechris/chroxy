@@ -78,11 +78,12 @@ describe('SettingsBar capability gating (#5731)', () => {
     expect(text).not.toContain('Sonnet');
   });
 
-  it('uses defaultModelId for the fixed badge when there is no explicit activeModel', () => {
+  it('uses a named non-Claude producer default for the fixed badge', () => {
     const tree = render(makeProps({
       modelSwitchSupported: false,
       activeModel: null,
       defaultModelId: 'sonnet',
+      provider: 'codex',
     }));
     const text = collectVisibleText(tree.root);
     // Falls back to the default model's label rather than rendering no model row.
@@ -145,7 +146,7 @@ describe('SettingsBar target identity (#8260)', () => {
 describe('SettingsBar null active-model default (#8260)', () => {
   it.each([true, false])('shows the known default in collapsed and expanded states with modelSwitch=%s without setting a model', (modelSwitchSupported) => {
     const setModel = jest.fn();
-    const props = makeProps({ activeModel: null, defaultModelId: 'haiku', availableModels: [{ id: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' }], modelSwitchSupported, setModel, provider: 'claude-sdk', expanded: false });
+    const props = makeProps({ activeModel: null, defaultModelId: 'haiku', availableModels: [{ id: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' }], modelSwitchSupported, setModel, provider: 'codex', expanded: false });
     const tree = render(props);
     expect(collectVisibleText(tree.root)).toContain('Default (Haiku 4.5)');
     expect(tree.root.findAll(node => node.props.accessibilityHint === 'Model target: claude-haiku-4-5').length).toBeGreaterThan(0);
@@ -154,6 +155,64 @@ describe('SettingsBar null active-model default (#8260)', () => {
     expect(collectVisibleText(expandedModel)).toContain('Default (Haiku 4.5)');
     expect(expandedModel.props.accessibilityHint).toBe('Model target: claude-haiku-4-5');
     expect(setModel).not.toHaveBeenCalled();
+    act(() => tree.unmount());
+  });
+});
+
+it('shows and selects Chroxy Sonnet 5.5 Default alongside upstream Default and Fable (#8603)', () => {
+  const setModel = jest.fn();
+  const tree = render(makeProps({
+    activeModel: 'claude-sonnet-5-5',
+    defaultModelId: 'sonnet-5-5',
+    availableModels: [
+      { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+      { id: 'default', fullId: 'default', label: 'Fable 5.1' },
+      { id: 'fable-5-1', fullId: 'claude-fable-5-1', label: 'Fable 5.1' },
+    ],
+    provider: 'claude-sdk',
+    setModel,
+  }));
+  const chip = tree.root.findByProps({ testID: 'settings-model-sonnet-5-5' });
+  expect(collectVisibleText(chip)).toContain('Default (Sonnet 5.5)');
+  expect(chip.props.accessibilityHint).toBe('Model target: claude-sonnet-5-5');
+  act(() => chip.props.onPress());
+  expect(setModel).toHaveBeenCalledWith('sonnet-5-5');
+  expect(tree.root.findByProps({ testID: 'settings-model-default' })).toBeDefined();
+  expect(tree.root.findByProps({ testID: 'settings-model-fable-5-1' })).toBeDefined();
+  act(() => tree.unmount());
+});
+
+describe('unknown current Claude model (#8603)', () => {
+  const roster = [
+    { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+    { id: 'fable-5-1', fullId: 'claude-fable-5-1', label: 'Fable 5.1' },
+    { id: 'default', fullId: 'default', label: 'Provider default' },
+  ];
+  it.each([true, false])('keeps collapsed/fixed unknown model neutral with switching=%s', modelSwitchSupported => {
+    const setModel = jest.fn();
+    const props = makeProps({ activeModel: null, defaultModelId: 'sonnet-5-5', availableModels: roster, provider: 'claude-sdk', modelSwitchSupported, expanded: false, setModel });
+    const tree = render(props);
+    expect(collectVisibleText(tree.root)).toContain('Provider default');
+    expect(collectVisibleText(tree.root)).not.toContain('Sonnet');
+    expect(tree.root.findAll(node => node.props.accessibilityHint === 'Model target: claude-sonnet-5-5')).toHaveLength(0);
+    act(() => tree.update(<SettingsBar {...(props as unknown as React.ComponentProps<typeof SettingsBar>)} expanded />));
+    if (modelSwitchSupported) {
+      const chips = tree.root.findAllByType(TouchableOpacity).filter(node => node.props.testID?.startsWith('settings-model-'));
+      expect(chips.filter(node => node.props.accessibilityState.selected)).toHaveLength(0);
+      act(() => tree.root.findByProps({ testID: 'settings-model-sonnet-5-5' }).props.onPress());
+      expect(setModel).toHaveBeenLastCalledWith('sonnet-5-5');
+      act(() => tree.root.findByProps({ testID: 'settings-model-default' }).props.onPress());
+      expect(setModel).toHaveBeenLastCalledWith('default');
+      act(() => tree.update(<SettingsBar {...(props as unknown as React.ComponentProps<typeof SettingsBar>)} activeModel="claude-fable-5-1" expanded />));
+      expect(tree.root.findByProps({ testID: 'settings-model-fable-5-1' }).props.accessibilityState.selected).toBe(true);
+      expect(tree.root.findByProps({ testID: 'settings-model-sonnet-5-5' }).props.accessibilityState.selected).toBe(false);
+    } else {
+      const fixed = tree.root.findByProps({ testID: 'settings-fixed-model' });
+      expect(collectVisibleText(fixed)).toBe('Provider default · fixed');
+      expect(fixed.props.accessibilityHint).toBeUndefined();
+      act(() => tree.update(<SettingsBar {...(props as unknown as React.ComponentProps<typeof SettingsBar>)} activeModel="claude-fable-5-1" expanded />));
+      expect(collectVisibleText(tree.root.findByProps({ testID: 'settings-fixed-model' }))).toBe('Fable 5.1 · fixed');
+    }
     act(() => tree.unmount());
   });
 });

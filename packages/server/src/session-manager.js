@@ -5,7 +5,7 @@ import { join, resolve, dirname } from 'path'
 import { execFileSync } from 'child_process'
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.js'
-import { isClaudeProvider } from './models.js'
+import { isClaudeProvider, CLAUDE_NEW_SESSION_DEFAULT_MODEL } from './models.js'
 import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, buildBinaryProvenanceOptions, ProviderBinaryNotFoundError, ProviderBinaryQuarantinedError, ProviderBinaryProvenanceError, ProviderBinaryUnsupportedError, ProviderBinaryVersionError, ProviderCredentialMissingError } from './utils/preflight.js'
@@ -1405,7 +1405,7 @@ export class SessionManager extends EventEmitter {
    *   effectiveSessionPreamble: (string|undefined),
    * }} the validated create plan.
    */
-  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, isRestore = false } = {}) {
+  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, resumeSessionId, isRestore = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -1472,6 +1472,13 @@ export class SessionManager extends EventEmitter {
       : null
     const resolvedProviderType = connectionResolution?.definition.runtime || provider || this._providerType
     const PreflightProviderClass = getProvider(resolvedProviderType)
+    // Pin only an ordinary NEW Claude session with no configured/user choice.
+    // Do this after connection resolution so another runtime never gets a
+    // Claude model. Internal null, restored identity and resumed history retain
+    // upstream policy; malformed/colliding preserve IDs still create fresh sessions.
+    if (!isRestore && !resumeSessionId && !preserve && model === undefined && resolvedModel === null && isClaudeProvider(resolvedProviderType, PreflightProviderClass)) {
+      resolvedModel = CLAUDE_NEW_SESSION_DEFAULT_MODEL
+    }
     // #7825 — reject an adapter/mode combination before preflight, worktree
     // creation, provider construction, or turn start. This chokepoint is shared
     // by explicit create requests, configured defaults, boot restore, and retry.
@@ -1791,6 +1798,7 @@ export class SessionManager extends EventEmitter {
       restoreWorktreeRepoDir,
       sessionPreamble,
       preserveId,
+      resumeSessionId,
       isRestore,
     })
     const {

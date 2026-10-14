@@ -29,13 +29,13 @@ describe('#7089 available_models wire shape', () => {
   })
 
   it('a registry with NO default yields null — the condition fixtures cannot fake', () => {
-    const registry = createModelsRegistry({})
+    const registry = createModelsRegistry({ fallbackModels: [{ id: 'other', fullId: 'other', label: 'Other', contextWindow: 200000 }] })
     assert.equal(registry.getDefaultModelId(), null, 'precondition: a bare registry has no default')
     assert.ok(registry.getModels().length > 0, 'and it still has models, so the payload is otherwise real')
   })
 
   it('the payload from a default-less registry satisfies the wire schema', () => {
-    const payload = payloadFrom(createModelsRegistry({}))
+    const payload = payloadFrom(createModelsRegistry({ fallbackModels: [{ id: 'other', fullId: 'other', label: 'Other', contextWindow: 200000 }] }))
     assert.equal(payload.defaultModel, null)
     const result = ServerAvailableModelsSchema.safeParse(payload)
     assert.ok(
@@ -45,14 +45,14 @@ describe('#7089 available_models wire shape', () => {
   })
 
   it('a string default still validates (the fix does not loosen the type)', () => {
-    const payload = { ...payloadFrom(createModelsRegistry({})), defaultModel: 'claude-opus-5' }
+    const payload = { ...payloadFrom(createModelsRegistry({ fallbackModels: [{ id: 'other', fullId: 'other', label: 'Other', contextWindow: 200000 }] })), defaultModel: 'claude-opus-5' }
     assert.ok(ServerAvailableModelsSchema.safeParse(payload).success)
   })
 
   it('nullable does NOT mean untyped — a non-string default is still refused', () => {
     // Guards the obvious over-correction: `.nullable()` must not become `.any()`.
     for (const bad of [42, {}, [], true]) {
-      const r = ServerAvailableModelsSchema.safeParse({ ...payloadFrom(createModelsRegistry({})), defaultModel: bad })
+      const r = ServerAvailableModelsSchema.safeParse({ ...payloadFrom(createModelsRegistry({ fallbackModels: [{ id: 'other', fullId: 'other', label: 'Other', contextWindow: 200000 }] })), defaultModel: bad })
       assert.equal(r.success, false, `defaultModel: ${JSON.stringify(bad)} must still be rejected`)
     }
   })

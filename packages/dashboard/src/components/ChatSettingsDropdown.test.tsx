@@ -439,3 +439,23 @@ describe('model presentation (#8260)', () => {
     expect(screen.getByTestId('chat-settings-trigger').title).toContain('claude-haiku-4-5-20251101')
   })
 })
+
+it('shows neutral unknown Claude label and tooltip, then exact observed model', () => {
+  const props = { activeModel: null, modelTooltipTarget: null, defaultModelId: 'sonnet', providerLabel: 'claude-sdk' }
+  const view = renderDropdown(props)
+  const trigger = screen.getByTestId('chat-settings-trigger')
+  expect(trigger.textContent).toBe('Provider default')
+  expect(trigger.title).not.toContain('claude-sonnet')
+  expect(trigger.title).not.toContain('Context window')
+  fireEvent.click(trigger)
+  expect(screen.getAllByRole('option').filter(row => row.getAttribute('aria-selected') === 'true')).toHaveLength(0)
+  view.unmount()
+  renderDropdown({ ...props, activeModel: 'claude-opus-4-7', modelTooltipTarget: 'claude-opus-4-7' })
+  expect(screen.getByTestId('chat-settings-trigger').textContent).toBe('Opus')
+  expect(screen.getByTestId('chat-settings-trigger').title).toContain('claude-opus-4-7')
+})
+it('keeps a named non-Claude producer default label and target', () => {
+  renderDropdown({ activeModel: null, defaultModelId: 'sonnet', providerLabel: 'codex' })
+  expect(screen.getByTestId('chat-settings-trigger').textContent).toBe('Default (Sonnet)')
+  expect(screen.getByTestId('chat-settings-trigger').title).toContain('claude-sonnet-4')
+})

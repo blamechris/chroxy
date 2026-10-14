@@ -16,6 +16,10 @@ import {
 
 const log = createLogger('models')
 
+// Chroxy's default for new Claude sessions; upstream defaults remain explicit
+// picker choices and restored null overrides keep their original semantics.
+export const CLAUDE_NEW_SESSION_DEFAULT_MODEL = 'claude-sonnet-5-5'
+
 // Claude model catalog (roster, pricing, context-window heuristic) moved to
 // claude-model-catalog.js (#6201 OCP) so this generic registry/overlay/cost
 // module no longer OWNS the Claude data — it consumes it. Re-exported under the
@@ -1002,6 +1006,9 @@ export function createModelsRegistry(hooks = {}) {
     // Reads `filtered`, not `activeModels` — stripping `provenance` never
     // touches `id`/`fullId`, so the two are equivalent for this lookup, and
     // `filtered` is already in hand.
+    if (isClaudeRegistry) {
+      nextDefault = filtered.find(m => m.fullId === CLAUDE_NEW_SESSION_DEFAULT_MODEL)?.id ?? null
+    }
     const defaultPresent =
       nextDefault != null && filtered.some((m) => m.id === nextDefault || m.fullId === nextDefault)
     if (nextDefault != null && !defaultPresent) {
@@ -1128,7 +1135,7 @@ export function createModelsRegistry(hooks = {}) {
     }
   }
 
-  rebuildLookups(fallbackModels)
+  applyModels(fallbackModels, null)
 
   // #5932: captured in a const so applyOverlay() can re-run the full
   // updateModels() pipeline against a re-folded fallback set. Methods reference

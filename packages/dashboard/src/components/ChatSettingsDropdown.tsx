@@ -9,7 +9,7 @@
  * likewise clipping-immune.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { findModelEntry, formatActiveModelLabel } from '@chroxy/store-core'
+import { findModelEntry, modelDisplayTarget, formatActiveModelLabel } from '@chroxy/store-core'
 import type { ModelInfo } from '../store/types'
 import type { PermissionMode } from '@chroxy/store-core'
 // #6901: single-source the sandbox label/description from protocol's
@@ -168,8 +168,8 @@ export function ChatSettingsDropdown({
   // #3888: hover tooltip on the active-model pill so users can see the full
   // model id and its context window without expanding the dropdown.
   const modelTitle = useMemo(
-    () => buildActiveModelTooltip(availableModels, modelTooltipTarget || activeModel || defaultModelId),
-    [availableModels, modelTooltipTarget, activeModel, defaultModelId],
+    () => buildActiveModelTooltip(availableModels, modelTooltipTarget ?? modelDisplayTarget(availableModels, activeModel, defaultModelId, providerLabel)),
+    [availableModels, modelTooltipTarget, activeModel, defaultModelId, providerLabel],
   )
 
   const activeLabel = formatActiveModelLabel(availableModels, activeModel, defaultModelId, providerLabel)

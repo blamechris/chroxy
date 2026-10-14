@@ -4814,7 +4814,7 @@ describe('model labels across actual dashboard callers (#8260)', () => {
 
 describe('null active-model default presentation (#8260)', () => {
   it.each([true, false])('shows the same known default and target in header/footer when modelSwitch=%s without setting the model', (modelSwitch) => {
-    const provider = modelSwitch ? 'claude-sdk' : 'claude-tui'
+    const provider = 'codex'
     const setModel = vi.fn()
     stateOverrides = { connectionPhase: 'connected', setModel,
       sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null, provider }],
@@ -4829,6 +4829,33 @@ describe('null active-model default presentation (#8260)', () => {
     expect(footer.textContent).toBe('Default (Haiku 4.5)')
     expect(header.title).toContain('claude-haiku-4-5')
     expect(footer.getAttribute('title')).toContain('claude-haiku-4-5')
+    expect(setModel).not.toHaveBeenCalled()
+  })
+})
+
+describe('null active-model default presentation (#8603)', () => {
+  it.each([true, false])('keeps unknown Claude neutral then reports observed Fable, switching=%s', modelSwitch => {
+    const provider = modelSwitch ? 'claude-sdk' : 'claude-tui'
+    const setModel = vi.fn()
+    let activeModel: string | null = null
+    stateOverrides = { connectionPhase: 'connected', setModel,
+      sessions: [{ sessionId: 's1', name: 'Test', cwd: '/tmp', type: 'cli', hasTerminal: true, model: null, permissionMode: null, isBusy: false, createdAt: Date.now(), conversationId: null, provider }],
+      activeSessionId: 's1', availableProviders: [{ name: provider, capabilities: { modelSwitch, permissionModeSwitch: false } }],
+      modelsByProvider: { [provider]: { models: [
+        { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+        { id: 'fable-5-1', fullId: 'claude-fable-5-1', label: 'Fable 5.1' },
+      ], defaultModelId: 'sonnet-5-5' } },
+      getActiveSessionState: () => ({ messages: [], streamingMessageId: null, activeModel, permissionMode: null, contextUsage: null, sessionCost: null, isIdle: true, activeAgents: [], isPlanPending: false }) }
+    const { container, rerender } = render(<App />)
+    const header = () => screen.getByTestId(modelSwitch ? 'chat-settings-trigger' : 'active-model-badge')
+    expect(header().textContent).toBe('Provider default')
+    expect(header().title).not.toContain('claude-sonnet')
+    expect(container.querySelector('.footer-model')).toBeNull()
+    activeModel = 'claude-fable-5-1'
+    rerender(<App />)
+    expect(header().textContent).toBe('Fable 5.1')
+    expect(header().title).toContain('claude-fable-5-1')
+    expect(container.querySelector('.footer-model')?.textContent).toBe('Fable 5.1')
     expect(setModel).not.toHaveBeenCalled()
   })
 })

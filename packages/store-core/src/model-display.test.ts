@@ -32,7 +32,7 @@ describe('model presentation (#8260)', () => {
     expect(formatActiveModelLabel([{ id: 'default', fullId: 'claude-opus-4-7', label: 'Operator label' }], 'default')).toBe('Operator label')
     expect(formatActiveModelLabel(models, 'default')).toBe('Provider default')
     expect(formatActiveModelLabel(models, null)).toBe('Provider default')
-    expect(formatActiveModelLabel(models, null, 'haiku')).toBe('Default (Haiku 4.5 (provider alias))')
+    expect(formatActiveModelLabel(models, null, 'haiku', 'codex')).toBe('Default (Haiku 4.5 (provider alias))')
   })
   it('matches the default by provider target when accepted aliases share a target', () => {
     const shared = [{ id: 'a', fullId: 'same-target', label: 'Shared' }, { id: 'b', fullId: 'same-target', label: 'Shared' }]
@@ -42,8 +42,8 @@ describe('model presentation (#8260)', () => {
   })
   it('resolves a null active model to the known default target for display only', () => {
     const roster = [{ id: 'haiku', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5' }]
-    expect(modelDisplayTarget(roster, null, 'haiku')).toBe('claude-haiku-4-5')
-    expect(formatActiveModelLabel(roster, null, 'haiku')).toBe('Default (Haiku 4.5)')
+    expect(modelDisplayTarget(roster, null, 'haiku', 'codex')).toBe('claude-haiku-4-5')
+    expect(formatActiveModelLabel(roster, null, 'haiku', 'codex')).toBe('Default (Haiku 4.5)')
     expect(findModelEntry(roster, null)).toBeUndefined()
   })
   it('formats absent dated running IDs without selecting an undated row', () => {
@@ -63,5 +63,26 @@ describe('model presentation (#8260)', () => {
     map = mergeModelsByProvider(map, 'codex', { models: [{ id: 'gpt', fullId: 'gpt', label: 'GPT' }], defaultModelId: 'gpt' })
     const roster = selectModelsForProvider(map, 'codex')
     expect(formatActiveModelLabel(roster.models, 'haiku', roster.defaultModelId, 'codex')).toBe('haiku')
+  })
+})
+
+describe('current model versus new-session recommendation (#8603)', () => {
+  const roster = [
+    { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+    { id: 'fable-5-1', fullId: 'claude-fable-5-1', label: 'Fable 5.1' },
+    { id: 'default', fullId: 'default', label: 'Provider default' },
+  ]
+  it.each([undefined, 'claude-sdk', 'claude-cli', 'claude-tui', 'docker-sdk'])('keeps unknown Claude neutral for %s', provider => {
+    expect(formatActiveModelLabel(roster, null, 'sonnet-5-5', provider)).toBe('Provider default')
+    expect(modelDisplayTarget(roster, null, 'sonnet-5-5', provider)).toBeNull()
+  })
+  it.each(['codex', 'gemini', 'custom', 'docker-ollama'])('retains named producer fallback for %s', provider => {
+    expect(formatActiveModelLabel(roster, null, 'sonnet-5-5', provider)).toBe('Default (Sonnet 5.5)')
+    expect(modelDisplayTarget(roster, null, 'sonnet-5-5', provider)).toBe('claude-sonnet-5-5')
+  })
+  it('preserves concrete observations, fresh pinned Sonnet and explicit upstream sentinel', () => {
+    expect(formatActiveModelLabel(roster, 'claude-fable-5-1', 'sonnet-5-5', 'claude-sdk')).toBe('Fable 5.1')
+    expect(formatActiveModelLabel(roster, 'claude-sonnet-5-5', 'sonnet-5-5', 'claude-sdk')).toBe('Default (Sonnet 5.5)')
+    expect(modelDisplayTarget(roster, 'default', 'sonnet-5-5', 'claude-sdk')).toBe('default')
   })
 })

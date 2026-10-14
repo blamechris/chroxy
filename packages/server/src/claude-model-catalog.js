@@ -173,8 +173,8 @@ const MODEL_METADATA = Object.freeze([
   }),
   // Current models are additional explicit choices (#8585). Keep the existing
   // family aliases above pinned: changing them would silently change saved
-  // sessions and configured defaults. supportedModels() still supplies the
-  // producer's default; this catalog does not choose one.
+  // sessions and configured defaults. Chroxy's fresh-session default is
+  // selected separately in models.js; upstream choices remain in the roster.
   // Model IDs/windows: https://platform.claude.com/docs/en/models/overview
   // Rates: https://platform.claude.com/docs/en/about-claude/pricing (2026-10-12)
   Object.freeze({
