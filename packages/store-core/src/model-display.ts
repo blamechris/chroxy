@@ -8,9 +8,16 @@ export function findModelEntry(models: readonly ModelInfo[], model: string | nul
   return models.find(m => m.id === model) ?? models.find(m => m.fullId === model)
 }
 
+/** Current model is independent of the Claude new-session recommendation.
+ * Named non-Claude providers retain their producer-default fallback.
+ */
+export function resolveCurrentModel(model: string | null | undefined, defaultModelId?: string | null, provider?: string | null): string | null {
+  return model || (isClaudeBackedProvider(provider) ? null : defaultModelId) || null
+}
+
 /** Effective target for labels/tooltips only; never writes a model selection. */
-export function modelDisplayTarget(models: readonly ModelInfo[], model: string | null | undefined, defaultModelId?: string | null): string | null {
-  const selected = model || defaultModelId
+export function modelDisplayTarget(models: readonly ModelInfo[], model: string | null | undefined, defaultModelId?: string | null, provider?: string | null): string | null {
+  const selected = resolveCurrentModel(model, defaultModelId, provider)
   if (!selected) return null
   const entry = findModelEntry(models, selected)
   return entry?.fullId || entry?.id || selected
@@ -62,7 +69,7 @@ export function formatActiveModelLabel(
   defaultModelId?: string | null,
   provider?: string | null,
 ): string {
-  const selected = model || defaultModelId
+  const selected = resolveCurrentModel(model, defaultModelId, provider)
   if (!selected) return 'Provider default'
   const entry = findModelEntry(models, selected)
   if (entry) {

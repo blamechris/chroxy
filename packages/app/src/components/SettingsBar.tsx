@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform, Animated, AccessibilityInfo, Alert, Modal, Pressable, ScrollView, Switch, TextInput, Linking } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { findModelEntry, modelDisplayTarget, modelChoices, formatActiveModelLabel, resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
+import { findModelEntry, resolveCurrentModel, modelDisplayTarget, modelChoices, formatActiveModelLabel, resolveContextWindow, contextOccupancyTokens, contextFillPercent } from '@chroxy/store-core';
 import type { CumulativeUsage, PendingPermissionConfirm, SessionIntervention } from '@chroxy/store-core';
 import { formatCostBadge, stripAnsi } from '@chroxy/store-core';
 // #6901: single-source the Codex sandbox label/description for the read-only
@@ -394,8 +394,9 @@ export function SettingsBar({
   }
 
   const choices = modelChoices(availableModels);
-  const activeEntry = findModelEntry(availableModels, activeModel || defaultModelId);
-  const displayTarget = modelDisplayTarget(availableModels, activeModel, defaultModelId);
+  const defaultEntry = findModelEntry(availableModels, defaultModelId);
+  const activeEntry = findModelEntry(availableModels, resolveCurrentModel(activeModel, defaultModelId, provider));
+  const displayTarget = modelDisplayTarget(availableModels, activeModel, defaultModelId, provider);
 
   return (
     <View style={styles.container}>
@@ -539,7 +540,7 @@ export function SettingsBar({
                         activeOpacity={0.7}
                       >
                         <Text style={[styles.chipText, isActive && styles.chipTextActive]}>
-                          {!activeModel && isActive ? formatActiveModelLabel(availableModels, activeModel, defaultModelId, provider) : m.label}
+                          {isActive || (m.fullId || m.id) === (defaultEntry?.fullId || defaultEntry?.id) ? formatActiveModelLabel(availableModels, m.id, defaultModelId, provider) : m.label}
                         </Text>
                       </TouchableOpacity>
                     );
@@ -547,11 +548,8 @@ export function SettingsBar({
                 </View>
               )}
               {!modelSwitchSupported && (() => {
-                // Fall back to defaultModelId when there's no explicit override,
-                // mirroring the interactive chip's `!activeModel && defaultModelId`
-                // active-match so a non-switching provider still shows its model.
-                const fixedId = activeModel || defaultModelId;
-                if (!fixedId) return null;
+                // An unobserved Claude model stays neutral even on fixed providers.
+                const fixedId = resolveCurrentModel(activeModel, defaultModelId, provider);
                 return (
                   <View style={styles.chipRow}>
                     <View style={[styles.chip, styles.chipReadOnly]} accessibilityRole="text" testID="settings-fixed-model"

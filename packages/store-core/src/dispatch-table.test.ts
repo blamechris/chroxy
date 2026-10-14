@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { formatActiveModelLabel, modelDisplayTarget } from './model-display'
 import {
   createDispatchTable,
   runDispatch,
@@ -38,6 +39,7 @@ interface FakeSession {
   sessionId: string
   messages: ChatMessage[]
   isIdle?: boolean
+  activeModel?: string | null
   conversationId?: string | null
   sessionRules?: PermissionRule[]
   // slice 2 reads
@@ -3186,4 +3188,27 @@ describe('shared dispatch table', () => {
       expect(env.checkpointSyncs).toEqual([])
     })
   })
+})
+
+it('preserves null replay then observed runtime identity across session switches (#8603)', () => {
+  const roster = [
+    { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+    { id: 'fable-5-1', fullId: 'claude-fable-5-1', label: 'Fable 5.1' },
+  ]
+  const env = makeAdapter({ activeSessionId: 'legacy', sessions: {
+    legacy: { sessionId: 'legacy', messages: [], activeModel: 'stale' },
+    fresh: { sessionId: 'fresh', messages: [], activeModel: 'claude-sonnet-5-5' },
+  } })
+  const label = () => formatActiveModelLabel(roster, env.sessions.legacy!.activeModel, 'sonnet-5-5', 'claude-sdk')
+  expect(dispatch(env, { type: 'model_changed', sessionId: 'legacy', model: null })).toBe(true)
+  expect(env.sessions.legacy!.activeModel).toBeNull()
+  expect(label()).toBe('Provider default')
+  expect(modelDisplayTarget(roster, env.sessions.legacy!.activeModel, 'sonnet-5-5', 'claude-sdk')).toBeNull()
+  expect(dispatch(env, { type: 'model_changed', sessionId: 'legacy', model: 'claude-fable-5-1' })).toBe(true)
+  env.setActive('fresh')
+  env.setActive('legacy')
+  // Auth/reconnect replay repeats the reported current model, not the registry default.
+  expect(dispatch(env, { type: 'model_changed', model: 'claude-fable-5-1' })).toBe(true)
+  expect(label()).toBe('Fable 5.1')
+  expect(env.sessions.fresh!.activeModel).toBe('claude-sonnet-5-5')
 })

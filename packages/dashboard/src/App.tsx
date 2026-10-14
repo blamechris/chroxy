@@ -2698,7 +2698,7 @@ export function App() {
     return formatActiveModelLabel(availableModels, activeModel, defaultModelId, activeSessionProvider)
   }, [activeModel, availableModels, defaultModelId, activeSessionProvider])
 
-  const activeModelDisplayTarget = modelDisplayTarget(availableModels, activeModel, defaultModelId)
+  const activeModelDisplayTarget = modelDisplayTarget(availableModels, activeModel, defaultModelId, activeSessionProvider)
 
   const isConnected = connectionPhase === 'connected'
   // Point the Cmd+Shift+L shortcut at the live QR handler, gated on connection

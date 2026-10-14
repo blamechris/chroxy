@@ -1405,7 +1405,7 @@ export class SessionManager extends EventEmitter {
    *   effectiveSessionPreamble: (string|undefined),
    * }} the validated create plan.
    */
-  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, isRestore = false } = {}) {
+  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, connectionId, restoredAgentConnection, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, resumeSessionId, isRestore = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -1474,8 +1474,9 @@ export class SessionManager extends EventEmitter {
     const PreflightProviderClass = getProvider(resolvedProviderType)
     // Pin only an ordinary NEW Claude session with no configured/user choice.
     // Do this after connection resolution so another runtime never gets a
-    // Claude model. Internal null and restored omissions retain upstream policy.
-    if (!isRestore && model === undefined && resolvedModel === null && isClaudeProvider(resolvedProviderType, PreflightProviderClass)) {
+    // Claude model. Internal null, restored identity and resumed history retain
+    // upstream policy; malformed/colliding preserve IDs still create fresh sessions.
+    if (!isRestore && !resumeSessionId && !preserve && model === undefined && resolvedModel === null && isClaudeProvider(resolvedProviderType, PreflightProviderClass)) {
       resolvedModel = CLAUDE_NEW_SESSION_DEFAULT_MODEL
     }
     // #7825 — reject an adapter/mode combination before preflight, worktree
@@ -1797,6 +1798,7 @@ export class SessionManager extends EventEmitter {
       restoreWorktreeRepoDir,
       sessionPreamble,
       preserveId,
+      resumeSessionId,
       isRestore,
     })
     const {

@@ -11,7 +11,7 @@
  * non-selectable row.
  */
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
-import { findModelEntry, modelChoices } from '@chroxy/store-core'
+import { findModelEntry, resolveCurrentModel, modelChoices } from '@chroxy/store-core'
 import { Modal } from './Modal'
 import type { ModelInfo } from '../store/types'
 import { isImeComposing } from '../utils/ime'
@@ -49,7 +49,7 @@ export function ModelPickerModal({
   }, [open])
 
   const choices = useMemo(() => modelChoices(availableModels), [availableModels])
-  const activeEntry = findModelEntry(availableModels, activeModel || defaultModelId)
+  const activeEntry = findModelEntry(availableModels, resolveCurrentModel(activeModel, defaultModelId, providerLabel))
   const defaultEntry = findModelEntry(availableModels, defaultModelId)
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()

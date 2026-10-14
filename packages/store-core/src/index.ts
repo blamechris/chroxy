@@ -10,7 +10,7 @@
  */
 
 export { DEFAULT_CONTEXT_WINDOW } from './types'
-export { findModelEntry, modelChoices, formatActiveModelLabel, modelDisplayTarget } from './model-display'
+export { findModelEntry, resolveCurrentModel, modelChoices, formatActiveModelLabel, modelDisplayTarget } from './model-display'
 
 // #5424: shared context-window resolution. The 200k default is a Claude
 // default — for providers that legitimately report no window (ollama sends

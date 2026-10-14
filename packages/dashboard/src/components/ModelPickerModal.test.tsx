@@ -200,7 +200,7 @@ it('selects Chroxy Sonnet 5.5 Default while keeping the upstream Default and Fab
       { id: 'default', fullId: 'default', label: 'Fable 5.1' },
       { id: 'fable-5-1', fullId: 'claude-fable-5-1', label: 'Fable 5.1' },
     ],
-    activeModel: null,
+    activeModel: 'claude-sonnet-5-5',
     defaultModelId: 'sonnet-5-5',
     onSelect,
   })
@@ -209,4 +209,17 @@ it('selects Chroxy Sonnet 5.5 Default while keeping the upstream Default and Fab
   expect(onSelect).toHaveBeenCalledWith('sonnet-5-5')
   expect(screen.getByTestId('model-picker-item-default')).toBeInTheDocument()
   expect(screen.getByTestId('model-picker-item-fable-5-1')).toBeInTheDocument()
+})
+
+it('keeps unknown Claude unselected while retaining the selectable recommendation', () => {
+  const onSelect = vi.fn()
+  renderModal({ activeModel: null, onSelect })
+  expect(screen.getAllByRole('option').filter(row => row.getAttribute('aria-selected') === 'true')).toHaveLength(0)
+  expect(screen.getByTestId('model-picker-item-opus').textContent).toContain('(default)')
+  fireEvent.click(screen.getByTestId('model-picker-item-opus'))
+  expect(onSelect).toHaveBeenCalledWith('opus')
+})
+it('preserves a named non-Claude producer default current row', () => {
+  renderModal({ activeModel: null, providerLabel: 'codex' })
+  expect(screen.getByTestId('model-picker-item-opus')).toHaveAttribute('aria-selected', 'true')
 })
