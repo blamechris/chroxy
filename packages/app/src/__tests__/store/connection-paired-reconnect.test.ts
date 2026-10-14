@@ -11,7 +11,7 @@ import { decodeBase64, encodeBase64 } from 'tweetnacl-util';
 import { createKeyPair, encrypt, DIRECTION_SERVER } from '../../utils/crypto';
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
-import { setPendingPairingId, setPendingPairingIdentityKey, getConnectionContext, getEncryptionState, resetReconnectAttempt } from '../../store/message-handler';
+import { setPendingPairingId, setPendingPairingIdentityKey, getConnectionContext, getEncryptionState, resetReconnectAttempt, loadConnection, saveConnection } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 function flushPromises(): Promise<void> {
@@ -437,4 +437,99 @@ it('requires an encrypted post-auth credential after the discrete handshake', as
   expect(getConnectionContext()?.token).toBe(ISSUED);
   encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: 'fixture-later-bootstrap' });
   expect(getConnectionContext()?.token).toBe(ISSUED);
+});
+
+it('preserves the verified identity through credential and tunnel changes and reload', async () => {
+  const persisted = new Map<string, string>();
+  (SecureStore.setItemAsync as jest.Mock).mockImplementation(async (key: string, value: string) => { persisted.set(key, value); });
+  (SecureStore.getItemAsync as jest.Mock).mockImplementation(async (key: string) => persisted.get(key) ?? null);
+  const exchange = signedExchange();
+  setPendingPairingIdentityKey(exchange.identityKey);
+  setPendingPairingId('fixture-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true } });
+  frame(socket, { type: 'key_exchange_ok', publicKey: exchange.publicKey, serverKeySig: exchange.serverKeySig });
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED, credentialConfirmation: true });
+  await flushPromises();
+  encryptedFrame(socket, { type: 'token_rotated', token: 'fixture-updated-token' });
+  expect(useConnectionLifecycleStore.getState().savedConnection?.pinnedIdentityKey).toBe(exchange.identityKey);
+  encryptedFrame(socket, { type: 'tunnel_url_changed', url: 'wss://current-paired.example.test/ws' });
+  await flushPromises();
+  expect((await loadConnection())?.pinnedIdentityKey).toBe(exchange.identityKey);
+  encryptedFrame(socket, { type: 'token_rotated', token: 'fixture-latest-token' });
+  await flushPromises();
+  expect((await loadConnection())?.url).toBe('wss://current-paired.example.test/ws');
+  expect((await loadConnection())?.pinnedIdentityKey).toBe(exchange.identityKey);
+});
+
+it('uses the explicit pairing identity when another daemon has a saved connection', async () => {
+  const previous = signedExchange(1);
+  const next = signedExchange(2);
+  const saved = { url: 'wss://previous.example.test/ws', token: MANUAL, pinnedIdentityKey: previous.identityKey };
+  useConnectionLifecycleStore.setState({ savedConnection: saved });
+  setPendingPairingIdentityKey(next.identityKey);
+  setPendingPairingId('fixture-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true } });
+  frame(socket, { type: 'key_exchange_ok', publicKey: next.publicKey, serverKeySig: next.serverKeySig });
+  expect(socket.close).not.toHaveBeenCalled();
+  expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(saved);
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED, credentialConfirmation: true });
+  expect(useConnectionLifecycleStore.getState().savedConnection?.pinnedIdentityKey).toBe(next.identityKey);
+});
+
+it('retains the same saved daemon when an explicit pairing exchange refuses', async () => {
+  const previous = signedExchange(1);
+  const next = signedExchange(2);
+  const saved = { url: 'wss://previous.example.test/ws', token: MANUAL, pinnedIdentityKey: previous.identityKey };
+  useConnectionLifecycleStore.setState({ savedConnection: saved });
+  setPendingPairingIdentityKey(next.identityKey);
+  setPendingPairingId('fixture-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true } });
+  frame(socket, { type: 'key_exchange_ok', publicKey: previous.publicKey, serverKeySig: previous.serverKeySig });
+  expect(socket.close).toHaveBeenCalled();
+  expect(useConnectionLifecycleStore.getState().savedConnection).toEqual(saved);
+});
+
+it('persists the certificate-effective pin through an admitted credential rotation', async () => {
+  const { createSigningKeyPair, signExchangeKey, signIdentityRotation } = jest.requireActual('../../../../store-core/src/crypto');
+  const original = createSigningKeyPair();
+  const current = createSigningKeyPair();
+  const exchange = createKeyPair();
+  useConnectionLifecycleStore.setState({ savedConnection: { url: URL, token: MANUAL, pinnedIdentityKey: original.publicKey } });
+  const socket = await dial(MANUAL);
+  frame(socket, { type: 'auth_ok', encryption: 'required', serverPublicKey: exchange.publicKey,
+    serverKeySig: signExchangeKey(exchange.publicKey, current.secretKey), newIdentityKey: current.publicKey,
+    rotationCert: signIdentityRotation(current.publicKey, original.secretKey) });
+  expect(getEncryptionState()).not.toBeNull();
+  encryptedFrame(socket, { type: 'token_rotated', token: 'fixture-current-credential' });
+  expect(useConnectionLifecycleStore.getState().savedConnection?.pinnedIdentityKey).toBe(current.publicKey);
+  const next = await reconnect(socket);
+  expect(sent(next, 'auth').token).toBe('fixture-current-credential');
+  frame(next, { type: 'auth_ok', encryption: 'disabled' });
+  expect(next.close).toHaveBeenCalled();
+});
+
+it('serializes connection metadata writes while an earlier save is pending', async () => {
+  const persisted = new Map<string, string>();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  (SecureStore.setItemAsync as jest.Mock).mockImplementation(async (key: string, value: string) => {
+    calls++;
+    if (calls === 1) await held;
+    persisted.set(key, value);
+  });
+  (SecureStore.getItemAsync as jest.Mock).mockImplementation(async (key: string) => persisted.get(key) ?? null);
+  const first = saveConnection(URL, 'fixture-first', { pinnedIdentityKey: 'fixture-pin' });
+  const next = saveConnection('wss://current.example.test/ws', 'fixture-current', { pinnedIdentityKey: 'fixture-current-pin' });
+  try {
+    await flushPromises();
+    expect(calls).toBe(1);
+  } finally {
+    release();
+    await Promise.all([first, next]);
+  }
+  expect((await loadConnection())?.pinnedIdentityKey).toBe('fixture-current-pin');
 });

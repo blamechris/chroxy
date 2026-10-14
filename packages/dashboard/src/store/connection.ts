@@ -1,3 +1,4 @@
+import { reconnectConnectionIdentity, captureConnectionIdentity, type ConnectionIdentityTarget } from '@chroxy/store-core';
 /**
  * Connection store — Zustand store managing WebSocket connection,
  * session state, and all server communication.
@@ -101,6 +102,7 @@ import {
   setEncryptionState,
   setPendingKeyPair,
   setPendingPairingIdentityKey,
+  getPendingPairingIdentityKey,
   prepareEagerKeyExchange,
   getEncryptionState,
   connectionAttemptId,
@@ -2805,7 +2807,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
   // the retry budget — intentional, since established connections should recover
   // aggressively after transient drops (tunnel blips, server restarts, etc.).
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number; _pairingId?: string }) => {
+  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number; _pairingId?: string; _identityTarget?: ConnectionIdentityTarget }) => {
     const _retryCount = options?._retryCount ?? 0;
     const silent = options?.silent ?? false;
     // #5281 ③ PR 2 — resolve the pairing id for THIS connect into the closure,
@@ -2817,6 +2819,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const pairingId = _retryCount === 0
       ? (() => { const id = pendingPairingId; pendingPairingId = null; return id; })()
       : (options?._pairingId ?? null);
+
+    const ownedServerId = get().activeServerId;
+    const ownedEntry = get().serverRegistry.find(s => s.id === ownedServerId);
+    const ownedSaved = ownedEntry ? { url: ownedEntry.wsUrl, token: ownedEntry.token, pinnedIdentityKey: ownedEntry.pinnedIdentityKey } : get().savedConnection;
+    const identityTarget = options?._identityTarget ?? captureConnectionIdentity(url, ownedSaved, getPendingPairingIdentityKey());
+    setPendingPairingIdentityKey(null);
+    let socketContext: ConnectionContext | null = null;
 
     // Detect if connecting to a different server — clear old session data + queue
     const currentUrl = get().wsUrl;
@@ -2875,7 +2884,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       fallbackUrl: string,
       fallbackToken: string,
     ): ConnectEndpoint => {
-      const sid = get().activeServerId;
+      const sid = ownedServerId;
+      fallbackToken = socketContext?.token ?? fallbackToken;
       if (!sid) return { url: fallbackUrl, token: fallbackToken };
       const entry = get().serverRegistry.find((s) => s.id === sid);
       if (!entry) return { url: fallbackUrl, token: fallbackToken };
@@ -2982,7 +2992,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // #5597 — re-resolve the registry endpoint so a repointed `wsUrl`
           // (or token) is dialed on the next attempt, not the dead captured one.
           const next = resolveActiveEndpoint(url, token);
-          get().connect(next.url, next.token, { silent, _retryCount: nextAttempt, ...(pairingId ? { _pairingId: pairingId } : {}) });
+          get().connect(next.url, next.token, { silent, _retryCount: nextAttempt, ...(pairingId ? { _pairingId: pairingId } : {}), _identityTarget: identityTarget });
         }, delayMs);
       },
       onRestartGaveUp: () => {
@@ -3054,7 +3064,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // come from the live active registry entry.
       reconnect: () => {
         const next = resolveActiveEndpoint(url, token);
-        get().connect(next.url, next.token);
+        get().connect(next.url, next.token, { _identityTarget: reconnectConnectionIdentity(identityTarget, socketContext?.verifiedIdentityKey, socketContext?.savedConnection) });
       },
       isStale: () => myAttemptId !== connectionAttemptId,
       retryDelays: retryLadder,
@@ -3174,7 +3184,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
     };
 
-    const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
+    const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket, isPairing: !!pairingId, identityTarget, serverId: ownedServerId };
+    socketContext = socketCtx;
     setConnectionContext(socketCtx);
     socket.onmessage = (event) => {
       // #8485 — a frame from a superseded socket (a switch, or a same-daemon
@@ -3285,7 +3296,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Trust button stuck across an auto-reconnect.
       const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
-      const wasConnected = get().connectionPhase === 'connected';
+      const wasConnected = get().connectionPhase === 'connected' || socketCtx.authReceived === true;
       set({ socket: null, sessionStates: cleanedSessionStates });
 
       // #7586: every in-flight request marker — cancel_activity, the reindex /
@@ -5868,7 +5879,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   fetchConversationHistory: () => {
     const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    if (get().connectionPhase === 'connected' && socket && socket.readyState === WebSocket.OPEN) {
       set({ conversationHistoryLoading: true });
       wsSend(socket, { type: 'list_conversations' });
       // Safety timeout — clear loading state if server never responds

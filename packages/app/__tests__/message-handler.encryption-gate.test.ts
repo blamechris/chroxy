@@ -288,7 +288,7 @@ describe('auth_ok encryption / identity refusal gate (#5635 / #5536 / #5614)', (
   describe('(a) plaintext-downgrade gate', () => {
     it('REFUSES a pinned connection whose auth_ok did not negotiate encryption', () => {
       const { identity } = makeServerHandshake();
-      mockSavedConnection = { pinnedIdentityKey: identity.publicKey };
+      mockSavedConnection = { url: 'wss://paired.example.com', token: 'fixture-saved', pinnedIdentityKey: identity.publicKey };
 
       handleMessage(authOk({ encryption: 'none' }), ctx());
 
@@ -302,7 +302,7 @@ describe('auth_ok encryption / identity refusal gate (#5635 / #5536 / #5614)', (
 
     it('REFUSES a pinned connection whose auth_ok OMITS the encryption field', () => {
       const { identity } = makeServerHandshake();
-      mockSavedConnection = { pinnedIdentityKey: identity.publicKey };
+      mockSavedConnection = { url: 'wss://paired.example.com', token: 'fixture-saved', pinnedIdentityKey: identity.publicKey };
 
       handleMessage(authOk({ encryption: undefined }), ctx());
 
@@ -329,7 +329,7 @@ describe('auth_ok encryption / identity refusal gate (#5635 / #5536 / #5614)', (
       const attackerExchange = createKeyPair();
       const attackerSig = signExchangeKey(attackerExchange.publicKey, attacker.secretKey);
       // We pinned the REAL daemon; the handshake is signed by the attacker.
-      mockSavedConnection = { pinnedIdentityKey: real.publicKey };
+      mockSavedConnection = { url: 'wss://paired.example.com', token: 'fixture-saved', pinnedIdentityKey: real.publicKey };
 
       handleMessage(
         authOk({
@@ -346,7 +346,7 @@ describe('auth_ok encryption / identity refusal gate (#5635 / #5536 / #5614)', (
     it('REFUSES when the exchange key was substituted (valid sig over a different key)', () => {
       const { identity, serverKeySig } = makeServerHandshake();
       const substituted = createKeyPair();
-      mockSavedConnection = { pinnedIdentityKey: identity.publicKey };
+      mockSavedConnection = { url: 'wss://paired.example.com', token: 'fixture-saved', pinnedIdentityKey: identity.publicKey };
 
       handleMessage(
         authOk({
@@ -385,7 +385,7 @@ describe('auth_ok encryption / identity refusal gate (#5635 / #5536 / #5614)', (
   describe('(c) pinned-but-unsigned downgrade', () => {
     it('REFUSES a pinned connection whose encrypted handshake carries NO signature', () => {
       const { identity, exchange } = makeServerHandshake();
-      mockSavedConnection = { pinnedIdentityKey: identity.publicKey };
+      mockSavedConnection = { url: 'wss://paired.example.com', token: 'fixture-saved', pinnedIdentityKey: identity.publicKey };
 
       handleMessage(
         authOk({
@@ -452,7 +452,7 @@ describe('auth_ok encryption / identity refusal gate (#5635 / #5536 / #5614)', (
 
     it('CONNECTS a verified reconnect against the committed pin without refusing', () => {
       const { identity, exchange, serverKeySig } = makeServerHandshake();
-      mockSavedConnection = { pinnedIdentityKey: identity.publicKey };
+      mockSavedConnection = { url: 'wss://paired.example.com', token: 'fixture-saved', pinnedIdentityKey: identity.publicKey };
 
       handleMessage(
         authOk({
@@ -494,7 +494,7 @@ describe('auth_ok encryption / identity refusal gate (#5635 / #5536 / #5614)', (
   describe('silent refusal', () => {
     it('does NOT fire the Alert when ctx.silent is true, but still refuses', () => {
       const { identity } = makeServerHandshake();
-      mockSavedConnection = { pinnedIdentityKey: identity.publicKey };
+      mockSavedConnection = { url: 'wss://paired.example.com', token: 'fixture-saved', pinnedIdentityKey: identity.publicKey };
 
       handleMessage(authOk({ encryption: 'none' }), ctx({ silent: true }));
 

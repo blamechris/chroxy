@@ -1,4 +1,4 @@
-import { CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
+import { captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -700,12 +700,14 @@ function adoptReconnectToken(ctx: ConnectionContext, token: string): void {
   ctx.token = token;
 }
 
-function applySettledCredential(ctx: ConnectionContext, credential: SettledCredential | null): void {
+function applySettledCredential(ctx: ConnectionContext, credential: SettledCredential | null, rotation = false): void {
   if (!credential) return;
   clearHandshakeTimer();
   adoptReconnectToken(ctx, credential.token);
   useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, credential.token);
-  persistVerifiedConnection(ctx.url, credential.token, credential.pin);
+  ctx.savedConnection = persistVerifiedConnection(rotation ? ctx.savedConnection?.url ?? ctx.url : ctx.url, credential.token, credential.pin, ctx.savedConnection);
+  getStore().setState({ socket: ctx.socket });
+  useConnectionLifecycleStore.getState().setConnectionPhase('connected');
 }
 
 export function setConnectionContext(ctx: ConnectionContext | null): void {
@@ -715,6 +717,15 @@ export function setConnectionContext(ctx: ConnectionContext | null): void {
 export function getConnectionContext(): ConnectionContext | null {
   return _connectionContext;
 }
+
+function identityTargetFor(ctx: ConnectionContext) {
+  if (!ctx.identityTarget) {
+    ctx.identityTarget = captureConnectionIdentity(ctx.url, useConnectionLifecycleStore.getState().savedConnection, pendingPairingIdentityKey);
+    ctx.savedConnection = ctx.identityTarget.savedConnection;
+  }
+  return ctx.identityTarget;
+}
+
 
 // ---------------------------------------------------------------------------
 // Encryption state accessors
@@ -1619,30 +1630,41 @@ export type SavedConnectionExtras = Pick<
   'lanUrl' | 'lanVerified' | 'tunnelUrl' | 'pinnedIdentityKey'
 >;
 
+let connectionStorageWrite: Promise<void> | null = null;
+
+function serializeConnectionWrite(write: () => Promise<void>): Promise<void> {
+  const run = connectionStorageWrite ? connectionStorageWrite.then(write) : write();
+  connectionStorageWrite = run;
+  void run.then(() => { if (connectionStorageWrite === run) connectionStorageWrite = null; });
+  return run;
+}
+
 export async function saveConnection(
   url: string,
   token: string,
   extras?: SavedConnectionExtras,
 ): Promise<void> {
-  try {
-    await SecureStore.setItemAsync(STORAGE_KEY_URL, url);
-    await SecureStore.setItemAsync(STORAGE_KEY_TOKEN, token);
-    // Only persist a metadata blob when there's something to store; otherwise
-    // delete any stale one so a fresh server (no LAN) can't inherit old fields.
-    const meta: SavedConnectionExtras = {};
-    if (extras?.lanUrl) meta.lanUrl = extras.lanUrl;
-    if (extras?.lanVerified) meta.lanVerified = true;
-    if (extras?.tunnelUrl) meta.tunnelUrl = extras.tunnelUrl;
-    // #5536 — the pinned E2E identity travels in the same metadata blob.
-    if (extras?.pinnedIdentityKey) meta.pinnedIdentityKey = extras.pinnedIdentityKey;
-    if (Object.keys(meta).length > 0) {
-      await SecureStore.setItemAsync(STORAGE_KEY_LAN_META, JSON.stringify(meta));
-    } else {
-      await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
+  return serializeConnectionWrite(async () => {
+    try {
+      await SecureStore.setItemAsync(STORAGE_KEY_URL, url);
+      await SecureStore.setItemAsync(STORAGE_KEY_TOKEN, token);
+      // Only persist a metadata blob when there's something to store; otherwise
+      // delete any stale one so a fresh server (no LAN) can't inherit old fields.
+      const meta: SavedConnectionExtras = {};
+      if (extras?.lanUrl) meta.lanUrl = extras.lanUrl;
+      if (extras?.lanVerified) meta.lanVerified = true;
+      if (extras?.tunnelUrl) meta.tunnelUrl = extras.tunnelUrl;
+      // #5536 — the pinned E2E identity travels in the same metadata blob.
+      if (extras?.pinnedIdentityKey) meta.pinnedIdentityKey = extras.pinnedIdentityKey;
+      if (Object.keys(meta).length > 0) {
+        await SecureStore.setItemAsync(STORAGE_KEY_LAN_META, JSON.stringify(meta));
+      } else {
+        await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
+      }
+    } catch {
+      // Storage not available (e.g. Expo Go limitations)
     }
-  } catch {
-    // Storage not available (e.g. Expo Go limitations)
-  }
+  });
 }
 
 export async function loadConnection(): Promise<SavedConnection | null> {
@@ -1693,11 +1715,10 @@ export function persistVerifiedConnection(
   // pinned key on a pin-on-first-use; omit to preserve whatever the prior
   // record carried (every reconnect re-runs this and must not drop the pin).
   pinnedIdentityKey?: string | null,
-): void {
+  ownedConnection?: SavedConnection | null,
+): SavedConnection {
   const prev = useConnectionLifecycleStore.getState().savedConnection;
-  const base: SavedConnection = prev?.token === token && prev
-    ? prev
-    : { url: connectedUrl, token };
+  const base: SavedConnection = ownedConnection ?? (connectionMatchesEndpoint(prev, connectedUrl) ? prev! : { url: connectedUrl, token });
   const next = recordVerifiedLanCandidate(base, connectedUrl, token);
   // `url` tracks the last-dialed endpoint for backward compat / manual flows.
   next.url = connectedUrl;
@@ -1715,6 +1736,7 @@ export function persistVerifiedConnection(
     pinnedIdentityKey: next.pinnedIdentityKey,
   });
   useConnectionLifecycleStore.getState().setSavedConnection(next);
+  return next;
 }
 
 /**
@@ -1763,8 +1785,10 @@ export function applyRotatedTunnelUrl(newTunnelUrl: string): boolean {
     lanUrl: next.lanUrl,
     lanVerified: next.lanVerified,
     tunnelUrl: next.tunnelUrl,
+    pinnedIdentityKey: next.pinnedIdentityKey,
   });
   useConnectionLifecycleStore.getState().setSavedConnection(next);
+  if (_connectionContext?.token === next.token && connectionMatchesEndpoint(_connectionContext.savedConnection, prev.url)) _connectionContext.savedConnection = next;
   return true;
 }
 
@@ -1777,13 +1801,15 @@ export function applyRotatedTunnelUrl(newTunnelUrl: string): boolean {
  * to close the live socket + reset in-memory state.
  */
 export async function clearSavedCredentials(): Promise<void> {
-  try {
-    await SecureStore.deleteItemAsync(STORAGE_KEY_URL);
-    await SecureStore.deleteItemAsync(STORAGE_KEY_TOKEN);
-    await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
-  } catch {
-    // Storage not available
-  }
+  return serializeConnectionWrite(async () => {
+    try {
+      await SecureStore.deleteItemAsync(STORAGE_KEY_URL);
+      await SecureStore.deleteItemAsync(STORAGE_KEY_TOKEN);
+      await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
+    } catch {
+      // Storage not available
+    }
+  });
 }
 
 /**
@@ -1814,11 +1840,9 @@ function verifyServerIdentityOrRefuse(
   newIdentityKey: string | null = null,
   rotationCert: string | null = null,
 ): { refused: false; pinToPersist: string | null } | { refused: true } {
-  const saved = useConnectionLifecycleStore.getState().savedConnection;
-  const pinnedIdentityKey = saved?.pinnedIdentityKey ?? null;
+  const target = identityTargetFor(ctx);
   const decision = decideKeyPinWithPairingIdentity({
-    pinnedIdentityKey,
-    pairingIdentityKey: pendingPairingIdentityKey,
+    ...target,
     exchangePublicKey,
     serverKeySig,
     newIdentityKey,
@@ -1840,7 +1864,8 @@ function verifyServerIdentityOrRefuse(
   if (decision.action === 'connect') {
     // Verified against an existing pin, or an old/unpinned daemon — leave the
     // stored record's pin untouched.
-    return { refused: false, pinToPersist: null };
+    ctx.verifiedIdentityKey = effectiveConnectionIdentity(target, decision);
+    return { refused: false, pinToPersist: ctx.verifiedIdentityKey };
   }
   if (decision.action === 'pin-and-connect' || decision.action === 'rotate-pin') {
     // #5616 — TOFU first-use ('pin-and-connect') AND a forward-chained identity
@@ -1848,7 +1873,8 @@ function verifyServerIdentityOrRefuse(
     // both persist the offered identity as the new pin. Without the explicit
     // 'rotate-pin' arm a rotation would connect but drop the new pin
     // (pinToPersist=null), silently failing to chain it forward (#5978).
-    return { refused: false, pinToPersist: decision.identityKey };
+    ctx.verifiedIdentityKey = effectiveConnectionIdentity(target, decision);
+    return { refused: false, pinToPersist: ctx.verifiedIdentityKey };
   }
   // Exhaustiveness guard (#5978): adding a KeyPinDecision variant without
   // handling it above is a compile error here. At runtime (e.g. a version-skew
@@ -1892,10 +1918,8 @@ function applyIdentityRefusal(ctx: ConnectionContext, reason: string, message: s
  * @returns true to PROCEED, false when the connection was refused (caller breaks).
  */
 function enforceEncryptionGateOrRefuse(ctx: ConnectionContext, encryptionMode: string | null | undefined): boolean {
-  const saved = useConnectionLifecycleStore.getState().savedConnection;
   const gate = decodeEncryptionGate({
-    pinnedIdentityKey: saved?.pinnedIdentityKey ?? null,
-    pairingIdentityKey: pendingPairingIdentityKey,
+    ...identityTargetFor(ctx),
     encryptionMode,
   });
   if (gate.action === 'refuse') {
@@ -2064,7 +2088,6 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       }
       const connectedState = {
         viewingCachedSession: false,
-        socket: ctx.socket,
         claudeReady: false,
         streamingMessageId: null,
         myClientId: auth.myClientId, // kept for backward compat; canonical source is useMultiClientStore
@@ -2096,7 +2119,6 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       useMultiClientStore.getState().setMyClientId(auth.myClientId);
       useMultiClientStore.getState().setConnectedClients(clients);
       // Sync connection lifecycle store
-      useConnectionLifecycleStore.getState().setConnectionPhase('connected');
       useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, effectiveToken);
       // #5518 — surface the active transport on the connection-quality badge.
       // ws:// is the direct LAN path; wss:// is the tunnel.
@@ -2174,6 +2196,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         _ctx.pendingSalt = null;
         break;
       }
+      ctx.authReceived = true;
       // Initiate key exchange if server requires encryption
       if (auth.encryption === 'required') {
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
@@ -4003,8 +4026,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         // #5518: a token change invalidates any prior LAN verification (it was
         // earned by the old credential), so persistVerifiedConnection clears it.
         console.log('[ws] Server token rotated — updating stored token');
-        adoptReconnectToken(ctx, newToken);
-        persistVerifiedConnection(ctx.url, newToken);
+        applySettledCredential(ctx, credentialSettlements.get(ctx)?.rotate(newToken) ?? null, true);
       } else {
         // Legacy: server didn't include new token — disconnect and prompt re-auth
         console.log('[ws] Server token rotated — re-authentication required');

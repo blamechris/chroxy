@@ -921,6 +921,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     }, keyExchangeTimeoutMs)
   }
 
+  // Confirm the credential through the completed transport independently of catalogs.
+  if (extra.sessionToken && client.clientCapabilities?.has('paired_credential_confirmation_v1')) {
+    send(ws, { type: 'auth_bootstrap', credentialConfirmation: true, sessionToken: extra.sessionToken })
+  }
+
   send(ws, { type: 'server_mode', mode: serverMode })
   send(ws, { type: 'status', connected: true })
 
@@ -1101,7 +1106,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     const bootMcpPrompts = typeof entry?.session?.getMcpPromptCommands === 'function'
       ? entry.session.getMcpPromptCommands()
       : []
-    sendAuthBootstrap(ctx, ws, { cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId, mcpPrompts: bootMcpPrompts, sessionToken: extra.sessionToken })
+    sendAuthBootstrap(ctx, ws, { cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId, mcpPrompts: bootMcpPrompts, sessionToken: client.clientCapabilities?.has('paired_credential_confirmation_v1') ? undefined : extra.sessionToken })
     return
   }
 
@@ -1144,7 +1149,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   permissions.resendPendingPermissions(ws, client)
   // #5555: legacy single-session bootstrap burst — providers + slash commands
   // + agents for the cliSession's cwd (no provider scoping in legacy mode).
-  sendAuthBootstrap(ctx, ws, { cwd: cliSession?.cwd || null, provider: null, sessionId: null, sessionToken: extra.sessionToken })
+  sendAuthBootstrap(ctx, ws, { cwd: cliSession?.cwd || null, provider: null, sessionId: null, sessionToken: client.clientCapabilities?.has('paired_credential_confirmation_v1') ? undefined : extra.sessionToken })
 }
 
 /**

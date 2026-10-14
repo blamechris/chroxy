@@ -31,6 +31,15 @@ describe('credential settlement', () => {
     expect(state.confirm('fixture-issued', true)).toBeNull()
   })
 
+  it('rotation keeps the admitted effective pin and requires prior settlement', () => {
+    const state = paired()
+    expect(state.rotate('fixture-current')).toBeNull()
+    state.authenticate('fixture-current-pin')
+    state.confirm('fixture-issued', true)
+    expect(state.rotate('fixture-current')).toEqual({ token: 'fixture-current', pin: 'fixture-current-pin' })
+    expect(state.rotate(null)).toBeNull()
+  })
+
   it('supports the negotiated plaintext transport after authentication', () => {
     const state = paired('disabled')
     expect(state.confirm('fixture-issued', false)).toBeNull()

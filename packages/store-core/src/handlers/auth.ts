@@ -338,6 +338,7 @@ export function handleAuthBootstrap(
   tunnelUrl: string | null
   defaultProvider: string | null
   sessionToken: string | null
+  credentialConfirmation: boolean
 } {
   const providers = parseUnknownArrayField(msg, 'providers')
   const slashCommands = parseUnknownArrayField(msg, 'slashCommands')
@@ -353,7 +354,7 @@ export function handleAuthBootstrap(
   // as the discrete `provider_list` message — see handleProviderList.
   const defaultProvider = parseStringField(msg, 'defaultProvider')
   return { providers, slashCommands, agents, sessionId, tunnelUrl, defaultProvider,
-    sessionToken: parseStringField(msg, 'sessionToken') }
+    sessionToken: parseStringField(msg, 'sessionToken'), credentialConfirmation: msg.credentialConfirmation === true }
 }
 
 /**

@@ -1,4 +1,4 @@
-import { CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
+import { captureConnectionIdentity, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -888,17 +888,22 @@ const _adapters: PlatformAdapters = {
 // ---------------------------------------------------------------------------
 let _connectionContext: ConnectionContext | null = null;
 const credentialSettlements = new WeakMap<ConnectionContext, CredentialSettlement>();
-const credentialServerIds = new WeakMap<ConnectionContext, string | null>();
 
-function applySettledCredential(ctx: ConnectionContext, credential: SettledCredential | null): void {
+function applySettledCredential(ctx: ConnectionContext, credential: SettledCredential | null, rotation = false): void {
   if (!credential) return;
   clearHandshakeTimer();
   ctx.token = credential.token;
   const state = getStore().getState();
-  const serverId = credentialServerIds.get(ctx);
-  if (credentialSettlements.get(ctx)?.paired && serverId && serverId === state.activeServerId) state.updateServer(serverId, { token: credential.token });
-  saveConnection(ctx.url, credential.token);
-  getStore().setState({ apiToken: credential.token, savedConnection: { url: ctx.url, token: credential.token } });
+  const serverId = ctx.serverId;
+  const entry = state.serverRegistry?.find(s => s.id === serverId);
+  const shouldUpdate = credentialSettlements.get(ctx)?.paired || (entry && (entry.token !== credential.token || (credential.pin && entry.pinnedIdentityKey !== credential.pin)));
+  if (serverId && serverId === state.activeServerId && shouldUpdate) {
+    state.updateServer(serverId, { token: credential.token, ...(credential.pin ? { pinnedIdentityKey: credential.pin } : {}) });
+  }
+  const savedUrl = rotation ? entry?.wsUrl ?? ctx.savedConnection?.url ?? ctx.url : ctx.url;
+  ctx.savedConnection = { url: savedUrl, token: credential.token, ...(credential.pin ? { pinnedIdentityKey: credential.pin } : {}) };
+  saveConnection(savedUrl, credential.token);
+  getStore().setState({ connectionPhase: 'connected', socket: ctx.socket, apiToken: credential.token, savedConnection: ctx.savedConnection });
 }
 
 
@@ -909,6 +914,17 @@ export function setConnectionContext(ctx: ConnectionContext | null): void {
 export function getConnectionContext(): ConnectionContext | null {
   return _connectionContext;
 }
+
+function identityTargetFor(ctx: ConnectionContext) {
+  if (!ctx.identityTarget) {
+    const state = getStore().getState();
+    const entry = state.serverRegistry?.find(s => s.id === (ctx.serverId ?? state.activeServerId));
+    const saved = entry ? { url: entry.wsUrl, token: entry.token, pinnedIdentityKey: entry.pinnedIdentityKey } : state.savedConnection;
+    ctx.identityTarget = captureConnectionIdentity(ctx.url, saved, getPendingPairingIdentityKey());
+  }
+  return ctx.identityTarget;
+}
+
 
 // ---------------------------------------------------------------------------
 // Encryption state accessors
@@ -1859,7 +1875,7 @@ export function clearSavedCredentials(): void {
  * @returns true to PROCEED with the handshake, false to ABORT (already refused).
  */
 function verifyServerIdentityOrRefuse(
-  ctx: { socket: WebSocket; silent: boolean },
+  ctx: ConnectionContext,
   exchangePublicKey: string,
   serverKeySig: string | null,
   // #5616 — identity-rotation continuity cert from the handshake (auth_ok /
@@ -1870,15 +1886,9 @@ function verifyServerIdentityOrRefuse(
   newIdentityKey: string | null = null,
   rotationCert: string | null = null,
 ): boolean {
-  const state = getStore().getState();
-  const activeServerId = state.activeServerId;
-  const activeEntry = activeServerId
-    ? state.serverRegistry.find((s) => s.id === activeServerId)
-    : undefined;
-  const pinnedIdentityKey = activeEntry?.pinnedIdentityKey ?? null;
+  const target = identityTargetFor(ctx);
   const decision = decideKeyPinWithPairingIdentity({
-    pinnedIdentityKey,
-    pairingIdentityKey: getPendingPairingIdentityKey(),
+    ...target,
     exchangePublicKey,
     serverKeySig,
     newIdentityKey,
@@ -1888,19 +1898,7 @@ function verifyServerIdentityOrRefuse(
     applyIdentityRefusal(ctx, decision.reason, decision.message);
     return false;
   }
-  // Connect — persist the offered identity as the new pin, then clear the
-  // pairing identity. #5616 (#5978 parity with the app): BOTH TOFU first-use
-  // ('pin-and-connect') AND a forward-chained rotation ('rotate-pin', where the
-  // old pinned identity signed the new one) re-pin. Without the explicit
-  // 'rotate-pin' arm the dashboard would connect this session but DROP the new
-  // pin, so the next connect re-enters the handoff every time and the user is
-  // locked out once the cert stops being offered.
-  if (
-    (decision.action === 'pin-and-connect' || decision.action === 'rotate-pin') &&
-    activeServerId
-  ) {
-    getStore().getState().updateServer(activeServerId, { pinnedIdentityKey: decision.identityKey });
-  }
+  ctx.verifiedIdentityKey = effectiveConnectionIdentity(target, decision);
   setPendingPairingIdentityKey(null);
   return true;
 }
@@ -1914,7 +1912,7 @@ function verifyServerIdentityOrRefuse(
  * the auto-reconnect loop from immediately re-dialing a box we just refused.
  */
 function applyIdentityRefusal(
-  ctx: { socket: WebSocket; silent: boolean },
+  ctx: ConnectionContext,
   reason: string,
   message: string,
 ): void {
@@ -1943,16 +1941,11 @@ function applyIdentityRefusal(
  * @returns true to PROCEED, false when the connection was refused (caller breaks).
  */
 function enforceEncryptionGateOrRefuse(
-  ctx: { socket: WebSocket; silent: boolean },
+  ctx: ConnectionContext,
   encryptionMode: string | null | undefined,
 ): boolean {
-  const state = getStore().getState();
-  const activeEntry = state.activeServerId
-    ? state.serverRegistry.find((s) => s.id === state.activeServerId)
-    : undefined;
   const gate = decodeEncryptionGate({
-    pinnedIdentityKey: activeEntry?.pinnedIdentityKey ?? null,
-    pairingIdentityKey: getPendingPairingIdentityKey(),
+    ...identityTargetFor(ctx),
     encryptionMode,
   });
   if (gate.action === 'refuse') {
@@ -2008,7 +2001,8 @@ function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: Ms
   if (!credentialSettlements.get(_ctx)?.isSettled) return;
   const { token: newToken } = sharedTokenRotated(msg);
   if (newToken) {
-    // Server sent the new token — update URL query param for reconnection
+    applySettledCredential(_ctx, credentialSettlements.get(_ctx)?.rotate(newToken) ?? null, true);
+    // Update the URL's credential alongside the owned connection stores.
     console.log('[ws] Server token rotated — updating stored token');
     try {
       const url = new URL(window.location.href);
@@ -4766,7 +4760,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
       const settlement = new CredentialSettlement(ctx.token, auth, ctx.isPairing);
       credentialSettlements.set(ctx, settlement);
       if (!settlement.paired) clearHandshakeTimer();
-      credentialServerIds.set(ctx, get().activeServerId);
+      if (ctx.serverId === undefined) ctx.serverId = get().activeServerId;
       if (!settlement.supported) {
         clearHandshakeTimer();
         setPendingPairingIdentityKey(null);
@@ -4809,11 +4803,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
 
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
-        connectionPhase: 'connected' as const,
         viewingCachedSession: false,
         wsUrl: ctx.url,
         apiToken: effectiveToken,
-        socket: ctx.socket,
         claudeReady: false,
         serverMode: auth.serverMode,
         sessionCwd: auth.sessionCwd,
@@ -4969,6 +4961,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         _pendingSalt = null;
         break;
       }
+      ctx.authReceived = true;
 
       // Initiate key exchange if server requires encryption
       if (auth.encryption === 'required') {
@@ -5044,7 +5037,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         }
       }
       if (auth.encryption !== 'required' || _encryptionState) {
-        applySettledCredential(ctx, settlement.authenticate());
+        applySettledCredential(ctx, settlement.authenticate(ctx.verifiedIdentityKey));
       }
       break;
     }
@@ -5081,7 +5074,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
         // completion point can't leave a timer to fire spuriously. Idempotent.
         if (!credentialSettlements.get(ctx)?.paired) clearHandshakeTimer();
         console.log('[crypto] E2E encryption established');
-        applySettledCredential(ctx, credentialSettlements.get(ctx)?.authenticate() ?? null);
+        applySettledCredential(ctx, credentialSettlements.get(ctx)?.authenticate(ctx.verifiedIdentityKey) ?? null);
         // Now send the post-auth messages that were deferred. #5555: skip the
         // 3 list requests when the server advertised the auth_bootstrap
         // capability (the burst frame already carries that data, queued behind

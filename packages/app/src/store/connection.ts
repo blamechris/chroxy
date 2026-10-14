@@ -1,3 +1,4 @@
+import { reconnectConnectionIdentity, captureConnectionIdentity, type ConnectionIdentityTarget } from '@chroxy/store-core';
 /**
  * Connection store — Zustand store managing WebSocket connection,
  * session state, and all server communication.
@@ -114,6 +115,8 @@ import {
   setLastConnectedUrl,
   nextReconnectAttempt,
   pendingPairingId,
+  pendingPairingIdentityKey,
+  setPendingPairingIdentityKey,
   setPendingPairingId,
   resetReplayFlags,
   clearPermissionSplits,
@@ -1057,6 +1060,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     options?: {
       silent?: boolean;
       _retryCount?: number;
+      _pairingId?: string | null;
+      _identityTarget?: ConnectionIdentityTarget;
       // #5555 — a fresh `/health` result from connectAuto's endpoint selector.
       // When recent (≤ HEALTH_PRECHECK_MAX_AGE_MS) and `status: 'ok'`, connect()
       // skips its own redundant probe and opens the WS directly. Only ever
@@ -1067,6 +1072,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   ) => {
     const _retryCount = options?._retryCount ?? 0;
     const silent = options?.silent ?? false;
+    const pairingId = options?._pairingId ?? pendingPairingId;
+    const identityTarget = options?._identityTarget ?? captureConnectionIdentity(url, useConnectionLifecycleStore.getState().savedConnection, pendingPairingIdentityKey);
+    setPendingPairingId(null);
+    setPendingPairingIdentityKey(null);
     // Honor a precheck only on the first attempt (retries must re-probe), and
     // only when it's recent enough that the host's liveness hasn't gone stale.
     const HEALTH_PRECHECK_MAX_AGE_MS = 2000;
@@ -1240,7 +1249,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // #5597/#5537 — re-resolve the URL for the NEXT attempt so a mid-ladder
           // tunnel rotation, or the LAN→tunnel fallback at the threshold, is
           // dialed instead of the dead captured URL.
-          get().connect(resolveEndpointForAttempt(url, token, nextAttempt), token, { silent, _retryCount: nextAttempt });
+          get().connect(resolveEndpointForAttempt(url, token, nextAttempt), token, { silent, _retryCount: nextAttempt, _pairingId: pairingId, _identityTarget: identityTarget });
         }, delayMs);
       },
       onRestartGaveUp: () => {
@@ -1315,7 +1324,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     liveSocket = socket;
     // The context belongs to this socket. Successful auth/pairing and rotation
     // update its token, so reconnect never borrows another daemon's credential.
-    const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
+    const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket, isPairing: !!pairingId, identityTarget, savedConnection: identityTarget.savedConnection };
 
     // #3624 (ported from dashboard) — per-socket reconnect scheduler for both
     // onclose and onerror. A single transport drop fires `error` → `close` on
@@ -1348,7 +1357,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // dialed. The reconnect re-enters connect() with _retryCount=0, so the
       // inner health-check ladder's resolveEndpoint then owns the #5537 LAN→
       // tunnel fast-fallback (keyed on the per-attempt index).
-      reconnect: () => get().connect(resolveCurrentEndpointUrl(socketCtx.url, socketCtx.token), socketCtx.token),
+      reconnect: () => get().connect(resolveCurrentEndpointUrl(socketCtx.url, socketCtx.token), socketCtx.token, { _identityTarget: reconnectConnectionIdentity(identityTarget, socketCtx.verifiedIdentityKey, socketCtx.savedConnection) }),
       isStale: () => myAttemptId !== connectionAttemptId,
       retryDelays: CONNECT_RETRY_DELAYS,
       // #5725 (#5698) — stop the reconnect ladder after RECONNECT_MAX_RUNG rungs
@@ -1375,7 +1384,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       void getDeviceId().then((deviceId) => {
         if (socket.readyState === WebSocket.OPEN) {
           // Use pairing flow when pendingPairingId is set (from QR scan)
-          const pairId = pendingPairingId;
+          const pairId = pairingId;
           if (pairId) {
             socketCtx.isPairing = true;
             setPendingPairingId(null); // Clear after use (one-time)
@@ -1519,7 +1528,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // cancel the CURRENT attempt's timer. Idempotent if already cleared.
       clearHandshakeTimer();
 
-      const wasConnected = useConnectionLifecycleStore.getState().connectionPhase === 'connected';
+      const wasConnected = !useConnectionLifecycleStore.getState().userDisconnected && (useConnectionLifecycleStore.getState().connectionPhase === 'connected' || socketCtx.authReceived === true);
       set({ socket: null });
 
       // #7456 — the replay window and its live-arrival ledger are

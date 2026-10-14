@@ -41,7 +41,7 @@ class MockWebSocket {
 
 const { useConnectionStore } = await import('./connection')
 const { getEncryptionState, getConnectionContext, prepareEagerKeyExchange } = await import('./message-handler')
-const { createKeyPair, createSigningKeyPair, signExchangeKey, encrypt, DIRECTION_SERVER } = await import('@chroxy/store-core/crypto')
+const { createKeyPair, createSigningKeyPair, signExchangeKey, encrypt, decrypt, DIRECTION_CLIENT, DIRECTION_SERVER } = await import('@chroxy/store-core/crypto')
 
 /** Wait until a WebSocket for `urlPart` exists, then return it. */
 async function socketFor(urlPart: string): Promise<MockWebSocket> {
@@ -180,3 +180,88 @@ it('identity refusal leaves the paired credential unpersisted', async () => {
   expect(useConnectionStore.getState().serverRegistry[0]?.token).toBe('')
   expect(useConnectionStore.getState().savedConnection?.token).not.toBe('fixture-issued-token')
 })
+
+it('updates admitted rotation details together for a registry socket', async () => {
+  const entry = useConnectionStore.getState().addServer('Remote', 'wss://rotate.example.test/ws', 'fixture-original');
+  useConnectionStore.getState().connectToServer(entry.id);
+  const ws = await socketFor('rotate.example.test');
+  ws.onopen?.();
+  receive(ws, { type: 'auth_ok', encryption: 'disabled' });
+  receive(ws, { type: 'token_rotated', token: 'fixture-updated' });
+  expect(getConnectionContext()?.token).toBe('fixture-updated');
+  expect(useConnectionStore.getState().apiToken).toBe('fixture-updated');
+  expect(useConnectionStore.getState().savedConnection?.token).toBe('fixture-updated');
+  expect(useConnectionStore.getState().serverRegistry.find(s => s.id === entry.id)?.token).toBe('fixture-updated');
+});
+
+it('publishes connected only after discrete credential admission', async () => {
+  useConnectionStore.getState().pairServer('Remote', 'wss://ready.example.test/ws', 'PAIR-1');
+  const ws = await socketFor('ready.example.test');
+  ws.onopen?.();
+  receive(ws, { type: 'auth_ok', encryption: 'required', capabilities: { pairedCredentialConfirmation: true } });
+  expect(useConnectionStore.getState().connectionPhase).not.toBe('connected');
+  expect(useConnectionStore.getState().socket).toBeNull();
+  useConnectionStore.getState().fetchConversationHistory();
+  expect(ws.sent.map(raw => JSON.parse(raw).type)).not.toContain('list_conversations');
+  const exchange = createKeyPair();
+  receive(ws, { type: 'key_exchange_ok', publicKey: exchange.publicKey });
+  expect(useConnectionStore.getState().connectionPhase).not.toBe('connected');
+  expect(useConnectionStore.getState().socket).toBeNull();
+  receiveEncrypted(ws, { type: 'auth_bootstrap', credentialConfirmation: true, sessionToken: 'fixture-issued' });
+  expect(useConnectionStore.getState().connectionPhase).toBe('connected');
+  useConnectionStore.getState().fetchConversationHistory();
+  const envelope = JSON.parse(ws.sent[ws.sent.length - 1]!);
+  expect(envelope.type).toBe('encrypted');
+  expect(decrypt(envelope, getEncryptionState()!.sharedKey, envelope.n, DIRECTION_CLIENT).type).toBe('list_conversations');
+});
+
+it.each([false, true])('automatic reconnect uses the admitted rotation for registry=%s', async (registry) => {
+  const url = registry ? 'wss://scheduled.example.test/ws' : 'ws://localhost:8765/ws';
+  let serverId: string | null = null;
+  if (registry) {
+    const entry = useConnectionStore.getState().addServer('Remote', url, 'fixture-original');
+    serverId = entry.id;
+    useConnectionStore.getState().connectToServer(entry.id);
+  } else {
+    useConnectionStore.getState().connect(url, 'fixture-original');
+  }
+  const ws = await socketFor(registry ? 'scheduled.example.test' : 'localhost');
+  ws.onopen?.();
+  vi.useFakeTimers();
+  const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+  try {
+    receive(ws, { type: 'auth_ok', encryption: 'disabled' });
+    receive(ws, { type: 'token_rotated', token: 'fixture-updated' });
+    expect(useConnectionStore.getState().savedConnection?.token).toBe('fixture-updated');
+    if (serverId) expect(useConnectionStore.getState().serverRegistry.find(s => s.id === serverId)?.token).toBe('fixture-updated');
+    ws.readyState = 3;
+    ws.onclose?.({ code: 1006 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    const next = MockWebSocket.instances[1]!;
+    next.onopen?.();
+    expect(JSON.parse(next.sent[0]!).token).toBe('fixture-updated');
+  } finally {
+    useConnectionStore.getState().disconnect();
+    random.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it('keeps a superseded socket from changing the current owned credentials', async () => {
+  const original = useConnectionStore.getState().addServer('Original', 'wss://original.example.test/ws', 'fixture-original');
+  useConnectionStore.getState().connectToServer(original.id);
+  const old = await socketFor('original.example.test');
+  old.onopen?.();
+  receive(old, { type: 'auth_ok', encryption: 'disabled' });
+  const callback = old.onmessage;
+  const current = useConnectionStore.getState().addServer('Current', 'wss://current.example.test/ws', 'fixture-current');
+  useConnectionStore.getState().connectToServer(current.id);
+  const socket = await socketFor('current.example.test');
+  socket.onopen?.();
+  receive(socket, { type: 'auth_ok', encryption: 'disabled' });
+  callback?.({ data: JSON.stringify({ type: 'token_rotated', token: 'fixture-later-original' }) });
+  expect(useConnectionStore.getState().apiToken).toBe('fixture-current');
+  expect(useConnectionStore.getState().serverRegistry.find(s => s.id === original.id)?.token).toBe('fixture-original');
+  expect(useConnectionStore.getState().serverRegistry.find(s => s.id === current.id)?.token).toBe('fixture-current');
+});

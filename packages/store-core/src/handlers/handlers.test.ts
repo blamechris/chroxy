@@ -3979,7 +3979,7 @@ describe('handleAuthBootstrap', () => {
     const agents = [{ name: 'reviewer', source: 'project' }]
     expect(
       handleAuthBootstrap({ type: 'auth_bootstrap', providers, slashCommands, agents, sessionId: 'sess-1' }),
-    ).toEqual({ providers, slashCommands, agents, sessionId: 'sess-1', tunnelUrl: null, sessionToken: null, defaultProvider: null })
+    ).toEqual({ providers, slashCommands, agents, sessionId: 'sess-1', tunnelUrl: null, credentialConfirmation: false, sessionToken: null, defaultProvider: null })
   })
 
   it('defaults each missing list to [] and sessionId to null', () => {
@@ -3989,14 +3989,14 @@ describe('handleAuthBootstrap', () => {
       agents: [],
       sessionId: null,
       tunnelUrl: null,
-      sessionToken: null, defaultProvider: null,
+      credentialConfirmation: false, sessionToken: null, defaultProvider: null,
     })
   })
 
   it('coerces non-array lists to [] independently (partial-compute tolerance)', () => {
     expect(
       handleAuthBootstrap({ providers: [{ name: 'x' }], slashCommands: 'oops', agents: null }),
-    ).toEqual({ providers: [{ name: 'x' }], slashCommands: [], agents: [], sessionId: null, tunnelUrl: null, sessionToken: null, defaultProvider: null })
+    ).toEqual({ providers: [{ name: 'x' }], slashCommands: [], agents: [], sessionId: null, tunnelUrl: null, credentialConfirmation: false, sessionToken: null, defaultProvider: null })
   })
 
   // #8151 (C3) — same field as handleProviderList's defaultProvider.

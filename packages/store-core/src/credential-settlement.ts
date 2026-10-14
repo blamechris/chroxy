@@ -35,6 +35,10 @@ export class CredentialSettlement {
     return this.admit(token)
   }
 
+  rotate(token: string | null): SettledCredential | null {
+    return this.settled && token ? { token, pin: this.pin } : null
+  }
+
   private admit(token: string): SettledCredential | null {
     if (this.settled) return null
     this.settled = true
