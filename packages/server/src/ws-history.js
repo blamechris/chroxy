@@ -827,7 +827,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     maxProtocolVersion: protocolVersion,
     webFeatures: webTaskManager.getFeatureStatus(),
     features,
-    capabilities,
+    capabilities: { ...capabilities, ...(extra.sessionToken ? { pairedCredentialConfirmation: true } : {}) },
     // #5555 — fold the static permission-mode enum into auth_ok so a new
     // client never has to wait for (or react to) the discrete
     // `available_permission_modes` burst frame. The discrete frame is still
@@ -865,6 +865,8 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       ? { newIdentityKey: serverIdentity.publicKey, rotationCert: serverIdentity.rotationCert }
       : {}),
     ...extra,
+    ...(extra.sessionToken && client.clientCapabilities?.has('paired_credential_confirmation_v1')
+      ? { sessionToken: undefined } : {}),
   })
 
   // #5555: now that the plaintext auth_ok (carrying serverPublicKey) has been
@@ -1099,7 +1101,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     const bootMcpPrompts = typeof entry?.session?.getMcpPromptCommands === 'function'
       ? entry.session.getMcpPromptCommands()
       : []
-    sendAuthBootstrap(ctx, ws, { cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId, mcpPrompts: bootMcpPrompts })
+    sendAuthBootstrap(ctx, ws, { cwd: entry?.cwd || null, provider: activeProvider, sessionId: activeId, mcpPrompts: bootMcpPrompts, sessionToken: extra.sessionToken })
     return
   }
 
@@ -1142,7 +1144,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   permissions.resendPendingPermissions(ws, client)
   // #5555: legacy single-session bootstrap burst — providers + slash commands
   // + agents for the cliSession's cwd (no provider scoping in legacy mode).
-  sendAuthBootstrap(ctx, ws, { cwd: cliSession?.cwd || null, provider: null, sessionId: null })
+  sendAuthBootstrap(ctx, ws, { cwd: cliSession?.cwd || null, provider: null, sessionId: null, sessionToken: extra.sessionToken })
 }
 
 /**
@@ -1226,6 +1228,7 @@ function sendAuthBootstrap(ctx, ws, info = {}) {
     if (ws.readyState !== 1) return
     send(ws, {
       type: 'auth_bootstrap',
+      ...(info.sessionToken ? { sessionToken: info.sessionToken } : {}),
       providers,
       // #8151 (C3) — same field/derivation as list_providers' response; see
       // handleListProviders (settings-handlers.js).

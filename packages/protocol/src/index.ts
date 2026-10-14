@@ -41,8 +41,10 @@ export const CLIENT_CAPABILITIES = {
   // replayed `user_question` (a newer question replaced it) and shows it as replaced.
   // A client without it is not sent that question, because an older build would
   // render it as a live, answerable card and then as "(resolved)".
-  desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1'] as const,
-  mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1'] as const,
+  // `paired_credential_confirmation_v1`: accept newly paired credentials
+  // from the completed transport's auth_bootstrap frame.
+  desktop: ['console', 'environment_panel', 'agent_monitor', 'diff_viewer', 'voice_input', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'paired_credential_confirmation_v1'] as const,
+  mobile: ['push_notifications', 'biometric_lock', 'voice_input', 'live_activity', 'input_context_v1', 'permission_outcome_stopped_v1', 'history_error_replay_v1', 'history_thinking_replay_v1', 'history_question_superseded_v1', 'paired_credential_confirmation_v1'] as const,
 } as const
 
 /**

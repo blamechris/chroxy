@@ -3125,6 +3125,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // token auth. A reconnect carries no pairing id, so it auths with the
         // session token written back to the registry in auth_ok.
         if (pairingId) {
+          socketCtx.isPairing = true;
           socket.send(JSON.stringify({ type: 'pair', pairingId, ...common }));
         } else {
           // #5555 (eager key exchange) — generate this connection's ephemeral
@@ -3187,6 +3188,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       } catch {
         return;
       }
+      let encryptedFrame = false;
       // Decrypt incoming encrypted messages
       const encState = getEncryptionState();
       if (msg.type === 'encrypted' && encState) {
@@ -3198,6 +3200,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         try {
           msg = decrypt(msg as EncryptedEnvelope, encState.sharedKey, encState.recvNonce, DIRECTION_SERVER);
           setEncryptionState({ ...encState, recvNonce: encState.recvNonce + 1 });
+          encryptedFrame = true;
         } catch (err) {
           console.error('[crypto] Decryption failed:', err);
           socket.close();
@@ -3220,7 +3223,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         socket.close();
         return;
       }
-      handleMessage(msg, socketCtx);
+      handleMessage(msg, socketCtx, encryptedFrame);
     };
 
     socket.onclose = (event?: CloseEvent) => {

@@ -118,6 +118,9 @@ beforeEach(() => {
 afterEach(() => { ws.restore(); });
 
 function frame(socket: FakeSocket, message: Record<string, unknown>): void {
+  if (message.type === 'auth_ok' && message.sessionToken && !message.capabilities) {
+    message = { ...message, capabilities: { pairedCredentialConfirmation: true } };
+  }
   socket.onmessage?.({ data: JSON.stringify(message) });
 }
 async function open(socket: FakeSocket): Promise<void> {
@@ -142,6 +145,7 @@ function sent(socket: FakeSocket, type: string): Record<string, unknown> {
 }
 async function admit(socket: FakeSocket, sessionToken?: string): Promise<void> {
   frame(socket, { type: 'auth_ok', encryption: 'disabled', clientId: 'fixture-client', serverMode: 'cli', ...(sessionToken ? { sessionToken } : {}) });
+  if (sessionToken) frame(socket, { type: 'auth_bootstrap', sessionToken });
   await flushPromises();
 }
 async function reconnect(socket: FakeSocket): Promise<FakeSocket> {
@@ -284,6 +288,9 @@ it('adopts the paired token after a verified discrete key exchange', async () =>
   expect(context?.token).toBe('');
   frame(socket, { type: 'key_exchange_ok', publicKey: exchange.publicKey, serverKeySig: exchange.serverKeySig });
   expect(getEncryptionState()).not.toBeNull();
+  expect(context?.token).toBe('');
+  expect(useConnectionLifecycleStore.getState().savedConnection).toBeNull();
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED });
   expect(context?.token).toBe(ISSUED);
   expect(useConnectionLifecycleStore.getState().savedConnection?.pinnedIdentityKey).toBe(exchange.identityKey);
   encryptedFrame(socket, { type: 'token_rotated', token: 'fixture-encrypted-rotation' });
@@ -298,6 +305,8 @@ it('verified eager auth adopts the server-issued token', async () => {
   frame(socket, { type: 'auth_ok', encryption: 'required', sessionToken: ISSUED,
     serverPublicKey: exchange.publicKey, serverKeySig: exchange.serverKeySig });
   expect(getEncryptionState()).not.toBeNull();
+  expect(getConnectionContext()?.token).toBe(MANUAL);
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED });
   const next = await reconnect(socket);
   expect(sent(next, 'auth').token).toBe(ISSUED);
 });
@@ -368,6 +377,7 @@ it('discrete completion uses this socket token even if another saved record appe
     savedConnection: { url: 'wss://other-daemon.example.test/ws', token: 'fixture-other-daemon-token' },
   });
   frame(socket, { type: 'key_exchange_ok', publicKey: exchange.publicKey, serverKeySig: exchange.serverKeySig });
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED });
   expect(getConnectionContext()?.token).toBe(ISSUED);
   expect(useConnectionLifecycleStore.getState().savedConnection?.token).toBe(ISSUED);
   const next = await reconnect(socket);
@@ -384,4 +394,47 @@ it('a missing discrete exchange key does not admit the proposed credential', asy
   expect(getConnectionContext()?.token).toBe(MANUAL);
   expect(getEncryptionState()).toBeNull();
   expect(socket.close).toHaveBeenCalled();
+});
+
+it('waits for the post-auth credential before writing paired connection details', async () => {
+  setPendingPairingId('fixture-pair-id');
+  const socket = await dial('');
+  (SecureStore.setItemAsync as jest.Mock).mockClear();
+  frame(socket, { type: 'auth_ok', encryption: 'disabled', sessionToken: ISSUED,
+    capabilities: { pairedCredentialConfirmation: true } });
+  expect(getConnectionContext()?.token).toBe('');
+  expect(useConnectionLifecycleStore.getState().apiToken).toBe('');
+  expect(useConnectionLifecycleStore.getState().savedConnection).toBeNull();
+  expect(SecureStore.setItemAsync).not.toHaveBeenCalled();
+  frame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED });
+  expect(getConnectionContext()?.token).toBe(ISSUED);
+  expect(useConnectionLifecycleStore.getState().apiToken).toBe(ISSUED);
+  expect(useConnectionLifecycleStore.getState().savedConnection?.token).toBe(ISSUED);
+});
+
+it('an older server pairing response refuses without writing credentials', async () => {
+  setPendingPairingId('fixture-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'disabled', sessionToken: ISSUED, capabilities: {} });
+  expect(socket.close).toHaveBeenCalled();
+  expect(getConnectionContext()?.token).toBe('');
+  expect(useConnectionLifecycleStore.getState().savedConnection).toBeNull();
+  expect(useConnectionLifecycleStore.getState().userDisconnected).toBe(true);
+});
+
+it('requires an encrypted post-auth credential after the discrete handshake', async () => {
+  const exchange = signedExchange();
+  setPendingPairingIdentityKey(exchange.identityKey);
+  setPendingPairingId('fixture-pair-id');
+  const socket = await dial('');
+  frame(socket, { type: 'auth_ok', encryption: 'required', sessionToken: ISSUED });
+  frame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED });
+  expect(getConnectionContext()?.token).toBe('');
+  expect(useConnectionLifecycleStore.getState().savedConnection).toBeNull();
+  frame(socket, { type: 'key_exchange_ok', publicKey: exchange.publicKey, serverKeySig: exchange.serverKeySig });
+  expect(getConnectionContext()?.token).toBe('');
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: ISSUED });
+  expect(getConnectionContext()?.token).toBe(ISSUED);
+  encryptedFrame(socket, { type: 'auth_bootstrap', sessionToken: 'fixture-later-bootstrap' });
+  expect(getConnectionContext()?.token).toBe(ISSUED);
 });

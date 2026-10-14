@@ -73,6 +73,8 @@ export type ConnectionPhase =
 
 /** Context captured from connect() closure for use by the extracted handleMessage(). */
 export interface ConnectionContext {
+  /** This socket sent a one-use pairing request. */
+  isPairing?: boolean;
   url: string;
   token: string;
   isReconnect: boolean;

@@ -1,3 +1,4 @@
+import { CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -693,15 +694,18 @@ export function _testClearPendingPermissionModeRequests(): void {
 // Connection context (set by connect(), read by handleMessage)
 // ---------------------------------------------------------------------------
 let _connectionContext: ConnectionContext | null = null;
-// A discrete auth response is not enough to adopt its reconnect credential:
-// wait for this socket's identity verification and key exchange to succeed.
-const pendingAuthTokens = new WeakMap<ConnectionContext, string>();
-const verifiedConnections = new WeakSet<ConnectionContext>();
+const credentialSettlements = new WeakMap<ConnectionContext, CredentialSettlement>();
 
 function adoptReconnectToken(ctx: ConnectionContext, token: string): void {
   ctx.token = token;
-  pendingAuthTokens.delete(ctx);
-  verifiedConnections.add(ctx);
+}
+
+function applySettledCredential(ctx: ConnectionContext, credential: SettledCredential | null): void {
+  if (!credential) return;
+  clearHandshakeTimer();
+  adoptReconnectToken(ctx, credential.token);
+  useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, credential.token);
+  persistVerifiedConnection(ctx.url, credential.token, credential.pin);
 }
 
 export function setConnectionContext(ctx: ConnectionContext | null): void {
@@ -1925,7 +1929,7 @@ function endQuestionCard(toolUseId: string, kind: 'superseded' | 'notDelivered',
  * module-level helpers (updateSession, updateActiveSession, nextMessageId, etc).
  * The few variables that were closured in connect() are accessed via _connectionContext.
  */
-export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
+export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext, encryptedFrame = false): void {
   // #7519 — one dispatched frame, one provenance scope. Every append the frame
   // causes (through ANY handler, including ones added later) is recorded by
   // `updateSession`'s observation hook against this frame's `historySeq`, so the
@@ -1939,13 +1943,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // racer #7420/#7492 exist to protect.
   beginReplayFrame(raw);
   try {
-    dispatchFrame(raw, ctxOverride);
+    dispatchFrame(raw, ctxOverride, encryptedFrame);
   } finally {
     endReplayFrame();
   }
 }
 
-function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
+function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedFrame = false): void {
   const ctx = ctxOverride ?? _connectionContext;
   if (!ctx) return;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
@@ -2004,6 +2008,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
 
   // #5556 — shared dispatch table first. A hit handles the message and returns;
   // a miss falls through to the switch below, keeping migration incremental.
+  if (msg.type === 'auth_bootstrap') {
+    applySettledCredential(ctx, credentialSettlements.get(ctx)?.confirm(handleAuthBootstrap(msg).sessionToken, encryptedFrame) ?? null);
+  }
+
   if (runDispatch(_dispatchTable, msg, _dispatchAdapter)) return;
 
   switch (msg.type) {
@@ -2012,11 +2020,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       return;
 
     case 'auth_ok': {
-      // #5962 (#5721 parity) — auth_ok is the authoritative handshake-complete
-      // signal; clear the handshake timer so a completed handshake can't fire it.
-      // Eager-encryption and no-encryption connects never send key_exchange, so
-      // this is the single authoritative clear (key_exchange_ok clears defensively).
-      clearHandshakeTimer();
+      // Direct auth completes here; pairing keeps its timeout until the
+      // post-handshake bootstrap credential has been admitted.
       // Reset replay flags — fresh auth means clean slate (#4512/#7497: clear
       // every per-session replay window so a reconnect doesn't leave a stale
       // one gating future activity bumps; `resetReplayReconcile` below IS that
@@ -2040,8 +2045,23 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       const authServerMode: 'cli' | null = auth.serverMode;
       const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
-      // If server provided a sessionToken (via pairing), use it for future auth
-      const effectiveToken = auth.sessionToken ?? ctx.token;
+      // Keep the current credential until the post-auth bootstrap settles pairing.
+      const effectiveToken = ctx.token;
+      const settlement = new CredentialSettlement(ctx.token, auth, ctx.isPairing);
+      credentialSettlements.set(ctx, settlement);
+      if (!settlement.paired) clearHandshakeTimer();
+      if (!settlement.supported) {
+        clearHandshakeTimer();
+        setPendingPairingIdentityKey(null);
+        useConnectionLifecycleStore.getState().setUserDisconnected(true);
+        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        useConnectionLifecycleStore.getState().setConnectionError('This server must be updated before pairing this device.', 0);
+        _ctx.pendingKeyPair = null;
+        _ctx.pendingSalt = null;
+        set({ socket: null });
+        ctx.socket.close();
+        break;
+      }
       const connectedState = {
         viewingCachedSession: false,
         socket: ctx.socket,
@@ -2237,12 +2257,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // #5536: eagerPinToPersist carries a pin-on-first-use captured this
       // handshake (null on the discrete path / reconnect — that pin is written
       // in key_exchange_ok). Null leaves the existing record's pin intact.
-      if (auth.encryption === 'required' && !_ctx.encryptionState) {
-        pendingAuthTokens.set(ctx, effectiveToken);
-      } else {
-        adoptReconnectToken(ctx, effectiveToken);
+      if (auth.encryption !== 'required' || _ctx.encryptionState) {
+        applySettledCredential(ctx, settlement.authenticate(eagerPinToPersist));
       }
-      persistVerifiedConnection(ctx.url, effectiveToken, eagerPinToPersist);
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
       break;
@@ -2253,7 +2270,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // timer (it precedes the discrete key-exchange round-trip), but clear again
       // so a future reordering that makes the encryption sub-handshake the real
       // completion point can't leave a timer to fire spuriously. Idempotent.
-      clearHandshakeTimer();
+      if (!credentialSettlements.get(ctx)?.paired) clearHandshakeTimer();
       if (_ctx.pendingKeyPair) {
         const { publicKey: serverPublicKey, serverKeySig, newIdentityKey, rotationCert } = sharedKeyExchangeOk(msg);
         if (!serverPublicKey) {
@@ -2282,12 +2299,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         _ctx.pendingKeyPair = null;
         _ctx.pendingSalt = null;
         console.log('[crypto] E2E encryption established');
-        adoptReconnectToken(ctx, pendingAuthTokens.get(ctx) ?? ctx.token);
-        // #5536 — persist the pin with the credential admitted by THIS socket,
-        // even if another saved connection was written during the handshake.
-        if (verdict.pinToPersist) {
-          persistVerifiedConnection(ctx.url, ctx.token, verdict.pinToPersist);
-        }
+        applySettledCredential(ctx, credentialSettlements.get(ctx)?.authenticate(verdict.pinToPersist) ?? null);
         // Now send the post-auth messages that were deferred. #5555: skip the
         // 3 list requests when the server advertised the auth_bootstrap
         // capability (the burst frame already carries that data, queued behind
@@ -3985,12 +3997,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // Token parse shared via store-core (#5454); persistence/re-auth side
       // effects stay platform-specific.
       const { token: newToken } = sharedTokenRotated(msg);
+      if (!credentialSettlements.get(ctx)?.isSettled) break;
       if (newToken) {
         // Server sent the new token — update stored credentials seamlessly.
         // #5518: a token change invalidates any prior LAN verification (it was
         // earned by the old credential), so persistVerifiedConnection clears it.
         console.log('[ws] Server token rotated — updating stored token');
-        if (verifiedConnections.has(ctx)) adoptReconnectToken(ctx, newToken);
+        adoptReconnectToken(ctx, newToken);
         persistVerifiedConnection(ctx.url, newToken);
       } else {
         // Legacy: server didn't include new token — disconnect and prompt re-auth

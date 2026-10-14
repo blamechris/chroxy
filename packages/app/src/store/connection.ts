@@ -1377,6 +1377,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // Use pairing flow when pendingPairingId is set (from QR scan)
           const pairId = pendingPairingId;
           if (pairId) {
+            socketCtx.isPairing = true;
             setPendingPairingId(null); // Clear after use (one-time)
             socket.send(JSON.stringify({
               type: 'pair',
@@ -1469,6 +1470,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       } catch {
         return;
       }
+      let encryptedFrame = false;
       // Decrypt incoming encrypted messages
       const encState = getEncryptionState();
       if (msg.type === 'encrypted' && encState) {
@@ -1480,6 +1482,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         try {
           msg = decrypt(msg as EncryptedEnvelope, encState.sharedKey, encState.recvNonce, DIRECTION_SERVER);
           setEncryptionState({ ...encState, recvNonce: encState.recvNonce + 1 });
+          encryptedFrame = true;
         } catch (err) {
           console.error('[crypto] Decryption failed:', err);
           socket.close();
@@ -1502,7 +1505,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         socket.close();
         return;
       }
-      handleMessage(msg, socketCtx);
+      handleMessage(msg, socketCtx, encryptedFrame);
     };
 
     socket.onclose = (event: CloseEvent) => {

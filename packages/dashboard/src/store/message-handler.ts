@@ -1,3 +1,4 @@
+import { CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -886,6 +887,20 @@ const _adapters: PlatformAdapters = {
 // Connection context (set by connect(), read by handleMessage)
 // ---------------------------------------------------------------------------
 let _connectionContext: ConnectionContext | null = null;
+const credentialSettlements = new WeakMap<ConnectionContext, CredentialSettlement>();
+const credentialServerIds = new WeakMap<ConnectionContext, string | null>();
+
+function applySettledCredential(ctx: ConnectionContext, credential: SettledCredential | null): void {
+  if (!credential) return;
+  clearHandshakeTimer();
+  ctx.token = credential.token;
+  const state = getStore().getState();
+  const serverId = credentialServerIds.get(ctx);
+  if (credentialSettlements.get(ctx)?.paired && serverId && serverId === state.activeServerId) state.updateServer(serverId, { token: credential.token });
+  saveConnection(ctx.url, credential.token);
+  getStore().setState({ apiToken: credential.token, savedConnection: { url: ctx.url, token: credential.token } });
+}
+
 
 export function setConnectionContext(ctx: ConnectionContext | null): void {
   _connectionContext = ctx;
@@ -1990,6 +2005,7 @@ function handleTerminalSize(msg: Record<string, unknown>, get: MsgGet, _set: Msg
 function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   // Token parse shared via store-core (#5454); the URL-rewrite side effect
   // stays dashboard-specific.
+  if (!credentialSettlements.get(_ctx)?.isSettled) return;
   const { token: newToken } = sharedTokenRotated(msg);
   if (newToken) {
     // Server sent the new token — update URL query param for reconnection
@@ -4605,7 +4621,7 @@ const HANDLERS: Record<string, Handler> = {
  * module-level helpers (updateSession, updateActiveSession, nextMessageId, etc).
  * The few variables that were closured in connect() are accessed via _connectionContext.
  */
-export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
+export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext, encryptedFrame = false): void {
   // #7519 — one dispatched frame, one provenance scope. Every append the frame
   // causes (through ANY handler, including ones added later) is recorded by
   // `updateSession`'s observation hook against this frame's `historySeq`, so the
@@ -4619,13 +4635,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // racer #7420/#7492 exist to protect.
   beginReplayFrame(raw);
   try {
-    dispatchFrame(raw, ctxOverride);
+    dispatchFrame(raw, ctxOverride, encryptedFrame);
   } finally {
     endReplayFrame();
   }
 }
 
-function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
+function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedFrame = false): void {
   const ctx = ctxOverride ?? _connectionContext;
   if (!ctx) return;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
@@ -4708,6 +4724,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
   // #5556 — shared dispatch table first. A hit handles the message and
   // returns; a miss falls through to the dashboard's own HANDLERS map +
   // switch below, keeping migration incremental.
+  if (msg.type === 'auth_bootstrap') {
+    applySettledCredential(ctx, credentialSettlements.get(ctx)?.confirm(handleAuthBootstrap(msg).sessionToken, encryptedFrame) ?? null);
+  }
+
   if (runDispatch(_dispatchTable, msg, _dispatchAdapter)) return;
 
   // Dispatch to the handler map next — extracted, self-contained cases.
@@ -4732,13 +4752,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // reset the close/error-path backoff ladder here (not on socket-open). A
       // socket that opens but never authenticates keeps climbing the ladder.
       resetReconnectAttempt();
-      // #5721 (item 2) — auth_ok is the authoritative handshake-completion frame
-      // (the issue calls it out by name); a discrete key_exchange round-trip, when
-      // it happens, only ever FOLLOWS a successful auth_ok. Clear the handshake
-      // timer here so the (healthy) encryption sub-handshake isn't counted against
-      // the budget. Eager-encryption and no-encryption connects never send
-      // key_exchange, so this is the single authoritative clear.
-      clearHandshakeTimer();
+      // Pairing keeps its timeout until the post-handshake credential arrives.
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // #4766: full wire-shape decode lives in the shared parser
@@ -4747,19 +4761,21 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       const auth = sharedAuthOk(msg);
       const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
-      // #5281 ③ PR 2 — a pairing handshake issues a session token in auth_ok;
-      // adopt it as the effective token so reconnects authenticate normally.
-      // For the normal token-auth path `auth.sessionToken` is null and this is
-      // just `ctx.token`.
-      const effectiveToken = auth.sessionToken ?? ctx.token;
-      // Persist the issued session token onto the active registry entry (which
-      // was added with an empty token by pairServer) so connectToServer/
-      // switchServer reuse it later.
-      const pairedServerId = get().activeServerId;
-      if (auth.sessionToken && pairedServerId) {
-        get().updateServer(pairedServerId, { token: auth.sessionToken });
+      // Keep the current credential until the post-auth bootstrap settles pairing.
+      const effectiveToken = ctx.token;
+      const settlement = new CredentialSettlement(ctx.token, auth, ctx.isPairing);
+      credentialSettlements.set(ctx, settlement);
+      if (!settlement.paired) clearHandshakeTimer();
+      credentialServerIds.set(ctx, get().activeServerId);
+      if (!settlement.supported) {
+        clearHandshakeTimer();
+        setPendingPairingIdentityKey(null);
+        set({ connectionPhase: 'disconnected', socket: null, userDisconnected: true, connectionError: 'This server must be updated before pairing this device.' });
+        _pendingKeyPair = null;
+        _pendingSalt = null;
+        ctx.socket.close();
+        break;
       }
-
       // #5356: exposure snapshot (non-loopback bind / public quick tunnel).
       // Read off the raw message — the auth_ok schema is passthrough and the
       // shared parser predates the field. Absent/malformed → null (no banner).
@@ -5027,9 +5043,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
           sendClientVisible(ctx.socket, document.visibilityState === 'visible');
         }
       }
-      // Save for quick reconnect (the issued session token, when paired).
-      saveConnection(ctx.url, effectiveToken);
-      set({ savedConnection: { url: ctx.url, token: effectiveToken } });
+      if (auth.encryption !== 'required' || _encryptionState) {
+        applySettledCredential(ctx, settlement.authenticate());
+      }
       break;
     }
 
@@ -5063,8 +5079,9 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         // (it always precedes this discrete round-trip), but clear again here so a
         // future reordering that makes the encryption sub-handshake the real
         // completion point can't leave a timer to fire spuriously. Idempotent.
-        clearHandshakeTimer();
+        if (!credentialSettlements.get(ctx)?.paired) clearHandshakeTimer();
         console.log('[crypto] E2E encryption established');
+        applySettledCredential(ctx, credentialSettlements.get(ctx)?.authenticate() ?? null);
         // Now send the post-auth messages that were deferred. #5555: skip the
         // 3 list requests when the server advertised the auth_bootstrap
         // capability (the burst frame already carries that data, queued behind

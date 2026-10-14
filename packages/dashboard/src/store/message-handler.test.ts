@@ -280,6 +280,7 @@ describe('dashboard message-handler dispatch', () => {
     it('#5281 ③ PR 2 — adopts a paired sessionToken and persists it on the active server', () => {
       store = createMockStore(baseState({ activeServerId: 'srv_paired' }))
       setStore(store)
+      const pairedCtx = ctx() as any
       handleMessage(
         {
           type: 'auth_ok',
@@ -289,9 +290,12 @@ describe('dashboard message-handler dispatch', () => {
           clientId: 'c1',
           connectedClients: [],
           sessionToken: 'sess-tok-xyz',
+          capabilities: { pairedCredentialConfirmation: true },
         },
-        ctx() as any,
+        pairedCtx,
       )
+      expect((store.getState() as any)._updateServerCalls).toEqual([])
+      handleMessage({ type: 'auth_bootstrap', sessionToken: 'sess-tok-xyz' }, pairedCtx)
       const state = store.getState() as any
       // Effective token = the issued session token (ctx.token was 'tok').
       expect(state.apiToken).toBe('sess-tok-xyz')

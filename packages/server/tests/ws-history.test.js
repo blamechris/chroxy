@@ -4499,3 +4499,51 @@ describe('sendChunkedWithBackpressure — the OPEN gate covers the empty-slice p
     assert.deepEqual(empty, closed, 'and the empty slice must behave the same way')
   })
 })
+
+describe('paired credential bootstrap delivery', () => {
+  beforeEach(_resetEagerDerivationBudgetForTests)
+
+  for (const path of ['eager', 'discrete', 'plaintext']) {
+    it(`delivers a modern paired credential after the ${path} transport handshake`, async () => {
+      const ws = makeFakeWs()
+      const ctx = makeEncryptingCtx({ encryptionEnabled: path !== 'plaintext' })
+      const keyPair = createKeyPair()
+      const salt = generateConnectionSalt()
+      const client = registerClient(ctx, ws, {
+        clientCapabilities: new Set(['paired_credential_confirmation_v1']),
+        ...(path === 'eager' ? { eagerKeyExchange: { publicKey: keyPair.publicKey, salt } } : {}),
+      })
+      sendPostAuthInfo(ctx, ws, { sessionToken: 'fixture-issued' })
+      await new Promise(r => setImmediate(r))
+      const auth = JSON.parse(ws._rawSent[0])
+      assert.equal(auth.capabilities.pairedCredentialConfirmation, true)
+      assert.equal(auth.sessionToken, undefined)
+      if (path === 'discrete') {
+        assert.equal(ws._rawSent.length, 1, 'post-auth burst waits for key exchange')
+        const { handleKeyExchange } = await import('../src/ws-auth.js')
+        ctx.flushPostAuthQueue = (socket, queue) => flushPostAuthQueue(ctx, socket, queue)
+        assert.equal(handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: keyPair.publicKey, salt }), true)
+        await new Promise(r => setImmediate(r))
+      }
+      const frames = ws._rawSent.map(raw => JSON.parse(raw))
+      let nonce = 0
+      const decoded = frames.map(frame => frame.type === 'encrypted'
+        ? decrypt(frame, client.encryptionState.sharedKey, nonce++, DIRECTION_SERVER)
+        : frame)
+      const bootstrap = decoded.find(frame => frame.type === 'auth_bootstrap')
+      assert.equal(bootstrap?.sessionToken, 'fixture-issued')
+      if (path !== 'plaintext') {
+        assert.ok(!frames.some(frame => frame.type === 'auth_bootstrap'), 'bootstrap uses established encryption')
+      }
+    })
+  }
+
+  it('retains the existing auth response for older clients', async () => {
+    const ws = makeFakeWs()
+    const ctx = makeEncryptingCtx()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws, { sessionToken: 'fixture-issued' })
+    await new Promise(r => setImmediate(r))
+    assert.equal(JSON.parse(ws._rawSent[0]).sessionToken, 'fixture-issued')
+  })
+})
