@@ -136,7 +136,17 @@ export function SessionScreen() {
   // #5556 — the composer draft now lives inside InputBar (see `inputRef`
   // below). SessionScreen no longer holds it in render-scope state, which is
   // what decouples typing from streaming-message re-renders.
-  const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
+  const [pendingAttachments, renderPendingAttachments] = useState<Attachment[]>([]);
+  const pendingAttachmentsRef = useRef<Attachment[]>([]);
+  const composerChangedRef = useRef<() => void>(() => {});
+  // Publish before scheduling React: picker completion and acknowledgement callbacks
+  // can run in the same batch, before any committed render sees the attachment.
+  const setPendingAttachments = useCallback((update: React.SetStateAction<Attachment[]>) => {
+    const next = typeof update === 'function' ? update(pendingAttachmentsRef.current) : update;
+    pendingAttachmentsRef.current = next;
+    renderPendingAttachments(next);
+    composerChangedRef.current();
+  }, []);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
   // #5517: ChatView's transcript is a virtualized FlatList. SessionScreen
   // only forwards this ref (never calls imperative methods on it); typed as
@@ -831,6 +841,8 @@ export function SessionScreen() {
   // React.memo. Instead we keep the live implementation in a ref (refreshed
   // each render) behind a single stable wrapper passed to InputBar.
   const handleSendImpl = () => {
+    const pendingAttachments = pendingAttachmentsRef.current;
+    const pastedTextBlocks = pastedTextBlocksRef.current;
     const hasAttachments = pendingAttachments.length > 0;
     // #5556 — read the draft from the InputBar ref (it owns the value now).
     const draft = inputRef.current?.getValue() ?? '';
@@ -982,7 +994,7 @@ export function SessionScreen() {
   const handleSend = useCallback(() => handleSendRef.current(), []);
 
   const addAttachment = useCallback(async (picker: () => Promise<Attachment | null>) => {
-    if (pendingAttachments.length >= MAX_ATTACHMENTS) {
+    if (pendingAttachmentsRef.current.length >= MAX_ATTACHMENTS) {
       Alert.alert('Limit reached', `Maximum ${MAX_ATTACHMENTS} attachments per message.`);
       return;
     }
@@ -994,7 +1006,7 @@ export function SessionScreen() {
     } catch (err: unknown) {
       Alert.alert('Error', `Failed to attach file: ${err instanceof Error ? err.message : 'Unknown error'}`);
     }
-  }, [pendingAttachments.length]);
+  }, []);
 
   const handleCamera = useCallback(() => {
     addAttachment(pickFromCamera);
@@ -1153,7 +1165,14 @@ export function SessionScreen() {
   // that grew by more than the shared threshold in a single tick is
   // treated as a paste and collapsed to an inline marker.
   type PastedTextBlock = { id: number; content: string };
-  const [pastedTextBlocks, setPastedTextBlocks] = useState<PastedTextBlock[]>([]);
+  const [pastedTextBlocks, renderPastedTextBlocks] = useState<PastedTextBlock[]>([]);
+  const pastedTextBlocksRef = useRef<PastedTextBlock[]>([]);
+  const setPastedTextBlocks = useCallback((update: React.SetStateAction<PastedTextBlock[]>) => {
+    const next = typeof update === 'function' ? update(pastedTextBlocksRef.current) : update;
+    pastedTextBlocksRef.current = next;
+    renderPastedTextBlocks(next);
+    composerChangedRef.current();
+  }, []);
   type ComposerSubmission = {
     clientMessageId: string;
     sessionId: string;
@@ -1170,18 +1189,21 @@ export function SessionScreen() {
 
   const restoreComposerSubmission = useCallback((submission: ComposerSubmission): boolean => {
     if (activeSessionId !== submission.sessionId) return false;
-    if ((inputRef.current?.getValue() ?? '').length > 0 || pendingAttachments.length > 0) return false;
+    if (restoredComposerOwnerRef.current || (inputRef.current?.getValue() ?? '').length > 0 || pendingAttachmentsRef.current.length > 0) return false;
+    // Claim the entire snapshot before any setter can notify another observer.
+    pendingAttachmentsRef.current = submission.attachments;
+    pastedTextBlocksRef.current = submission.pastedBlocks;
+    restoredComposerOwnerRef.current = { sessionId: submission.sessionId, clientMessageId: submission.clientMessageId };
+    recoveredComposersRef.current.retain(submission, true);
     inputRef.current?.setValue(submission.draft);
     setPendingAttachments(submission.attachments);
     setPastedTextBlocks(submission.pastedBlocks);
     pastedTextNextIdRef.current = Math.max(0, ...submission.pastedBlocks.map(block => block.id));
     restoreUsedVoice(submission.isVoice);
-    recoveredComposersRef.current.retain(submission, true);
-    restoredComposerOwnerRef.current = { sessionId: submission.sessionId, clientMessageId: submission.clientMessageId };
     setRecoveryComposerOccupied(submission.draft.length > 0);
     setComposerRecovery(recoveredComposersRef.current.offer);
     return true;
-  }, [activeSessionId, pendingAttachments.length]);
+  }, [activeSessionId]);
 
   const composerRecoveryOriginalExists = composerRecovery
     ? sessions.some((session) => session.sessionId === composerRecovery.sessionId)
@@ -1201,7 +1223,7 @@ export function SessionScreen() {
       pendingComposerSubmissionsRef.current.delete(clientMessageId);
       const result = recoverRejectedComposer(delivery, submission, {
         originalSessionActive: state.activeSessionId === submission.sessionId,
-        composerUnchanged: (inputRef.current?.getValue() ?? '').length === 0 && pendingAttachments.length === 0,
+        composerUnchanged: (inputRef.current?.getValue() ?? '').length === 0 && pendingAttachmentsRef.current.length === 0,
         restore: restoreComposerSubmission,
       });
       if (result === 'offer') {
@@ -1210,14 +1232,14 @@ export function SessionScreen() {
         setComposerRecovery(recoveredComposersRef.current.offer);
       }
     }
-  }), [pendingAttachments.length, restoreComposerSubmission]);
+  }), [restoreComposerSubmission]);
   useEffect(() => {
     const owner = restoredComposerOwnerRef.current;
     if (owner) {
       // Read the actual locally owned draft immediately before roster pruning.
       recoveredComposersRef.current.updateRestored(owner.sessionId, snapshot => ({
         ...snapshot, draft: inputRef.current?.getValue() ?? snapshot.draft,
-        pastedBlocks: [...pastedTextBlocks], attachments: [...pendingAttachments],
+        pastedBlocks: [...pastedTextBlocksRef.current], attachments: [...pendingAttachmentsRef.current],
       }));
     }
     recoveredComposersRef.current.prune(new Set(sessions.map(session => session.sessionId)));
@@ -1249,16 +1271,31 @@ export function SessionScreen() {
   // recognition is a real user keystroke, so the hook re-anchors unconditionally
   // on each one — a mid-recognition manual edit is preserved and the next
   // transcript appends after it instead of overwriting it.
-  const handleComposerDraftChange = useCallback((text: string, isVoice: boolean) => {
+  const handleComposerValueChange = useCallback(() => {
+    const text = inputRef.current?.getValue() ?? '';
+    const attachments = pendingAttachmentsRef.current;
+    const owner = restoredComposerOwnerRef.current;
+    if (owner) {
+      if (text.length === 0 && attachments.length === 0) {
+        recoveredComposersRef.current.dismiss(owner.clientMessageId);
+        restoredComposerOwnerRef.current = null;
+        setComposerRecovery(recoveredComposersRef.current.offer);
+        restoreUsedVoice(false);
+      } else {
+        recoveredComposersRef.current.updateRestored(owner.sessionId, snapshot => ({
+          ...snapshot, draft: text, attachments: [...attachments],
+          pastedBlocks: [...pastedTextBlocksRef.current],
+        }));
+      }
+    }
+    // Avoid a screen render per keystroke; only empty/nonempty transitions matter.
+    setRecoveryComposerOccupied(text.length > 0);
+  }, []);
+  composerChangedRef.current = handleComposerValueChange;
+  const handleComposerDraftChange = useCallback((_text: string, isVoice: boolean) => {
     const owner = restoredComposerOwnerRef.current;
     if (owner) recoveredComposersRef.current.updateRestored(owner.sessionId, snapshot => ({ ...snapshot, isVoice }));
-    if (owner && text.length === 0 && pendingAttachments.length === 0) {
-      recoveredComposersRef.current.releaseRestored(owner.sessionId);
-      restoredComposerOwnerRef.current = null;
-      restoreUsedVoice(false);
-    }
-    if (composerRecovery) setRecoveryComposerOccupied(text.length > 0);
-  }, [composerRecovery, pendingAttachments.length]);
+  }, []);
   const { handleChangeText, handleMicPress, consumeUsedVoice, restoreUsedVoice } = useDictationComposer({
     inputRef,
     isRecognizing,
@@ -2033,6 +2070,7 @@ export function SessionScreen() {
       <InputBar
         ref={inputRef}
         onChangeText={handleChangeText}
+        onValueChange={handleComposerValueChange}
         onSend={handleSend}
         onInterrupt={sendInterrupt}
         onClearTerminal={handleClearTerminal}

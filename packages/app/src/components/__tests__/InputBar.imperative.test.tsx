@@ -510,3 +510,17 @@ it('8593 review recovery Restore reacts after a newer native draft is cleared', 
   expect(inputRef!.current?.getValue()).toBe('kept draft');
   act(() => { tree.unmount(); });
 });
+
+it('observes silent values independently of the real-user paste and voice handler', () => {
+  const ref = React.createRef<InputBarHandle>();
+  const onChangeText = jest.fn(), onValueChange = jest.fn();
+  let tree!: renderer.ReactTestRenderer;
+  act(() => { tree = renderer.create(<InputBar ref={ref} {...baseProps} onChangeText={onChangeText} onValueChange={onValueChange} />); });
+  act(() => { ref.current?.setValue('programmatic'); ref.current?.clear(); });
+  expect(onValueChange.mock.calls).toEqual([['programmatic'], ['']]);
+  expect(onChangeText).not.toHaveBeenCalled();
+  act(() => getTextInput(tree).props.onChangeText('typed'));
+  expect(onChangeText).toHaveBeenCalledWith('typed', '');
+  expect(onValueChange).toHaveBeenLastCalledWith('typed');
+  act(() => tree.unmount());
+});

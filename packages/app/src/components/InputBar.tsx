@@ -54,6 +54,8 @@ export interface InputBarProps {
    * without holding the draft in its own render-scope state.
    */
   onChangeText: (text: string, prevText: string) => void;
+  /** Observe every applied value, including silent writes, without paste/voice re-anchoring. */
+  onValueChange?: (text: string) => void;
   onSend: () => void | boolean;
   onInterrupt: () => void;
   onKeyPress: (key: string) => void;
@@ -143,6 +145,7 @@ const SLASH_SOURCE_RANK: Record<string, number> = { builtin: 0, project: 1, user
 export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(function InputBar({
   inputText,
   onChangeText,
+  onValueChange,
   onSend,
   onInterrupt,
   onKeyPress,
@@ -190,7 +193,8 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
   // and the programmatic setValue() always read the freshest draft without
   // depending on a stale closure.
   const valueRef = useRef(value);
-  valueRef.current = value;
+  const onValueChangeRef = useRef(onValueChange);
+  onValueChangeRef.current = onValueChange;
 
   useImperativeHandle(ref, () => ({
     focus: () => textInputRef.current?.focus(),
@@ -200,10 +204,12 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
       // voice merge / marker strip don't recurse back into the parent diff.
       valueRef.current = text;
       setValue(text);
+      onValueChangeRef.current?.(text);
     },
     clear: () => {
       valueRef.current = '';
       setValue('');
+      onValueChangeRef.current?.('');
     },
   }), []);
 
@@ -215,6 +221,7 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
     valueRef.current = next;
     setValue(next);
     onChangeText(next, prev);
+    onValueChangeRef.current?.(valueRef.current);
   }, [onChangeText]);
 
   // Pulsing animation for recording state

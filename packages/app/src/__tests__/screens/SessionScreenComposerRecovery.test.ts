@@ -6,7 +6,7 @@ import * as path from 'path';
 const source = fs.readFileSync(path.resolve(__dirname, '../../screens/SessionScreen.tsx'), 'utf8');
 const restore = source.slice(source.indexOf('const restoreComposerSubmission ='), source.indexOf('const composerRecoveryOriginalExists ='));
 const send = source.slice(source.indexOf('const isVoice = consumeUsedVoice()'), source.indexOf('// #6774'));
-const input = source.slice(source.indexOf('const handleComposerDraftChange ='), source.indexOf('const handleRemovePastedText ='));
+const input = source.slice(source.indexOf('const handleComposerValueChange ='), source.indexOf('const handleRemovePastedText ='));
 
 it('keeps native recovery guarded and restores paste allocation and voice only inside successful restoration', () => {
   expect(restore.indexOf('return false;') < restore.indexOf('restoreUsedVoice(submission.isVoice)')).toBe(true);
@@ -20,5 +20,6 @@ it('connects local InputBar edits to the recovery occupancy observer without own
   expect(/onDraftChange: handleComposerDraftChange/.test(input)).toBe(true);
   expect(/setRecoveryComposerOccupied\(text\.length > 0\)/.test(input)).toBe(true);
   expect(/onChangeText=\{handleChangeText\}/.test(source)).toBe(true);
+  expect(/onValueChange=\{handleComposerValueChange\}/.test(source)).toBe(true);
   expect(/\|\| recoveryComposerOccupied \|\| pendingAttachments\.length > 0/.test(source)).toBe(true);
 });
