@@ -693,6 +693,16 @@ export function _testClearPendingPermissionModeRequests(): void {
 // Connection context (set by connect(), read by handleMessage)
 // ---------------------------------------------------------------------------
 let _connectionContext: ConnectionContext | null = null;
+// A discrete auth response is not enough to adopt its reconnect credential:
+// wait for this socket's identity verification and key exchange to succeed.
+const pendingAuthTokens = new WeakMap<ConnectionContext, string>();
+const verifiedConnections = new WeakSet<ConnectionContext>();
+
+function adoptReconnectToken(ctx: ConnectionContext, token: string): void {
+  ctx.token = token;
+  pendingAuthTokens.delete(ctx);
+  verifiedConnections.add(ctx);
+}
 
 export function setConnectionContext(ctx: ConnectionContext | null): void {
   _connectionContext = ctx;
@@ -2227,6 +2237,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // #5536: eagerPinToPersist carries a pin-on-first-use captured this
       // handshake (null on the discrete path / reconnect — that pin is written
       // in key_exchange_ok). Null leaves the existing record's pin intact.
+      if (auth.encryption === 'required' && !_ctx.encryptionState) {
+        pendingAuthTokens.set(ctx, effectiveToken);
+      } else {
+        adoptReconnectToken(ctx, effectiveToken);
+      }
       persistVerifiedConnection(ctx.url, effectiveToken, eagerPinToPersist);
       // Register push token (async, non-blocking)
       void registerPushToken(ctx.socket);
@@ -2267,15 +2282,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         _ctx.pendingKeyPair = null;
         _ctx.pendingSalt = null;
         console.log('[crypto] E2E encryption established');
-        // #5536 — persist a pin-on-first-use captured this discrete handshake.
-        // The auth_ok handler already wrote the verified connection (unpinned on
-        // this path); re-persist now to add the pin. Use the token the auth_ok
-        // handler saved (the effectiveToken — a pairing-issued session token may
-        // differ from the dial token), falling back to the dial ctx.token.
+        adoptReconnectToken(ctx, pendingAuthTokens.get(ctx) ?? ctx.token);
+        // #5536 — persist the pin with the credential admitted by THIS socket,
+        // even if another saved connection was written during the handshake.
         if (verdict.pinToPersist) {
-          const savedToken =
-            useConnectionLifecycleStore.getState().savedConnection?.token ?? ctx.token;
-          persistVerifiedConnection(ctx.url, savedToken, verdict.pinToPersist);
+          persistVerifiedConnection(ctx.url, ctx.token, verdict.pinToPersist);
         }
         // Now send the post-auth messages that were deferred. #5555: skip the
         // 3 list requests when the server advertised the auth_bootstrap
@@ -3979,6 +3990,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         // #5518: a token change invalidates any prior LAN verification (it was
         // earned by the old credential), so persistVerifiedConnection clears it.
         console.log('[ws] Server token rotated — updating stored token');
+        if (verifiedConnections.has(ctx)) adoptReconnectToken(ctx, newToken);
         persistVerifiedConnection(ctx.url, newToken);
       } else {
         // Legacy: server didn't include new token — disconnect and prompt re-auth

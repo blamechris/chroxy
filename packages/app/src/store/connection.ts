@@ -1313,6 +1313,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearHandshakeTimer();
     const socket = new WebSocket(url);
     liveSocket = socket;
+    // The context belongs to this socket. Successful auth/pairing and rotation
+    // update its token, so reconnect never borrows another daemon's credential.
+    const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
 
     // #3624 (ported from dashboard) — per-socket reconnect scheduler for both
     // onclose and onerror. A single transport drop fires `error` → `close` on
@@ -1345,7 +1348,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // dialed. The reconnect re-enters connect() with _retryCount=0, so the
       // inner health-check ladder's resolveEndpoint then owns the #5537 LAN→
       // tunnel fast-fallback (keyed on the per-attempt index).
-      reconnect: () => get().connect(resolveCurrentEndpointUrl(url, token), token),
+      reconnect: () => get().connect(resolveCurrentEndpointUrl(socketCtx.url, socketCtx.token), socketCtx.token),
       isStale: () => myAttemptId !== connectionAttemptId,
       retryDelays: CONNECT_RETRY_DELAYS,
       // #5725 (#5698) — stop the reconnect ladder after RECONNECT_MAX_RUNG rungs
@@ -1453,7 +1456,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
     };
 
-    const socketCtx: ConnectionContext = { url, token, isReconnect, silent, socket };
     setConnectionContext(socketCtx);
     socket.onmessage = (event) => {
       // #8485 — a frame from a superseded socket (a switch, or a same-daemon
