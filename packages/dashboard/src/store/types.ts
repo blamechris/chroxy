@@ -1,3 +1,4 @@
+import type { ConnectionIdentityTarget } from '@chroxy/store-core';
 /**
  * Shared type definitions for the connection store.
  *
@@ -1857,7 +1858,7 @@ export interface ConnectionState {
   _terminalWriteCallback: ((data: string) => void) | null;
 
   // Actions
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number; _pairingId?: string }) => void;
+  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number; _pairingId?: string; _identityTarget?: ConnectionIdentityTarget; _serverId?: string | null }) => void;
   disconnect: () => void;
   loadSavedConnection: () => void;
   clearSavedConnection: () => void;

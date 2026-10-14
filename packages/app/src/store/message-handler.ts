@@ -1,3 +1,4 @@
+import { captureConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity, CredentialSettlement, handleAuthBootstrap, type SettledCredential } from '@chroxy/store-core';
 /**
  * WebSocket message handler — processes all incoming server messages.
  *
@@ -693,6 +694,22 @@ export function _testClearPendingPermissionModeRequests(): void {
 // Connection context (set by connect(), read by handleMessage)
 // ---------------------------------------------------------------------------
 let _connectionContext: ConnectionContext | null = null;
+const credentialSettlements = new WeakMap<ConnectionContext, CredentialSettlement>();
+
+function adoptReconnectToken(ctx: ConnectionContext, token: string): void {
+  ctx.token = token;
+}
+
+function applySettledCredential(ctx: ConnectionContext, credential: SettledCredential | null, rotation = false): void {
+  if (!credential) return;
+  clearHandshakeTimer();
+  adoptReconnectToken(ctx, credential.token);
+  useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, credential.token);
+  ctx.savedConnection = persistVerifiedConnection(rotation ? ctx.savedConnection?.url ?? ctx.url : ctx.url, credential.token, credential.pin, ctx.savedConnection);
+  getStore().setState({ socket: ctx.socket });
+  useConnectionLifecycleStore.getState().setConnectionPhase('connected');
+  flushPushRegistration(ctx);
+}
 
 export function setConnectionContext(ctx: ConnectionContext | null): void {
   _connectionContext = ctx;
@@ -701,6 +718,15 @@ export function setConnectionContext(ctx: ConnectionContext | null): void {
 export function getConnectionContext(): ConnectionContext | null {
   return _connectionContext;
 }
+
+function identityTargetFor(ctx: ConnectionContext) {
+  if (!ctx.identityTarget) {
+    ctx.identityTarget = captureConnectionIdentity(ctx.url, useConnectionLifecycleStore.getState().savedConnection, pendingPairingIdentityKey);
+    ctx.savedConnection = ctx.identityTarget.savedConnection;
+  }
+  return ctx.identityTarget;
+}
+
 
 // ---------------------------------------------------------------------------
 // Encryption state accessors
@@ -1564,18 +1590,26 @@ function pushSessionNotification(
 // Push token registration
 // ---------------------------------------------------------------------------
 
-async function registerPushToken(socket: WebSocket): Promise<void> {
+const pendingPushTokens = new WeakMap<ConnectionContext, string>();
+
+function flushPushRegistration(ctx: ConnectionContext): void {
+  const token = pendingPushTokens.get(ctx);
+  if (!token) return;
+  // The application socket is published only by completed admission.
+  if (ctx !== _connectionContext || getStore().getState().socket !== ctx.socket || ctx.socket.readyState !== WebSocket.OPEN) return;
+  pendingPushTokens.delete(ctx);
+  wsSend(ctx.socket, { type: 'register_push_token', token });
+  // Keep Settings bound to the device registration sent on this connection.
+  getStore().setState({ pushToken: token });
+  console.log('[push] Registered push token with server');
+}
+
+async function registerPushToken(ctx: ConnectionContext): Promise<void> {
   try {
     const token = await registerForPushNotifications();
-    if (token && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'register_push_token', token });
-      // #4543: mirror the resolved token into the store so the
-      // SettingsScreen can address THIS device's entry in the
-      // `notification_prefs.devices` map. Without this mirror the
-      // per-device toggle row would never know which key to patch and
-      // would have to render disabled forever.
-      getStore().setState({ pushToken: token });
-      console.log('[push] Registered push token with server');
+    if (token) {
+      pendingPushTokens.set(ctx, token);
+      flushPushRegistration(ctx);
     }
   } catch (err) {
     console.log('[push] Push registration skipped:', err);
@@ -1605,30 +1639,41 @@ export type SavedConnectionExtras = Pick<
   'lanUrl' | 'lanVerified' | 'tunnelUrl' | 'pinnedIdentityKey'
 >;
 
+let connectionStorageWrite: Promise<void> | null = null;
+
+function serializeConnectionWrite(write: () => Promise<void>): Promise<void> {
+  const run = connectionStorageWrite ? connectionStorageWrite.then(write) : write();
+  connectionStorageWrite = run;
+  void run.then(() => { if (connectionStorageWrite === run) connectionStorageWrite = null; });
+  return run;
+}
+
 export async function saveConnection(
   url: string,
   token: string,
   extras?: SavedConnectionExtras,
 ): Promise<void> {
-  try {
-    await SecureStore.setItemAsync(STORAGE_KEY_URL, url);
-    await SecureStore.setItemAsync(STORAGE_KEY_TOKEN, token);
-    // Only persist a metadata blob when there's something to store; otherwise
-    // delete any stale one so a fresh server (no LAN) can't inherit old fields.
-    const meta: SavedConnectionExtras = {};
-    if (extras?.lanUrl) meta.lanUrl = extras.lanUrl;
-    if (extras?.lanVerified) meta.lanVerified = true;
-    if (extras?.tunnelUrl) meta.tunnelUrl = extras.tunnelUrl;
-    // #5536 — the pinned E2E identity travels in the same metadata blob.
-    if (extras?.pinnedIdentityKey) meta.pinnedIdentityKey = extras.pinnedIdentityKey;
-    if (Object.keys(meta).length > 0) {
-      await SecureStore.setItemAsync(STORAGE_KEY_LAN_META, JSON.stringify(meta));
-    } else {
-      await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
+  return serializeConnectionWrite(async () => {
+    try {
+      await SecureStore.setItemAsync(STORAGE_KEY_URL, url);
+      await SecureStore.setItemAsync(STORAGE_KEY_TOKEN, token);
+      // Only persist a metadata blob when there's something to store; otherwise
+      // delete any stale one so a fresh server (no LAN) can't inherit old fields.
+      const meta: SavedConnectionExtras = {};
+      if (extras?.lanUrl) meta.lanUrl = extras.lanUrl;
+      if (extras?.lanVerified) meta.lanVerified = true;
+      if (extras?.tunnelUrl) meta.tunnelUrl = extras.tunnelUrl;
+      // #5536 — the pinned E2E identity travels in the same metadata blob.
+      if (extras?.pinnedIdentityKey) meta.pinnedIdentityKey = extras.pinnedIdentityKey;
+      if (Object.keys(meta).length > 0) {
+        await SecureStore.setItemAsync(STORAGE_KEY_LAN_META, JSON.stringify(meta));
+      } else {
+        await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
+      }
+    } catch {
+      // Storage not available (e.g. Expo Go limitations)
     }
-  } catch {
-    // Storage not available (e.g. Expo Go limitations)
-  }
+  });
 }
 
 export async function loadConnection(): Promise<SavedConnection | null> {
@@ -1679,11 +1724,10 @@ export function persistVerifiedConnection(
   // pinned key on a pin-on-first-use; omit to preserve whatever the prior
   // record carried (every reconnect re-runs this and must not drop the pin).
   pinnedIdentityKey?: string | null,
-): void {
+  ownedConnection?: SavedConnection | null,
+): SavedConnection {
   const prev = useConnectionLifecycleStore.getState().savedConnection;
-  const base: SavedConnection = prev?.token === token && prev
-    ? prev
-    : { url: connectedUrl, token };
+  const base: SavedConnection = ownedConnection ?? (connectionMatchesEndpoint(prev, connectedUrl) ? prev! : { url: connectedUrl, token });
   const next = recordVerifiedLanCandidate(base, connectedUrl, token);
   // `url` tracks the last-dialed endpoint for backward compat / manual flows.
   next.url = connectedUrl;
@@ -1701,6 +1745,7 @@ export function persistVerifiedConnection(
     pinnedIdentityKey: next.pinnedIdentityKey,
   });
   useConnectionLifecycleStore.getState().setSavedConnection(next);
+  return next;
 }
 
 /**
@@ -1749,8 +1794,10 @@ export function applyRotatedTunnelUrl(newTunnelUrl: string): boolean {
     lanUrl: next.lanUrl,
     lanVerified: next.lanVerified,
     tunnelUrl: next.tunnelUrl,
+    pinnedIdentityKey: next.pinnedIdentityKey,
   });
   useConnectionLifecycleStore.getState().setSavedConnection(next);
+  if (_connectionContext?.token === next.token && connectionMatchesEndpoint(_connectionContext.savedConnection, prev.url)) _connectionContext.savedConnection = next;
   return true;
 }
 
@@ -1763,13 +1810,15 @@ export function applyRotatedTunnelUrl(newTunnelUrl: string): boolean {
  * to close the live socket + reset in-memory state.
  */
 export async function clearSavedCredentials(): Promise<void> {
-  try {
-    await SecureStore.deleteItemAsync(STORAGE_KEY_URL);
-    await SecureStore.deleteItemAsync(STORAGE_KEY_TOKEN);
-    await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
-  } catch {
-    // Storage not available
-  }
+  return serializeConnectionWrite(async () => {
+    try {
+      await SecureStore.deleteItemAsync(STORAGE_KEY_URL);
+      await SecureStore.deleteItemAsync(STORAGE_KEY_TOKEN);
+      await SecureStore.deleteItemAsync(STORAGE_KEY_LAN_META);
+    } catch {
+      // Storage not available
+    }
+  });
 }
 
 /**
@@ -1800,11 +1849,9 @@ function verifyServerIdentityOrRefuse(
   newIdentityKey: string | null = null,
   rotationCert: string | null = null,
 ): { refused: false; pinToPersist: string | null } | { refused: true } {
-  const saved = useConnectionLifecycleStore.getState().savedConnection;
-  const pinnedIdentityKey = saved?.pinnedIdentityKey ?? null;
+  const target = identityTargetFor(ctx);
   const decision = decideKeyPinWithPairingIdentity({
-    pinnedIdentityKey,
-    pairingIdentityKey: pendingPairingIdentityKey,
+    ...target,
     exchangePublicKey,
     serverKeySig,
     newIdentityKey,
@@ -1826,7 +1873,8 @@ function verifyServerIdentityOrRefuse(
   if (decision.action === 'connect') {
     // Verified against an existing pin, or an old/unpinned daemon — leave the
     // stored record's pin untouched.
-    return { refused: false, pinToPersist: null };
+    ctx.verifiedIdentityKey = effectiveConnectionIdentity(target, decision);
+    return { refused: false, pinToPersist: ctx.verifiedIdentityKey };
   }
   if (decision.action === 'pin-and-connect' || decision.action === 'rotate-pin') {
     // #5616 — TOFU first-use ('pin-and-connect') AND a forward-chained identity
@@ -1834,7 +1882,8 @@ function verifyServerIdentityOrRefuse(
     // both persist the offered identity as the new pin. Without the explicit
     // 'rotate-pin' arm a rotation would connect but drop the new pin
     // (pinToPersist=null), silently failing to chain it forward (#5978).
-    return { refused: false, pinToPersist: decision.identityKey };
+    ctx.verifiedIdentityKey = effectiveConnectionIdentity(target, decision);
+    return { refused: false, pinToPersist: ctx.verifiedIdentityKey };
   }
   // Exhaustiveness guard (#5978): adding a KeyPinDecision variant without
   // handling it above is a compile error here. At runtime (e.g. a version-skew
@@ -1878,10 +1927,8 @@ function applyIdentityRefusal(ctx: ConnectionContext, reason: string, message: s
  * @returns true to PROCEED, false when the connection was refused (caller breaks).
  */
 function enforceEncryptionGateOrRefuse(ctx: ConnectionContext, encryptionMode: string | null | undefined): boolean {
-  const saved = useConnectionLifecycleStore.getState().savedConnection;
   const gate = decodeEncryptionGate({
-    pinnedIdentityKey: saved?.pinnedIdentityKey ?? null,
-    pairingIdentityKey: pendingPairingIdentityKey,
+    ...identityTargetFor(ctx),
     encryptionMode,
   });
   if (gate.action === 'refuse') {
@@ -1915,7 +1962,7 @@ function endQuestionCard(toolUseId: string, kind: 'superseded' | 'notDelivered',
  * module-level helpers (updateSession, updateActiveSession, nextMessageId, etc).
  * The few variables that were closured in connect() are accessed via _connectionContext.
  */
-export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): void {
+export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext, encryptedFrame = false): void {
   // #7519 — one dispatched frame, one provenance scope. Every append the frame
   // causes (through ANY handler, including ones added later) is recorded by
   // `updateSession`'s observation hook against this frame's `historySeq`, so the
@@ -1929,13 +1976,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // racer #7420/#7492 exist to protect.
   beginReplayFrame(raw);
   try {
-    dispatchFrame(raw, ctxOverride);
+    dispatchFrame(raw, ctxOverride, encryptedFrame);
   } finally {
     endReplayFrame();
   }
 }
 
-function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
+function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedFrame = false): void {
   const ctx = ctxOverride ?? _connectionContext;
   if (!ctx) return;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
@@ -1994,6 +2041,10 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
 
   // #5556 — shared dispatch table first. A hit handles the message and returns;
   // a miss falls through to the switch below, keeping migration incremental.
+  if (msg.type === 'auth_bootstrap') {
+    applySettledCredential(ctx, credentialSettlements.get(ctx)?.confirm(handleAuthBootstrap(msg).sessionToken, encryptedFrame) ?? null);
+  }
+
   if (runDispatch(_dispatchTable, msg, _dispatchAdapter)) return;
 
   switch (msg.type) {
@@ -2002,11 +2053,8 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       return;
 
     case 'auth_ok': {
-      // #5962 (#5721 parity) — auth_ok is the authoritative handshake-complete
-      // signal; clear the handshake timer so a completed handshake can't fire it.
-      // Eager-encryption and no-encryption connects never send key_exchange, so
-      // this is the single authoritative clear (key_exchange_ok clears defensively).
-      clearHandshakeTimer();
+      // Direct auth completes here; pairing keeps its timeout until the
+      // post-handshake bootstrap credential has been admitted.
       // Reset replay flags — fresh auth means clean slate (#4512/#7497: clear
       // every per-session replay window so a reconnect doesn't leave a stale
       // one gating future activity bumps; `resetReplayReconcile` below IS that
@@ -2030,11 +2078,25 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       const authServerMode: 'cli' | null = auth.serverMode;
       const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
-      // If server provided a sessionToken (via pairing), use it for future auth
-      const effectiveToken = auth.sessionToken ?? ctx.token;
+      // Keep the current credential until the post-auth bootstrap settles pairing.
+      const effectiveToken = ctx.token;
+      const settlement = new CredentialSettlement(ctx.token, auth, ctx.isPairing);
+      credentialSettlements.set(ctx, settlement);
+      if (!settlement.paired) clearHandshakeTimer();
+      if (!settlement.supported) {
+        clearHandshakeTimer();
+        setPendingPairingIdentityKey(null);
+        useConnectionLifecycleStore.getState().setUserDisconnected(true);
+        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        useConnectionLifecycleStore.getState().setConnectionError('This server must be updated before pairing this device.', 0);
+        _ctx.pendingKeyPair = null;
+        _ctx.pendingSalt = null;
+        set({ socket: null });
+        ctx.socket.close();
+        break;
+      }
       const connectedState = {
         viewingCachedSession: false,
-        socket: ctx.socket,
         claudeReady: false,
         streamingMessageId: null,
         myClientId: auth.myClientId, // kept for backward compat; canonical source is useMultiClientStore
@@ -2066,7 +2128,6 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       useMultiClientStore.getState().setMyClientId(auth.myClientId);
       useMultiClientStore.getState().setConnectedClients(clients);
       // Sync connection lifecycle store
-      useConnectionLifecycleStore.getState().setConnectionPhase('connected');
       useConnectionLifecycleStore.getState().setConnectionDetails(ctx.url, effectiveToken);
       // #5518 — surface the active transport on the connection-quality badge.
       // ws:// is the direct LAN path; wss:// is the tunnel.
@@ -2144,6 +2205,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         _ctx.pendingSalt = null;
         break;
       }
+      ctx.authReceived = true;
       // Initiate key exchange if server requires encryption
       if (auth.encryption === 'required') {
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });
@@ -2227,9 +2289,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // #5536: eagerPinToPersist carries a pin-on-first-use captured this
       // handshake (null on the discrete path / reconnect — that pin is written
       // in key_exchange_ok). Null leaves the existing record's pin intact.
-      persistVerifiedConnection(ctx.url, effectiveToken, eagerPinToPersist);
+      if (auth.encryption !== 'required' || _ctx.encryptionState) {
+        applySettledCredential(ctx, settlement.authenticate(eagerPinToPersist));
+      }
       // Register push token (async, non-blocking)
-      void registerPushToken(ctx.socket);
+      void registerPushToken(ctx);
       break;
     }
 
@@ -2238,7 +2302,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // timer (it precedes the discrete key-exchange round-trip), but clear again
       // so a future reordering that makes the encryption sub-handshake the real
       // completion point can't leave a timer to fire spuriously. Idempotent.
-      clearHandshakeTimer();
+      if (!credentialSettlements.get(ctx)?.paired) clearHandshakeTimer();
       if (_ctx.pendingKeyPair) {
         const { publicKey: serverPublicKey, serverKeySig, newIdentityKey, rotationCert } = sharedKeyExchangeOk(msg);
         if (!serverPublicKey) {
@@ -2267,16 +2331,7 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
         _ctx.pendingKeyPair = null;
         _ctx.pendingSalt = null;
         console.log('[crypto] E2E encryption established');
-        // #5536 — persist a pin-on-first-use captured this discrete handshake.
-        // The auth_ok handler already wrote the verified connection (unpinned on
-        // this path); re-persist now to add the pin. Use the token the auth_ok
-        // handler saved (the effectiveToken — a pairing-issued session token may
-        // differ from the dial token), falling back to the dial ctx.token.
-        if (verdict.pinToPersist) {
-          const savedToken =
-            useConnectionLifecycleStore.getState().savedConnection?.token ?? ctx.token;
-          persistVerifiedConnection(ctx.url, savedToken, verdict.pinToPersist);
-        }
+        applySettledCredential(ctx, credentialSettlements.get(ctx)?.authenticate(verdict.pinToPersist) ?? null);
         // Now send the post-auth messages that were deferred. #5555: skip the
         // 3 list requests when the server advertised the auth_bootstrap
         // capability (the burst frame already carries that data, queued behind
@@ -3974,12 +4029,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext): void {
       // Token parse shared via store-core (#5454); persistence/re-auth side
       // effects stay platform-specific.
       const { token: newToken } = sharedTokenRotated(msg);
+      if (!credentialSettlements.get(ctx)?.isSettled) break;
       if (newToken) {
         // Server sent the new token — update stored credentials seamlessly.
         // #5518: a token change invalidates any prior LAN verification (it was
         // earned by the old credential), so persistVerifiedConnection clears it.
         console.log('[ws] Server token rotated — updating stored token');
-        persistVerifiedConnection(ctx.url, newToken);
+        applySettledCredential(ctx, credentialSettlements.get(ctx)?.rotate(newToken) ?? null, true);
       } else {
         // Legacy: server didn't include new token — disconnect and prompt re-auth
         console.log('[ws] Server token rotated — re-authentication required');

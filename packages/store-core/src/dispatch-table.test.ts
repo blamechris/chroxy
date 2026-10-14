@@ -1976,6 +1976,16 @@ describe('shared dispatch table', () => {
       expect(env.rotatedTunnelUrls).toEqual([{ url: 'wss://boot.x', previousUrl: null }])
     })
 
+    it('credential confirmation preserves warmed inventories until the catalog bootstrap', () => {
+      const env = makeAdapter({ inventoryHooks: true })
+      dispatch(env, { type: 'auth_bootstrap', providers: [{ name: 'existing' }], slashCommands: [{ name: '/existing' }], agents: [{ name: 'existing-agent' }] })
+      const before = { ...env.flat }
+      dispatch(env, { type: 'auth_bootstrap', credentialConfirmation: true, sessionToken: 'fixture-issued' })
+      expect(env.flat).toEqual(before)
+      dispatch(env, { type: 'auth_bootstrap', providers: [{ name: 'current' }], slashCommands: [], agents: [] })
+      expect(env.flat.availableProviders).toEqual(['__mapped__', { name: 'current' }])
+    })
+
     it('auth_bootstrap writes providers verbatim with no mirror when hooks are absent (dashboard)', () => {
       const env = makeAdapter()
       dispatch(env, { type: 'auth_bootstrap', providers: [{ name: 'claude' }], slashCommands: [{ name: '/x' }], agents: [] })

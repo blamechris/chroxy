@@ -1,3 +1,4 @@
+import type { ConnectionIdentityTarget } from '@chroxy/store-core';
 /**
  * Shared type definitions for the connection store.
  *
@@ -496,7 +497,7 @@ export interface ConnectionActions {
     token: string,
     // #5555 — `healthPrecheck` carries connectAuto's fresh `/health` result so
     // connect() can skip its own redundant probe (one connect == one probe).
-    options?: { silent?: boolean; _retryCount?: number; healthPrecheck?: { ts: number; status: 'ok' } },
+    options?: { silent?: boolean; _retryCount?: number; _pairingId?: string | null; _identityTarget?: ConnectionIdentityTarget; healthPrecheck?: { ts: number; status: 'ok' } },
   ) => void;
   /**
    * #5518 — auto-select the best endpoint for a saved connection (races a

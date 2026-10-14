@@ -69,7 +69,7 @@ jest.mock('../src/store/notifications', () => ({
 }));
 
 jest.mock('../src/store/conversations', () => ({
-  useConversationStore: { getState: jest.fn(() => ({})), setState: jest.fn() },
+  useConversationStore: { getState: jest.fn(() => ({ setSlashCommands: jest.fn(), setCustomAgents: jest.fn() })), setState: jest.fn() },
 }));
 
 // Track calls to connection lifecycle store methods
@@ -530,9 +530,11 @@ describe('auth_ok handler', () => {
   });
 
   describe('session token from pairing', () => {
-    it('uses sessionToken from auth_ok when provided (pairing flow)', () => {
+    it('uses the paired sessionToken only after its post-auth confirmation', () => {
       const ctx = createMockConnectionContext({ url: 'wss://t', token: 'original-tok', socket: mockSocket });
-      handleMessage(createAuthOkMessage({ sessionToken: 'paired-tok' }), ctx);
+      handleMessage(createAuthOkMessage({ sessionToken: 'paired-tok', capabilities: { pairedCredentialConfirmation: true } }), ctx);
+      expect(mockSetSavedConnection).not.toHaveBeenCalled();
+      handleMessage({ type: 'auth_bootstrap', sessionToken: 'paired-tok' }, ctx);
 
       // Connection details should use the sessionToken, not original token
       expect(mockSetConnectionDetails).toHaveBeenCalledWith('wss://t', 'paired-tok');

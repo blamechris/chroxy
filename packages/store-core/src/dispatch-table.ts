@@ -899,6 +899,8 @@ export interface DispatchMessageMap {
   }
   auth_bootstrap: {
     type: 'auth_bootstrap'
+    sessionToken?: string
+    credentialConfirmation?: boolean
     sessionId?: string
     providers?: unknown[]
     slashCommands?: unknown[]
@@ -2052,6 +2054,7 @@ function dispatchAuthBootstrap<S extends DispatchSessionBase>(
   adapter: ClientStoreAdapter<S>,
 ): void {
   const boot = handleAuthBootstrap(msg as Record<string, unknown>)
+  if (boot.credentialConfirmation) return
   // Re-learn a tunnel URL that may have rotated while offline. Applied BEFORE the
   // session-scope guard so a stale-session burst still refreshes the URL.
   if (boot.tunnelUrl) adapter.applyRotatedTunnelUrl?.(boot.tunnelUrl, null)

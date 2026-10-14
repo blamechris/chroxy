@@ -954,6 +954,8 @@ export declare const ServerProviderListSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const ServerAuthBootstrapSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_bootstrap">;
+    sessionToken: z.ZodOptional<z.ZodString>;
+    credentialConfirmation: z.ZodOptional<z.ZodBoolean>;
     providers: z.ZodDefault<z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;

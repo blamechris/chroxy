@@ -553,6 +553,9 @@ export const ServerProviderListSchema = z.object({
 // dir) still parses. `passthrough()` keeps the frame forward-compatible.
 export const ServerAuthBootstrapSchema = z.object({
     type: z.literal('auth_bootstrap'),
+    // Newly paired credentials arrive through the completed transport handshake.
+    sessionToken: z.string().min(1).max(512).optional(),
+    credentialConfirmation: z.boolean().optional(),
     providers: z.array(z.object({
         name: z.string(),
         capabilities: z.record(z.string(), z.boolean()).optional(),

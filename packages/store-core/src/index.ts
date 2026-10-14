@@ -1238,3 +1238,9 @@ export { abbreviateCwd, repoDisplayName, sessionGroupKey } from './repo-label'
 export { isDevPreviewPending } from './handlers/dev-preview'
 
 export { describeNoPrStatus, formatChecks, formatMergeState } from './ci-presentation'
+
+export { CredentialSettlement } from './credential-settlement'
+export type { SettledCredential } from './credential-settlement'
+
+export { captureConnectionIdentity, reconnectConnectionIdentity, connectionMatchesEndpoint, effectiveConnectionIdentity } from './connection-identity'
+export type { ConnectionIdentityTarget } from './connection-identity'

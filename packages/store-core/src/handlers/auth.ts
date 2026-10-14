@@ -93,9 +93,8 @@ export interface AuthOkPayload {
   /** Raw encryption directive from the server (`'required'` or other). */
   encryption: string | null
   /**
-   * `sessionToken` issued via the pairing flow. Only the mobile app currently
-   * consumes this; the dashboard ignores it. Exposed in the shared payload so
-   * the wire-shape decode lives in one place.
+   * Legacy pairing credential candidate. Modern clients await the credential
+   * carried by the post-handshake bootstrap before storing it.
    */
   sessionToken: string | null
   /** Self-identifying clientId issued by the server, null when missing/malformed. */
@@ -338,6 +337,8 @@ export function handleAuthBootstrap(
   sessionId: string | null
   tunnelUrl: string | null
   defaultProvider: string | null
+  sessionToken: string | null
+  credentialConfirmation: boolean
 } {
   const providers = parseUnknownArrayField(msg, 'providers')
   const slashCommands = parseUnknownArrayField(msg, 'slashCommands')
@@ -352,7 +353,8 @@ export function handleAuthBootstrap(
   // #8151 (C3): the daemon's own resolved default provider, same field/shape
   // as the discrete `provider_list` message — see handleProviderList.
   const defaultProvider = parseStringField(msg, 'defaultProvider')
-  return { providers, slashCommands, agents, sessionId, tunnelUrl, defaultProvider }
+  return { providers, slashCommands, agents, sessionId, tunnelUrl, defaultProvider,
+    sessionToken: parseStringField(msg, 'sessionToken'), credentialConfirmation: msg.credentialConfirmation === true }
 }
 
 /**
