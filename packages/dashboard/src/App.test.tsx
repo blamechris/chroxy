@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, within, waitFor, act } from '@testing-library/react'
+import type { CreateSessionData } from './components/CreateSessionModal'
 
 vi.mock('./hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
@@ -98,6 +99,9 @@ vi.mock('./components/PermissionPrompt', () => ({
 // New Session overflow-menu click assertion verify the `open` prop transition
 // without dragging in directory-browser store wiring. Production
 // behaviour is exercised by the CreateSessionModal*.test.tsx suites.
+const createSessionModalData = vi.hoisted(() => ({
+  current: { name: 'New Session', cwd: '/tmp/new' } as CreateSessionData,
+}))
 vi.mock('./components/CreateSessionModal', () => ({
   // #5218 — expose an `onCreate` seam so create-flow tests can drive the
   // confirm path (App.handleCreateSession) without dragging in the real
@@ -106,7 +110,7 @@ vi.mock('./components/CreateSessionModal', () => ({
   // button is inert for them.
   CreateSessionModal: (props: {
     open: boolean
-    onCreate?: (data: { name: string; cwd: string }) => void
+    onCreate?: (data: CreateSessionData) => void
     // #6301 — surface the create spinner + retryable error so the
     // #6285 App-layer branches (create-confirm effect / not-sent
     // else-branch) are directly assertable from the modal's DOM.
@@ -118,7 +122,7 @@ vi.mock('./components/CreateSessionModal', () => ({
         <button
           type="button"
           data-testid="create-session-modal-confirm"
-          onClick={() => props.onCreate?.({ name: 'New Session', cwd: '/tmp/new' })}
+          onClick={() => props.onCreate?.(createSessionModalData.current)}
         />
         {props.isCreating ? <div data-testid="create-session-modal-creating" /> : null}
         {props.serverError ? (
@@ -342,6 +346,7 @@ vi.mock('zustand/react/shallow', () => ({
 }))
 
 beforeEach(() => {
+  createSessionModalData.current = { name: 'New Session', cwd: '/tmp/new' }
   recoverySubscriptions.clear()
   stateOverrides = {}
   capturedOnRestart = null
@@ -3545,6 +3550,61 @@ describe('#6301 create-session spinner reset (#6285 App-layer branches)', () => 
     fireEvent.click(screen.getByTestId('welcome-new-session'))
     expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
   }
+
+  it('forwards the selected session creation options exactly once', () => {
+    createSessionModalData.current = {
+      name: 'Selected session',
+      cwd: '/tmp/selected',
+      provider: 'codex',
+      connectionId: 'selected-connection',
+      model: 'selected-model',
+      permissionMode: 'approve',
+      worktree: true,
+      environmentId: 'selected-environment',
+      codexSandbox: 'read-only',
+      skipPermissions: false,
+    }
+    const createSession = vi.fn<(options: Record<string, unknown>) => boolean>(() => true)
+    stateOverrides = { ...freshConnectedState(() => true), createSession }
+    render(<App />)
+    openCreateViaWelcome()
+
+    fireEvent.click(screen.getByTestId('create-session-modal-confirm'))
+
+    expect(createSession).toHaveBeenCalledTimes(1)
+    expect(createSession).toHaveBeenCalledWith({
+      name: 'Selected session',
+      cwd: '/tmp/selected',
+      provider: 'codex',
+      connectionId: 'selected-connection',
+      model: 'selected-model',
+      permissionMode: 'approve',
+      worktree: true,
+      environmentId: 'selected-environment',
+      codexSandbox: 'read-only',
+      skipPermissions: false,
+    })
+    expect(screen.getByTestId('create-session-modal-creating')).toBeInTheDocument()
+    expect(screen.queryByTestId('create-session-modal-error')).not.toBeInTheDocument()
+  })
+
+  it('preserves omitted default options and normalizes an empty working directory', () => {
+    createSessionModalData.current = { name: 'Default session', cwd: '' }
+    const createSession = vi.fn<(options: Record<string, unknown>) => boolean>(() => true)
+    stateOverrides = { ...freshConnectedState(() => true), createSession }
+    render(<App />)
+    openCreateViaWelcome()
+
+    fireEvent.click(screen.getByTestId('create-session-modal-confirm'))
+
+    expect(createSession).toHaveBeenCalledTimes(1)
+    expect(createSession).toHaveBeenCalledWith({ name: 'Default session', cwd: undefined })
+    const options = createSession.mock.calls[0]?.[0]
+    expect(options).toBeDefined()
+    expect(Object.prototype.hasOwnProperty.call(options, 'codexSandbox')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(options, 'connectionId')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(options, 'environmentId')).toBe(false)
+  })
 
   it('(a) clears the spinner and surfaces a retryable error when the socket drops mid-create', () => {
     stateOverrides = freshConnectedState(() => true)

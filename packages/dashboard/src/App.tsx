@@ -129,6 +129,7 @@ import { PairedDevicesPanel } from './components/PairedDevicesPanel'
 import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
 import { ControlRoomView } from './components/ControlRoomView'
 import { AppModals } from './components/AppModals'
+import type { CreateSessionData } from './components/CreateSessionModal'
 import { AppHeader } from './components/AppHeader'
 import { SESSION_PR_STATUS_AUTO_PULL_MAX_AGE_MS } from './components/SessionCiChip'
 import { SetupWizard } from './components/SetupWizard'
@@ -2406,14 +2407,14 @@ export function App() {
   // `handleShowQr`, which depends on `fetchQrInto`, which is declared
   // further down. The hook is a no-op outside Tauri (web dashboard).
 
-  const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string; worktree?: boolean; skipPermissions?: boolean }) => {
+  const handleCreateSession = useCallback((data: CreateSessionData) => {
     setSessionCreateError(null)
     // #6285 — only latch the "Creating…" spinner when the request actually went
     // on the wire. createSession is a silent no-op when the socket is closed; if
     // we latched unconditionally the spinner would wedge forever (no
     // session_switched / session_error reply ever arrives to clear it). On a
     // closed socket, surface a retryable error instead.
-    const sent = createSession({ name: data.name, cwd: data.cwd || undefined, provider: data.provider, model: data.model, permissionMode: data.permissionMode, worktree: data.worktree, skipPermissions: data.skipPermissions })
+    const sent = createSession({ ...data, cwd: data.cwd || undefined })
     if (sent) {
       setIsCreatingSession(true)
     } else {
