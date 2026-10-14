@@ -4,6 +4,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor, act, createEvent } from '@testing-library/react'
 import { useState } from 'react'
+import fs from 'node:fs'
+import path from 'node:path'
 import { InputBar } from './InputBar'
 import type { EvaluatorResultPayload } from '../store/types'
 
@@ -318,6 +320,40 @@ describe('InputBar', () => {
     )
     fireEvent.click(screen.getByTestId('interrupt-button'))
     expect(onInterrupt).toHaveBeenCalled()
+  })
+
+  describe('Stop tap target (#8601)', () => {
+    // jsdom has no layout engine. Resolve the minimum through the complete
+    // stylesheet cascade on the real control; painted geometry is smoke-tested
+    // in a browser, including the narrow-viewport padding override.
+    it.each([
+      { isBusy: true, isStreaming: false, draft: '' },
+      { isBusy: true, isStreaming: false, draft: 'queued follow-up' },
+      { isBusy: false, isStreaming: true, draft: '' },
+      { isBusy: false, isStreaming: true, draft: 'queued follow-up' },
+    ])('resolves a 44x44 floor with busy=$isBusy, streaming=$isStreaming, draft="$draft"', ({ isBusy, isStreaming, draft }) => {
+      const style = document.createElement('style')
+      style.textContent = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
+      document.head.appendChild(style)
+
+      try {
+        render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy={isBusy} isStreaming={isStreaming} />)
+        if (draft) fireEvent.change(screen.getByRole('textbox'), { target: { value: draft } })
+
+        const stop = screen.getByRole('button', { name: 'Stop generation' })
+        const computed = getComputedStyle(stop)
+        expect(
+          Number.parseFloat(computed.minWidth) >= 44,
+          `Stop min-width resolved to ${JSON.stringify(computed.minWidth)}`,
+        ).toBe(true)
+        expect(
+          Number.parseFloat(computed.minHeight) >= 44,
+          `Stop min-height resolved to ${JSON.stringify(computed.minHeight)}`,
+        ).toBe(true)
+      } finally {
+        style.remove()
+      }
+    })
   })
 
   // #3850: pre-fix, the Send/Stop toggle was gated on `!value.trim()` —
