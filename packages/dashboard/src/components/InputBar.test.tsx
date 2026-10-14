@@ -54,6 +54,36 @@ describe('InputBar', () => {
     expect(textarea.value).toBe('')
   })
 
+  it('keeps the draft when the send callback refuses dispatch', () => {
+    const onSend = vi.fn(() => false)
+    render(<InputBar onSend={onSend} onInterrupt={vi.fn()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: 'keep this' } })
+    fireEvent.click(screen.getByTestId('send-button'))
+    expect(onSend).toHaveBeenCalledWith('keep this')
+    expect(textarea.value).toBe('keep this')
+  })
+
+  it('inhibits click and keyboard send while keeping editing available', () => {
+    const onSend = vi.fn()
+    render(
+      <InputBar
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+        sendInhibited
+        sendStatus="Session initializing — your draft is kept."
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    expect(textarea.disabled).toBe(false)
+    fireEvent.change(textarea, { target: { value: 'first prompt' } })
+    fireEvent.click(screen.getByTestId('send-button'))
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+    expect(onSend).not.toHaveBeenCalled()
+    expect(textarea.value).toBe('first prompt')
+    expect(screen.getByRole('status')).toHaveTextContent('Session initializing — your draft is kept.')
+  })
+
   it('sends on Cmd+Enter', () => {
     const onSend = vi.fn()
     render(<InputBar onSend={onSend} onInterrupt={vi.fn()} />)

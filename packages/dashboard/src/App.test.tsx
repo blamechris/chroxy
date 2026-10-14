@@ -152,8 +152,8 @@ vi.mock('./utils/native-notifications', async (importOriginal) => ({
 // appendImageAttachments, the attachment state, the unsaved-work probe) is real.
 vi.mock('./utils/image-utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./utils/image-utils')>()),
-  processImageFiles: async () => ({
-    accepted: [{ type: 'image' as const, mediaType: 'image/png', data: 'AAAA', name: 'shot.png' }],
+  processImageFiles: async (files: File[]) => ({
+    accepted: [{ type: 'image' as const, mediaType: 'image/png', data: 'AAAA', name: files[0]?.name ?? 'shot.png' }],
     rejected: [],
   }),
 }))
@@ -194,7 +194,9 @@ import { persistSidebarRepoNames } from './store/persistence'
 let stateOverrides: Record<string, unknown> = {}
 
 // Mock the store module — return default state merged with overrides
-vi.mock('./store/connection', () => {
+const recoverySubscriptions = vi.hoisted(() => new Set<(state: any) => void>())
+vi.mock('./store/connection', async () => {
+  const { useStore } = await import('zustand')
   const baseState = {
     connectionPhase: 'disconnected',
     sessions: [],
@@ -312,17 +314,17 @@ vi.mock('./store/connection', () => {
     sessionPrStatus: {},
     sessionPrStatusLoading: {},
   }
-  const useConnectionStore = (
-    selector?: (s: typeof baseState) => unknown,
-  ) => {
-    // Merge overrides at call time so tests can set them before render
-    const state = { ...baseState, ...stateOverrides }
-    if (typeof selector === 'function') {
-      return selector(state as typeof baseState)
-    }
-    return state
+  let lastOverrides: any = null
+  let cachedState: any
+  const getState = () => {
+    if (lastOverrides !== stateOverrides) { lastOverrides = stateOverrides; cachedState = { ...baseState, ...stateOverrides } }
+    return cachedState
   }
-  useConnectionStore.getState = () => ({ ...baseState, ...stateOverrides })
+  const subscribe = vi.fn((cb) => { recoverySubscriptions.add(cb); return () => recoverySubscriptions.delete(cb) })
+  const api = { getState, getInitialState: getState, subscribe }
+  const useConnectionStore = (selector?: any) => { const state = useStore(api); return selector ? selector(state) : state }
+  useConnectionStore.getState = getState
+  useConnectionStore.subscribe = subscribe
   // #6287 — useChatKeyboard (mounted by App) calls these rule-eligibility helpers
   // at render to decide whether the permission shortcut offers allow-for-session.
   // Stub them false in the smoke harness (real coverage lives in
@@ -340,6 +342,7 @@ vi.mock('zustand/react/shallow', () => ({
 }))
 
 beforeEach(() => {
+  recoverySubscriptions.clear()
   stateOverrides = {}
   capturedOnRestart = null
   // #7344 — reset so each case only sees the auto-pull it triggered.
@@ -4828,4 +4831,376 @@ describe('null active-model default presentation (#8260)', () => {
     expect(footer.getAttribute('title')).toContain('claude-haiku-4-5')
     expect(setModel).not.toHaveBeenCalled()
   })
+})
+
+import { useConnectionStore as reviewStore } from './store/connection'
+
+describe('#8593 actual App recovery', () => {
+  function setup() {
+    vi.mocked(reviewStore.subscribe).mockClear()
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput,
+      sessions: [{ sessionId: 's1', name: 'One', cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null }],
+      sessionStates: { s1: { messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} } } }
+    const view = render(<App />)
+    return { sendInput, view, box: screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement }
+  }
+  function reject(sendInput: ReturnType<typeof vi.fn>, active = 's1') {
+    const id = sendInput.mock.calls[0]![2].clientMessageId
+    const delivery = { clientMessageId: id, sessionId: 's1', status: 'rejected', delivery: 'not_dispatched', retrySafe: true, pendingContextItemIds: [], updatedAt: 1 }
+    const state = { ...reviewStore.getState(), activeSessionId: active, sessionStates: { s1: { messages: [], activeAgents: [], isIdle: true, inputDeliveries: { [id]: delivery } } } }
+    act(() => {
+      for (const callback of recoverySubscriptions) callback(state)
+    })
+  }
+  it('preserves restored paste A when a new paste B is appended before resend', () => {
+    const { box, sendInput } = setup()
+    const a = 'ORIGINAL-A\n'.repeat(30), b = 'NEW-B\n'.repeat(30)
+    const paste = (text: string) => fireEvent.paste(box, { clipboardData: { files: [], items: [], getData: (t: string) => t === 'text/plain' ? text : '' } })
+    paste(a)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(sendInput.mock.calls[0]![0]).toBe(a)
+    reject(sendInput)
+    expect(box.value).toContain('Pasted text #1')
+    box.setSelectionRange(box.value.length, box.value.length)
+    paste(b)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(String(sendInput.mock.calls[1]![0]).includes('ORIGINAL-A'), 'resend must preserve original pasted content').toBe(true)
+    expect(sendInput.mock.calls[1]![0]).toContain('NEW-B')
+  })
+})
+
+describe('#8593 actual App session lifecycle', () => {
+  const session = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null })
+  const ss = () => ({ messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} })
+  it('keeps the proven unsent snapshot available if the restored original is then pruned', () => {
+    vi.mocked(reviewStore.subscribe).mockClear()
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput, sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+    const { rerender } = render(<App />)
+    const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+    fireEvent.change(box, { target: { value: 'valuable rejected draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    const id = sendInput.mock.calls[0]![2].clientMessageId
+    const delivery = { clientMessageId: id, sessionId: 's1', status: 'rejected', delivery: 'not_dispatched', retrySafe: true, pendingContextItemIds: [], updatedAt: 1 }
+    const state = { ...reviewStore.getState(), sessionStates: { s1: { ...ss(), inputDeliveries: { [id]: delivery } }, s2: ss() } }
+    act(() => { for (const callback of recoverySubscriptions) callback(state) })
+    expect(box.value).toBe('valuable rejected draft')
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2', sessions: [session('s2')], sessionStates: { s2: ss() } }
+    rerender(<App />)
+    expect(Boolean(screen.queryByTestId('composer-recovery')), 'closed-session snapshot must still be offered').toBe(true)
+  })
+  it('offers a snapshot when a render-stale restore callback refuses the newly active origin', () => {
+    vi.mocked(reviewStore.subscribe).mockClear()
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput, sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+    const { rerender } = render(<App />)
+    const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+    fireEvent.change(box, { target: { value: 'valuable rejected draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    const id = sendInput.mock.calls[0]![2].clientMessageId
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    const delivery = { clientMessageId: id, sessionId: 's1', status: 'rejected', delivery: 'not_dispatched', retrySafe: true, pendingContextItemIds: [], updatedAt: 1 }
+    // The store switches back to s1 then receives the ack before React commits s1.
+    stateOverrides = { ...stateOverrides, activeSessionId: 's1', sessionStates: { s1: { ...ss(), inputDeliveries: { [id]: delivery } }, s2: ss() } }
+    act(() => { for (const callback of recoverySubscriptions) callback(reviewStore.getState()) })
+    rerender(<App />)
+    expect(box.value === 'valuable rejected draft' || Boolean(screen.queryByTestId('composer-recovery')), 'failed restore must retain an offer').toBe(true)
+  })
+})
+
+it('#8593 actual App counts a retained recovery snapshot as unsaved work', async () => {
+  vi.mocked(reviewStore.subscribe).mockClear()
+  const { hasUnsavedWork } = await import('./utils/unsaved-work')
+  const session = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null })
+  const ss = () => ({ messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} })
+  const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+  stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput, sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+  const { rerender } = render(<App />)
+  const box = screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement
+  fireEvent.change(box, { target: { value: 'valuable rejected draft' } })
+  fireEvent.keyDown(box, { key: 'Enter' })
+  const id = sendInput.mock.calls[0]![2].clientMessageId
+  stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+  rerender(<App />)
+  const delivery = { clientMessageId: id, sessionId: 's1', status: 'rejected', delivery: 'not_dispatched', retrySafe: true, pendingContextItemIds: [], updatedAt: 1 }
+  stateOverrides = { ...stateOverrides, sessionStates: { s1: { ...ss(), inputDeliveries: { [id]: delivery } }, s2: ss() } }
+  act(() => { for (const callback of recoverySubscriptions) callback(reviewStore.getState()) })
+  expect(Boolean(screen.queryByTestId('composer-recovery'))).toBe(true)
+  expect(box.value).toBe('')
+  expect(hasUnsavedWork(), 'recovery snapshot must inhibit automatic stale-bundle reload').toBe(true)
+})
+
+describe('#8593 retained composer lifecycle', () => {
+  const session = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null })
+  const ss = () => ({ messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} })
+  function setup() {
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput,
+      sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+    const view = render(<App />)
+    return { ...view, sendInput, box: screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement }
+  }
+  function acknowledge(sendInput: ReturnType<typeof vi.fn>, index = 0, sessionId = 's1', status = 'rejected', retrySafe = true) {
+    const id = sendInput.mock.calls[index]![2].clientMessageId
+    const state = reviewStore.getState()
+    stateOverrides = { ...stateOverrides, sessionStates: { ...state.sessionStates,
+      [sessionId]: { ...ss(), inputDeliveries: { [id]: { clientMessageId: id, sessionId,
+        status, delivery: status === 'rejected' ? 'not_dispatched' : 'unknown', retrySafe, pendingContextItemIds: [], updatedAt: 1 } } } } }
+    act(() => { for (const callback of recoverySubscriptions) callback(reviewStore.getState()) })
+  }
+  it('offers the edited recovered draft with both paste blocks after origin pruning and restores here once', () => {
+    const { box, sendInput, rerender } = setup()
+    const a = 'ORIGINAL-A\n'.repeat(30), b = 'NEW-B\n'.repeat(30), c = 'LAST-C\n'.repeat(30)
+    const paste = (text: string) => {
+      box.setSelectionRange(box.value.length, box.value.length)
+      fireEvent.paste(box, { clipboardData: { files: [], items: [], getData: (kind: string) => kind === 'text/plain' ? text : '' } })
+    }
+    paste(a)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    acknowledge(sendInput)
+    paste(b)
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2', sessions: [session('s2')], sessionStates: { s2: ss() } }
+    rerender(<App />)
+    expect(box.value).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Restore draft here' }))
+    expect(box.value).toContain('#1')
+    expect(box.value).toContain('#2')
+    paste(c)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(sendInput.mock.calls).toHaveLength(2)
+    expect(sendInput.mock.calls[1]![0]).toBe(a + b + c)
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+  })
+  it('keeps an explicit paste removal when a recovered draft is later pruned', () => {
+    const { box, sendInput, rerender } = setup()
+    const pasted = 'REMOVE-ME\n'.repeat(30)
+    fireEvent.paste(box, { clipboardData: { files: [], items: [], getData: (kind: string) => kind === 'text/plain' ? pasted : '' } })
+    fireEvent.change(box, { target: { value: 'keep this text ' + box.value } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    acknowledge(sendInput)
+    fireEvent.click(screen.getByRole('button', { name: /Remove Pasted text #1/ }))
+    expect(box.value).toBe('keep this text ')
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2', sessions: [session('s2')], sessionStates: { s2: ss() } }
+    rerender(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore draft here' }))
+    expect(box.value).toBe('keep this text ')
+    expect(screen.queryByRole('button', { name: /Remove Pasted text/ })).toBeNull()
+    expect(sendInput.mock.calls).toHaveLength(1)
+  })
+  it('counts pending and offered work in the actual probe, then releases on dismissal', async () => {
+    const { hasUnsavedWork } = await import('./utils/unsaved-work')
+    const { box, sendInput, rerender } = setup()
+    fireEvent.change(box, { target: { value: 'kept draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(hasUnsavedWork()).toBe(true)
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    acknowledge(sendInput)
+    expect(hasUnsavedWork()).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(hasUnsavedWork()).toBe(false)
+  })
+  it('offers after pruning before the acknowledgement, and accepted explicit resend releases retained work', async () => {
+    const { hasUnsavedWork } = await import('./utils/unsaved-work')
+    const { box, sendInput, rerender } = setup()
+    fireEvent.change(box, { target: { value: 'draft from removed session' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2', sessions: [session('s2')], sessionStates: { s2: ss() } }
+    rerender(<App />)
+    acknowledge(sendInput)
+    expect(box.value).toBe('')
+    expect(hasUnsavedWork()).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Restore draft here' }))
+    expect(box.value).toBe('draft from removed session')
+    expect(sendInput.mock.calls).toHaveLength(1)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(sendInput.mock.calls).toHaveLength(2)
+    acknowledge(sendInput, 1, 's2', 'accepted')
+    expect(hasUnsavedWork()).toBe(false)
+  })
+  it('keeps each of two rejected submissions until it is individually dismissed', () => {
+    const { box, sendInput, rerender } = setup()
+    fireEvent.change(box, { target: { value: 'first draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    stateOverrides = { ...stateOverrides, activeSessionId: 's2' }
+    rerender(<App />)
+    fireEvent.change(box, { target: { value: 'second draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    fireEvent.change(box, { target: { value: 'newer draft' } })
+    acknowledge(sendInput)
+    acknowledge(sendInput, 1, 's2')
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(Boolean(screen.queryByTestId('composer-recovery'))).toBe(true)
+    fireEvent.change(box, { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Restore unsent draft' }))
+    expect(box.value).toBe('second draft')
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+    expect(sendInput.mock.calls).toHaveLength(2)
+  })
+  it.each([['uncertain', true], ['accepted', true], ['rejected', false]])('never restores or offers %s acknowledgement with retrySafe=%s', (status, retrySafe) => {
+    const { box, sendInput } = setup()
+    fireEvent.change(box, { target: { value: 'original draft' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    acknowledge(sendInput, 0, 's1', status as string, retrySafe as boolean)
+    expect(box.value).toBe('')
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+    expect(sendInput.mock.calls).toHaveLength(1)
+  })
+})
+
+describe('precommit recovery adversarial actual App', () => {
+  const session = (id: string) => ({ sessionId: id, name: id, cwd: '/tmp', type: 'cli', provider: 'claude-sdk', hasTerminal: false, model: null, permissionMode: null, isBusy: false, createdAt: 1, conversationId: null })
+  const ss = () => ({ messages: [], activeAgents: [], isIdle: true, inputDeliveries: {} })
+  function setup() {
+    const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+    stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput,
+      sessions: [session('s1'), session('s2')], sessionStates: { s1: ss(), s2: ss() } }
+    const view = render(<App />)
+    return { ...view, sendInput, box: screen.getByRole('textbox', { name: /message input/i }) as HTMLTextAreaElement }
+  }
+  function ack(sendInput: ReturnType<typeof vi.fn>, index: number, status = 'rejected') {
+    const id = sendInput.mock.calls[index]![2].clientMessageId
+    const state = reviewStore.getState()
+    stateOverrides = { ...stateOverrides, sessionStates: { ...state.sessionStates,
+      s1: { ...ss(), inputDeliveries: { [id]: { clientMessageId: id, sessionId: 's1',
+        status, delivery: status === 'rejected' ? 'not_dispatched' : 'dispatch_started', retrySafe: status === 'rejected', pendingContextItemIds: [], updatedAt: 1 } } } } }
+    act(() => { for (const callback of recoverySubscriptions) callback(reviewStore.getState()) })
+  }
+  it('precommit recovery remove the last restored paste releases automatic reload protection', async () => {
+    const { hasUnsavedWork } = await import('./utils/unsaved-work')
+    const { box, sendInput } = setup()
+    fireEvent.paste(box, { clipboardData: { files: [], items: [], getData: (t: string) => t === 'text/plain' ? 'PASTE-A\n'.repeat(30) : '' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    ack(sendInput, 0)
+    expect(box.value).toContain('Pasted text #1')
+    expect(hasUnsavedWork()).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: /Remove Pasted text #1/ }))
+    expect(box.value).toBe('')
+    expect(screen.queryByRole('button', { name: /Remove Pasted text/ })).toBeNull()
+    expect(hasUnsavedWork(), 'intentional removal must release the retained recovery').toBe(false)
+  })
+  it('precommit recovery reverse acknowledgements preserve both individual drafts', async () => {
+    const { box, sendInput } = setup()
+    for (const text of ['first', 'second']) { fireEvent.change(box, { target: { value: text } }); fireEvent.keyDown(box, { key: 'Enter' }) }
+    fireEvent.change(box, { target: { value: 'newer' } })
+    ack(sendInput, 1)
+    ack(sendInput, 0)
+    fireEvent.change(box, { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Restore unsent draft' }))
+    expect(box.value).toBe('second')
+    expect(Boolean(screen.queryByTestId('composer-recovery'))).toBe(true)
+    fireEvent.keyDown(box, { key: 'Enter' })
+    fireEvent.click(screen.getByRole('button', { name: 'Restore unsent draft' }))
+    expect(box.value).toBe('first')
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+  })
+  it('precommit recovery false send return keeps the actual composer and registers no pending recovery', async () => {
+    const { hasUnsavedWork } = await import('./utils/unsaved-work')
+    const { box, sendInput } = setup()
+    sendInput.mockReturnValueOnce(false as never)
+    fireEvent.change(box, { target: { value: 'keep this' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(box.value).toBe('keep this')
+    fireEvent.change(box, { target: { value: '' } })
+    expect(hasUnsavedWork()).toBe(false)
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+  })
+  it('precommit recovery preserves an image attachment staged before React commits its new occupancy', async () => {
+    const { box, sendInput } = setup()
+    fireEvent.change(box, { target: { value: 'rejected original' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    const png = new File([new Uint8Array([1, 2, 3])], 'shot.png', { type: 'image/png' })
+    await act(async () => {
+      fireEvent.paste(box, { clipboardData: { getData: () => '', items: [], files: [png] } })
+      await Promise.resolve()
+      ack(sendInput, 0)
+    })
+    expect(Boolean(screen.queryByTestId('image-thumbnails'))).toBe(true)
+    expect(box.value).toBe('')
+    expect(Boolean(screen.queryByTestId('composer-recovery'))).toBe(true)
+  })
+  it.each(['accepted', 'uncertain'])('precommit recovery %s control keeps the same precommit image stage', async (status) => {
+    const { box, sendInput } = setup()
+    fireEvent.change(box, { target: { value: 'original' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    const png = new File([new Uint8Array([1, 2, 3])], 'shot.png', { type: 'image/png' })
+    await act(async () => {
+      fireEvent.paste(box, { clipboardData: { getData: () => '', items: [], files: [png] } })
+      await Promise.resolve()
+      ack(sendInput, 0, status)
+    })
+    expect(Boolean(screen.queryByTestId('image-thumbnails'))).toBe(true)
+    expect(box.value).toBe('')
+    expect(screen.queryByTestId('composer-recovery')).toBeNull()
+  })
+  it('precommit recovery counts current media before React commits when no pending delivery remains', async () => {
+    const { hasUnsavedWork } = await import('./utils/unsaved-work')
+    const { box, sendInput } = setup()
+    fireEvent.change(box, { target: { value: 'accepted original' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    ack(sendInput, 0, 'accepted')
+    expect(hasUnsavedWork()).toBe(false)
+    await act(async () => {
+      fireEvent.paste(box, {clipboardData:{getData:()=>'',items:[],files:[new File([new Uint8Array([1])], 'newer.png', {type:'image/png'})]}})
+      await Promise.resolve()
+      expect(hasUnsavedWork(), 'staged media must protect automatic reload immediately').toBe(true)
+    })
+  })
+  it('precommit recovery retains attachment-only snapshots before setters notify and through pruning', async () => {
+    const { hasUnsavedWork } = await import('./utils/unsaved-work')
+    const { box, sendInput, rerender } = setup()
+    fireEvent.paste(box, {clipboardData:{getData:()=>'',items:[],files:[new File([new Uint8Array([1])], 'original.png', {type:'image/png'})]}})
+    await screen.findByTestId('image-thumbnails')
+    fireEvent.keyDown(box, {key:'Enter'})
+    ack(sendInput, 0)
+    stateOverrides = {...stateOverrides, activeSessionId:'s2',sessions:[session('s2')],sessionStates:{s2:ss()}}
+    rerender(<App />)
+    expect(screen.getByRole('button', {name:'Restore draft here'})).toBeTruthy()
+    // Clear the tray shown in the new session. The removed origin's offer is
+    // still separate unsent work, and must survive until explicitly dismissed.
+    fireEvent.click(screen.getByRole('button', {name:'Remove original.png'}))
+    expect(hasUnsavedWork()).toBe(true)
+    fireEvent.click(screen.getByRole('button', {name:'Restore draft here'}))
+    expect(screen.getByRole('button', {name:'Remove original.png'})).toBeTruthy()
+    expect(sendInput).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', {name:'Remove original.png'}))
+    expect(hasUnsavedWork()).toBe(false)
+  })
+  it('precommit recovery safe acknowledgement does preserve a previously committed newer image', async () => {
+    const { box, sendInput } = setup()
+    fireEvent.change(box, { target: { value: 'original' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+    const png = new File([new Uint8Array([1, 2, 3])], 'shot.png', { type: 'image/png' })
+    fireEvent.paste(box, { clipboardData: { getData: () => '', items: [], files: [png] } })
+    await screen.findByTestId('image-thumbnails')
+    ack(sendInput, 0)
+    expect(Boolean(screen.queryByTestId('image-thumbnails'))).toBe(true)
+    expect(box.value).toBe('')
+    expect(Boolean(screen.queryByTestId('composer-recovery'))).toBe(true)
+  })
+})
+
+it('precommit recovery retains an attachment-only restored owner and releases it on removal', async () => {
+  const { hasUnsavedWork } = await import('./utils/unsaved-work')
+  const sendInput = vi.fn((_text: string, _files?: unknown, _options?: any) => 'sent')
+  stateOverrides = { connectionPhase: 'connected', activeSessionId: 's1', sendInput,
+    sessions: [{sessionId:'s1', name:'s1', provider:'claude-sdk', hasTerminal:false, type:'cli'}],
+    sessionStates: {s1:{messages:[],activeAgents:[],isIdle:true,inputDeliveries:{}}} }
+  render(<App />)
+  const box = screen.getByRole('textbox', { name: /message input/i })
+  const file = new File([new Uint8Array([1])], 'A.png', {type:'image/png'})
+  fireEvent.paste(box, {clipboardData:{getData:()=>'',items:[],files:[file]}})
+  await screen.findByTestId('image-thumbnails')
+  fireEvent.keyDown(box, {key:'Enter'})
+  const id = sendInput.mock.calls[0]![2].clientMessageId
+  stateOverrides = {...stateOverrides, sessionStates:{s1:{messages:[],activeAgents:[],isIdle:true,inputDeliveries:{[id]:{clientMessageId:id,sessionId:'s1',status:'rejected',delivery:'not_dispatched',retrySafe:true,pendingContextItemIds:[],updatedAt:1}}}}}
+  act(() => {for(const cb of recoverySubscriptions) cb(reviewStore.getState())})
+  expect(screen.getByTestId('image-thumbnails')).toBeTruthy()
+  expect(hasUnsavedWork()).toBe(true)
+  fireEvent.click(screen.getByRole('button', {name:'Remove A.png'}))
+  expect(hasUnsavedWork()).toBe(false)
+  expect(screen.queryByTestId('composer-recovery')).toBeNull()
+  expect(sendInput).toHaveBeenCalledOnce()
 })

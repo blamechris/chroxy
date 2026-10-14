@@ -465,6 +465,7 @@ export declare const ServerProviderRuntimeInfoSchema: z.ZodObject<{
     sessionId: z.ZodString;
     provider: z.ZodString;
     binaryVersion: z.ZodUnion<readonly [z.ZodString, z.ZodLiteral<"unknown">]>;
+    inputRequiresReady: z.ZodDefault<z.ZodOptional<z.ZodBoolean>>;
     capabilities: z.ZodArray<z.ZodObject<{
         name: z.ZodString;
         state: z.ZodUnion<readonly [z.ZodBoolean, z.ZodLiteral<"unknown">]>;

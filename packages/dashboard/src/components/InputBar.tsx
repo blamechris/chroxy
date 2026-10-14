@@ -68,9 +68,12 @@ export interface ImageAttachment {
 }
 
 export interface InputBarProps {
-  onSend: (text: string, attachments?: FileAttachment[]) => void
+  onSend: (text: string, attachments?: FileAttachment[]) => void | boolean
   onInterrupt: () => void
   disabled?: boolean
+  /** Inhibit submission without disabling draft editing or attachment controls. */
+  sendInhibited?: boolean
+  sendStatus?: string
   isBusy?: boolean
   isStreaming?: boolean
   /** Chat redesign #6391: the canonical chat-activity state
@@ -214,7 +217,7 @@ function findAtTrigger(text: string, caret: number): number {
   return -1
 }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, chatActivityState, queuedCount, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, sendInhibited, sendStatus, isBusy, isStreaming, chatActivityState, queuedCount, placeholder, filePickerFiles, mcpResources, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
@@ -465,12 +468,14 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
   const send = useCallback(() => {
     const trimmed = value.trim()
     const hasAtts = dedupedAttachments && dedupedAttachments.length > 0
-    if (!canSubmit) return
+    if (!canSubmit || sendInhibited) return
+    let accepted: void | boolean
     if (hasAtts) {
-      onSend(trimmed, dedupedAttachments)
+      accepted = onSend(trimmed, dedupedAttachments)
     } else {
-      onSend(trimmed)
+      accepted = onSend(trimmed)
     }
+    if (accepted === false) return
     setValue('')
     setFilePickerOpen(false)
     setFileSelectedIndex(0)
@@ -488,7 +493,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, onSend, dedupedAttachments, canSubmit, setValue])
+  }, [value, onSend, dedupedAttachments, canSubmit, sendInhibited, setValue])
 
   const selectCommand = useCallback((name: string) => {
     setValue(`/${name} `)
@@ -1341,6 +1346,11 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
           rows={1}
         />
       </div>
+      {sendStatus && (
+        <div className="input-bar-send-status" role="status" data-testid="input-bar-send-status">
+          {sendStatus}
+        </div>
+      )}
       <div className="input-bar-actions">
         {/* Chat redesign #6391 (slice 5): always-visible Enter-mode keyhint so
             the send key is never a guess. aria-hidden — the sr-only
@@ -1406,7 +1416,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
                 data-testid="send-button"
                 className="btn-send"
                 onClick={send}
-                disabled={disabled}
+                disabled={disabled || sendInhibited}
                 type="button"
                 aria-label="Send follow-up"
               >
@@ -1428,7 +1438,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
             data-testid="send-button"
             className="btn-send"
             onClick={send}
-            disabled={disabled}
+            disabled={disabled || sendInhibited}
             type="button"
             aria-label="Send message"
           >

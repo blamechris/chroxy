@@ -42,6 +42,31 @@ function getTextInput(tree: renderer.ReactTestRenderer): ReactTestInstance {
 }
 
 describe('InputBar imperative draft ownership (#5556)', () => {
+  it('keeps editing enabled but inhibits both send paths during native startup', () => {
+    const ref = React.createRef<InputBarHandle>();
+    const onSend = jest.fn();
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar
+          ref={ref}
+          {...baseProps}
+          onChangeText={noop}
+          onSend={onSend}
+          sendInhibited
+          sendStatus="Session initializing — your draft is kept."
+        />,
+      );
+    });
+    act(() => { getTextInput(tree).props.onChangeText('first prompt'); });
+    expect(getTextInput(tree).props.editable).toBe(true);
+    expect(getTextInput(tree).props.onSubmitEditing).toBeUndefined();
+    expect(tree.root.findByProps({ testID: 'chat-send-button' }).props.disabled).toBe(true);
+    expect(tree.root.findByProps({ testID: 'composer-send-status' }).props.children).toBe('Session initializing — your draft is kept.');
+    expect(ref.current?.getValue()).toBe('first prompt');
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it('round-trips draft via getValue/setValue/clear on the ref', () => {
     const ref = React.createRef<InputBarHandle>();
     let tree!: renderer.ReactTestRenderer;
@@ -442,4 +467,60 @@ describe('InputBar composer state lozenge (chat redesign #6391)', () => {
     });
     expect(lozengeText(tree)).toBe('◐ waiting');
   });
+});
+
+import { TouchableOpacity, View } from 'react-native';
+import { useDictationComposer } from '../../hooks/useDictationComposer';
+
+it('8593 review recovery Restore reacts after a newer native draft is cleared', () => {
+  let parentRenders = 0;
+  let inputRef: React.RefObject<InputBarHandle | null>;
+  function RecoveryHost() {
+    parentRenders++;
+    inputRef = React.useRef<InputBarHandle>(null);
+    const [recovery, setRecovery] = React.useState(false);
+    const [occupied, setOccupied] = React.useState(false);
+    const observeDraft = React.useCallback((text: string) => { if (recovery) setOccupied(text.length > 0); }, [recovery]);
+    const restore = () => {
+      if ((inputRef.current?.getValue() ?? '').length > 0) return false;
+      inputRef.current?.setValue('kept draft');
+      setRecovery(false);
+      return true;
+    };
+    const { handleChangeText } = useDictationComposer({ inputRef, isRecognizing: false, transcript: '', startListening: noop, stopListening: noop, onPasteCollapsed: noop, onDraftChange: observeDraft });
+    return <View>
+      <TouchableOpacity testID="offer" onPress={() => { setOccupied((inputRef.current?.getValue() ?? '').length > 0); setRecovery(true); }} />
+      {recovery && <TouchableOpacity testID="restore" disabled={occupied} onPress={restore} />}
+      <InputBar ref={inputRef} {...baseProps} onChangeText={handleChangeText} />
+    </View>;
+  }
+  let tree!: renderer.ReactTestRenderer;
+  act(() => { tree = renderer.create(<RecoveryHost />); });
+  act(() => { getTextInput(tree).props.onChangeText('newer draft'); });
+  act(() => { tree.root.findByProps({ testID: 'offer' }).props.onPress(); });
+  expect(tree.root.findByProps({ testID: 'restore' }).props.disabled).toBe(true);
+  act(() => { tree.root.findByProps({ testID: 'restore' }).props.onPress(); });
+  expect(inputRef!.current?.getValue()).toBe('newer draft');
+  const before = parentRenders;
+  act(() => { getTextInput(tree).props.onChangeText(''); });
+  expect(inputRef!.current?.getValue()).toBe('');
+  expect(parentRenders).toBe(before + 1);
+  expect(tree.root.findByProps({ testID: 'restore' }).props.disabled).toBe(false);
+  act(() => { tree.root.findByProps({ testID: 'restore' }).props.onPress(); });
+  expect(inputRef!.current?.getValue()).toBe('kept draft');
+  act(() => { tree.unmount(); });
+});
+
+it('observes silent values independently of the real-user paste and voice handler', () => {
+  const ref = React.createRef<InputBarHandle>();
+  const onChangeText = jest.fn(), onValueChange = jest.fn();
+  let tree!: renderer.ReactTestRenderer;
+  act(() => { tree = renderer.create(<InputBar ref={ref} {...baseProps} onChangeText={onChangeText} onValueChange={onValueChange} />); });
+  act(() => { ref.current?.setValue('programmatic'); ref.current?.clear(); });
+  expect(onValueChange.mock.calls).toEqual([['programmatic'], ['']]);
+  expect(onChangeText).not.toHaveBeenCalled();
+  act(() => getTextInput(tree).props.onChangeText('typed'));
+  expect(onChangeText).toHaveBeenCalledWith('typed', '');
+  expect(onValueChange).toHaveBeenLastCalledWith('typed');
+  act(() => tree.unmount());
 });

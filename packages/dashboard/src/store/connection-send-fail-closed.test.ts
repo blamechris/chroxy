@@ -73,6 +73,7 @@ describe('#7822 — selected context delivery', () => {
     const socket = closingSocket()
     useConnectionStore.setState({
       activeSessionId: 'sess-1',
+      sessions: [{ sessionId: 'sess-1', name: 'SDK', provider: 'claude-sdk' }],
       sessionStates: { 'sess-1': createEmptySessionState() },
       serverCapabilities: { inputContextV1: true },
       socket,
@@ -95,6 +96,7 @@ describe('#7822 — selected context delivery', () => {
     const socket = liveSocket(sent)
     useConnectionStore.setState({
       activeSessionId: 'sess-1',
+      sessions: [{ sessionId: 'sess-1', name: 'SDK', provider: 'claude-sdk' }],
       sessionStates: { 'sess-1': createEmptySessionState() },
       serverCapabilities: { inputContextV1: true },
       socket,
@@ -105,6 +107,26 @@ describe('#7822 — selected context delivery', () => {
     useConnectionStore.setState({ serverCapabilities: {} } as never)
     expect(useConnectionStore.getState().sendInput('blocked', undefined, { context })).toBe(false)
     expect(sent).toHaveLength(1)
+  })
+})
+
+describe('#8593 — composer startup readiness', () => {
+  it('refuses unresolved app-server input before optimistic, wire, or delivery mutation', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessions: [{ sessionId: 'sess-1', name: 'Codex', provider: 'codex' }],
+      sessionStates: { 'sess-1': createEmptySessionState() },
+      socket,
+    } as never)
+
+    expect(useConnectionStore.getState().sendInput('kept')).toBe(false)
+    expect(sent).toHaveLength(0)
+    const session = useConnectionStore.getState().sessionStates['sess-1']!
+    expect(session.messages).toHaveLength(0)
+    expect(session.inputDeliveries).toEqual({})
   })
 })
 

@@ -5,7 +5,7 @@
  * without any network I/O. Uses Jest fake timers for retry delay assertions.
  */
 import { Alert } from 'react-native';
-import { useConnectionStore } from '../../store/connection';
+import { useConnectionStore, createEmptySessionState } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
@@ -249,5 +249,51 @@ describe('connect() attempt cancellation', () => {
     const lifecycleState = useConnectionLifecycleStore.getState();
     expect(lifecycleState.connectionPhase).not.toBe('disconnected');
     expect(lifecycleState.connectionError).toBeNull();
+  });
+});
+
+describe('#8593 current-socket readiness on direct reconnect', () => {
+  it('blocks until the same daemon sends fresh runtime facts, then sends exactly once', async () => {
+    const original = global.WebSocket;
+    class Socket {
+      static OPEN = 1;
+      static instances: Socket[] = [];
+      readyState = 1;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      sent: Record<string, unknown>[] = [];
+      constructor(_url: string) { Socket.instances.push(this); }
+      send(raw: string) { this.sent.push(JSON.parse(raw)); }
+      close() { this.readyState = 3; }
+    }
+    global.WebSocket = Socket as unknown as typeof WebSocket;
+    global.fetch = jest.fn().mockResolvedValue(mockResponse(200, { status: 'ok' }));
+    const auth = { type: 'auth_ok', clientId: 'epoch-client', encryption: 'disabled', serverMode: 'cli' };
+    const ready = { provider: 'codex', inputRequiresReady: true, capabilities: [{ name: 'inputReady', state: true }] };
+    try {
+      useConnectionStore.getState().connect('ws://localhost:3000/ws', 'fixture-token', { silent: true });
+      await flushPromises();
+      const first = Socket.instances[0];
+      first.onopen?.();
+      first.onmessage?.({ data: JSON.stringify(auth) });
+      useConnectionStore.setState({ activeSessionId: 'epoch-s1', sessions: [{ sessionId: 'epoch-s1', name: 'Codex', provider: 'codex' }],
+        sessionStates: { 'epoch-s1': { ...createEmptySessionState(), providerRuntimeInfo: ready } } } as never);
+      useConnectionStore.getState().connect('ws://localhost:3000/ws', 'fixture-token', { silent: true });
+      await flushPromises();
+      const second = Socket.instances[1];
+      expect(first.onclose).toBeNull();
+      second.onopen?.();
+      second.onmessage?.({ data: JSON.stringify(auth) });
+      expect(useConnectionStore.getState().sendInput('kept draft')).toBe(false);
+      expect(second.sent.filter(frame => frame.type === 'input')).toHaveLength(0);
+      second.onmessage?.({ data: JSON.stringify({ type: 'provider_runtime_info', sessionId: 'epoch-s1', ...ready }) });
+      expect(useConnectionStore.getState().sendInput('explicit send')).toBe('sent');
+      expect(second.sent.filter(frame => frame.type === 'input')).toHaveLength(1);
+    } finally {
+      useConnectionStore.getState().disconnect();
+      global.WebSocket = original;
+    }
   });
 });

@@ -193,6 +193,8 @@ import {
   buildInputMessage,
   beginInputDelivery,
   cancelInputDelivery,
+  deriveComposerReadiness,
+  providerInputReadinessFallback,
   // #7411 — shared streaming/plan transient-state clear, single-sourced so
   // the app and dashboard onclose sweeps can't drift apart on this trio
   // again (the dashboard swept all sessions; the app only swept the active
@@ -1096,6 +1098,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     retireSocket(existing);
     if (liveSocket !== existing) retireSocket(liveSocket);
     liveSocket = null;
+    // Every new socket must obtain its own session readiness snapshot, including
+    // direct reconnects whose retired socket no longer runs onclose.
+    clearStreamingAndPlanStateAcrossSessions(get);
     // #6286 — re-dialing over a still-`connected` phase (the resume/network
     // liveness paths, or switching servers while connected) is a RECONNECT, not
     // a fresh connect: `connected → connecting` is an illegal FSM exit and the
@@ -1921,12 +1926,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendInput: (input, wireAttachments, options) => {
-    const { socket, activeSessionId, serverCapabilities } = get();
+    const { socket, activeSessionId, serverCapabilities, sessions } = get();
+    const active = get().getActiveSessionState();
+    const activeProvider = sessions.find(session => session.sessionId === activeSessionId)?.provider;
+    const readiness = deriveComposerReadiness(
+      active.providerRuntimeInfo,
+      providerInputReadinessFallback(activeProvider),
+    );
+    if (!readiness.canSend) return false;
     // When the caller pre-generated a client-side messageId for the
     // optimistic UI (via addUserMessage), include it in the wire so the
     // server adopts the same id in its history record. Enables id-based
     // dedup on reconnect replay (issue #2902).
-    const clientMessageId = options?.clientMessageId || (options?.context ? nextMessageId('user') : undefined);
+    const clientMessageId = options?.clientMessageId || nextMessageId('user');
     if (options?.context && serverCapabilities.inputContextV1 !== true) return false;
     const payload = buildInputMessage({
       input,
@@ -1936,12 +1948,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clientMessageId,
       context: options?.context,
     });
-    if (options?.context && clientMessageId && activeSessionId) {
+    if (activeSessionId) {
       updateSession(activeSessionId, (session) => ({
         inputDeliveries: beginInputDelivery(
           session.inputDeliveries,
           clientMessageId,
-          options.context!,
+          options?.context,
           Date.now(),
           activeSessionId,
         ),

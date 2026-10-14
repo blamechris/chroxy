@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync, utimesSync, u
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest, validateProviderClass, getRegisteredProviderNames, getProviderCustomizationRoster } from '../src/providers.js'
+import { registerProvider, getProvider, listProviders, registerDockerProvider, _resetCredsCacheForTest, validateProviderClass, getRegisteredProviderNames, getProviderCustomizationRoster, getProviderRuntimeInfo } from '../src/providers.js'
 import { CliSession } from '../src/cli-session.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { CodexSession } from '../src/codex-session.js'
@@ -26,6 +26,26 @@ const __sandboxConfigDir = process.env.CHROXY_CONFIG_DIR
 const BUILTIN_PROVIDER_NAMES = listProviders().map(p => p.name)
 
 describe('Provider Registry', () => {
+  it('publishes the app-server-only input readiness trait and live admission state', () => {
+    const native = new CodexAppServerSession({ cwd: process.cwd() })
+    assert.equal(getProviderRuntimeInfo('codex', native).inputRequiresReady, true)
+    assert.deepEqual(
+      getProviderRuntimeInfo('codex', native).capabilities.find(cap => cap.name === 'inputReady'),
+      { name: 'inputReady', state: false },
+    )
+    native._client = {}
+    native._processReady = true
+    native._isBusy = true
+    assert.deepEqual(
+      getProviderRuntimeInfo('codex', native).capabilities.find(cap => cap.name === 'inputReady'),
+      { name: 'inputReady', state: true },
+      'busy app-server sessions remain input-admissible for follow-up queuing',
+    )
+
+    const legacy = Object.create(CodexSession.prototype)
+    assert.equal(getProviderRuntimeInfo('codex', legacy).inputRequiresReady, false)
+  })
+
   it('has claude-cli and claude-sdk pre-registered', () => {
     const cli = getProvider('claude-cli')
     const sdk = getProvider('claude-sdk')

@@ -1839,6 +1839,7 @@ describe('sendSessionInfo', () => {
     assert.deepEqual(frame.capabilities, [
       { name: 'mcp', state: 'unknown' },
       { name: 'approvals', state: true },
+      { name: 'inputReady', state: false },
     ])
     assert.equal(frame.customization.mcp.toolCalls, 'unknown')
   })
@@ -1870,6 +1871,7 @@ describe('sendSessionInfo', () => {
       { name: 'mcp', state: 'unknown' },
       { name: 'approvals', state: true },
       { name: 'sandbox', state: false },
+      { name: 'inputReady', state: false },
     ])
     assert.doesNotThrow(() => ServerProviderRuntimeInfoSchema.parse(frame))
   })

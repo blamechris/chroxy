@@ -2388,7 +2388,7 @@ describe('shared dispatch table', () => {
             inputDeliveries: {
               'user-1': {
                 clientMessageId: 'user-1', sessionId: 's1', status: 'uncertain', delivery: 'unknown',
-                pendingContextItemIds: ['ocr-1'], updatedAt: 1,
+                retrySafe: false, pendingContextItemIds: ['ocr-1'], updatedAt: 1,
               },
             },
           },
@@ -2405,6 +2405,37 @@ describe('shared dispatch table', () => {
         status: 'accepted', pendingContextItemIds: [],
       })
       expect(env.sessions.s2.inputDeliveries).toEqual({})
+    })
+
+    it('rolls back only the matching optimistic turn on a definitive safe rejection', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [
+              { id: 'user-1', type: 'user_input', content: 'first', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 1 },
+              { id: 'newer', type: 'user_input', content: 'newer', timestamp: 2 },
+            ],
+            streamingMessageId: 'pending', pendingClientMessageId: 'user-1', isIdle: false,
+            inputDeliveries: {
+              'user-1': {
+                clientMessageId: 'user-1', sessionId: 's1', status: 'uncertain', delivery: 'unknown',
+                retrySafe: false, pendingContextItemIds: [], updatedAt: 1,
+              },
+            },
+          },
+        },
+      })
+      dispatch(env, {
+        type: 'input_ack', sessionId: 's1', clientMessageId: 'user-1',
+        status: 'rejected', delivery: 'not_dispatched', retrySafe: true,
+        dedupScope: 'process', reason: 'not_runnable',
+      })
+      expect(env.sessions.s1.messages.map(message => message.id)).toEqual(['newer'])
+      expect(env.sessions.s1).toMatchObject({
+        streamingMessageId: null, pendingClientMessageId: null, isIdle: true,
+      })
     })
 
     it('reconciles a server message_queued by appending a confirmed entry', () => {

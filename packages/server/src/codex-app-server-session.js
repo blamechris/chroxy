@@ -149,9 +149,19 @@ const CODEX_FIRST_PARTY_NATIVE_BASE_URL = 'https://chatgpt.com/backend-api/codex
  */
 export class CodexAppServerSession extends BaseSession {
   static get customizationDescriptor() { return CODEX_APPSERVER_CUSTOMIZATION }
+  static get inputRequiresReady() { return true }
 
   get providerBinaryVersion() { return this.codexVersion || 'unknown' }
-  get providerRuntimeCapabilities() { return { ...(this.codexCapabilities || {}), nativeResume: this._nativeResumeCapability } }
+  get providerRuntimeCapabilities() {
+    return {
+      ...(this.codexCapabilities || {}),
+      nativeResume: this._nativeResumeCapability,
+      // This is the exact admission boundary used by sendMessage below. Busy is
+      // deliberately excluded: an established busy session accepts follow-ups
+      // through BaseSession's existing outgoing queue.
+      inputReady: Boolean(this._processReady && this._client),
+    }
+  }
   static get nativeResumeDriver() { return NATIVE_RESUME_DRIVER }
 
   get nativeResumeState() {

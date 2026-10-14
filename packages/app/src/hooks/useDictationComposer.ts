@@ -50,6 +50,8 @@ export interface UseDictationComposerParams {
   startListening: () => void;
   /** Stop the recogniser session. */
   stopListening: () => void;
+  /** Observe draft edits without moving text ownership out of InputBar. */
+  onDraftChange?: (text: string, isVoice: boolean) => void;
   /**
    * Called when a composer change is detected as a paste large enough to
    * collapse. The host owns the pasted-block id counter + block state (it must
@@ -71,6 +73,8 @@ export interface UseDictationComposerReturn {
    * pending message used voice, then clears the flag.
    */
   consumeUsedVoice: () => boolean;
+  /** Restore the corresponding draft's voice marker after a refused send. */
+  restoreUsedVoice: (used?: boolean) => void;
 }
 
 export function useDictationComposer(
@@ -83,6 +87,7 @@ export function useDictationComposer(
     startListening,
     stopListening,
     onPasteCollapsed,
+  onDraftChange,
   } = params;
 
   // Index where the current dictation session began inserting (#5556).
@@ -95,7 +100,10 @@ export function useDictationComposer(
   const onPasteCollapsedRef = useRef(onPasteCollapsed);
   onPasteCollapsedRef.current = onPasteCollapsed;
 
+  const onDraftChangeRef = useRef(onDraftChange);
+  onDraftChangeRef.current = onDraftChange;
   const handleChangeText = useCallback((text: string, prev: string) => {
+    onDraftChangeRef.current?.(text, usedVoiceRef.current);
     // Every `onChangeText` is a real user keystroke (the dictation write goes
     // through the silent `setValue` since #5566). So while recognition is active
     // this IS a manual mid-dictation edit — re-anchor so the next transcript
@@ -136,7 +144,9 @@ export function useDictationComposer(
       const prefix = current.slice(0, dictationStartRef.current);
       const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : '';
       usedVoiceRef.current = true;
-      inputRef.current?.setValue(prefix + separator + transcript);
+      const draft = prefix + separator + transcript;
+      inputRef.current?.setValue(draft);
+      onDraftChangeRef.current?.(draft, true);
     }
   }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes
 
@@ -146,5 +156,9 @@ export function useDictationComposer(
     return used;
   }, []);
 
-  return { handleChangeText, handleMicPress, consumeUsedVoice };
+  const restoreUsedVoice = useCallback((used = true) => {
+    usedVoiceRef.current = used;
+  }, []);
+
+  return { handleChangeText, handleMicPress, consumeUsedVoice, restoreUsedVoice };
 }
