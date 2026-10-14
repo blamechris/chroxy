@@ -6765,6 +6765,8 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .btn-interrupt {
+  min-height: 44px;
+  min-width: 44px;
   background: var(--accent-red);
   color: #fff;
 }
