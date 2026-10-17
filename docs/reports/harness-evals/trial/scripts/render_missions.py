@@ -3,7 +3,9 @@
 
 Usage: python3 render_missions.py            (from any cwd)
 Writes ../missions/<RUN_ID>.md for every run. Re-run after changing the queue
-or T0 so all four missions stay identical except for their run fields.
+so all four missions stay identical except for their run fields. T0 is not
+rendered: a clone cut from T0 cannot contain its own SHA, so the template
+derives it with git merge-base instead.
 """
 import json, pathlib
 
@@ -23,7 +25,7 @@ else:
 for run in runs['runs']:
     fields = {
         'RUN_ID': run['id'], 'HARNESS': run['harness'], 'MODEL': run['model'],
-        'EFFORT': run['effort'], 'BASE_BRANCH': run['base'], 'T0': runs['T0'],
+        'EFFORT': run['effort'], 'BASE_BRANCH': run['base'],
         'QUEUE': queue_md, 'INVOCATION': run['invocation'],
     }
     out = template

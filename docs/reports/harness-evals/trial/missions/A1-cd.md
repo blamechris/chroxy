@@ -13,7 +13,7 @@ wins**; where it is silent, the directive applies as written.
 | Harness | CD — Claude desktop app, local Claude Code session in a fresh clone |
 | Coordinator model / effort | `claude-opus-5-5` / high |
 | Base branch (the ONLY merge target) | `trial/a1-cd` |
-| Base SHA (T0) | `TBD — set when trial/* branches are cut` |
+| Base SHA (T0) | `git merge-base origin/trial/a1-cd origin/main` — the commit the base was cut from; identified in `README.md` on `main` |
 | Run report path | `docs/reports/harness-evals/trial/runs/A1-cd/REPORT.md` |
 | Wall-clock cap | 12 hours from your first command |
 

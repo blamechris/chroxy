@@ -13,7 +13,7 @@ wins**; where it is silent, the directive applies as written.
 | Harness | CY — Chroxy session, Codex app-server provider (ChatGPT connection) |
 | Coordinator model / effort | `gpt-6-astra` / xhigh |
 | Base branch (the ONLY merge target) | `trial/b2-cy-codex` |
-| Base SHA (T0) | `TBD — set when trial/* branches are cut` |
+| Base SHA (T0) | `git merge-base origin/trial/b2-cy-codex origin/main` — the commit the base was cut from; identified in `README.md` on `main` |
 | Run report path | `docs/reports/harness-evals/trial/runs/B2-cy-codex/REPORT.md` |
 | Wall-clock cap | 12 hours from your first command |
 
