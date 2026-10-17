@@ -43,7 +43,8 @@ for o in runs:
              median_first_commit_to_pr_min=med(lead),median_last_commit_to_merge_min=med(post),median_commit_span_min=med([(ts(det[n]['last_commit_date'])-ts(det[n]['first_commit_date'])).total_seconds()/60 for n in nums if det[n]['first_commit_date']]))
     rows.append(row); o['review']=row
 json.dump(runs,open('data/runs.json','w'),indent=1)
-w=csv.DictWriter(open('/home/user/chroxy/docs/reports/harness-evals/data/review-metrics-2026-10-17.csv','w'),fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
+import os
+w=csv.DictWriter(open(os.environ.get('HE_METRICS_PATH','/home/user/chroxy/docs/reports/harness-evals/data/review-metrics-2026-10-17.csv'),'w',newline=''),fieldnames=list(rows[0].keys()),lineterminator='\n'); w.writeheader(); w.writerows(rows)
 print(f"{'run':10} {'cov':>7} {'c/PR':>4} {'multi':>5} {'thr':>4} {'res':>4} {'PRw/thr':>7} {'copilot':>7} {'human':>5} {'rev/PR':>6} {'appr':>4} {'chg':>3} {'lead':>5} {'post':>5} {'cspan':>5}")
 for r in rows:
     print(f"{r['run']:10} {r['coverage']:>7} {r['commits_per_pr']:>4} {r['prs_multi_commit']:>5} {r['threads_total']:>4} {r['threads_resolved']:>4} {r['prs_with_threads']:>7} {r['copilot_comments']:>7} {r['human_replies']:>5} {r['reviews_per_pr']:>6} {r['prs_approved']:>4} {r['prs_changes_requested']:>3} {r['median_first_commit_to_pr_min']:>5} {r['median_last_commit_to_merge_min']:>5} {r['median_commit_span_min']:>5}")

@@ -73,9 +73,9 @@
  {
   "run": "B1",
   "label": "Sep 22 session",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 8,
   "pr_numbers": [
    7862,
@@ -114,7 +114,7 @@
   },
   "review": {
    "run": "B1",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "8/8",
    "commits_per_pr": 3.5,
@@ -135,9 +135,9 @@
  {
   "run": "B2",
   "label": "Sep 24 marathon",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 20,
   "pr_numbers": [
    7882,
@@ -187,7 +187,7 @@
   },
   "review": {
    "run": "B2",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "20/20",
    "commits_per_pr": 2.7,
@@ -208,9 +208,9 @@
  {
   "run": "B3",
   "label": "Sep 25-26 marathon",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 28,
   "pr_numbers": [
    7923,
@@ -268,7 +268,7 @@
   },
   "review": {
    "run": "B3",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "28/28",
    "commits_per_pr": 2.9,
@@ -289,9 +289,9 @@
  {
   "run": "B4",
   "label": "Sep 26-28 marathon",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 26,
   "pr_numbers": [
    7980,
@@ -350,7 +350,7 @@
   },
   "review": {
    "run": "B4",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "26/26",
    "commits_per_pr": 3.6,
@@ -371,9 +371,9 @@
  {
   "run": "B5",
   "label": "Sep 28 session",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 10,
   "pr_numbers": [
    8045,
@@ -415,7 +415,7 @@
   },
   "review": {
    "run": "B5",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "10/10",
    "commits_per_pr": 3.2,
@@ -436,9 +436,9 @@
  {
   "run": "B6",
   "label": "Sep 28-29 session",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 10,
   "pr_numbers": [
    8060,
@@ -479,7 +479,7 @@
   },
   "review": {
    "run": "B6",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "10/10",
    "commits_per_pr": 2.5,
@@ -500,9 +500,9 @@
  {
   "run": "B7",
   "label": "Sep 29-30 marathon (incl. v0.11.1 cloud session)",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred; 3 PRs from llm-/ cloud branch",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 42,
   "pr_numbers": [
    8085,
@@ -577,7 +577,7 @@
   },
   "review": {
    "run": "B7",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "42/42",
    "commits_per_pr": 2.5,
@@ -598,9 +598,9 @@
  {
   "run": "B8",
   "label": "Sep 30 session (v0.11.2)",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "SS?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 5,
   "pr_numbers": [
    8170,
@@ -635,7 +635,7 @@
   },
   "review": {
    "run": "B8",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "SS?",
    "coverage": "5/5",
    "commits_per_pr": 2.6,
@@ -656,9 +656,9 @@
  {
   "run": "R01",
   "label": "Sep 30 16:24 -> Oct 1 08:11 Claude session",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 13,
   "pr_numbers": [
    8177,
@@ -705,7 +705,7 @@
   },
   "review": {
    "run": "R01",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "13/13",
    "commits_per_pr": 3.2,
@@ -782,9 +782,9 @@
  {
   "run": "R03",
   "label": "Oct 1-2 Claude PRs",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "SS?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 4,
   "pr_numbers": [
    8206,
@@ -818,7 +818,7 @@
   },
   "review": {
    "run": "R03",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "SS?",
    "coverage": "4/4",
    "commits_per_pr": 2.5,
@@ -839,9 +839,9 @@
  {
   "run": "R04",
   "label": "Oct 3 #8216 (delivery pilot)",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "SS",
-  "confidence": "inferred; body: \"under the delivery pilot\"",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 1,
   "pr_numbers": [
    8216
@@ -871,7 +871,7 @@
   },
   "review": {
    "run": "R04",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "SS",
    "coverage": "1/1",
    "commits_per_pr": 4.0,
@@ -892,9 +892,9 @@
  {
   "run": "R05",
   "label": "Oct 4 #8272 (first smoke-table PR)",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "PD?",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 1,
   "pr_numbers": [
    8272
@@ -924,7 +924,7 @@
   },
   "review": {
    "run": "R05",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "PD?",
    "coverage": "1/1",
    "commits_per_pr": 13.0,
@@ -945,9 +945,9 @@
  {
   "run": "R06",
   "label": "Oct 5 #8297/#8299",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "SS",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 2,
   "pr_numbers": [
    8297,
@@ -977,7 +977,7 @@
   },
   "review": {
    "run": "R06",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "SS",
    "coverage": "2/2",
    "commits_per_pr": 1.5,
@@ -1051,9 +1051,9 @@
  {
   "run": "R08",
   "label": "Oct 6 follow-up to the CY run (#8304 docs, #8320, #8325)",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "SS",
-  "confidence": "inferred; desktop git identity",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 3,
   "pr_numbers": [
    8304,
@@ -1090,7 +1090,7 @@
   },
   "review": {
    "run": "R08",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "SS",
    "coverage": "3/3",
    "commits_per_pr": 9.3,
@@ -1111,9 +1111,9 @@
  {
   "run": "R09",
   "label": "Oct 6 auto-deploy #8330",
-  "harness": "CD?",
+  "harness": "CD (session)",
   "mode": "SS",
-  "confidence": "inferred",
+  "confidence": "CX evaluation round two: bridge-session id present in native desktop bridgeSessionIds; per-PR attribution provisional",
   "prs": 1,
   "pr_numbers": [
    8330
@@ -1144,7 +1144,7 @@
   },
   "review": {
    "run": "R09",
-   "harness": "CD?",
+   "harness": "CD (session)",
    "mode": "SS",
    "coverage": "1/1",
    "commits_per_pr": 11.0,
