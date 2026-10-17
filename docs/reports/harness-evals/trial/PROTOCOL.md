@@ -113,9 +113,10 @@ issue in the vault (outside the repository): expected root cause, acceptance
 checks, and whether the fix is already known. Nothing from it enters the repo
 until all four runs are done, but its SHA-256 is committed in
 `KEY-COMMITMENT.md` before run 1 so a later edit is detectable. After run 4 the
-key is committed to `trial/eval` for the graders, who verify the digest first. Where the owner does not know the answer, the four
-implementations are cross-checked against each other, CI and the issue's own
-acceptance criteria — that is the realistic case and is graded as such.
+key is committed to `trial/eval` for the graders, who verify the digest first.
+Where the owner does not know the answer, the four implementations are
+cross-checked against each other, CI and the issue's own acceptance criteria —
+that is the realistic case and is graded as such.
 
 Why not re-run already-fixed issues: the merged fix is one `git log` or
 `gh pr view` away, and the PD skill reads issues and history by design, so the

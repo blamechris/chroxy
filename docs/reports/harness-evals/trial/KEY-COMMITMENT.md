@@ -14,7 +14,8 @@ unseal that the key they receive is the one sealed before run 1.
 | Trial base T0 | derived: `git merge-base origin/trial/a1-cd origin/main` (README status table identifies the cut) |
 | Verify | `shasum -a 256 KEY.md` (macOS) or `sha256sum KEY.md` must print the digest above |
 
-The digest covers the whole file, including its own "Sealed at" line. A changed
-key means a new row here, committed before run 1; once run 1 has started the key
-is frozen, and a digest mismatch at unseal is reported as an incident, not
-silently accepted.
+The digest is of the plaintext `KEY.md`, covering the whole file including
+`KEY.md`'s own "Sealed at" line; the encrypted copy at rest is `KEY.md.enc`. A
+changed key means a replacement table here (the old digest stays in git
+history), committed before run 1; once run 1 has started the key is frozen, and
+a digest mismatch at unseal is reported as an incident, not silently accepted.
