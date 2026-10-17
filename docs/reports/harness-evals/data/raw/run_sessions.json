@@ -1,0 +1,930 @@
+[
+ {
+  "run": "B-CX-Sep13",
+  "sessions": []
+ },
+ {
+  "run": "B-CX-7854",
+  "sessions": [
+   {
+    "id": "session_014V57QD8QPe4PqbrdPy5Nu3",
+    "title": "Prime directive readiness",
+    "created": "2026-09-26T07:31:48.016933Z",
+    "updated": "2026-09-26T22:58:37.761901Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "684809",
+    "cost": "",
+    "match": [],
+    "status": "2 PRs merged, 3 issues filed, meter reset; handoff seed refreshed",
+    "recent": "PRs #7980 & #7982 merged; #7978 & #7324 closed; #7981/7985/7986 filed; ready for next session from handoff seed"
+   },
+   {
+    "id": "session_013efRErjQaXRSWqutPREYNG",
+    "title": "Land visual-brief dark-default in skill registry",
+    "created": "2026-09-25T01:30:25.692286Z",
+    "updated": "2026-09-26T09:43:11.497829Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "196433",
+    "cost": "",
+    "match": [],
+    "status": "PRs #306 & #307 merged; worktree cleaned",
+    "recent": "visual-brief dark-by-default merged to skill-templates main (4a39c94 + 7534cf8 reindex)"
+   },
+   {
+    "id": "session_017bLWzDxjxYnRiPJPD9YMMP",
+    "title": "Prime directive readiness",
+    "created": "2026-09-24T06:39:50.934894Z",
+    "updated": "2026-09-26T07:31:35.939220Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "731863",
+    "cost": "",
+    "match": [
+     7854
+    ],
+    "status": "56 PRs merged (49 ours, 7 Renovate); #7854 security controls + daemon landed; disk cleared 118 GB free",
+    "recent": "PR queue empty: #7854 external planner controls + #7971 daemon permissions merged; #7978 (Grep floor gap) flagged for next session"
+   },
+   {
+    "id": "session_0149vc3WkJHWuDWQihuioUXh",
+    "title": "Open issues review",
+    "created": "2026-09-22T22:58:12.650112Z",
+    "updated": "2026-09-23T01:43:42.842890Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-fable-5-1",
+    "ctx": "177756",
+    "cost": "",
+    "match": [],
+    "status": "PRs #7878 #7879 merged, issues closed, wave teardown complete",
+    "recent": "Security wave shipped: 2 PRs merged (boot sweep + container write fixes), 4 worktrees cleaned, benchmark + memory + seed archived"
+   }
+  ]
+ },
+ {
+  "run": "B1",
+  "sessions": [
+   {
+    "id": "session_0149vc3WkJHWuDWQihuioUXh",
+    "title": "Open issues review",
+    "created": "2026-09-22T22:58:12.650112Z",
+    "updated": "2026-09-23T01:43:42.842890Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-fable-5-1",
+    "ctx": "177756",
+    "cost": "",
+    "match": [
+     7878,
+     7879
+    ],
+    "status": "PRs #7878 #7879 merged, issues closed, wave teardown complete",
+    "recent": "Security wave shipped: 2 PRs merged (boot sweep + container write fixes), 4 worktrees cleaned, benchmark + memory + seed archived"
+   }
+  ]
+ },
+ {
+  "run": "B2",
+  "sessions": [
+   {
+    "id": "session_017bLWzDxjxYnRiPJPD9YMMP",
+    "title": "Prime directive readiness",
+    "created": "2026-09-24T06:39:50.934894Z",
+    "updated": "2026-09-26T07:31:35.939220Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "731863",
+    "cost": "",
+    "match": [],
+    "status": "56 PRs merged (49 ours, 7 Renovate); #7854 security controls + daemon landed; disk cleared 118 GB free",
+    "recent": "PR queue empty: #7854 external planner controls + #7971 daemon permissions merged; #7978 (Grep floor gap) flagged for next session"
+   }
+  ]
+ },
+ {
+  "run": "B3",
+  "sessions": [
+   {
+    "id": "session_013efRErjQaXRSWqutPREYNG",
+    "title": "Land visual-brief dark-default in skill registry",
+    "created": "2026-09-25T01:30:25.692286Z",
+    "updated": "2026-09-26T09:43:11.497829Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "196433",
+    "cost": "",
+    "match": [],
+    "status": "PRs #306 & #307 merged; worktree cleaned",
+    "recent": "visual-brief dark-by-default merged to skill-templates main (4a39c94 + 7534cf8 reindex)"
+   },
+   {
+    "id": "session_017bLWzDxjxYnRiPJPD9YMMP",
+    "title": "Prime directive readiness",
+    "created": "2026-09-24T06:39:50.934894Z",
+    "updated": "2026-09-26T07:31:35.939220Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "731863",
+    "cost": "",
+    "match": [
+     7971
+    ],
+    "status": "56 PRs merged (49 ours, 7 Renovate); #7854 security controls + daemon landed; disk cleared 118 GB free",
+    "recent": "PR queue empty: #7854 external planner controls + #7971 daemon permissions merged; #7978 (Grep floor gap) flagged for next session"
+   }
+  ]
+ },
+ {
+  "run": "B4",
+  "sessions": [
+   {
+    "id": "session_01V3b4GCSTSvAFnWRAToDrB3",
+    "title": "Prime directive readiness",
+    "created": "2026-09-28T03:36:58.964275Z",
+    "updated": "2026-09-29T05:58:55.693832Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "463192",
+    "cost": "",
+    "match": [],
+    "status": "session complete: 21 PRs merged, 22 issues closed, brief+seed ready",
+    "recent": "Brief at ~/Obsidian/no-it-all/briefs/chroxy-prime-directive-session-2026-09-28.html; seed at /Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md"
+   },
+   {
+    "id": "session_01TJRYrdS5bh31t3MVNRJXQs",
+    "title": "Prime directive readiness",
+    "created": "2026-09-28T01:36:57.465021Z",
+    "updated": "2026-09-28T03:36:58.044260Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "407842",
+    "cost": "",
+    "match": [
+     8034
+    ],
+    "status": "PR #8034 merged; #8035 filed; handoff seed written",
+    "recent": "PR #8034 merged (fbe56c272); container-escape & signature-check fixes shipped; #8035 filed for gemini/codex gap; handoff seed at NEXT-chroxy.md"
+   },
+   {
+    "id": "session_01Y38bgdopGzXaB8Zsw2bhWY",
+    "title": "Prime directive readiness",
+    "created": "2026-09-28T00:02:00.082238Z",
+    "updated": "2026-09-28T01:36:50.067580Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "238189",
+    "cost": "",
+    "match": [
+     8033
+    ],
+    "status": "PR #8033 merged (a524a8861); min version + warning + Renovate throttle landed",
+    "recent": "PR #8033 merged with SDK version-floor enforcement; next: /Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md"
+   },
+   {
+    "id": "session_01SgsmZEgnZRp9EEP2SGNzTH",
+    "title": "Prime directive readiness",
+    "created": "2026-09-27T22:00:00.140969Z",
+    "updated": "2026-09-28T00:01:52.943619Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "445427",
+    "cost": "",
+    "match": [],
+    "status": "fix/7986 branch deleted; 5 worktrees + 8 branches cleaned up",
+    "recent": "Branch fix/7986-desktop-installed-claude-sdk removed; cleaned up agent worktrees and leftover branches. Ready for next task via NEXT-chroxy.md"
+   },
+   {
+    "id": "session_01Bnk94vs971e3w3PZwqosRz",
+    "title": "Prime directive readiness",
+    "created": "2026-09-27T16:29:11.235960Z",
+    "updated": "2026-09-27T21:59:59.315190Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "806777",
+    "cost": "",
+    "match": [],
+    "status": "last decision #7986: use installed claude; seed updated",
+    "recent": "#7986 decided: bundle removed, SDK points to installed claude; next task ready in NEXT-chroxy.md"
+   },
+   {
+    "id": "session_01K5oz8dJKJqwdsvvEJZ2HrT",
+    "title": "Prime directive readiness",
+    "created": "2026-09-27T08:51:22.587262Z",
+    "updated": "2026-09-27T16:29:09.187197Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "660136",
+    "cost": "",
+    "match": [],
+    "status": "Wave 1 complete (8 PRs merged); awaiting #7986 decision (SDK binary: sign or use installed)",
+    "recent": "Wave 1 shipped: 8 PRs merged, 7 issues closed, main CI green; seed at /Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md"
+   },
+   {
+    "id": "session_01BtTu1yfsCM9298gauKzv3z",
+    "title": "Prime directive readiness",
+    "created": "2026-09-27T03:22:51.635780Z",
+    "updated": "2026-09-27T08:51:13.413956Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "490618",
+    "cost": "",
+    "match": [],
+    "status": "merged 3 PRs (#7983, #7992, #7993); chroxy 0 open; seed updated",
+    "recent": "chroxy PR queue cleared (3 merged); handoff seed at /Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md"
+   },
+   {
+    "id": "session_013Mb1abWeLWBVVaqm6wFHjP",
+    "title": "Prime directive readiness",
+    "created": "2026-09-26T22:58:38.774069Z",
+    "updated": "2026-09-27T03:22:47.911048Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "383512",
+    "cost": "",
+    "match": [
+     7988,
+     7989
+    ],
+    "status": "github-runners#8 blocked by merge hook; needs your click to merge",
+    "recent": "#7988 & #7989 merged, #7922/#7874 closed, #7990 filed, seed/ledger/summary written"
+   },
+   {
+    "id": "session_017E2DaL3xozEiZnGBHbSej1",
+    "title": "Update \"three lockfiles\" docs to two after #7324",
+    "created": "2026-09-26T09:06:55.693278Z",
+    "updated": "2026-09-26T09:43:11.486125Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "151922",
+    "cost": "",
+    "match": [
+     7982
+    ],
+    "status": "patch verified in #7982 (ebddf2470); worktree clean",
+    "recent": "wording change landed in PR #7982 commit ebddf2470; local branch cleaned up"
+   },
+   {
+    "id": "session_014V57QD8QPe4PqbrdPy5Nu3",
+    "title": "Prime directive readiness",
+    "created": "2026-09-26T07:31:48.016933Z",
+    "updated": "2026-09-26T22:58:37.761901Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "684809",
+    "cost": "",
+    "match": [
+     7980,
+     7982
+    ],
+    "status": "2 PRs merged, 3 issues filed, meter reset; handoff seed refreshed",
+    "recent": "PRs #7980 & #7982 merged; #7978 & #7324 closed; #7981/7985/7986 filed; ready for next session from handoff seed"
+   },
+   {
+    "id": "session_013efRErjQaXRSWqutPREYNG",
+    "title": "Land visual-brief dark-default in skill registry",
+    "created": "2026-09-25T01:30:25.692286Z",
+    "updated": "2026-09-26T09:43:11.497829Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "196433",
+    "cost": "",
+    "match": [],
+    "status": "PRs #306 & #307 merged; worktree cleaned",
+    "recent": "visual-brief dark-by-default merged to skill-templates main (4a39c94 + 7534cf8 reindex)"
+   },
+   {
+    "id": "session_017bLWzDxjxYnRiPJPD9YMMP",
+    "title": "Prime directive readiness",
+    "created": "2026-09-24T06:39:50.934894Z",
+    "updated": "2026-09-26T07:31:35.939220Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "731863",
+    "cost": "",
+    "match": [],
+    "status": "56 PRs merged (49 ours, 7 Renovate); #7854 security controls + daemon landed; disk cleared 118 GB free",
+    "recent": "PR queue empty: #7854 external planner controls + #7971 daemon permissions merged; #7978 (Grep floor gap) flagged for next session"
+   }
+  ]
+ },
+ {
+  "run": "B5",
+  "sessions": [
+   {
+    "id": "session_01V3b4GCSTSvAFnWRAToDrB3",
+    "title": "Prime directive readiness",
+    "created": "2026-09-28T03:36:58.964275Z",
+    "updated": "2026-09-29T05:58:55.693832Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "463192",
+    "cost": "",
+    "match": [],
+    "status": "session complete: 21 PRs merged, 22 issues closed, brief+seed ready",
+    "recent": "Brief at ~/Obsidian/no-it-all/briefs/chroxy-prime-directive-session-2026-09-28.html; seed at /Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md"
+   }
+  ]
+ },
+ {
+  "run": "B6",
+  "sessions": [
+   {
+    "id": "session_01V3b4GCSTSvAFnWRAToDrB3",
+    "title": "Prime directive readiness",
+    "created": "2026-09-28T03:36:58.964275Z",
+    "updated": "2026-09-29T05:58:55.693832Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "463192",
+    "cost": "",
+    "match": [],
+    "status": "session complete: 21 PRs merged, 22 issues closed, brief+seed ready",
+    "recent": "Brief at ~/Obsidian/no-it-all/briefs/chroxy-prime-directive-session-2026-09-28.html; seed at /Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md"
+   }
+  ]
+ },
+ {
+  "run": "B7",
+  "sessions": [
+   {
+    "id": "session_019DeZ71en9LqiKujkTYr2yz",
+    "title": "Consolidate usage-normalize.js's UNSAFE_KEY set into @chroxy/protocol",
+    "created": "2026-09-29T22:16:31.189004Z",
+    "updated": "2026-09-30T04:39:27.634064Z",
+    "kind": "cloud/desktop_app",
+    "model": "claude-opus-5-5",
+    "ctx": "625747",
+    "cost": "35.673599",
+    "match": [],
+    "status": "5 PRs drafted + indexed; prompt ready for next agent",
+    "recent": "Prompt for next agent review: 5 open PRs (#8147\u2013#8151) with fixes for Docker smoke tests, CHANGELOG conflicts, dashboard 404, node-pty Linux build, and image scope. Instructions: merge main to resolve conflicts, gate release.yml on smoke test, add ci.yml test, ask me on #8151 scope, never dispatch release.yml, leave branch deletion to me. Report: PR list, closes, review verdict, CI status, blockers."
+   },
+   {
+    "id": "session_01GJTWLDjt4PTwYH9auaF8MT",
+    "title": "Prime directive readiness",
+    "created": "2026-09-29T05:58:57.934352Z",
+    "updated": "2026-10-02T01:13:48.853111Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "393792",
+    "cost": "",
+    "match": [],
+    "status": "#8210 merged; 17-item smoke test checklist ready",
+    "recent": "#8210 shipped (b7ee7bd); smoke-test checklist + next session pointer (/Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md) ready"
+   },
+   {
+    "id": "session_01V3b4GCSTSvAFnWRAToDrB3",
+    "title": "Prime directive readiness",
+    "created": "2026-09-28T03:36:58.964275Z",
+    "updated": "2026-09-29T05:58:55.693832Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "463192",
+    "cost": "",
+    "match": [],
+    "status": "session complete: 21 PRs merged, 22 issues closed, brief+seed ready",
+    "recent": "Brief at ~/Obsidian/no-it-all/briefs/chroxy-prime-directive-session-2026-09-28.html; seed at /Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md"
+   }
+  ]
+ },
+ {
+  "run": "B8",
+  "sessions": [
+   {
+    "id": "session_01GJTWLDjt4PTwYH9auaF8MT",
+    "title": "Prime directive readiness",
+    "created": "2026-09-29T05:58:57.934352Z",
+    "updated": "2026-10-02T01:13:48.853111Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "393792",
+    "cost": "",
+    "match": [],
+    "status": "#8210 merged; 17-item smoke test checklist ready",
+    "recent": "#8210 shipped (b7ee7bd); smoke-test checklist + next session pointer (/Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md) ready"
+   }
+  ]
+ },
+ {
+  "run": "R01",
+  "sessions": [
+   {
+    "id": "session_01GJTWLDjt4PTwYH9auaF8MT",
+    "title": "Prime directive readiness",
+    "created": "2026-09-29T05:58:57.934352Z",
+    "updated": "2026-10-02T01:13:48.853111Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "393792",
+    "cost": "",
+    "match": [],
+    "status": "#8210 merged; 17-item smoke test checklist ready",
+    "recent": "#8210 shipped (b7ee7bd); smoke-test checklist + next session pointer (/Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md) ready"
+   }
+  ]
+ },
+ {
+  "run": "R02-CX",
+  "sessions": [
+   {
+    "id": "session_01GJTWLDjt4PTwYH9auaF8MT",
+    "title": "Prime directive readiness",
+    "created": "2026-09-29T05:58:57.934352Z",
+    "updated": "2026-10-02T01:13:48.853111Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "393792",
+    "cost": "",
+    "match": [],
+    "status": "#8210 merged; 17-item smoke test checklist ready",
+    "recent": "#8210 shipped (b7ee7bd); smoke-test checklist + next session pointer (/Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md) ready"
+   }
+  ]
+ },
+ {
+  "run": "R03",
+  "sessions": [
+   {
+    "id": "session_01EJjZwwz8K5Xcij8cm8qoBZ",
+    "title": "christophers-macbook-pro-16984-local-sequential-music",
+    "created": "2026-10-02T03:51:16.951027Z",
+    "updated": "2026-10-03T16:49:41.609821Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "170071",
+    "cost": "",
+    "match": [],
+    "status": "PR #8212 ready, awaiting decision on terminal buffer on reconnect",
+    "recent": "PR #8212 draft: connection lifecycle resets (CI 24 pass, approved); deferred terminal buffer policy question"
+   },
+   {
+    "id": "session_01GJTWLDjt4PTwYH9auaF8MT",
+    "title": "Prime directive readiness",
+    "created": "2026-09-29T05:58:57.934352Z",
+    "updated": "2026-10-02T01:13:48.853111Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "393792",
+    "cost": "",
+    "match": [
+     8210
+    ],
+    "status": "#8210 merged; 17-item smoke test checklist ready",
+    "recent": "#8210 shipped (b7ee7bd); smoke-test checklist + next session pointer (/Users/blamechris/Obsidian/no-it-all/handoffs/NEXT-chroxy.md) ready"
+   }
+  ]
+ },
+ {
+  "run": "R04",
+  "sessions": [
+   {
+    "id": "session_01EJjZwwz8K5Xcij8cm8qoBZ",
+    "title": "christophers-macbook-pro-16984-local-sequential-music",
+    "created": "2026-10-02T03:51:16.951027Z",
+    "updated": "2026-10-03T16:49:41.609821Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "170071",
+    "cost": "",
+    "match": [],
+    "status": "PR #8212 ready, awaiting decision on terminal buffer on reconnect",
+    "recent": "PR #8212 draft: connection lifecycle resets (CI 24 pass, approved); deferred terminal buffer policy question"
+   }
+  ]
+ },
+ {
+  "run": "R05",
+  "sessions": [
+   {
+    "id": "session_01Q5uxkJBvdXPpf9d8kzqwWA",
+    "title": "Chroxy handoff",
+    "created": "2026-10-04T18:48:49.218404Z",
+    "updated": "2026-10-05T17:42:10.445834Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "572145",
+    "cost": "",
+    "match": [],
+    "status": "SDK session refresh + model default decision pending",
+    "recent": ""
+   }
+  ]
+ },
+ {
+  "run": "R06",
+  "sessions": [
+   {
+    "id": "session_01HXQeJCitomPus2rkx2vBQh",
+    "title": "Connected users modal cutoff",
+    "created": "2026-10-05T05:06:39.644296Z",
+    "updated": "2026-10-06T23:10:49.510685Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "199948",
+    "cost": "",
+    "match": [],
+    "status": "auto-delete branches enabled on chroxy; setting confirmed",
+    "recent": "auto-delete of merged branches enabled on chroxy repo"
+   },
+   {
+    "id": "session_01Q5uxkJBvdXPpf9d8kzqwWA",
+    "title": "Chroxy handoff",
+    "created": "2026-10-04T18:48:49.218404Z",
+    "updated": "2026-10-05T17:42:10.445834Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "572145",
+    "cost": "",
+    "match": [],
+    "status": "SDK session refresh + model default decision pending",
+    "recent": ""
+   }
+  ]
+ },
+ {
+  "run": "R07-CY",
+  "sessions": [
+   {
+    "id": "session_017GD6baxR8Z2F5sy4umrKSD",
+    "title": "chroxy #8304 \u2014 trial RCA, directive refined, tracks #8306 and #7820 scoped",
+    "created": "2026-10-06T01:10:58.213851Z",
+    "updated": "2026-10-06T08:00:54.476932Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-fable-5-1",
+    "ctx": "725053",
+    "cost": "",
+    "match": [],
+    "status": "",
+    "recent": ""
+   },
+   {
+    "id": "session_01HXQeJCitomPus2rkx2vBQh",
+    "title": "Connected users modal cutoff",
+    "created": "2026-10-05T05:06:39.644296Z",
+    "updated": "2026-10-06T23:10:49.510685Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "199948",
+    "cost": "",
+    "match": [],
+    "status": "auto-delete branches enabled on chroxy; setting confirmed",
+    "recent": "auto-delete of merged branches enabled on chroxy repo"
+   },
+   {
+    "id": "session_01Q5uxkJBvdXPpf9d8kzqwWA",
+    "title": "Chroxy handoff",
+    "created": "2026-10-04T18:48:49.218404Z",
+    "updated": "2026-10-05T17:42:10.445834Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "572145",
+    "cost": "",
+    "match": [],
+    "status": "SDK session refresh + model default decision pending",
+    "recent": ""
+   }
+  ]
+ },
+ {
+  "run": "R08",
+  "sessions": [
+   {
+    "id": "session_01VvQ4GeEpBaGQSxe11j4Ptb",
+    "title": "chroxy #8301+#8302 \u2014 coordinator",
+    "created": "2026-10-06T08:20:50.300474Z",
+    "updated": "2026-10-06T20:12:11.796692Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "367965",
+    "cost": "",
+    "match": [],
+    "status": "daily daemon deployed to 9c348d315; auto-deploy queued",
+    "recent": "Daily daemon running 9c348d315 (PID 30061, health OK); auto-deploy feature ready for next PR CI"
+   },
+   {
+    "id": "session_01YYJzGBFNZCQeqDSvCBwyxQ",
+    "title": "chroxy #8300 \u2014 stall fix (#8320 merged)",
+    "created": "2026-10-06T06:01:56.259514Z",
+    "updated": "2026-10-06T08:20:08.280469Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-fable-5-1",
+    "ctx": "645802",
+    "cost": "",
+    "match": [],
+    "status": "daemon deployed to 12b4ce7f0, healthy; automation design filed as #8324",
+    "recent": "daemon deployed and verified healthy; automation pattern designed and filed as #8324; ready for Opus 5.5 session"
+   },
+   {
+    "id": "session_017GD6baxR8Z2F5sy4umrKSD",
+    "title": "chroxy #8304 \u2014 trial RCA, directive refined, tracks #8306 and #7820 scoped",
+    "created": "2026-10-06T01:10:58.213851Z",
+    "updated": "2026-10-06T08:00:54.476932Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-fable-5-1",
+    "ctx": "725053",
+    "cost": "",
+    "match": [],
+    "status": "",
+    "recent": ""
+   },
+   {
+    "id": "session_01HXQeJCitomPus2rkx2vBQh",
+    "title": "Connected users modal cutoff",
+    "created": "2026-10-05T05:06:39.644296Z",
+    "updated": "2026-10-06T23:10:49.510685Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "199948",
+    "cost": "",
+    "match": [],
+    "status": "auto-delete branches enabled on chroxy; setting confirmed",
+    "recent": "auto-delete of merged branches enabled on chroxy repo"
+   }
+  ]
+ },
+ {
+  "run": "R09",
+  "sessions": [
+   {
+    "id": "session_01Ggsqbrsfnoj7Xk7Z7j6769",
+    "title": "chroxy #8324 \u2014 coordinator (idle-only daemon auto-deploy)",
+    "created": "2026-10-06T20:12:12.879050Z",
+    "updated": "2026-10-07T01:13:06.511781Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "426625",
+    "cost": "",
+    "match": [],
+    "status": "launchd daemon installed & loaded; checks main every 10m",
+    "recent": "com.chroxy.deploy plist written, launchctl bootstrap complete, verified with test run (exit 0)"
+   },
+   {
+    "id": "session_01VvQ4GeEpBaGQSxe11j4Ptb",
+    "title": "chroxy #8301+#8302 \u2014 coordinator",
+    "created": "2026-10-06T08:20:50.300474Z",
+    "updated": "2026-10-06T20:12:11.796692Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "367965",
+    "cost": "",
+    "match": [],
+    "status": "daily daemon deployed to 9c348d315; auto-deploy queued",
+    "recent": "Daily daemon running 9c348d315 (PID 30061, health OK); auto-deploy feature ready for next PR CI"
+   },
+   {
+    "id": "session_01HXQeJCitomPus2rkx2vBQh",
+    "title": "Connected users modal cutoff",
+    "created": "2026-10-05T05:06:39.644296Z",
+    "updated": "2026-10-06T23:10:49.510685Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "199948",
+    "cost": "",
+    "match": [],
+    "status": "auto-delete branches enabled on chroxy; setting confirmed",
+    "recent": "auto-delete of merged branches enabled on chroxy repo"
+   }
+  ]
+ },
+ {
+  "run": "R10",
+  "sessions": [
+   {
+    "id": "session_01Sg6tKEPRHvLBnZxDECUU3g",
+    "title": "chroxy prime-directive #8340 #8253 #7356 #7353 \u2014 coordinator",
+    "created": "2026-10-07T06:16:50.307659Z",
+    "updated": "2026-10-09T03:59:00.548492Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "931855",
+    "cost": "",
+    "match": [],
+    "status": "waves 16\u201319 merged; awaiting your decisions and release call",
+    "recent": "17 PRs merged and 8 old-debt issues closed across waves 16\u201319; brief at ~/Obsidian/no-it-all/briefs/chroxy-pd-waves-16-19-2026-10-08.html"
+   },
+   {
+    "id": "session_01TVg6vkfCPmn24K2tuDrSxh",
+    "title": "chroxy #8331 \u2014 coordinator",
+    "created": "2026-10-07T01:13:07.246972Z",
+    "updated": "2026-10-07T06:16:49.214262Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "454154",
+    "cost": "",
+    "match": [],
+    "status": "v0.11.3 released + advisory published + daemon deployed",
+    "recent": "v0.11.3 released (DMG+MSI), GHSA-88h6-3rg4-f76x published, daily daemon on 0.11.3, #8337 filed"
+   },
+   {
+    "id": "session_01Ggsqbrsfnoj7Xk7Z7j6769",
+    "title": "chroxy #8324 \u2014 coordinator (idle-only daemon auto-deploy)",
+    "created": "2026-10-06T20:12:12.879050Z",
+    "updated": "2026-10-07T01:13:06.511781Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "426625",
+    "cost": "",
+    "match": [],
+    "status": "launchd daemon installed & loaded; checks main every 10m",
+    "recent": "com.chroxy.deploy plist written, launchctl bootstrap complete, verified with test run (exit 0)"
+   }
+  ]
+ },
+ {
+  "run": "R11",
+  "sessions": [
+   {
+    "id": "session_0139AFynhu9E94iSB1kJY66e",
+    "title": "chroxy prime-directive #8340 #8253 #7356 #7353 \u2014 coordinator",
+    "created": "2026-10-09T03:59:07.861298Z",
+    "updated": "2026-10-09T07:54:39.691697Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "329564",
+    "cost": "",
+    "match": [
+     8377,
+     8386,
+     8413,
+     8420,
+     8466,
+     8520,
+     8521,
+     8525
+    ],
+    "status": "wave 20 merged; paused on weekly budget, decisions pending",
+    "recent": "Wave 20 merged: #8520 (8b646270c), #8521 (f8285052a), #8525 (7138871fe); follow-ups #8522 and #8524 filed."
+   },
+   {
+    "id": "session_01Sg6tKEPRHvLBnZxDECUU3g",
+    "title": "chroxy prime-directive #8340 #8253 #7356 #7353 \u2014 coordinator",
+    "created": "2026-10-07T06:16:50.307659Z",
+    "updated": "2026-10-09T03:59:00.548492Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "931855",
+    "cost": "",
+    "match": [],
+    "status": "waves 16\u201319 merged; awaiting your decisions and release call",
+    "recent": "17 PRs merged and 8 old-debt issues closed across waves 16\u201319; brief at ~/Obsidian/no-it-all/briefs/chroxy-pd-waves-16-19-2026-10-08.html"
+   }
+  ]
+ },
+ {
+  "run": "R12",
+  "sessions": [
+   {
+    "id": "session_01CKindBV8JAPNSMpBoknEbw",
+    "title": "chroxy prime-directive #8340 #8253 #7356 #7353 \u2014 coordinator",
+    "created": "2026-10-09T07:54:40.740241Z",
+    "updated": "2026-10-09T17:21:13.288070Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "228815",
+    "cost": "",
+    "match": [
+     8526,
+     8527,
+     8530
+    ],
+    "status": "wave 21 landed: #8530, #8526, #8527 on main; $21-23 spent",
+    "recent": "Merged #8530 (006b7fcf1), #8526 (9418ca2cf), #8527 (9d93c1a9f). Wave 22 waits for a fresh session after about 16:50Z; open user decisions are listed in the vault."
+   },
+   {
+    "id": "session_0139AFynhu9E94iSB1kJY66e",
+    "title": "chroxy prime-directive #8340 #8253 #7356 #7353 \u2014 coordinator",
+    "created": "2026-10-09T03:59:07.861298Z",
+    "updated": "2026-10-09T07:54:39.691697Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "329564",
+    "cost": "",
+    "match": [],
+    "status": "wave 20 merged; paused on weekly budget, decisions pending",
+    "recent": "Wave 20 merged: #8520 (8b646270c), #8521 (f8285052a), #8525 (7138871fe); follow-ups #8522 and #8524 filed."
+   }
+  ]
+ },
+ {
+  "run": "R13",
+  "sessions": [
+   {
+    "id": "session_01Nu6EYWMMTVCceozy3E42tv",
+    "title": "chroxy #8519 #7070 #7244 \u2014 prime wave 22",
+    "created": "2026-10-09T17:21:14.543708Z",
+    "updated": "2026-10-10T07:11:10.812764Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "271377",
+    "cost": "",
+    "match": [
+     8533,
+     8534,
+     8535
+    ],
+    "status": "wave 22 landed (#8533-8535); paused for cost until 00:00Z",
+    "recent": "Wave 22 shipped (#8533, #8534, #8535); paused on spend, resume via NEXT-chroxy.md after 00:00Z 2026-10-10."
+   },
+   {
+    "id": "session_01CKindBV8JAPNSMpBoknEbw",
+    "title": "chroxy prime-directive #8340 #8253 #7356 #7353 \u2014 coordinator",
+    "created": "2026-10-09T07:54:40.740241Z",
+    "updated": "2026-10-09T17:21:13.288070Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "228815",
+    "cost": "",
+    "match": [],
+    "status": "wave 21 landed: #8530, #8526, #8527 on main; $21-23 spent",
+    "recent": "Merged #8530 (006b7fcf1), #8526 (9418ca2cf), #8527 (9d93c1a9f). Wave 22 waits for a fresh session after about 16:50Z; open user decisions are listed in the vault."
+   }
+  ]
+ },
+ {
+  "run": "R14",
+  "sessions": [
+   {
+    "id": "session_01MrqdUyWSRwv28pcauDfCpZ",
+    "title": "chroxy #8515 #7509 #7131 \u2014 PD wave 23 coordinator",
+    "created": "2026-10-10T07:11:18.961729Z",
+    "updated": "2026-10-11T01:05:32.415228Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "727770",
+    "cost": "",
+    "match": [
+     8538,
+     8568
+    ],
+    "status": "waves 23-28 merged (20 PRs); run paused for fresh session",
+    "recent": "Waves 23\u201328 merged to main: 20 PRs (#8538\u2013#8568), 19 issues closed. Release cut and GHSA-f946 publish/hold await your decision."
+   },
+   {
+    "id": "session_01Nu6EYWMMTVCceozy3E42tv",
+    "title": "chroxy #8519 #7070 #7244 \u2014 prime wave 22",
+    "created": "2026-10-09T17:21:14.543708Z",
+    "updated": "2026-10-10T07:11:10.812764Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "271377",
+    "cost": "",
+    "match": [],
+    "status": "wave 22 landed (#8533-8535); paused for cost until 00:00Z",
+    "recent": "Wave 22 shipped (#8533, #8534, #8535); paused on spend, resume via NEXT-chroxy.md after 00:00Z 2026-10-10."
+   }
+  ]
+ },
+ {
+  "run": "R15",
+  "sessions": [
+   {
+    "id": "session_01Aa6dz4AQNj7EqfRkk5kCsB",
+    "title": "chroxy #8515 #7509 #7131 \u2014 PD wave 23 coordinator",
+    "created": "2026-10-11T01:06:16.086081Z",
+    "updated": "2026-10-11T09:02:13.779930Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "293708",
+    "cost": "",
+    "match": [
+     8570,
+     8572,
+     8573,
+     8575,
+     8576
+    ],
+    "status": "waves 29-30 merged to main; handoff seed written",
+    "recent": "Merged #8570, #8572, #8573, #8575, #8576 to main; filed #8571; next handoff resumes at wave 31"
+   },
+   {
+    "id": "session_01MrqdUyWSRwv28pcauDfCpZ",
+    "title": "chroxy #8515 #7509 #7131 \u2014 PD wave 23 coordinator",
+    "created": "2026-10-10T07:11:18.961729Z",
+    "updated": "2026-10-11T01:05:32.415228Z",
+    "kind": "bridge/claude_code_cli/rc-sdk",
+    "model": "claude-opus-5-5",
+    "ctx": "727770",
+    "cost": "",
+    "match": [],
+    "status": "waves 23-28 merged (20 PRs); run paused for fresh session",
+    "recent": "Waves 23\u201328 merged to main: 20 PRs (#8538\u2013#8568), 19 issues closed. Release cut and GHSA-f946 publish/hold await your decision."
+   }
+  ]
+ },
+ {
+  "run": "R16-CX",
+  "sessions": []
+ },
+ {
+  "run": "R17",
+  "sessions": []
+ },
+ {
+  "run": "R18-CX",
+  "sessions": []
+ },
+ {
+  "run": "R19-CX",
+  "sessions": []
+ }
+]

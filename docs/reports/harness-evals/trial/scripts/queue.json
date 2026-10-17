@@ -1,0 +1,15 @@
+{
+  "status": "SET 2026-10-17 — owner approved the supervisor's default pick",
+  "issues": [
+    {"number": 8233, "title": "cli: chroxy doctor ignores the configured port and checks 8765", "type": "bug, server"},
+    {"number": 8215, "title": "isLoopbackHost: the ::ffff:7f prefix match accepts non-loopback mapped addresses", "type": "bug, server"},
+    {"number": 7771, "title": "fix(server): models.js updateContextWindow admits NaN", "type": "bug, server"},
+    {"number": 8595, "title": "bug: custom model collision labels repeat pinned descriptors", "type": "bug, store-core"},
+    {"number": 8364, "title": "app: the lone tool bubble and tool detail modal show no terminated state", "type": "bug, app"},
+    {"number": 8282, "title": "feat(server): record the stream kind on history entries so reasoning text is distinguishable from replies", "type": "feature, server + protocol"},
+    {"number": 8277, "title": "dashboard: Settings hides a saved provider override the connected server does not offer, and never shows the migration notice", "type": "feature, dashboard"},
+    {"number": 8567, "title": "notifications: DEFAULT_BYPASS_CATEGORIES is still hand-copied in both clients", "type": "cross-package, protocol + server + app + dashboard"},
+    {"number": 8303, "title": "server,dashboard: Browse is $HOME-only while Create honours workspaceRoots, and a blank cwd inherits a configured directory that explicit Create would refuse", "type": "cross-package, server + dashboard"},
+    {"number": 7815, "title": "test(server): doctor 'accepts custom port' hardcodes 59123 and asserts pass", "type": "test, server tests"}
+  ]
+}
