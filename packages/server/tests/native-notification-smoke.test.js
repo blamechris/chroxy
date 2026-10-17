@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { readFile, rm, stat } from 'node:fs/promises'
+import { readFile, rm, stat, mkdtemp, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
 import vm from 'node:vm'
 import { request as httpRequest } from 'node:http'
 import { randomBytes } from 'node:crypto'
@@ -54,9 +58,11 @@ test('fixture owns private synthetic config and serves the production health cha
   const f = await setup(t)
   assert.equal(new URL(f.origin).hostname, '127.0.0.1')
   assert.ok(![8765, 8785, 3131, 8080, 3000].includes(f.port))
-  assert.equal((await stat(f.root)).mode & 0o777, 0o700)
-  for (const name of ['config.json', 'desktop-settings.json', 'control.json', 'receipt.json']) {
-    assert.equal((await stat(`${f.root}/${name}`)).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(f.root)).mode & 0o777, 0o700)
+    for (const name of ['config.json', 'desktop-settings.json', 'control.json', 'receipt.json']) {
+      assert.equal((await stat(`${f.root}/${name}`)).mode & 0o777, 0o600)
+    }
   }
   const settings = JSON.parse(await readFile(`${f.root}/desktop-settings.json`))
   assert.equal(settings.autoStartServer, false)
@@ -195,4 +201,17 @@ test('lifetime and disposal close the listener and keep the verdict explicit', a
   await assert.rejects(fetch(`${f.origin}/health`))
   assert.equal(f.snapshot().state, 'FAILED')
   await assert.rejects(armSmoke('relative'), /absolute/)
+})
+
+
+test('CLI entry point runs through a symlink and rejects invalid arguments without echoing them', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'native-smoke-cli-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const alias = join(root, 'scripts-alias')
+  await symlink(fileURLToPath(new URL('../../desktop/scripts/', import.meta.url)), alias, process.platform === 'win32' ? 'junction' : 'dir')
+  const result = spawnSync(process.execPath, [join(alias, 'native-notification-smoke.mjs'), 'invalid-command'], { encoding: 'utf8', timeout: 5000 })
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 1)
+  assert.equal(result.stdout, '')
+  assert.equal(result.stderr, 'Native smoke fixture failed; usage: native-notification-smoke.mjs serve | arm /absolute/fixture-root\n')
 })

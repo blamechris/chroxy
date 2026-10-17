@@ -4,8 +4,8 @@ import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { mkdtemp, readFile, writeFile, chmod, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve, isAbsolute } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { join, isAbsolute } from 'node:path'
+import { isEntryPoint } from '../../../scripts/lib/is-entry-point.mjs'
 import { challengeFromUrl, computeHealthProof } from '../../server/src/health-proof.js'
 
 const CLIENT = new URL('./native-notification-smoke-client.js', import.meta.url)
@@ -158,7 +158,8 @@ export async function armSmoke(root) {
 
 async function main() {
   if (process.versions.node.split('.')[0] !== '22') throw new Error('Node 22 required')
-  const [command, root, ...extra] = process.argv.slice(2)
+  const args = process.argv.slice(2)
+  const [command, root, ...extra] = args
   if (command === 'arm' && root && !extra.length) {
     console.log(JSON.stringify(await armSmoke(root)))
   } else if (command === 'serve' && !root) {
@@ -170,6 +171,6 @@ async function main() {
   } else throw new Error('usage: native-notification-smoke.mjs serve | arm /absolute/fixture-root')
 }
 
-if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  main().catch(() => { console.error('Native smoke fixture failed; check arguments, readiness, or local permissions.'); process.exitCode = 1 })
+if (isEntryPoint(import.meta.url)) {
+  main().catch(() => { console.error('Native smoke fixture failed; usage: native-notification-smoke.mjs serve | arm /absolute/fixture-root'); process.exitCode = 1 })
 }
