@@ -179,11 +179,20 @@ check "clean tree of 25 scripts exits 0" 0 "$RC"
 check_contains "clean tree reports the real count" "parsed 25 tracked shell script(s)" "$OUT"
 
 # ---- Case 2: THE positive control — a syntax error must fail, exit 1 ----
+# Filler i lands in REAL_DIRS[i % n] (make_repo), so f000.sh is in REAL_DIRS[0]
+# and f001.sh in REAL_DIRS[1] — whatever those directories are TODAY. The cases
+# below used to spell them as `packages/app/.maestro/scripts` and
+# `packages/desktop/scripts`, which held only while no tracked *.sh lived in a
+# directory sorting before `packages/`. The first one that did
+# (docs/reports/harness-evals/scripts/) moved f000.sh out from under the typed
+# path: the write landed on an UNTRACKED file, the sweep saw nothing broken, and
+# six cases went red with "expected 1, got 0" — a typed path beside a derived
+# set, the same shape the derivation above exists to avoid.
 R="$TMP/broken"; make_repo "$R" 25
-printf '%s' "$BROKEN" > "$R/packages/app/.maestro/scripts/f000.sh"
+printf '%s' "$BROKEN" > "$R/${REAL_DIRS[0]}/f000.sh"
 run_check "$R"
 check "a syntax error exits 1 (not 0, not 2)" 1 "$RC"
-check_contains "the failing file is named in the output" "packages/app/.maestro/scripts/f000.sh" "$OUT"
+check_contains "the failing file is named in the output" "${REAL_DIRS[0]}/f000.sh" "$OUT"
 
 # ---- Case 3: the floor fires on a short enumeration, exit 2 ----
 R="$TMP/short"; make_repo "$R" 5
@@ -208,10 +217,10 @@ check "20 scripts clears the floor, exit 0" 0 "$RC"
 # `-- scripts` measured 61 files here, not fewer. Both spellings are in the
 # mutation record; only the exclude one is a silent narrowing.)
 R="$TMP/nested"; make_repo "$R" 25
-printf '%s' "$BROKEN" > "$R/packages/desktop/scripts/f001.sh"
+printf '%s' "$BROKEN" > "$R/${REAL_DIRS[1]}/f001.sh"
 run_check "$R"
 check "a broken script in a DEEP subdirectory is caught" 1 "$RC"
-check_contains "the deep file is named" "packages/desktop/scripts/f001.sh" "$OUT"
+check_contains "the deep file is named" "${REAL_DIRS[1]}/f001.sh" "$OUT"
 
 # ---- Case 6: the alphabetically LAST file — kills a truncated enumeration ----
 # Any `| head`-style truncation drops the tail, and the tail is the only thing
@@ -271,17 +280,17 @@ check "a broken NON-.sh tracked file is ignored" 0 "$RC"
 
 # ---- Case 11: every broken file is reported, not just the first ----
 R="$TMP/two"; make_repo "$R" 25
-printf '%s' "$BROKEN" > "$R/packages/app/.maestro/scripts/f000.sh"
-printf '%s' "$BROKEN" > "$R/packages/desktop/scripts/f001.sh"
+printf '%s' "$BROKEN" > "$R/${REAL_DIRS[0]}/f000.sh"
+printf '%s' "$BROKEN" > "$R/${REAL_DIRS[1]}/f001.sh"
 run_check "$R"
-check_contains "the first broken file is named" "packages/app/.maestro/scripts/f000.sh" "$OUT"
-check_contains "the second broken file is named too (the loop does not stop)" "packages/desktop/scripts/f001.sh" "$OUT"
+check_contains "the first broken file is named" "${REAL_DIRS[0]}/f000.sh" "$OUT"
+check_contains "the second broken file is named too (the loop does not stop)" "${REAL_DIRS[1]}/f001.sh" "$OUT"
 
 # ---- Case 12: a broken enumeration OUTRANKS a parse error ----
 # Both are failures; the distinction matters because exit 2 means "do not
 # believe this run at all", while exit 1 means "the sweep worked and found a bug".
 R="$TMP/both"; make_repo "$R" 5
-printf '%s' "$BROKEN" > "$R/packages/app/.maestro/scripts/f000.sh"
+printf '%s' "$BROKEN" > "$R/${REAL_DIRS[0]}/f000.sh"
 run_check "$R"
 check "short enumeration + parse error still exits 2" 2 "$RC"
 
