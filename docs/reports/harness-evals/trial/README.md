@@ -8,7 +8,7 @@ prompts: [`graders/`](graders/). This file is the step list and the live status.
 | Item | Value |
 |---|---|
 | T0 (base SHA) | not yet cut |
-| Queue | not yet set — see [`queue.md`](queue.md) |
+| Queue | set 2026-10-17, 10 issues — see [`queue.md`](queue.md) |
 | Run 1 `A1-cd` | not started |
 | Run 2 `B2-cy-codex` | not started |
 | Run 3 `A2-cy-claude` | not started |
@@ -49,7 +49,9 @@ measures and grades. Steps are tagged **[owner]** or **[supervisor]**.
    recommended: without it the merge gate relies on the skill alone.
 5. **Dry runs (one tiny docs-only issue, 45-minute cap, not a queue issue).**
    **[supervisor]** pushes `trial/dry-cy-claude`, `trial/dry-cy-codex`,
-   `trial/dry-cx` from `main` and writes a one-paragraph dry mission for each.
+   `trial/dry-cx` from `main` (on the owner's go); the dry missions are in
+   [`missions/dry/`](missions/dry/) and use a synthetic docs-only task, so no
+   backlog issue is touched.
    **[owner]** launches each harness exactly as its real invocation says, with
    the dry mission. **[supervisor]** verifies on GitHub that the skill loaded, a
    PR targeted the dry base, the gate completed and a run report was written,

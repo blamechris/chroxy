@@ -19,7 +19,16 @@ wins**; where it is silent, the directive applies as written.
 
 ## Queue (fixed — work these and nothing else)
 
-**NOT YET SET — owner picks from the candidate list; see ../queue.md**
+- #8233 — cli: chroxy doctor ignores the configured port and checks 8765 _(type: bug, server)_
+- #8215 — isLoopbackHost: the ::ffff:7f prefix match accepts non-loopback mapped addresses _(type: bug, server)_
+- #7771 — fix(server): models.js updateContextWindow admits NaN _(type: bug, server)_
+- #8595 — bug: custom model collision labels repeat pinned descriptors _(type: bug, store-core)_
+- #8364 — app: the lone tool bubble and tool detail modal show no terminated state _(type: bug, app)_
+- #8282 — feat(server): record the stream kind on history entries so reasoning text is distinguishable from replies _(type: feature, server + protocol)_
+- #8277 — dashboard: Settings hides a saved provider override the connected server does not offer, and never shows the migration notice _(type: feature, dashboard)_
+- #8567 — notifications: DEFAULT_BYPASS_CATEGORIES is still hand-copied in both clients _(type: cross-package, protocol + server + app + dashboard)_
+- #8303 — server,dashboard: Browse is $HOME-only while Create honours workspaceRoots, and a blank cwd inherits a configured directory that explicit Create would refuse _(type: cross-package, server + dashboard)_
+- #7815 — test(server): doctor 'accepts custom port' hardcodes 59123 and asserts pass _(type: test, server tests)_
 
 Choose your own order. Do not add, swap or decompose items. An item you cannot
 deliver is **flagged blocked** in the run report with the reason, not replaced.
