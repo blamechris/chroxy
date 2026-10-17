@@ -346,5 +346,7 @@ Root causes as filed: the Agent SDK closes the CLI's stdin at the first `result`
 *Suggested vault location:* `no-it-all/reports/harness-evals/2026-10-17-harness-diagnostic-cd-cx-cy.md` (copy this file and the `data/` folder together).
 """
 import os
-open(os.environ.get('HE_REPORT_PATH','/home/user/chroxy/docs/reports/harness-evals/2026-10-17-harness-diagnostic-cd-cx-cy.md'),'w').write(md)
+# Default is the committed report, relative to docs/reports/harness-evals (the
+# directory reproduce.sh says to run from); reproduce.sh overrides it into its workdir.
+open(os.environ.get('HE_REPORT_PATH','2026-10-17-harness-diagnostic-cd-cx-cy.md'),'w').write(md)
 print("written", len(md), "chars")
