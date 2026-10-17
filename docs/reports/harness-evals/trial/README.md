@@ -7,9 +7,9 @@ prompts: [`graders/`](graders/). This file is the step list and the live status.
 
 | Item | Value |
 |---|---|
-| T0 (base SHA) | the squash-merge commit of the PR that introduced this row; the four bases are cut from it right after merge — verify with `git merge-base origin/trial/a1-cd origin/main` |
+| T0 (base SHA) | the squash-merge commit of the PR that last changed this row; the four bases are cut from it on the owner's go — verify with `git merge-base origin/trial/a1-cd origin/main` |
 | Queue | set 2026-10-17, 10 issues — see [`queue.md`](queue.md) |
-| Run 1 `A1-cd` | base cut; waiting for dry runs, clones and the owner's "starting A1-cd" |
+| Run 1 `A1-cd` | base cut from T0 on the owner's go; then waits for dry runs, clones and the owner's "starting A1-cd" |
 | Run 2 `B2-cy-codex` | not started |
 | Run 3 `A2-cy-claude` | not started |
 | Run 4 `B1-cx` | not started |
@@ -73,15 +73,18 @@ local Claude session in the chroxy checkout.
    **[owner]** launches each harness exactly as its real invocation says, with
    the dry mission. **[supervisor]** verifies on GitHub that the skill loaded, a
    PR targeted the dry base, the gate completed and a run report was written,
-   and lists blockers. Fix blockers before step 6. Then delete the dry branches.
+   and lists blockers. Fix blockers before run 1 (step 8); if a fix lands on
+   `main` after the bases were cut, step 6 re-cuts them. Then delete the dry
+   branches.
 6. **[supervisor, on the owner's explicit go] Cut the bases.** Only after this
    package has merged, since the clones must contain the missions. T0 is the
    `main` commit the bases are cut from; the missions do not bake it in (a
    clone cut from T0 cannot contain its own SHA) but derive it with
-   `git merge-base origin/<base> origin/main`, and the status table above names
-   the PR whose merge commit it is. Dry runs may still be in progress when the
-   bases are cut; if a dry run forces a fix to the package, the bases are
-   re-cut from the fixed `main` before run 1 (nothing is on them until then).
+   `git merge-base origin/<base> origin/main`, and the status table above
+   identifies the PR whose merge commit it is. Dry runs may still be in progress
+   when the bases are cut; if a dry run forces a fix to the package, the fixing
+   PR updates the T0 row and the bases are re-cut from its merge commit before
+   run 1 (nothing is on them until then).
 7. **[owner, Mac] Four fresh clones**, one per run, never the daemon's checkout.
    Use the same git identity in all four (the diagnostic found a second identity
    on the daemon checkout that confounded attribution):

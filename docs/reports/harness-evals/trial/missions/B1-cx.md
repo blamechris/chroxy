@@ -13,7 +13,7 @@ wins**; where it is silent, the directive applies as written.
 | Harness | CX — Codex desktop app in a fresh clone |
 | Coordinator model / effort | `gpt-6-astra` / xhigh |
 | Base branch (the ONLY merge target) | `trial/b1-cx` |
-| Base SHA (T0) | `git merge-base origin/trial/b1-cx origin/main` — the commit the base was cut from; also recorded in `README.md` on `main` |
+| Base SHA (T0) | `git merge-base origin/trial/b1-cx origin/main` — the commit the base was cut from; identified in `README.md` on `main` |
 | Run report path | `docs/reports/harness-evals/trial/runs/B1-cx/REPORT.md` |
 | Wall-clock cap | 12 hours from your first command |
 

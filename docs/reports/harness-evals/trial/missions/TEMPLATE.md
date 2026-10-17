@@ -13,7 +13,7 @@ wins**; where it is silent, the directive applies as written.
 | Harness | {{HARNESS}} |
 | Coordinator model / effort | `{{MODEL}}` / {{EFFORT}} |
 | Base branch (the ONLY merge target) | `{{BASE_BRANCH}}` |
-| Base SHA (T0) | `git merge-base origin/{{BASE_BRANCH}} origin/main` — the commit the base was cut from; also recorded in `README.md` on `main` |
+| Base SHA (T0) | `git merge-base origin/{{BASE_BRANCH}} origin/main` — the commit the base was cut from; identified in `README.md` on `main` |
 | Run report path | `docs/reports/harness-evals/trial/runs/{{RUN_ID}}/REPORT.md` |
 | Wall-clock cap | 12 hours from your first command |
 

@@ -13,7 +13,7 @@ wins**; where it is silent, the directive applies as written.
 | Harness | CY — Chroxy session, claude-sdk provider |
 | Coordinator model / effort | `claude-opus-5-5` / high |
 | Base branch (the ONLY merge target) | `trial/a2-cy-claude` |
-| Base SHA (T0) | `git merge-base origin/trial/a2-cy-claude origin/main` — the commit the base was cut from; also recorded in `README.md` on `main` |
+| Base SHA (T0) | `git merge-base origin/trial/a2-cy-claude origin/main` — the commit the base was cut from; identified in `README.md` on `main` |
 | Run report path | `docs/reports/harness-evals/trial/runs/A2-cy-claude/REPORT.md` |
 | Wall-clock cap | 12 hours from your first command |
 

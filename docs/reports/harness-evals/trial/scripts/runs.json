@@ -1,5 +1,4 @@
 {
-  "T0": "derived: git merge-base origin/<base> origin/main (README.md status table records the SHA)",
   "runs": [
     {
       "id": "A1-cd",

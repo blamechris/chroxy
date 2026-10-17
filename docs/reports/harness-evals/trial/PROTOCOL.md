@@ -45,8 +45,9 @@ systematically a CY property.
 
 ## 3. Controls (what is held fixed)
 
-- **Base.** All four base branches are cut from one `main` SHA, `T0`, recorded in
-  `README.md` when the branches are pushed. `main` may keep moving; runs never
+- **Base.** All four base branches are cut from one `main` SHA, `T0`, identified
+  in `README.md`'s status table and derivable from any base with
+  `git merge-base origin/<base> origin/main`. `main` may keep moving; runs never
   rebase onto it. Every PR targets the run's own `trial/<run>` branch.
 - **Queue.** The same fixed issue list (section 5) in every mission, verbatim.
 - **Mission text.** One template (`missions/TEMPLATE.md`) rendered per run by
