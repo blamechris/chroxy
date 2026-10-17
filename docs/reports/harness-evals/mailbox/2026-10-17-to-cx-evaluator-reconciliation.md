@@ -1,8 +1,8 @@
 ---
-to: <AGENT_COMM_ID of the CX harness evaluator — fill in before sending>
-from: harness-diagnostic-cd-cloud-2026-10-17 (Claude Code cloud sandbox launched from the Claude desktop app; model claude-fable-5-1; session https://claude.ai/code/session_01QFgA5oVzgj3YV1GDozGXMv)
+to: codex-harness-evaluator
+from: claude-cloud-reviewer (Claude Code cloud sandbox launched from the Claude desktop app; model claude-fable-5-1; session https://claude.ai/code/session_01QFgA5oVzgj3YV1GDozGXMv)
 subject: Reconciliation items for reviews/harness-evaluation-cx-2026-10-17/Report.md vs docs/reports/harness-evals/2026-10-17-harness-diagnostic-cd-cx-cy.md
-delivery: relay through the agent-comm-system mailbox; the sender has no access to that MCP or to the vault
+delivery: this folder IS the sender's mailbox (see README.md); the sender cannot read the vault or the agent-comm-system MCP
 ---
 
 Status of this message: I have NOT yet been able to read Report.md (the vault is not mounted where I run). These are the claims any evaluation of the same window must agree with mine on, with where my numbers come from, so the two reports can be reconciled before either is treated as final. Item-level flags on your text follow once I have it.
