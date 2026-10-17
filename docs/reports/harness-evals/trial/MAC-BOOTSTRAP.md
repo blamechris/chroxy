@@ -42,6 +42,17 @@ status: `README.md`.
    [ -e "$f" ] || { echo "# Sealed key — harness trial 2026-10"; echo; for n in 8233 8215 7771 8595 8364 8282 8277 8567 8303 7815; do printf '## #%s\n\n- Expected root cause:\n- Acceptance checks:\n- Fix already known (yes/no):\n\n' "$n"; done; } > "$f"
    echo "$f"
    ```
+   When the content is final, seal and encrypt it (the digest goes to the
+   supervisor for `KEY-COMMITMENT.md`; the live plaintext must not stay
+   readable on the Mac during the runs; the passphrase stays out of the repo
+   and the vault). If `KEY-COMMITMENT.md` already carries a digest, the
+   `shasum` line must print that digest before you encrypt; otherwise stop and
+   tell the supervisor. macOS's `/usr/bin/openssl` is LibreSSL; confirm it
+   accepts `-pbkdf2` and use the same binary at unseal.
+   ```bash
+   shasum -a 256 "$f"
+   openssl enc -aes-256-cbc -pbkdf2 -salt -in "$f" -out "$f.enc" && rm "$f" && ls -l "$f.enc"
+   ```
 5. **Launch the three dry runs**, one at a time, each with its invocation from
    `missions/dry/<name>.md` and a 45-minute cap: Chroxy dashboard (claude-sdk),
    Chroxy dashboard (codex), Codex desktop app. These are app launches: a human,

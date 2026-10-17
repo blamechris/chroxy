@@ -24,7 +24,8 @@ merge into `trial/dry-cy-claude`.
 
 Rules 1 to 7 of the real missions apply verbatim (base branch replaces `main`
 everywhere; `Trial-Closes:` is moot here since no issue is involved; no issue
-comments, labels or new issues; do not read any other `trial/*` branch). Stop at
+comments, labels or new issues; do not read any other `trial/*` branch,
+the owner's vault (`~/Obsidian`) or any `KEY.md` / `KEY.md.enc`). Stop at
 the 45-minute cap even if unfinished, and write
 `docs/reports/harness-evals/trial/runs/dry-cy-claude/REPORT.md` with the run-report
 fields from the real mission template, including the invocation method that
