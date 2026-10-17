@@ -89,12 +89,17 @@ runs' work. Rules, in order of how much they buy:
    queue issues, no new issues. Follow-ups go in the run report, and the owner
    files them after run 4.
 4. **Never read another run's branch or PRs** (`trial/*` other than your own, or
-   PRs whose base is one). Self-report any accidental read in the run report.
+   PRs whose base is one), and **never read the owner's vault** (`~/Obsidian`)
+   or any file named `KEY.md` / `KEY.md.enc`: the sealed answer key (section 5)
+   lives there, on the same Mac the runs use. Self-report any accidental read in
+   the run report.
 5. **Graders audit** PR bodies and transcripts for violations of 2–4 and for
    solutions that are byte-identical to an earlier run's.
 
 Residual leak: a run that deliberately lists merged PRs on other trial bases can
-find them. This is **detected, not prevented**. The stricter alternative — one
+find them. This is **detected, not prevented**. The key itself is a different
+case: it sits on the same Mac, so it is encrypted at rest (prevention) and its
+digest is committed before run 1 (detection of any change). The stricter alternative — one
 private fork per run — would lose Copilot auto-review, the repository rulesets and
 repo-memory parity, so it is held in reserve for a second trial if graders find
 leakage in this one.

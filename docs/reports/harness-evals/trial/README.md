@@ -67,9 +67,9 @@ local Claude session in the chroxy checkout.
    merge into a trial base runs CI; without it the "red CI on the base after a
    merge" measure in `PROTOCOL.md` §6 is `not observable`.
 5. **Dry runs (one tiny docs-only issue, 45-minute cap, not a queue issue).**
-   **[supervisor]** pushes `trial/dry-cy-claude`, `trial/dry-cy-codex`,
-   `trial/dry-cx` from this package's head commit — not from `main`, which does
-   not carry the trial folder until this package merges; the dry missions are in
+   **[supervisor]** cuts `trial/dry-cy-claude`, `trial/dry-cy-codex` and
+   `trial/dry-cx` from `main` at T0, like the four bases, and fast-forwards them
+   with the bases on any re-cut; the dry missions are in
    [`missions/dry/`](missions/dry/) and use a synthetic docs-only task, so no
    backlog issue is touched. **[owner]** also opens one scratch issue, writes
    `Trial-Closes: <its number>` (no `#`) in a dry-run PR body, and confirms the
