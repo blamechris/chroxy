@@ -1,0 +1,391 @@
+5c9c698d9f7194221f01a4b018b3ecab78fa6eec	2026-10-16 23:56:02 -0700	test(desktop): add reachable isolated native notification smoke	4	514	0
+14fe4b58667758c0d02712c0f9deb130c224bb10	2026-10-14 03:38:14 -0700	fix(dashboard): preserve selected session creation options (#8608)	2	65	4
+e78b20955d75ed54fd2b517c732ca39715af7ea0	2026-10-14 01:52:56 -0700	fix(app): reconnect paired phones with their admitted credential (#8606)	31	1656	199
+cc56df7a1336d18a8007f7596f3215c0282fba13	2026-10-14 00:40:52 -0700	fix(dashboard): give Stop a 44px target floor (#8607)	2	38	0
+535b0e96f150d1cb2f146f8f227f6e7d71c98b2f	2026-10-13 21:23:01 -0700	feat(server): default new Claude sessions to Sonnet 5.5 (#8604)	22	476	71
+017a8f8f7d375175f807b710063905104b370d25	2026-10-13 19:30:40 -0700	fix(app): retain drafts while native sessions initialize (#8600)	42	2016	111
+3c0c96c849a4fb699197124b0eb714e40f0e2eca	2026-10-13 14:38:10 -0700	feat(server): resume native Codex threads after daemon restart (#8597)	14	965	32
+3c18f801efba146ad2ea215e3d751f5c2538c668	2026-10-13 13:18:58 -0700	fix(server): preserve partial model discovery and distinguish model choices (#8592)	23	790	233
+153ad8dc40646f38b3dbed06541ff2b1c9cac921	2026-10-13 11:59:00 -0700	fix(app): keep replayed user inputs and visible message keys unique (#8590)	11	431	15
+2cbdbcaefe7756b1415557298e94a1f907f2fc89	2026-10-13 11:27:32 -0700	fix(dashboard): keep permission actions at the 44px target minimum (#8591)	2	66	0
+963e06c1b201afa376dbf7297ae6e60539a2ce07	2026-10-13 08:47:28 -0700	fix(ci): distinguish non-repository sessions on both clients (#8586)	22	326	72
+f84f639da3c88f9bb80e2c9a0f2b1963fbf46fa2	2026-10-12 23:02:37 -0700	fix(server): add current Claude model catalog (#8588)	8	252	16
+174f5304fb87e56654a75ee7663a7a8ddf113ce2	2026-10-12 20:41:49 -0700	feat(server): require explicit consent for HTTP previews (#8583)	66	1940	678
+4488a46c5bc43ca025952506f240bf0f293d9512	2026-10-12 00:06:57 -0700	fix(server): open dev previews only on an explicit request (#8582)	3	192	19
+45e43cf8487a55f062886d9a7c848e93b980befb	2026-10-11 23:23:53 -0700	feat(server): deliver provider instructions and runtime details	85	3233	67
+32c4c2c092f299b73d79831622db58afe8d1cb08	2026-10-11 18:51:44 -0700	fix(cli): author shared project rules and verify instruction chains (#8578)	22	877	1700
+d884f69a09d693eb8cf40790200844cabc02e289	2026-10-10 19:19:51 -0700	fix(server): back off undeterminable CI watches; fork unusable row reports a reason (#7441, #7443) (#8576)	4	307	15
+2220c59be9e2e6215b707e5ac754704ceb9a341f	2026-10-10 19:19:26 -0700	fix(server): forward each byok tool_start/tool_result once (#8574) (#8575)	5	260	7
+ec779929626a0be7aa04b98b68c0e991df929e6b	2026-10-10 18:39:49 -0700	fix(server): close a scheduled task's session when the task is deleted (#7006) (#8570)	2	330	2
+390da85aff8020babc39ef5056cd70de9465afac	2026-10-10 18:36:53 -0700	fix(protocol,dashboard): drop the pause/resume run actions the engine cannot serve (#7140) (#8573)	19	191	61
+17c3d85c5b5ed1abbf82b660040bad1a2c265424	2026-10-10 18:34:32 -0700	fix(server): close the byok tool row when a Stop settles a tool_use with a synthesized result (#8569) (#8572)	2	143	21
+30330a09a84675a3b3bd2b6e1eba91cc26f53e50	2026-10-10 07:04:29 -0700	fix(server): end a requested Stop on claude-tui as a quiet stopped, not an error (#8558) (#8568)	9	605	70
+5753ec9a67a8a951d7aed7133242ddbac2a1b345	2026-10-10 06:59:12 -0700	test(server): gate CONFIG.md's features inventory and fail-closed counts on the src gates (#7032) (#8563)	4	539	0
+23ff1aece7f499e883a84a2ee644862218506e28	2026-10-10 06:47:31 -0700	fix(server): keep the prompt and completed tool rounds when a byok turn is stopped mid-stream (#8559) (#8565)	2	368	2
+042bbf138ccab57e692b26f0c9601685bc9ed9e1	2026-10-10 06:39:29 -0700	refactor(protocol): one notification category roster for the app, dashboard and server check (#7429) (#8566)	12	498	195
+c56d4c4e86187cd01f2c9b878fbc5db7e69446a7	2026-10-10 06:05:26 -0700	test(server): accept either hard-timeout path ending a stuck claude-tui turn at its budget (#7041) (#8562)	1	19	7
+e0c1c39b0fb50de5055f83abfdd473c984eb6b49	2026-10-10 05:38:19 -0700	feat(protocol,server,dashboard): report each MCP server's config scope so remove-confirm targets it (#7028) (#8560)	16	476	23
+880ae31b021158591657073e3dbbe3ec9449ed09	2026-10-10 04:56:50 -0700	fix(server): end a requested byok Stop mid-stream as stopped, not a red ABORT error (#8553) (#8557)	3	292	59
+4cc19a5b3b0cffc11ce53ee9e59c98e231f9986e	2026-10-10 04:41:51 -0700	docs(github): add PR template and issue chooser config (#7146) (#8556)	2	41	0
+38dcc2f2d597eae04d7a2ad117a9afd7c1615f8d	2026-10-10 04:24:00 -0700	test(server): replace wall-clock assertions with deterministic ones (#7041) (#8555)	28	497	259
+ad3a1a148c386db60df9b1aad88990750e7eff65	2026-10-10 02:54:17 -0700	fix(server): correct the ws-server roster field lists and pin them to the protocol schemas (#7107) (#8550)	5	349	55
+b7e02e1561345edb4c2bc5e67390c32889cf307e	2026-10-10 02:50:23 -0700	fix(server): an interrupted turn no longer settles as a successful one (#7072) (#8549)	14	495	53
+965b59adc479572007870d9aa87ffeda838deb94	2026-10-10 02:13:39 -0700	test(server): gate provider entry shapes against CONFIG.md and document modelDiscovery (#7547) (#8546)	5	286	16
+0d6a13e9d4abba688b1982f66764879f18b0e349	2026-10-10 02:05:45 -0700	fix(server): drop the phantom session_created and discovered_sessions frames from the roster (#7109) (#8547)	9	163	31
+c5ce9d6ab6f850c26c2508cfd90d34a0324a5051	2026-10-10 02:01:06 -0700	test(dashboard): release the store import's document listener between replay-parity cases and restore every interruptible case (#8531) (#8545)	1	55	33
+84cc5dfda4ac800b752b9c6688e0c6146b317def	2026-10-10 01:36:06 -0700	test(server): cover POST /permission-floor's real auth gate, limiter, body cap and shell matrix (#7019) (#8543)	2	492	41
+a4561f3572784b3bceb8e3e232f49c09f213d07f	2026-10-10 01:20:51 -0700	fix(server,dashboard): thinking-order follow-ups from the #8530 review (#8532, #8536) (#8542)	6	71	5
+43f2ba9ea592a751cd4d675b4eb5cdfd90b8743d	2026-10-10 01:14:19 -0700	test(app): tidy the SessionScreen chat-filter guards left after the selector extraction (#7228) (#8541)	2	47	57
+5d8342b133bb0903a827986b1740ca4eba2a144a	2026-10-10 00:56:55 -0700	fix(store-core,server): settle user_question re-delivery divergences (#7509) (#8540)	9	532	33
+2bd7d5a89dfb7a1a04acb5bb6047198cc2d47576	2026-10-10 00:50:00 -0700	fix(server): drain confirmed claude-tui background agents on a transcript swap (#8515) (#8538)	2	211	14
+9a68d85d84d94ed352703d4cebc624b53d909a1b	2026-10-10 00:45:31 -0700	fix(server): a rejected epic plan or escalation cancels the run (#7131) (#8539)	4	75	8
+3f9ac33d3bada545aa3594f6c97908e7d2a2a3b3	2026-10-09 11:00:20 -0700	feat(cli): acknowledge a deliberate second config root with config-dir ack (#7244) (#8534)	8	648	34
+139b251d338837a69a01b289a4cad68f182b68df	2026-10-09 10:59:32 -0700	fix(server): harden the claude-tui late-thinking window (#8519) (#8535)	2	147	2
+96d2c356690ed2d8e2a52eb8e550f35c8308c8ab	2026-10-09 10:47:46 -0700	test(server): add an fsync seam to writeClaudeConfigAtomic and pin the directory-fsync caveat (#7070) (#8533)	4	159	8
+006b7fcf17f074b88a0b2310d1459bd79072d3c8	2026-10-09 01:48:26 -0700	feat(server,dashboard,app): place a late thinking block above the tool row or answer it precedes (#8518) (#8530)	26	1497	30
+9418ca2cf66cebfa0bb8fb618351a9bed7f141e7	2026-10-09 01:29:34 -0700	fix(server): report a daemon-side permission rejection honestly instead of as a user deny (#8526)	4	177	2
+9d93c1a9f07f402519d7dca22e869f9e4044f27d	2026-10-09 01:26:59 -0700	fix(server): track the backgrounded orchestration start so dispose() settles it (#8527)	5	171	14
+7138871fe8bf898862f21fd1618a0dd2f1f3ba71	2026-10-08 22:05:46 -0700	test(server): exclude the first-turn submit nudge from the thinking no-wait guard (#8525)	1	4	0
+f8285052ac8f8a49a578fbaa90a2769ebf1f8a7a	2026-10-08 22:05:08 -0700	fix(server,dashboard): surface and discard unreadable scheduled tasks; keep an operator's hand-fix (#7077, #7079) (#8521)	23	1949	76
+8b646270c70627326517d6f3753d6425411df705	2026-10-08 21:28:06 -0700	fix(server,dashboard): keep Allow for Session apart from one-time allows through the resolved echo and the journal (#8517) (#8520)	36	716	29
+2c87a22068ac5ef975d15c2f112131cdf1a2b712	2026-10-08 18:52:40 -0700	feat(server): show the model's reasoning on claude-tui and claude-cli (#7393) (#8513)	18	2459	9
+d9b8800587d2a4293c93fd0496283521b43acdb0	2026-10-08 15:36:45 -0700	feat(server): track subagents on claude-tui sessions (#7396) (#8511)	8	1279	38
+102b1ac81be8be68d5b7dc2c9f8b29a3ffc02823	2026-10-08 15:20:31 -0700	feat(server,dashboard): journal the approved tool input so replayed permission records show what was approved (#8512)	28	1362	58
+6da05bfc0f98a09b6c8312f9efb284bef3f640aa	2026-10-08 15:05:56 -0700	test(ci): stop harness-case-floor timing out on check-dist-drift (#8509)	1	260	32
+e5dadb8dfdbc6c6cdcb9d2aceabe6ba872609882	2026-10-08 14:26:59 -0700	fix(app): key the SettingsScreen notification-prefs refresh on the connection (#8496) (#8510)	4	166	5
+c2c8d8969c4a7c4d44a5c14bb363044688b6afe6	2026-10-08 14:10:00 -0700	feat(dashboard,app): tell the user what a checkpoint restore actually did (#6808) (#8508)	15	941	27
+694b26bd1784dfe13e7a7b16ead621666fc22a60	2026-10-08 14:04:55 -0700	fix(store-core): render the Agent SDK WebFetchOutput and flattened WebSearch results (#8507)	10	721	5
+ef9992c229cfe74943dc3845faede00e5174b125	2026-10-08 13:39:09 -0700	fix(dashboard): show safety-relevant flags before the command on permission records (#8506)	8	368	38
+a180b78ef5a6952896fa94e33d4fe29ae7c6974f	2026-10-08 13:20:42 -0700	fix(server): build the turn-end session_list after the provider clears busy (#8504)	7	543	19
+3740c753d8240be5238d913099e3c5deb50723e2	2026-10-08 13:04:31 -0700	feat(dashboard): expandable resolved permission records and grouping of repeated ones (#8501)	24	2543	61
+5a21074373ac2d292848ccc24f02b3465f688571	2026-10-08 12:58:54 -0700	perf(dashboard): downscale tool-result image thumbnails and cap eager renders (#8499)	12	1184	52
+570d062dd6fa7535a15fbd6ed80b05c66e1f9100	2026-10-08 12:36:19 -0700	fix(server): take a session out of busy when a requested Stop ends a turn without a result (#8500)	6	369	11
+d0736c8e3c88f5baacad626909e9af07e012e819	2026-10-08 12:05:41 -0700	fix(server,store-core,dashboard,app): turn-outcome chip follow-ups (#8461) (#8494)	20	581	20
+e33a4b8d67df4bf6365df6e2eabbc0526b52deaf	2026-10-08 12:01:47 -0700	fix(dashboard,app): drop frames from a superseded socket; key notification prefs on the handshake (#8485) (#8492)	7	596	27
+f95deba3cde619626c00327e3a0a103c0b305546	2026-10-08 11:55:47 -0700	feat(dashboard): rename sidebar repo groups from their context menu (#7330) (#8491)	11	744	7
+03963ddb38a84408511439ad72188e05cca27128	2026-10-08 11:51:16 -0700	fix(dashboard): let a session context menu taller than the viewport scroll (#8483) (#8489)	3	162	3
+ffd0125384a183e5694beebb9e4d461abc9c1b1b	2026-10-08 11:34:22 -0700	perf(server): bound docker-byok's post-failure docker inspect with a negative-result cooldown (#7609) (#8490)	2	354	4
+9c27db6a26f57f693a2220aef64adb0535a7935a	2026-10-08 11:14:45 -0700	fix(dashboard): reset panels and transient readings from shared factories (#8411, #7588) (#8487)	6	727	93
+c46b5b3f7a1f70f95f7f66a10eb2f9f3b50d216d	2026-10-08 11:10:38 -0700	fix(dashboard): an IDE palette re-asks on reconnect when its request was lost (#8429) (#8484)	5	387	46
+a50de843f11d9b5211a69e04aa88d7b08f7e9e8c	2026-10-08 10:59:31 -0700	fix(server): forget a vanished docker-byok container in the pool on destroy (#7610) (#8481)	3	88	7
+f09867e8fda18ae9de2e7b3297989da996fdba1a	2026-10-08 10:53:44 -0700	fix(dashboard): Settings tab re-requests credentials after a server switch (#8419) (#8482)	5	257	5
+41dfa08ed82781abea6e44a2faf11ad8c51ffc84	2026-10-08 10:49:33 -0700	fix(dashboard): session context-menu rows are 44px on every pointer (#8467) (#8480)	3	103	12
+b149e2d48638416276ca24b9d5995b1c233ca526	2026-10-08 10:33:29 -0700	fix(server): a prompt raised between Stop and the SDK abort reads stopped (#8430) (#8473)	10	877	55
+62c224eedee950308c287b3531532b99201a12d1	2026-10-08 10:18:09 -0700	fix(server): end a superseded AskUserQuestion and report a refused answer to the client (#8470) (#8476)	37	1844	76
+a66327e8b6cb3cc82041936ff2d066e2c8c522b8	2026-10-08 10:00:02 -0700	fix(server): tell the user when a restored claude-tui conversation's transcript is gone (#8418) (#8475)	6	710	10
+0fd4f11cab08da77b194821b936b9c162c81d871	2026-10-08 09:44:08 -0700	perf(dashboard): pin the streaming tail on content change, not every frame (#8474)	3	498	50
+e458abf95bdd44b313a0acbca199986c0e0abe03	2026-10-08 09:12:15 -0700	ci: drop the unconsumed platform filter from Detect Changed Paths (#7642) (#8472)	3	21	30
+3557860c32273b076baca892687cb50fbb804105	2026-10-08 08:54:05 -0700	feat(desktop): click a native notification to raise the window and select its session on macOS (#7367) (#8466)	11	1077	27
+6bfd4ce9a5bbc9a7841e559171380f05d87e0e0d	2026-10-08 08:51:11 -0700	fix(server): drop a question answer whose toolUseId is not the pending question's (#8460) (#8465)	7	228	21
+70d5eccf6f7a35d92dfdc6f0ea712ca280ec18f5	2026-10-08 08:47:28 -0700	fix(server): claude-tui limit detection ignores quoted limit text on idle exit and prompt echo (#8454) (#8468)	2	251	9
+fda507e90022ac3b067a9168fd1d4aa7fb84aa76	2026-10-08 08:38:15 -0700	fix(store-core,dashboard,app): a cursor replay fills in the input of a tool card held without it (#8455) (#8463)	6	142	15
+732889db5620d6c8c383225bb4b7f4366cd61ba7	2026-10-08 08:34:27 -0700	feat(dashboard): session rename from a context menu, the keyboard and the sidebar (#7329) (#8464)	7	345	3
+ea885c7607bd2c4e52a920117f70d91daf0b1ae2	2026-10-08 08:04:39 -0700	feat(protocol,server,store-core,dashboard,app): mark replies that were cut off, refused or stopped (#7326) (#8462)	51	1973	42
+00f9e98cfa4276b7d06c868651f230bd61d2f558	2026-10-08 07:52:16 -0700	fix(server): build a narrowed pre-write edit from the raw tool input (#8446) (#8458)	34	1765	217
+4ea49fe8d19b0e0f9155e3a82f4e0b1e77d92efa	2026-10-08 07:19:58 -0700	fix(store-core,dashboard,app): a cursor replay completes a reply the client held only in part (#8444) (#8456)	10	741	47
+3f569b4d2fd937c3a86c35fc177eee064211a608	2026-10-08 07:18:41 -0700	test(server): pin the id-less answered-question fallback and document accepted vs delivered (#8394) (#8459)	2	23	0
+0a6c3227e58bc494a5e0a623641f59d21767b1ef	2026-10-08 06:51:04 -0700	fix(server): redaction runs in linear time on long inputs; the logger and tool-input redaction bound what they scan (#8451)	11	799	108
+cea0fadf88a0c46896d7c40fae03aa61c207c53c	2026-10-08 06:44:58 -0700	fix(server): claude-tui says the usage limit when claude exits or a turn ends with no Stop payload (#8441) (#8453)	2	294	5
+1997eb409ab7947b7bb399724eb9d4711f97207c	2026-10-08 06:17:58 -0700	fix(desktop): an automatic start adopts or refuses a daemon it did not start; the start origin is an argument (#8393, #8388) (#8413)	22	3972	489
+52b5a6136ebee27a40de10ca686a735e534bfebf	2026-10-08 06:17:34 -0700	fix(server): permission descriptions come from the sanitised input; recordDescription is clipped and stays in-process (#8384, #8397) (#8422)	9	617	48
+e05361c27b67ee015e84cced7b0a451199c4722d	2026-10-08 06:17:10 -0700	fix(server): claude-tui says when a usage limit, rate limit or overload ended the turn (#8400) (#8426)	12	1272	16
+3db92e1e7811f8bfbbe5e94c1548a22f3239477c	2026-10-08 06:16:46 -0700	fix(dashboard): destroy-refusal UX follow-ups (#8407) (#8442)	16	609	15
+cb03605600ffbc0348f4e7feab98fc0328649e09	2026-10-08 06:16:20 -0700	fix(dashboard): IDE palettes settle after a transport drop and re-ask on reconnect (#8404) (#8427)	8	601	6
+91bb4415b1d13a64ad7dfc9dc535d61d35bc3aef	2026-10-08 06:15:56 -0700	fix(server): smoke-test.mjs takes an explicit target and refuses the production daemon (#8225) (#8436)	9	904	198
+8111c67bfe116eb255ba15841aaf5ca2bb14a5bd	2026-10-08 06:15:08 -0700	fix(server): service install refuses to re-point an installed service without --force (#7161) (#8420)	4	660	18
+ae54aa37079285ddad92dcd8da4638a13a4487e8	2026-10-08 05:32:12 -0700	fix(server): claude-tui redacts and caps AskUserQuestion and background-command payloads (#8373) (#8450)	3	427	4
+79dc8d7b66fb2e141a5af12d2fd191a0ecce25f2	2026-10-08 05:08:23 -0700	fix(server): claude-tui log tail truncatedStart is wrong after a PTY respawn (#8401) (#8448)	2	136	2
+7a9bd71056637444e6e44faa5b154ac4bd673a58	2026-10-08 04:53:20 -0700	test(store-core): noop contract check snapshots seeds and compares strictly (#8399) (#8447)	3	242	30
+2457e54fe40249adbf3ff4b9fa7161ac7a20c761	2026-10-08 04:47:23 -0700	fix(server,store-core,dashboard,app): a resumed transcript rebuilds what the live one showed (#6630) (#8443)	37	4889	296
+d00884af8473d41cff4bf806ca5c13bd5c38117f	2026-10-08 03:12:07 -0700	fix(dashboard): composer slash pick uses the current handler; @ picker follows the caret (#8437)	2	265	37
+1d2dce708d8f10f6e545e574ca52080f111082f4	2026-10-08 02:56:49 -0700	fix(server): a legacy allowAlways answered over WS sends no rules refresh (#8398) (#8434)	2	141	1
+1a3239f5f52c3f647d592279cf57c163df9a09e6	2026-10-08 02:41:33 -0700	fix(server): keep claude-tui diagnostics out of the chat and say plainly what happened (#8252) (#8387)	11	742	50
+f94b59b0817a2c6d47152ddab51c93115e7d3089	2026-10-08 02:28:50 -0700	fix(server): respawn a claude-tui session fresh when claude never saved its conversation (#8239) (#8412)	4	473	2
+74dc3aee4ea99796f8eba52cd4afddfbafba8057	2026-10-08 02:20:24 -0700	fix(server,store-core): a prompt cancelled by Stop reads stopped, not Denied (#8374) (#8423)	47	1384	59
+2dd6eecaad9ac91777a2db25d43ea6877fe71b9e	2026-10-08 02:01:20 -0700	fix(server): file overwrite works on Windows (#7284) (#8421)	4	208	21
+0bc250d5cab7000795571d8448f343f56a44c106	2026-10-08 01:47:44 -0700	fix(dashboard): stale-bundle and reconnect follow-ups (#8385) (#8409)	15	141	18
+22b54a4f62f8052a3ccc16444a9f47dfffbbf1ef	2026-10-08 01:23:21 -0700	fix(dashboard): daemon snapshots get a connection lifetime; a run node's Open session leaves the Control Room (#7579, #7538) (#8414)	9	994	11
+a4416f7a7fa26de51cf70f8523c7ebb0bb8d3341	2026-10-08 01:19:40 -0700	test(store-core): a noop contract fixture fails when a seeded key is overwritten (#7531) (#8396)	3	198	16
+3597d73db5d43b8753b8221b03480c2688ec361f	2026-10-08 00:56:36 -0700	fix(dashboard): a transport drop clears every loading flag, and one helper clears the connection-scoped trackers (#8378, #7592) (#8402)	4	361	42
+2364dfcd30c1cffc9de4e180574e6c4925a6bd49	2026-10-08 00:53:51 -0700	fix(server): a running claude-sdk tool's input survives a switch or reload (#8371) (#8410)	6	238	10
+99bfa0ab0a33de700caf5aa5f83960890a2fd199	2026-10-08 00:42:01 -0700	fix(server): a claude-tui PTY death keeps the background shells it does not take with it (#8379) (#8406)	2	216	0
+18bd770859c0cae25f9612b1d99186aebfc0cee4	2026-10-08 00:35:08 -0700	fix(dashboard): destroy escalation follows the refusal, not stale local state (#7594) (#8405)	15	399	58
+ee75b430b8c73fefe2878392261f6a43ce7f1359	2026-10-08 00:27:08 -0700	fix(server,store-core): a permission prompt's outcome is part of the durable transcript (#8348) (#8382)	35	2980	19
+fbd4e6d2f09174e5ce6252874bd25c985c6b5c5c	2026-10-08 00:09:48 -0700	fix(server,dashboard): the transcript watchdog outlasts the back-pressure park (#7496) (#8395)	11	329	9
+45d3a79a224f9ed07e0cfa67ee554e7953200a5f	2026-10-07 23:54:12 -0700	fix(server): a question answered before a restart is not labelled interrupted (#8362) (#8390)	5	235	3
+394db2f29b580a6f15bb9ea2b9d76830ab35f872	2026-10-07 23:53:39 -0700	fix(desktop): the tray reflects an externally managed daemon (#8267) (#8386)	5	1184	142
+0c833cfd6f2c29808a9b817115548727f105ebaa	2026-10-07 23:48:05 -0700	test(server): the claude-tui spawn-gate tests run on their own without hanging (#8380) (#8403)	1	13	1
+d5ea7f2973c1fda397973da04f2fe8ffaeacea48	2026-10-07 23:32:04 -0700	fix(dashboard): reconnect to the local daemon without a cap and reload a stale bundle after an update (#8268) (#8383)	34	1729	38
+bd5f6006003015c7494ba4ca44cb806f7bbd6faf	2026-10-07 23:15:02 -0700	fix(server): an unmapped legacy permission answered over WS broadcasts its resolution (#8359) (#8389)	4	223	48
+97f05fd405bce6286424f873ae35a72f3e46a6cd	2026-10-07 22:34:48 -0700	fix(dashboard): the permission-mode roster follows the active session's provider on create (#8224) (#8375)	48	954	148
+5d69bfe64a65d3d90f99a4b9eede8fac99ecf4b2	2026-10-07 22:27:19 -0700	fix(server): Stop during a pending claude-sdk permission reads as stopped, not refused (#8363) (#8381)	15	542	11
+87f15e3d1fdb14eef8b5aee562f7f1dda4caf559	2026-10-07 22:12:52 -0700	fix(dashboard): a user Disconnect clears every in-flight marker through one shared reset (#7586) (#8377)	6	661	171
+574e60893dc3a8e723b7b36e9ca8b5c70e9ab61b	2026-10-07 21:56:15 -0700	fix(server): a respawn forgets the background shells its tree kill ended (#7611) (#8376)	5	240	0
+6c1f0bd6e599fed6b225631481995ba4190d3901	2026-10-07 21:40:23 -0700	fix(server,dashboard): the Chat tab no longer shrinks the claude PTY; clamp and reset terminal size (#8254) (#8372)	14	749	25
+d1b60b8a9ab26d8ad8baf04f40bb6031bcaa36bd	2026-10-07 21:32:45 -0700	fix(server,store-core): tool INPUT shows for claude-tui and survives replay (#8251) (#8370)	8	284	13
+988b4076da6395344a61980cc92bdba0e2e3fb03	2026-10-07 21:31:35 -0700	fix(server,dashboard): a tool cut off by a terminated turn says so instead of looking failed (#7376) (#8361)	35	1636	38
+b8d19cd312a3b52a72af6c8fdd31e4d3f5e670b4	2026-10-07 21:18:09 -0700	fix(dashboard): reserve the streaming lozenge's overhang so it no longer covers the activity line (#7368) (#8368)	3	71	2
+f5497b132623e2577245af6b3ef8de1dfff2aece	2026-10-07 20:58:45 -0700	fix(dashboard): opaque copy control and a text gutter so it no longer covers assistant text (#7338) (#8369)	2	57	7
+850e985756e1bc51d65ea71a2f7c2ea6d63bb81b	2026-10-07 20:55:00 -0700	test(server): stop the update-status watcher in teardown so its tests exit (#8366) (#8367)	1	35	7
+03c5b57e4e89e7fa69601d08da76eec1c38925bd	2026-10-07 20:51:53 -0700	fix(dashboard): an AskUserQuestion permission card reads as a question, not raw JSON (#8264) (#8358)	10	463	122
+a356de9cafa42200bac7d59b8ffc991d74dfbde9	2026-10-07 20:46:57 -0700	fix(server,dashboard): a question cut off by a restart reads as interrupted and renders once (#8336) (#8360)	24	1479	50
+1079cce5e0d373ae7ff149b0c40381a7d3f84953	2026-10-07 19:52:36 -0700	fix(dashboard): hold the banner slot's height while a banner retires so a click cannot land on the tab strip (#7466) (#8355)	5	272	17
+3e6d173e13be7f4dd5543fa07738b88a25fa6d9a	2026-10-07 19:45:38 -0700	fix(server): broadcast permission_resolved when a WS answer resolves a session-mapped hook prompt (#7976) (#8356)	4	150	14
+58553d5d1aae8d34c786f2f08d1b5d591f07e141	2026-10-07 19:35:15 -0700	test(server): keep tests off the live daemon's tmpdir bases and guard them (#8352) (#8353)	9	365	6
+090ed7ca99a5676bf056ea0eff590381ad45fda2	2026-10-07 19:05:34 -0700	fix(server): a stray user-level chroxy hook no longer doubles claude-tui permission prompts (#8263) (#8346)	11	757	11
+d0ec354199ec1628356708913842eee3774ad558	2026-10-07 18:34:03 -0700	fix(server): bound concurrent Glob walks daemon-wide (#7356) (#8347)	2	285	6
+eb84cb78e073e8378f40dddc53ba8f56cab87be0	2026-10-07 18:18:21 -0700	fix(server): re-send pending permissions after a Sync Full History replay (#8340) (#8345)	8	221	3
+6ddd40c894de646e7b6c36ad301d5dbb72d47d77	2026-10-07 18:13:21 -0700	test(server): settle the interrupt-cascade test's fake stream and make its assertion able to fail (#8351)	1	34	6
+51125f1dc9f02aca1e80a81303d8533aa3296065	2026-10-07 17:40:10 -0700	fix(dashboard): dismissing an expired permission keeps a compact record of the dropped tool call (#7353) (#8344)	10	365	13
+3d610bb36a4f61c872c532cb84d486e384f99338	2026-10-07 12:34:35 -0700	chore(release): cut v0.11.4 (#8343)	17	87	45
+d75843bbe144fadbce0218d9293bb5ff58dda93d	2026-10-07 01:41:30 -0700	fix(server): deliver data to a session-bound client only for its own session (#8342)	23	995	35
+bd1ac9b8285d011aba66540288996cd910df611b	2026-10-07 00:07:36 -0700	fix(server): re-send pending permissions after a session-switch replay (#8328) (#8339)	8	819	5
+3742fd2b44083b185506594d60dc33ff17a23ca9	2026-10-06 21:21:51 -0700	chore(release): cut v0.11.3	17	47	45
+dd32c770de269b255d48aa6bfc85b9d21703ca5c	2026-10-06 20:43:55 -0700	feat(server,dashboard): daemon update banner with Restart now / Postpone and an Updated-to notice (#8331) (#8335)	43	4639	45
+f5cd468503a429236bf54b907db1a5bc5b6caba0	2026-10-06 15:57:20 -0700	feat(server): idle-only auto-deploy of main to the daily daemon (#8324) (#8330)	17	3850	2
+9c348d315af455ea18ec9218e1eb283de4950657	2026-10-06 03:33:29 -0700	fix(server,dashboard): wake claude-sdk sessions on CI completion and publish why a session is busy (#8301, #8302) (#8325)	52	4156	55
+12b4ce7f09f3b412292ad127e750192c74c47863	2026-10-06 00:55:58 -0700	fix(server): keep the claude-sdk permission channel open for the whole turn (#8300) (#8320)	8	1836	135
+cc13a6ee8448be5adc7f2dab1baa8b64d7df1446	2026-10-05 19:26:12 -0700	docs(prime-directive): add the dogfooding floor and the owner-path smoke step (#8304)	4	74	24
+3c02c4839a5b4c06cdcaf8323d15e0a1cbeb7182	2026-10-05 17:50:17 -0700	fix(dashboard,server): make claude-sdk the default and stop legacy saved defaults overriding it (#8265, #8266) (#8276)	46	1129	175
+0b13905d73f9bb90a29c0f8b5469156e8a4fcf33	2026-10-05 00:11:01 -0700	fix(dashboard): re-place the shared-session popover when its trigger resizes (#8299)	2	165	7
+f8c38ff83b32c49e49f88a9aaf350508067970f5	2026-10-04 22:24:40 -0700	fix(dashboard): keep the shared-session popover inside the viewport (#8297)	3	108	5
+6593845699a801fe74389c964923642db9fafe71	2026-10-04 15:17:13 -0700	fix(server): surface a logged-out or expired claude login (#8223) (#8272)	47	3588	127
+76c370386c3a7533e6dbfafd230360c3d37868ae	2026-10-03 01:53:56 -0700	fix(agent-control): refuse ws:// to non-loopback hosts unless --allow-insecure-ws (#7969) (#8216)	7	956	27
+0c462ff7a3d184f0df45410a59600942a7adfdd8	2026-10-02 16:30:10 -0700	fix(dashboard): say why the worktree checkbox is disabled when no working directory is set (#7332) (#8213)	3	231	7
+b7ee7bdf283c7999f7114e8a1250e7d2da888104	2026-10-01 17:48:46 -0700	test(ci): guard the paths-filter wiring of every path-filtered job (#8193) (#8210)	2	1680	0
+0cb487c5ca2960da208b841fc90d546e71773191	2026-10-01 16:00:13 -0700	fix(test): the real-binary tripwire unwraps explicit shells, env/npx and assignments, and splits chains quote-aware (#8186) (#8209)	2	902	118
+4c9f80d53cf7e093c685abb278203958ec4bd6b7	2026-10-01 13:34:10 -0700	fix(dashboard): connectToServer to a different daemon clears the connection-scoped roster (#7570) (#8206)	5	662	43
+06d2ebd4037b9c1da2657c641b2384e11a5c3bd3	2026-10-01 13:12:02 -0700	fix(workflow): preserve review counts through skill argument expansion (#8205)	6	107	9
+b7e6506390874cf4ab7770ca498fa17cb070f1dd	2026-10-01 01:11:39 -0700	fix(server): web-task-manager logs failed feature detection, rejects a dash-led task id, and stays stopped after destroy (#8204)	5	367	14
+5b482f1fbe44e1413eb28633d3a4973f3447e256	2026-10-01 00:10:20 -0700	test(server): run the tripwire tests over a stubbed child_process (#8185) (#8203)	2	214	47
+5774fdbcbb5acd91f2d0f0c2d9e722bc83a3f5d2	2026-09-30 23:39:50 -0700	fix(workflow): derive PRIME merge approvals from live rules (#8202)	5	28	3
+b09e99e0e1327ad383207739d84bcd3a8d3b5ce8	2026-09-30 23:12:55 -0700	fix(workflow): reconcile Chroxy PRIME compatibility and verify fresh sessions (#8200)	27	1162	605
+17d15cef7a22bc02db673bc9275d8d293ca315d7	2026-09-30 21:45:31 -0700	test: the transient-sweep parity guard checks both directions (#8147) (#8201)	3	360	8
+72b160ece203dd39638c887adf753e3e8e272b8b	2026-09-30 20:56:22 -0700	fix(app): worktree sessions show their repo name in the nav header (#8198)	7	240	91
+14957e03036e4bc868fc3c8dc4e8325e6a5bb673	2026-09-30 20:39:21 -0700	fix(server): chroxy schedule resolves the default provider like start does (CLI > env > file) (#8189) (#8197)	5	175	19
+583acc29fac1cb0a9c202bcb69a91f56906713b5	2026-09-30 20:09:47 -0700	fix(server): claude-sdk plan mode — capability now honoured (#8153) (#8192)	13	513	27
+90fcf3a7849ab1fc13d1eaadf823f82fa502ec7d	2026-09-30 19:55:31 -0700	ci: verify the publish artifacts on PRs that touch them, not only at release time (#8167) (#8191)	5	467	4
+7a7732e61a9eed04b37e1d6c15d9e17f70d8ae47	2026-09-30 19:36:55 -0700	test(dashboard): session-preset snapshots test no longer logs after teardown (#8168) (#8190)	1	35	3
+0492c4edeaa614aa39b93852a28058b199897eaf	2026-09-30 19:09:40 -0700	fix(ci): dist-drift check catches tracked dist files orphaned by a deleted source (#8163) (#8179)	6	2038	116
+8f3bb7ba2eadc10cc805d2d484eb8ee0d656be64	2026-09-30 18:49:24 -0700	fix(docker): the image serves the dashboard and defaults to the headless claude-sdk provider (#8151) (#8177)	45	2753	46
+428ed989c201aba9032ba77062d835d05a6eac89	2026-09-30 17:48:19 -0700	fix(server): git status/stage agree on path base and quoting (#7292) (#8183)	15	1137	33
+3792543a445f48908af67fc20d2d4b924985907d	2026-09-30 17:08:32 -0700	fix(test): real-binary tripwire sees guarded names in shell:true strings and the cmd.exe wrapper (#8102) (#8184)	2	270	51
+0837dbf1bc9ffce60bad9df5a134727d67210ed2	2026-09-30 17:02:37 -0700	fix(dashboard): worktree sessions show and group by their repo on the sidebar, footer and file tree (#8123) (#8180)	15	664	33
+0dc9c2fe5dc65e07f50a34385683786b03ba9bfb	2026-09-30 11:03:15 -0700	fix(ci): release.yml smokes the Docker image before pushing it (#8150) (#8173)	8	2229	226
+377efcb51dc3500eba66cf9c88dee7f7fd460bce	2026-09-30 10:55:09 -0700	feat(dashboard): summarise permissions that expired unanswered at turn end (#7365) (#8174)	27	1860	14
+16b65f31522c2951646e9b41ab86e8881aad0db0	2026-09-30 10:03:56 -0700	fix(server): spawn-env roster strips comments with a real tokenizer, not a regex (#8142) (#8176)	3	268	30
+0a89a8eee9d22ce885b05e8981b9bb9c49b8c3b9	2026-09-30 09:10:57 -0700	test(store-core): pin build-publish-dir's self-check to the staged tree, even for ./crypto (#7211) (#8171)	1	41	0
+b828d735fde535c62a9731ee9037fc08685242df	2026-09-30 08:49:43 -0700	fix(docker): the image ships a pinned, signature-verified claude CLI, so start passes preflight (#8145) (#8170)	10	698	16
+3895cfe4cfa395ae91005c4504fdd96249b2366d	2026-09-30 00:41:34 -0700	chore(release): cut v0.11.2 (#8169)	17	47	45
+bdbd33bc14ac03fb783647a0849f9206e14cafb3	2026-09-30 00:24:11 -0700	fix(release): verify-artifacts passes on the hosted runner and gates every publishing job (#8165) (#8166)	8	1674	11
+4ceb2e39bea22a4d4a8727fd88b0d5cdb822dc93	2026-09-29 23:29:51 -0700	fix(ci): release.yml's Test Suite installs ripgrep from the same step as ci.yml (#8160) (#8164)	8	893	25
+6c3e8602eda57ccdf5c649336d36c5e84a70f65c	2026-09-29 22:45:01 -0700	fix(ci): the dist-drift check fails on new untracked dist files, not just modified ones (#8152) (#8162)	4	273	4
+a4d978c79e84b3971d98da934d5a3fdacd23becd	2026-09-29 22:30:55 -0700	fix(scripts): bump-version rewrites @chroxy/* ranges inside package-lock.json too (#8159) (#8161)	3	250	6
+187bffe135002a0f7cee9ce70a4504c6cb3c65c9	2026-09-29 21:56:23 -0700	fix(scripts): bump-version passes paths to node via the environment, never spliced into program text (#7237) (#8158)	3	399	129
+d76af1d8bac8fdb149314172133c0268cf22733c	2026-09-29 21:37:05 -0700	chore(release): cut v0.11.1 (#8157)	17	47	45
+ab3caaaafc1e6d72245f2944f5aee71b87ff15eb	2026-09-29 20:57:41 -0700	fix(server): copy workspace packages into the Docker image (#8133) (#8149)	7	264	13
+ca2e78cd6b17a585dec70d20c33ecf3ea494f9a5	2026-09-29 20:43:03 -0700	test(server): the spawn-env roster finds enclosing functions with the TypeScript parser, not a brace scanner (#8141) (#8156)	1	224	235
+de93ba7e220cf9594bce6c59dd8ba8eb80af5663	2026-09-29 20:24:20 -0700	fix(server): report plan permission mode unsupported for providers without plan mode (#8090) (#8155)	4	249	3
+17490e6807abaeb4ea6d0d0804f392eb99203d9a	2026-09-29 20:07:34 -0700	fix(app,dashboard): disconnect() clears transient streaming/plan state on every session (#8148) (#8154)	5	302	46
+02b206799b8e5f989c6a9ea37c17c00d032bf160	2026-09-29 19:35:31 -0700	fix(app): socket close clears transient state on every session, not just the active one (#7411) (#8144)	8	496	18
+92ab2111ce6f2af7c93a12657ccc97b35df55435	2026-09-29 19:10:37 -0700	fix(app): SessionPicker shows the provider badge for the default provider too (#8130) (#8146)	4	66	21
+5ed72a9d185b99f9187790ff5bb2a3b735d31fa8	2026-09-29 18:41:19 -0700	fix(server): price claude-opus-4-8 at $5/$25 with no long-context premium (#7434) (#8143)	8	92	85
+4469291ef8c124bdb358a575ef421ad524438187	2026-09-29 18:36:15 -0700	test(server): scope the spawn-env roster's strip-then-return check to the enclosing function (#8114) (#8140)	1	428	22
+da4d1b1c5ed9661bb4225c03803b09080858d8e5	2026-09-29 18:06:36 -0700	fix(server): survey-throttle stragglers can't write into a reused session id's new record (#8094) (#8139)	3	166	15
+efb2ca0c33e222c75ea2637741d370df0ba566c2	2026-09-29 17:42:29 -0700	fix(server): BYOK streams one sanitized tool_input_delta instead of raw input chunks (#8137) (#8138)	4	325	143
+535b431b57290a21d844f70169c54463e44601d9	2026-09-29 17:00:27 -0700	refactor(server): import UNSAFE_MCP_KEYS in usage-normalize (#8131)	2	14	15
+613ca7ba0a655449270c22e12bafb8bbf5faf267	2026-09-29 16:43:40 -0700	fix(server): capture tool input for cli/sdk in-flight and after completion (#8134)	20	1501	11
+1d65c6a8d62d4f2de78d62e9f0c4998627d8988c	2026-09-29 15:37:21 -0700	fix(cli): chroxy start's doctor checks probe the merged config's tunnel (#8116) (#8132)	5	405	0
+efa6d0a214fdfbb4ec560eef902432f48fcd9f1e	2026-09-29 14:59:45 -0700	fix(dashboard): show the sidebar provider badge for every session (#7334) (#8129)	4	128	5
+6c38711e26da3068c17ee6f419aae4bebc8af0e2	2026-09-29 14:41:43 -0700	fix(server): defer clearing a winning migrate's expectation until persist succeeds (#8098) (#8128)	3	93	1
+0929ce107dfef7ae04f5baad3f18d1bfa083836f	2026-09-29 14:15:18 -0700	fix(dashboard): resolve the remaining dashboard wsSend one-shots immediately when the send fails (#8086) (#8127)	5	337	19
+2151c44e893bae6e5d9bcb0e35a0a467b5efc94d	2026-09-29 13:47:03 -0700	fix(ci): match argv-sink catalogue entries by exact expression, not substring (#8112) (#8125)	5	739	49
+2d181c9cf05c27a62dd23af11077ff12e7fe4fb8	2026-09-29 12:27:40 -0700	test(server): drive pairing.test.js TTL tests off a mocked clock (#8106) (#8124)	1	62	28
+7106b146e436925170f9de320fa058270f10ad76	2026-09-29 12:03:02 -0700	fix(dashboard): show the repo name on a worktree session's tab-cwd badge (#7328) (#8122)	8	238	6
+05cddca97d2875e8de25d996b3d0c063542308fc	2026-09-29 11:40:11 -0700	refactor(protocol): share MCP server-name/reserved-key validation constants (#7030) (#8119)	9	703	69
+b749fd5885de0130a72ed809e83252ae8343de7e	2026-09-29 11:30:09 -0700	fix(server): executeBash waits for stdio to drain after the child exits (#8120) (#8121)	3	113	0
+662af1f7c86d8faf96baa6036d47da150caebd37	2026-09-29 10:28:27 -0700	fix(server): neutralize Discord mentions in the status and billing sinks (#8105) (#8118)	8	234	13
+e634d4f3914aad2abf073cdc80770e404b428528	2026-09-29 10:00:42 -0700	fix(server): claude-tui background-task snapshot reads that don't broadcast no longer commit the poll baseline (#8052) (#8117)	5	371	19
+afba6e646d2a1fa8cf97d1a0a9dfc0f7e0c3b1cf	2026-09-29 09:35:48 -0700	fix(cli): chroxy start's dependency checks preflight the selected provider (#8075) (#8115)	4	238	12
+9fe5a750e5ccf28b92b0543a29e81973ea74a8c7	2026-09-29 09:03:18 -0700	fix(server): a spawned provider no longer inherits the daemon's own hook secret (#7360) (#8111)	18	984	40
+09ac4549357f92e7330ed4359e93c2e2ec9bb15a	2026-09-29 07:59:14 -0700	test(server): behavioural argv pins for two Docker argv builders (#7416) (#8109)	2	386	0
+11a0be4f5e8694c7863fe71315baddda66803ed8	2026-09-29 07:34:51 -0700	test(server): skip the #7978 ripgrep oracle cleanly when rg is missing (#8100) (#8110)	1	4	2
+8ff5c2be0f0821722fd1e02d99b366926660936d	2026-09-29 06:53:10 -0700	fix(server): resolve lsof by absolute path so the orphan-reaper sweeps under launchd (#8108)	3	309	23
+305c6afd2e4e97c26207e0e59db8c0245a121531	2026-09-29 06:15:05 -0700	fix(server): normalize claude-tui tool results to plain text (#8082) (#8107)	7	766	15
+455ba1dfc49cd1d6d5b50bc8b3d268abe4a8614d	2026-09-29 04:57:53 -0700	fix(server): deliver ci_complete to Discord as its own message (#7428) (#8103)	13	780	23
+3ffcc50a12777d2ec57ddaffbb922a2c01663133	2026-09-29 04:07:36 -0700	test(server): stop cloudflared/claude-tui provenance tests from reaching real binaries (#8099)	9	806	37
+61eb4b0efbada3e64e32e8e3b38b5910523683ba	2026-09-29 02:26:26 -0700	fix(server): hash a launcher's whole package tree in the provenance gate (#8040) (#8093)	14	2822	63
+2c923da2f6e0a894cc4ff51a4683649e4a1a2d5a	2026-09-29 00:48:18 -0700	fix(server): prune the survey throttle on session_destroyed, close the indeterminate wire leak (#8088)	11	947	39
+155bfa0c3fc5b90ec2302047c24e076d1670d486	2026-09-29 00:25:23 -0700	fix(dashboard): Shift+Tab moves focus backward everywhere (#8084) (#8087)	19	883	34
+7dbaf924a90f2efd8cc4cb69cd65cbe116369200	2026-09-28 23:31:27 -0700	fix(dashboard): resolve MCP add/remove immediately when the send fails (#7029) (#8085)	5	315	23
+9ee74d5f88b3379d2a3de8eac6019ab20c6efa21	2026-09-28 19:36:19 -0700	fix(server): refresh the trust ledger from disk before a first-sight or revoke decision (#8073) (#8079)	10	896	115
+d481182c42c6a81e8a2bd019e8ccbbccd6387d8d	2026-09-28 18:05:41 -0700	fix(server): gate chroxy tunnel setup's cloudflared execs through the binary-provenance check (#8066) (#8076)	10	1041	121
+113ead4c6e3096b5e31b06ea8b7d26035e5cecfb	2026-09-28 16:05:19 -0700	fix(server): the trust ledger merges on flush instead of overwriting another process's pins (#8068) (#8072)	7	1325	35
+2733fa8d00c29a92d8fac02c050debd3691e4b5e	2026-09-28 15:59:04 -0700	fix(server): chroxy start's dependency checks run verified binaries (#8041) (#8074)	8	1272	44
+139dd5c5b6f6948c5b6424f8e4c398cd8f680d1b	2026-09-28 14:38:30 -0700	fix(dashboard): composer keyboard handlers ignore keys during IME composition (#8064) (#8070)	29	488	1
+dac327659f19d9f15734074d33be9ba9d59a01db	2026-09-28 14:35:43 -0700	fix(server): chroxy start --skip-checks no longer crashes when the default provider fails preflight (#8029) (#8069)	3	256	4
+1992b5cadb1ed7cdee7b007e72cdd24a7d529316	2026-09-28 13:50:33 -0700	fix(server): chroxy resume runs the verified claude binary (#8061) (#8065)	7	842	90
+101f923034e3bf7f51674c3bc505b6b83be63c48	2026-09-28 13:40:05 -0700	fix(server): a raw data.project can no longer bypass the ingest project clamp (#7123) (#8063)	6	586	7
+0a1b02f596dc1b40bb04103e74167c0cdba1519b	2026-09-28 12:50:58 -0700	feat(dashboard): Tab completes the highlighted slash command without sending (#7370) (#8062)	3	194	1
+8126ecbd5f91eb4e5cbf7a0e970196bafb8c8bf3	2026-09-28 12:30:42 -0700	fix(server): run web tasks through the verified claude binary, not a bare PATH lookup (#8039) (#8060)	8	797	39
+f318f5fa1bfbe10f2aae804bb85eb3d6684c2d7a	2026-09-28 07:55:31 -0700	fix(server): gate the codex model-catalog probe through the verified one-shot resolver (#8036) (#8059)	9	533	28
+2fe38384d08fe87efc68d1bd78a5f3935fd7659f	2026-09-28 06:51:30 -0700	fix(server): a rejected claude-tui native route marker no longer burns the respawn budget (#8057) (#8058)	6	206	19
+78b43fc08d2ee0e4b6a13fe8d5def2cad1767220	2026-09-28 05:50:57 -0700	fix(server): sweep crash-leaked codex attach dirs and docker-byok env files (#7373) (#8047)	9	817	65
+1ae5236857b3114381ace674f43dc2a212ad70c4	2026-09-28 05:50:46 -0700	fix(server): report the model a claude-tui session is actually running (#7327) (#8048)	7	847	19
+401fde77fe3fec677afb0c3d6bcea1c8a6ee9199	2026-09-28 05:50:08 -0700	fix(server): a logged-out claude-tui native session no longer burns its respawn budget (#8044) (#8054)	6	203	20
+7532f67d5632e0905798d09398314a1f80ed25da	2026-09-28 05:27:40 -0700	fix(dashboard): derive the monthly meter's label from the billing class (#7377) (#8053)	11	372	18
+6f6f689d37767765ed1580e7903c6cd5327af5a3	2026-09-28 05:17:37 -0700	test: install the assert.match payload guard in claude-hooks, protocol and design-tokens (#7413) (#8050)	12	431	19
+5e06607f4e195c074d71d860ef4eef505597c20d	2026-09-28 04:59:49 -0700	fix(dashboard): make the chat scroller keyboard-focusable (#7406) (#8051)	4	127	19
+cf005bd448836ff85d24dc26b3968bb5e9e9cdbe	2026-09-28 04:51:49 -0700	test(server): make the claude-tui sidecar atomic-write tests fail without atomicity (#7415) (#8046)	1	45	1
+b566fd879ea36122744c73021889fe69738db5ba	2026-09-28 04:21:58 -0700	fix(server): claude-tui respawn no longer reports ready on a dead PTY (#8043) (#8045)	2	241	10
+5c76cd91b280480b786bbb969ea1b418bb6bfa1c	2026-09-28 00:28:56 -0700	fix(server): gate claude-cli/claude-tui respawns and codex app-server start through the binary gate (#8038) (#8042)	12	1204	67
+7f929f23458800309651b4da6fbfd8ce2e2744ac	2026-09-27 22:01:07 -0700	fix(server): gate gemini and codex exec spawns before every turn (#8035) (#8037)	12	932	67
+fbe56c2728b4d62e2b5bf2577e7686bcf2574057	2026-09-27 20:26:55 -0700	fix(server): every Agent SDK spawn goes through the binary gate (#8030) (#8034)	18	1842	124
+a524a8861ff2380823725f4b73d31d18517da012	2026-09-27 17:55:13 -0700	fix(server): claude-sdk version floor is a hand-kept minimum plus an SDK-pairing advisory (#8031) (#8033)	14	895	115
+e396c5be258adb51fba15ddffed1012036e1ce11	2026-09-27 16:49:16 -0700	fix: claude-sdk spawns the installed claude; desktop drops the SDK binary and catches extension-less Mach-O (#7986) (#8028)	31	3008	102
+dc25316bc63522f28a726e1706f1824164247ee3	2026-09-27 14:07:24 -0700	fix(server): a fixed memory root may only point outside the project at markdown (#8021) (#8026)	2	146	4
+4802e74c5b4fc89f29db9c10a3b948084bf5f8ea	2026-09-27 13:24:07 -0700	ci: run the three long Linux jobs on standard GitHub-hosted runners (#8025)	5	432	199
+c71cb4d16770739e45765336f11b8c595107ba21	2026-09-27 12:54:59 -0700	fix(server): one projects-dir encoder, matching what Claude Code writes (#7283) (#8024)	6	96	44
+59d967a648f06ba5dfe8e8b6d0159accf85df0b4	2026-09-27 12:05:43 -0700	fix(server): deny unresolvable write/git targets outside the project (#8016) (#8023)	4	304	31
+261dbf1eb66719757ac06646a48bf9950003bef7	2026-09-27 11:50:41 -0700	fix(server): apply the @import markdown gate to the resolved target (#8017) (#8022)	2	70	2
+6b83799ef34c9dc1f1896cd92191be1c245f66ac	2026-09-27 11:07:12 -0700	fix(server): deny non-ENOENT realpath failures outside the boundary (#8012) (#8020)	4	443	16
+1e507d9599fb853ddf5f55e0c551974a0c1da208	2026-09-27 10:20:25 -0700	fix(server): follow a dangling symlink in realpathOfDeepestAncestor (#8013) (#8015)	2	335	3
+6318466c6658e9c61192bf70638ec0efcf6bc8ca	2026-09-27 08:08:25 -0700	fix(server): verify Glob fallback entries against the verified parent (#7919) (#8003)	2	277	18
+0350ccb32726d1b9d12ea0cac315f246046a30e4	2026-09-27 07:25:11 -0700	fix(server): decide read_file's missing-file containment canonically (#8000) (#8010)	3	155	12
+cd26ee4e4dc71412b763fc3ea1bff4f320a004f6	2026-09-27 06:35:27 -0700	test(server): assert the glob search-state budget bounds the work, not the clock (#7990) (#8004)	2	36	4
+715ef43e6202e2cc33c4901988adf47c5fb856f2	2026-09-27 06:30:08 -0700	fix(server): contain list_directory's missing targets canonically (#8011) (#8014)	2	96	5
+137c0647d0c97df05da1d4f6ea5acf286f78b938	2026-09-27 05:44:47 -0700	fix(server): emit '/'-separated paths from listFiles on every OS (#7282) (#8002)	3	13	11
+8ce4fcbc0060b83fd5920db68c479f19c0301ced	2026-09-27 04:24:33 -0700	test(server): fix two Windows fixtures that asserted a POSIX-only premise (#7285) (#8001)	5	57	35
+40e78e4e0102b575bea97e61de520a48a681f17f	2026-09-27 04:17:38 -0700	test(server): assert the 100-skill toggle is served from the parse cache, not the clock (#7041) (#8008)	1	31	23
+57dc0eaa4a6551f4161ead00ce45a0413675592c	2026-09-27 02:51:05 -0700	test(server): un-exempt the three symlink-create rows now that chroxy-win holds the privilege (#7288) (#7998)	10	306	85
+9126d5aa1838dc68d0a8e67b35a226667660f76d	2026-09-27 01:48:28 -0700	chore(deps): update cargo-bins/cargo-binstall action to v1.24.0 (#7993)	1	2	2
+94fe0f6acfb7dbb5877f2c7c9859ab3497ae89a1	2026-09-27 01:48:23 -0700	chore(deps): update rust crate serde_json to v1.0.151 (#7992)	1	2	2
+0c47e46f182b786be8d53c30e685289fff19943c	2026-09-27 01:47:18 -0700	chore(deps): update dependency expo-font to v14.0.12 (#7983)	2	5	5
+9341b840b453f03981b3178a2511459c0f307083	2026-09-27 00:46:06 -0700	test(server): make two symlink tests correct on Windows with symlink privilege (#7288) (#7995)	2	22	5
+9e217d79c7f192fcae93ad20ec6b1f3ebda5a372	2026-09-26 23:34:23 -0700	fix(ci): let the review hook pass merges that target another repo (#7994)	2	411	1
+a38d2a323a7bcca629818ea9a49906c0db978373	2026-09-26 21:56:49 -0700	chore(deps): update rust crate serde to v1.0.229 (#7987)	1	18	7
+a6af8e77a50410f7744a2772b3ab1da46fcd1b18	2026-09-26 21:56:35 -0700	chore(deps): update rust crate libc to v0.2.189 (#7984)	1	2	2
+f7b58c590fb3800059dd7e7ab0ef0436e449631e	2026-09-26 19:18:29 -0700	fix(ci): document the review hook as a speed bump; block the GraphQL merge form (#7922) (#7988)	2	118	2
+7a07a364b092e9b9871df5b01cb5c2e2b860078f	2026-09-26 18:50:17 -0700	fix(server): log a distinct line when a volume reports file index 0 (#7874) (#7989)	4	338	6
+6886bfe00bec0193d5e83dd1aaa31a976438c776	2026-09-26 14:41:36 -0700	fix(desktop): derive the server lockfile from the root at build time (#7324) (#7982)	16	1316	3289
+481185585006f9ecfe92beebf9e54081dc6b265b	2026-09-26 11:38:25 -0700	security(server): floor Grep's glob, which overrides .gitignore (#7978) (#7980)	10	1080	32
+ce21a0e0d0689a0d96b7c781542afe59824dc3af	2026-09-26 00:30:02 -0700	chore(deps): update softprops/action-gh-release digest to 3bb1273 (#7966)	1	1	1
+d82cf4bd4ff904042ab24d15423bfea7cc79b1e1	2026-09-26 00:29:46 -0700	chore(deps): update swatinem/rust-cache digest to 6323deb (#7970)	1	2	2
+e577085f711b7bc6a09d44cbb7b47f9f2a53e461	2026-09-26 00:29:28 -0700	chore(deps): update dependency @testing-library/react to v16.3.3 (#7972)	1	4	4
+882d66c9fa840d8d651c7cc293285d2361f45988	2026-09-26 00:28:55 -0700	feat(server): expose sessions to external planners over MCP (#7854)	20	6535	6
+f17f69c2bc2f4cfe492da888bc7792ba7d64a24b	2026-09-25 22:36:41 -0700	security(server,protocol): carry the permission floor verdict on every permission_request (#7968) (#7971)	11	927	3
+a7355d20f3997ea18208d9800062eeba5854e5c7	2026-09-25 21:13:44 -0700	fix(deps): bump js-yaml in the root lockfile past the merge-key DoS advisory (#7967)	1	16	6
+4a13e13ea627d2cd5f5661e2864056bd9c71a357	2026-09-25 20:20:32 -0700	chore(deps): update actions/checkout digest to 11d5960 (#7720)	5	30	30
+5957ec33479359003e020305a5db6110985d2626	2026-09-25 20:13:39 -0700	chore(deps): update dorny/paths-filter digest to 0e4a8c6 (#7753)	1	1	1
+def769c0c3495da79bdc52c4a47eccdb2f33ba2f	2026-09-25 19:44:29 -0700	fix(server): Glob brace ranges, comma-less {x}, and negated-class parity (#7958)	4	1326	93
+5ac52a2723d5bf6239cb451af0c58c90fddc9b9b	2026-09-25 19:27:53 -0700	chore(deps): update dtolnay/rust-toolchain digest to 6bed076 (#7754)	2	3	3
+1554629eafcdf5bd28817c678687e1cad3db1dbb	2026-09-25 18:20:26 -0700	feat: show where an MCP server was configured in the spawn-trust prompt (#7939) (#7959)	19	1098	22
+1b776178ec590ceab72cda1b6318a4693a4f156c	2026-09-25 17:18:11 -0700	security(server): pin container Grep's --glob (and other model-supplied options) to the joined form (#7928) (#7960)	3	168	4
+54e4e6f0dcb1f0636cd72e63cadecd543d2bcf97	2026-09-25 17:00:24 -0700	security: require O_NONBLOCK on every O_NOFOLLOW open, and fix the sites that lacked it (#7938) (#7955)	14	2025	8
+533869028196ac9b28781ca40dbd16f9ec21e4b0	2026-09-25 16:25:20 -0700	test(server): give spawned provider binaries an isolated HOME under the test suite (#7269) (#7946)	3	788	0
+67c088011ba1e3132e542b5feb920d308871c748	2026-09-25 16:00:05 -0700	fix(server): forward USERPROFILE and Windows home vars to allowlist-mode spawns (#7956)	2	77	0
+99d30af6090fe5d9dcb2076468e13b6109625053	2026-09-25 15:59:16 -0700	security(server): scan node-pty spawns in lint-argv-sinks and stop same-name findings aliasing (#7935, #7936) (#7954)	5	545	31
+08f4d64193fc8bf100f270dbe48020c3e4d07b8a	2026-09-25 15:56:37 -0700	fix(server): container Glob phantom literal path + dangling-symlink parity (#7896, #7897) (#7952)	4	392	13
+bf77b58abc8fdb3af96e089d636a6047fc0b69c8	2026-09-25 15:41:32 -0700	fix(deps): bump @anthropic-ai/claude-agent-sdk so no vulnerable @anthropic-ai/sdk remains nested (#7886) (#7953)	2	129	109
+02d510594188ebfa4dcb6466038c363e1a3f0ab8	2026-09-25 15:36:42 -0700	fix(ci): cap App Tests jest workers so the Docker runners stop OOM-killing them (#7947) (#7950)	1	17	1
+f4fba12bc74de94eb1c99b2f7f19bbf0b78fc7b6	2026-09-25 15:28:07 -0700	fix(server): report a destroyed MCP client as failed, not connecting (#7930) (#7943)	2	84	3
+3c34ce2a8727f0f2fe8b320f8b494f6dd5896f8c	2026-09-25 15:02:12 -0700	fix(server): load project-scoped and .mcp.json MCP servers in BYOK (#7931)	5	644	48
+b6d5d37478f5c0c55dcae0ca925ae4e9fb026de9	2026-09-25 15:02:01 -0700	test: bundle three lint/test-hygiene fixes (#7256, #7279, #7343) (#7941)	8	424	18
+a5233c0c6aea614d0eaa74dbd756fd47e236d440	2026-09-25 13:47:36 -0700	fix(server): close four Glob self-walk parity gaps vs fs.glob (#7912, #7916, #7917, #7918) (#7945)	3	805	125
+6dffa110ae1bd1ada2fae2b09cc60b2fa17ba7b4	2026-09-25 13:33:44 -0700	test(server): cover the contributing-roster and sidecar entry-point guards as real subprocesses (#7937) (#7944)	2	367	0
+3724b31cae81a13c76ceb633706ba00a36077076	2026-09-25 13:25:29 -0700	fix(ci): stop Release PR Subject timing out on a full-history checkout (#7873) (#7942)	1	27	2
+c46ec35f2e36e3396ed7b5cbc0ee168912522b6b	2026-09-25 12:19:23 -0700	fix(server): re-validate the claude-tui hook-sink base on every poll (#7926)	4	1110	24
+40dbf5147271953f014c79607f3990728a9abfaa	2026-09-25 12:01:20 -0700	test(ci): cover compile-skill-targets.mjs's untested main() branches (#7940)	1	144	1
+5c7723068476d81304629254690b85e084fec9e0	2026-09-25 11:45:50 -0700	fix(server): route ws-forwarding's available_models tags through the shared per-recipient resolver (#7932)	9	908	191
+5a3cc22fa4cd879444498ab7a19993a1118da3e7	2026-09-25 11:08:32 -0700	fix(server): arm the dead NODE_ENV test gate, stop leaking config-dir temp dirs (#7933)	6	311	8
+d0d0f9b5296d2e700dda4d23ad848c97a753a27d	2026-09-25 10:08:45 -0700	docs: clarify entry-point guard layers and add pi target documentation (#7934)	2	32	9
+805bd637941182bf129fa650f606cb8c9e218254	2026-09-25 10:08:34 -0700	security(server): gate argv sinks with a lint + fold k8s.js's third guard spelling (#7868, #7869) (#7929)	14	2234	21
+19b9f99c6d9d30c0a49dccaad2e988f217915a17	2026-09-25 10:08:23 -0700	fix(protocol): bound and type getDiff's base field at the wire (#7870) (#7927)	6	477	48
+8e053586d21ff02b4f667beab347fff962cdabce	2026-09-25 10:08:11 -0700	fix(server): re-check _destroyed after the MCP spawn-trust gate await (#7925)	3	522	5
+0924999fecb6d7fa2d98b9975ae800c25052f046	2026-09-25 10:07:58 -0700	fix(claude-hooks): enforce ingest-secret mode/owner parity in the hook reader (#7923)	4	528	14
+9c4498f02c0dd5e3556e076ab21a4d6b8dd873bd	2026-09-25 10:07:20 -0700	fix(server): read credential files through a TOCTOU-safe open+fstat, not statSync+readFileSync (#7924)	11	1027	134
+99547a85cf22e253b382334236cf79f16b20a471	2026-09-24 11:49:24 -0700	fix(ci): make the pre-merge review gate read Claude Code's stdin hook payload (it never fired) (#7921)	2	456	83
+ba00270c1349bbe6b60b9c2e12f8d654f9d3df5e	2026-09-24 10:50:19 -0700	fix(server): replace host Glob's fs.glob with a self-walked, non-backtracking matcher (#7910)	3	2145	283
+b81a4b4541cede4f604e72c7be16968c6d8b8258	2026-09-24 10:45:35 -0700	fix(ci): stop pipefail+SIGPIPE from flipping grep -q verdicts in production scripts (#7913)	13	823	13
+39ad3dc1f0d63cfa51daef0e7ed820b99882448d	2026-09-24 09:52:59 -0700	fix(ci): let queued main-push CI runs supersede each other (#7909)	4	297	7
+c8e126e23d5c2286c7f64b0854e5909f6cccf77e	2026-09-24 09:05:21 -0700	test(server): raise the #7898 Glob perf-guard budget from 250ms to 2000ms (#7915)	1	14	8
+efd705dc5409470ae2c235f5710c6dbea7b307ef	2026-09-24 06:48:50 -0700	test(ci): stop pipefail+SIGPIPE from flipping grep -q verdicts in the scripts test harnesses (#7908)	2	252	21
+c3b3823bda92693ff87eddc0da0a34dc20f031cc	2026-09-24 06:33:38 -0700	fix(server): persist ratchet-learned contextWindow for declaration-only rows (#7904)	2	689	23
+739a5a52a79cb2006de1de7de5a8b3a884a713fe	2026-09-24 06:21:51 -0700	fix(deps): bump ws to 8.21.0 in the root lockfile [security] (#7892)	3	20	20
+a7e744c8e0b7e77bf717d3d032de2d5fd32c206e	2026-09-24 05:58:13 -0700	fix(server): connect the first MCP server without a session restart (#7903)	3	251	22
+5c806548690b36d287abcaecfd31d787a34b97d6	2026-09-24 05:38:50 -0700	fix(server): .env.example names claude-tui as the default provider (#7884)	2	140	1
+360a8f155aa76612007662db5c67cfd6c263f396	2026-09-24 05:20:09 -0700	fix(server): host Glob case-sensitivity + dangling-symlink/newline parity (#7355, #7357) (#7898)	9	1551	39
+a826788db65f20f927b1ed720b2072e254c2ee38	2026-09-24 05:04:47 -0700	server: derive permission-mode copy from the roster provider, not the session provider (#7885)	4	116	14
+224d616f979e3b83b9f18793ed3c4ed2dfbcabd4	2026-09-24 04:23:53 -0700	fix(server): re-check the ingest-secret mode on every existing-file read (#7889)	3	238	16
+66212ab617deb9f69cbcc2de92828d11345a5273	2026-09-24 04:12:20 -0700	fix(server): re-tag the overlay-reload default roster per recipient (#7891)	2	331	32
+fc761302561e23905566b0dff81a45dcf928e73a	2026-09-24 04:12:15 -0700	test(server): convert sidecar agent.test.js fixed sleeps to event-driven waits (#7902)	1	275	180
+10e25ef8b53855c33a4e89e5778eef6cd91a3bd3	2026-09-24 03:09:05 -0700	fix(server): preserve overlay-override metadata and provenance fidelity (#7888)	4	571	24
+a020f8edca4570d15c10a5f71c071414abb1f9f6	2026-09-24 02:59:23 -0700	fix(server,app): add thinking_level_changed to the outbound roster and wire it into the mobile app (#7890)	13	299	12
+f4cd1d71718b5453d1f5c71f10f82e3995db9eb5	2026-09-24 02:03:08 -0700	fix(dashboard): seed the scheduler datetime-local field in local time (#7883)	2	104	6
+ee75896b64af525639e5f419cbcb578389b10183	2026-09-24 01:27:57 -0700	fix(deps): update @anthropic-ai/sdk to ^0.91.0 with a synced root lockfile [security] (#7887)	2	42	22
+03a55685c9d762c8a1bae18a08e3d16f5ee4f8f8	2026-09-24 00:17:20 -0700	chore(ci): pause the marathon per-session cost breaker, keep spend tracking (#7882)	10	38	27
+2e98fbfe4c151afac66b393111b7de73c437c749	2026-09-24 00:04:01 -0700	chore(deps): update dependency vitest to v4 [security] (#7718)	2	49	408
+6cb07b359f70fe87474a885acd62ede1a6606871	2026-09-22 16:48:41 -0700	fix(server): confine container Write/Edit through symlinked directories (#7879)	5	643	31
+289e91ede2aacf8d5e2ad0159688ddc424f118ea	2026-09-22 16:34:36 -0700	fix(server): refuse to sweep stale dirs through an unowned base (#7878)	2	276	2
+3f191690413061e6204c8aa9c73aefe8d4c55d77	2026-09-22 14:48:40 -0700	fix(server): make the symlink-refusing open actually refuse on Windows (#7280) (#7865)	8	749	40
+da276a10bbb97eda128c203026563c2d616a43ac	2026-09-22 14:01:08 -0700	fix(server): stop container Glob/Grep/Read escaping /workspace through a symlinked directory (#7354) (#7867)	7	1432	54
+74134415760768eb961634b6a20992252748d3e6	2026-09-22 14:00:55 -0700	fix(server): harden the claude-tui sink base dir like claude-cli's (#7372) (#7864)	5	309	13
+ecda2adb65493a09ec393fd9db57caa6a798f8d6	2026-09-22 14:00:47 -0700	fix(server): close getDiff's path-existence oracle (#7298) (#7862)	3	631	56
+a92772d0f41765433d1cb19494c98bbd23c7ca9d	2026-09-22 14:00:41 -0700	fix(server): close the remaining argv option-injection sites (#7296) (#7866)	12	542	12
+f95dfe67ae8563237c679add3d60318d349e52df	2026-09-22 14:00:34 -0700	fix(server): stop the client prompt being option-parsed by codex exec and gemini (#7342, #7291) (#7863)	14	422	54
+767d342963157d2c0be60ebf6882be28aa352a13	2026-09-14 18:30:51 -0700	fix(server): route native Codex inference to ChatGPT (#7853)	2	81	22
+26e6f3c6121667c75dff9b71cbf52c6c3e36bcd3	2026-09-13 19:26:40 -0700	fix(store): preserve tool and response identity across replay (#7851)	4	242	9
+5786697bad0dd765a57f0eb06ac0623a01adfdb0	2026-09-13 19:11:32 -0700	fix(store): preserve replay order when clearing placeholders (#7850)	6	242	91
+3202a95aadfaec7ba5b34cb841a314715a16fe37	2026-09-13 18:16:27 -0700	fix(dashboard): contain tool output and use neutral activity text (#7848)	11	177	52
+50f86deb6cbe9bf459c22fd015ec75731aa3a10f	2026-09-13 16:27:11 -0700	fix(desktop): bundle all server runtime hooks (#7846)	3	123	2
+8a0a54ed987ad35f7e7e336f1d315694d8083a38	2026-09-13 13:48:41 -0700	fix(server): enforce protected-path permission guarantees (#7842)	43	1075	135
+b467b92d257c3ec97cf7b3f1f18b4ddc78fb6906	2026-09-13 13:36:14 -0700	feat(protocol): add typed context delivery acknowledgements (#7843)	54	2873	105
+d31465c17f6a3100324b768784168ec74e4826b3	2026-09-13 12:43:38 -0700	feat(server): add explicit agent connection routes (#7844)	58	3124	107
+7211ff3ac76d76b2bf25b8628aa6e186d152c33e	2026-09-13 12:39:45 -0700	fix(server): apply runtime skill policy at daemon startup (#7841)	4	358	41
+4513e81ba2fc02e6c6d8aa8c3ad1b288f9d72bb6	2026-09-13 00:23:42 -0700	test(server): await the claude-tui PTY write drain instead of a fixed sleep (#7814)	3	151	35
+6c26c6ce486301018ca3b613142a93c0cdd36844	2026-09-13 00:23:27 -0700	test(store-core): pin the clock across both contract runs so flat parity stops racing (#7813)	2	201	13
+554e66fb61f0262184d998e6035b29650fee2b47	2026-09-12 19:20:50 -0700	fix(server): tag every available_models send with a concrete provider, and let an overlay override ride the union gate (#7799)	12	1102	105
+429d9d956ae4a26a3dd481c7bf188968bb643e28	2026-09-12 18:50:02 -0700	fix(server): push the booted reasoning effort in the ready burst (#7795)	8	227	7
+492f7ea2696138e702081a03772121acf1f2d98c	2026-09-12 18:49:27 -0700	fix(server): codex booted-model restore + live catalog roster push (#7796)	2	271	7
+b47d4f2b8c41c0a4ec84d9469bb3e984581c8726	2026-09-12 17:28:20 -0700	fix(server,dashboard): one source for the thinking-level roster, pinned in both directions (#7800)	19	882	160
+331374cca92fbbaf4735464a9e63d1680c14ef16	2026-09-12 17:25:20 -0700	fix(server): codex turn usage is a delta of the cumulative total, cleared per turn, and finally emits an occupancy snapshot (#7798)	6	535	36
+401ee784702b76c283afc3f8735769270ca10d14	2026-09-12 17:24:42 -0700	fix(dashboard): Tokens panel reads live session_usage, not just the snapshot (#7797)	4	384	5
+e48d32b5db7e57059d70df69f3e18ea9de8a4f60	2026-09-12 12:28:47 -0700	test(server): two-directional catalog/consumer parity guard, red-proofed in both directions and against its own shape (#7788)	4	1289	1
+a72c7c2b7b813593dbb9624551d6f9d04795a811	2026-09-12 11:38:26 -0700	docs(server): the codex rows describe the DEFAULT app-server driver; catalog sources, the version gate and the effort control get written down (#7787)	5	222	34
+8db3e4749cb15eee63f981e161707c73eaf74d5c	2026-09-12 10:41:02 -0700	feat(protocol,server,dashboard): reasoning effort end to end — per-model levels replace the hardcoded thinking-level enums (#7782)	29	2219	43
+abe905ab890399b1c3fee3d069ca5f239926e555	2026-09-12 08:42:35 -0700	feat(server): capture the model codex resolved, extract the thread/turn param builders, take the context window from thread/tokenUsage/updated (#7767)	3	934	36
+b6469b1fe7118cf0159696799878078e206db859	2026-09-12 08:12:46 -0700	test(server): reconcile the tri-state validator (#7766) with the Claude-only union (#7765) (#7780)	2	23	7
+d864ff68d3f1eed2ce21c51ee23f7ee34cfcc36b	2026-09-12 07:30:05 -0700	fix(server): scope the #3075 fallback union and the [1m] synthesis to the Claude registry (#7765)	7	989	114
+132050bf29632c7d34b98dc809d31d0b581e74ac	2026-09-12 07:29:10 -0700	feat(server): codex model validation becomes tri-state — the binary's own catalog, or unrestricted (#7766)	13	904	49
+967f5ac14d787eac9f61c290ed61d984d2316650	2026-09-12 05:02:10 -0700	fix(store-core,dashboard,app): key available_models by provider, so one roster cannot hide or hijack another session's picker (#7758)	44	1713	340
+7a9694932909def9ec60ebb8d6aa327a3bc01629	2026-09-12 05:01:16 -0700	feat(server): source the codex model catalog from the app-server's own model/list (#7757)	7	1699	9
+f6d03efa69e914e0092dd6a702fb94226f62d18d	2026-09-12 03:20:44 -0700	feat(server,dashboard): split the magic-keyword highlight onto its own thinkingKeywords capability (#7735)	21	451	9
+db5d733cfc7c9ebfb4ba48cb6a3015b2e2d67aa0	2026-09-12 02:15:14 -0700	feat(protocol,server): model entries carry provenance + reasoning levels; updateModels stops discarding contextWindow (#7736)	9	884	11
+557fbf51a1e463215d5019818cea3e15713b86c4	2026-09-12 02:14:34 -0700	fix(server): tag each overlay hot-reload broadcast with the registry it came from (#7733)	5	1099	14
+a0cc3115eedf968bc258449983210a4ac9e5c7bf	2026-09-12 01:41:47 -0700	feat(server): gate codex app-server features on the initialize handshake (#7734)	4	898	2
+0b531c654b96d71a0b285428a41004ff454de516	2026-09-11 22:29:59 -0700	fix(docs): restore the effort half of the follow-on test, and make every wave retire old debt (#7713)	12	369	33
+a3fc894b1dec69f9fb99eb21a9587205dd08127b	2026-09-11 21:21:43 -0700	chore(ci): throttle Renovate PR creation before the app install (#7711)	1	2	0
+db808003c8fd9928fa239322ffac6dc80ab75838	2026-09-11 19:24:51 -0700	fix(server): the PodAgent eviction flake is a MUTABLE timestamp, not timer granularity (#7709)	3	251	72
+c3160a8a1955f31bd97497540d14ae45d41e2562	2026-09-11 18:40:30 -0700	chore(server): clear the 164 lint warnings, and make no-unused-vars an ERROR so they cannot return (#7707)	87	150	158
+0869ede593a596924d41b869facd294e01ce502b	2026-09-11 17:54:57 -0700	test(app): pin createMockConnectionContext's `silent` default, and record which defaults get one (#7704)	2	131	4
+000557aedc687dc20f76aa516fb5179c0cea8c1f	2026-09-11 17:18:50 -0700	test(scripts): an unreadable declarator is a cannot-check, and ten declarator shapes get rows (#7702)	2	354	33
+bd188473d7ace509337342b48070ecbf89977632	2026-09-11 16:24:22 -0700	fix(scripts): `delete` through an accessor obeys the in-place flag, like its four siblings (#7699)	2	389	36
+3ef6cb7bd7bdbc80b00e711ca2b28a9fb07b7955	2026-09-11 15:28:36 -0700	fix(scripts): a destructuring declarator has no initializer, so the alias rule must not judge one (#7697)	2	574	21
+a4f3f64c4720f49f31b0b03963d9a030a1f375ad	2026-09-11 01:43:36 -0700	fix(scripts): in-place mutation is a write on the app target too, and the flag is now wired there (#7695)	2	136	16
+87f5ba175d39d9a4f823bdd55a9cff5af4255676	2026-09-11 01:15:03 -0700	test(app): pin createMockConnectionContext's default url by its classification (#7694)	2	47	0
+8b0a5e8f92a51db59486ee8910c68d35005d4e1e	2026-09-11 00:12:02 -0700	test(server): scan the remainder of an owner region, not just skip it (#7693)	1	134	3
+25aa468b0a6839e14c940e690464b56d04579df8	2026-09-10 23:07:42 -0700	fix(scripts): a prefix increment through an accessor obeys the in-place flag (#7692)	2	196	20
+43d463376982fc92e4eaf7327e28723188c36f10	2026-09-10 17:37:55 -0700	fix(scripts): the module-bindings roster now sees destructured and multi-declarator forms (#7687)	2	524	21
+80d21cfd80fbe8697e93f730ceb4cd3e39cafe32	2026-09-10 15:00:12 -0700	test(server): pin the production ctx against CTX_NAMESPACES, the third side of the triangle (#7686)	1	156	0
+a03dd198d42483f24c406dc929ef9e7332bca7e0	2026-09-10 14:27:54 -0700	test(server): the anti-orphan mutation harness must notice a collapsed copy (#7685)	1	63	1
+fd36bdd17257e06af22197109dbf273b09a31582	2026-09-10 13:45:45 -0700	fix(scripts): assert-test-count must not call a CANCELLED run OK (#7684)	2	117	3
+1c7df60b59b2bdec0e1110b3721a78833db4fcc1	2026-09-10 13:01:51 -0700	test(scripts): make the updater-feed harness's case count outcome-independent (#7683)	1	52	27
+b4371664b0f9128f56ce65458007d0270fe9defe	2026-09-10 12:16:34 -0700	test(scripts): give the collation probe its own positive control (#7682)	1	115	3
+fd19a505a2db9a3ab4c3db061cf931ee4e1300a9	2026-09-10 11:21:53 -0700	test(server): floor smoke-test.mjs's case count, and put its red proof where it can run (#7681)	4	195	12
+dd7eea350e5a54934c32f7c4110193750505da76	2026-09-10 10:47:05 -0700	chore(server): ESLint covers tests/, which nothing linted (#7679)	2	103	33
+610513dbff3b4a8b4092c2ddd44ec1a9e22a2c1a	2026-09-10 09:59:13 -0700	test(ci): prose must not help clear the setup-node floor (#7678)	5	135	8
+ffd7f3f9ca9a5173522ba1e02a411238d045a216	2026-09-10 09:25:29 -0700	fix(ci): a reusable-workflow job has no steps, and that is not a defect (#7677)	2	188	19
+b36e004509188feb646d91c4f4ded5d0cd907a5f	2026-09-10 08:28:37 -0700	test(ci): refuse a flow-collection step by name, rather than catching it by accident (#7676)	2	203	1
+f27798d036196fbdd3f4fcdc86e1a3d53520b869	2026-09-10 07:55:49 -0700	fix(ci): a plain scalar continued on the next line is a run body, not nothing (#7675)	2	320	62
+37b65c1e4ba4e1f1688ab641e3c470b4467bcd7a	2026-09-10 06:52:51 -0700	fix(ci): a valueless key may carry a trailing comment, at every anchor (#7674)	3	406	9
+668dfabb9bfe591f79545aee20182e5fe49dc509	2026-09-10 06:08:47 -0700	test(ci): hold every workflow file to the steps its own text declares (#7671)	3	610	12

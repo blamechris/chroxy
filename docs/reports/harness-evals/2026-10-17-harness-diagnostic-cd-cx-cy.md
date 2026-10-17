@@ -7,7 +7,7 @@ range: 2026-10-01..2026-10-17 (baselines 2026-09-13..09-30 and June 2026)
 reviewer-harness: CD-cloud (Claude Code cloud sandbox launched from the Claude desktop app)
 reviewer-model: claude-fable-5-1
 reviewer-session: https://claude.ai/code/session_01QFgA5oVzgj3YV1GDozGXMv
-status: draft for cross-review by the other evaluating agent
+status: revised 2026-10-17 after reconciliation with the CX (Codex) evaluation; dispositions in §13
 tags: [harness-eval, chroxy, codex, claude-desktop, prime-directive]
 ---
 
@@ -19,12 +19,12 @@ tags: [harness-eval, chroxy, codex, claude-desktop, prime-directive]
 
 ## 1. Bottom line
 
-1. **In Oct 1–17 the measurable output was overwhelmingly Claude-driven coordinator waves; Codex was a steady secondary; Chroxy-hosted (CY) work that can be *proven* from GitHub artifacts is one run.** Of **173 PRs merged** in the window, 142 came from Claude sessions that git alone cannot place (labelled `CD?`; §3.1's session records now tie them to the owner's bridged coordinator sessions, so `CD?` most likely means desktop app or terminal, not Chroxy), 16 from Codex (`codex/` branches), 2 more are probably Codex (dialect), 12 are small bursts with no harness signal, and **1 PR is provably Chroxy-hosted** (#8276, see §3 and §6).
-2. **The one documented CY prime-directive run (Oct 4–6, delivering #8265/#8266 as PR #8276) finished its delegated outcome but spent ~15.4 h of its 23.1 h PR lifetime stalled** on a Chroxy claude-sdk defect chain (#8300 orphan-task notification closing the permission channel, #8301 CI completion never waking an SDK session, #8302 roster `isBusy` stuck, #8303 Browse/Create cwd mismatch). The owner had to intervene; the run then produced four high-quality defect reports and the fixes landed the next morning (#8320, #8325, #8304). As a *harness* result it is a fail-then-fix: work preserved, autonomy lost.
-3. **The Claude coordinator waves (most likely CD) set the throughput ceiling:** the Oct 7–9 wave merged **92 PRs in 29.7 h (3.1 PRs/h, +66.9k/−3.8k lines, 1,033 files)** with a 55-min median PR cycle, up to 12 PRs open at once, 7 branch CI failures in 208 runs and one red main-branch run. Half of the issues it closed (49/93) were filed during the wave itself, i.e. the wave fed on its own review and smoke findings as much as on backlog.
-4. **Codex (CX) on Oct 13–14 ran a 12-PR, 33-h session at ~0.4 PRs/h** with a longer cycle (median 84 min, p90 246), **3.5 review events per PR** against 1.2–1.5 for Claude runs with a similar commit count (consistent with Codex re-requesting Copilot after each push), 3 branch CI failures in 26 runs and one red main run (#8607). It merged #8606 with its own PR body stating two strict smoke assertions still failed. Its best contribution of the period was finding that **Codex silently truncated this repo's 42.8 KB `AGENTS.md`** (#8577 → #8578), a harness defect no Claude run could have noticed.
-5. **Cost cannot be compared from GitHub.** The only hard dollar figure in the period is Codex's own fixture trial inside #8200 ($3.81 for six Claude Code evaluation cases). Per-run cost must come from the vault's benchmark rows; §8 gives the join keys and the proxies (commits, review rounds, lines) that are available here.
-6. **Single sessions (SS) across harnesses look alike in GitHub:** 1–5 PRs, 10–140 min cycles, one or two commits per PR, almost no review threads. The harness difference shows up only in **PD runs** (parallelism, self-healing, stall behaviour) and in **incidents** (§6).
+1. **173 PRs merged in the window (UTC).** After reconciliation with the Codex-side evaluation (§13): **CD (Claude desktop app)** coordinated the Oct 7–11 prime-directive chain, R10–R15 = 128 PRs (the CX evaluation's native records show `entrypoint: claude-desktop` and a per-wave roster summing to 123 PD PRs across waves 1–30, which matches GitHub exactly); **CX (Codex desktop app)** delivered 18 Chroxy PRs across six roots; the remaining 25 Claude-driven PRs (Oct 1–7, plus the Sep baselines) are tied to bridged coordinator sessions that the CX evaluation did not cover (`CD?`). **No CY-coordinated prime-directive run exists in the evidence of either report.** Chroxy appears as an *implementation worker* in four merged PRs, always under Codex coordination: #8276 (claude-sdk, Opus 5.5 plus four Sonnet children, NORMAL assignment), and #8581, #8591, #8600 (Chroxy-hosted native Codex workers, `originator=chroxy`). Only #8276 is provable from GitHub alone; the other three rest on the CX evaluation's native histories.
+2. **The one Chroxy-hosted worker run GitHub can see (Oct 4–6, PR #8276) delivered its package but spent about 15 h of a 23 h PR lifetime stalled** on a claude-sdk defect chain (#8300 orphan-task notification closing the permission channel, #8301 CI completion never waking an SDK session, #8302 roster `isBusy` stuck). Before accepting, the owner hit a Browse/Create failure on the preview (#8303) at 17:23 PDT; acceptance came at 17:42 and the merge at 17:50 PDT. The root-cause reports and fixes (#8300–#8304, #8320, #8325) were produced the next morning by separate sessions, not by the stalled worker. Work preserved, autonomy lost, infrastructure fixed within a day.
+3. **The CD coordinator waves set the throughput ceiling:** R11 merged 92 PRs in 29.7 h (3.1 PRs per window hour, +66.9k/−3.8k lines, 1,033 files) with a 54.6-min median PR cycle (nearest-rank p90 172.8 min), up to 12 PRs open at once, 7 branch CI failures in 208 runs and one red `main` run. 49 of the 93 issues it closed were filed during the wave. The CX evaluation prices the chain's five later segments (34 PRs) at $195.47 observed helper-priced usage and the first mixed root (SS, release and waves 1–19) at $835.03 on a historical rate card; those are its figures.
+4. **CX on Oct 13–14: 12 Chroxy PRs across three Codex roots in a 33.3 h window** (0.36 PRs per window hour; the nine-PR daily-driver root alone spans 18.55 h of transcript), median PR cycle 70.9 min, p90 269.7 min. Copilot reviewed each PR exactly once; the extra review events are 30 owner-account review bodies the agent posted (2.5 per PR). 3 branch CI failures in 26 runs and one red `main` run (#8607). #8606 merged with two strict smoke assertions still red, which the CX evaluation records as an explicit acceptance judgment, not as green. Codex also found that this repo's 42.8 KB `AGENTS.md` exceeded its default 32 KiB project-doc cap (#8577 → #8578); whether an earlier Codex run actually lost the tail depends on the cap configured at the time.
+5. **Cost cannot be compared from GitHub.** Hard figures in the period: $35.67 recorded usage for the Sep 29–30 desktop-app cloud sandbox session (3 PRs including the v0.11.1 release cut), $3.81 for Codex's fixture trial inside #8200, and the CX evaluation's transcript-priced estimates listed in §8. Per-run subscription cost is unknown for all three harnesses.
+6. **Single sessions look alike in GitHub** (1–5 PRs, 10–140 min cycles, 1–3 commits per PR, few review threads). Harness differences show up only in PD coordination (parallelism, continuation, stall behaviour) and in incidents (§6).
 
 ## 2. Scope, data and method
 
@@ -39,7 +39,7 @@ tags: [harness-eval, chroxy, codex, claude-desktop, prime-directive]
 
 **Metrics.**
 - *Work*: merged PRs, files and +/− lines from the squash commit, distinct issues named by `Closes/Fixes/Resolves`, and how many of those were filed **during** the run (self-generated work vs backlog).
-- *Time*: window span, PR cycle (opened → merged) median and p90, first commit → PR opened, last commit → merge, and commit spans (stalls).
+- *Time*: window span, PR cycle (opened → merged) as the standard sample median and the nearest-rank p90 (`ceil(0.9·n)−1` on sorted minutes; for n ≤ 2 the p90 equals the maximum), first commit → PR opened, last commit → merge, and commit spans (stalls). The first publication used an upper-middle median and a mis-indexed p90; both were corrected in this revision (§13, F02).
 - *Issues*: CI runs on the PR branches (success/failure/cancelled, where cancelled = superseded by a newer push), red `CI` runs on `main` traced to the run's merge commit, Copilot review threads and owner replies, follow-up `from-review` issues filed, follow-up PRs, abandoned PRs, and incidents documented in issue bodies.
 - *Cost*: not observable here; proxies and join keys only.
 
@@ -53,7 +53,7 @@ tags: [harness-eval, chroxy, codex, claude-desktop, prime-directive]
 |---|---|---|---|
 | Branch prefix `codex/` | Codex-authored PR | 25 PRs Sep 13 → Oct 17 (#7841–#7854, #8200/#8202/#8205, #8583–#8608, #8612) | High |
 | PR-body dialect: no headings, a `Validation:` bullet block, "independent review … final head", "contained P3" | Codex authorship | All `codex/` PRs; also #8578 and #8581 on `fix/`/`feat/` branches (Oct 12) | High on `codex/`; probable on #8578/#8581 (#8578 also says it ran "fresh instruction-loading proofs … in Codex CLI 0.154.0") |
-| Commit author `BlameChris <ChrisPishaki@gmail.com>` instead of `blamechris <christopher.bowenx@gmail.com>` (936 of 959 commits) | A different git identity, i.e. a different checkout or HOME: the Chroxy daemon's environment | Only PR #8276 (5 commits, Oct 4–5) and PR #7853 (2 commits, Sep 14, `codex/codex-native-endpoint`) | High for #8276 (issue #8300 and PR #8304 describe it as "an autonomous `claude-sdk` session in Auto mode" / "the 2026-10-05 delivery run"); #7853 therefore *probably* a Chroxy-hosted Codex-provider session — owner to confirm |
+| Commit author `BlameChris <ChrisPishaki@gmail.com>` instead of `blamechris <christopher.bowenx@gmail.com>` (936 of 959 commits) | A *checkout* with its own git config (most plausibly the daily-daemon checkout), not a harness | PR #8276 (5 commits, Oct 4–5) and PR #7853 (2 commits, Sep 14, `codex/codex-native-endpoint`) | High that #8276 was made from that checkout by the Chroxy-hosted session #8300/#8304 describe; the CX evaluation shows #7853 was Codex-native despite the same identity, so the identity alone cannot attribute a harness |
 | Branch `llm-/great-tesla-uc8nfy`, commits at `+0000` | A cloud-sandbox Claude Code session with a non-default branch prefix (same adjective-scientist slug shape as the four `claude/…` branches on origin from July; this review's own session uses the same scheme) | #8131, #8149, #8157 (Sep 29–30, including the v0.11.1 release cut) | Probable; owner to confirm the `llm-/` prefix is their cloud-environment setting |
 | Issue #8323 (Oct 6): "The maintainer's daily loop is a coordinator session fanning out reviewers, scopers and implementers. In the vendor desktop app a subagent's work is at least readable…" | The coordinator-wave pattern is the owner's **desktop-app** loop | Supports labelling the large coordinator waves (R11, R14, Sep marathons) as CD | Inferred, not proven per run |
 | PR #8216 (Oct 3): "Under the delivery pilot it gets one independent review per round plus a Codex review" | A "delivery pilot" was running Oct 1–7 with Codex as a reviewer inside Claude runs | 11 PRs in R11 have "Codex round/delta" sections; #8320, #8330, #8423, #8476, #8512 | High (text) |
@@ -67,10 +67,10 @@ After the first version of this report was pushed, the reviewing session read th
 
 - **The `llm-/great-tesla-uc8nfy` branch is a cloud sandbox launched from the Claude desktop app**, not a guess any more: session "Consolidate usage-normalize.js's UNSAFE_KEY set into @chroxy/protocol" (Sep 29 22:16 → Sep 30 04:39, model claude-opus-5-5) is PR #8131's subject, and its recorded usage is **$35.67**. That run is therefore CD (cloud) and cost is known for it.
 - **Every Claude-driven run from Sep 22 to Oct 11 maps to a chain of bridged local sessions whose closing summaries name the run's PRs** (table below). The Sep 24 → Oct 2 chain is one `/prime-directive` run handed off across eleven sessions all titled "Prime directive readiness" (the Sep 24–26 segment alone reports "56 PRs merged (49 ours, 7 Renovate)"). The Oct 7 → Oct 11 chain is the "chroxy prime-directive #8340 #8253 #7356 #7353 — coordinator" / "prime wave 22" / "PD wave 23 coordinator" sessions; waves 23–28 name #8538 and #8568 (R14 exactly), waves 29–30 name #8570, #8572, #8573, #8575, #8576 (R15 exactly), wave 21 names #8530, #8526, #8527 (R12 exactly) and records "$21-23 spent" for those three PRs.
-- **Mode is now known for those rows:** R10–R15 and B2–R01 are PD (the sessions are explicitly prime-directive waves with handoff seeds and budget pauses: "paused on weekly budget", "paused for cost until 00:00Z"). R12 and R13, which GitHub made look like small bursts, are waves 21 and 22 of the same run.
-- **Harness is still the owner's call, with the evidence now pointing at CD/CLI rather than CY for these rows.** The Oct 5 Chroxy-hosted implementation session (the one #8300 and #8304 describe, which produced #8276 under the `BlameChris` identity) does **not** appear in the session list, while the sessions that *coordinated* it do ("Chroxy handoff", Oct 4 18:48 → Oct 5 17:42; "Connected users modal cutoff", Oct 5 05:06 → Oct 6 23:10). If Chroxy-spawned claude-sdk sessions registered with Remote Control they would be in this list and that one is not, so the 100 bridged sessions are most likely the owner's own coordinator sessions, i.e. the desktop app or terminal (`CD`), delegating to subagents and, on Oct 4–6, to a Chroxy session. The `CD?` labels stand but the question mark now means "CD or terminal CLI", not "CD or CY". The owner can confirm in one line.
-- **Correction to the identity row above:** the `BlameChris <ChrisPishaki@gmail.com>` identity marks a *checkout* with its own git config (most plausibly the daily-daemon checkout `~/Projects/chroxy-daemon`), not "the Chroxy daemon's environment" as such; it still proves #8276 was made from that checkout by the session #8300/#8304 describe.
-- **One accounting gap, and it matters for CY.** The Sep 24–26 coordinator's summary ("56 PRs merged (49 ours, 7 Renovate)") matches GitHub exactly (B2 + B3 = 49 non-Renovate PRs), so for that run the coordinator chain accounts for everything. The Oct 7 06:16 → Oct 9 03:59 coordinator, whose lifetime covers 89 of R11's 92 PRs, reports only **"17 PRs merged and 8 old-debt issues closed across waves 16–19"**. Either that summary undercounts by a factor of five, or roughly 70 of the Oct 8 PRs were produced by sessions that are not in this list: parallel subagents of the same coordinator would still be inside its session, so the candidates are desktop-app local sessions, terminal sessions without Remote Control, or **Chroxy-hosted sessions, which this list does not show.** If the owner ran a Chroxy prime-directive wave on Oct 8 alongside the coordinator (issue #8352 notes "several agents ran the full server suite on the owner's machine" that night), then CY's output in the window is far larger than the one PR this report can prove, and §5.3 understates it. This is the single most important question for the owner to answer; the per-PR CSV lets the answer be applied PR by PR.
+- **Mode is settled for those rows:** R11–R15 are PD waves 1–30 of one `/prime-directive` mission (the sessions are explicitly prime-directive waves with handoff seeds and budget pauses: "paused on weekly budget", "paused for cost until 00:00Z"). R12 and R13, which GitHub made look like small bursts, are waves 21 and 22. R10 stays SS: its PRs (#8339, #8342, release #8343 and two fixes) are NORMAL and release episodes recorded in the same native root before the PD mission began.
+- **Harness is settled for the Oct 7–11 chain by the CX evaluation's native records, not by GitHub.** The Codex-side evaluation read the Claude transcripts on the owner's machine: root `532cf9d9` carries `entrypoint: claude-desktop`, so the chain is **CD**. It also resolved what the first version of this report called an accounting gap: the coordinator's "17 PRs merged" line was a waves-16–19 summary, and its per-wave roster (6, 5, 5, 6, 6; 4, 5, 6, 5, 3; 6, 5, 5, 5; 5, 4, 4, 4) sums to 89 PRs for waves 1–19, exactly the 89 PRs merged during that session's lifetime. No parallel unseen run is needed to explain Oct 8. This is a corroborated report (their evidence is private); it is consistent with every GitHub number here.
+- **The bridged `remote-control-sdk` sessions are therefore desktop-app sessions**, at least for that chain. The Oct 5 Chroxy-hosted worker does not appear in the session list, which is consistent with Chroxy-spawned sessions not registering there. Rows still labelled `CD?` (Oct 1–7 and the Sep baselines) are the same kind of bridged session but were not covered by the CX evaluation's roster.
+- **Correction to the identity row above:** the `BlameChris <ChrisPishaki@gmail.com>` identity marks a checkout's git config, not a harness. #7853 (Sep 14) carries it and was Codex-native per the CX evaluation.
 - **Model mix is visible:** the coordinator chains ran claude-opus-5-5 at effort high; the Oct 6 root-cause sessions ("chroxy #8304 — trial RCA", "chroxy #8300 — stall fix") ran claude-fable-5-1; the Codex sessions and the Chroxy implementation session are not in this list at all. Context size at each session's last turn is recorded below as a proxy for how hard each segment was driven (it is not cumulative cost).
 
 | Run | Session record (title) | Created → last turn (UTC) | Kind | Model | Context at end | PRs the session's own summary names that are in this run | Session's closing status |
@@ -108,7 +108,25 @@ After the first version of this report was pushed, the reviewing session read th
 | R14 | chroxy #8515 #7509 #7131 — PD wave 23 coordinator | 10-10T07:11 → 10-11T01:05 | bridged local CLI (`remote-control-sdk`) | opus-5-5 | 727,770 | #8538, #8568 | waves 23-28 merged (20 PRs); run paused for fresh session |
 | R15 | chroxy #8515 #7509 #7131 — PD wave 23 coordinator | 10-11T01:06 → 10-11T09:02 | bridged local CLI (`remote-control-sdk`) | opus-5-5 | 293,708 | #8570, #8572, #8573, #8575, #8576 | waves 29-30 merged to main; handoff seed written |
 
-Only sessions whose summaries name PRs in the run, or that overlap the single-PR runs, are shown; the full 105-row list is in `data/ccr-sessions-2026-10-17.csv`.
+Only sessions whose summaries name PRs in the run, or that overlap the single-PR runs, are shown; the full 105-row list is in `data/ccr-sessions-2026-10-17.csv`. For R05–R09 the listed sessions overlap the window in time only; the CX evaluation shows that #8276's coordinator was a Codex chat, so the Claude sessions shown against R07-CY are concurrent owner sessions, not its coordinator.
+
+### 3.2 What the CX evaluation's native records add (corroborated report)
+
+The Codex-side evaluation (`reviews/harness-evaluation-cx-2026-10-17/Report.md`, attached under `mailbox/attachments/`) read the native Claude, Codex and Chroxy session stores on the owner's machine. Its attributions that this report adopts, all consistent with GitHub but not independently verifiable from here:
+
+| Item | CX evaluation's finding | Effect here |
+|---|---|---|
+| Oct 7–11 chain | `entrypoint: claude-desktop`; roots `532cf9d9` (waves 1–19, 89 PRs), `c26d0267` (wave 20, 3), `b22bbf2b` (wave 21, 3), `34a55f19` (wave 22, 3), `28912bd5` (waves 23–28, 20), `3a0b4364` (waves 29–30, 5) = 123 PD PRs | R11–R15 labelled CD / PD |
+| #8276 | Chroxy claude-sdk worker (Opus 5.5 + four Sonnet children) under a **CX coordinator**, assignment **NORMAL** | R07 relabelled "CY worker / CX coord", SS |
+| #8581 | CX SS chat with a **Chroxy-hosted native Codex worker** (an interrupted thread, then a 3 h 34 min replacement thread; actual model 5.6 Sol) | CY worker contribution counted |
+| #8591, #8600 | Chroxy-hosted native Codex workers (5.6 Sol/high) inside the CX daily-driver PD root `01a1365a`; #8600's first completion failed independent review with six P2 findings and needed two owner-authorised retries | CY worker contributions counted; quality note |
+| #8578 | CX PD root `01a12d7b` (with MarchBorne #1033) | R16 labelled CX / PD |
+| #8583, #8586, #8588 | CX roots `01a1329d` (SS) and `01a133a3` (PD) | R18 is three roots, not one session |
+| #8612 | CX root `01a147f9`, selected package | R19 CX / SS |
+| #7853 | Codex-native parent/child despite the `BlameChris` identity | identity is not a harness signal |
+| Complete CY-coordinated PD runs | none established in retained evidence | matches this report |
+
+
 
 ## 4. Run inventory
 
@@ -116,35 +134,35 @@ Only sessions whose summaries name PRs in the run, or that overlap the single-PR
 
 | Run | Harness | Mode | Window (UTC) | Span h | PRs | Files | Lines | Commits | Cycle med/p90 min | CI runs / fails | Issues closed (filed in-window) | Issues filed in-window (from-review) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| R01 | CD? | PD? | 09-30 16:24→10-01 08:11 | 15.8 | 13 | 124 | +9,233 / −492 | 41 | 41 / 82 | 36 / 5 | 13 (3) | 12 (11) |
-| R02-CX | CX | SS | 10-01 04:09→10-01 20:12 | 16.0 | 3 | 38 | +1,297 / −617 | 5 | 124 / 124 | 5 / 0 | 0 (0) | 0 (0) |
-| R03 | CD? | SS? | 10-01 20:01→10-02 23:30 | 27.5 | 4 | 12 | +3,475 / −168 | 10 | 46 / 46 | 10 / 0 | 4 (0) | 4 (4) |
-| R04 | CD? | SS | 10-03 07:58→10-03 08:53 | 0.9 | 1 | 7 | +956 / −27 | 4 | 56 / 56 | 4 / 0 | 1 (0) | 3 (3) |
-| R05 | CD? | PD? | 10-04 20:44→10-04 22:17 | 1.6 | 1 | 47 | +3,588 / −127 | 13 | 93 / 93 | 2 / 1 | 1 (0) | 2 (0) |
-| R06 | CD? | SS | 10-05 05:10→10-05 07:11 | 2.0 | 2 | 5 | +273 / −12 | 3 | 22 / 14 | 3 / 0 | 2 (1) | 1 (1) |
-| R07-CY | CY | PD | 10-05 01:43→10-06 00:50 | 23.1 | 1 | 46 | +1,129 / −175 | 5 | 1387 / 1387 | 5 / 1 | 2 (0) | 21 (4) |
-| R08 | CD? | SS | 10-06 01:39→10-06 10:33 | 8.9 | 3 | 64 | +6,066 / −214 | 28 | 82 / 82 | 16 / 2 | 3 (0) | 23 (0) |
-| R09 | CD? | SS | 10-06 20:40→10-06 22:57 | 2.3 | 1 | 17 | +3,850 / −2 | 11 | 137 / 137 | 6 / 2 | 1 (0) | 4 (0) |
-| R10 | CD? | SS | 10-07 01:41→10-07 19:34 | 17.9 | 5 | 108 | +6,587 / −175 | 15 | 31 / 76 | 12 / 4 | 2 (0) | 4 (2) |
-| R11 | CD? | PD | 10-07 23:25→10-09 05:05 | 29.7 | 92 | 1033 | +66,853 / −3,776 | 221 | 55 / 157 | 208 / 7 | 93 (49) | 90 (9) |
-| R12 | ? | SS | 10-09 08:04→10-09 08:48 | 0.7 | 3 | 35 | +1,845 / −46 | 5 | 23 / 23 | 5 / 1 | 3 (0) | 4 (4) |
-| R13 | ? | PD? | 10-09 17:30→10-09 18:00 | 0.5 | 3 | 14 | +954 / −44 | 6 | 25 / 25 | 5 / 0 | 3 (0) | 0 (0) |
-| R14 | CD? | PD | 10-10 07:21→10-10 14:04 | 6.7 | 20 | 136 | +6,111 / −961 | 41 | 27 / 41 | 41 / 0 | 19 (3) | 12 (8) |
-| R15 | ? | PD? | 10-11 01:15→10-11 02:19 | 1.1 | 5 | 32 | +1,231 / −106 | 8 | 24 / 27 | 8 / 0 | 6 (1) | 2 (2) |
-| R16-CX? | CX? | SS | 10-12 00:33→10-12 06:23 | 5.8 | 2 | 107 | +4,110 / −1,767 | 8 | 91 / 78 | 6 / 4 | 3 (0) | 2 (1) |
-| R17 | ? | SS | 10-12 06:57→10-12 07:06 | 0.2 | 1 | 3 | +192 / −19 | 1 | 10 / 10 | 1 / 0 | 0 (0) | 0 (0) |
-| R18-CX | CX | PD? | 10-13 01:22→10-14 10:38 | 33.3 | 12 | 245 | +9,021 / −1,431 | 31 | 84 / 246 | 26 / 3 | 10 (7) | 14 (1) |
-| R19-CX | CX | SS | 10-17 06:39→10-17 06:56 | 0.3 | 1 | 4 | +514 / −0 | 2 | 17 / 17 | 2 / 0 | 0 (0) | 0 (0) |
+| R01 | CD? | PD? | 09-30 16:24→10-01 08:11 | 15.8 | 13 | 124 | +9,233 / −492 | 41 | 41.1 / 172.4 | 36 / 5 | 13 (3) | 12 (11) |
+| R02-CX | CX | SS | 10-01 04:09→10-01 20:12 | 16.0 | 3 | 38 | +1,297 / −617 | 5 | 123.8 / 170.6 | 5 / 0 | 0 (0) | 0 (0) |
+| R03 | CD? | SS? | 10-01 20:01→10-02 23:30 | 27.5 | 4 | 12 | +3,475 / −168 | 10 | 39.2 / 56.0 | 10 / 0 | 4 (0) | 4 (4) |
+| R04 | CD? | SS | 10-03 07:58→10-03 08:53 | 0.9 | 1 | 7 | +956 / −27 | 4 | 55.7 / 55.7 | 4 / 0 | 1 (0) | 3 (3) |
+| R05 | CD? | PD? | 10-04 20:44→10-04 22:17 | 1.6 | 1 | 47 | +3,588 / −127 | 13 | 93.1 / 93.1 | 2 / 1 | 1 (0) | 2 (0) |
+| R06 | CD? | SS | 10-05 05:10→10-05 07:11 | 2.0 | 2 | 5 | +273 / −12 | 3 | 18.2 / 22.1 | 3 / 0 | 2 (1) | 1 (1) |
+| R07-CY | CY worker / CX coord | SS | 10-05 01:43→10-06 00:50 | 23.1 | 1 | 46 | +1,129 / −175 | 5 | 1386.8 / 1386.8 | 5 / 1 | 2 (0) | 21 (4) |
+| R08 | CD? | SS | 10-06 01:39→10-06 10:33 | 8.9 | 3 | 64 | +6,066 / −214 | 28 | 82.2 / 97.7 | 16 / 2 | 3 (0) | 23 (0) |
+| R09 | CD? | SS | 10-06 20:40→10-06 22:57 | 2.3 | 1 | 17 | +3,850 / −2 | 11 | 137.2 / 137.2 | 6 / 2 | 1 (0) | 4 (0) |
+| R10 | CD | SS + release | 10-07 01:41→10-07 19:34 | 17.9 | 5 | 108 | +6,587 / −175 | 15 | 31.3 / 122.7 | 12 / 4 | 2 (0) | 4 (2) |
+| R11 | CD | PD | 10-07 23:25→10-09 05:05 | 29.7 | 92 | 1033 | +66,853 / −3,776 | 221 | 54.6 / 172.8 | 208 / 7 | 93 (49) | 90 (9) |
+| R12 | CD | PD | 10-09 08:04→10-09 08:48 | 0.7 | 3 | 35 | +1,845 / −46 | 5 | 22.7 / 25.6 | 5 / 1 | 3 (0) | 4 (4) |
+| R13 | CD | PD | 10-09 17:30→10-09 18:00 | 0.5 | 3 | 14 | +954 / −44 | 6 | 24.8 / 28.7 | 5 / 0 | 3 (0) | 0 (0) |
+| R14 | CD | PD | 10-10 07:21→10-10 14:04 | 6.7 | 20 | 136 | +6,111 / −961 | 41 | 25.0 / 40.9 | 41 / 0 | 19 (3) | 12 (8) |
+| R15 | CD | PD | 10-11 01:15→10-11 02:19 | 1.1 | 5 | 32 | +1,231 / −106 | 8 | 23.9 / 30.0 | 8 / 0 | 6 (1) | 2 (2) |
+| R16-CX | CX | PD + SS | 10-12 00:33→10-12 06:23 | 5.8 | 2 | 107 | +4,110 / −1,767 | 8 | 84.4 / 90.5 | 6 / 4 | 3 (0) | 2 (1) |
+| R17 | ? | SS | 10-12 06:57→10-12 07:06 | 0.2 | 1 | 3 | +192 / −19 | 1 | 9.8 / 9.8 | 1 / 0 | 0 (0) | 0 (0) |
+| R18-CX | CX | PD (+1 SS) | 10-13 01:22→10-14 10:38 | 33.3 | 12 | 245 | +9,021 / −1,431 | 31 | 70.9 / 269.7 | 26 / 3 | 10 (7) | 14 (1) |
+| R19-CX | CX | SS | 10-17 06:39→10-17 06:56 | 0.3 | 1 | 4 | +514 / −0 | 2 | 16.9 / 16.9 | 2 / 0 | 0 (0) | 0 (0) |
 
 Totals for the window, by harness bucket:
 
 | Bucket | Runs | PRs | Files | Lines | Issues closed |
 |---|---|---|---|---|---|
-| CD? | 10 | 142 | 1,553 | +106,992 / −5,954 | 139 |
-| CX | 3 | 16 | 287 | +10,832 / −2,048 | 10 |
-| ? | 4 | 12 | 84 | +4,222 / −215 | 12 |
-| CX? | 1 | 2 | 107 | +4,110 / −1,767 | 3 |
-| CY | 1 | 1 | 46 | +1,129 / −175 | 2 |
+| CD | 6 | 128 | 1,358 | +83,581 / −5,108 | 126 |
+| CD? | 7 | 25 | 276 | +27,441 / −1,042 | 25 |
+| CX | 4 | 18 | 394 | +14,942 / −3,815 | 13 |
+| CY worker / CX coord | 1 | 1 | 46 | +1,129 / −175 | 2 |
+| ? | 1 | 1 | 3 | +192 / −19 | 0 |
 
 PR membership of every run is in `data/runs-2026-10-17.csv` (column `pr_numbers`) and per-PR in `data/pr-attribution-2026-10-17.csv`.
 
@@ -154,16 +172,16 @@ Caveats on the issue columns: "filed in-window" counts every issue the owner's a
 
 | Run | Harness | Mode | Window (UTC) | Span h | PRs | Files | Lines | Commits | Cycle med/p90 min | CI runs / fails | Issues closed (filed in-window) | Issues filed in-window (from-review) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| B-CX-Sep13 | CX | SS? | 09-13 16:08→09-15 01:30 | 33.4 | 8 | 182 | +8,172 / −562 | 38 | 211 / 263 | 10 / 1 | 0 (0) | 1 (0) |
-| B-CX-7854 | CX | SS | 09-18 06:01→09-26 07:28 | 193.5 | 1 | 20 | +6,535 / −6 | 12 | 11607 / 11607 | 7 / 0 | 0 (0) | 55 (42) |
-| B1 | CD? | PD? | 09-22 06:17→09-22 23:48 | 17.5 | 8 | 56 | +5,004 / −262 | 28 | 877 / 884 | 27 / 0 | 9 (2) | 10 (8) |
-| B2 | CD? | PD? | 09-12 04:33→09-24 18:49 | 302.3 | 21 | 87 | +8,701 / −1,261 | 54 | 174 / 295 | 53 / 2 | 20 (13) | 52 (21) |
-| B3 | CD? | PD? | 09-25 01:54→09-26 05:36 | 27.7 | 28 | 150 | +17,152 / −941 | 82 | 241 / 914 | 59 / 6 | 37 (10) | 22 (19) |
-| B4 | CD? | PD? | 09-26 08:04→09-28 07:28 | 47.4 | 26 | 176 | +13,963 / −4,302 | 93 | 88 / 227 | 68 / 3 | 23 (14) | 31 (22) |
-| B5 | CD? | PD? | 09-28 10:51→09-28 14:55 | 4.1 | 10 | 67 | +3,822 / −218 | 32 | 54 / 98 | 30 / 1 | 10 (1) | 5 (5) |
-| B6 | CD? | PD? | 09-28 15:46→09-29 02:36 | 10.8 | 10 | 91 | +7,697 / −457 | 25 | 64 / 118 | 23 / 3 | 10 (5) | 12 (12) |
-| B7 | CD? | PD? | 09-29 06:08→09-30 07:41 | 25.5 | 42 | 289 | +20,373 / −1,412 | 106 | 28 / 71 | 103 / 2 | 49 (29) | 43 (36) |
-| B8 | CD? | SS? | 09-30 10:07→09-30 18:03 | 7.9 | 5 | 49 | +5,096 / −286 | 13 | 100 / 110 | 12 / 0 | 5 (0) | 2 (2) |
+| B-CX-Sep13 | CX | SS? | 09-13 16:08→09-15 01:30 | 33.4 | 8 | 182 | +8,172 / −562 | 38 | 141.0 / 275.9 | 10 / 1 | 0 (0) | 1 (0) |
+| B-CX-7854 | CX | SS | 09-18 06:01→09-26 07:28 | 193.5 | 1 | 20 | +6,535 / −6 | 12 | 11607.5 / 11607.5 | 7 / 0 | 0 (0) | 55 (42) |
+| B1 | CD? | PD? | 09-22 06:17→09-22 23:48 | 17.5 | 8 | 56 | +5,004 / −262 | 28 | 870.3 / 914.0 | 27 / 0 | 9 (2) | 10 (8) |
+| B2 | CD? | PD? | 09-24 06:46→09-24 18:49 | 12.1 | 20 | 85 | +8,652 / −853 | 54 | 163.5 / 294.9 | 52 / 2 | 20 (4) | 18 (12) |
+| B3 | CD? | PD? | 09-25 01:54→09-26 05:36 | 27.7 | 28 | 150 | +17,152 / −941 | 82 | 239.9 / 947.9 | 59 / 6 | 37 (10) | 22 (19) |
+| B4 | CD? | PD? | 09-26 08:04→09-28 07:28 | 47.4 | 26 | 176 | +13,963 / −4,302 | 93 | 86.3 / 327.5 | 68 / 3 | 23 (14) | 31 (22) |
+| B5 | CD? | PD? | 09-28 10:51→09-28 14:55 | 4.1 | 10 | 67 | +3,822 / −218 | 32 | 53.8 / 98.5 | 30 / 1 | 10 (1) | 5 (5) |
+| B6 | CD? | PD? | 09-28 15:46→09-29 02:36 | 10.8 | 10 | 91 | +7,697 / −457 | 25 | 61.1 / 118.0 | 23 / 3 | 10 (5) | 12 (12) |
+| B7 | CD? | PD? | 09-29 06:08→09-30 07:41 | 25.5 | 42 | 289 | +20,373 / −1,412 | 106 | 27.7 / 85.5 | 103 / 2 | 49 (29) | 43 (36) |
+| B8 | CD? | SS? | 09-30 10:07→09-30 18:03 | 7.9 | 5 | 49 | +5,096 / −286 | 13 | 100.1 / 342.6 | 12 / 0 | 5 (0) | 2 (2) |
 
 Baseline windows start at the oldest PR's creation, so a long-open PR inflates the span: B2 includes a PR opened Sep 12 and merged Sep 24, and B-CX-7854 is a single PR open for eight days. Read the Sep rows for size and cycle time, not for PRs per hour.
 
@@ -179,23 +197,23 @@ June reference points (from repo records, not re-derived): the 2026-06-02 overni
 | R04 | CD? | SS | 1/1 | 4.0 | 1 | 0 (0) | 0 | 0 | 0 | 1.0 | 2 | 15 | 42 |
 | R05 | CD? | PD? | 1/1 | 13.0 | 1 | 0 (0) | 0 | 0 | 0 | 3.0 | 82 | 30 | 145 |
 | R06 | CD? | SS | 2/2 | 1.5 | 1 | 0 (0) | 0 | 0 | 0 | 1.0 | 0 | 17 | 2 |
-| R07-CY | CY | PD | 1/1 | 5.0 | 1 | 0 (0) | 0 | 0 | 0 | 1.0 | 7 | 156 | 1237 |
+| R07-CY | CY worker / CX coord | SS | 1/1 | 5.0 | 1 | 0 (0) | 0 | 0 | 0 | 1.0 | 7 | 156 | 1237 |
 | R08 | CD? | SS | 3/3 | 9.3 | 3 | 0 (0) | 0 | 0 | 0 | 1.0 | 2 | 17 | 66 |
 | R09 | CD? | SS | 1/1 | 11.0 | 1 | 0 (0) | 0 | 0 | 0 | 1.0 | 12 | 16 | 133 |
-| R10 | CD? | SS | 5/5 | 3.0 | 3 | 0 (0) | 0 | 0 | 0 | 1.0 | 1 | 17 | 15 |
-| R11 | CD? | PD | 92/92 | 2.4 | 68 | 16 (16) | 16 | 16 | 16 | 1.18 | 1 | 31 | 16 |
-| R12 | ? | SS | 3/3 | 1.7 | 2 | 0 (0) | 0 | 0 | 0 | 1.0 | 0 | 14 | 9 |
-| R13 | ? | PD? | 3/3 | 2.0 | 2 | 0 (0) | 0 | 0 | 0 | 1.0 | 0 | 17 | 10 |
-| R14 | CD? | PD | 20/20 | 2.0 | 16 | 5 (5) | 5 | 5 | 5 | 1.25 | 0 | 13 | 11 |
-| R15 | ? | PD? | 5/5 | 1.6 | 3 | 3 (3) | 3 | 3 | 3 | 1.6 | 3 | 16 | 8 |
-| R16-CX? | CX? | SS | 2/2 | 4.0 | 2 | 0 (0) | 0 | 0 | 0 | 1.0 | 18 | 15 | 87 |
+| R10 | CD | SS + release | 5/5 | 3.0 | 3 | 0 (0) | 0 | 0 | 0 | 1.0 | 1 | 17 | 15 |
+| R11 | CD | PD | 92/92 | 2.4 | 68 | 16 (16) | 16 | 16 | 16 | 1.18 | 1 | 31 | 16 |
+| R12 | CD | PD | 3/3 | 1.7 | 2 | 0 (0) | 0 | 0 | 0 | 1.0 | 0 | 14 | 9 |
+| R13 | CD | PD | 3/3 | 2.0 | 2 | 0 (0) | 0 | 0 | 0 | 1.0 | 0 | 17 | 10 |
+| R14 | CD | PD | 20/20 | 2.0 | 16 | 5 (5) | 5 | 5 | 5 | 1.25 | 0 | 13 | 11 |
+| R15 | CD | PD | 5/5 | 1.6 | 3 | 3 (3) | 3 | 3 | 3 | 1.6 | 3 | 16 | 8 |
+| R16-CX | CX | PD + SS | 2/2 | 4.0 | 2 | 0 (0) | 0 | 0 | 0 | 1.0 | 18 | 15 | 87 |
 | R17 | ? | SS | 1/1 | 1.0 | 0 | 0 (0) | 0 | 0 | 0 | 1.0 | 6 | 16 | 0 |
-| R18-CX | CX | PD? | 12/12 | 2.6 | 8 | 7 (7) | 5 | 7 | 7 | 3.5 | 9 | 41 | 54 |
+| R18-CX | CX | PD (+1 SS) | 12/12 | 2.6 | 8 | 7 (7) | 5 | 7 | 7 | 3.5 | 9 | 41 | 54 |
 | R19-CX | CX | SS | 1/1 | 2.0 | 1 | 1 (1) | 1 | 1 | 1 | 2.0 | 1 | 12 | 6 |
 | B-CX-Sep13 | CX | SS? | 0/8 | – | – | – | – | – | – | – | – | – | – |
 | B-CX-7854 | CX | SS | 0/1 | – | – | – | – | – | – | – | – | – | – |
 | B1 | CD? | PD? | 8/8 | 3.5 | 8 | 6 (6) | 5 | 6 | 6 | 2.12 | 1 | 618 | 241 |
-| B2 | CD? | PD? | 20/21 | 2.7 | 17 | 14 (14) | 9 | 14 | 14 | 1.7 | 1 | 106 | 19 |
+| B2 | CD? | PD? | 20/20 | 2.7 | 17 | 14 (14) | 9 | 14 | 14 | 1.7 | 1 | 106 | 19 |
 | B3 | CD? | PD? | 28/28 | 2.9 | 22 | 26 (26) | 17 | 26 | 26 | 1.93 | 1 | 147 | 19 |
 | B4 | CD? | PD? | 26/26 | 3.6 | 21 | 14 (14) | 10 | 14 | 14 | 1.73 | 0 | 44 | 28 |
 | B5 | CD? | PD? | 10/10 | 3.2 | 10 | 8 (8) | 7 | 8 | 8 | 1.8 | 0 | 22 | 29 |
@@ -203,13 +221,13 @@ June reference points (from repo records, not re-derived): the 2026-06-02 overni
 | B7 | CD? | PD? | 42/42 | 2.5 | 29 | 13 (13) | 12 | 13 | 13 | 1.31 | 1 | 14 | 10 |
 | B8 | CD? | SS? | 5/5 | 2.6 | 3 | 1 (1) | 1 | 1 | 1 | 1.2 | 1 | 17 | 83 |
 
-Reading the shape: Claude runs open the PR within about a minute of the first commit and then push follow-up commits (2–3 per PR, 16–30 min first→last) while Copilot reviews; "last commit → merge" of 13–17 min is essentially CI latency, so Claude waves merge as soon as CI is green. Codex (R18-CX) carries 2.6 commits per PR but waits a median 41 min after its last commit and accrues 3.5 review events per PR, consistent with re-requesting Copilot after each push. The CY run's 1,237-minute first→last commit span is the stall described in §6.
+Reading the shape: Claude runs open the PR within about a minute of the first commit and then push follow-up commits (2–3 per PR, 16–30 min first→last) while Copilot reviews; "last commit → merge" of 13–17 min is essentially CI latency, so Claude waves merge as soon as CI is green. Codex (R18-CX) carries 2.6 commits per PR and waits a median 41 min after its last commit. Its 3.5 review events per PR are one Copilot review per PR plus 30 owner-account review bodies posted by the agent across the 12 PRs; Copilot reviewed every PR in every run exactly once, so the reviews-per-PR column measures how often the agent posted a review-shaped summary, not reviewer pressure. The CY run's 1,237-minute first→last commit span is the stall described in §6.
 
 ## 5. Comparison
 
 ### 5.1 Prime-directive style runs (the harness-sensitive mode)
 
-| Metric | R11 (CD?/PD) | R14 (CD?/PD) | R18-CX (CX/PD?) | R07-CY (CY/PD) | B7 (CD?/PD?) | B3 (CD?/PD?) |
+| Metric | R11 (CD/PD) | R14 (CD/PD) | R18-CX (CX/PD (+1 SS)) | R07-CY (CY worker / CX coord/SS) | B7 (CD?/PD?) | B3 (CD?/PD?) |
 |---|---|---|---|---|---|---|
 | Merged PRs | 92 | 20 | 12 | 1 | 42 | 28 |
 | Window span (h) | 29.7 | 6.7 | 33.3 | 23.1 | 25.5 | 27.7 |
@@ -218,7 +236,7 @@ Reading the shape: Claude runs open the PR within about a minute of the first co
 | Changed lines per PR (mean) | 767 | 353 | 871 | 1,304 | 518 | 646 |
 | Files touched | 1,033 | 136 | 245 | 46 | 289 | 150 |
 | Commits per PR | 2.4 | 2.0 | 2.6 | 5.0 | 2.5 | 2.9 |
-| PR cycle, median / p90 (min) | 55 / 157 | 27 / 41 | 84 / 246 | 1387 / 1387 | 28 / 71 | 241 / 914 |
+| PR cycle, median / p90 (min) | 54.6 / 172.8 | 25.0 / 40.9 | 70.9 / 269.7 | 1386.8 / 1386.8 | 27.7 / 85.5 | 239.9 / 947.9 |
 | Last commit → merge, median (min) | 31 | 13 | 41 | 156 | 14 | 147 |
 | CI runs on PR branches / failures | 208 / 7 (3%) | 41 / 0 (0%) | 26 / 3 (12%) | 5 / 1 (20%) | 103 / 2 (2%) | 59 / 6 (10%) |
 | Review threads per PR | 0.17 | 0.25 | 0.58 | 0.00 | 0.31 | 0.93 |
@@ -228,43 +246,44 @@ Reading the shape: Claude runs open the PR within about a minute of the first co
 
 What the table supports:
 
-- **Throughput.** The Claude coordinator waves run 3 PRs/hour sustained for 7–30 hours, roughly double the late-September marathons (B7: 1.6/h) and about eight times the Codex run (R18-CX: 0.36/h). The difference is parallelism: R11 kept a mean of 5.3 PRs open at once (max 12); R18-CX worked essentially serially (max 2 open).
-- **PR size.** Codex PRs are larger per PR (870 changed lines vs ~770 for R11 and ~350 for R14) and touch more files per PR (20 vs 11), consistent with fewer, broader PRs.
-- **Cycle time.** Claude waves: 55 and 27 min medians, p90 under 3 h. Codex: 84 min median, p90 4 h. CY (#8276): 23 h for one PR, 15.4 h of it idle.
-- **CI.** Branch failure rates are similar and low for Claude (3.4% R11, 0% R14) and higher for Codex (11.5% R18-CX, 3 of 26). Red `main` runs after merge: R11 one (#8375, Desktop Rust Tests; log expired), R18-CX one (#8607, Server Tests, 2 failing of 21,319), plus R01 one (#8180), R02-CX two (#8200, #8202), R13 one (#8534, the Windows PodAgent suite, which has a flake history: #7709) and R15 one (#8576). Every one of those PR branches was green at its head and every red run failed a single test (two for #8607) out of 18–21k, so these read as flaky or order-dependent tests rather than harness-attributable breakage; the failing test names could not be retrieved (log tails).
-- **Review pressure.** Copilot left 0.17 threads/PR on R11, 0.25 on R14 and 0.58 on R18-CX; the Sep baselines sat at 0.3–0.9. Every thread in every run was resolved with an owner reply (the agents reply as the owner, per the repo's zero-attribution policy). No PR in the whole window carried an APPROVED or CHANGES_REQUESTED review state; the repo's gate is Copilot comments plus conversation resolution, so "approvals" is not a usable quality signal here.
-- **Self-generated work.** 53% of the issues R11 closed were filed during R11; 70% for R18-CX (it was fixing dogfood findings filed the same day: #8587, #8593, #8601, #8602, #8603); 16% for R14; 59% for B7. High self-generation is not bad per se (the smoke step is designed to find things) but it means "issues closed" overstates backlog burn-down by about half for the big waves.
+- **Throughput.** The CD coordinator waves ran about 3 PRs per window hour for 7–30 hours, roughly double the late-September marathons (B7: 1.6/h) and about eight times the Oct 13–14 Codex roots (0.36/h). The waves kept a mean of 5.3 PRs open at once (max 12) while the Codex roots worked almost serially (max 2 open). That is an association between parallelism and throughput, not a demonstrated cause; task mix, model and acceptance burden also differed.
+- **PR size.** Codex PRs are larger (about 870 changed lines and 20 files per PR against about 770/11 for R11 and 350/7 for R14), consistent with fewer, broader PRs.
+- **Cycle time** (standard median / nearest-rank p90, minutes): R11 54.6 / 172.8; R14 25.0 / 40.9; R18-CX 70.9 / 269.7; the Chroxy-hosted worker's single PR took 1386.8 min, about 15 h of it idle.
+- **CI.** Branch failure rates: R11 7 of 208 runs, R14 0 of 41, R18-CX 3 of 26. Red `CI` runs on `main` after merge: R11 one (#8375, Desktop Rust Tests; log expired), R18-CX one (#8607, Server Tests, 2 of 21,319 tests), plus R01 one (#8180), R02-CX two (#8200, #8202), R13 one (#8534, the Windows PodAgent suite, which has a flake history: #7709) and R15 one (#8576). Every one of those PR branches was green at its head and each red run failed one test (two for #8607) out of 18–21k. That pattern is *consistent with* flaky or order-dependent tests, but the failing test names could not be retrieved from the log tails, so flakiness is not established and neither is a harness-attributable break.
+- **Review events.** Copilot reviewed every PR exactly once in every run. Copilot *threads* per PR were 0.17 on R11, 0.25 on R14, 0.58 on R18-CX and 0.3–0.9 on the Sep baselines; every thread was resolved with an owner-account reply (the agents reply as the owner under the repo's zero-attribution policy). No PR in the window carried an APPROVED or CHANGES_REQUESTED state, so approvals are not a usable signal here.
+- **Self-generated work.** 53% of the issues R11 closed were filed during R11; 70% for R18-CX (dogfood findings filed the same day: #8587, #8593, #8601, #8602, #8603); 16% for R14; 59% for B7. The smoke step is designed to find things, so this is not bad in itself, but "issues closed" overstates backlog burn-down by about half for the big waves, and concurrent owner filings fall inside the same windows (see the caveat under §4.1).
 
 ### 5.2 Single sessions
 
-SS runs in the window (R03, R04, R06, R08, R09, R10, R12, R16-CX?, R17, R19-CX) are 1–5 PRs each with 10–137 min cycles. Two things differ by harness: Codex SS PRs carry the `Validation:` block and no smoke table even when they touch the dashboard (#8578, #8581, #8612), while Claude SS PRs after Oct 6 carry the smoke table when in scope (R08, R09). PR size in SS is dominated by the task, not the harness (#8325 +4,156, #8330 +3,850, #8581 +3,233 are all SS). GitHub cannot separate CD-SS from CY-SS; the vault ledgers can.
+SS runs in the window (R03, R04, R06, R07-CY, R08, R09, R10, the #8581 half of R16-CX, R17, R19-CX) are 1–5 PRs each with 10–140 min cycles, except the stalled #8276. Two things differ by harness: Codex SS PRs carry the `Validation:` block and no smoke table even when they touch the dashboard (#8578, #8581, #8612), while Claude SS PRs after Oct 6 carry the smoke table when in scope (R08, R09). PR size in SS is dominated by the task, not the harness (#8325 +4,156, #8330 +3,850, #8581 +3,233 are all SS). GitHub cannot separate CD-SS from CY-SS; the vault ledgers can.
 
 ### 5.3 Where CY stands, on the evidence available
 
-- **Proven CY output in the window: one PD run, one PR, +1,129/−175 lines, 46 files, 2 issues closed, 23.1 h, with a 15.4 h stall and an owner intervention.** Compared with the smallest CD?-PD data point (R14: 20 PRs in 6.7 h, no stalls documented), CY is not yet competitive as an unattended PD host; this is a single data point, and the defects behind the stall were fixed the next day. Compared with CX, the CY run's *per-PR* quality was fine (the PR has a smoke section, mutation table and review fold-ins) and its failure mode was infrastructural, not model-quality.
-- **CY's value in the period was diagnostic.** The run produced four precise defect reports with reproductions (#8300 includes a self-contained SDK-only repro script), which were fixed within a day (#8320, #8325) and converted into a dogfooding floor in the skill (#8304). Issue #8323 (desktop-parity: subagent transcripts invisible in Chroxy) and the Oct 13–14 Codex-in-Chroxy findings (#8593 fixed, #8609/#8610/#8611 open) are the same pattern: dogfooding the harness surfaces harness bugs.
-- **Anything beyond that is unknown, not negative.** If the owner's ledgers show that R11, R14 or the Oct 9/11 bursts ran inside Chroxy, the picture changes completely; nothing in GitHub contradicts that, and nothing supports it either (see §3 and §9).
+- **No CY-coordinated prime-directive run exists in either report's evidence.** Both the GitHub reconstruction here and the CX evaluation's native-store reading find zero complete runs in which Chroxy owned the queue, the review gate and the merge. What exists is Chroxy as an **implementation worker** under Codex coordination in four merged PRs: #8276 (claude-sdk, Oct 4–6), #8581 (native Codex, Oct 12), #8591 and #8600 (native Codex, Oct 13–14). GitHub alone proves only #8276; the other three are the CX evaluation's `originator=chroxy` histories.
+- **As a worker, CY delivered.** #8276 is +1,129/−175 across 46 files with a smoke section, mutation table and review fold-ins; #8591 completed in a 5 min 34 s worker span; #8600's native thread survived an update and recalled its task afterwards. Its failure modes were infrastructural (the Oct 5 stall) or quality-gated by the coordinator (#8600's first completion failed independent review with six P2 findings and needed two owner-authorised retries).
+- **As an unattended coordinator, CY is untested in this window**, so "how CY stacks up in PD" cannot be answered from these runs. The dogfooding floor added on Oct 6 (#8304), the Oct 6 fixes (#8320, #8325) and the native Codex continuity shown on Oct 13–14 are the prerequisites; a bounded CY-coordinated trial with the same queue, review gate and acceptance as a CD or CX run is the measurement still missing, and the CX evaluation recommends the same.
 
 ## 6. Incidents and harness defects observed
 
-### 6.1 The CY run of Oct 4–6 (PR #8276)
+### 6.1 The Chroxy-hosted worker run of Oct 4–6 (PR #8276)
 
 | Step | Time (UTC) | Evidence |
 |---|---|---|
-| First commit (daemon identity `BlameChris`) | Oct 5 01:36 | PR head commits |
+| First commit (checkout identity `BlameChris`) | Oct 5 01:36 | PR head commits |
 | PR opened | Oct 5 01:43 | PR #8276 |
 | Commits 2–4 (review fold-ins) | Oct 5 02:32, 02:36, 06:49 | PR head commits |
-| **Stall: no commits, session idle "on a permission nobody could resolve"** | Oct 5 06:49 → 22:14 (15 h 25 min) | commit gap; #8304 body: "sat idle for about 15 hours"; #8300: "three resumptions in a row began with a `<task-notification>` for background shells … each first tool call was cancelled" |
+| **Stall: no commits; the worker sat on a tool denial nobody could resolve** | Oct 5 06:49 → 22:14 (15 h 25 min between commits; 15 h 01 min 56 s between retained transcript events per the CX evaluation) | commit gap; #8304: "sat idle for about 15 hours"; #8300: "three resumptions in a row began with a `<task-notification>` for background shells … each first tool call was cancelled" |
 | Commit 5 | Oct 5 22:14 | PR head commits |
-| Merged | Oct 6 00:50 | PR #8276 |
-| Defects filed | Oct 6 01:36 (#8300, #8301, #8302, #8303) | issue timestamps |
+| Owner's preview check fails on Browse → Create (#8303); fixture repaired; workflow re-verified | Oct 6 00:23 (17:23 PDT) | CX evaluation timeline; #8303 |
+| Owner acceptance; merge | Oct 6 00:42; 00:50 | CX evaluation timeline; PR #8276 |
+| Defects filed by separate sessions | Oct 6 01:36 (#8300, #8301, #8302, #8303) | issue timestamps; session records "chroxy #8304 — trial RCA" (Oct 6 01:10) and "chroxy #8300 — stall fix" (06:01) |
 | Fixes merged | Oct 6 02:26 (#8304 docs), 07:55 (#8320, +1,836/−135), 10:33 (#8325, +4,156/−55) | PR timestamps |
 
-Root causes as filed: the Agent SDK closes the CLI's stdin at the first `result`, and a resumed turn that begins with an orphan-task notification emits a `num_turns: 0` result first, so every tool in the real turn is cancelled with the generic "user doesn't want to take this action" text and no `permission_request` is emitted (#8300); CI completion only wakes claude-tui PTYs, so the SDK session polled with a background `gh pr checks --watch` that became the orphan (#8301); the roster kept `isBusy: true` with no pending shells, so monitors read the idle agent as working (#8302). The owner's first manual action after the merge (Browse → Create with explicit cwd) also failed on a fixture every automated check had passed (#8303, still open).
+Root causes as filed: the Agent SDK closes the CLI's stdin at the first `result`, and a resumed turn that begins with an orphan-task notification emits a `num_turns: 0` result first, so every tool in the real turn is cancelled with the generic "user doesn't want to take this action" text and no `permission_request` is emitted (#8300); CI completion only wakes claude-tui PTYs, so the SDK session polled with a background `gh pr checks --watch` that became the orphan (#8301); the roster kept `isBusy: true` with no pending shells, so monitors read the idle agent as working (#8302). The CX evaluation adds that the worker was coordinated by a Codex chat with a NORMAL (not prime-directive) assignment, that the Browse/Create failure was a missed owner path by both worker and coordinator, and that the RCA and fixes were separate work rather than autonomous recovery by the stalled worker. The first version of this report placed the Browse/Create failure after the merge; it was before.
 
 ### 6.2 Other harness-relevant findings in the window
 
-- **Codex truncates this repo's rules.** #8577 (Oct 11): `AGENTS.md` at 42,813 bytes exceeded Codex's default `project_doc_max_bytes` (32 KiB) so every Codex session silently lost the last ~10 KB of project rules — including everything from "Testing Conventions" onward in the old layout. Fixed by #8578 (Oct 12), which made `AGENTS.md` the authored source with thin `CLAUDE.md`/`GEMINI.md` adapters and added an executable size floor. Any Codex PR before Oct 12 ran without the tail of the rules.
+- **Codex's default project-doc cap was below this repo's rules file.** #8577 (Oct 11): `AGENTS.md` at 42,813 bytes exceeded Codex's default `project_doc_max_bytes` (32 KiB), so a Codex session running with the default cap would silently lose the last ~10 KB of project rules. Fixed by #8578 (Oct 12), which made `AGENTS.md` the authored source with thin `CLAUDE.md`/`GEMINI.md` adapters and added an executable size floor. The CX evaluation reports that its own sessions ran with a raised cap (a measured chain of 75,165 of 98,304 bytes before the migration), so which earlier Codex runs, if any, actually lost the tail depends on the cap configured at the time and is not established here. The first version of this report claimed every Codex PR before Oct 12 ran without the tail; that was unsupported.
 - **Chroxy's Codex provider failed on first use for the owner.** #8609 (Oct 14, open, priority high): chroxy spawns whichever `codex` is first on PATH (codex-cli 0.154.0) while the Codex desktop app bundles 0.162.0-alpha; the shared `~/.codex/config.toml` names `gpt-6.1-sol`, which the older client cannot use, so a default Codex session fails its first message with HTTP 400. #8610 (errors render as raw JSON, turn stays busy) and #8611 (New Session modal overflow) were filed with it. #8593 (composer accepted input ~90 ms before native startup) was fixed by #8600.
 - **Running the server test suite on the owner's machine broke live Chroxy sessions.** #8352 (Oct 7): "several agents ran the full server suite on the owner's machine" and the suite deleted the live daemon's claude-tui hook-sink base, breaking every running claude-tui session. This is a direct hazard of running CD waves and CY sessions on the same host; fixed the same night (#8353).
 - **Two PRs were abandoned** in the whole Sep 22 → Oct 17 range: #8182 (Sep 30, closed in 2 min, superseded) and #8212 (Oct 2, closed unmerged after 16 h with no review). Zero reverts on `main`.
@@ -273,26 +292,27 @@ Root causes as filed: the Agent SDK closes the CLI's stdin at the first `result`
 
 ## 7. What each harness did well and badly (evidence-bound)
 
-**CD (Claude coordinator waves, probable).** Best throughput and parallelism by a wide margin; consistent PR template (cause → fix → tests → mutation table → smoke → owner-reserved); low Copilot friction; CI mostly green. Costs: half the closed issues were self-generated, the waves file ~1 issue per PR (90 in R11), and the wave consumed the owner's machine (`#8352`). No stall or abandonment documented.
+**CD (Claude desktop app, coordinating).** Best throughput and parallelism by a wide margin; consistent PR template (cause → fix → tests → mutation table → smoke → owner-reserved); one Copilot review per PR with few threads; CI mostly green. Costs: half the closed issues were self-generated, the waves file about one issue per PR (90 in R11), the chain paused repeatedly on weekly budget and needed fresh-session relaunches, and the wave consumed the owner's machine (#8352). No stall or abandonment documented in GitHub for the chain itself.
 
-**CX (Codex).** Lower throughput and serial execution; bigger PRs; more review events per PR and the highest branch CI failure rate; two red `main` runs on Oct 1 and one on Oct 14 after green branches. It merged a PR acknowledging remaining smoke-assertion failures (#8606). On the plus side: it found and fixed its own instruction-loading defect (#8577/#8578), it brought the `AGENTS.md`-as-source migration, and its PRIME-compatibility work (#8200) included a paid, recorded fixture ($3.81) rather than an assertion. Codex also served as a reviewer inside Claude waves (11 PRs in R11), which is a harness *collaboration* pattern worth tracking separately.
+**CX (Codex desktop app).** Lower throughput and near-serial execution; larger PRs; a review-posting habit (2.5 owner-account review bodies per PR) rather than more reviewer pressure; the highest branch CI failure rate in the window and three red `main` runs after green branches (Oct 1 ×2, Oct 14). It merged #8606 with two strict smoke assertions still red, recorded as an acceptance judgment. On the plus side: it found and fixed the project-doc cap problem (#8577 → #8578), brought the `AGENTS.md`-as-source migration, ran a paid, recorded fixture ($3.81) in #8200 rather than asserting, and coordinated all four Chroxy-hosted worker contributions in the window. Codex also served as a reviewer inside the CD waves (11 PRs in R11 cite Codex review rounds), a collaboration pattern worth tracking separately.
 
-**CY (Chroxy).** One proven run: outcome delivered, autonomy failed on infrastructure, recovery excellent. The dogfooding floor added on Oct 6 (no background shell or subagent may outlive a turn; CI watcher in the foreground; completion is the explicit handoff) is the right response and should make the next CY-PD run measurable. Chroxy-as-harness also lacks subagent visibility (#8323) and had Codex-provider first-run failures (#8609).
+**CY (Chroxy, as a worker).** Four worker contributions, one provable from GitHub, all coordinated by Codex; the one run GitHub can see delivered its package after a 15-hour infrastructure stall that separate sessions root-caused and fixed within a day. Native Codex workers inside Chroxy completed small tasks and survived an update with context intact, and one first completion failed independent review. As a coordinator CY is untested in this window. Chroxy-as-harness also lacks subagent visibility (#8323) and had Codex-provider first-run failures for the owner (#8609).
 
 ## 8. Cost
 
-- **Measured in GitHub: nothing per run.** The vault's `usage-benchmark-row.py` rows are the only durable cost record (per `.claude/skill-profile.md`, budget tracking is "track-only" since 2026-09-24). This review cannot see them.
-- **One hard figure:** Codex's PRIME-compatibility fixture (#8200) ran six Claude Code 2.1.285 cases on host-default `claude-opus-5-5` at $0.58–$0.72 each, **$3.81 total**, recorded in `scripts/fixtures/prime-compatibility/verification-2026-09-30.json`.
-- **Proxies available here** (all in `data/runs-2026-10-17.csv`): commits per run (API-call proxy: R11 221, R14 41, R18-CX 31, R07-CY 5), review rounds (reviews per PR), lines changed, and the "coordinator smoke on a real Haiku session" count in PR bodies (51 Haiku mentions on Oct 8, 30 on Oct 10, i.e. cheap-tier sessions were used for smoke, a cost-shaping choice the vault rows should confirm).
-- **Join keys for the vault-side agent:** run id, window start/end (UTC) and PR list per run. A benchmark row whose session start/end falls inside a window belongs to that run; the Oct 8 wave likely spans several rows (compactions and re-launches).
+- **Measured in GitHub: nothing per run.** Per-run subscription or invoice cost is unknown for all three harnesses; the CX evaluation reaches the same conclusion from the native stores.
+- **Hard figures available:**
+  - $35.67 recorded usage for the Sep 29–30 desktop-app cloud sandbox session that produced #8131, #8149 and #8157 (`llm-/great-tesla-uc8nfy`): 2,318 input, 298,950 output, 109,161,915 cache-read and 1,113,918 cache-write tokens on claude-opus-5-5. This is the cloud sandbox's own `usage.cost_usd` field, a metered API-equivalent figure for that session only; it is not an invoice line and is not comparable to transcript-priced subtotals without agreeing a rate card.
+  - $3.81 for Codex's PRIME-compatibility fixture inside #8200 (six Claude Code 2.1.285 cases on host-default claude-opus-5-5 at $0.58–$0.72 each, `scripts/fixtures/prime-compatibility/verification-2026-09-30.json`); a fixture-local estimate, not the cost of the coordinating run.
+- **CX evaluation's transcript-priced estimates** (its figures, on an installed historical rate card, "observed lower" bounds; reproduced for joining, not re-derived): CD root `532cf9d9` (SS + release + waves 1–19) $835.03; the five later CD segments (34 PRs) $195.47, about $5.75 per PR and 3.09 PRs per summed transcript hour; wave 21 (3 PRs) $21.72–$23.90, matching the session's own "$21-23 spent"; the Chroxy claude-sdk worker for #8276 with its four children $33.23–$36.55. For Codex it reports tokens, not dollars: daily-driver root 298.6M parent + 540.6M native-child tokens (+98.3M guardian) for 9 PRs. It flags a rate-card discrepancy for Sonnet 5.5 cache reads ($0.20 vs $0.10 per million) and 20 unpriced Haiku responses.
+- **Proxies available here** (all in `data/runs-2026-10-17.csv`): commits per run (R11 221, R14 41, R18-CX 31, R07 5), review events per PR, lines changed, and the "coordinator smoke on a real Haiku session" count in PR bodies (51 Haiku mentions on Oct 8, 30 on Oct 10). Commits are not API-call counts.
+- **Join keys:** run id, window start/end (UTC) and PR list per run; the CX evaluation joins by native session id, role and PR receipt, which is the better key where it exists.
 
-## 9. Open questions for the owner (the attribution the vault can settle)
+## 9. Open questions for the owner
 
-1. Confirm that bridged `remote-control-sdk` sessions (§3.1) are your own desktop-app or terminal sessions and that Chroxy-spawned claude-sdk sessions do not register there. If so, every `CD?` row is CD and the only CY run in the window is R07-CY; if not, R10–R15 flip to CY.
-2. Is `llm-/` the branch prefix of a Claude Code cloud environment (the Sep 29–30 session that cut v0.11.1)?
-3. Was #7853 (Sep 14, `codex/codex-native-endpoint`, daemon git identity) a Chroxy-hosted Codex-provider session?
-4. Were #8578 and #8581 (Oct 12, Codex dialect on `fix/`/`feat/` branches) Codex sessions?
-5. Which runs were prime-directive (`/prime-directive` invoked) versus `/tackle-issues` or plain sessions? The smoke-table marker is a proxy for PD after Oct 6 only.
+1. The Oct 1–7 Claude runs (R01, R03–R06, R08–R09) and the Sep baselines are bridged coordinator sessions not covered by the CX evaluation's roster. Confirm they were desktop-app (or terminal) sessions, so the `CD?` labels can drop their question marks.
+2. Was any Chroxy-coordinated prime-directive run attempted in Oct 1–17 that left no merged PR? Both reports find none with a merge; an attempt without a merge would still matter for the CY verdict.
+3. The $35.67 cloud-sandbox figure: is a per-session metered figure the right unit to compare with the CX evaluation's transcript-priced estimates, or should both be restated on one declared rate card?
 
 ## 10. Recommendations to make the next evaluation measurable from GitHub alone
 
@@ -315,13 +335,35 @@ Root causes as filed: the Agent SDK closes the CLI's stdin at the first `result`
 | Review thread and commit metrics | Per-PR `get_commits`, `get_reviews`, `get_review_comments` for every PR created Sep 22 → Oct 17 (169 October PRs, all three calls succeeded; September coverage shown in the table) |
 | Issue counts | 564 issues updated since Sep 22 paged to exhaustion (`hasNextPage=false`), 412 created in range; labels read from the API |
 | $3.81 fixture cost | `scripts/fixtures/prime-compatibility/verification-2026-09-30.json` `cases.*.cost_usd` summed; matches "$3.8064" in #8200 |
-| Not verified | Failing test names in the red `main` runs; token/cost per run; CD vs CY for `CD?` rows; whether any `?` burst was Codex or Claude |
+| Reconciliation with the CX evaluation (§13) | B2 contained Renovate PR #7718 (confirmed in the PR list; removed, all runs now exclude non-owner authors); R18's 42 review events are 12 Copilot + 30 owner-account COMMENTED (confirmed from the per-PR review data); the published medians used the upper-middle value and the p90 index was off by one (confirmed by recomputation; both replaced). The CX evaluation's native-record attributions (CD entrypoint, CY workers, Codex roots) are accepted as corroborated reports and are consistent with every GitHub number here, but were not independently verified |
+| Not verified | Failing test names in the red `main` runs; token/cost per run; the host of the `CD?` rows; anything that rests on the CX evaluation's private native stores |
+
 
 ## 12. Appendix: files and reproduction
 
 - `data/runs-2026-10-17.csv` — one row per run with every metric above and the PR list.
 - `data/pr-attribution-2026-10-17.csv` — one row per merged PR (Sep 13 → Oct 17): run, harness, mode, size, head commits, git identity, body signals.
 - `data/review-metrics-2026-10-17.csv` — per-run review/commit shape.
-- Raw collections (not committed; in the reviewing session's scratchpad): PR list pages, PR bodies, issues JSON, 6,300 Actions runs, per-PR detail CSVs, PR head-commit identities, and the Python scripts that produced every table.
+- `data/ccr-sessions-2026-10-17.csv` — the account's Claude Code session records since Sep 20.
+- `data/raw/` — the inputs behind every table, added at the CX evaluation's request: `prs_closed.csv` (400 PRs), `pr_detail_oct.csv` and `pr_detail_sep.csv` (per-PR commits, reviews, review threads), `pr_head_commits.csv` (author identity and timezone per PR), `main_commit_stats.tsv` (squash-commit sizes), `issues_since_0922.csv`, `workflow_runs_since_0922.csv.gz` (6,300 Actions runs) and `workflow_runs_by_branch.csv`, `clusters.json`, `runs.json`, `run_sessions.json`.
+- `scripts/` — the Python that produced every number (`build_master.py`, `cluster_sessions.py`, `clusters_v2.py`, `cluster_issues.py`, `runs_table.py`, `review_metrics.py`, `map_sessions.py`, `gen_report.py`). Re-running `runs_table.py`, `review_metrics.py`, `map_sessions.py` and `gen_report.py` in that order against `data/raw/` regenerates the report.
+- `mailbox/` — the cross-review correspondence with the CX evaluation and its attached report.
+
+## 13. Reconciliation register (CX evaluation findings F01–F10, dispositioned 2026-10-17)
+
+| # | Finding (CX evaluation) | Disposition | What changed here |
+|---|---|---|---|
+| F01 | CX session identities and modes for #8578, #8581, #8583–#8612; CY worker roster | **Accept** (corroborated report) | R16/R18/R19 labels and modes; §3.2; §5.3; §7 |
+| F02 | Cycle statistics used an upper-middle median and an off-by-one p90 (p90 < median on 2-PR runs) | **Accept** (verified by recomputation) | Standard median and nearest-rank p90 everywhere; convention stated in §2 |
+| F03 | R18's 3.5 review events per PR are 1 Copilot + 2.5 owner-account bodies, not Copilot re-requests | **Accept** (verified from the per-PR review data) | §1, §4.3, §5.1, §7 |
+| F04 | B2 included Renovate PR #7718 | **Accept** (verified) | Non-owner PRs excluded from every run; B2 is 20 PRs / 12.1 h |
+| F05 | #7853 was Codex-native despite the `BlameChris` identity; identity marks a checkout | **Accept** (corroborated report) | §3 ledger row; §3.1 |
+| F06 | #8276 timeline: Browse/Create failure before merge; RCA and fixes were separate work; event gap 15 h 01 min 56 s | **Accept** (merge time consistent with GitHub) | §1, §6.1 |
+| F07 | #8606 merged with two red strict assertions as an explicit acceptance judgment | **Accept** | §1, §7 wording |
+| F08 | "Every Codex PR before Oct 12 lacked the rules tail" was unsupported | **Accept** | §1, §6.2 narrowed to the default-cap defect |
+| F09 | Scope frames differ: UTC 173 vs Pacific-midnight 160; Oct 1 Codex PRs come from an older root | **Accept, both kept** | §2 states UTC; this report keeps the Oct 1 Codex PRs because they merged in the window |
+| F10 | Causal restraint: concurrency ≠ cause; green branch/red main ≠ proven flake; commits ≠ API calls; publish inputs | **Accept** | §5.1 and §8 wording; raw data and scripts published under `data/raw/` and `scripts/` |
+| R-A | Oct 7–11 chain is CD (`entrypoint: claude-desktop`); "17 PRs" was waves 16–19 only; per-wave roster sums to 89 | **Accept** (corroborated; consistent with GitHub) | The "accounting gap" bullet replaced in §3.1; R10–R15 relabelled |
+
 
 *Suggested vault location:* `no-it-all/reports/harness-evals/2026-10-17-harness-diagnostic-cd-cx-cy.md` (copy this file and the `data/` folder together).
