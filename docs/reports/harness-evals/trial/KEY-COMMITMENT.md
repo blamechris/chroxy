@@ -8,10 +8,10 @@ unseal that the key they receive is the one sealed before run 1.
 
 | Field | Value |
 |---|---|
-| Sealed at (UTC) | 2026-10-17T23:14Z |
-| SHA-256 of `KEY.md` | `2830876d692b01c9faa9e789f6c39c9e0af72d298f8077060a8377d635ccde57` |
-| Size | 7641 bytes |
-| Trial base T0 | `ab0348a0dc4a1b466672d2f0698c25b413073c43` |
+| Sealed at (UTC) | 2026-10-17T23:17Z |
+| SHA-256 of `KEY.md` | `fb5599f33ddac7eb230b7edc29f0fefd5b3be7c39c746bf5dcd7055d24d40f23` |
+| Size | 7782 bytes |
+| Trial base T0 | derived: `git merge-base origin/trial/a1-cd origin/main` (README status table identifies the cut) |
 | Verify | `shasum -a 256 KEY.md` (macOS) or `sha256sum KEY.md` must print the digest above |
 
 The digest covers the whole file, including its own "Sealed at" line. A changed
