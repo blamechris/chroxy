@@ -5,7 +5,7 @@
 after both-way reconciliation with the Codex evaluation (see `../mailbox/`). The
 diagnostic found no CY-coordinated prime-directive (PD) run on record and no
 per-run cost for any harness; this trial exists to produce both under controlled
-conditions. Status: **draft, awaiting owner sign-off on the queue (section 5).**
+conditions. Status: **queue set (section 5); awaiting the dry runs and T0 (README steps 5–6).**
 
 Harness codes as in the diagnostic: **CD** = Claude desktop app (local Claude Code
 session), **CX** = Codex desktop app, **CY** = Chroxy daemon session.
@@ -56,9 +56,12 @@ systematically a CY property.
   checkout that confounded attribution); Node 22; same `gh` account.
 - **Skill source.** `/prime-directive` and the skills it composes come from the
   same commit (`T0`): the compiled `.claude/skills/*` for Claude harnesses, and
-  `~/.codex/prompts/*` compiled from that commit for Codex harnesses
-  (`node scripts/compile-skill-targets.mjs --targets codex`). The invocation
-  method is recorded per run as a harness attribute, not hidden.
+  `~/.codex/prompts/*` for Codex harnesses, compiled from a `trial/*` clone
+  **after** the bases are cut (`node scripts/compile-skill-targets.mjs --targets
+  codex`, README step 7), with the compile SHA written into the run report.
+  Compiling from `main` earlier would let the two vendor arms run different skill
+  text if `main` moved in between. The invocation method is recorded per run as
+  a harness attribute, not hidden.
 - **Worker tier.** Each harness's default worker models; the run report records
   what was actually used. Within an arm they are expected to match (same vendor).
 - **Stop.** A run ends when the queue is exhausted (each issue merged into the
@@ -74,9 +77,13 @@ runs' work. Rules, in order of how much they buy:
 
 1. **Merges into `trial/*` never close issues.** GitHub only auto-closes on merge
    into the default branch, so every run sees the same open queue.
-2. **`Trial-Closes: #N` instead of `Closes #N`** in PR bodies. The closing
-   keyword would link the PR into the issue's timeline, where the next run's
-   "read the issue and linked threads" step would find it.
+2. **`Trial-Closes: N` (bare number, no `#`) instead of `Closes #N`** in PR
+   bodies, and no `#N` in PR titles or commit subjects. A closing keyword would
+   link the PR into the issue's timeline, where the next run's "read the issue
+   and linked threads" step would find it — and any `#N` anywhere in a PR body,
+   title or commit message posts a cross-reference event on that timeline even
+   without a keyword. Whether GitHub treats `Trial-Closes:` itself as a closing
+   keyword is unverified; README step 5 checks it on a scratch issue before run 1.
 3. **No writes to shared state during a run:** no comments, labels or closures on
    queue issues, no new issues. Follow-ups go in the run report, and the owner
    files them after run 4.
@@ -123,7 +130,8 @@ diagnostic's scripts adapted to trial branches (reproducible, inputs committed):
 | Delivered: merged into base **and** grader-verified correct | PR + grader |
 | Wall clock: first command → run report committed | run report, PR timestamps |
 | Cost: Claude session cost (`/cost` or ccusage) ; Codex from the owner's usage page, else `n/a` | run report / owner |
-| CI runs per PR; red CI on the base after a merge | Actions API |
+| CI runs per PR | Actions API |
+| Red CI on the base after a merge | Actions API — **observable only if** the owner adds `trial/**` to `on.push.branches` in `ci.yml` before T0 (README step 4); `ci.yml` runs on `pull_request` to any base but on `push` only to `main`, so without that change a merge into `trial/*` triggers nothing. Graders then record `not observable`, never `0`. |
 | Review rounds, split Copilot vs owner-account bodies | PR reviews |
 | PR cycle (opened → merged): median and nearest-rank p90 | PR timestamps |
 | Stalls (> 90 min with no commit, CI or PR activity) and incidents | supervisor log + run report |
@@ -166,7 +174,10 @@ names and review patterns — so the cross-origin pairing is the substitute.
 - **Invocation differs by vendor** (slash skill vs compiled prompt). Recorded,
   not controlled.
 - The version-bump workflow and issue auto-close do not fire on `trial/*`. Both
-  are intended.
+  are intended. Neither does CI on a *push* to `trial/*` unless the owner adds
+  the trigger (README step 4): the "red CI on the base" measure is `not
+  observable` without it, and a zero there is a missing measurement, not a
+  clean record.
 
 ## 9. Roles
 

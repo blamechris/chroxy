@@ -13,20 +13,21 @@ status: `README.md`.
 
 ## Now
 
-1. **Compile the Codex prompts** so both Codex harnesses run the same skill text
-   as the Claude ones (writes `~/.codex/prompts/*.md`, nothing in the repo):
+1. **Dry-run clones** (the branches already exist):
    ```bash
    export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
-   git fetch origin && git checkout main && git pull --ff-only
-   node scripts/compile-skill-targets.mjs --targets codex
-   ls ~/.codex/prompts/prime-directive.md ~/.codex/prompts/tackle-issues.md ~/.codex/prompts/full-review.md ~/.codex/prompts/swarm-audit.md ~/.codex/prompts/session-lifecycle.md
-   ```
-2. **Dry-run clones** (the branches already exist):
-   ```bash
    for r in dry-cy-claude dry-cy-codex dry-cx; do
      git clone --branch "trial/$r" https://github.com/blamechris/chroxy "$HOME/trial/$r"
      (cd "$HOME/trial/$r" && npm install)
    done
+   ```
+2. **Compile the Codex prompts for the dry runs** from one of those clones, so
+   the dry runs use the same skill text as this package (writes
+   `~/.codex/prompts/*.md`, nothing in the repo). They are recompiled from a T0
+   clone in step 6 before run 1:
+   ```bash
+   (cd "$HOME/trial/dry-cx" && node scripts/compile-skill-targets.mjs --targets codex)
+   ls ~/.codex/prompts/prime-directive.md ~/.codex/prompts/tackle-issues.md ~/.codex/prompts/full-review.md ~/.codex/prompts/swarm-audit.md ~/.codex/prompts/session-lifecycle.md
    ```
 3. **Ruleset for `trial/**`** (optional, recommended): copy `main`'s branch
    ruleset to the pattern `refs/heads/trial/**` — required status checks,
@@ -53,15 +54,19 @@ status: `README.md`.
    checkout:
    ```bash
    export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+   NAME="$(git config --global user.name)"; EMAIL="$(git config --global user.email)"
+   echo "identity for all four clones: $NAME <$EMAIL>"   # must be your GitHub identity, not the daemon's
    for r in a1-cd b2-cy-codex a2-cy-claude b1-cx; do
      git clone --branch "trial/$r" https://github.com/blamechris/chroxy "$HOME/trial/$r"
-     git -C "$HOME/trial/$r" config user.name  "$(git config user.name)"
-     git -C "$HOME/trial/$r" config user.email "$(git config user.email)"
+     git -C "$HOME/trial/$r" config user.name  "$NAME"
+     git -C "$HOME/trial/$r" config user.email "$EMAIL"
      (cd "$HOME/trial/$r" && npm install)
    done
+   # Recompile the Codex prompts at T0 and note the SHA for the run reports:
+   (cd "$HOME/trial/a1-cd" && node scripts/compile-skill-targets.mjs --targets codex && git rev-parse HEAD)
    ```
-   The identity lines copy the name and email of the checkout you run this from;
-   make sure that is your GitHub identity, not the daemon's.
+   The identity comes from your global git config, echoed first so you can stop
+   if it is not your GitHub identity.
 
 ## Per run
 

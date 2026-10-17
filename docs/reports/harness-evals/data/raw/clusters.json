@@ -1,6 +1,251 @@
 [
  {
   "cluster": 0,
+  "first_pr_created": "09-10 13:17",
+  "first_merge": "09-10 13:08",
+  "last_merge": "09-11 00:37",
+  "span_h": 11.3,
+  "merge_span_h": 11.5,
+  "merges": 14,
+  "prs": 14,
+  "files": 31,
+  "ins": 3187,
+  "del": 211,
+  "median_cycle_min": 40,
+  "prefixes": {
+   "fix": 3,
+   "test": 9,
+   "chore": 1
+  },
+  "signals": {},
+  "ci": {},
+  "prs_list": [
+   7671,
+   7674,
+   7675,
+   7676,
+   7677,
+   7678,
+   7679,
+   7681,
+   7682,
+   7683,
+   7684,
+   7685,
+   7686,
+   7687
+  ]
+ },
+ {
+  "cluster": 1,
+  "first_pr_created": "09-11 00:43",
+  "first_merge": "09-11 06:07",
+  "last_merge": "09-11 08:43",
+  "span_h": 8.0,
+  "merge_span_h": 2.6,
+  "merges": 4,
+  "prs": 4,
+  "files": 7,
+  "ins": 513,
+  "del": 39,
+  "median_cycle_min": 62,
+  "prefixes": {
+   "test": 4
+  },
+  "signals": {},
+  "ci": {},
+  "prs_list": [
+   7692,
+   7693,
+   7694,
+   7695
+  ]
+ },
+ {
+  "cluster": 2,
+  "first_pr_created": "09-11 21:19",
+  "first_merge": "09-11 22:28",
+  "last_merge": "09-12 05:29",
+  "span_h": 8.2,
+  "merge_span_h": 7.0,
+  "merges": 8,
+  "prs": 8,
+  "files": 111,
+  "ins": 2220,
+  "del": 357,
+  "median_cycle_min": 44,
+  "prefixes": {
+   "fix": 4,
+   "test": 2,
+   "chore": 2
+  },
+  "signals": {},
+  "ci": {},
+  "prs_list": [
+   7697,
+   7699,
+   7702,
+   7704,
+   7707,
+   7709,
+   7711,
+   7713
+  ]
+ },
+ {
+  "cluster": 3,
+  "first_pr_created": "09-12 06:18",
+  "first_merge": "09-12 08:41",
+  "last_merge": "09-12 19:28",
+  "span_h": 13.2,
+  "merge_span_h": 10.8,
+  "merges": 13,
+  "prs": 13,
+  "files": 153,
+  "ins": 13324,
+  "del": 669,
+  "median_cycle_min": 133,
+  "prefixes": {
+   "feat": 7,
+   "fix": 4,
+   "docs": 1,
+   "test": 1
+  },
+  "signals": {},
+  "ci": {},
+  "prs_list": [
+   7734,
+   7733,
+   7736,
+   7735,
+   7757,
+   7758,
+   7766,
+   7765,
+   7780,
+   7767,
+   7782,
+   7787,
+   7788
+  ]
+ },
+ {
+  "cluster": 4,
+  "first_pr_created": "09-12 21:13",
+  "first_merge": "09-13 00:24",
+  "last_merge": "09-13 02:20",
+  "span_h": 5.1,
+  "merge_span_h": 1.9,
+  "merges": 6,
+  "prs": 6,
+  "files": 51,
+  "ins": 3401,
+  "del": 320,
+  "median_cycle_min": 274,
+  "prefixes": {
+   "fix": 6
+  },
+  "signals": {},
+  "ci": {},
+  "prs_list": [
+   7797,
+   7798,
+   7800,
+   7796,
+   7795,
+   7799
+  ]
+ },
+ {
+  "cluster": 5,
+  "first_pr_created": "09-13 05:41",
+  "first_merge": "09-13 07:23",
+  "last_merge": "09-13 07:23",
+  "span_h": 1.7,
+  "merge_span_h": 0.0,
+  "merges": 2,
+  "prs": 2,
+  "files": 5,
+  "ins": 352,
+  "del": 48,
+  "median_cycle_min": 102,
+  "prefixes": {
+   "fix": 2
+  },
+  "signals": {},
+  "ci": {},
+  "prs_list": [
+   7813,
+   7814
+  ]
+ },
+ {
+  "cluster": 6,
+  "first_pr_created": "09-13 16:08",
+  "first_merge": "09-13 19:39",
+  "last_merge": "09-14 02:26",
+  "span_h": 10.3,
+  "merge_span_h": 6.8,
+  "merges": 8,
+  "prs": 8,
+  "files": 183,
+  "ins": 8214,
+  "del": 542,
+  "median_cycle_min": 211,
+  "prefixes": {
+   "codex": 7,
+   "fix": 1
+  },
+  "signals": {
+   "codex-branch": 7
+  },
+  "ci": {
+   "runs": 35,
+   "success": 30,
+   "cancelled": 4,
+   "failure": 1
+  },
+  "prs_list": [
+   7841,
+   7844,
+   7843,
+   7842,
+   7846,
+   7848,
+   7850,
+   7851
+  ]
+ },
+ {
+  "cluster": 7,
+  "first_pr_created": "09-15 01:10",
+  "first_merge": "09-15 01:30",
+  "last_merge": "09-15 01:30",
+  "span_h": 0.3,
+  "merge_span_h": 0.0,
+  "merges": 1,
+  "prs": 1,
+  "files": 2,
+  "ins": 81,
+  "del": 22,
+  "median_cycle_min": 20,
+  "prefixes": {
+   "codex": 1
+  },
+  "signals": {
+   "codex-branch": 1
+  },
+  "ci": {
+   "runs": 7,
+   "cancelled": 2,
+   "success": 5
+  },
+  "prs_list": [
+   7853
+  ]
+ },
+ {
+  "cluster": 8,
   "first_pr_created": "09-22 06:17",
   "first_merge": "09-22 21:00",
   "last_merge": "09-22 23:48",
@@ -39,7 +284,7 @@
   ]
  },
  {
-  "cluster": 1,
+  "cluster": 9,
   "first_pr_created": "09-12 04:33",
   "first_merge": "09-24 07:04",
   "last_merge": "09-24 18:49",
@@ -94,7 +339,7 @@
   ]
  },
  {
-  "cluster": 2,
+  "cluster": 10,
   "first_pr_created": "09-12 05:31",
   "first_merge": "09-25 17:07",
   "last_merge": "09-26 07:30",
@@ -167,7 +412,7 @@
   ]
  },
  {
-  "cluster": 3,
+  "cluster": 11,
   "first_pr_created": "09-26 08:04",
   "first_merge": "09-26 18:38",
   "last_merge": "09-26 18:38",
@@ -196,7 +441,7 @@
   ]
  },
  {
-  "cluster": 4,
+  "cluster": 12,
   "first_pr_created": "09-26 09:06",
   "first_merge": "09-26 21:41",
   "last_merge": "09-26 21:41",
@@ -226,7 +471,7 @@
   ]
  },
  {
-  "cluster": 5,
+  "cluster": 13,
   "first_pr_created": "09-26 09:07",
   "first_merge": "09-27 01:50",
   "last_merge": "09-28 07:28",
@@ -293,7 +538,7 @@
   ]
  },
  {
-  "cluster": 6,
+  "cluster": 14,
   "first_pr_created": "09-28 10:51",
   "first_merge": "09-28 11:21",
   "last_merge": "09-28 14:55",
@@ -337,7 +582,7 @@
   ]
  },
  {
-  "cluster": 7,
+  "cluster": 15,
   "first_pr_created": "09-28 15:46",
   "first_merge": "09-28 19:30",
   "last_merge": "09-29 02:36",
@@ -379,7 +624,7 @@
   ]
  },
  {
-  "cluster": 8,
+  "cluster": 16,
   "first_pr_created": "09-29 06:08",
   "first_merge": "09-29 06:31",
   "last_merge": "09-30 07:41",
@@ -459,7 +704,7 @@
   ]
  },
  {
-  "cluster": 9,
+  "cluster": 17,
   "first_pr_created": "09-30 10:07",
   "first_merge": "09-30 15:49",
   "last_merge": "09-30 18:03",
@@ -496,7 +741,7 @@
   ]
  },
  {
-  "cluster": 10,
+  "cluster": 18,
   "first_pr_created": "09-30 16:24",
   "first_merge": "10-01 00:02",
   "last_merge": "10-01 08:11",
@@ -551,7 +796,7 @@
   ]
  },
  {
-  "cluster": 11,
+  "cluster": 19,
   "first_pr_created": "10-01 17:21",
   "first_merge": "10-01 20:12",
   "last_merge": "10-02 00:48",
@@ -589,7 +834,7 @@
   ]
  },
  {
-  "cluster": 12,
+  "cluster": 20,
   "first_pr_created": "10-02 23:00",
   "first_merge": "10-02 23:30",
   "last_merge": "10-02 23:30",
@@ -618,7 +863,7 @@
   ]
  },
  {
-  "cluster": 13,
+  "cluster": 21,
   "first_pr_created": "10-03 07:58",
   "first_merge": "10-03 08:53",
   "last_merge": "10-03 08:53",
@@ -648,7 +893,7 @@
   ]
  },
  {
-  "cluster": 14,
+  "cluster": 22,
   "first_pr_created": "10-04 20:44",
   "first_merge": "10-04 22:17",
   "last_merge": "10-04 22:17",
@@ -679,7 +924,7 @@
   ]
  },
  {
-  "cluster": 15,
+  "cluster": 23,
   "first_pr_created": "10-05 05:10",
   "first_merge": "10-05 05:24",
   "last_merge": "10-05 07:11",
@@ -709,7 +954,7 @@
   ]
  },
  {
-  "cluster": 16,
+  "cluster": 24,
   "first_pr_created": "10-05 01:43",
   "first_merge": "10-06 00:50",
   "last_merge": "10-06 02:26",
@@ -744,7 +989,7 @@
   ]
  },
  {
-  "cluster": 17,
+  "cluster": 25,
   "first_pr_created": "10-06 06:33",
   "first_merge": "10-06 07:55",
   "last_merge": "10-06 10:33",
@@ -779,7 +1024,7 @@
   ]
  },
  {
-  "cluster": 18,
+  "cluster": 26,
   "first_pr_created": "10-06 20:40",
   "first_merge": "10-06 22:57",
   "last_merge": "10-06 22:57",
@@ -811,7 +1056,7 @@
   ]
  },
  {
-  "cluster": 19,
+  "cluster": 27,
   "first_pr_created": "10-07 01:41",
   "first_merge": "10-07 03:43",
   "last_merge": "10-07 08:41",
@@ -849,7 +1094,7 @@
   ]
  },
  {
-  "cluster": 20,
+  "cluster": 28,
   "first_pr_created": "10-07 19:13",
   "first_merge": "10-07 19:34",
   "last_merge": "10-07 19:34",
@@ -874,7 +1119,7 @@
   ]
  },
  {
-  "cluster": 21,
+  "cluster": 29,
   "first_pr_created": "10-07 23:25",
   "first_merge": "10-08 00:40",
   "last_merge": "10-08 22:36",
@@ -1002,7 +1247,7 @@
   ]
  },
  {
-  "cluster": 22,
+  "cluster": 30,
   "first_pr_created": "10-08 21:40",
   "first_merge": "10-09 01:52",
   "last_merge": "10-09 05:05",
@@ -1042,7 +1287,7 @@
   ]
  },
  {
-  "cluster": 23,
+  "cluster": 31,
   "first_pr_created": "10-09 08:04",
   "first_merge": "10-09 08:26",
   "last_merge": "10-09 08:48",
@@ -1079,7 +1324,7 @@
   ]
  },
  {
-  "cluster": 24,
+  "cluster": 32,
   "first_pr_created": "10-09 17:30",
   "first_merge": "10-09 17:47",
   "last_merge": "10-09 18:00",
@@ -1116,7 +1361,7 @@
   ]
  },
  {
-  "cluster": 25,
+  "cluster": 33,
   "first_pr_created": "10-10 07:21",
   "first_merge": "10-10 07:45",
   "last_merge": "10-10 14:04",
@@ -1172,7 +1417,7 @@
   ]
  },
  {
-  "cluster": 26,
+  "cluster": 34,
   "first_pr_created": "10-11 01:15",
   "first_merge": "10-11 01:34",
   "last_merge": "10-11 02:19",
@@ -1207,7 +1452,7 @@
   ]
  },
  {
-  "cluster": 27,
+  "cluster": 35,
   "first_pr_created": "10-12 00:33",
   "first_merge": "10-12 01:51",
   "last_merge": "10-12 01:51",
@@ -1238,7 +1483,7 @@
   ]
  },
  {
-  "cluster": 28,
+  "cluster": 36,
   "first_pr_created": "10-12 06:57",
   "first_merge": "10-12 06:23",
   "last_merge": "10-12 07:06",
@@ -1263,7 +1508,7 @@
   ]
  },
  {
-  "cluster": 29,
+  "cluster": 37,
   "first_pr_created": "10-13 01:22",
   "first_merge": "10-13 03:41",
   "last_merge": "10-13 06:02",
@@ -1295,7 +1540,7 @@
   ]
  },
  {
-  "cluster": 30,
+  "cluster": 38,
   "first_pr_created": "10-13 05:29",
   "first_merge": "10-13 15:47",
   "last_merge": "10-13 21:38",
@@ -1332,7 +1577,7 @@
   ]
  },
  {
-  "cluster": 31,
+  "cluster": 39,
   "first_pr_created": "10-13 22:00",
   "first_merge": "10-14 02:30",
   "last_merge": "10-14 04:23",
@@ -1363,7 +1608,7 @@
   ]
  },
  {
-  "cluster": 32,
+  "cluster": 40,
   "first_pr_created": "10-14 04:46",
   "first_merge": "10-14 07:40",
   "last_merge": "10-14 10:38",
@@ -1395,7 +1640,7 @@
   ]
  },
  {
-  "cluster": 33,
+  "cluster": 41,
   "first_pr_created": "10-17 06:39",
   "first_merge": "10-17 06:56",
   "last_merge": "10-17 06:56",

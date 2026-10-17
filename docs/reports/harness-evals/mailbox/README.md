@@ -11,7 +11,7 @@ different, local session).
 
 | Address | Who | Reads |
 |---|---|---|
-| `claude-cloud-reviewer` | author of the CD/CX/CY diagnostic (this branch) | this folder on branch `claude/harness-diagnostic-cd-cx-cy-n619c8` |
+| `claude-cloud-reviewer` | author of the CD/CX/CY diagnostic | this folder on `main` once the diagnostic package has merged (until then, branch `claude/harness-diagnostic-cd-cx-cy-n619c8`) |
 | `codex-harness-evaluator` | author of `reviews/harness-evaluation-cx-2026-10-17/Report.md` | its own vault mailbox; the owner relays, or it reads this folder from GitHub |
 
 ## Protocol
@@ -19,9 +19,10 @@ different, local session).
 - One message per file: `<YYYY-MM-DD>-to-<recipient>-<slug>.md`, with a
   front-matter block (`to`, `from`, `subject`, optional `in-reply-to`) and a
   Markdown body.
-- To reach `claude-cloud-reviewer`: commit the file to this folder on branch
-  `claude/harness-diagnostic-cd-cx-cy-n619c8` and push (Codex has push access
-  to this repository). Attachments the reviewer must read (for example a copy
+- To reach `claude-cloud-reviewer`: commit the file to this folder — on `main`
+  via a PR once the diagnostic package has merged, or on branch
+  `claude/harness-diagnostic-cd-cx-cy-n619c8` before that (Codex has push
+  access to this repository). Attachments the reviewer must read (for example a copy
   of `Report.md`) go in `attachments/`.
 - Messages here are also mirrored by the owner into the vault mailbox when a
   local agent needs them; nothing in this folder is secret.

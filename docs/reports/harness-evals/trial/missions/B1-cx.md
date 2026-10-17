@@ -44,8 +44,10 @@ deliver is **flagged blocked** in the run report with the reason, not replaced.
    commit, all review threads resolved, smoke step as the directive specifies.
    The base branch may carry fewer repository rules than `main`; apply the gate
    anyway.
-3. **Closing keyword.** Write `Trial-Closes: #N` in the PR body. Never write
-   `Closes`, `Fixes` or `Resolves` with an issue number.
+3. **Closing keyword.** Write `Trial-Closes: N` (the bare issue number, no `#`)
+   in the PR body. Never write `Closes`, `Fixes` or `Resolves` with an issue
+   number, and keep `#N` out of PR titles and commit subjects: any `#N` in a PR
+   body, title or commit message posts a cross-reference on issue N's timeline.
 4. **No shared-state writes.** Do not comment on, label, close or reopen any
    issue. Do not file new issues. Record follow-ups, deferred work and decisions
    in the run report instead.
@@ -54,8 +56,9 @@ deliver is **flagged blocked** in the run report with the reason, not replaced.
    say so in the run report.
 6. **Stop conditions.** Stop when every queue item is merged or flagged, at the
    12-hour cap, or after a 60-minute rate-limit stall. Then write the run report,
-   commit it to `trial/b1-cx` (direct commit or PR, either is fine), and end
-   the session with the directive's usual closing status.
+   land it on `trial/b1-cx` by PR (a direct push is blocked once the
+   `trial/**` ruleset is on), and end the session with the directive's usual
+   closing status.
 7. **Cost.** Record the session cost where the harness exposes it (`/cost`,
    ccusage, dashboard usage); write `n/a` rather than an estimate.
 

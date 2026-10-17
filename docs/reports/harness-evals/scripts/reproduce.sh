@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Regenerate the harness diagnostic from the published inputs.
-# Usage: bash scripts/reproduce.sh <workdir>   (run from docs/reports/harness-evals)
+# Usage: bash scripts/reproduce.sh <workdir>   (run from docs/reports/harness-evals;
+#        the workdir may be relative — it is resolved to an absolute path below)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${1:?workdir required}"
 mkdir -p "$WORK/data" "$WORK/scripts"
+# Resolve BEFORE the `cd` below: HE_REPORT_PATH / HE_METRICS_PATH are built from
+# $WORK and opened from inside it, so a relative argument used to fail with
+# FileNotFoundError at review_metrics.py after five steps had already run.
+WORK="$(cd "$WORK" && pwd)"
 cp "$HERE"/scripts/*.py "$WORK/scripts/"
 for f in "$HERE"/data/raw/*; do
   base="$(basename "$f")"

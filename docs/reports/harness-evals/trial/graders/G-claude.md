@@ -30,7 +30,8 @@ Grade the arm your vendor did **not** run first: `arm B (B1-cx and B2-cy-codex)`
 | Acceptance criteria met | each criterion from the issue, checked by reading the diff and tests, not the PR body |
 | Tests | added / changed / none; do they fail without the fix (reason from the diff, do not run mutations) |
 | Review rounds | Copilot bodies vs owner-account bodies, counted |
-| CI runs; red CI on the base after merge | Actions API |
+| CI runs | Actions API |
+| Red CI on the base after merge | Actions API, push runs on the base branch; if `ci.yml` had no push trigger for `trial/**` during the run, write `not observable`, never `0` |
 | Cycle | PR opened → merged, minutes |
 | Isolation | `Closes/Fixes/Resolves` keyword used? issue comments/labels/closures? new issues filed? any read of another `trial/*`? solution byte-identical to an earlier run's? |
 | Incidents | from the run report and from what you can see on GitHub that the report omitted |
@@ -51,7 +52,8 @@ the inference. CD vs CX is descriptive only.
 
 - Verify every claim you make against GitHub or the branch; cite PR number,
   commit or file:line. Where you cannot verify, say "unverified".
-- Do not fix, comment on or re-run anything. Read-only on GitHub.
+- Do not fix, comment on or re-run anything. No writes to issues, PRs or
+  comments; your only writes are commits to your own `trial/eval-*` branch.
 - Write your output to `docs/reports/harness-evals/trial/eval/G-claude/GRADING.md`
   on branch `trial/eval-claude`; one commit per arm, no attribution
   lines or model names in commit messages.
