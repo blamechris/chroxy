@@ -23,7 +23,9 @@ Mac: it cannot start the Claude or Codex desktop apps or the Chroxy daemon, and 
 message it sends into a running session arrives as peer data, not owner
 authority, which a prime-directive run needs to self-merge. So the owner launches
 every subject run and types its invocation; the supervisor prepares, observes,
-measures and grades. Steps are tagged **[owner]** or **[supervisor]**.
+measures and grades. Steps are tagged **[owner]** or **[supervisor]**. The owner-side commands are
+collected in [`MAC-BOOTSTRAP.md`](MAC-BOOTSTRAP.md), written to be handed to a
+local Claude session in the chroxy checkout.
 
 ## Steps
 
