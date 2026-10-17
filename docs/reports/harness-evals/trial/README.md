@@ -9,6 +9,7 @@ prompts: [`graders/`](graders/). This file is the step list and the live status.
 |---|---|
 | T0 (base SHA) | the squash-merge commit of the PR that last changed this row; the four bases are cut from it on the owner's go — verify with `git merge-base origin/trial/a1-cd origin/main` |
 | Queue | set 2026-10-17, 10 issues — see [`queue.md`](queue.md) |
+| Sealed key | sealed 2026-10-17T23:14Z; SHA-256 committed in [`KEY-COMMITMENT.md`](KEY-COMMITMENT.md) |
 | Run 1 `A1-cd` | base cut from T0 on the owner's go; then waits for dry runs, clones and the owner's "starting A1-cd" |
 | Run 2 `B2-cy-codex` | not started |
 | Run 3 `A2-cy-claude` | not started |
