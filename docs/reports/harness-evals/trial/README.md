@@ -40,9 +40,15 @@ local Claude session in the chroxy checkout.
    expected root cause, acceptance checks, known-fix yes/no. Nothing from it goes
    into the repository until step 11. Then seal it: `shasum -a 256 KEY.md`, hand
    the digest to the supervisor for [`KEY-COMMITMENT.md`](KEY-COMMITMENT.md), and
-   encrypt the plaintext at rest so no process on the Mac can read it:
+   encrypt the plaintext so the live copy is unreadable to any process on the Mac:
    `openssl enc -aes-256-cbc -pbkdf2 -salt -in KEY.md -out KEY.md.enc && rm KEY.md`.
-   The digest is of the plaintext; keep the passphrase out of the repo and the vault.
+   If the digest is already in `KEY-COMMITMENT.md`, confirm `shasum` matches it
+   before encrypting; a mismatch (an editor re-save, for instance) means a
+   replacement table before run 1. The digest is of the plaintext; keep the
+   passphrase out of the repo and the vault. macOS's `/usr/bin/openssl` is
+   LibreSSL: confirm once that it accepts `-pbkdf2`, and decrypt with the same
+   binary. Sync and backup copies of the plaintext are covered by the digest and
+   the grader audit, not by the `rm`.
 3. **[owner, Mac] Dry-run clones, then compile the Codex prompts for the dry
    runs** from one of them, so the dry runs exercise the same skill text as this
    package (`MAC-BOOTSTRAP.md` steps 1–2). The prompts are recompiled from a `T0`
@@ -122,14 +128,15 @@ local Claude session in the chroxy checkout.
    before the first message (#8609).
 10. **Run 3 — `A2-cy-claude`**, then **Run 4 — `B1-cx`.** Same pattern. Runs
     never overlap; between runs wait for the relevant vendor's reset if needed.
-11. **[owner] Unseal.** Decrypt
-    (`openssl enc -d -aes-256-cbc -pbkdf2 -in KEY.md.enc -out KEY.md`), run
-    `shasum -a 256 KEY.md` and confirm it matches `KEY-COMMITMENT.md` before
-    anything else — a re-save through Obsidian can change bytes, and a mismatch
-    here is a key change to explain, not a grader incident. Then copy the key
-    into the repository as `docs/reports/harness-evals/trial/eval/KEY.md` on
-    branch `trial/eval` (the supervisor creates the branch; a direct commit is
-    fine). Any follow-ups the runs deferred can be filed now.
+11. **[owner] Unseal.** Decrypt straight into a clone of `trial/eval` (the
+    supervisor creates the branch), never back into the vault where Obsidian
+    could re-save it:
+    `openssl enc -d -aes-256-cbc -pbkdf2 -in ~/Obsidian/no-it-all/reviews/harness-trial-2026-10/KEY.md.enc -out <clone>/docs/reports/harness-evals/trial/eval/KEY.md`,
+    then `shasum -a 256` on that file and confirm it matches `KEY-COMMITMENT.md`
+    before committing. A mismatch here is a key change for the owner to explain
+    in `eval/KEY-NOTE.md` beside the key, not a grader incident; the graders'
+    own check is against the committed file. Commit directly to `trial/eval`.
+    Any follow-ups the runs deferred can be filed now.
 12. **Grading.** **[supervisor]** spawns a fresh cloud session with
     `graders/G-claude.md` as its prompt and supervises it. **[owner]** opens
     Codex desktop (astra, xhigh) in a fresh clone of `trial/eval` and pastes

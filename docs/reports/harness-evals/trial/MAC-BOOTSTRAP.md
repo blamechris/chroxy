@@ -43,8 +43,12 @@ status: `README.md`.
    echo "$f"
    ```
    When the content is final, seal and encrypt it (the digest goes to the
-   supervisor for `KEY-COMMITMENT.md`; the plaintext must not stay readable on
-   the Mac during the runs; the passphrase stays out of the repo and the vault):
+   supervisor for `KEY-COMMITMENT.md`; the live plaintext must not stay
+   readable on the Mac during the runs; the passphrase stays out of the repo
+   and the vault). If `KEY-COMMITMENT.md` already carries a digest, the
+   `shasum` line must print that digest before you encrypt; otherwise stop and
+   tell the supervisor. macOS's `/usr/bin/openssl` is LibreSSL; confirm it
+   accepts `-pbkdf2` and use the same binary at unseal.
    ```bash
    shasum -a 256 "$f"
    openssl enc -aes-256-cbc -pbkdf2 -salt -in "$f" -out "$f.enc" && rm "$f" && ls -l "$f.enc"
