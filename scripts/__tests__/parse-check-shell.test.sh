@@ -130,6 +130,22 @@ REALDIRS
 [ "${#REAL_DIRS[@]}" -ge 3 ] \
   || { echo "HARNESS BROKEN: derived only ${#REAL_DIRS[@]} script directories from the real repo"; exit 1; }
 
+# The DEEPEST derived directory (most path separators) and the filler that lands
+# in it — make_repo puts filler i in REAL_DIRS[i % n], so with 25 fillers and
+# fewer than 25 directories the filler for index k is f00k.sh. Case 5 promises a
+# NESTED subject, so it picks by depth, not by position. Ties go to the LAST
+# candidate (`-ge`), so with three or more directories the deep file is never
+# case 2's f000.sh in REAL_DIRS[0]: the two cases keep exercising two files.
+DEEP_IDX=0; deep_n=-1; i=0
+for d in "${REAL_DIRS[@]}"; do
+  s="${d//[^\/]/}"
+  if [ "${#s}" -ge "$deep_n" ]; then deep_n="${#s}"; DEEP_IDX="$i"; fi
+  i=$((i + 1))
+done
+[ "$DEEP_IDX" -lt 25 ] \
+  || { echo "HARNESS BROKEN: ${#REAL_DIRS[@]} script directories exceed the 25 fillers; DEEP_FILE would not exist"; exit 1; }
+DEEP_FILE="${REAL_DIRS[$DEEP_IDX]}/f$(printf '%03d' "$DEEP_IDX").sh"
+
 # make_repo <dir> <n_fillers>
 # A git repo with exactly <n_fillers> TRACKED *.sh files, spread over the real
 # repo's own directory shape, plus an UNTRACKED copy of the subject at
@@ -186,8 +202,9 @@ check_contains "clean tree reports the real count" "parsed 25 tracked shell scri
 # directory sorting before `packages/`. The first one that did
 # (docs/reports/harness-evals/scripts/) moved f000.sh out from under the typed
 # path: the write landed on an UNTRACKED file, the sweep saw nothing broken, and
-# six cases went red with "expected 1, got 0" — a typed path beside a derived
-# set, the same shape the derivation above exists to avoid.
+# six cases went red (two "expected '1', got '0'", four "output did not contain")
+# — a typed path beside a derived set, the same shape the derivation above
+# exists to avoid.
 R="$TMP/broken"; make_repo "$R" 25
 printf '%s' "$BROKEN" > "$R/${REAL_DIRS[0]}/f000.sh"
 run_check "$R"
@@ -217,10 +234,10 @@ check "20 scripts clears the floor, exit 0" 0 "$RC"
 # `-- scripts` measured 61 files here, not fewer. Both spellings are in the
 # mutation record; only the exclude one is a silent narrowing.)
 R="$TMP/nested"; make_repo "$R" 25
-printf '%s' "$BROKEN" > "$R/${REAL_DIRS[1]}/f001.sh"
+printf '%s' "$BROKEN" > "$R/$DEEP_FILE"
 run_check "$R"
 check "a broken script in a DEEP subdirectory is caught" 1 "$RC"
-check_contains "the deep file is named" "${REAL_DIRS[1]}/f001.sh" "$OUT"
+check_contains "the deep file is named" "$DEEP_FILE" "$OUT"
 
 # ---- Case 6: the alphabetically LAST file — kills a truncated enumeration ----
 # Any `| head`-style truncation drops the tail, and the tail is the only thing
@@ -240,7 +257,7 @@ check_contains "the last file is named" "$LAST" "$OUT"
 # Measured: `git ls-files '*.sh'` from a subdirectory lists only that subtree.
 # The script resolves its root from its own location, so the cwd is irrelevant.
 R="$TMP/fromsub"; make_repo "$R" 25
-run_check "$R" "$R/packages/desktop/scripts"
+run_check "$R" "$R/${REAL_DIRS[1]}"
 check "invoked from a subdirectory, still exits 0" 0 "$RC"
 check_contains "invoked from a subdirectory, still sees all 25" "parsed 25 tracked shell script(s)" "$OUT"
 
@@ -261,19 +278,19 @@ check_contains "outside a git repo it blames GIT, not the tree size" "git ls-fil
 # The git index is the source of truth, not the filesystem: node_modules, dist
 # and every ignored tree are excluded by construction.
 R="$TMP/untracked"; make_repo "$R" 25
-printf '%s' "$BROKEN" > "$R/packages/server/hooks/not-added.sh"
+printf '%s' "$BROKEN" > "$R/${REAL_DIRS[2]}/not-added.sh"
 run_check "$R"
 check "an UNTRACKED broken script is ignored (the index is the roster)" 0 "$RC"
 
 # ---- Case 10: scope is by extension — a broken non-.sh file is ignored ----
 R="$TMP/ext"; make_repo "$R" 25
-printf '%s' "$BROKEN" > "$R/packages/server/hooks/notes.txt"
+printf '%s' "$BROKEN" > "$R/${REAL_DIRS[2]}/notes.txt"
 # Status checked like every other fixture step: an unchecked `git add` here
 # leaves the .txt untracked, and the case then passes because the file is out of
 # scope for a reason it was not testing.
-( cd "$R" && git add packages/server/hooks/notes.txt >/dev/null 2>&1 ) \
+( cd "$R" && git add ${REAL_DIRS[2]}/notes.txt >/dev/null 2>&1 ) \
   || { echo "FIXTURE FAILED: git add notes.txt in $R"; exit 1; }
-( cd "$R" && git ls-files --error-unmatch packages/server/hooks/notes.txt >/dev/null 2>&1 ) \
+( cd "$R" && git ls-files --error-unmatch ${REAL_DIRS[2]}/notes.txt >/dev/null 2>&1 ) \
   || { echo "FIXTURE FAILED: notes.txt is not tracked in $R"; exit 1; }
 run_check "$R"
 check "a broken NON-.sh tracked file is ignored" 0 "$RC"
