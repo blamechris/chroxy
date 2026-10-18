@@ -16,6 +16,22 @@ describe('model presentation (#8260)', () => {
     expect(choices.map(m => m.label)).toEqual(['Haiku 4.5 (provider alias)', 'Haiku 4.5 (pinned 4.5)', 'Haiku 4.5 (pinned 20251001)'])
     expect(models[0]!.label).toBe('Haiku 4.5')
   })
+  it.each(['', '[1m]', '-20251001'])('uses one full-target discriminator when custom families share a descriptor (%s)', suffix => {
+    const sourceRows = [
+      { id: 'alpha', fullId: `claude-alpha-1-0${suffix}`, label: 'Custom' },
+      { id: 'beta', fullId: `claude-beta-1-0${suffix}`, label: 'Custom' },
+    ]
+    const snapshot = structuredClone(sourceRows)
+    const choices = modelChoices(sourceRows)
+
+    expect(choices.map(m => m.label)).toEqual(sourceRows.map(m => `Custom (${m.fullId})`))
+    expect(new Set(choices.map(m => m.label)).size).toBe(2)
+    expect(choices.map(m => m.id)).toEqual(sourceRows.map(m => m.id))
+    expect(choices.map(m => m.fullId)).toEqual(sourceRows.map(m => m.fullId))
+    expect(formatActiveModelLabel(sourceRows, 'alpha')).toBe(choices[0]!.label)
+    expect(findModelEntry(sourceRows, 'alpha')).toBe(sourceRows[0])
+    expect(sourceRows).toEqual(snapshot)
+  })
   it('collapses only identical targets while preserving exact alias resolution', () => {
     const duplicate = { ...models[1]!, id: 'second-alias' }
     expect(modelChoices([...models, duplicate])).toHaveLength(3)
