@@ -60,7 +60,8 @@ deliver is **flagged blocked** in the run report with the reason, not replaced.
    do not read the sealed key's folder
    (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`) or any file named
    `KEY.md` or `KEY.md.enc`, and do not read or resume from another run's
-   handoff seed or brief (`NEXT-*.md`, briefs that name a trial run). Your normal
+   handoff seed or brief (`NEXT-*.md`, and any brief under `briefs/` that names
+   a trial run). Your normal
    coordination notes, usage ledger and your own brief are allowed. The graders
    audit transcripts for vault reads. If you read something forbidden by
    accident, say so in the run report.
@@ -97,4 +98,6 @@ In the Chroxy dashboard: New Session → provider Claude (SDK) → model claude-
 /prime-directive "Trial run A2-cy-claude: follow docs/reports/harness-evals/trial/missions/A2-cy-claude.md exactly"
 ```
 
-If the slash command is not recognised, send: `Invoke the prime-directive skill with the argument: Trial run A2-cy-claude: follow docs/reports/harness-evals/trial/missions/A2-cy-claude.md exactly` and note "invocation: natural-language skill call" in the run report. Permission mode: Auto (the dashboard header dropdown; needs `allowAutoPermissionMode: true` in the daemon config). The dashboard's default model is Sonnet 5.5: confirm the header shows Opus 5.5 and the thinking level shows high before sending.
+If the slash command is not recognised, send: `Invoke the prime-directive skill with the argument: Trial run A2-cy-claude: follow docs/reports/harness-evals/trial/missions/A2-cy-claude.md exactly` and note "invocation: natural-language skill call" in the run report.
+
+Permission mode: Auto (the dashboard header dropdown; needs `allowAutoPermissionMode: true` in the daemon config). The dashboard's default model is Sonnet 5.5: confirm the header shows Opus 5.5 and the thinking level shows high before sending.

@@ -60,7 +60,8 @@ deliver is **flagged blocked** in the run report with the reason, not replaced.
    do not read the sealed key's folder
    (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`) or any file named
    `KEY.md` or `KEY.md.enc`, and do not read or resume from another run's
-   handoff seed or brief (`NEXT-*.md`, briefs that name a trial run). Your normal
+   handoff seed or brief (`NEXT-*.md`, and any brief under `briefs/` that names
+   a trial run). Your normal
    coordination notes, usage ledger and your own brief are allowed. The graders
    audit transcripts for vault reads. If you read something forbidden by
    accident, say so in the run report.
@@ -97,4 +98,6 @@ In the Chroxy dashboard: New Session → provider Codex → connection ChatGPT s
 /prompts:prime-directive Trial run B2-cy-codex: follow docs/reports/harness-evals/trial/missions/B2-cy-codex.md exactly
 ```
 
-If the session does not expand `/prompts:` (app-server sessions may not), paste the full contents of `~/.codex/prompts/prime-directive.md` followed by the line `Trial run B2-cy-codex: follow docs/reports/harness-evals/trial/missions/B2-cy-codex.md exactly`, and note "invocation: pasted prompt" in the run report. Permission mode: Auto. If the dropdown still says "Auto (unavailable)", stop and tell the supervisor; do not run this attended. The slash prompt did not expand in the dry run, so expect the fallback: open `~/.codex/prompts/prime-directive.md`, paste its contents into the message box, add the mission line, and note "invocation: pasted prompt" in the run report.
+If the session does not expand `/prompts:` (app-server sessions may not), paste the full contents of `~/.codex/prompts/prime-directive.md` followed by the line `Trial run B2-cy-codex: follow docs/reports/harness-evals/trial/missions/B2-cy-codex.md exactly`, and note "invocation: pasted prompt" in the run report.
+
+Permission mode: Auto. If the dropdown still says "Auto (unavailable)", stop and tell the supervisor; do not run this attended. The slash prompt did not expand in the dry run (`DRY-RUNS.md`, finding 4), so expect the pasted-prompt fallback above.

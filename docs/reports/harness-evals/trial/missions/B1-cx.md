@@ -60,7 +60,8 @@ deliver is **flagged blocked** in the run report with the reason, not replaced.
    do not read the sealed key's folder
    (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`) or any file named
    `KEY.md` or `KEY.md.enc`, and do not read or resume from another run's
-   handoff seed or brief (`NEXT-*.md`, briefs that name a trial run). Your normal
+   handoff seed or brief (`NEXT-*.md`, and any brief under `briefs/` that names
+   a trial run). Your normal
    coordination notes, usage ledger and your own brief are allowed. The graders
    audit transcripts for vault reads. If you read something forbidden by
    accident, say so in the run report.
@@ -95,4 +96,6 @@ In the Codex desktop app open the run's clone, set model gpt-6-astra and reasoni
 
 ```
 /prompts:prime-directive Trial run B1-cx: follow docs/reports/harness-evals/trial/missions/B1-cx.md exactly
-``` Approvals: full access, never ask. If `/prompts:` does not expand, Codex reads `~/.codex/prompts/prime-directive.md` itself; that is the expected fallback and goes in the run report as the invocation method.
+```
+
+Approvals: full access, never ask. If `/prompts:` does not expand, Codex reads `~/.codex/prompts/prime-directive.md` itself; that is the expected fallback and goes in the run report as the invocation method.

@@ -15,6 +15,7 @@ prompts: [`graders/`](graders/). This file is the step list and the live status.
 | Run 3 `A2-cy-claude` | not started |
 | Run 4 `B1-cx` | not started |
 | Dry runs | 3 of 3 complete 2026-10-18 — see [`DRY-RUNS.md`](DRY-RUNS.md); vault rule narrowed and permission-mode control added as a result |
+| `Trial-Closes:` scratch check | pending — owner, before run 1 (step 5) |
 | Grading | not started |
 
 ## Who can do what
@@ -87,8 +88,10 @@ local Claude session in the chroxy checkout.
    PR targeted the dry base, the gate completed and a run report was written,
    and lists blockers. Fix blockers before run 1 (step 8); if a fix lands on
    `main` after the bases were cut, step 6 re-cuts them. Keep the dry branches
-   until the trial report is written; they are its evidence. **Done 2026-10-18:
-   see [`DRY-RUNS.md`](DRY-RUNS.md).**
+   until the trial report is written; they are its evidence. **The three dry
+   runs are done (2026-10-18, see [`DRY-RUNS.md`](DRY-RUNS.md)); the
+   `Trial-Closes:` scratch-issue check has not been performed yet and happens
+   before run 1.**
 6. **[supervisor, on the owner's explicit go] Cut the bases.** Only after this
    package has merged, since the clones must contain the missions. T0 is the
    `main` commit the bases are cut from; the missions do not bake it in (a

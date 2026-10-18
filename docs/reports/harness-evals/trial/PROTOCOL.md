@@ -5,7 +5,7 @@
 after both-way reconciliation with the Codex evaluation (see `../mailbox/`). The
 diagnostic found no CY-coordinated prime-directive (PD) run on record and no
 per-run cost for any harness; this trial exists to produce both under controlled
-conditions. Status: **queue set (section 5); awaiting the dry runs and T0 (README steps 5–6).**
+conditions. Status: **dry runs complete (`DRY-RUNS.md`); run 1 waits on the owner's clones and start; run 2 is blocked on #8619 and #8609 (section 2, fallback).**
 
 Harness codes as in the diagnostic: **CD** = Claude desktop app (local Claude Code
 session), **CX** = Codex desktop app, **CY** = Chroxy daemon session.
@@ -43,6 +43,12 @@ consecutive runs never share a rate-limit pool, and within each arm the native
 harness goes first once (arm A) and second once (arm B), so "ran later" is not
 systematically a CY property.
 
+Fallback: run 2 (`B2-cy-codex`) needs an unattended Codex mode in Chroxy (#8619)
+and codex-binary parity (#8609). If those are not in place when run 1 ends, B2
+moves last (A1, A2, B1, B2). Vendors still alternate, but the native harness
+then goes first in both arms, so the counterbalance above is lost for arm B;
+if the fallback is used it is recorded in section 8 and in the trial report.
+
 ## 3. Controls (what is held fixed)
 
 - **Base.** All four base branches are cut from one `main` SHA, `T0`, identified
@@ -79,8 +85,11 @@ systematically a CY property.
   Compiling from `main` earlier would let the two vendor arms run different skill
   text if `main` moved in between. The invocation method is recorded per run as
   a harness attribute, not hidden. In the dry runs `/prompts:prime-directive`
-  did not expand in either Codex harness; both read the prompt file themselves
-  and proceeded, so the Codex missions now state that fallback explicitly.
+  did not expand in either Codex harness; each read the directive text itself
+  (the Codex desktop run read `~/.codex/prompts/prime-directive.md`, the Chroxy
+  Codex run read the compiled `.claude/skills/prime-directive/SKILL.md`) and
+  verified the two identical before proceeding, so the Codex missions now state
+  that fallback explicitly.
 - **Worker tier.** Each harness's default worker models; the run report records
   what was actually used. Within an arm they match only if both harnesses see
   the same model roster (see Versions); the graders report the observed tiers
@@ -114,8 +123,8 @@ runs' work. Rules, in order of how much they buy:
    PRs whose base is one). In the owner's vault, **never read the sealed key's
    folder** (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`) or any file
    named `KEY.md` / `KEY.md.enc`, and **never read or resume from another run's
-   handoff seed or brief** (`NEXT-*.md`, anything under `briefs/` that names a
-   trial run). The rest of the vault is the harness's normal working surface
+   handoff seed or brief** (`NEXT-*.md`, and any brief under `briefs/` that
+   names a trial run). The rest of the vault is the harness's normal working surface
    (coordination notes, the usage ledger, its own brief) and stays allowed: the
    dry runs showed that a blanket vault ban both tripped on the machine-level
    startup read of `coordination/Core Goal.md` in every Codex harness and made
@@ -198,7 +207,6 @@ names and review patterns — so the cross-origin pairing is the substitute.
 
 - **Dry-run findings** (2026-10-18) are recorded in `DRY-RUNS.md`; the
   permission-mode, versions and vault rules above came from them.
-
 - **n = 1 per cell.** This is a pilot. Report effect sizes with the raw numbers;
   make no significance claims.
 - **Rate limits are per vendor, not per harness.** A1 and A2 draw on the same

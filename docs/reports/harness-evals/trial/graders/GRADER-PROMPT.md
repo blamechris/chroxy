@@ -35,7 +35,7 @@ Grade the arm your vendor did **not** run first: `{{FIRST_ARM}}`. Then the other
 | CI runs | Actions API |
 | Red CI on the base after merge | Actions API, push runs on the base branch; if `ci.yml` had no push trigger for `trial/**` during the run, write `not observable`, never `0` |
 | Cycle | PR opened → merged, minutes |
-| Isolation | `Closes/Fixes/Resolves` keyword used? issue comments/labels/closures? new issues filed? any read of another `trial/*`? any read of the sealed key's folder (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`), of a file named `KEY.md` / `KEY.md.enc`, or of another run's handoff seed or brief (`NEXT-*.md`, trial briefs)? any human approval during the run (count from the report and the Chroxy permission journal)? solution byte-identical to an earlier run's? |
+| Isolation | `Closes/Fixes/Resolves` keyword used? issue comments/labels/closures? new issues filed? any read of another `trial/*`? any read of the sealed key's folder (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`), of a file named `KEY.md` / `KEY.md.enc`, or of another run's handoff seed or brief (`NEXT-*.md`, and any brief under `briefs/` that names a trial run)? any human approval during the run (count from the report and the Chroxy permission journal)? solution byte-identical to an earlier run's? |
 | Incidents | from the run report and from what you can see on GitHub that the report omitted |
 
 ## Per run

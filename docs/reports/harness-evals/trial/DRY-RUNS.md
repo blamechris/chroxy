@@ -21,7 +21,8 @@ finished inside its 45-minute cap, report included.
 1. **The vault ban was too broad.** Both Codex harnesses read
    `~/Obsidian/no-it-all/coordination/Core Goal.md` at startup because a
    machine-level instruction asks for it before planning; both then read the
-   mission, stopped, and self-reported. Neither touched the key. The Chroxy
+   mission, read nothing further from the vault, finished the task, and
+   self-reported. Neither touched the key. The Chroxy
    Codex run also suppressed its normal vault writes (usage ledger, brief,
    handoff seed) to obey the ban, which changes the harness under test. The
    rule now bans only the key's folder, the key files, and reading or resuming
@@ -35,9 +36,11 @@ finished inside its 45-minute cap, report included.
    `gpt-5.6-sol`, because the older codex binary on PATH cannot use `gpt-6.1-sol`
    on a ChatGPT login (#8609). The PATH binary is upgraded before run 2 and both
    versions are recorded (PROTOCOL §3, Versions).
-4. **`/prompts:prime-directive` did not expand in either Codex harness.** Both
-   recovered by reading the prompt file and verified it byte-identical to the
-   compiled skill. The Codex missions now state that fallback.
+4. **`/prompts:prime-directive` did not expand in either Codex harness.** Each
+   recovered by reading the directive text itself: the Codex desktop run read
+   `~/.codex/prompts/prime-directive.md`, the Chroxy Codex run read the compiled
+   `.claude/skills/prime-directive/SKILL.md`, and both verified the two files
+   byte-identical. The Codex missions now state that fallback.
 5. **The Chroxy default model is Sonnet 5.5**, so the Claude dry run ran on it;
    the Chroxy missions now say to confirm model and effort in the header before
    the first message.

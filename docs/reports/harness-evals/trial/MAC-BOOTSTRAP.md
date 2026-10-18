@@ -93,7 +93,7 @@ status: `README.md`.
 
 ## Per run
 
-7. Launch per `missions/<RUN_ID>.md` → *Invocation*. The A1-cd session is the
+9. Launch per `missions/<RUN_ID>.md` → *Invocation*. The A1-cd session is the
    subject itself: the owner types that one directly in the Claude desktop app.
    Say "starting <RUN_ID>" to the supervisor when you type the invocation and
    "done <RUN_ID>" (plus the Codex cost from the usage page for the two GPT runs)
