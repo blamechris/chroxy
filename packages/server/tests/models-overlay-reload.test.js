@@ -1312,17 +1312,13 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
   })
 
   it('a NaN ratchet is never written into the learned map (#7771)', () => {
-    // updateContextWindow's OWN input guard (`typeof contextWindow !== 'number'
-    // || contextWindow <= 0`) admits NaN — `typeof NaN === 'number'` is true and
-    // `NaN <= 0` is false, so neither clause fires. That is a pre-existing gap
-    // tracked separately (#7771); what THIS fix must not do is compound it by
-    // writing a NaN through the new persistence path. `activeModels` is allowed
-    // to carry the NaN in-process (unrelated, out of scope) — the learned MAP
-    // specifically must refuse it.
+    // updateContextWindow's input guard now rejects NaN outright (it is not
+    // finite), so the ratchet is refused before it reaches any map. The
+    // learned map and the persisted cache must both stay clean.
     const reg = makeNoSeamRegistry(cachePath)
     reg.applyOverlay(overlayMap({ 'my-model': {} }))
-    assert.equal(reg.updateContextWindow('my-model', NaN), true,
-      'sanity: the pre-existing top-level guard does not reject NaN (#7771)')
+    assert.equal(reg.updateContextWindow('my-model', NaN), false,
+      'a NaN ratchet is refused by the top-level guard')
 
     assert.equal(reg.saveCache(cachePath), true)
     const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
@@ -1334,6 +1330,21 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
     assert.equal(restarted.loadCache(cachePath), true)
     const row = restarted.getModels().find((m) => m.fullId === 'my-model')
     assert.equal(row?.contextWindow, 4242, 'a restart falls back to the heuristic, never NaN')
+  })
+
+  it('a fractional ratchet is never written into the learned map', () => {
+    // A fractional window is finite and positive, so the top-level guard in
+    // updateContextWindow admits it. Only the learned-map write's own integer
+    // check keeps it off disk, where the read side would refuse to load it.
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(overlayMap({ 'my-model': {} }))
+    assert.equal(reg.updateContextWindow('my-model', 272000.5), true,
+      'sanity: a finite fractional window passes the top-level guard')
+
+    assert.equal(reg.saveCache(cachePath), true)
+    const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.equal(Object.prototype.hasOwnProperty.call(payload.learnedContextWindows ?? {}, 'my-model'), false,
+      'the fractional ratchet must not reach the learned map on disk')
   })
 
   // Review addendum (#7810) — `applyOverlay` is a THIRD place that rebuilds a
