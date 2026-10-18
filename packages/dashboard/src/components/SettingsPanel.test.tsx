@@ -291,11 +291,11 @@ describe('SettingsPanel', () => {
       expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
-    it('follows the NORMALIZED provider the <select> above actually shows', () => {
+    it('hides the Default model field while the saved provider is dormant', () => {
       // The persisted defaultProvider is absent from the server's list, so the
-      // provider <select> renders availableProviders[0]. Reading the raw
-      // persisted value here computed the roster for a provider that by
-      // construction can never have broadcast one, and the field vanished.
+      // provider <select> shows the saved value as a disabled dormant option
+      // (#8277). The model field must not list another provider's roster
+      // (availableProviders[0]) — a pick would persist an id for the wrong provider.
       setMockState({
         defaultProvider: 'gemini',
         defaultProviderSource: 'user',
@@ -304,7 +304,19 @@ describe('SettingsPanel', () => {
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
-      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
+      expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
+    })
+
+    it('still follows the normalized provider when the override is not a user choice', () => {
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultProviderSource: 'server',
+        defaultModel: '',
+        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+        modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
       expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
     })
 
@@ -3218,5 +3230,79 @@ describe('Session Defaults model identity (#8260)', () => {
     expect(setDefaultModel).toHaveBeenCalledWith('date')
     fireEvent.change(select, { target: { value: 'long' } })
     expect(setDefaultModel).toHaveBeenLastCalledWith('long')
+  })
+})
+
+describe('Session Defaults dormant override + migration notice (#8277)', () => {
+  it('names a saved provider the server does not offer instead of silently showing another', () => {
+    const setDefaultProvider = vi.fn()
+    setMockState({
+      defaultProvider: 'codex', defaultProviderSource: 'user', setDefaultProvider,
+      availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+    })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    const hint = screen.getByTestId('default-provider-dormant')
+    expect(hint.textContent).toMatch(/codex/i)
+    expect(hint.textContent).toMatch(/does not offer/i)
+    const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+    expect(hint.id).toBe('default-provider-dormant-hint')
+    expect(select.getAttribute('aria-describedby')).toBe(hint.id)
+    expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
+    expect(select.value).toBe('codex')
+    expect(select.options[select.selectedIndex]!.disabled).toBe(true)
+    expect(setDefaultProvider).not.toHaveBeenCalled()
+  })
+
+  it('shows no dormant hint when the saved provider is offered', () => {
+    setMockState({
+      defaultProvider: 'claude-cli', defaultProviderSource: 'user',
+      availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+    })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    expect(screen.queryByTestId('default-provider-dormant')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Default provider').hasAttribute('aria-describedby')).toBe(false)
+  })
+
+  it('choosing another provider from the dormant state persists it', () => {
+    const setDefaultProvider = vi.fn()
+    setMockState({
+      defaultProvider: 'codex', defaultProviderSource: 'user', setDefaultProvider,
+      availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+    })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: 'claude-cli' } })
+    expect(setDefaultProvider).toHaveBeenCalledWith('claude-cli')
+  })
+
+  it('"Server default" clears a dormant override and opening Settings writes nothing', () => {
+    const setDefaultProvider = vi.fn()
+    const setDefaultModel = vi.fn()
+    setMockState({
+      defaultProvider: 'codex', defaultProviderSource: 'user', setDefaultProvider, setDefaultModel,
+      availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+    })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    expect(setDefaultProvider).not.toHaveBeenCalled()
+    expect(setDefaultModel).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: '' } })
+    expect(setDefaultProvider).toHaveBeenCalledWith('')
+  })
+
+  it('shows the undismissed migration notice and dismisses through the shared action', () => {
+    const dismissSessionDefaultsNotice = vi.fn()
+    setMockState({
+      sessionDefaultsNotice: { provider: 'claude-tui', model: null },
+      dismissSessionDefaultsNotice,
+    })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    expect(screen.getByTestId('session-defaults-notice').textContent).toMatch(/older version was cleared/)
+    fireEvent.click(screen.getByTestId('session-defaults-notice-dismiss'))
+    expect(dismissSessionDefaultsNotice).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows no notice when none is pending', () => {
+    setMockState({ sessionDefaultsNotice: null })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
   })
 })

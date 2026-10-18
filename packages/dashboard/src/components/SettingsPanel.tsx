@@ -14,6 +14,7 @@ import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
+import { SessionDefaultsNotice } from './SessionDefaultsNotice'
 import {
   COST_BADGE_MODES,
   COST_BADGE_MODE_LABELS,
@@ -1160,6 +1161,16 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     return defaultProvider
   }, [availableProviders, defaultProvider])
 
+  // #8277: a saved override this server does not offer is dormant, not gone.
+  // Surface it instead of letting the select show another provider; never
+  // rewrite the stored value from here.
+  const dormantProvider = defaultProviderSource === 'user'
+    && availableProviders.length > 0
+    && defaultProvider
+    && !availableProviders.some(p => p.name === defaultProvider)
+    ? defaultProvider
+    : null
+
   // #7728 — the Default-model picker belongs to the DEFAULT PROVIDER selected
   // just above it, so it reads that provider's roster instead of whichever
   // provider broadcast last. Empty (field hidden) until that roster arrives —
@@ -1171,13 +1182,16 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   //    roster for a provider the server does not offer — one that by
   //    construction can never have broadcast a roster — and the field would
   //    vanish whenever the two diverge.
+  //  - while a saved override is dormant (#8277) the select shows THAT
+  //    provider, so the roster is its own — normally empty here, which hides
+  //    the field rather than offering another provider's ids.
   //  - the EVIDENCE-side read. This block produces `defaultModel`, and its
   //    consumer (`resolveCreateSessionModel`) requires the chosen provider's OWN
   //    catalog to contain the id. Offering ids from an untagged roster here
   //    would let Settings show a default that create-time silently drops.
   const availableModels = useMemo(
-    () => selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
-    [modelsByProvider, effectiveProvider],
+    () => selectOwnModelsForProvider(modelsByProvider, dormantProvider ?? effectiveProvider)?.models ?? [],
+    [modelsByProvider, dormantProvider, effectiveProvider],
   )
 
   const defaultModelChoices = useMemo(() => modelChoices(availableModels), [availableModels])
@@ -1269,7 +1283,8 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
               <select
                 id="default-provider"
                 aria-label="Default provider"
-                value={defaultProviderSource === 'user' ? effectiveProvider : ''}
+                value={defaultProviderSource === 'user' ? (dormantProvider ?? effectiveProvider) : ''}
+                aria-describedby={dormantProvider ? 'default-provider-dormant-hint' : undefined}
                 onChange={handleProviderChange}
               >
                 <option value="">
@@ -1277,6 +1292,11 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     ? `Server default (${PROVIDER_LABELS[serverDefaultProvider] || serverDefaultProvider})`
                     : 'Server default'}
                 </option>
+                {dormantProvider && (
+                  <option value={dormantProvider} disabled>
+                    {`${PROVIDER_LABELS[dormantProvider] || dormantProvider} (not offered by this server)`}
+                  </option>
+                )}
                 {availableProviders.length > 0
                   ? availableProviders.map(p => (
                       <option key={p.name} value={p.name}>
@@ -1289,7 +1309,14 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     </>
                 }
               </select>
+              {dormantProvider && (
+                <p className="settings-hint" id="default-provider-dormant-hint" data-testid="default-provider-dormant">
+                  {PROVIDER_LABELS[dormantProvider] || dormantProvider} is saved as your default but this
+                  server does not offer it. It stays saved for servers that do.
+                </p>
+              )}
             </div>
+            <SessionDefaultsNotice />
             {availableModels.length > 0 && (
               <div className="settings-field">
                 <label htmlFor="default-model">Default model</label>
