@@ -43,6 +43,9 @@ const log = createLogger('doctor')
 const __filename = fileURLToPath(import.meta.url)
 const SERVER_PKG_DIR = dirname(dirname(__filename))
 
+// Port `chroxy start` binds when neither flag, env nor config names one.
+const DEFAULT_PORT = 8765
+
 // Honor CHROXY_CONFIG_DIR (the repo-wide convention — connection-info.js,
 // models.js, etc.) so the config read resolves to the same dir as every other
 // reader. Without this, doctor read the REAL ~/.chroxy in tests despite
@@ -565,7 +568,8 @@ export function checkUserLevelChroxyHook({ settingsPath } = {}) {
  * warned about missing `codex` or `OPENAI_API_KEY` (issue #2951).
  *
  * @param {Object} [options]
- * @param {number} [options.port] - Port to test availability for
+ * @param {number} [options.port] - Port to test availability for. When omitted, resolved from
+ *   PORT env / config.json `port` / the 8765 default via mergeConfig (same as `chroxy start`)
  * @param {string[]} [options.providers] - Override configured providers (mainly for tests)
  * @param {boolean} [options.verbose]
  * @param {string} [options.pkgDir] - Override directory used to locate node_modules for the
@@ -1010,13 +1014,39 @@ export async function runDoctorChecks({
     }
   }
 
-  // 7. Port availability
-  const checkPort = port || 8765
-  try {
-    await checkPortAvailable(checkPort)
-    checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
-  } catch {
-    checks.push({ name: 'Port', status: 'warn', message: `${checkPort} is in use (server may already be running)` })
+  // 7. Port availability. Resolved with the SAME merge `chroxy start` runs
+  // (mergeConfig: explicit flag > PORT env > config.json `port` > 8765 default),
+  // so doctor probes the port start would actually bind rather than always 8765.
+  // A caller-supplied `port` (doctor's -p flag, or start's already-merged port)
+  // is the CLI tier.
+  const checkPort = mergeConfig({
+    fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
+    cliOverrides: port !== undefined ? { port } : {},
+    defaults: { port: DEFAULT_PORT },
+  }).port
+  // A malformed port (PORT=abc, 8800.7, 99999, a non-number in config.json) is a
+  // refusal in `start`, so it is a failure here — and must never reach listen():
+  // Node treats a non-numeric listen argument as a unix socket path and would
+  // bind a file in cwd. Validity is validateConfig's own port rule (type + range)
+  // plus integrality, which it does not check.
+  if (!Number.isInteger(checkPort) || validateConfig({ port: checkPort }).warnings.length > 0) {
+    // Label only — which tier supplied the value; the value itself came from mergeConfig.
+    const source = port !== undefined ? '--port flag'
+      : process.env.PORT !== undefined ? 'PORT env'
+        : parsedConfig && parsedConfig.port !== undefined ? 'config.json'
+          : 'default'
+    checks.push({
+      name: 'Port',
+      status: 'fail',
+      message: `${String(checkPort)} (from ${source}) is not a valid port — must be an integer 1-65535; chroxy start would refuse it`,
+    })
+  } else {
+    try {
+      await checkPortAvailable(checkPort)
+      checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
+    } catch {
+      checks.push({ name: 'Port', status: 'warn', message: `${checkPort} is in use (server may already be running)` })
+    }
   }
 
   const passed = checks.every(c => c.status !== 'fail')
