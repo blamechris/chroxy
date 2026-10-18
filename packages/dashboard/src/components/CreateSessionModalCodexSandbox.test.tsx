@@ -43,6 +43,7 @@ function mockStore(defaultProvider: string, providers = [CODEX_PROVIDER, SDK_PRO
         environments: [],
         requestDirectoryListing: () => {},
         setDirectoryListingCallback: () => {},
+        addDirectoryListingListener: () => () => {},
         defaultCwd: null,
       }),
   }))

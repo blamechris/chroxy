@@ -2070,6 +2070,12 @@ export interface ConnectionState {
 
   // Directory listing
   setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
+  /**
+   * Register a listener offered EVERY directory_listing reply, independent of the
+   * single setDirectoryListingCallback slot (which path autocomplete and the
+   * Browse dialog overwrite). Returns the unsubscribe function.
+   */
+  addDirectoryListingListener: (cb: (listing: DirectoryListing) => void) => () => void;
   requestDirectoryListing: (path?: string) => void;
 
   // File browser

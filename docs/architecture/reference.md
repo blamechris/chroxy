@@ -188,7 +188,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `list_checkpoints` | Request list of checkpoints for session |
 | `list_environments` | Request list of persistent container environments |
 | `list_conversations` | Request scan of conversation history files |
-| `list_directory` | Request home directory listing for browsing |
+| `list_directory` | Request a directory listing for browsing ($HOME, configured workspace roots, and a valid default cwd; credential and config directories are refused) |
 | `list_files` | Recursive file search within session CWD (case-insensitive substring match, max depth 3) |
 | `list_repos` | Request list of configured repos |
 | `list_sessions` | Request list of all sessions |
@@ -249,7 +249,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `dev_preview` | Dev server preview tunnel opened |
 | `dev_preview_stopped` | Dev server preview tunnel closed |
 | `diff_result` | Git diff for uncommitted changes |
-| `directory_listing` | Home directory listing response |
+| `directory_listing` | Directory listing response (or an `Access denied` error outside the browsable roots) |
 | `encrypted` | Encrypted message envelope (E2E encryption) |
 | `environment_created` | Persistent environment created successfully |
 | `environment_destroyed` | Persistent environment removed |

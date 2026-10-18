@@ -42,6 +42,7 @@ function mockStore() {
         environments: [],
         requestDirectoryListing: () => {},
         setDirectoryListingCallback: () => {},
+        addDirectoryListingListener: () => () => {},
         defaultCwd: null,
       }),
   }))

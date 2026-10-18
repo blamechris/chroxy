@@ -31,6 +31,7 @@ function setStoreState(overrides: Record<string, unknown> = {}) {
     availableProviders: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},
+    addDirectoryListingListener: () => () => {},
     defaultCwd: null,
     environments: [],
     ...overrides,

@@ -36,6 +36,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
 import { configDir, configPath } from './config-dir.js'
+import { validateCwdAllowed } from './handler-utils.js'
 import { detectStrandedState, missingTokenAdvice, startupStrandedWarning } from './config-dir-migration.js'
 
 const log = createLogger('cli')
@@ -488,6 +489,28 @@ function wireTunnelEvents(tunnel, wsServer) {
   })
 }
 
+/**
+ * Issue 8303 — a session created with a BLANK cwd inherits `config.cwd` without
+ * going through `validateCwdAllowed`, while the same directory typed explicitly
+ * into New Session is refused (and Browse cannot open it). Whether a blank cwd
+ * should bypass the check is a separate decision; until then the operator gets
+ * one startup warning naming the reason instead of three silent answers.
+ *
+ * @param {object} config - The merged startup config
+ * @param {{ warn: Function }} log
+ * @returns {boolean} true when a warning was logged
+ */
+export function warnIfConfiguredCwdRefused(config, log) {
+  if (!config?.cwd) return false
+  const reason = validateCwdAllowed(config.cwd, config)
+  if (!reason) return false
+  log.warn(
+    `Configured cwd "${config.cwd}" would be refused for an explicit New Session and cannot be opened in Browse (${reason}). ` +
+    'Sessions created with a blank cwd still inherit it.',
+  )
+  return true
+}
+
 function isWithinHome(dir) {
   const rel = relative(homedir(), dir)
   return !rel.startsWith('..') && !rel.startsWith(sep)
@@ -654,9 +677,13 @@ export function formatStartupSkillPolicyDiagnostic(diagnostics) {
  *
  * @param {object} config merged daemon config
  * @param {object} sessionManagerOptions remaining daemon constructor options
+ * @param {{ warn: Function }} [warnLog] logger for the configured-cwd warning
  * @returns {{ sessionManager: SessionManager, startupSkillPolicy: object }}
  */
-export function createDaemonSessionManager(config, sessionManagerOptions) {
+export function createDaemonSessionManager(config, sessionManagerOptions, warnLog = log) {
+  // The configured cwd becomes the manager's default here, so this is where a
+  // cwd that explicit Create would refuse is reported (once, at startup).
+  warnIfConfiguredCwdRefused(config, warnLog)
   const startupSkillPolicy = resolveStartupSkillPolicy(config)
   const sessionManager = new SessionManager({
     ...sessionManagerOptions,

@@ -231,6 +231,7 @@ import type {
   ConnectionContext,
   ConnectionState,
   DirectoryEntry,
+  DirectoryListing,
   EnvironmentInfo,
   EvaluatorRewriteMeta,
   FileEntry,
@@ -267,6 +268,21 @@ type StoreApi = {
   setState: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void;
 };
 let _store: StoreApi | null = null;
+
+/**
+ * Listeners offered EVERY directory_listing reply, in addition to the store's
+ * single `_directoryListingCallback` slot. The slot is shared by path
+ * autocomplete and the Browse dialog, each of which overwrites it; a caller
+ * that must see a specific reply (the New Session prefilled-cwd probe) registers
+ * here instead. Returns the unsubscribe function.
+ */
+const directoryListingListeners = new Set<(listing: DirectoryListing) => void>();
+export function registerDirectoryListingListener(cb: (listing: DirectoryListing) => void): () => void {
+  directoryListingListeners.add(cb);
+  return () => {
+    directoryListingListeners.delete(cb);
+  };
+}
 
 export function setStore(store: StoreApi): void {
   _store = store;
@@ -6599,9 +6615,13 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
 
     case 'directory_listing': {
       const cb = get()._directoryListingCallback;
-      if (cb) {
+      if (cb || directoryListingListeners.size > 0) {
         const payload = sharedDirectoryListing(msg);
-        cb({ ...payload, entries: payload.entries as DirectoryEntry[] });
+        const listing = { ...payload, entries: payload.entries as DirectoryEntry[] };
+        // Listeners first: they match on the reply's own path, so they are
+        // indifferent to who holds the single callback slot at this moment.
+        for (const listener of [...directoryListingListeners]) listener(listing);
+        if (cb) cb(listing);
       }
       break;
     }

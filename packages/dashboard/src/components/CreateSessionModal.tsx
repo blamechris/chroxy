@@ -60,10 +60,27 @@ function basename(p: string): string {
   return p.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || p
 }
 
-/** Normalize a browse path for comparison: strip trailing slashes. */
+/**
+ * Normalize a browse path for comparison: strip trailing separators. A trailing
+ * backslash is only a separator on a Windows-shaped path (drive letter, or
+ * backslashes and no forward slash); on a POSIX path it is part of the name, so
+ * `/srv/project\\` and `/srv/project` stay different directories.
+ */
 function normalizeBrowsePath(p: string): string {
   if (!p || p === '/') return p
-  return p.replace(/\/+$/, '')
+  const windowsShaped = /^[A-Za-z]:/.test(p) || (p.includes('\\') && !p.includes('/'))
+  return p.replace(windowsShaped ? /[/\\]+$/ : /\/+$/, '')
+}
+
+/**
+ * Whether a prefilled cwd can be matched against the server's reply. The server
+ * answers with a normalised absolute path, so a relative path, a `~` path or one
+ * with `..` segments never equals its own reply; those are not probed (no
+ * listener is left waiting for a reply that cannot match).
+ */
+function isProbeablePath(p: string): boolean {
+  const absolute = p.startsWith('/') || /^[A-Za-z]:[/\\]/.test(p) || p.startsWith('\\\\')
+  return absolute && !p.split(/[/\\]/).includes('..')
 }
 
 /** Check if two browse paths refer to the same directory, accounting for server normalization. */
@@ -73,6 +90,17 @@ function browsePathsMatch(requested: string, response: string): boolean {
   // Server expands ~ to home dir — if request started with ~, accept the server's canonical path
   if (requested.startsWith('~')) return true
   return false
+}
+
+/**
+ * Strict match for the prefilled-cwd probe: the reply must name exactly the
+ * directory that was asked about. Unlike {@link browsePathsMatch} it never
+ * accepts a reply with no path or any reply to a `~` request, so a stale reply
+ * for another directory cannot set the note.
+ */
+function probeReplyMatches(requested: string, response: string | null | undefined): boolean {
+  if (!response) return false
+  return normalizeBrowsePath(response) === normalizeBrowsePath(requested)
 }
 
 /** Generate a default session name from a directory path, avoiding collisions. */
@@ -334,8 +362,24 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [browseEntries, setBrowseEntries] = useState<DirectoryEntry[]>([])
   const [browseLoading, setBrowseLoading] = useState(false)
   const [browseError, setBrowseError] = useState<string | null>(null)
+  // Issue 8303: the prefilled cwd the daemon refused to list (outside $HOME and
+  // every workspace root, or a credential directory). Holds the exact path that
+  // was probed so the note disappears as soon as the user changes the field.
+  const [unbrowsableCwd, setUnbrowsableCwd] = useState<string | null>(null)
+  // Unsubscribe handle for the prefilled-cwd probe's listener.
+  const probeUnsubRef = useRef<(() => void) | null>(null)
+  const stopProbe = useCallback(() => {
+    probeUnsubRef.current?.()
+    probeUnsubRef.current = null
+  }, [])
+  // The probe must not outlive the dialog: drop it on close and on unmount.
+  useEffect(() => {
+    if (!open) stopProbe()
+  }, [open, stopProbe])
+  useEffect(() => stopProbe, [stopProbe])
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
+  const addDirectoryListingListener = useConnectionStore(s => s.addDirectoryListingListener)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   // #5553: per-repo session preset disclosure. When the chosen cwd has an
   // ACTIVE preset, surface a compact, expandable indicator so the operator can
@@ -417,7 +461,27 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setSelectedSuggestion(-1)
     setBrowsing(false)
     setBrowseEntries([])
+    setUnbrowsableCwd(null)
+    stopProbe()
     setDirectoryListingCallback(null)
+    // Issue 8303: ask the daemon whether Browse can open the prefilled
+    // directory, so a refusal is explained here instead of surfacing only
+    // after the user clicks Browse. The reply is delivered through a listener
+    // path autocomplete and Browse cannot replace (they share the single
+    // callback slot; autocomplete takes it over 200 ms after open, and a reply
+    // over a tunnel is often slower), and matched by exact path. A path the
+    // server's normalised reply cannot equal (`~`, relative, or containing `..`)
+    // is not probed.
+    if (cwdValue && isProbeablePath(cwdValue)) {
+      probeUnsubRef.current = addDirectoryListingListener((listing: DirectoryListing) => {
+        if (!probeReplyMatches(cwdValue, listing.path)) return
+        setUnbrowsableCwd(
+          typeof listing.error === 'string' && /^Access denied/i.test(listing.error) ? cwdValue : null,
+        )
+        stopProbe()
+      })
+      requestDirectoryListing(cwdValue)
+    }
     if (cwdValue) {
       const generated = generateDefaultName(cwdValue, existingNames)
       setName(generated)
@@ -426,7 +490,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setName('')
       nameValRef.current = ''
     }
-  }, [open, initialCwd, existingNames, availableProviders, defaultProvider])
+  }, [open, initialCwd, existingNames, availableProviders, defaultProvider, requestDirectoryListing, setDirectoryListingCallback, addDirectoryListingListener, stopProbe])
 
   // Keep provider in sync while modal is open: if availableProviders changes
   // and the current provider is no longer valid, fall back to first available.
@@ -791,6 +855,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Browse...
             </button>
           </div>
+          {unbrowsableCwd !== null && cwd === unbrowsableCwd && (
+            <span className="cwd-hint" data-testid="cwd-not-browsable-note" role="note">
+              This directory is outside the browsable roots; Browse can&apos;t open it.
+            </span>
+          )}
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
           )}
