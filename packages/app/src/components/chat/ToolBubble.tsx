@@ -15,6 +15,7 @@ import { formatToolName } from './chat-utils';
 import { TodoList, parseTodoList } from './TodoList';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 import { ChildAgentEventList } from './ChildAgentEventList';
+import { ToolTerminationNote } from './ToolTerminationNote';
 
 /**
  * #4081: while a `tool_use` is streaming its input via
@@ -50,7 +51,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
    *  the detail modal needs it to route WebSearch/WebFetch results through
    *  the structured renderer, since `toolName` has already been through
    *  `formatToolName`. */
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string, toolResultTerminatedReason?: string) => void;
   /** #5517: seed + persist expand state in ChatView's id-keyed registry so
    *  it survives FlatList row recycling. */
   getInitialExpanded?: (id: string) => boolean;
@@ -116,6 +117,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const hasResult =
     message.toolResult !== undefined || (message.toolResultImages?.length ?? 0) > 0;
   const inFlight = !hasResult;
+  const terminated = hasResult && !!message.toolResultTerminatedReason;
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -126,7 +128,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool, message.toolResultTerminatedReason);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -190,7 +192,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   // *input* set by `handleToolStart` in store-core, so it never matches
   // the "Todo list (N items)..." header. Mirrors the dashboard's
   // `parseTodoList(result)` call site.
-  const todoParsed = expanded && message.tool === 'TodoWrite' && message.toolResult
+  const todoParsed = expanded && !terminated && message.tool === 'TodoWrite' && message.toolResult
     ? parseTodoList(message.toolResult)
     : null;
   // #6982: the same parse-with-fallback treatment for WebSearch/WebFetch,
@@ -200,7 +202,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   // `message.tool` so `web_search`/`web-search` match too. `null` (wrong
   // tool, no result yet, unparseable payload) falls through to the
   // existing plain-text branches below.
-  const webParsed = expanded && !todoParsed
+  const webParsed = expanded && !terminated && !todoParsed
     ? parseWebToolResult(message.tool, message.toolResult)
     : null;
   // #6391 (mobile auto-collapse): collapse a long expanded result to its head
@@ -213,7 +215,8 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
       activeOpacity={0.7}
       onPress={handlePress}
       onLongPress={!expanded && !isSelecting ? handleLongPress : undefined}
-      style={[styles.toolBubble, isSelected && styles.selectedBubble]}
+      style={[styles.toolBubble, terminated && styles.terminatedBubble, isSelected && styles.selectedBubble]}
+      testID={`tool-bubble-${message.id}`}
     >
       <View style={styles.toolHeader}>
         {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
@@ -236,6 +239,9 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
           )}
         </Text>
       </View>
+      {terminated && (
+        <ToolTerminationNote reason={message.toolResultTerminatedReason!} testID={`tool-bubble-terminated-${message.id}`} />
+      )}
       {expanded ? (
         <>
           {todoParsed ? (
@@ -284,6 +290,8 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
 
 const styles = StyleSheet.create({
   toolBubble: {
+    minHeight: 44,
+    minWidth: 44,
     backgroundColor: COLORS.backgroundTertiary,
     padding: 8,
     paddingHorizontal: 10,
@@ -292,6 +300,9 @@ const styles = StyleSheet.create({
     maxWidth: '85%',
     borderWidth: 1,
     borderColor: COLORS.backgroundCard,
+  },
+  terminatedBubble: {
+    borderColor: COLORS.accentOrange,
   },
   toolHeader: {
     flexDirection: 'row',

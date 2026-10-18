@@ -14,8 +14,9 @@ import type { ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
+import { ToolTerminationNote } from './ToolTerminationNote';
 
-export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
+export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTerminatedReason, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
   /**
@@ -30,6 +31,7 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   rawToolName?: string;
   content: string;
   toolResult?: string;
+  toolResultTerminatedReason?: string;
   toolResultTruncated?: boolean;
   toolResultImages?: ToolResultImage[];
   serverName?: string;
@@ -39,7 +41,9 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   // #6982: structured WebSearch/WebFetch render, parse-with-fallback —
   // `null` (non-web tool, absent or unparseable result) keeps the existing
   // `<Text selectable>` dump below.
-  const webParsed = parseWebToolResult(rawToolName, toolResult);
+  const hasResult = toolResult !== undefined || (toolResultImages?.length ?? 0) > 0;
+  const terminated = hasResult && !!toolResultTerminatedReason;
+  const webParsed = terminated ? null : parseWebToolResult(rawToolName, toolResult);
   return (
     <Modal
       visible={visible}
@@ -48,7 +52,7 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
       onRequestClose={onClose}
     >
       <Pressable style={styles.toolModalOverlay} onPress={onClose}>
-        <Pressable style={styles.toolModalContainer} onPress={(e) => e.stopPropagation()}>
+        <Pressable style={[styles.toolModalContainer, terminated && styles.terminatedContainer]} onPress={(e) => e.stopPropagation()}>
           <View style={styles.toolModalHeader}>
             <View style={styles.toolModalTitleContainer}>
               <Text style={styles.toolModalTitle} numberOfLines={1}>Tool: {toolName}</Text>
@@ -66,6 +70,9 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.toolModalScroll}>
+            {terminated && (
+              <ToolTerminationNote reason={toolResultTerminatedReason!} testID="tool-detail-terminated" />
+            )}
             {content ? (
               <>
                 <Text style={styles.toolModalSectionLabel}>Input</Text>
@@ -95,7 +102,7 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
                 </View>
               </>
             ) : null}
-            {toolResult != null ? (
+            {!terminated && toolResult != null ? (
               <>
                 <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
                 {webParsed ? (
@@ -128,6 +135,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.borderPrimary,
     overflow: 'hidden',
+  },
+  terminatedContainer: {
+    borderColor: COLORS.accentOrange,
   },
   toolModalHeader: {
     flexDirection: 'row',
