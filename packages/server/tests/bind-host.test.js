@@ -24,6 +24,36 @@ describe('isLoopbackHost', () => {
     assert.equal(isLoopbackHost('LOCALHOST'), true)
   })
 
+  it('accepts the hex mapped form only for a full 7f00-7fff first hextet', () => {
+    assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('::ffff:7fff:ffff'), true)
+    assert.equal(isLoopbackHost('::FFFF:7F00:1'), true)
+    assert.equal(isLoopbackHost('::ffff:7f00:0001'), true)
+    // fully expanded spellings of ::ffff:7f00:1 are the same address
+    assert.equal(isLoopbackHost('0:0:0:0:0:ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('0::ffff:7f00:1'), true)
+  })
+
+  it('does not treat short or malformed ::ffff:7f... hosts as loopback', () => {
+    // ::ffff:7f:1 is ::ffff:0.127.0.1 — not loopback
+    assert.equal(isLoopbackHost('::ffff:7f:1'), false)
+    assert.equal(isLoopbackHost('::ffff:7f'), false)
+    assert.equal(isLoopbackHost('::ffff:7f00'), false)
+    assert.equal(isLoopbackHost('::ffff:7f00:1:2'), false)
+    assert.equal(isLoopbackHost('::ffff:7fgg:1'), false)
+    // first hextet outside 7f00-7fff
+    assert.equal(isLoopbackHost('::ffff:7e00:1'), false)
+    assert.equal(isLoopbackHost('::ffff:8000:1'), false)
+    assert.equal(isLoopbackHost('::ffff:c0a8:1'), false)
+  })
+
+  it('does not treat a malformed dotted ::ffff:127. host as loopback', () => {
+    assert.equal(isLoopbackHost('::ffff:127.'), false)
+    assert.equal(isLoopbackHost('::ffff:127.0.0'), false)
+    assert.equal(isLoopbackHost('::ffff:127.0.0.1.2'), false)
+    assert.equal(isLoopbackHost('::ffff:127.example.com'), false)
+  })
+
   it('does not treat a hostname starting with 127. as loopback', () => {
     // Only valid IPv4 literals in 127.0.0.0/8 count — not arbitrary hostnames.
     assert.equal(isLoopbackHost('127.example.com'), false)
