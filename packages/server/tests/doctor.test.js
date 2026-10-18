@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
+import { createServer, Server } from 'node:net'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -18,6 +20,19 @@ import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
  * on whichever provider is configured in the developer's local
  * ~/.chroxy/config.json (which would otherwise make the suite flaky).
  */
+
+// Keep the listener open until teardown so availability cannot change between
+// selecting a port and asking doctor to check it.
+async function occupyPort(t) {
+  const server = createServer()
+  const listening = once(server, 'listening')
+  server.listen(0, '127.0.0.1')
+  await listening
+  t.after(() => new Promise((resolve, reject) => {
+    server.close(err => err ? reject(err) : resolve())
+  }))
+  return server.address().port
+}
 
 describe('runDoctorChecks', () => {
   it('returns checks array, passed boolean, and providers list', async () => {
@@ -304,17 +319,40 @@ describe('runDoctorChecks', () => {
     assert.ok(portCheck)
   })
 
-  it('accepts custom port', async () => {
-    // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
+  it('accepts custom port and warns when it is occupied', async (t) => {
+    const port = await occupyPort(t)
+    const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const portCheck = checks.find(c => c.name === 'Port')
     assert.ok(portCheck)
-    assert.ok(portCheck.message.includes('59123'))
+    assert.equal(portCheck.message, `${port} is in use (server may already be running)`)
+    assert.equal(portCheck.status, 'warn')
+  })
+
+  it('reports pass when the custom port bind succeeds', async (t) => {
+    const port = 12345
+    const listen = Server.prototype.listen
+    const calls = []
+    // Preserve a real successful bind, using an OS-assigned port rather than
+    // releasing a reserved port and racing another process to bind it again.
+    t.mock.method(Server.prototype, 'listen', function (requestedPort, host) {
+      calls.push([requestedPort, host])
+      return listen.call(this, 0, host)
+    })
+    const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+    assert.deepEqual(calls, [[port, '127.0.0.1']])
+    const portCheck = checks.find(c => c.name === 'Port')
+    assert.ok(portCheck)
+    assert.equal(portCheck.message, `${port} is available`)
     assert.equal(portCheck.status, 'pass')
   })
 
-  it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
+  it('passed is true when no failures, including an occupied port warning', async (t) => {
+    const port = await occupyPort(t)
+    const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+    const portCheck = checks.find(c => c.name === 'Port')
+    assert.ok(portCheck)
+    assert.equal(portCheck.status, 'warn')
+    assert.ok(portCheck.message.includes(String(port)))
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
