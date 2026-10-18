@@ -13,6 +13,10 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     },
+    "./notification-categories": {
+      "import": "./dist/notification-categories.js",
+      "types": "./dist/notification-categories.d.ts"
+    },
     "./schemas": {
       "import": "./dist/schemas/index.js",
       "types": "./dist/schemas/index.d.ts"

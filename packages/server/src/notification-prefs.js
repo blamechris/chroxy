@@ -57,6 +57,10 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, unlinkSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { configPath } from './config-dir.js'
+import { DEFAULT_BYPASS_CATEGORIES } from '@chroxy/protocol/notification-categories'
+
+// Preserve the existing server import surface while sharing the client default.
+export { DEFAULT_BYPASS_CATEGORIES }
 
 /**
  * Authoritative category list. MUST stay in sync with the keys of
@@ -110,21 +114,6 @@ export const ALL_CATEGORIES = Object.freeze([
 export const CATEGORY_DEFAULTS = Object.freeze(
   Object.fromEntries(ALL_CATEGORIES.map((c) => [c, true]))
 )
-
-/**
- * Categories that bypass quiet hours when no explicit override is set (#4544).
- *
- * Rationale: `permission` blocks the agent until the operator decides — if it
- * gets muted by quiet hours the agent stalls indefinitely. `activity_error`
- * surfaces crashes/tunnel drops/fatal session failures and demands operator
- * attention in the same way. Anything else (completion pings, activity
- * updates, inactivity warnings) is exactly what quiet hours is for, so it
- * stays muted by default.
- *
- * Users can opt out per-device (`bypassCategories: []`) or extend the
- * global list to silence even errors if they want.
- */
-export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(['permission', 'activity_error'])
 
 /**
  * #7080 — wire bounds mirroring `ServerNotificationPrefsSchema` in @chroxy/protocol

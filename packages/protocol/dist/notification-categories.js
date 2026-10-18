@@ -113,3 +113,13 @@ export const NOTIFICATION_CATEGORY_ORDER = Object.freeze(NOTIFICATION_CATEGORIES
  * key.
  */
 export const NOTIFICATION_CATEGORY_LABELS = Object.freeze(Object.fromEntries(NOTIFICATION_CATEGORIES.map((c) => [c.key, Object.freeze({ label: c.label, hint: c.hint })])));
+/**
+ * Categories that bypass quiet hours when no explicit override is set.
+ * Permission requests block a session until answered; session errors need
+ * operator attention. Both clients use this same default for older snapshots
+ * that omit bypassCategories. Explicit global or per-device lists replace it.
+ */
+export const DEFAULT_BYPASS_CATEGORIES = Object.freeze([
+    'permission',
+    'activity_error',
+]);

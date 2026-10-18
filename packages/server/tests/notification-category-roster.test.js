@@ -26,11 +26,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  DEFAULT_BYPASS_CATEGORIES,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
 } from '@chroxy/protocol'
-import { ALL_CATEGORIES } from '../src/notification-prefs.js'
+import { ALL_CATEGORIES, DEFAULT_BYPASS_CATEGORIES as SERVER_BYPASS, defaultPrefs, resolveBypassCategories, shouldBypassQuietHours } from '../src/notification-prefs.js'
 import { RATE_LIMITS } from '../src/push.js'
 
 const PROTOCOL_FILE = 'packages/protocol/src/notification-categories.ts'
@@ -84,5 +85,21 @@ describe('notification category roster: server <-> clients (#7429)', () => {
       assert.ok(!seen.has(c.key), `${c.key}: listed twice in ${PROTOCOL_FILE}`)
       seen.add(c.key)
     }
+  })
+})
+
+
+describe('default bypass categories: server <-> clients', () => {
+  it('preserves the server export as the shared immutable defaults', () => {
+    assert.equal(SERVER_BYPASS, DEFAULT_BYPASS_CATEGORIES)
+    assert.ok(Object.isFrozen(SERVER_BYPASS))
+  })
+
+  it('fresh preferences and absent overrides use exactly the shared set in both directions', () => {
+    const defaults = [...DEFAULT_BYPASS_CATEGORIES].sort()
+    assert.deepEqual(defaultPrefs().bypassCategories.sort(), defaults)
+    assert.deepEqual(resolveBypassCategories({}).sort(), defaults)
+    const bypassed = ALL_CATEGORIES.filter((key) => shouldBypassQuietHours({}, key)).sort()
+    assert.deepEqual(bypassed, defaults, 'daemon bypass decisions must match the client defaults exactly')
   })
 })

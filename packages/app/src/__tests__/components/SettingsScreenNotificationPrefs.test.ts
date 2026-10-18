@@ -8,11 +8,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+  DEFAULT_BYPASS_CATEGORIES as PROTOCOL_BYPASS,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS as PROTOCOL_LABELS,
   NOTIFICATION_CATEGORY_ORDER as PROTOCOL_ORDER,
 } from '@chroxy/protocol';
 import {
+  DEFAULT_BYPASS_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
 } from '../../components/settings/constants';
@@ -646,5 +648,13 @@ describe('SettingsScreen — notification-prefs capability gate (#4560)', () => 
     expect(messageHandlerSource).toMatch(
       /setServerInfo\([\s\S]{0,2000}serverCapabilities:\s*auth\.serverCapabilities,/,
     );
+  });
+});
+
+
+describe('shared default bypass categories', () => {
+  it('preserves the settings export as the shared immutable defaults', () => {
+    expect(DEFAULT_BYPASS_CATEGORIES).toBe(PROTOCOL_BYPASS);
+    expect(Object.isFrozen(DEFAULT_BYPASS_CATEGORIES)).toBe(true);
   });
 });

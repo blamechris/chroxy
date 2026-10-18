@@ -36,7 +36,7 @@ import {
 } from '@chroxy/store-core'
 import { isTauri } from '../utils/tauri'
 import { isMacPlatform } from '../utils/platform'
-import { NOTIFICATION_CATEGORY_LABELS, NOTIFICATION_CATEGORY_ORDER } from '@chroxy/protocol'
+import { DEFAULT_BYPASS_CATEGORIES, NOTIFICATION_CATEGORY_LABELS, NOTIFICATION_CATEGORY_ORDER } from '@chroxy/protocol'
 import { getTauriInvoke } from '../utils/tauri-bridge'
 import {
   getTunnelMode,
@@ -136,14 +136,6 @@ const CURRENT_DEVICE_CLEAR_CONFIRM_MESSAGE =
 // category from a newer server isn't silently hidden.
 
 /**
- * #4544: documented defaults for the quiet-hours bypass list. Mirrors
- * `DEFAULT_BYPASS_CATEGORIES` from packages/server/src/notification-prefs.js.
- * Used when a snapshot omits the field (older server, fresh install) so
- * the UI shows the right initial checkboxes.
- */
-const DEFAULT_BYPASS_CATEGORIES = ['permission', 'activity_error']
-
-/**
  * #4544: timezone picker options. The curated short-list lives in
  * `@chroxy/store-core` (#4569) so the dashboard and mobile pickers share a
  * single source of truth. We prepend the browser-resolved zone here so the
@@ -226,7 +218,7 @@ export interface SettingsPanelProps {
 function QuietHoursEditor(props: {
   window: { start: string; end: string; timezone: string } | null
   categories: Record<string, boolean>
-  bypassCategories: string[]
+  bypassCategories: readonly string[]
   onWindowChange: (w: { start: string; end: string; timezone: string } | null) => void
   onBypassChange: (categories: string[]) => void
 }) {
