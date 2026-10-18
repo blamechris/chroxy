@@ -15,6 +15,7 @@ import { formatToolName } from './chat-utils';
 import { TodoList, parseTodoList } from './TodoList';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 import { ChildAgentEventList } from './ChildAgentEventList';
+import { getToolTermination, TerminatedIcon, TerminatedNote } from './ToolTermination';
 
 /**
  * #4081: while a `tool_use` is streaming its input via
@@ -50,7 +51,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
    *  the detail modal needs it to route WebSearch/WebFetch results through
    *  the structured renderer, since `toolName` has already been through
    *  `formatToolName`. */
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string, toolResultTerminatedReason?: string) => void;
   /** #5517: seed + persist expand state in ChatView's id-keyed registry so
    *  it survives FlatList row recycling. */
   getInitialExpanded?: (id: string) => boolean;
@@ -116,6 +117,8 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const hasResult =
     message.toolResult !== undefined || (message.toolResultImages?.length ?? 0) > 0;
   const inFlight = !hasResult;
+  // #8364: same amber terminated state as ActivityGroup (shared helper).
+  const termination = getToolTermination(hasResult, message.toolResultTerminatedReason);
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -126,7 +129,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool, message.toolResultTerminatedReason);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -225,6 +228,9 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
             importantForAccessibility="no-hide-descendants"
           />
         )}
+        {termination && (
+          <TerminatedIcon termination={termination} markerId={`tool-bubble-terminated-icon-${message.id}`} />
+        )}
         <Text style={styles.senderLabelTool}>
           {message.serverName ? (
             <>
@@ -236,6 +242,12 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
           )}
         </Text>
       </View>
+      {/* #8364: always visible (not behind the expand toggle) so "cut off, check
+          before retrying" reads differently from "ran and failed" without
+          opening anything. */}
+      {termination && (
+        <TerminatedNote termination={termination} markerId={`tool-bubble-terminated-${message.id}`} style={styles.terminatedNote} />
+      )}
       {expanded ? (
         <>
           {todoParsed ? (
@@ -334,6 +346,9 @@ const styles = StyleSheet.create({
   toolResultExpand: {
     color: COLORS.accentBlue,
     fontSize: 12,
+    marginTop: 6,
+  },
+  terminatedNote: {
     marginTop: 6,
   },
   selectedBubble: {

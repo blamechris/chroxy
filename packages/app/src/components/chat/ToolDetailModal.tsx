@@ -14,8 +14,9 @@ import type { ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
+import { getToolTermination, TerminatedIcon, TerminatedNote } from './ToolTermination';
 
-export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
+export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, toolResultTerminatedReason, serverName, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
   /**
@@ -32,6 +33,8 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   toolResult?: string;
   toolResultTruncated?: boolean;
   toolResultImages?: ToolResultImage[];
+  /** #8364: the server's `terminatedReason` when the turn was terminated under this tool. */
+  toolResultTerminatedReason?: string;
   serverName?: string;
   onClose: () => void;
   onImagePress: (uri: string) => void;
@@ -39,6 +42,9 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   // #6982: structured WebSearch/WebFetch render, parse-with-fallback —
   // `null` (non-web tool, absent or unparseable result) keeps the existing
   // `<Text selectable>` dump below.
+  // #8364: a terminated tool's `toolResult` is the server's synthesized
+  // placeholder; the amber note replaces it (shared with the bubble/group).
+  const termination = getToolTermination(toolResult != null || (toolResultImages?.length ?? 0) > 0, toolResultTerminatedReason);
   const webParsed = parseWebToolResult(rawToolName, toolResult);
   return (
     <Modal
@@ -95,7 +101,15 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
                 </View>
               </>
             ) : null}
-            {toolResult != null ? (
+            {termination ? (
+              <>
+                <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result</Text>
+                <View style={styles.toolTerminatedRow}>
+                  <TerminatedIcon termination={termination} markerId="tool-detail-terminated-icon" />
+                  <TerminatedNote termination={termination} markerId="tool-detail-terminated" />
+                </View>
+              </>
+            ) : toolResult != null ? (
               <>
                 <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
                 {webParsed ? (
@@ -175,6 +189,11 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: 6,
+  },
+  toolTerminatedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   toolImageGrid: {
     flexDirection: 'row',
