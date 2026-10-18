@@ -249,19 +249,44 @@ describe('CreateSessionModal browse mode (#1585)', () => {
 })
 
 describe('CreateSessionModal not-browsable note (#8303)', () => {
-  it('shows a note under the cwd field when Browse is refused for the prefilled cwd', () => {
+  it('shows the note on open, without a Browse click, when the prefilled cwd cannot be listed', () => {
     renderModal({ initialCwd: '/srv/work' })
+    expect(mockRequestDirectoryListing).toHaveBeenCalledTimes(1)
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/srv/work')
     expect(screen.queryByTestId('cwd-browse-note')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByText('Browse...'))
     act(() => {
       capturedCallback!({ path: '/srv/work', entries: [], error: 'Access denied: directory listing is restricted to the home directory' })
     })
-    fireEvent.click(screen.getByLabelText('Cancel'))
 
     const note = screen.getByTestId('cwd-browse-note')
-    expect(note.textContent).toContain("Browse can't open this directory")
-    expect(note.textContent).toContain('restricted to the home directory')
+    expect(note.textContent).toContain("Browse can't open this directory on this server.")
+    expect(note.querySelector('[title]')?.getAttribute('title')).toContain('restricted to the home directory')
+  })
+
+  it('shows no note when the probe lists fine', () => {
+    renderModal({ initialCwd: '/srv/work' })
+    act(() => { capturedCallback!({ path: '/srv/work', entries: [{ name: 'a', isDirectory: true }], error: null }) })
+    expect(screen.queryByTestId('cwd-browse-note')).not.toBeInTheDocument()
+  })
+
+  it('does not probe when there is no prefilled cwd', () => {
+    renderModal({ initialCwd: '' })
+    expect(mockRequestDirectoryListing).not.toHaveBeenCalled()
+  })
+
+  it('a user Browse after the probe works normally and a late probe response cannot clobber it', () => {
+    renderModal({ initialCwd: '/srv/work' })
+    const probeCallback = capturedCallback!
+    fireEvent.click(screen.getByText('Browse...'))
+    expect(capturedCallback).not.toBe(probeCallback)
+    simulateListing('/srv/work', [{ name: 'projects', isDirectory: true }])
+    // a probe response straggling in afterwards (different path) is ignored by the probe
+    act(() => { probeCallback({ path: '/elsewhere', entries: [], error: 'Access denied' }) })
+    expect(screen.getByText('projects')).toBeInTheDocument()
+    expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Cancel'))
+    expect(screen.queryByTestId('cwd-browse-note')).not.toBeInTheDocument()
   })
 
   it('does not show the note when the prefilled cwd lists fine', () => {

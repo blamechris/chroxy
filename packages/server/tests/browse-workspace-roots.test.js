@@ -1,8 +1,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
 import { resolveSessionCwd, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
 import { warnIfDefaultCwdDisallowed, validateCwdAllowed } from '../src/handler-utils.js'
@@ -74,10 +74,50 @@ describe('Browse honours workspaceRoots and the default cwd (#8303)', () => {
     assert.ok(r.error && /credential/.test(r.error), r.error)
   })
 
-  it('denies the credential dir via the default cwd route too', async () => {
+  it('applies the credential-dir deny-list under the home fallback (no roots)', async () => {
     const config = { homeOverride: fakeHome }
-    const r = await list(join(fakeHome, '.ssh'), { getConfig: () => config, getDefaultCwd: () => fakeHome })
-    assert.ok(r.error)
+    const r = await list(join(fakeHome, '.ssh'), { getConfig: () => config })
+    assert.ok(r.error && /credential/.test(r.error), r.error)
+  })
+
+  it('refuses a symlink inside a root that points outside every root and $HOME', async () => {
+    symlinkSync(join(root, 'elsewhere'), join(root, 'ws', 'escape'))
+    const config = { homeOverride: fakeHome, workspaceRoots: [join(root, 'ws')] }
+    const r = await list(join(root, 'ws', 'escape'), { getConfig: () => config })
+    assert.ok(r.error && /workspace root/.test(r.error), r.error)
+    assert.deepEqual(r.entries, [])
+  })
+
+  it('answers "not found" for a missing path under a root, a denial for one outside every root', async () => {
+    const config = { homeOverride: fakeHome, workspaceRoots: [join(root, 'ws')] }
+    const inside = await list(join(root, 'ws', 'missing'), { getConfig: () => config })
+    assert.equal(inside.error, 'Directory not found')
+    const outside = await list(join(root, 'elsewhere', 'missing'), { getConfig: () => config })
+    assert.ok(outside.error && /workspace root/.test(outside.error), outside.error)
+  })
+
+  it('an unresolvable path names the workspace roots, not the home directory, when roots are set', async () => {
+    writeFileSync(join(root, 'elsewhere', 'file.txt'), 'x')
+    const config = { homeOverride: fakeHome, workspaceRoots: [join(root, 'ws')] }
+    const r = await list(join(root, 'elsewhere', 'file.txt', 'sub'), { getConfig: () => config })
+    assert.ok(r.error && /workspace roots/.test(r.error) && !/home directory/.test(r.error), r.error)
+  })
+
+  it('a blank or ~ request with roots excluding $HOME lists the first usable root', async () => {
+    const config = { homeOverride: fakeHome, workspaceRoots: [join(root, 'gone'), join(root, 'ws')] }
+    for (const req of ['', '~', null]) {
+      const r = await list(req, { getConfig: () => config })
+      assert.equal(r.error, null, `request ${JSON.stringify(req)}`)
+      assert.equal(r.path, join(root, 'ws'))
+      assert.deepEqual(r.entries.map(e => e.name), ['proj-a'])
+    }
+  })
+
+  it('an explicit $HOME request is still refused when roots exclude it', async () => {
+    const config = { homeOverride: fakeHome, workspaceRoots: [join(root, 'ws')] }
+    const r = await list(realpathSync(homedir()), { getConfig: () => config })
+    assert.ok(r.error && /workspace root/.test(r.error), r.error)
+    assert.deepEqual(r.entries, [])
   })
 })
 

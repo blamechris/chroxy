@@ -540,6 +540,9 @@ export function checkRealPathDenied(realCwd, config = null) {
  *
  * @returns {string|null} Error message or null if allowed
  */
+/** Reason returned by checkRealPathInAllowlist for the home-fallback layer. */
+export const CWD_OUTSIDE_HOME_ERROR = 'Directory must be within your home directory'
+
 export function checkRealPathInAllowlist(realCwd, config = null) {
   const home = resolveEffectiveHome(config)
   // Layer 3: explicit allowlist (opt-in, strict)
@@ -573,7 +576,7 @@ export function checkRealPathInAllowlist(realCwd, config = null) {
 
   // Layer 4: home fallback (default)
   if (!isPathWithin(realCwd, home)) {
-    return 'Directory must be within your home directory'
+    return CWD_OUTSIDE_HOME_ERROR
   }
   return null
 }

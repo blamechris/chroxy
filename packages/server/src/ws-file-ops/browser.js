@@ -4,8 +4,7 @@ import { join, resolve, normalize, relative, sep } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
-import { isPathWithin } from '../utils/path-containment.js'
-import { checkRealPathDenied, checkRealPathInAllowlist } from '../handler-utils.js'
+import { checkRealPathDenied, checkRealPathInAllowlist, CWD_OUTSIDE_HOME_ERROR } from '../handler-utils.js'
 import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
 
 const log = createLogger('ws')
@@ -31,6 +30,29 @@ const LISTING_UNRESOLVABLE_REASONS = {
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, { getConfig = () => null } = {}) {
 
   const HOME_DENIAL = 'Access denied: directory listing is restricted to the home directory'
+  const ROOTS_DENIAL = 'Access denied: directory listing is restricted to the configured workspace roots'
+
+  function configuredRoots() {
+    const roots = getConfig()?.workspaceRoots
+    return Array.isArray(roots) ? roots.filter((r) => typeof r === 'string' && r.length > 0) : []
+  }
+
+  // The denial for a path we could not canonicalise: names the boundary in force.
+  function unknownDenial() {
+    return configuredRoots().length > 0 ? ROOTS_DENIAL : HOME_DENIAL
+  }
+
+  // A blank / `~` request is the dashboard's open-at-home fallback. When $HOME is
+  // outside workspaceRoots it stays refused (one allowlist), but the request must
+  // not dead-end: list the first configured root that resolves and passes the check.
+  async function firstAllowedRoot() {
+    for (const root of configuredRoots()) {
+      let real
+      try { real = await realpath(root) } catch { continue }
+      if (!checkBrowseAllowed(real)) return real
+    }
+    return null
+  }
 
   /**
    * #8303 — Browse uses the SAME rules as Create: credential-dir deny-list,
@@ -44,7 +66,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     if (denied) return denied
     const outside = checkRealPathInAllowlist(realPath, config)
     if (!outside) return null
-    return outside === 'Directory must be within your home directory' ? HOME_DENIAL : outside
+    return outside === CWD_OUTSIDE_HOME_ERROR ? HOME_DENIAL : outside
   }
 
   /** List directories at a given path, sending a directory_listing response */
@@ -52,6 +74,8 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     let absPath = null
     try {
       const home = homedir()
+      const isHomeRequest = !requestedPath || typeof requestedPath !== 'string' ||
+        ['', '~', '~/'].includes(requestedPath.trim())
       if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
         absPath = home
       } else {
@@ -81,7 +105,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
             parentPath: null,
             entries: [],
             error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
-              'Access denied: directory listing is restricted to the home directory'),
+              unknownDenial()),
           })
           return
         }
@@ -98,7 +122,15 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           containmentUnknown = true
         }
       }
-      const denial = containmentUnknown ? HOME_DENIAL : checkBrowseAllowed(realAbsPath)
+      let denial = containmentUnknown ? unknownDenial() : checkBrowseAllowed(realAbsPath)
+      if (denial && isHomeRequest && !containmentUnknown && configuredRoots().length > 0) {
+        const rootReal = await firstAllowedRoot()
+        if (rootReal) {
+          absPath = rootReal
+          realAbsPath = rootReal
+          denial = null
+        }
+      }
       if (denial) {
         sendFn(ws, {
           type: 'directory_listing',

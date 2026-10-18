@@ -446,6 +446,23 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setName('')
       nameValRef.current = ''
     }
+    // #8303: probe the prefilled cwd once so the "Browse can't open this directory"
+    // note is there before the user clicks Browse. The probe callback only ever sets
+    // the note; handleBrowseNavigate replaces it (the store holds one callback), and
+    // a response for any other path is ignored, so it cannot clobber a user listing.
+    // Skipped under Tauri, where Browse is the native picker and never lists.
+    const inTauri = typeof window !== 'undefined' &&
+      !!(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    if (cwdValue.trim() && !inTauri) {
+      const probePath = cwdValue.trim()
+      setCwdBrowseNote(null)
+      setDirectoryListingCallback((listing: DirectoryListing) => {
+        const responsePath = listing.path || listing.parentPath || ''
+        if (!browsePathsMatch(probePath, responsePath)) return
+        setCwdBrowseNote(listing.error ? { path: probePath, message: listing.error } : null)
+      })
+      requestDirectoryListing(probePath)
+    }
   }, [open, initialCwd, existingNames, availableProviders, defaultProvider])
 
   // Keep provider in sync while modal is open: if availableProviders changes
@@ -819,7 +836,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           )}
           {cwdBrowseNote && cwdBrowseNote.path === cwd.trim() && (
             <span className="cwd-hint cwd-browse-note" role="note" data-testid="cwd-browse-note">
-              Browse can&apos;t open this directory: {cwdBrowseNote.message}
+              <span title={cwdBrowseNote.message}>Browse can&apos;t open this directory on this server.</span>
             </span>
           )}
           {currentPreset && (
