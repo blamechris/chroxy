@@ -1016,10 +1016,15 @@ export async function runDoctorChecks({
 
   // 7. Port availability
   // Same precedence `chroxy start` uses (mergeConfig): explicit flag > env PORT >
-  // config.json `port` > 8765. A blank value (`PORT=`) falls through to 8765 like
-  // start's `config.port || 8765`; anything else must be an integer in 1..65535
-  // (start rejects bad types as a fatal config warning).
-  const checkPort = merged.port === '' || merged.port == null ? 8765 : merged.port
+  // config.json `port` > 8765. Any falsy merged port (`PORT=`, config/flag/env 0)
+  // falls through to 8765 exactly like start's `config.port || 8765`
+  // (cli/server-cmd.js preflight) — start only warns (non-fatal "Invalid value")
+  // on a config port of 0. Everything else must be an integer in 1..65535. Two
+  // cases fail here because start cannot bind them either: a non-numeric string
+  // (PORT=abc, -p abc) is a fatal "Invalid type" config error in start, and an
+  // out-of-range value (70000) passes start's non-fatal warning but then crashes
+  // on listen with ERR_SOCKET_BAD_PORT.
+  const checkPort = !merged.port ? 8765 : merged.port
   if (!Number.isInteger(checkPort) || checkPort < 1 || checkPort > 65535) {
     checks.push({
       name: 'Port',

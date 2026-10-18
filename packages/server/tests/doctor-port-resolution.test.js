@@ -81,8 +81,18 @@ describe('runDoctorChecks port resolution', () => {
   })
 
   for (const [label, opts] of [
-    ['PORT=abc', { env: { PORT: 'abc' }, config: {} }],
     ['config port 0', { config: { port: 0 } }],
+    ['PORT=0', { env: { PORT: '0' }, config: {} }],
+    ['-p 0', { config: {}, port: 0 }],
+  ]) {
+    it(`${label} falls through to 8765 like start's config.port || 8765`, async () => {
+      const msg = await portRow(opts)
+      assert.ok(msg.startsWith('8765 '), msg)
+    })
+  }
+
+  for (const [label, opts] of [
+    ['PORT=abc', { env: { PORT: 'abc' }, config: {} }],
     ['config port 70000', { config: { port: 70000 } }],
     ['-p abc', { config: {}, port: 'abc' }],
   ]) {
