@@ -432,13 +432,25 @@ function pathTouchesForbiddenSubdir(absPath, home) {
 function pathTouchesConfigDir(absPath) {
   let realConfigDir
   try {
-    realConfigDir = realpathSync(configDir())
+    realConfigDir = realpathNative(configDir())
   } catch {
     // The root does not exist yet. `absPath` already resolved through
     // realpathSync, so it cannot be inside a directory that is not there.
     return false
   }
   return isPathWithin(absPath, realConfigDir)
+}
+
+/**
+ * The ONE realpath flavour for cwd-policy canonicalisation (Create + Browse).
+ * Browse resolves the requested path with fs.promises.realpath, which is the
+ * native (libuv) implementation: on Windows it expands 8.3 short names and
+ * normalises case, and on case-insensitive volumes it returns the on-disk
+ * case. The JS `realpathSync` does neither, so roots/$HOME resolved with it
+ * never matched a natively-resolved target (#8303). Keep every side native.
+ */
+function realpathNative(p) {
+  return realpathSync.native(p)
 }
 
 /**
@@ -478,7 +490,7 @@ export function validateCwdAllowed(cwd, config = null) {
   }
   let realCwd
   try {
-    realCwd = realpathSync(cwd)
+    realCwd = realpathNative(cwd)
   } catch {
     return `Cannot resolve path: ${cwd}`
   }
@@ -492,7 +504,7 @@ function resolveEffectiveHome(config) {
     ? config.homeOverride
     : homedir()
   try {
-    return realpathSync(rawHome)
+    return realpathNative(rawHome)
   } catch {
     return rawHome
   }
@@ -554,7 +566,7 @@ export function checkRealPathInAllowlist(realCwd, config = null) {
     for (const root of roots) {
       let realRoot
       try {
-        realRoot = realpathSync(root)
+        realRoot = realpathNative(root)
       } catch {
         // Configured root that doesn't resolve is a config error — skip
         // it rather than failing the whole check, but it can't match.

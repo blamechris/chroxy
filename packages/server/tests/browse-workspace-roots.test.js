@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync, symlinkSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
@@ -27,7 +27,7 @@ describe('Browse honours workspaceRoots and the default cwd (#8303)', () => {
   }
 
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-8303-')))
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-8303-')))
     fakeHome = join(root, 'home')
     mkdirSync(join(fakeHome, '.ssh'), { recursive: true })
     mkdirSync(join(root, 'ws', 'proj-a'), { recursive: true })
@@ -41,6 +41,18 @@ describe('Browse honours workspaceRoots and the default cwd (#8303)', () => {
     const top = await list(join(root, 'ws'), { getConfig: () => config })
     assert.equal(top.error, null)
     assert.deepEqual(top.entries.map(e => e.name), ['proj-a'])
+    const sub = await list(join(root, 'ws', 'proj-a'), { getConfig: () => config })
+    assert.equal(sub.error, null)
+  })
+
+  // Browse canonicalises with the native realpath (case + 8.3 short names on
+  // Windows, case on macOS); the roots and $HOME must be canonicalised the
+  // same way or no real path ever matches (Windows runner, #8303). A root
+  // spelled in a different case only differs under a case-insensitive FS.
+  it('matches a root spelled with different case to the canonical listing path', async (t) => {
+    if (!existsSync(join(root, 'WS'))) return t.skip('case-sensitive filesystem')
+    const config = { workspaceRoots: [join(root, 'WS')] }
+    assert.equal(validateCwdAllowed(join(root, 'ws', 'proj-a'), config), null)
     const sub = await list(join(root, 'ws', 'proj-a'), { getConfig: () => config })
     assert.equal(sub.error, null)
   })
@@ -124,7 +136,7 @@ describe('Browse honours workspaceRoots and the default cwd (#8303)', () => {
 describe('startup warning for a disallowed configured cwd (#8303)', () => {
   let root
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-8303w-')))
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-8303w-')))
     mkdirSync(join(root, 'ws'))
     mkdirSync(join(root, 'other'))
   })
