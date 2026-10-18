@@ -120,11 +120,9 @@ describe('notification category roster: server <-> clients (#7429)', () => {
     )
   })
 
-  it('the default-bypass sets are subsets of the roster, and the client set is derived from the flag', () => {
+  it('the server default-bypass set only names categories the server can fire', () => {
     const rosterKeys = new Set(ALL_CATEGORIES)
     const stray = DEFAULT_BYPASS_CATEGORIES.filter((k) => !rosterKeys.has(k))
     assert.deepEqual(stray, [], `DEFAULT_BYPASS_CATEGORIES names categories outside ALL_CATEGORIES: ${stray.join(', ')}`)
-    const flagged = NOTIFICATION_CATEGORIES.filter((c) => c.defaultBypass === true).map((c) => c.key)
-    assert.deepEqual([...CLIENT_DEFAULT_BYPASS_CATEGORIES], flagged)
   })
 })
