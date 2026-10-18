@@ -291,12 +291,11 @@ describe('SettingsPanel', () => {
       expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
-    it('follows the NORMALIZED provider the <select> above actually shows', () => {
+    it('hides the Default model field while the saved provider is dormant', () => {
       // The persisted defaultProvider is absent from the server's list, so the
-      // provider <select> now shows the saved value as a disabled dormant option
-      // (#8277), but the model roster still follows availableProviders[0]:
-      // reading the raw persisted value here computed the roster for a provider
-      // that by construction can never have broadcast one, and the field vanished.
+      // provider <select> shows the saved value as a disabled dormant option
+      // (#8277). The model field must not list another provider's roster
+      // (availableProviders[0]) — a pick would persist an id for the wrong provider.
       setMockState({
         defaultProvider: 'gemini',
         defaultProviderSource: 'user',
@@ -306,6 +305,18 @@ describe('SettingsPanel', () => {
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
       expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
+      expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
+    })
+
+    it('still follows the normalized provider when the override is not a user choice', () => {
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultProviderSource: 'server',
+        defaultModel: '',
+        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+        modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
       expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
     })
 
@@ -3234,6 +3245,9 @@ describe('Session Defaults dormant override + migration notice (#8277)', () => {
     expect(hint.textContent).toMatch(/codex/i)
     expect(hint.textContent).toMatch(/does not offer/i)
     const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+    expect(hint.id).toBe('default-provider-dormant-hint')
+    expect(select.getAttribute('aria-describedby')).toBe(hint.id)
+    expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     expect(select.value).toBe('codex')
     expect(select.options[select.selectedIndex]!.disabled).toBe(true)
     expect(setDefaultProvider).not.toHaveBeenCalled()
@@ -3246,6 +3260,32 @@ describe('Session Defaults dormant override + migration notice (#8277)', () => {
     })
     render(<SettingsPanel isOpen onClose={vi.fn()} />)
     expect(screen.queryByTestId('default-provider-dormant')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Default provider').hasAttribute('aria-describedby')).toBe(false)
+  })
+
+  it('choosing another provider from the dormant state persists it', () => {
+    const setDefaultProvider = vi.fn()
+    setMockState({
+      defaultProvider: 'codex', defaultProviderSource: 'user', setDefaultProvider,
+      availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+    })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: 'claude-cli' } })
+    expect(setDefaultProvider).toHaveBeenCalledWith('claude-cli')
+  })
+
+  it('"Server default" clears a dormant override and opening Settings writes nothing', () => {
+    const setDefaultProvider = vi.fn()
+    const setDefaultModel = vi.fn()
+    setMockState({
+      defaultProvider: 'codex', defaultProviderSource: 'user', setDefaultProvider, setDefaultModel,
+      availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+    })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    expect(setDefaultProvider).not.toHaveBeenCalled()
+    expect(setDefaultModel).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: '' } })
+    expect(setDefaultProvider).toHaveBeenCalledWith('')
   })
 
   it('shows the undismissed migration notice and dismisses through the shared action', () => {

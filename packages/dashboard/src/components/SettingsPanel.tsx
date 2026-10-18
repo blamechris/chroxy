@@ -1176,13 +1176,16 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   //    roster for a provider the server does not offer — one that by
   //    construction can never have broadcast a roster — and the field would
   //    vanish whenever the two diverge.
+  //  - while a saved override is dormant (#8277) the select shows THAT
+  //    provider, so the roster is its own — normally empty here, which hides
+  //    the field rather than offering another provider's ids.
   //  - the EVIDENCE-side read. This block produces `defaultModel`, and its
   //    consumer (`resolveCreateSessionModel`) requires the chosen provider's OWN
   //    catalog to contain the id. Offering ids from an untagged roster here
   //    would let Settings show a default that create-time silently drops.
   const availableModels = useMemo(
-    () => selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
-    [modelsByProvider, effectiveProvider],
+    () => selectOwnModelsForProvider(modelsByProvider, dormantProvider ?? effectiveProvider)?.models ?? [],
+    [modelsByProvider, dormantProvider, effectiveProvider],
   )
 
   const defaultModelChoices = useMemo(() => modelChoices(availableModels), [availableModels])
@@ -1275,6 +1278,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                 id="default-provider"
                 aria-label="Default provider"
                 value={defaultProviderSource === 'user' ? (dormantProvider ?? effectiveProvider) : ''}
+                aria-describedby={dormantProvider ? 'default-provider-dormant-hint' : undefined}
                 onChange={handleProviderChange}
               >
                 <option value="">
@@ -1300,9 +1304,9 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                 }
               </select>
               {dormantProvider && (
-                <p className="settings-hint" data-testid="default-provider-dormant">
-                  Your saved default, {PROVIDER_LABELS[dormantProvider] || dormantProvider}, is not on this
-                  server: this server does not offer it. It stays saved and applies again on a server that does.
+                <p className="settings-hint" id="default-provider-dormant-hint" data-testid="default-provider-dormant">
+                  {PROVIDER_LABELS[dormantProvider] || dormantProvider} is saved as your default but this
+                  server does not offer it. It stays saved for servers that do.
                 </p>
               )}
             </div>
