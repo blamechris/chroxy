@@ -29,6 +29,9 @@ describe('isLoopbackHost', () => {
     assert.equal(isLoopbackHost('::ffff:7fff:ffff'), true)
     assert.equal(isLoopbackHost('::FFFF:7F00:1'), true)
     assert.equal(isLoopbackHost('::ffff:7f00:0001'), true)
+    // fully expanded spellings of ::ffff:7f00:1 are the same address
+    assert.equal(isLoopbackHost('0:0:0:0:0:ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('0::ffff:7f00:1'), true)
   })
 
   it('does not treat short or malformed ::ffff:7f... hosts as loopback', () => {
