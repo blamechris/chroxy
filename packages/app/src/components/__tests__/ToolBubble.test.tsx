@@ -220,3 +220,56 @@ describe('ToolBubble — in-flight pulse marker (#4321 / #4308)', () => {
     expect(findByTestId(root, 'tool-bubble-pulse-tu-inflight')).toHaveLength(0);
   });
 });
+
+describe('ToolBubble — terminated state', () => {
+  const textOf = (root: renderer.ReactTestRenderer) =>
+    root.root.findAllByType(Text)
+      .flatMap((t) => (Array.isArray(t.props.children) ? t.props.children : [t.props.children]))
+      .filter((c): c is string => typeof c === 'string')
+      .join(' ');
+
+  const terminated = (overrides: Partial<ChatMessage> = {}) =>
+    makeToolMessage({
+      id: 'm1',
+      tool: 'Bash',
+      content: 'sleep 100',
+      toolResult: 'synthesized placeholder',
+      toolResultIsError: true,
+      toolResultTerminatedReason: 'permission_mode_switch',
+      ...overrides,
+    });
+
+  it('shows the terminated icon and the check-before-retrying note for a tool cut off by a terminated turn', () => {
+    const root = renderBubble(terminated());
+    const icon = findByTestId(root, 'tool-bubble-terminated-m1')[0];
+    expect(icon).toBeTruthy();
+    expect(icon!.props.accessibilityLabel).toBe('turn terminated');
+    expect(textOf(root)).toContain('Check whether it took effect before retrying.');
+  });
+
+  it('labels a tool whose pending permission Stop cancelled as stopped', () => {
+    const root = renderBubble(terminated({ toolResultTerminatedReason: 'user_stop_before_run' }));
+    expect(findByTestId(root, 'tool-bubble-terminated-m1')[0]!.props.accessibilityLabel).toBe('stopped');
+  });
+
+  it('passes the terminated reason to onOpenDetail so the modal can render it', () => {
+    const onOpenDetail = jest.fn();
+    let root!: renderer.ReactTestRenderer;
+    act(() => {
+      root = renderer.create(
+        <ToolBubble message={terminated()} isSelected={false} isSelecting={false} onToggleSelection={() => {}} onOpenDetail={onOpenDetail} />,
+      );
+    });
+    tapToExpand(root);
+    tapToExpand(root);
+    expect(onOpenDetail.mock.calls[0]![7]).toBe('permission_mode_switch');
+  });
+
+  it('control: a plain failed tool and a pending tool show no terminated state', () => {
+    const failed = renderBubble(terminated({ toolResultTerminatedReason: undefined }));
+    expect(findByTestId(failed, 'tool-bubble-terminated-m1')).toHaveLength(0);
+    const pending = renderBubble(terminated({ toolResult: undefined }));
+    expect(findByTestId(pending, 'tool-bubble-terminated-m1')).toHaveLength(0);
+    expect(textOf(failed)).not.toContain('Check whether it took effect');
+  });
+});
