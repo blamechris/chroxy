@@ -3379,6 +3379,11 @@ describe('@chroxy/protocol schemas', () => {
         const reply = ServerMessageSchema.safeParse(base)
         assert.ok(reply.success)
         assert.equal(reply.data.kind, undefined)
+        // An older client's schema does not know the field at all: a frame carrying a key the schema
+        // does not declare must still parse, with the key dropped (the schema is not strict).
+        const unknown = ServerMessageSchema.safeParse({ ...base, kind: 'thinking', someFutureField: 1 })
+        assert.ok(unknown.success, JSON.stringify(unknown.error?.issues))
+        assert.ok(!('someFutureField' in unknown.data), 'an unrecognised key is ignored, not carried or rejected')
         // Bounded like the other short tags.
         assert.ok(!ServerMessageSchema.safeParse({ ...base, kind: 'x'.repeat(33) }).success)
       })

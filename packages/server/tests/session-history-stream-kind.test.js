@@ -48,7 +48,10 @@ function replayFrames(mgr, sid) {
   return frames
 }
 
-/** Record a complete stream through the manager's own history, as a session's events would. */
+/**
+ * Record a complete stream through the manager's own history, as a session's events would.
+ * `mgr._history.recordHistory` stands in for the session event wiring.
+ */
 function recordStream(mgr, sid, messageId, text, { thinking }) {
   const flag = thinking ? { thinking: true } : {}
   mgr._history.recordHistory(sid, 'stream_start', { messageId, ...flag })
