@@ -45,7 +45,7 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   // #8364: a terminated tool's `toolResult` is the server's synthesized
   // placeholder; the amber note replaces it (shared with the bubble/group).
   const termination = getToolTermination(toolResult != null || (toolResultImages?.length ?? 0) > 0, toolResultTerminatedReason);
-  const webParsed = termination ? null : parseWebToolResult(rawToolName, toolResult);
+  const webParsed = parseWebToolResult(rawToolName, toolResult);
   return (
     <Modal
       visible={visible}
@@ -192,7 +192,7 @@ const styles = StyleSheet.create({
   },
   toolTerminatedRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 6,
   },
   toolImageGrid: {

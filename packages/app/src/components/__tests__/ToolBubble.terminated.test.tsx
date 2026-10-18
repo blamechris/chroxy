@@ -1,7 +1,7 @@
 /**
  * The lone chat ToolBubble must show the same amber "terminated" state that
  * ActivityGroup shows for a tool cut off by a terminated turn, instead of
- * rendering as a plain (or red-failed) tool with the raw synthesized result.
+ * rendering as an ordinary tool with no sign it was cut off.
  */
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
