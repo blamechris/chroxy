@@ -274,17 +274,18 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   `allowAutoPermissionMode` config gate and the bound-client refusal apply to a
   codex switch exactly as they do to Claude (`settings-handlers.js`), and the
   daemon advertises the gate as `auth_ok.capabilities.autoPermissionMode` so a
-  client can disable Auto with the real reason. The pre-#8619 state — Auto
-  rejected at create/restore/switch — is the history behind `#7825`. What no mode
-  covers: an action the native sandbox already authorizes runs without any RPC,
-  in Auto as in Approve, so `permissionFloor` stays `false` and the enforcement
-  reported for every codex mode is `unknown`, not `chroxy`. Codex `read-only`,
-  `workspace-write`, and `danger-full-access` are native sandbox settings reported
-  separately; they do not prove that Chroxy's prompt floor ran. A codex
-  sandbox-scope escalation (`request_permissions`) raised fresh under Auto is
-  auto-granted like any other unfloored request, while one that was already
-  pending when the session switched to Auto stays pending for a human
-  (`autoAllowPending`, #7975).
+  client can disable Auto with the real reason. (`#7825` introduced the
+  rejection of codex Auto at create/restore/switch; #8619 removed it.) What no
+  mode covers: an action the native sandbox already authorizes runs without any
+  RPC, in Auto as in Approve, so `permissionFloor` stays `false` and the
+  enforcement reported for every codex mode is `unknown`, not `chroxy`. Codex
+  `read-only`, `workspace-write`, and `danger-full-access` are native sandbox
+  settings reported separately; they do not prove that Chroxy's prompt floor
+  ran. A codex sandbox-scope escalation (`request_permissions`) always prompts,
+  fresh or pending: the auto short-circuit skips every `NOT_DELEGABLE_TOOLS`
+  member for the same reason `autoAllowPending` leaves one pending (#7975) — it
+  carries no path for the floor to see, yet a turn-scoped grant would switch
+  the `apply_patch` floor off for the rest of the turn.
 
 Permission-mode metadata reports both `supported` and `enforcement`. Current
 adapters use `chroxy`, `unsupported`, or `unknown`; Codex sandbox copy identifies

@@ -116,7 +116,7 @@ const PERMISSION_MODE_DESCRIPTIONS: Record<'default' | 'codex', Record<string, s
     acceptEdits: 'Auto-approve codex file-edit approval requests (apply_patch). Other native approval requests still prompt; sandbox-authorized actions may run without a request.',
     // #8619: mirrors handler-utils.js — codex keeps approvalPolicy `on-request`
     // in Auto, so every native approval request still reaches Chroxy's floor.
-    auto: 'Auto-approve every codex approval request that passes the protected-path / secret-read floor; floor hits still prompt (codex keeps approvalPolicy `on-request`). Sandbox-authorized actions never raise a request in any mode.',
+    auto: 'Auto-approve codex command, file-edit and connector approval requests that pass the protected-path / secret-read floor; floor hits and sandbox-scope escalation requests still prompt (codex keeps approvalPolicy `on-request`). Sandbox-authorized actions never raise a request in any mode.',
     plan: 'Not a distinct codex mode — behaves like Approve (codex has no plan enforcement).',
   },
 }
@@ -504,7 +504,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const autoUnavailableNote: string | null = selectedProviderAutoUnsupported
     ? `Auto is unavailable for ${PROVIDER_LABELS[provider] || provider}: its adapter cannot intercept protected-path or secret-read actions before execution.`
     : autoPermissionModeGateOff
-      ? 'Auto is disabled on this server: allowAutoPermissionMode is not enabled. Set allowAutoPermissionMode: true in the server config file on the dev machine (Settings → Security in the desktop app), then restart the daemon.'
+      ? 'Auto is disabled on this server: allowAutoPermissionMode is not enabled, so no session can switch to Auto. Set allowAutoPermissionMode: true in the server config file on the dev machine (Settings → Security in the desktop app), then restart the daemon.'
       : null
 
   // A mode selected for the previous provider must not survive a provider
@@ -1092,7 +1092,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               value={permissionMode}
               onChange={e => setPermissionMode(e.target.value)}
               aria-label="Permission mode"
-              aria-describedby="permission-mode-hint"
+              // #8619: the reason Auto is disabled is part of the select's
+              // description, so a screen reader announces it on focus.
+              aria-describedby={autoUnavailableNote ? 'permission-mode-hint permission-mode-auto-note' : 'permission-mode-hint'}
             >
               <option value="">Server default</option>
               {/* #4019: mode IDs come from availablePermissionModes. Labels

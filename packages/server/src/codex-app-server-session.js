@@ -2238,9 +2238,10 @@ export class CodexAppServerSession extends BaseSession {
     }
   }
 
-  // Kept defensively for old/direct callers. BaseSession now rejects Auto for
-  // this adapter before invoking the hook because Codex `never` cannot surface
-  // the protected-path floor.
+  // #3729 panic button: a switch to Auto drains the prompts already pending
+  // as allow. `autoAllowPending` leaves a floored prompt and a sandbox-scope
+  // escalation (`request_permissions`, NOT_DELEGABLE_TOOLS — #7975) pending for
+  // a human, and `approvalPolicy` stays `on-request` after the switch (#8619).
   _onPermissionModeChanged(mode) {
     if (mode === 'auto') this._permissions.autoAllowPending()
   }

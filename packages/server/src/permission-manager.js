@@ -775,7 +775,16 @@ export class PermissionManager extends EventEmitter {
     // still emits prompts because session rules and the prompt path run
     // before any mode check. #6794: the floor takes precedence — a protected
     // target still prompts even under auto.
-    if (permissionMode === 'auto' && !protectedTarget) {
+    //
+    // #8619: so does NOT_DELEGABLE_TOOLS — the one list of tools an unattended
+    // approver may never say yes to (#7975). A codex sandbox-scope escalation
+    // (`request_permissions`) carries no path field, so the floor cannot see
+    // it, yet a turn-scoped grant would switch off the only floor codex has
+    // (`apply_patch` → `changes[].path`) for the rest of the turn. Now that
+    // codex Auto keeps `approvalPolicy: 'on-request'`, this is the first path
+    // on which such a request can reach the short-circuit; it falls through to
+    // the prompt, exactly as `autoAllowPending` leaves a pending one pending.
+    if (permissionMode === 'auto' && !protectedTarget && !NOT_DELEGABLE_TOOLS.has(toolName)) {
       return Promise.resolve({ behavior: 'allow', updatedInput: input || {} })
     }
 

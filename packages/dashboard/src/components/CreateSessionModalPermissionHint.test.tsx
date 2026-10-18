@@ -411,6 +411,8 @@ describe('CreateSessionModal Auto availability + reason note (#8619)', () => {
     const note = autoNote(container)
     expect(note?.textContent).toMatch(/Auto is disabled on this server/)
     expect(note?.textContent).toMatch(/allowAutoPermissionMode: true/)
+    const select = container.querySelector('select[aria-label="Permission mode"]') as HTMLSelectElement
+    expect(select.getAttribute('aria-describedby')).toBe('permission-mode-hint permission-mode-auto-note')
     const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
     expect(auto?.disabled).toBe(true)
     expect(auto?.textContent).toBe('Auto (disabled on this server)')
@@ -436,5 +438,7 @@ describe('CreateSessionModal Auto availability + reason note (#8619)', () => {
     expect(auto?.disabled).toBe(false)
     expect(auto?.textContent).toBe('Auto')
     expect(autoNote(container)).toBeNull()
+    const select = container.querySelector('select[aria-label="Permission mode"]') as HTMLSelectElement
+    expect(select.getAttribute('aria-describedby')).toBe('permission-mode-hint')
   })
 })

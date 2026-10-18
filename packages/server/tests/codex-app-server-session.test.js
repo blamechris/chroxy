@@ -1161,7 +1161,7 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
   // accident.
   describe('unattended Auto (#8619)', () => {
     function mkAutoSession() {
-      const { s, cleanup } = mkSession({ permissionMode: 'auto' })
+      const { s, cleanup: rmTmp } = mkSession({ permissionMode: 'auto' })
       const responded = []
       s._processReady = true
       s._turnAbort = new AbortController()
@@ -1169,6 +1169,9 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
         respond: (id, r) => responded.push([id, r]),
         respondError: (id, code, message) => responded.push([id, { error: { code, message } }]),
       }
+      // destroy() first: a prompt left pending by a failing assertion carries a
+      // 5-minute timer, and a red test that then hangs reads as flake (#7340).
+      const cleanup = () => { s.destroy(); rmTmp() }
       return { s, cleanup, responded }
     }
 
@@ -1220,6 +1223,27 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
       await tick()
       assert.equal(reqs.length, 0, 'an ordinary project file does not prompt')
       assert.deepEqual(responded, [[43, { decision: 'approved' }]])
+      cleanup()
+    })
+
+    it('a sandbox-scope escalation (request_permissions) in Auto still waits for a decision (#7975 posture)', async () => {
+      const { s, cleanup, responded } = mkAutoSession()
+      const reqs = capture(s, ['permission_request'])
+      // No path field for the floor to see, yet a turn-scoped grant would
+      // authorize later writes without any fileChange RPC — so the grant is a
+      // human's to give, fresh here exactly as autoAllowPending leaves it pending.
+      s._onServerRequest({ id: 44, method: 'item/permissions/requestApproval', params: {
+        cwd: '/tmp', itemId: 'i-esc', threadId: 't1', turnId: 'turn1', startedAtMs: 0, reason: 'write hooks',
+        permissions: { fileSystem: { entries: [{ access: 'write', path: { type: 'path', path: '/tmp/.git' } }] }, network: { enabled: true } },
+      } })
+      await tick()
+      assert.equal(reqs.length, 1, 'Auto does not auto-grant a sandbox-scope escalation')
+      assert.equal(reqs[0][1].tool, 'request_permissions')
+      assert.deepEqual(responded, [], 'codex is not answered until a human decides')
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      await tick()
+      assert.equal(responded.length, 1)
+      assert.deepEqual(responded[0][1].permissions, {}, 'deny grants nothing')
       cleanup()
     })
   })
@@ -1477,6 +1501,7 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     await tick()
     assert.equal(s.permissionMode, 'auto')
     assert.deepEqual(responded, [[21, { decision: 'accept' }]], 'the pending prompt is drained as accept')
+    s.destroy() // a prompt left pending by a failing switch would otherwise hang the run on its timer
     cleanup()
   })
 

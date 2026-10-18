@@ -427,7 +427,7 @@ Chroxy's `PermissionManager` decides whether to prompt or auto-resolve:
 |---|---|---|
 | `approve` (default) | `on-request` | Every codex command / file edit prompts for your approval. |
 | `acceptEdits` | `on-request` | Codex **file edits auto-approve**; **commands still prompt**. |
-| `auto` | `on-request` | Every codex approval request that passes Chroxy's protected-path / secret-read floor is **auto-allowed** without a prompt; a floor hit still prompts. Gated by `allowAutoPermissionMode` like Claude's Auto (#8619). Switching *to* `auto` also drains pending prompts (floor hits excepted). |
+| `auto` | `on-request` | Codex command, file-edit and connector approval requests that pass Chroxy's protected-path / secret-read floor are **auto-allowed** without a prompt; a floor hit and a sandbox-scope escalation (`request_permissions`) still prompt. Gated by `allowAutoPermissionMode` like Claude's Auto (#8619). Switching *to* `auto` also drains pending prompts (floor hits and escalations excepted). |
 | `plan` | `on-request` | Not a real codex mode (codex has no plan enforcement) — behaves like `approve`. |
 
 The `CHROXY_CODEX_SANDBOX` override still applies: codex asks before any action

@@ -58,13 +58,13 @@ pre-execution seam; see §7 and `docs/security/permission-floor.md` §3). `plan`
 |---|---|---|---|---|
 | **approve** (default) | Prompt | Prompt | Prompt | Prompt |
 | **acceptEdits** | Prompt | **Auto-approve** (floor hit → prompt) | Prompt | Prompt |
-| **auto** | Auto-allow | Auto-allow (floor hit → prompt) | Auto-allow | Auto-allow |
+| **auto** | Auto-allow | Auto-allow (floor hit → prompt) | **Prompt** | Auto-allow |
 | **plan** | Prompt (= approve) | Prompt | Prompt | Prompt |
 
 Why the cells are what they are:
 - `apply_patch` is in `ACCEPT_EDITS_TOOLS`, so `acceptEdits` auto-approves Codex edits (the analogue of auto-approving Claude Write/Edit).
 - `shell`, `request_permissions`, and `mcp_elicitation` are in `NEVER_AUTO_ALLOW` — they always prompt (except under `auto`).
-- Under `auto`, `PermissionManager.handlePermission` short-circuits to allow every request that passes the protected-path / secret-read floor (`isFlooredTarget`), so Codex is answered without a prompt; a floored `apply_patch` (a `changes[].path` under `.git/`, `.claude/`, a `.env*`, key material, …) still prompts, exactly as under `acceptEdits`. The gate on *entering* `auto` is the same as Claude's: `allowAutoPermissionMode: true` in the local config, primary-token clients only.
+- Under `auto`, `PermissionManager.handlePermission` short-circuits to allow every request that passes the protected-path / secret-read floor (`isFlooredTarget`), so Codex is answered without a prompt; a floored `apply_patch` (a `changes[].path` under `.git/`, `.claude/`, a `.env*`, key material, …) still prompts, exactly as under `acceptEdits`. A `request_permissions` escalation also still prompts: it is in `NOT_DELEGABLE_TOOLS` (#7975), carries no path for the floor to see, and a turn-scoped grant would let later writes run sandbox-authorized with no `fileChange` RPC at all. The gate on *entering* `auto` is the same as Claude's: `allowAutoPermissionMode: true` in the local config, primary-token clients only.
 - **No mode sees a sandbox-authorized action.** Codex only sends a `requestApproval` for an action its sandbox would block; what the sandbox already permits runs with no RPC, in `auto` as in `approve`. That is why the codex adapter keeps `permissionFloor: false` and every codex mode reports enforcement `unknown` (§5).
 - **`mcp_elicitation`** = a connector eliciting the user (#6635), surfaced as accept/decline — the confirmation case. See §8 for what's still open (form `content`, url-mode). The connector tool *execution* (`mcpToolCall`) now renders as a `tool_start`/`tool_result` (#6684 part 4).
 
@@ -183,7 +183,7 @@ Both clients render these via the existing `PermissionPrompt` (`<tool>:
 
 - **Timeout:** a pending approval times out after the `PermissionManager` default (5 min) → resolved as deny → Codex answered with the family's deny value.
 - **Interrupt / Stop / destroy:** aborting the turn (`_turnAbort`) resolves every pending approval as deny, so Codex is always answered (never left waiting) and the turn unblocks.
-- **Switch to `auto` mid-turn:** drains pending `shell` / `apply_patch` / `mcp_elicitation` prompts as accept (the panic-button drain). A pending prompt the floor forced, and a pending `request_permissions`, are left pending for a human (#7975). The switch itself is gated like Claude's (`allowAutoPermissionMode`, primary token); `approvalPolicy` stays `on-request` after it (#8619).
+- **Switch to `auto` mid-turn:** drains pending `shell` / `apply_patch` / `mcp_elicitation` prompts as accept (the panic-button drain). A pending prompt the floor forced, and a pending `request_permissions`, are left pending for a human (#7975) — and a fresh one raised under `auto` prompts too, through the same `NOT_DELEGABLE_TOOLS` check in the auto short-circuit (#8619). The switch itself is gated like Claude's (`allowAutoPermissionMode`, primary token); `approvalPolicy` stays `on-request` after it.
 - **Switch to `acceptEdits` mid-turn:** applies to *subsequent* requests; an already-pending `apply_patch` prompt is not retroactively auto-approved.
 
 ---

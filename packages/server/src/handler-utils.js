@@ -44,7 +44,7 @@ const MODE_DESCRIPTIONS = {
     // #8619: codex keeps approvalPolicy `on-request` in Auto (never `never`), so
     // every native approval request still reaches Chroxy's floor; the sandbox
     // gap is the same in every mode and is stated here rather than implied.
-    auto: 'Auto-approve every codex approval request that passes the protected-path / secret-read floor; floor hits still prompt (codex keeps approvalPolicy `on-request`). Sandbox-authorized actions never raise a request in any mode.',
+    auto: 'Auto-approve codex command, file-edit and connector approval requests that pass the protected-path / secret-read floor; floor hits and sandbox-scope escalation requests still prompt (codex keeps approvalPolicy `on-request`). Sandbox-authorized actions never raise a request in any mode.',
     plan: 'Not a distinct codex mode — behaves like Approve (codex has no plan enforcement).',
   },
 }
