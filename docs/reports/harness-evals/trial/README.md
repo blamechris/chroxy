@@ -10,12 +10,12 @@ prompts: [`graders/`](graders/). This file is the step list and the live status.
 | T0 (base SHA) | the squash-merge commit of the PR that last changed this row (re-cut after the dry-run findings landed, so the clones carry the corrected rules); the four run bases `trial/a1-cd`, `trial/b2-cy-codex`, `trial/a2-cy-claude`, `trial/b1-cx` fast-forward to it, and an existing clone follows with `git pull --ff-only` — verify with `git merge-base origin/trial/a1-cd origin/main`. The three `trial/dry-*` branches keep their evidence and stay on the previous cut |
 | Queue | set 2026-10-17, 10 issues — see [`queue.md`](queue.md) |
 | Sealed key | sealed 2026-10-17T23:17Z; SHA-256 committed in [`KEY-COMMITMENT.md`](KEY-COMMITMENT.md) |
-| Run 1 `A1-cd` | base re-cut from T0 once this row's PR merges; then waits for the four clones, the `Trial-Closes:` scratch check and the owner's "starting A1-cd" |
+| Run 1 `A1-cd` | **started 2026-10-18T04:08Z** in the Claude desktop app 2.42304.0 (e7f60e), Opus 5.5 / high, unattended; 12-hour cap ends 16:08Z the same day; clone `~/trial/a1-cd` at T0 |
 | Run 2 `B2-cy-codex` | blocked until #8619 is merged and the daemon updated, and the PATH codex binary is upgraded (#8609); if that is not done when run 1 ends, B2 moves to last (order A1, A2, B1, B2) |
 | Run 3 `A2-cy-claude` | not started |
 | Run 4 `B1-cx` | not started |
 | Dry runs | 3 of 3 complete 2026-10-18 — see [`DRY-RUNS.md`](DRY-RUNS.md); vault rule narrowed and permission-mode control added as a result |
-| `Trial-Closes:` scratch check | pending — owner, before run 1 (step 5) |
+| `Trial-Closes:` scratch check | done 2026-10-18T03:55Z — `Trial-Closes: 8630` added to the body of merged dry PR 8621; scratch issue 8630 stayed open with no cross-reference and no closing link, then closed by hand |
 | Grading | not started |
 
 ## Who can do what
@@ -90,9 +90,9 @@ local Claude session in the chroxy checkout.
    and lists blockers. Fix blockers before run 1 (step 8); if a fix lands on
    `main` after the bases were cut, step 6 re-cuts them. Keep the dry branches
    until the trial report is written; they are its evidence. **The three dry
-   runs are done (2026-10-18, see [`DRY-RUNS.md`](DRY-RUNS.md)); the
-   `Trial-Closes:` scratch-issue check has not been performed yet and happens
-   before run 1.**
+   runs are done (2026-10-18, see [`DRY-RUNS.md`](DRY-RUNS.md)), and the
+   `Trial-Closes:` scratch-issue check was done 2026-10-18T03:55Z (status
+   table above).**
 6. **[supervisor, on the owner's explicit go] Cut the bases.** Only after this
    package has merged, since the clones must contain the missions. T0 is the
    `main` commit the bases are cut from; the missions do not bake it in (a
