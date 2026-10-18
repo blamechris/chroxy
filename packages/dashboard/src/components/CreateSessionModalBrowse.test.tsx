@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 
+let mockPathCheck: { path: string; error: string | null } | null = null
 let capturedCallback: ((listing: Record<string, unknown>) => void) | null = null
 const mockRequestDirectoryListing = vi.fn()
 const mockSetDirectoryListingCallback = vi.fn((cb: unknown) => {
@@ -15,7 +16,7 @@ const mockSetDirectoryListingCallback = vi.fn((cb: unknown) => {
 })
 
 vi.mock('../hooks/usePathAutocomplete', () => ({
-  usePathAutocomplete: () => ({ suggestions: [] }),
+  usePathAutocomplete: () => ({ suggestions: [], pathCheck: mockPathCheck }),
 }))
 
 vi.mock('../store/connection', () => ({
@@ -33,6 +34,7 @@ import { CreateSessionModal, type CreateSessionModalProps } from './CreateSessio
 
 afterEach(() => {
   cleanup()
+  mockPathCheck = null
   capturedCallback = null
   mockRequestDirectoryListing.mockClear()
   mockSetDirectoryListingCallback.mockClear()
@@ -245,5 +247,21 @@ describe('CreateSessionModal browse mode (#1585)', () => {
 
     // Name should NOT change because it was manually edited
     expect(nameInput.value).toBe('My Custom Name')
+  })
+})
+
+
+describe('prefilled directory note', () => {
+  it('shows a one-line note before Browse when the server refuses the prefill', () => {
+    mockPathCheck = { path: '/outside', error: 'Access denied' }
+    renderModal({ initialCwd: '/outside' })
+    expect(screen.getByRole('status')).toHaveTextContent('Prefilled directory is not browsable: Access denied')
+    fireEvent.change(screen.getByLabelText('Working directory'), { target: { value: '/allowed' } })
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+  it('shows no warning for a browsable prefill', () => {
+    mockPathCheck = { path: '/allowed', error: null }
+    renderModal({ initialCwd: '/allowed' })
+    expect(screen.queryByText(/Prefilled directory is not browsable/)).not.toBeInTheDocument()
   })
 })

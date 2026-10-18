@@ -213,14 +213,15 @@ async function unresolvedLinkTarget(cursor, stepOver) {
  * cycle (ELOOP), or any walk that cannot finish, answers `false`.
  *
  * @param {string} absPath - Absolute path whose `realpath()` failed
- * @param {string|null} rootReal - The boundary, already a real path; `null`
+ * @param {string|Function|null} rootReal - The boundary, already a real path, or a canonical-path predicate; `null`
  *   (it could not be resolved) is never "within"
  * @returns {Promise<boolean>}
  */
 export async function isUnresolvablePathWithin(absPath, rootReal) {
   if (!rootReal) return false
   try {
-    return isPathWithin(await deepestAncestorWalk(absPath, STEP_OVER_UNSEEABLE), rootReal)
+    const canonical = await deepestAncestorWalk(absPath, STEP_OVER_UNSEEABLE)
+    return typeof rootReal === 'function' ? rootReal(canonical) : isPathWithin(canonical, rootReal)
   } catch {
     return false
   }
@@ -236,7 +237,7 @@ export async function isUnresolvablePathWithin(absPath, rootReal) {
  *
  * @param {NodeJS.ErrnoException} err - The failure from the first `realpath()`
  * @param {string} absPath - The path that failed to resolve
- * @param {string|null} rootReal - The handler's boundary, already a real path
+ * @param {string|Function|null} rootReal - The handler's canonical root or canonical-path predicate
  * @param {Record<string, string>} reasons - In-boundary text by error code
  * @param {string} denial - The handler's usual "Access denied: …" text
  * @returns {Promise<string>}

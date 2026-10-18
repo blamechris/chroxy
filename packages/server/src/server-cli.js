@@ -1,3 +1,4 @@
+import { validateCwdAllowed } from './handler-utils.js'
 import {
   SessionManager,
   ProviderBinaryNotFoundError,
@@ -647,6 +648,13 @@ export function formatStartupSkillPolicyDiagnostic(diagnostics) {
   return `Runtime skills: allowlist=${allowlist.effective} (source: ${allowlist.source}${providers}); trust=${trust.effective} (source: ${trust.source})`
 }
 
+/** Warn without changing the established blank-cwd inheritance behavior. */
+export function warnInvalidDefaultCwd(config = {}, logger = log) {
+  if (!config.cwd) return
+  const error = validateCwdAllowed(config.cwd, config)
+  if (error) logger.warn(`Configured default cwd cannot be browsed or explicitly selected: ${error}. Sessions with a blank cwd still inherit this directory.`)
+}
+
 /**
  * Construct the daemon SessionManager with its resolved runtime-skill policy.
  * Tests use this same production factory so removing the final constructor
@@ -657,6 +665,7 @@ export function formatStartupSkillPolicyDiagnostic(diagnostics) {
  * @returns {{ sessionManager: SessionManager, startupSkillPolicy: object }}
  */
 export function createDaemonSessionManager(config, sessionManagerOptions) {
+  warnInvalidDefaultCwd(config)
   const startupSkillPolicy = resolveStartupSkillPolicy(config)
   const sessionManager = new SessionManager({
     ...sessionManagerOptions,

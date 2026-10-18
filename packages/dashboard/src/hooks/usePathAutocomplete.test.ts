@@ -152,3 +152,34 @@ describe('usePathAutocomplete', () => {
     expect(result.current.suggestions).toEqual([])
   })
 })
+
+
+describe('prefilled directory check', () => {
+  it('checks the exact prefilled directory separately from its parent', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/outside/project', '/outside/project'))
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/outside/project')
+    act(() => capturedCallback?.({ path: '/outside', entries: [], error: 'Access denied' }))
+    expect(result.current.pathCheck).toBeNull()
+    act(() => capturedCallback?.({ path: '/outside/project', entries: [], error: 'Access denied' }))
+    expect(result.current.pathCheck).toEqual({ path: '/outside/project', error: 'Access denied' })
+  })
+  it('accepts an allowed prefill even when its parent cannot be browsed', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/workspace/root', '/workspace/root'))
+    act(() => { vi.advanceTimersByTime(200) })
+    act(() => capturedCallback?.({ path: '/workspace/root', entries: [], error: null }))
+    act(() => capturedCallback?.({ path: '/workspace', entries: [], error: 'Access denied' }))
+    expect(result.current.pathCheck).toEqual({ path: '/workspace/root', error: null })
+  })
+  it('checks the inherited default when input is blank and suspends during Browse', () => {
+    const { result, rerender } = renderHook(({ enabled }) => usePathAutocomplete('', '/default', enabled), { initialProps: { enabled: true } })
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/default')
+    act(() => capturedCallback?.({ path: '/default', entries: [], error: 'Access denied' }))
+    expect(result.current.pathCheck?.error).toBe('Access denied')
+    mockRequestDirectoryListing.mockClear()
+    rerender({ enabled: false })
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(mockRequestDirectoryListing).not.toHaveBeenCalled()
+  })
+})

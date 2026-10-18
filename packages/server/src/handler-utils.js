@@ -483,6 +483,16 @@ export function validateCwdAllowed(cwd, config = null) {
     return `Cannot resolve path: ${cwd}`
   }
 
+  return validateResolvedCwdAllowed(realCwd, config)
+}
+
+/**
+ * Shared cwd policy for an already canonical absolute path. Unlike
+ * validateCwdAllowed this does not require the target to exist: directory
+ * browsing uses it only to classify errors without exposing outside paths.
+ * Callers must canonicalize existing targets before applying this policy.
+ */
+export function validateResolvedCwdAllowed(realCwd, config = null) {
   // Layer 2: credential-directory deny-list (always active).
   // `homeOverride` exists so tests can use a hermetic fake home
   // directory instead of creating throwaway dirs under the user's

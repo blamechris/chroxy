@@ -33,7 +33,8 @@ export function splitPath(input: string): { parent: string; partial: string } {
 
 const DEBOUNCE_MS = 200
 
-export function usePathAutocomplete(input: string) {
+export function usePathAutocomplete(input: string, checkedPath = '', enabled = true) {
+  const [pathCheck, setPathCheck] = useState<{ path: string; error: string | null } | null>(null)
   const [suggestions, setSuggestions] = useState<string[]>([])
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
@@ -44,14 +45,15 @@ export function usePathAutocomplete(input: string) {
   inputRef.current = input
 
   const handleListing = useCallback((listing: DirectoryListing) => {
+    const responsePath = listing.path || listing.parentPath || ''
+    if (checkedPath && responsePath.replace(/\/+$/, '') === checkedPath.replace(/\/+$/, '')) {
+      setPathCheck({ path: checkedPath, error: listing.error || null })
+    }
+    // The exact prefill check and autocomplete share the existing response
+    // callback. A check reply must never replace parent-directory suggestions.
+    if (responsePath && lastParentRef.current && responsePath !== lastParentRef.current) return
     if (listing.error || !listing.entries) {
       setSuggestions([])
-      return
-    }
-
-    // Guard against out-of-order responses — only accept listings matching the last request
-    const responsePath = listing.path || listing.parentPath || ''
-    if (responsePath && lastParentRef.current && responsePath !== lastParentRef.current) {
       return
     }
 
@@ -66,19 +68,13 @@ export function usePathAutocomplete(input: string) {
       })
 
     setSuggestions(dirs)
-  }, [])
+  }, [checkedPath])
 
   useEffect(() => {
-    if (!input || input.length < 2) {
-      setSuggestions([])
-      setDirectoryListingCallback(null)
-      return
-    }
-
+    setPathCheck(null)
+    if (!enabled) return
     const { parent } = splitPath(input)
-
-    // Need at least a parent directory to query
-    if (!parent) {
+    if ((!input || input.length < 2 || !parent) && !checkedPath) {
       setSuggestions([])
       setDirectoryListingCallback(null)
       return
@@ -93,18 +89,19 @@ export function usePathAutocomplete(input: string) {
     debounceRef.current = setTimeout(() => {
       lastParentRef.current = queryPath
       setDirectoryListingCallback(handleListing)
-      requestDirectoryListing(queryPath)
+      if (queryPath) requestDirectoryListing(queryPath)
+      if (checkedPath && checkedPath !== queryPath) requestDirectoryListing(checkedPath)
     }, DEBOUNCE_MS)
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [input, handleListing, requestDirectoryListing, setDirectoryListingCallback])
+  }, [input, checkedPath, enabled, handleListing, requestDirectoryListing, setDirectoryListingCallback])
 
   // Cleanup callback on unmount
   useEffect(() => {
     return () => setDirectoryListingCallback(null)
   }, [setDirectoryListingCallback])
 
-  return { suggestions }
+  return { suggestions, pathCheck }
 }

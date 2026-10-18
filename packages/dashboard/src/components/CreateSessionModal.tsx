@@ -370,7 +370,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const cwdValRef = useRef('')
 
   // Autocomplete suggestions from server
-  const { suggestions: autocompleteSuggestions } = usePathAutocomplete(cwd)
+  const prefilledCwd = initialCwd || defaultCwd || ''
+  const { suggestions: autocompleteSuggestions, pathCheck } = usePathAutocomplete(cwd, prefilledCwd, open && !browsing)
+  const prefilledCwdError = pathCheck?.path === prefilledCwd && (cwd === prefilledCwd || !cwd)
+    ? pathCheck.error
+    : null
 
   // Merge autocomplete with known cwds, deduplicate and sort
   const suggestions = useMemo(() => {
@@ -807,7 +811,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Browse...
             </button>
           </div>
-          {cwd && !suggestions.includes(cwd) && (
+          {prefilledCwdError && (
+            <span className="cwd-hint" role="status">Prefilled directory is not browsable: {prefilledCwdError}</span>
+          )}
+          {!prefilledCwdError && cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
           )}
           {currentPreset && (
