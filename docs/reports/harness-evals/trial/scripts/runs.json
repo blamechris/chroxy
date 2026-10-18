@@ -25,6 +25,14 @@
       "invocation": "In the Chroxy dashboard: New Session → provider Claude (SDK) → model claude-opus-5-5 → effort high → worktree isolation off (the clone is already isolated) → working directory = the run's clone. First message:\n\n```\n/prime-directive \"Trial run A2-cy-claude: follow docs/reports/harness-evals/trial/missions/A2-cy-claude.md exactly\"\n```\n\nIf the slash command is not recognised, send: `Invoke the prime-directive skill with the argument: Trial run A2-cy-claude: follow docs/reports/harness-evals/trial/missions/A2-cy-claude.md exactly` and note \"invocation: natural-language skill call\" in the run report.\n\nPermission mode: Auto (the dashboard header dropdown; needs `allowAutoPermissionMode: true` in the daemon config). The dashboard's default model is Sonnet 5.5: confirm the header shows Opus 5.5 and the thinking level shows high before sending."
     },
     {
+      "id": "A2b-cy-claude",
+      "harness": "CY — Chroxy session, claude-sdk provider",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "base": "trial/a2b-cy-claude",
+      "invocation": "In the Chroxy dashboard: New Session → provider Claude (SDK) → model claude-opus-5-5 → worktree isolation off (the clone is already isolated) → working directory = the run's clone. Effort is not set from the dashboard: the header's thinking level sets a `maxThinkingTokens` budget, not Claude Code's effort level, and at Auto it sets none, so leave it at Auto. Before the session is created, save the level in the user settings so the SDK session inherits it: `~/.claude/settings.json` → `modelSettings` → `claude-opus-5-5` → `effortLevel: \"high\"`, and confirm it with `grep -A3 modelSettings ~/.claude/settings.json`. First message:\n\n```\n/prime-directive \"Trial run A2b-cy-claude: follow docs/reports/harness-evals/trial/missions/A2b-cy-claude.md exactly\"\n```\n\nIf the slash command is not recognised, send: `Invoke the prime-directive skill with the argument: Trial run A2b-cy-claude: follow docs/reports/harness-evals/trial/missions/A2b-cy-claude.md exactly` and note \"invocation: natural-language skill call\" in the run report.\n\nPermission mode: Auto (the dashboard header dropdown; needs `allowAutoPermissionMode: true` in the daemon config). The dashboard's default model is Sonnet 5.5: confirm the header shows Opus 5.5 before sending. The daemon's auto-deploy agent must be unloaded for the whole run (`MAC-BOOTSTRAP.md`, step 9)."
+    },
+    {
       "id": "B1-cx",
       "harness": "CX — Codex desktop app in a fresh clone",
       "model": "gpt-6-astra",
