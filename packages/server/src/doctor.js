@@ -43,6 +43,9 @@ const log = createLogger('doctor')
 const __filename = fileURLToPath(import.meta.url)
 const SERVER_PKG_DIR = dirname(dirname(__filename))
 
+// Port `chroxy start` binds when neither flag, env nor config names one.
+const DEFAULT_PORT = 8765
+
 // Honor CHROXY_CONFIG_DIR (the repo-wide convention — connection-info.js,
 // models.js, etc.) so the config read resolves to the same dir as every other
 // reader. Without this, doctor read the REAL ~/.chroxy in tests despite
@@ -565,7 +568,8 @@ export function checkUserLevelChroxyHook({ settingsPath } = {}) {
  * warned about missing `codex` or `OPENAI_API_KEY` (issue #2951).
  *
  * @param {Object} [options]
- * @param {number} [options.port] - Port to test availability for
+ * @param {number} [options.port] - Port to test availability for. When omitted, resolved from
+ *   PORT env / config.json `port` / the 8765 default via mergeConfig (same as `chroxy start`)
  * @param {string[]} [options.providers] - Override configured providers (mainly for tests)
  * @param {boolean} [options.verbose]
  * @param {string} [options.pkgDir] - Override directory used to locate node_modules for the
@@ -1010,8 +1014,16 @@ export async function runDoctorChecks({
     }
   }
 
-  // 7. Port availability
-  const checkPort = port || 8765
+  // 7. Port availability. Resolved with the SAME merge `chroxy start` runs
+  // (mergeConfig: explicit flag > PORT env > config.json `port` > 8765 default),
+  // so doctor probes the port start would actually bind rather than always 8765.
+  // A caller-supplied `port` (doctor's -p flag, or start's already-merged port)
+  // is the CLI tier. `|| DEFAULT_PORT` keeps the previous falsy-port fallback.
+  const checkPort = mergeConfig({
+    fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
+    cliOverrides: port !== undefined ? { port } : {},
+    defaults: { port: DEFAULT_PORT },
+  }).port || DEFAULT_PORT
   try {
     await checkPortAvailable(checkPort)
     checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
