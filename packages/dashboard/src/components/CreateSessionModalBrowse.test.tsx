@@ -68,6 +68,11 @@ function simulateListing(path: string, entries: { name: string; isDirectory: boo
   })
 }
 
+function lastBrowseRequestId(): string | undefined {
+  const calls = mockRequestDirectoryListing.mock.calls
+  return calls[calls.length - 1]?.[1]
+}
+
 describe('CreateSessionModal browse mode (#1585)', () => {
   it('clicking Browse opens DirectoryBrowser', () => {
     renderModal()
@@ -88,7 +93,7 @@ describe('CreateSessionModal browse mode (#1585)', () => {
     renderModal({ initialCwd: '/home/user/projects' })
     fireEvent.click(screen.getByText('Browse...'))
 
-    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/home/user/projects')
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/home/user/projects', expect.any(String))
     expect(mockSetDirectoryListingCallback).toHaveBeenCalled()
   })
 
@@ -230,7 +235,7 @@ describe('CreateSessionModal browse mode (#1585)', () => {
     // Click on a directory entry to navigate into it
     fireEvent.click(screen.getByText('projects'))
 
-    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/home/user/projects')
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/home/user/projects', expect.any(String))
   })
 
   it('does not auto-rename when user manually edited name before browsing', () => {
@@ -251,6 +256,62 @@ describe('CreateSessionModal browse mode (#1585)', () => {
 
     // Name should NOT change because it was manually edited
     expect(nameInput.value).toBe('My Custom Name')
+  })
+})
+
+describe('Browse reply correlation', () => {
+  it.each([null, 'Access denied'])('settles a normalized reply with error %s', (error) => {
+    renderModal({ initialCwd: '/workspace/../sibling/' })
+    fireEvent.click(screen.getByText('Browse...'))
+    const requestId = lastBrowseRequestId()
+    act(() => capturedCallback?.({ path: '/sibling', requestId, entries: [], error }))
+
+    expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
+    expect(requestId).toEqual(expect.any(String))
+    if (error) expect(screen.getByRole('alert')).toHaveTextContent(error)
+    else {
+      fireEvent.click(screen.getByLabelText('Select'))
+      expect(screen.getByLabelText('Working directory')).toHaveValue('/sibling')
+    }
+  })
+
+  it('ignores an earlier nonce even when the response path matches the current navigation', () => {
+    renderModal()
+    fireEvent.click(screen.getByText('Browse...'))
+    const firstId = lastBrowseRequestId()
+    simulateListing('/home/user', [{ name: 'projects', isDirectory: true }])
+    fireEvent.click(screen.getByText('projects'))
+    const currentId = lastBrowseRequestId()
+
+    act(() => capturedCallback?.({ path: '/home/user/projects', requestId: firstId || 'old-id', entries: [], error: 'stale error' }))
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    expect(currentId).not.toBe(firstId)
+    act(() => capturedCallback?.({ path: '/home/user/projects', requestId: currentId, entries: [], error: null }))
+    expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
+  })
+
+  it('keeps path-based compatibility for old daemons and rejects stale no-ID paths', () => {
+    renderModal({ initialCwd: '/home/user/' })
+    fireEvent.click(screen.getByText('Browse...'))
+    simulateListing('/other', [{ name: 'stale', isDirectory: true }])
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    simulateListing('/home/user', [{ name: 'projects', isDirectory: true }])
+    expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
+    expect(screen.getByText('projects')).toBeInTheDocument()
+  })
+
+  it('ignores a captured callback after cancelling and reopening Browse', () => {
+    renderModal()
+    fireEvent.click(screen.getByText('Browse...'))
+    const previousCallback = capturedCallback
+    const previousId = lastBrowseRequestId()
+    fireEvent.click(screen.getByLabelText('Cancel'))
+    fireEvent.click(screen.getByText('Browse...'))
+    act(() => previousCallback?.({ path: '/home/user', requestId: previousId, entries: [], error: 'stale error' }))
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
 
