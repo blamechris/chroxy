@@ -256,6 +256,87 @@ describe('SettingsPanel', () => {
     })
   })
 
+  describe('Default provider: dormant saved override (#8277)', () => {
+    const dormantState = (extra: Record<string, unknown> = {}) =>
+      setMockState({
+        defaultProvider: 'claude-cli',
+        defaultProviderSource: 'user',
+        serverDefaultProvider: 'codex',
+        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+        ...extra,
+      })
+
+    it('shows the stored provider as a disabled selected option instead of another provider', () => {
+      dormantState()
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+      expect(select.value).toBe('claude-cli')
+      const option = Array.from(select.options).find(o => o.value === 'claude-cli')!
+      expect(option.disabled).toBe(true)
+      expect(option.textContent).toMatch(/Claude Code \(CLI\)/)
+    })
+
+    it('says which provider new sessions use instead', () => {
+      dormantState()
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.getByTestId('default-provider-dormant-hint').textContent).toBe(
+        "Saved default Claude Code (CLI) isn't offered by this server; new sessions use Codex (CLI)",
+      )
+    })
+
+    it('persists nothing until the user picks a new value', () => {
+      const setDefaultProvider = vi.fn()
+      dormantState({ setDefaultProvider })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(setDefaultProvider).not.toHaveBeenCalled()
+      fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: 'claude-sdk' } })
+      expect(setDefaultProvider).toHaveBeenCalledWith('claude-sdk')
+    })
+
+    it('shows no hint and no extra option when the stored provider is offered', () => {
+      dormantState({ defaultProvider: 'claude-sdk' })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('default-provider-dormant-hint')).not.toBeInTheDocument()
+      const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+      expect(select.value).toBe('claude-sdk')
+      expect(Array.from(select.options).filter(o => o.disabled)).toHaveLength(0)
+    })
+
+    it('shows no hint when the default is inherited, even if the inherited name is unlisted', () => {
+      dormantState({ defaultProviderSource: 'server' })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('default-provider-dormant-hint')).not.toBeInTheDocument()
+    })
+
+    it('shows no hint before the server has reported its providers', () => {
+      dormantState({ availableProviders: [] })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('default-provider-dormant-hint')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('Session Defaults migration notice (#8277)', () => {
+    it('shows the undismissed notice and dismisses through the store', () => {
+      const dismiss = vi.fn()
+      setMockState({
+        sessionDefaultsNotice: { provider: 'claude-cli', model: 'opus-4-6' },
+        dismissSessionDefaultsNotice: dismiss,
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const notice = screen.getByTestId('session-defaults-notice')
+      expect(notice.textContent).toMatch(/Claude Code \(CLI\)/)
+      expect(notice.textContent).toMatch(/opus-4-6/)
+      fireEvent.click(screen.getByTestId('session-defaults-notice-dismiss'))
+      expect(dismiss).toHaveBeenCalledTimes(1)
+    })
+
+    it('is absent when nothing was migrated', () => {
+      setMockState({ sessionDefaultsNotice: null })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+    })
+  })
+
   describe('Default model select reads the default provider OWN roster (#7728)', () => {
     const opus = { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }
     const gpt = { id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5-2026-01' }
@@ -304,7 +385,9 @@ describe('SettingsPanel', () => {
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
-      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
+      // The select keeps showing the STORED (dormant) provider (#8277); the
+      // roster below still follows the provider new sessions will really use.
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
       expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
     })
 
