@@ -10,8 +10,8 @@ prompts: [`graders/`](graders/). This file is the step list and the live status.
 | T0 (base SHA) | the squash-merge commit of the PR that last changed this row (re-cut after the dry-run findings landed, so the clones carry the corrected rules); the four run bases `trial/a1-cd`, `trial/b2-cy-codex`, `trial/a2-cy-claude`, `trial/b1-cx` fast-forward to it, and an existing clone follows with `git pull --ff-only` — verify with `git merge-base origin/trial/a1-cd origin/main`. The three `trial/dry-*` branches keep their evidence and stay on the previous cut |
 | Queue | set 2026-10-17, 10 issues — see [`queue.md`](queue.md) |
 | Sealed key | sealed 2026-10-17T23:17Z; SHA-256 committed in [`KEY-COMMITMENT.md`](KEY-COMMITMENT.md) |
-| Run 1 `A1-cd` | **started 2026-10-18T04:08Z** in the Claude desktop app 2.42304.0 (e7f60e), Opus 5.5 / high, unattended; 12-hour cap ends 16:08Z the same day; clone `~/trial/a1-cd` at T0 |
-| Run 2 `B2-cy-codex` | blocked until #8619 is merged and the daemon updated, and the PATH codex binary is upgraded (#8609); if that is not done when run 1 ends, B2 moves to last (order A1, A2, B1, B2) |
+| Run 1 `A1-cd` | **done** — started 2026-10-18T04:07Z (first command), report PR merged 06:06:54Z; Claude desktop app 2.42304.0 (e7f60e), Claude Code 2.1.296, Opus 5.5 / high, unattended, 0 human approvals; 10 of 10 queue items merged into `trial/a1-cd` (tip `fe7ea87e`); cost `n/a` (not exposed by the desktop app); 1 security finding withheld to the owner privately; report: `runs/A1-cd/REPORT.md` on `trial/a1-cd` |
+| Run 2 `B2-cy-codex` | **ready** — #8619 merged (#8625) and the daemon runs it; PATH codex 0.163.0 matches the Codex app roster (#8609); the planned order A1, B2, A2, B1 holds; waits for the owner's "starting B2-cy-codex" |
 | Run 3 `A2-cy-claude` | not started |
 | Run 4 `B1-cx` | not started |
 | Dry runs | 3 of 3 complete 2026-10-18 — see [`DRY-RUNS.md`](DRY-RUNS.md); vault rule narrowed and permission-mode control added as a result |
