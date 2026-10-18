@@ -434,8 +434,9 @@ function pathTouchesConfigDir(absPath, realpath = realpathSync) {
   try {
     realConfigDir = realpath(configDir())
   } catch {
-    // The root does not exist yet. `absPath` already resolved through
-    // realpathSync, so it cannot be inside a directory that is not there.
+    // The root does not exist yet. `absPath` is already resolved (by the same
+    // `realpath` resolver passed in here), so it cannot be inside a directory
+    // that is not there.
     return false
   }
   return isPathWithin(absPath, realConfigDir)

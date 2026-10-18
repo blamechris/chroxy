@@ -129,6 +129,40 @@ describe('CreateSessionModal: prefilled cwd that Browse cannot open (issue 8303)
     expect(screen.getByText(NOTE)).toBeInTheDocument()
   })
 
+  it('a reply with no path sets no note', () => {
+    renderModal()
+    deliver({ parentPath: null, entries: [], error: DENIED })
+    deliver({ path: '', parentPath: null, entries: [], error: DENIED })
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
+  })
+
+  it('does not treat a trailing backslash as a separator on a POSIX path', () => {
+    renderModal({ initialCwd: '/srv/project\\' })
+    deliver({ path: '/srv/project', parentPath: null, entries: [], error: DENIED })
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
+  })
+
+  it('does not treat a reply with a trailing backslash as the same POSIX directory either', () => {
+    renderModal({ initialCwd: '/srv/project' })
+    deliver({ path: '/srv/project\\', parentPath: null, entries: [], error: DENIED })
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['a path with .. segments', '/srv/root/../outside'],
+    ['a relative path', 'rel/dir'],
+    ['a Windows path with .. segments', 'C:\\repo\\..\\other'],
+  ])('does not probe %s, so no listener is left waiting', (_label, cwd) => {
+    renderModal({ initialCwd: cwd })
+    expect(mockRequestDirectoryListing).not.toHaveBeenCalledWith(cwd)
+    expect(listeners.size).toBe(0)
+  })
+
+  it('still probes an absolute Windows path', () => {
+    renderModal({ initialCwd: 'C:\\repo' })
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('C:\\repo')
+  })
+
   it('does not probe a ~ path, and a stray denial cannot set the note for it', () => {
     renderModal({ initialCwd: '~/proj' })
     expect(mockRequestDirectoryListing).not.toHaveBeenCalledWith('~/proj')

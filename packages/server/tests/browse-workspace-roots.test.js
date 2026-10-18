@@ -268,7 +268,7 @@ describe('list_directory honours workspaceRoots and the default cwd (issue 8303)
     // every listing was refused. Browse resolves both with the native resolver;
     // these cases prove the resolver is the one threaded through, whatever the
     // platform.
-    function tagged(prefix) {
+    function tagged() {
       const seen = []
       const fn = (p) => { seen.push(p); return realpathSync.native(p) }
       fn.seen = seen

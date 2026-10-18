@@ -60,10 +60,27 @@ function basename(p: string): string {
   return p.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || p
 }
 
-/** Normalize a browse path for comparison: strip trailing slashes and backslashes. */
+/**
+ * Normalize a browse path for comparison: strip trailing separators. A trailing
+ * backslash is only a separator on a Windows-shaped path (drive letter, or
+ * backslashes and no forward slash); on a POSIX path it is part of the name, so
+ * `/srv/project\\` and `/srv/project` stay different directories.
+ */
 function normalizeBrowsePath(p: string): string {
   if (!p || p === '/') return p
-  return p.replace(/[/\\]+$/, '')
+  const windowsShaped = /^[A-Za-z]:/.test(p) || (p.includes('\\') && !p.includes('/'))
+  return p.replace(windowsShaped ? /[/\\]+$/ : /\/+$/, '')
+}
+
+/**
+ * Whether a prefilled cwd can be matched against the server's reply. The server
+ * answers with a normalised absolute path, so a relative path, a `~` path or one
+ * with `..` segments never equals its own reply; those are not probed (no
+ * listener is left waiting for a reply that cannot match).
+ */
+function isProbeablePath(p: string): boolean {
+  const absolute = p.startsWith('/') || /^[A-Za-z]:[/\\]/.test(p) || p.startsWith('\\\\')
+  return absolute && !p.split(/[/\\]/).includes('..')
 }
 
 /** Check if two browse paths refer to the same directory, accounting for server normalization. */
@@ -468,10 +485,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // after the user clicks Browse. The reply is delivered through a listener
     // path autocomplete and Browse cannot replace (they share the single
     // callback slot; autocomplete takes it over 200 ms after open, and a reply
-    // over a tunnel is often slower), and matched by exact path. A `~` path is
-    // not probed: the server answers with the expanded path, which cannot be
-    // matched to the request.
-    if (cwdValue && !cwdValue.startsWith('~')) {
+    // over a tunnel is often slower), and matched by exact path. A path the
+    // server's normalised reply cannot equal (`~`, relative, or containing `..`)
+    // is not probed.
+    if (cwdValue && isProbeablePath(cwdValue)) {
       probeUnsubRef.current = addDirectoryListingListener((listing: DirectoryListing) => {
         if (!probeReplyMatches(cwdValue, listing.path)) return
         setUnbrowsableCwd(
