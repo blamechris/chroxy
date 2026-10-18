@@ -31,6 +31,13 @@ export interface NotificationCategoryMeta {
   readonly label: string
   /** One-line explanation shown under the label. */
   readonly hint: string
+  /**
+   * True when this category bypasses a muted / quiet-hours state by default.
+   * The server's `DEFAULT_BYPASS_CATEGORIES` (notification-prefs.js) is pinned
+   * to the set derived from this flag, in both directions, by
+   * `notification-category-roster.test.js`.
+   */
+  readonly bypassByDefault?: boolean
 }
 
 /**
@@ -43,6 +50,7 @@ export interface NotificationCategoryMeta {
 export const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[] = Object.freeze([
   {
     key: 'permission',
+    bypassByDefault: true,
     label: 'Permission requests',
     hint: 'Tool-use prompts that need an allow / deny decision.',
   },
@@ -53,6 +61,7 @@ export const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[] = Obje
   },
   {
     key: 'activity_error',
+    bypassByDefault: true,
     label: 'Session errors',
     hint: 'Crashes, tunnel drops, and unrecoverable session failures.',
   },
@@ -132,3 +141,12 @@ export const NOTIFICATION_CATEGORY_LABELS: Readonly<Record<string, { label: stri
       NOTIFICATION_CATEGORIES.map((c) => [c.key, Object.freeze({ label: c.label, hint: c.hint })]),
     ),
   )
+
+/**
+ * Categories that bypass a muted / quiet state by default (derived from the
+ * `bypassByDefault` flag — never a second list). Clients use it when a
+ * snapshot omits `bypassCategories`.
+ */
+export const DEFAULT_BYPASS_CATEGORIES: readonly string[] = Object.freeze(
+  NOTIFICATION_CATEGORIES.filter((c) => c.bypassByDefault === true).map((c) => c.key),
+)
