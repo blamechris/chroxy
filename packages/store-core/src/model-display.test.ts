@@ -80,6 +80,22 @@ describe('model presentation (#8260)', () => {
     ]
     expect(modelChoices(rows).map(m => m.label)).toEqual(['Custom (pinned 1.0)', 'Custom (pinned 2.0)'])
   })
+  it('keeps a lone descriptor and adds the full target only on colliding rows', () => {
+    const rows = [
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' },
+      { id: 'gamma', fullId: 'claude-gamma-1-0', label: 'Custom' },
+      { id: 'alpha2', fullId: 'claude-alpha-2-0', label: 'Custom' },
+    ]
+    const labels = modelChoices(rows).map(m => m.label)
+    expect(labels).toEqual([
+      'Custom (claude-alpha-1-0)',
+      'Custom (claude-beta-1-0)',
+      'Custom (claude-gamma-1-0)',
+      'Custom (pinned 2.0)',
+    ])
+    expect(new Set(labels).size).toBe(labels.length)
+  })
   it('uses only the selected provider roster', () => {
     let map = mergeModelsByProvider({}, 'claude-sdk', { models, defaultModelId: 'haiku' })
     map = mergeModelsByProvider(map, 'codex', { models: [{ id: 'gpt', fullId: 'gpt', label: 'GPT' }], defaultModelId: 'gpt' })
