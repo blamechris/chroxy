@@ -417,7 +417,7 @@ function _isSecureRequest(req) {
  *   { type: 'server_shutdown', reason, restartEtaMs } — server shutting down (reason: 'restart'|'shutdown')
  *   { type: 'server_status', message, phase?, tunnelMode?, tunnelUrl?, attempt?, maxAttempts? }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category?, message, recoverable, correlationId?, sessionId? } — server-side error forwarded to app
- *   { type: 'directory_listing', path, parentPath, entries, error } — directory listing response for file browser
+ *   { type: 'directory_listing', path, parentPath, entries, error, requestId? } — directory listing response for file browser
  *   { type: 'file_listing', path, parentPath, entries, error } — file browser listing response
  *   { type: 'file_content', path, content, language, size, truncated, error, requestId? } — file content response
  *   { type: 'symbols_snapshot', path, symbols: [{ name, kind, file, line, exported }], truncated, error } — #6471 workspace symbol table (opt-in IDE, features.ide; dashboard-only v1)
