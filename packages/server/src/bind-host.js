@@ -10,6 +10,7 @@
  */
 
 import { isIPv4, isIPv6 } from 'node:net'
+import { mappedV6ToV4 } from './ssrf-guard.js'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '::1'])
 
@@ -27,8 +28,11 @@ export function isLoopbackHost(host) {
   if (LOOPBACK_HOSTS.has(h)) return true
   // 127.0.0.0/8, but only for real IPv4 literals.
   if (isIPv4(h) && h.startsWith('127.')) return true
-  // IPv4-mapped IPv6 loopback, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1.
-  if (h.startsWith('::ffff:127.') || h.startsWith('::ffff:7f')) return true
+  // IPv4-mapped IPv6 loopback, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1. Parse
+  // the whole address (both the dotted and hex tails) rather than matching a
+  // prefix, so `::ffff:7f:1` (0.127.0.1) and `::ffff:7f` are not loopback.
+  const mapped = mappedV6ToV4(h)
+  if (mapped !== null && mapped.startsWith('127.')) return true
   return false
 }
 
