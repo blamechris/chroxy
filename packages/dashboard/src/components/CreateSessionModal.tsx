@@ -336,6 +336,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [browseEntries, setBrowseEntries] = useState<DirectoryEntry[]>([])
   const [browseLoading, setBrowseLoading] = useState(false)
   const [browseError, setBrowseError] = useState<string | null>(null)
+  const browseSequenceRef = useRef(0)
+  const browseRequestRef = useRef<string | null>(null)
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
@@ -356,7 +358,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const cwdValRef = useRef('')
 
   // Autocomplete suggestions from server
-  const { suggestions: autocompleteSuggestions } = usePathAutocomplete(cwd)
+  const prefilledCwd = cwd.trim() ? (initialCwd || defaultCwd || '') : (defaultCwd || '')
+  const { suggestions: autocompleteSuggestions, pathCheck } = usePathAutocomplete(cwd, prefilledCwd, open && !browsing)
+  const prefilledCwdError = pathCheck?.path === prefilledCwd && (cwd === prefilledCwd || !cwd.trim())
+    ? pathCheck.error
+    : null
 
   // Merge autocomplete with known cwds, deduplicate and sort
   const suggestions = useMemo(() => {
@@ -394,6 +400,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // while the modal is already open would wipe the user's in-progress edits.
     const freshOpen = open && !prevOpenRef.current
     prevOpenRef.current = open
+    if (!open) browseRequestRef.current = null
     if (!freshOpen) return
 
     const cwdValue = initialCwd || ''
@@ -418,6 +425,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setShowSuggestions(false)
     setSelectedSuggestion(-1)
     setBrowsing(false)
+    browseRequestRef.current = null
     setBrowseEntries([])
     setDirectoryListingCallback(null)
     if (cwdValue) {
@@ -551,11 +559,17 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setBrowseEntries([])
     setBrowseError(null)
     const requestedPath = path
+    const requestId = `${listboxId}-browse-${++browseSequenceRef.current}`
+    browseRequestRef.current = requestId
     setDirectoryListingCallback((listing: DirectoryListing) => {
-      // Guard: ignore stale responses from previous navigations (#1584)
-      // Normalize paths before comparing — server may expand ~ or add/strip slashes (#1592)
+      if (browseRequestRef.current !== requestId) return // stale callback
       const responsePath = listing.path || listing.parentPath || ''
-      if (!browsePathsMatch(requestedPath, responsePath)) return // stale
+      // A nonce survives server normalization of relative paths and Windows
+      // aliases. Older daemons omit it and retain the existing path fallback.
+      const matchesRequest = listing.requestId
+        ? listing.requestId === requestId
+        : browsePathsMatch(requestedPath, responsePath)
+      if (!matchesRequest) return // stale
       // Update browsePath to the server's canonical path when it differs
       if (responsePath && responsePath !== requestedPath) {
         setBrowsePath(responsePath)
@@ -571,8 +585,8 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
         setBrowseEntries(listing.entries)
       }
     })
-    requestDirectoryListing(path)
-  }, [requestDirectoryListing, setDirectoryListingCallback])
+    requestDirectoryListing(path, requestId)
+  }, [listboxId, requestDirectoryListing, setDirectoryListingCallback])
 
   const handleBrowseOpen = useCallback(async () => {
     // In Tauri context, use native OS folder picker via IPC command.
@@ -611,6 +625,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setCwd(path)
     cwdValRef.current = path
     setBrowsing(false)
+    browseRequestRef.current = null
     setDirectoryListingCallback(null)
     if (!nameManuallyEdited) {
       const generated = generateDefaultName(path, existingNames)
@@ -621,6 +636,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
 
   const handleBrowseCancel = useCallback(() => {
     setBrowsing(false)
+    browseRequestRef.current = null
     setDirectoryListingCallback(null)
   }, [setDirectoryListingCallback])
 
@@ -793,7 +809,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Browse...
             </button>
           </div>
-          {cwd && !suggestions.includes(cwd) && (
+          {prefilledCwdError && (
+            <span className="cwd-hint" role="status">Prefilled directory is not browsable: {prefilledCwdError}</span>
+          )}
+          {!prefilledCwdError && cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
           )}
           {currentPreset && (

@@ -271,6 +271,7 @@ export interface DirectoryEntry {
 }
 
 export interface DirectoryListing {
+  requestId?: string;
   path: string | null;
   parentPath: string | null;
   entries: DirectoryEntry[];
@@ -2070,7 +2071,7 @@ export interface ConnectionState {
 
   // Directory listing
   setDirectoryListingCallback: (cb: ((listing: DirectoryListing) => void) | null) => void;
-  requestDirectoryListing: (path?: string) => void;
+  requestDirectoryListing: (path?: string, requestId?: string) => void;
 
   // File browser
   setFileBrowserCallback: (cb: ((listing: FileListing) => void) | null) => void;

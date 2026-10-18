@@ -49,16 +49,19 @@ function makeWs() {
 
 describe('file-handlers', () => {
   describe('list_directory', () => {
-    it('delegates to fileOps.listDirectory with the provided path', () => {
+    it('delegates to fileOps.listDirectory with the provided path and runtime cwd policy', () => {
       const ctx = makeCtx()
       const ws = makeWs()
+      ctx.services.config = { workspaceRoots: ['/some/dir'], cwd: '/some/dir' }
 
-      fileHandlers.list_directory(ws, makeClient(), { path: '/some/dir' }, ctx)
+      fileHandlers.list_directory(ws, makeClient(), { path: '/some/dir', requestId: 'check-path' }, ctx)
 
       assert.equal(ctx.services.fileOps.listDirectory.callCount, 1)
-      const [callWs, callPath] = ctx.services.fileOps.listDirectory.lastCall
+      const [callWs, callPath, callConfig, callRequestId] = ctx.services.fileOps.listDirectory.lastCall
       assert.equal(callWs, ws)
       assert.equal(callPath, '/some/dir')
+      assert.equal(callConfig, ctx.services.config)
+      assert.equal(callRequestId, 'check-path')
     })
   })
 

@@ -432,10 +432,10 @@ function pathTouchesForbiddenSubdir(absPath, home) {
 function pathTouchesConfigDir(absPath) {
   let realConfigDir
   try {
-    realConfigDir = realpathSync(configDir())
+    realConfigDir = realpathSync.native(configDir())
   } catch {
     // The root does not exist yet. `absPath` already resolved through
-    // realpathSync, so it cannot be inside a directory that is not there.
+    // native realpath, so it cannot be inside a directory that is not there.
     return false
   }
   return isPathWithin(absPath, realConfigDir)
@@ -478,11 +478,24 @@ export function validateCwdAllowed(cwd, config = null) {
   }
   let realCwd
   try {
-    realCwd = realpathSync(cwd)
+    realCwd = realpathSync.native(cwd)
   } catch {
     return `Cannot resolve path: ${cwd}`
   }
 
+  return validateResolvedCwdAllowed(realCwd, config)
+}
+
+/**
+ * Shared cwd policy for an already canonical absolute path. Unlike
+ * validateCwdAllowed this does not require the target to exist: directory
+ * browsing uses it only to classify errors without exposing outside paths.
+ * Callers must canonicalize existing targets before applying this policy.
+ */
+export function validateResolvedCwdAllowed(realCwd, config = null) {
+  // Browse uses promise realpath, which expands Windows 8.3 components.
+  // Native sync realpath gives Create and every boundary the same spelling;
+  // legacy realpathSync can preserve short names and reject the native target.
   // Layer 2: credential-directory deny-list (always active).
   // `homeOverride` exists so tests can use a hermetic fake home
   // directory instead of creating throwaway dirs under the user's
@@ -502,7 +515,7 @@ export function validateCwdAllowed(cwd, config = null) {
     : homedir()
   let home
   try {
-    home = realpathSync(rawHome)
+    home = realpathSync.native(rawHome)
   } catch {
     home = rawHome
   }
@@ -525,7 +538,7 @@ export function validateCwdAllowed(cwd, config = null) {
     for (const root of roots) {
       let realRoot
       try {
-        realRoot = realpathSync(root)
+        realRoot = realpathSync.native(root)
       } catch {
         // Configured root that doesn't resolve is a config error — skip
         // it rather than failing the whole check, but it can't match.

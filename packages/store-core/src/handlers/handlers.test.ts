@@ -3541,6 +3541,11 @@ describe('handleSessionSwitched', () => {
 // handleDirectoryListing
 // ---------------------------------------------------------------------------
 describe('handleDirectoryListing', () => {
+  it('preserves an optional request nonce without changing legacy payloads', () => {
+    expect(handleDirectoryListing({ requestId: 'check-path' }).requestId).toBe('check-path')
+    expect(handleDirectoryListing({ requestId: 7 })).not.toHaveProperty('requestId')
+  })
+
   it('extracts all fields from a valid payload', () => {
     const entries = [{ name: 'src', isDirectory: true }, { name: 'README.md', isDirectory: false }]
     expect(

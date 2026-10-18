@@ -4,7 +4,7 @@ import { join, resolve, normalize, relative, sep } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
-import { isPathWithin } from '../utils/path-containment.js'
+import { validateCwdAllowed, validateResolvedCwdAllowed } from '../handler-utils.js'
 import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
 
 const log = createLogger('ws')
@@ -30,12 +30,18 @@ const LISTING_UNRESOLVABLE_REASONS = {
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
 
   /** List directories at a given path, sending a directory_listing response */
-  async function listDirectory(ws, requestedPath) {
+  async function listDirectory(ws, requestedPath, config = null, requestId) {
+    const sendListing = (message) => {
+      if (typeof requestId === 'string') message.requestId = requestId
+      sendFn(ws, message)
+    }
     let absPath = null
     try {
-      const home = homedir()
+      const home = config?.homeOverride || homedir()
+      const denial = 'Access denied: directory is outside the allowed workspace or is a blocked credential/config directory'
+      const allowed = (path) => validateResolvedCwdAllowed(path, config) === null
       if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
-        absPath = home
+        absPath = config?.cwd && !validateCwdAllowed(config.cwd, config) ? config.cwd : home
       } else {
         const trimmed = requestedPath.trim()
         absPath = trimmed.startsWith('~')
@@ -52,18 +58,16 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         if (err.code !== 'ENOENT') {
           // #8012 — any OTHER failure (EACCES, EPERM, ENOTDIR, ELOOP, …) used
           // to skip the containment check: the outer catch answered
-          // "Permission denied" / "Not a directory" for a path outside home,
+          // "Permission denied" / "Not a directory" for a path outside the policy,
           // where a readable one answers "Access denied", and sent ELOOP's
-          // raw message with the server path in it. Only a path inside home
+          // raw message with the server path in it. Only an allowed path
           // keeps a specific message now; everything else is the denial.
-          const homeReal = await realpath(home).catch(() => null)
-          sendFn(ws, {
+          sendListing({
             type: 'directory_listing',
             path: absPath,
             parentPath: null,
             entries: [],
-            error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
-              'Access denied: directory listing is restricted to the home directory'),
+            error: await unresolvablePathError(err, absPath, allowed, LISTING_UNRESOLVABLE_REASONS, denial),
           })
           return
         }
@@ -80,15 +84,13 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           containmentUnknown = true
         }
       }
-      const homeReal = await realpath(home)
-
-      if (containmentUnknown || !isPathWithin(realAbsPath, homeReal)) {
-        sendFn(ws, {
+      if (containmentUnknown || !allowed(realAbsPath)) {
+        sendListing({
           type: 'directory_listing',
           path: absPath,
           parentPath: null,
           entries: [],
-          error: 'Access denied: directory listing is restricted to the home directory',
+          error: denial,
         })
         return
       }
@@ -101,7 +103,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
 
       const parentPath = absPath === '/' ? null : resolve(absPath, '..')
 
-      sendFn(ws, {
+      sendListing({
         type: 'directory_listing',
         path: absPath,
         parentPath,
@@ -115,7 +117,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       else if (err.code === 'ENOTDIR') errorMessage = 'Not a directory'
       else errorMessage = err.message || 'Unknown error'
 
-      sendFn(ws, {
+      sendListing({
         type: 'directory_listing',
         path: absPath || requestedPath || null,
         parentPath: null,
