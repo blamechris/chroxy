@@ -26,11 +26,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  DEFAULT_BYPASS_CATEGORIES as CLIENT_DEFAULT_BYPASS,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
 } from '@chroxy/protocol'
-import { ALL_CATEGORIES } from '../src/notification-prefs.js'
+import { ALL_CATEGORIES, DEFAULT_BYPASS_CATEGORIES } from '../src/notification-prefs.js'
 import { RATE_LIMITS } from '../src/push.js'
 
 const PROTOCOL_FILE = 'packages/protocol/src/notification-categories.ts'
@@ -84,5 +85,25 @@ describe('notification category roster: server <-> clients (#7429)', () => {
       assert.ok(!seen.has(c.key), `${c.key}: listed twice in ${PROTOCOL_FILE}`)
       seen.add(c.key)
     }
+  })
+
+  it('the default-bypass set is the same on the server and the clients, in both directions', () => {
+    const server = new Set(DEFAULT_BYPASS_CATEGORIES)
+    const client = new Set(CLIENT_DEFAULT_BYPASS)
+    assert.ok(server.size >= 1, 'server DEFAULT_BYPASS_CATEGORIES is empty')
+    assert.ok(client.size >= 1, `client DEFAULT_BYPASS_CATEGORIES is empty (bypassByDefault flags in ${PROTOCOL_FILE}; is protocol built?)`)
+    const serverOnly = [...server].filter((k) => !client.has(k))
+    const clientOnly = [...client].filter((k) => !server.has(k))
+    assert.deepEqual(
+      serverOnly,
+      [],
+      `bypass by default on the server (${SERVER_FILE}) but without bypassByDefault in ${PROTOCOL_FILE}: ${serverOnly.join(', ')}`,
+    )
+    assert.deepEqual(
+      clientOnly,
+      [],
+      `bypassByDefault in ${PROTOCOL_FILE} but absent from the server's DEFAULT_BYPASS_CATEGORIES: ${clientOnly.join(', ')}`,
+    )
+    for (const k of client) assert.ok(ALL_CATEGORIES.includes(k), `${k}: default-bypass but not a known category`)
   })
 })

@@ -33,6 +33,7 @@
 export const NOTIFICATION_CATEGORIES = Object.freeze([
     {
         key: 'permission',
+        bypassByDefault: true,
         label: 'Permission requests',
         hint: 'Tool-use prompts that need an allow / deny decision.',
     },
@@ -43,6 +44,7 @@ export const NOTIFICATION_CATEGORIES = Object.freeze([
     },
     {
         key: 'activity_error',
+        bypassByDefault: true,
         label: 'Session errors',
         hint: 'Crashes, tunnel drops, and unrecoverable session failures.',
     },
@@ -113,3 +115,9 @@ export const NOTIFICATION_CATEGORY_ORDER = Object.freeze(NOTIFICATION_CATEGORIES
  * key.
  */
 export const NOTIFICATION_CATEGORY_LABELS = Object.freeze(Object.fromEntries(NOTIFICATION_CATEGORIES.map((c) => [c.key, Object.freeze({ label: c.label, hint: c.hint })])));
+/**
+ * Categories that bypass a muted / quiet state by default (derived from the
+ * `bypassByDefault` flag — never a second list). Clients use it when a
+ * snapshot omits `bypassCategories`.
+ */
+export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(NOTIFICATION_CATEGORIES.filter((c) => c.bypassByDefault === true).map((c) => c.key));

@@ -30,6 +30,13 @@ export interface NotificationCategoryMeta {
     readonly label: string;
     /** One-line explanation shown under the label. */
     readonly hint: string;
+    /**
+     * True when this category bypasses a muted / quiet-hours state by default.
+     * The server's `DEFAULT_BYPASS_CATEGORIES` (notification-prefs.js) is pinned
+     * to the set derived from this flag, in both directions, by
+     * `notification-category-roster.test.js`.
+     */
+    readonly bypassByDefault?: boolean;
 }
 /**
  * Every notification category, in the order the clients render them. The
@@ -51,3 +58,9 @@ export declare const NOTIFICATION_CATEGORY_LABELS: Readonly<Record<string, {
     label: string;
     hint?: string;
 }>>;
+/**
+ * Categories that bypass a muted / quiet state by default (derived from the
+ * `bypassByDefault` flag — never a second list). Clients use it when a
+ * snapshot omits `bypassCategories`.
+ */
+export declare const DEFAULT_BYPASS_CATEGORIES: readonly string[];

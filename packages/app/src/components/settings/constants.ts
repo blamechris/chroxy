@@ -1,5 +1,6 @@
 import type { VoiceInputMode } from '@chroxy/store-core';
 import {
+  DEFAULT_BYPASS_CATEGORIES as PROTOCOL_DEFAULT_BYPASS_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS as PROTOCOL_NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER as PROTOCOL_NOTIFICATION_CATEGORY_ORDER,
 } from '@chroxy/protocol';
@@ -28,11 +29,12 @@ export const NOTIFICATION_CATEGORY_ORDER: readonly string[] = PROTOCOL_NOTIFICAT
 
 /**
  * #4544: documented defaults for the quiet-hours bypass list. Mirrors
- * `DEFAULT_BYPASS_CATEGORIES` from packages/server/src/notification-prefs.js.
- * Used when a snapshot omits the field (older server, fresh install) so
+ * `DEFAULT_BYPASS_CATEGORIES` from packages/server/src/notification-prefs.js,
+ * derived from the `bypassByDefault` flags in `@chroxy/protocol` (the server's
+ * copy is pinned to it by notification-category-roster.test.js). Used when a snapshot omits the field (older server, fresh install) so
  * the UI shows the right initial checkboxes.
  */
-export const DEFAULT_BYPASS_CATEGORIES = ['permission', 'activity_error'];
+export const DEFAULT_BYPASS_CATEGORIES: string[] = [...PROTOCOL_DEFAULT_BYPASS_CATEGORIES];
 
 /**
  * #4544: HH:MM validation predicate. Mirrors the server-side regex in
