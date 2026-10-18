@@ -17,6 +17,14 @@
       "invocation": "In the Chroxy dashboard: New Session → provider Codex → connection ChatGPT subscription → model gpt-6-astra → reasoning effort xhigh → working directory = the run's clone. Confirm the session header shows gpt-6-astra (not the config default, see #8609). First message:\n\n```\n/prompts:prime-directive Trial run B2-cy-codex: follow docs/reports/harness-evals/trial/missions/B2-cy-codex.md exactly\n```\n\nIf the session does not expand `/prompts:` (app-server sessions may not), paste the full contents of `~/.codex/prompts/prime-directive.md` followed by the line `Trial run B2-cy-codex: follow docs/reports/harness-evals/trial/missions/B2-cy-codex.md exactly`, and note \"invocation: pasted prompt\" in the run report.\n\nPermission mode: Auto. If the dropdown still says \"Auto (unavailable)\", stop and tell the supervisor; do not run this attended. The slash prompt did not expand in the dry run (`DRY-RUNS.md`, finding 4), so expect the pasted-prompt fallback above."
     },
     {
+      "id": "B2b-cy-codex",
+      "harness": "CY — Chroxy session, Codex app-server provider (ChatGPT connection)",
+      "model": "gpt-6-astra",
+      "effort": "xhigh",
+      "base": "trial/b2b-cy-codex",
+      "invocation": "In the Chroxy dashboard: New Session → provider Codex → connection ChatGPT subscription → working directory = the run's clone → Advanced: permission mode Auto, sandbox left on the `Default` option (workspace-write on this daemon, which sets no `CHROXY_CODEX_SANDBOX`), worktree isolation off (the clone is already isolated). After Create, set the session header to model gpt-6-astra and reasoning effort xhigh and confirm both before sending (the header may show the config default first, see #8609). First message:\n\n```\n/prompts:prime-directive Trial run B2b-cy-codex: follow docs/reports/harness-evals/trial/missions/B2b-cy-codex.md exactly\n```\n\nIf the session does not expand `/prompts:`, paste the full contents of `~/.codex/prompts/prime-directive.md` followed by the line `Trial run B2b-cy-codex: follow docs/reports/harness-evals/trial/missions/B2b-cy-codex.md exactly`, and note \"invocation: pasted prompt\" in the run report.\n\nPermission mode: Auto. If the dropdown says \"Auto (unavailable)\", stop and tell the supervisor; do not run this attended. The daemon's auto-deploy agent must be unloaded for the whole run (`MAC-BOOTSTRAP.md`, step 9), and the daemon must not be restarted while the run is live: a Codex app-server session cannot be restored by this daemon build, so a restart ends the run."
+    },
+    {
       "id": "A2-cy-claude",
       "harness": "CY — Chroxy session, claude-sdk provider",
       "model": "claude-opus-5-5",
