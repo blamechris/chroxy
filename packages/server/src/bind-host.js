@@ -28,7 +28,13 @@ export function isLoopbackHost(host) {
   // 127.0.0.0/8, but only for real IPv4 literals.
   if (isIPv4(h) && h.startsWith('127.')) return true
   // IPv4-mapped IPv6 loopback, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1.
-  if (h.startsWith('::ffff:127.') || h.startsWith('::ffff:7f')) return true
+  // Dotted form needs a real 127/8 IPv4 literal; hex form needs a full 7f00-7fff
+  // first hextet followed by a 1-4 digit hextet.
+  if (h.startsWith('::ffff:')) {
+    const rest = h.slice('::ffff:'.length)
+    if (isIPv4(rest) && rest.startsWith('127.')) return true
+    if (/^7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(rest)) return true
+  }
   return false
 }
 
