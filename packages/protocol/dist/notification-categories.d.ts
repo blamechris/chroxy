@@ -20,6 +20,15 @@
  * to `ALL_CATEGORIES` + `RATE_LIMITS` (server) and to `NOTIFICATION_CATEGORIES`
  * below; forgetting either side fails that test and names the missing key.
  *
+ * The default quiet-hours bypass set (the categories that still fire during
+ * quiet hours when nobody has overridden it) is the same shape of problem and
+ * is solved the same way, with one difference: it is a per-category FLAG
+ * (`defaultBypass`) on the roster rather than a second list, so it cannot name
+ * a key the roster does not carry, and `DEFAULT_BYPASS_CATEGORIES` below is
+ * derived from it. The daemon keeps its own `DEFAULT_BYPASS_CATEGORIES`
+ * (notification-prefs.js) for the same reason it keeps `ALL_CATEGORIES`, and
+ * the roster test pins it to the flag in both directions.
+ *
  * Zod-free and dependency-free on purpose: the server, the dashboard and the
  * mobile app all import it.
  */
@@ -30,6 +39,12 @@ export interface NotificationCategoryMeta {
     readonly label: string;
     /** One-line explanation shown under the label. */
     readonly hint: string;
+    /**
+     * True when this category bypasses quiet hours with no explicit override.
+     * Absent means false. The server's `DEFAULT_BYPASS_CATEGORIES` must equal the
+     * set of keys flagged here.
+     */
+    readonly defaultBypass?: boolean;
 }
 /**
  * Every notification category, in the order the clients render them. The
@@ -41,6 +56,12 @@ export interface NotificationCategoryMeta {
 export declare const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[];
 /** Render order for the known categories (derived — never a second list). */
 export declare const NOTIFICATION_CATEGORY_ORDER: readonly string[];
+/**
+ * Categories that bypass quiet hours when no explicit override is set (derived
+ * from the `defaultBypass` flag — never a second list). Clients use it when a
+ * snapshot omits `bypassCategories` (older server, fresh install).
+ */
+export declare const DEFAULT_BYPASS_CATEGORIES: readonly string[];
 /**
  * Label + hint by key (derived — never a second list). Typed as a plain
  * string-keyed record because snapshots carry keys this build has never heard

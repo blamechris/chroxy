@@ -26,11 +26,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  DEFAULT_BYPASS_CATEGORIES as CLIENT_DEFAULT_BYPASS_CATEGORIES,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
 } from '@chroxy/protocol'
-import { ALL_CATEGORIES } from '../src/notification-prefs.js'
+import { ALL_CATEGORIES, DEFAULT_BYPASS_CATEGORIES } from '../src/notification-prefs.js'
 import { RATE_LIMITS } from '../src/push.js'
 
 const PROTOCOL_FILE = 'packages/protocol/src/notification-categories.ts'
@@ -84,5 +85,44 @@ describe('notification category roster: server <-> clients (#7429)', () => {
       assert.ok(!seen.has(c.key), `${c.key}: listed twice in ${PROTOCOL_FILE}`)
       seen.add(c.key)
     }
+  })
+
+  // The default-bypass set (the categories that fire through quiet hours when
+  // no override is set) had the same shape: the server's literal and a
+  // hand-copied literal in each client. It is now a per-category flag
+  // (`defaultBypass`) on the protocol roster, with `DEFAULT_BYPASS_CATEGORIES`
+  // derived from it, and the server's own list is pinned to it here.
+  it('refuses to compare empty default-bypass sets', () => {
+    assert.ok(DEFAULT_BYPASS_CATEGORIES.length >= 1, 'server DEFAULT_BYPASS_CATEGORIES is empty')
+    assert.ok(
+      CLIENT_DEFAULT_BYPASS_CATEGORIES.length >= 1,
+      `client DEFAULT_BYPASS_CATEGORIES is empty — is any category flagged defaultBypass in ${PROTOCOL_FILE}, and is packages/protocol built?`,
+    )
+  })
+
+  it('every server default-bypass category is flagged defaultBypass in the client roster', () => {
+    const clientBypass = new Set(CLIENT_DEFAULT_BYPASS_CATEGORIES)
+    const missing = DEFAULT_BYPASS_CATEGORIES.filter((k) => !clientBypass.has(k))
+    assert.deepEqual(
+      missing,
+      [],
+      `server default-bypass categories not flagged defaultBypass in ${PROTOCOL_FILE} (both clients would show them as not bypassing quiet hours): ${missing.join(', ')}`,
+    )
+  })
+
+  it('every client default-bypass category is in the server DEFAULT_BYPASS_CATEGORIES', () => {
+    const serverBypass = new Set(DEFAULT_BYPASS_CATEGORIES)
+    const extra = CLIENT_DEFAULT_BYPASS_CATEGORIES.filter((k) => !serverBypass.has(k))
+    assert.deepEqual(
+      extra,
+      [],
+      `client default-bypass categories missing from DEFAULT_BYPASS_CATEGORIES in ${SERVER_FILE} (both clients would show them as bypassing, the daemon would mute them): ${extra.join(', ')}`,
+    )
+  })
+
+  it('the server default-bypass set only names categories the server can fire', () => {
+    const rosterKeys = new Set(ALL_CATEGORIES)
+    const stray = DEFAULT_BYPASS_CATEGORIES.filter((k) => !rosterKeys.has(k))
+    assert.deepEqual(stray, [], `DEFAULT_BYPASS_CATEGORIES names categories outside ALL_CATEGORIES: ${stray.join(', ')}`)
   })
 })

@@ -4,6 +4,8 @@
  * Tests theme picker, session defaults, close/backdrop behavior,
  * and Escape key dismissal.
  */
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
@@ -1530,6 +1532,18 @@ describe('SettingsPanel', () => {
       expect(allCategories).toContain('permission')
       expect(allCategories).toContain('ci_complete')
       expect(new Set(allCategories).size).toBe(allCategories.length)
+    })
+
+    it('takes the default bypass set from @chroxy/protocol instead of a local copy', () => {
+      // The quiet-hours bypass default is derived from the roster's
+      // `defaultBypass` flag and pinned to the server by the roster test.
+      // A local array literal here would be a third hand-written copy.
+      const src = readFileSync(resolve(__dirname, 'SettingsPanel.tsx'), 'utf-8')
+      const importsFromProtocol =
+        /import\s*\{[^}]*\bDEFAULT_BYPASS_CATEGORIES\b[^}]*\}\s*from\s*'@chroxy\/protocol'/.test(src)
+      const hasLocalLiteral = /\bDEFAULT_BYPASS_CATEGORIES(?:\s*:[^=\n]+)?\s*=\s*\[/.test(src)
+      expect(importsFromProtocol, 'SettingsPanel.tsx must import DEFAULT_BYPASS_CATEGORIES from @chroxy/protocol').toBe(true)
+      expect(hasLocalLiteral, 'SettingsPanel.tsx must not declare a local DEFAULT_BYPASS_CATEGORIES array').toBe(false)
     })
 
     it('renders a friendly label for every server category (no raw-key fallback)', () => {
