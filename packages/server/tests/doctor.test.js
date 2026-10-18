@@ -359,7 +359,11 @@ describe('runDoctorChecks', () => {
     try {
       const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
       assert.equal(checks.find(c => c.name === 'Port').status, 'warn')
-      assert.equal(passed, checks.every(c => c.status !== 'fail'))
+      // Expectation excludes the Port row: an unrelated failing check on the host
+      // must not make this vacuous (both sides false), and a warn counted as a
+      // failure must turn this red regardless of host state.
+      const othersPass = checks.filter(c => c.name !== 'Port').every(c => c.status !== 'fail')
+      assert.equal(passed, othersPass)
     } finally {
       await closeServer(server)
     }
