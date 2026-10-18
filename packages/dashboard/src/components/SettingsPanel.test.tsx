@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
-import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES } from '@chroxy/protocol'
+import { DEFAULT_BYPASS_CATEGORIES, NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES } from '@chroxy/protocol'
 import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
 
 // Mock theme-engine
@@ -2149,6 +2149,10 @@ describe('SettingsPanel', () => {
       const errCheck = screen.getByTestId('quiet-hours-bypass-toggle-activity_error') as HTMLInputElement
       expect(permCheck.checked).toBe(true)
       expect(errCheck.checked).toBe(true)
+      const checked = screen.getAllByTestId(/^quiet-hours-bypass-toggle-/)
+        .filter((input) => (input as HTMLInputElement).checked)
+        .map((input) => input.dataset.testid!.replace('quiet-hours-bypass-toggle-', ''))
+      expect(checked.sort()).toEqual([...DEFAULT_BYPASS_CATEGORIES].sort())
     })
 
     // #4570: snapshot broadcasts must not clobber unsaved edits.
