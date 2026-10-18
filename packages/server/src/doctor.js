@@ -1018,17 +1018,35 @@ export async function runDoctorChecks({
   // (mergeConfig: explicit flag > PORT env > config.json `port` > 8765 default),
   // so doctor probes the port start would actually bind rather than always 8765.
   // A caller-supplied `port` (doctor's -p flag, or start's already-merged port)
-  // is the CLI tier. `|| DEFAULT_PORT` keeps the previous falsy-port fallback.
+  // is the CLI tier.
   const checkPort = mergeConfig({
     fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
     cliOverrides: port !== undefined ? { port } : {},
     defaults: { port: DEFAULT_PORT },
-  }).port || DEFAULT_PORT
-  try {
-    await checkPortAvailable(checkPort)
-    checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
-  } catch {
-    checks.push({ name: 'Port', status: 'warn', message: `${checkPort} is in use (server may already be running)` })
+  }).port
+  // A malformed port (PORT=abc, 8800.7, 99999, a non-number in config.json) is a
+  // refusal in `start`, so it is a failure here — and must never reach listen():
+  // Node treats a non-numeric listen argument as a unix socket path and would
+  // bind a file in cwd. Validity is validateConfig's own port rule (type + range)
+  // plus integrality, which it does not check.
+  if (!Number.isInteger(checkPort) || validateConfig({ port: checkPort }).warnings.length > 0) {
+    // Label only — which tier supplied the value; the value itself came from mergeConfig.
+    const source = port !== undefined ? '--port flag'
+      : process.env.PORT !== undefined ? 'PORT env'
+        : parsedConfig && parsedConfig.port !== undefined ? 'config.json'
+          : 'default'
+    checks.push({
+      name: 'Port',
+      status: 'fail',
+      message: `${String(checkPort)} (from ${source}) is not a valid port — must be an integer 1-65535; chroxy start would refuse it`,
+    })
+  } else {
+    try {
+      await checkPortAvailable(checkPort)
+      checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
+    } catch {
+      checks.push({ name: 'Port', status: 'warn', message: `${checkPort} is in use (server may already be running)` })
+    }
   }
 
   const passed = checks.every(c => c.status !== 'fail')

@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Command } from 'commander'
@@ -108,6 +108,51 @@ describe('doctor port resolution', () => {
       const startPort = loadAndMergeConfig({ config: cfgPath }).port
       const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
       assert.ok(checksPort(checks, startPort), `start binds ${startPort}, doctor said: ${portMessage(checks)}`)
+    })
+  })
+
+  describe('malformed merged port', () => {
+    // `start` refuses a non-integer / out-of-range port; doctor must not report
+    // it OK, and must not hand it to listen() — Node treats a non-numeric
+    // listen argument as a unix socket path and would bind a file in cwd.
+    const withTempCwd = async (fn) => {
+      const cwd = process.cwd()
+      const dir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-port-cwd-'))
+      tmpDirs.push(dir)
+      process.chdir(dir)
+      try {
+        return await fn(dir)
+      } finally {
+        process.chdir(cwd)
+      }
+    }
+    const cases = [
+      ['PORT=abc', { env: { PORT: 'abc' } }, 'abc', 'PORT'],
+      ['PORT=8800.7', { env: { PORT: '8800.7' } }, '8800.7', 'PORT'],
+      ['PORT=99999', { env: { PORT: '99999' } }, '99999', 'PORT'],
+      ['config port "abc"', { fileConfig: { port: 'abc' } }, 'abc', 'config'],
+    ]
+    for (const [name, setup, bad, source] of cases) {
+      it(`${name} is a failing Port row and is never probed`, async () => {
+        isolate(setup)
+        await withTempCwd(async (dir) => {
+          const { checks, passed } = await runDoctorChecks({ providers: ['claude-sdk'] })
+          const row = checks.find((c) => c.name === 'Port')
+          assert.ok(row, 'doctor must emit a Port check')
+          assert.equal(row.status, 'fail', row.message)
+          assert.ok(row.message.includes(bad), row.message)
+          assert.ok(row.message.includes(source), row.message)
+          assert.ok(!/available|in use/.test(row.message), row.message)
+          assert.equal(passed, false)
+          assert.deepEqual(readdirSync(dir), [], 'a malformed port must not be handed to listen()')
+        })
+      })
+    }
+
+    it('an explicit port option still beats a malformed env port', async () => {
+      isolate({ env: { PORT: 'abc' } })
+      const { checks } = await runDoctorChecks({ port: FLAG_PORT, providers: ['claude-sdk'] })
+      assert.ok(checksPort(checks, FLAG_PORT), portMessage(checks))
     })
   })
 
