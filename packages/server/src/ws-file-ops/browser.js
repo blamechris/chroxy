@@ -5,6 +5,7 @@ import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
+import { checkRealPathDenied, checkRealPathInAllowlist } from '../handler-utils.js'
 import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
 
 const log = createLogger('ws')
@@ -27,7 +28,24 @@ const LISTING_UNRESOLVABLE_REASONS = {
  * @param {Function} validatePathWithinCwd - shared path validator
  * @returns {Object} browser operation methods
  */
-export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
+export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, { getConfig = () => null } = {}) {
+
+  const HOME_DENIAL = 'Access denied: directory listing is restricted to the home directory'
+
+  /**
+   * #8303 — Browse uses the SAME rules as Create: credential-dir deny-list,
+   * then workspaceRoots (else $HOME). A default cwd that passes
+   * validateCwdAllowed is by definition inside that allowlist, so its subtree
+   * needs no separate rule. `realPath` is already canonical. Returns an error string or null.
+   */
+  function checkBrowseAllowed(realPath) {
+    const config = getConfig()
+    const denied = checkRealPathDenied(realPath, config)
+    if (denied) return denied
+    const outside = checkRealPathInAllowlist(realPath, config)
+    if (!outside) return null
+    return outside === 'Directory must be within your home directory' ? HOME_DENIAL : outside
+  }
 
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath) {
@@ -80,15 +98,14 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           containmentUnknown = true
         }
       }
-      const homeReal = await realpath(home)
-
-      if (containmentUnknown || !isPathWithin(realAbsPath, homeReal)) {
+      const denial = containmentUnknown ? HOME_DENIAL : checkBrowseAllowed(realAbsPath)
+      if (denial) {
         sendFn(ws, {
           type: 'directory_listing',
           path: absPath,
           parentPath: null,
           entries: [],
-          error: 'Access denied: directory listing is restricted to the home directory',
+          error: denial,
         })
         return
       }

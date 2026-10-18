@@ -483,6 +483,29 @@ export function validateCwdAllowed(cwd, config = null) {
     return `Cannot resolve path: ${cwd}`
   }
 
+  return checkRealPathAllowed(realCwd, config)
+}
+
+/** Realpath'd $HOME (or the test-only `homeOverride`); raw value if unresolvable. */
+function resolveEffectiveHome(config) {
+  const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
+    ? config.homeOverride
+    : homedir()
+  try {
+    return realpathSync(rawHome)
+  } catch {
+    return rawHome
+  }
+}
+
+/**
+ * Layers 2 + 2b of validateCwdAllowed: the credential/config-directory
+ * deny-list. `realPath` must already be realpath-resolved. Shared with
+ * Browse (ws-file-ops/browser.js) so the two surfaces cannot drift (#8303).
+ *
+ * @returns {string|null} Error message or null if not denied
+ */
+export function checkRealPathDenied(realCwd, config = null) {
   // Layer 2: credential-directory deny-list (always active).
   // `homeOverride` exists so tests can use a hermetic fake home
   // directory instead of creating throwaway dirs under the user's
@@ -497,15 +520,7 @@ export function validateCwdAllowed(cwd, config = null) {
   // positive control. Falls back to the raw value if it cannot be resolved,
   // which is the conservative direction: an unresolvable $HOME still gets a
   // prefix test rather than none.
-  const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
-    ? config.homeOverride
-    : homedir()
-  let home
-  try {
-    home = realpathSync(rawHome)
-  } catch {
-    home = rawHome
-  }
+  const home = resolveEffectiveHome(config)
   if (pathTouchesForbiddenSubdir(realCwd, home)) {
     return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
   }
@@ -515,7 +530,18 @@ export function validateCwdAllowed(cwd, config = null) {
   if (pathTouchesConfigDir(realCwd)) {
     return 'Directory is not allowed: the chroxy config/state directory is blocked for security'
   }
+  return null
+}
 
+/**
+ * Layers 3 + 4 of validateCwdAllowed: workspaceRoots allowlist when
+ * configured, else the $HOME fallback. `realCwd` must already be
+ * realpath-resolved. Does NOT run the deny-list.
+ *
+ * @returns {string|null} Error message or null if allowed
+ */
+export function checkRealPathInAllowlist(realCwd, config = null) {
+  const home = resolveEffectiveHome(config)
   // Layer 3: explicit allowlist (opt-in, strict)
   const roots = Array.isArray(config?.workspaceRoots)
     ? config.workspaceRoots.filter((r) => typeof r === 'string' && r.length > 0)
@@ -550,6 +576,30 @@ export function validateCwdAllowed(cwd, config = null) {
     return 'Directory must be within your home directory'
   }
   return null
+}
+
+/** Deny-list then allowlist, on an already-resolved real path. */
+export function checkRealPathAllowed(realCwd, config = null) {
+  return checkRealPathDenied(realCwd, config) || checkRealPathInAllowlist(realCwd, config)
+}
+
+/**
+ * #8303 — a blank-cwd Create inherits the daemon's configured default cwd
+ * WITHOUT validateCwdAllowed (deliberately unchanged), so a config.cwd that
+ * the explicit-cwd path would refuse silently produces sessions in a
+ * directory the user could not have picked. Warn once at startup instead.
+ *
+ * @param {object} config - Runtime config (reads `cwd`, `workspaceRoots`)
+ * @param {{warn: Function}} [logger]
+ * @returns {string|null} The warning text that was logged, or null
+ */
+export function warnIfDefaultCwdDisallowed(config, logger = log) {
+  if (!config?.cwd || typeof config.cwd !== 'string') return null
+  const err = validateCwdAllowed(config.cwd, config)
+  if (!err) return null
+  const msg = `Configured default cwd "${config.cwd}" fails the session cwd policy (${err}); sessions created without an explicit cwd will still start there, but it cannot be chosen explicitly`
+  logger.warn(msg)
+  return msg
 }
 
 /**

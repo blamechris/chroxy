@@ -368,6 +368,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // before the next event fires, so we can't read from the DOM in submit.
   const nameValRef = useRef('')
   const cwdValRef = useRef('')
+  // #8303: set when the server refuses to list the field's own cwd (typically a
+  // prefilled default cwd outside what Browse may open). Keyed by path so editing
+  // the field hides it without needing a reset effect.
+  const [cwdBrowseNote, setCwdBrowseNote] = useState<{ path: string; message: string } | null>(null)
 
   // Autocomplete suggestions from server
   const { suggestions: autocompleteSuggestions } = usePathAutocomplete(cwd)
@@ -575,6 +579,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
         setBrowsePath(responsePath)
       }
       setBrowseLoading(false)
+      if (requestedPath === cwdValRef.current.trim()) {
+        setCwdBrowseNote(listing.error ? { path: requestedPath, message: listing.error } : null)
+      }
       if (listing.error) {
         setBrowseError(listing.error)
         setBrowseEntries([])
@@ -809,6 +816,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           </div>
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
+          )}
+          {cwdBrowseNote && cwdBrowseNote.path === cwd.trim() && (
+            <span className="cwd-hint cwd-browse-note" role="note" data-testid="cwd-browse-note">
+              Browse can&apos;t open this directory: {cwdBrowseNote.message}
+            </span>
           )}
           {currentPreset && (
             <div className="repo-preset-disclosure" data-testid="repo-preset-disclosure">

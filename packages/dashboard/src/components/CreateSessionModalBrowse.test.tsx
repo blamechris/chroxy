@@ -247,3 +247,39 @@ describe('CreateSessionModal browse mode (#1585)', () => {
     expect(nameInput.value).toBe('My Custom Name')
   })
 })
+
+describe('CreateSessionModal not-browsable note (#8303)', () => {
+  it('shows a note under the cwd field when Browse is refused for the prefilled cwd', () => {
+    renderModal({ initialCwd: '/srv/work' })
+    expect(screen.queryByTestId('cwd-browse-note')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Browse...'))
+    act(() => {
+      capturedCallback!({ path: '/srv/work', entries: [], error: 'Access denied: directory listing is restricted to the home directory' })
+    })
+    fireEvent.click(screen.getByLabelText('Cancel'))
+
+    const note = screen.getByTestId('cwd-browse-note')
+    expect(note.textContent).toContain("Browse can't open this directory")
+    expect(note.textContent).toContain('restricted to the home directory')
+  })
+
+  it('does not show the note when the prefilled cwd lists fine', () => {
+    renderModal({ initialCwd: '/home/user' })
+    fireEvent.click(screen.getByText('Browse...'))
+    simulateListing('/home/user', [{ name: 'projects', isDirectory: true }])
+    fireEvent.click(screen.getByLabelText('Cancel'))
+    expect(screen.queryByTestId('cwd-browse-note')).not.toBeInTheDocument()
+  })
+
+  it('hides the note once the cwd is edited to a different path', () => {
+    renderModal({ initialCwd: '/srv/work' })
+    fireEvent.click(screen.getByText('Browse...'))
+    act(() => { capturedCallback!({ path: '/srv/work', entries: [], error: 'Access denied' }) })
+    fireEvent.click(screen.getByLabelText('Cancel'))
+    expect(screen.getByTestId('cwd-browse-note')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Working directory'), { target: { value: '/home/user' } })
+    expect(screen.queryByTestId('cwd-browse-note')).not.toBeInTheDocument()
+  })
+})
