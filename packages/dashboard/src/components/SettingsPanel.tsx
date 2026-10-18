@@ -10,6 +10,7 @@ import { useConnectionStore, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionRule, PermissionAuditEntry } from '../store/types'
 import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
 import { ProviderCredentialsPane } from './ProviderCredentialsPane'
+import { SessionDefaultsNotice } from './SessionDefaultsNotice'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
@@ -1154,6 +1155,14 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     return defaultProvider
   }, [availableProviders, defaultProvider])
 
+  // #8277 — the persisted override is origin-global, so a different server may
+  // not offer it. It stays stored (and shown) until the user picks something
+  // else; the select must not pretend another provider is what is saved.
+  const dormantProvider =
+    defaultProviderSource === 'user' && defaultProvider && effectiveProvider !== defaultProvider
+      ? defaultProvider
+      : null
+
   // #7728 — the Default-model picker belongs to the DEFAULT PROVIDER selected
   // just above it, so it reads that provider's roster instead of whichever
   // provider broadcast last. Empty (field hidden) until that roster arrives —
@@ -1263,7 +1272,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
               <select
                 id="default-provider"
                 aria-label="Default provider"
-                value={defaultProviderSource === 'user' ? effectiveProvider : ''}
+                value={defaultProviderSource === 'user' ? (dormantProvider ?? effectiveProvider) : ''}
                 onChange={handleProviderChange}
               >
                 <option value="">
@@ -1271,6 +1280,11 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     ? `Server default (${PROVIDER_LABELS[serverDefaultProvider] || serverDefaultProvider})`
                     : 'Server default'}
                 </option>
+                {dormantProvider ? (
+                  <option value={dormantProvider} disabled>
+                    {PROVIDER_LABELS[dormantProvider] || dormantProvider} (not offered by this server)
+                  </option>
+                ) : null}
                 {availableProviders.length > 0
                   ? availableProviders.map(p => (
                       <option key={p.name} value={p.name}>
@@ -1283,7 +1297,13 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     </>
                 }
               </select>
+              {dormantProvider ? (
+                <p className="settings-hint" data-testid="default-provider-dormant-hint">
+                  {`Saved default ${PROVIDER_LABELS[dormantProvider] || dormantProvider} isn't offered by this server; new sessions use ${PROVIDER_LABELS[effectiveProvider] || effectiveProvider}`}
+                </p>
+              ) : null}
             </div>
+            <SessionDefaultsNotice />
             {availableModels.length > 0 && (
               <div className="settings-field">
                 <label htmlFor="default-model">Default model</label>
