@@ -548,6 +548,30 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
     assert.equal(updateContextWindow('claude-opus-4-8', 'big'), false)
   })
 
+  for (const value of [NaN, Infinity, -Infinity]) {
+    it(`rejects ${value} without changing models or context-window overrides`, () => {
+      const sdkModels = [
+        { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
+      ]
+      updateModels(sdkModels)
+
+      for (const expectedWindow of [1_000_000, 500_000]) {
+        if (expectedWindow === 500_000) {
+          assert.equal(updateContextWindow('claude-opus-4-8', expectedWindow), true)
+        }
+        const modelsBefore = getModels()
+        const snapshot = structuredClone(modelsBefore)
+        assert.equal(updateContextWindow('claude-opus-4-8', value), false)
+        assert.equal(getModels(), modelsBefore, 'invalid input must leave the active array untouched')
+        assert.deepEqual(getModels(), snapshot, 'invalid input must leave every model untouched')
+
+        updateModels(sdkModels)
+        assert.equal(getModels()[0].contextWindow, expectedWindow,
+          'invalid input must neither create an override nor replace a finite override')
+      }
+    })
+  }
+
   it('override survives subsequent updateModels refreshes (regression for #2820)', () => {
     // _fetchSupportedModels() fires on every SDK session init, so the first
     // updateModels() rebuild cannot clobber a value we already learned from
