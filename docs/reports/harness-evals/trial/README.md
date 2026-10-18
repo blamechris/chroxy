@@ -90,9 +90,9 @@ local Claude session in the chroxy checkout.
    and lists blockers. Fix blockers before run 1 (step 8); if a fix lands on
    `main` after the bases were cut, step 6 re-cuts them. Keep the dry branches
    until the trial report is written; they are its evidence. **The three dry
-   runs are done (2026-10-18, see [`DRY-RUNS.md`](DRY-RUNS.md)); the
-   `Trial-Closes:` scratch-issue check has not been performed yet and happens
-   before run 1.**
+   runs are done (2026-10-18, see [`DRY-RUNS.md`](DRY-RUNS.md)), and the
+   `Trial-Closes:` scratch-issue check was done 2026-10-18T03:55Z (status
+   table above).**
 6. **[supervisor, on the owner's explicit go] Cut the bases.** Only after this
    package has merged, since the clones must contain the missions. T0 is the
    `main` commit the bases are cut from; the missions do not bake it in (a
