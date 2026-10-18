@@ -45,9 +45,12 @@ systematically a CY property.
 
 Fallback: run 2 (`B2-cy-codex`) needs an unattended Codex mode in Chroxy (#8619)
 and codex-binary parity (#8609). If those are not in place when run 1 ends, B2
-moves last (A1, A2, B1, B2). Vendors still alternate, but the native harness
-then goes first in both arms, so the counterbalance above is lost for arm B;
-if the fallback is used it is recorded in section 8 and in the trial report.
+moves last (A1, A2, B1, B2). That order loses both design properties above: the
+same-vendor runs are back to back (A1 then A2 on the Claude allowance, B1 then
+B2 on the ChatGPT plan), so wait for the vendor's reset between them as section
+8 says, and the native harness goes first in both arms, so the counterbalance
+is lost for arm B. If the fallback is used it is recorded in section 8 and in
+the trial report.
 
 ## 3. Controls (what is held fixed)
 
