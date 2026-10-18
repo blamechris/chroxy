@@ -350,6 +350,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [browseEntries, setBrowseEntries] = useState<DirectoryEntry[]>([])
   const [browseLoading, setBrowseLoading] = useState(false)
   const [browseError, setBrowseError] = useState<string | null>(null)
+  // Issue 8303: the prefilled cwd the daemon refused to list (outside $HOME and
+  // every workspace root, or a credential directory). Holds the exact path that
+  // was probed so the note disappears as soon as the user changes the field.
+  const [unbrowsableCwd, setUnbrowsableCwd] = useState<string | null>(null)
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
@@ -433,7 +437,25 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setSelectedSuggestion(-1)
     setBrowsing(false)
     setBrowseEntries([])
-    setDirectoryListingCallback(null)
+    setUnbrowsableCwd(null)
+    if (cwdValue) {
+      // Issue 8303: ask the daemon whether Browse can open the prefilled
+      // directory, so a refusal is explained here instead of surfacing only
+      // after the user clicks Browse. Reuses the existing directory listing
+      // round trip; the reply is matched by path, so a stale or autocomplete
+      // reply for another directory is ignored.
+      setDirectoryListingCallback((listing: DirectoryListing) => {
+        const responsePath = listing.path || listing.parentPath || ''
+        if (!browsePathsMatch(cwdValue, responsePath)) return
+        setUnbrowsableCwd(
+          typeof listing.error === 'string' && /^Access denied/i.test(listing.error) ? cwdValue : null,
+        )
+        setDirectoryListingCallback(null)
+      })
+      requestDirectoryListing(cwdValue)
+    } else {
+      setDirectoryListingCallback(null)
+    }
     if (cwdValue) {
       const generated = generateDefaultName(cwdValue, existingNames)
       setName(generated)
@@ -442,7 +464,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setName('')
       nameValRef.current = ''
     }
-  }, [open, initialCwd, existingNames, availableProviders, defaultProvider])
+  }, [open, initialCwd, existingNames, availableProviders, defaultProvider, requestDirectoryListing, setDirectoryListingCallback])
 
   // Keep provider in sync while modal is open: if availableProviders changes
   // and the current provider is no longer valid, fall back to first available.
@@ -807,6 +829,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Browse...
             </button>
           </div>
+          {unbrowsableCwd !== null && cwd === unbrowsableCwd && (
+            <span className="cwd-hint" data-testid="cwd-not-browsable-note" role="note">
+              This directory is outside the browsable roots; Browse can&apos;t open it.
+            </span>
+          )}
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
           )}

@@ -36,6 +36,7 @@ import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
 import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
 import { configDir, configPath } from './config-dir.js'
+import { validateCwdAllowed } from './handler-utils.js'
 import { detectStrandedState, missingTokenAdvice, startupStrandedWarning } from './config-dir-migration.js'
 
 const log = createLogger('cli')
@@ -486,6 +487,28 @@ function wireTunnelEvents(tunnel, wsServer) {
     // The tunnel_failed event above already surfaces a user-facing error.
     // This is operator-facing diagnostic only.
   })
+}
+
+/**
+ * Issue 8303 — a session created with a BLANK cwd inherits `config.cwd` without
+ * going through `validateCwdAllowed`, while the same directory typed explicitly
+ * into New Session is refused (and Browse cannot open it). Whether a blank cwd
+ * should bypass the check is a separate decision; until then the operator gets
+ * one startup warning naming the reason instead of three silent answers.
+ *
+ * @param {object} config - The merged startup config
+ * @param {{ warn: Function }} log
+ * @returns {boolean} true when a warning was logged
+ */
+export function warnIfConfiguredCwdRefused(config, log) {
+  if (!config?.cwd) return false
+  const reason = validateCwdAllowed(config.cwd, config)
+  if (!reason) return false
+  log.warn(
+    `Configured cwd "${config.cwd}" would be refused for an explicit New Session and cannot be opened in Browse (${reason}). ` +
+    'Sessions created with a blank cwd still inherit it.',
+  )
+  return true
 }
 
 function isWithinHome(dir) {
@@ -1127,6 +1150,7 @@ export async function startCliServer(config) {
   // line below can't drift apart, and any over-ceiling operator value emits
   // a single warning here at boot (not three on each tunable).
   const startupTimeouts = resolveStartupTimeouts(config, log)
+  warnIfConfiguredCwdRefused(config, log)
 
   // #7601: wire the proactive container-liveness poll's inspect seam. A dedicated
   // DockerBackend (a stateless docker-CLI wrapper — same shape server-cli already

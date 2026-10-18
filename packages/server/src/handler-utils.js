@@ -442,6 +442,108 @@ function pathTouchesConfigDir(absPath) {
 }
 
 /**
+ * The realpath-resolved $HOME the cwd policy compares against.
+ *
+ * `config.homeOverride` exists so tests can use a hermetic fake home directory
+ * instead of creating throwaway dirs under the user's real ~/.config. Never
+ * used in production — config.js does not declare or forward homeOverride from
+ * user config.
+ *
+ * #7273 review — BOTH sides must be realpath-resolved or the comparison is
+ * meaningless. A cwd arrives resolved; `homedir()` is not. When $HOME is itself
+ * a symlink (common on macOS//home layouts and in containers), the resolved cwd
+ * and the unresolved home share no prefix, `pathTouchesForbiddenSubdir` returns
+ * false for every path, and the whole credential deny-list — ~/.ssh, ~/.aws,
+ * ~/.config/gcloud — silently stops denying. Falls back to the raw value if it
+ * cannot be resolved, which is the conservative direction: an unresolvable
+ * $HOME still gets a prefix test rather than none.
+ *
+ * @param {object|null} [config]
+ * @returns {string}
+ */
+export function resolveCwdPolicyHome(config = null) {
+  const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
+    ? config.homeOverride
+    : homedir()
+  try {
+    return realpathSync(rawHome)
+  } catch {
+    return rawHome
+  }
+}
+
+/**
+ * Layers 2 and 2b of the cwd policy as a predicate on an already
+ * realpath-resolved path: the credential-directory deny-list under $HOME, then
+ * the daemon's own config/state root (wherever CHROXY_CONFIG_DIR put it, #7052).
+ * Single implementation, shared by {@link validateCwdAllowed} (Create) and the
+ * directory Browse, so the two can never disagree about what is off-limits.
+ *
+ * @param {string} realPath - realpath-resolved absolute path
+ * @param {string} home - realpath-resolved $HOME ({@link resolveCwdPolicyHome})
+ * @returns {string|null} Denial message, or null if neither layer objects
+ */
+export function credentialDirDenialReason(realPath, home) {
+  if (pathTouchesForbiddenSubdir(realPath, home)) {
+    return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
+  }
+  if (pathTouchesConfigDir(realPath)) {
+    return 'Directory is not allowed: the chroxy config/state directory is blocked for security'
+  }
+  return null
+}
+
+/**
+ * The configured `workspaceRoots`, realpath-resolved. A configured root that
+ * does not resolve (mount offline, typo, removed dir) is skipped: it cannot
+ * match anything. `configured` counts the usable string entries so callers can
+ * tell "no allowlist" from "an allowlist whose every entry is stale".
+ *
+ * @param {object|null} [config]
+ * @returns {{ configured: number, real: string[] }}
+ */
+export function resolveWorkspaceRoots(config = null) {
+  const roots = Array.isArray(config?.workspaceRoots)
+    ? config.workspaceRoots.filter((r) => typeof r === 'string' && r.length > 0)
+    : []
+  const real = []
+  for (const root of roots) {
+    try {
+      real.push(realpathSync(root))
+    } catch {
+      // unresolvable root: skipped, can't match
+    }
+  }
+  return { configured: roots.length, real }
+}
+
+/**
+ * The directories Browse may list, as realpath-resolved boundaries:
+ * $HOME, each resolvable workspace root, and the daemon's default cwd when it
+ * passes {@link validateCwdAllowed}. $HOME stays browsable even when roots are
+ * configured so the user can navigate toward a root.
+ *
+ * The default-cwd entry is gated on the SAME {@link validateCwdAllowed} Create
+ * runs, so today it is always inside $HOME or a root already; it is listed
+ * explicitly so Browse tracks that gate if it ever admits something else.
+ *
+ * @param {object|null} config
+ * @param {string|null} [defaultCwd]
+ * @returns {string[]}
+ */
+export function browseBoundaries(config = null, defaultCwd = null) {
+  const bounds = [resolveCwdPolicyHome(config), ...resolveWorkspaceRoots(config).real]
+  if (typeof defaultCwd === 'string' && defaultCwd && validateCwdAllowed(defaultCwd, config) === null) {
+    try {
+      bounds.push(realpathSync(defaultCwd))
+    } catch {
+      // raced away between validate and resolve: not browsable
+    }
+  }
+  return bounds
+}
+
+/**
  * Validate that a cwd path is allowed as a session working directory.
  *
  * Layers (each must pass):
@@ -483,64 +585,23 @@ export function validateCwdAllowed(cwd, config = null) {
     return `Cannot resolve path: ${cwd}`
   }
 
-  // Layer 2: credential-directory deny-list (always active).
-  // `homeOverride` exists so tests can use a hermetic fake home
-  // directory instead of creating throwaway dirs under the user's
-  // real ~/.config. Never used in production — config.js does not
-  // declare or forward homeOverride from user config.
-  // #7273 review — BOTH sides must be realpath-resolved or the comparison is
-  // meaningless. `realCwd` above is resolved; `homedir()` is not. When $HOME is
-  // itself a symlink (common on macOS//home layouts and in containers), the
-  // resolved cwd and the unresolved home share no prefix, `pathTouchesForbiddenSubdir`
-  // returns false for every path, and the whole credential deny-list — ~/.ssh,
-  // ~/.aws, ~/.config/gcloud — silently stops denying. Reproduced with a
-  // positive control. Falls back to the raw value if it cannot be resolved,
-  // which is the conservative direction: an unresolvable $HOME still gets a
-  // prefix test rather than none.
-  const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
-    ? config.homeOverride
-    : homedir()
-  let home
-  try {
-    home = realpathSync(rawHome)
-  } catch {
-    home = rawHome
-  }
-  if (pathTouchesForbiddenSubdir(realCwd, home)) {
-    return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
-  }
-  // Layer 2b: the daemon's OWN state root, wherever CHROXY_CONFIG_DIR put it.
-  // Separate from the set above because that one matches literal first segments
-  // under $HOME and cannot follow a relocated root (#7052).
-  if (pathTouchesConfigDir(realCwd)) {
-    return 'Directory is not allowed: the chroxy config/state directory is blocked for security'
-  }
+  // Layers 2 + 2b: credential-directory deny-list and the daemon's own
+  // config/state root (always active; shared with Browse).
+  const home = resolveCwdPolicyHome(config)
+  const denied = credentialDirDenialReason(realCwd, home)
+  if (denied) return denied
 
   // Layer 3: explicit allowlist (opt-in, strict)
-  const roots = Array.isArray(config?.workspaceRoots)
-    ? config.workspaceRoots.filter((r) => typeof r === 'string' && r.length > 0)
-    : []
-  if (roots.length > 0) {
-    let anyRootResolved = false
-    for (const root of roots) {
-      let realRoot
-      try {
-        realRoot = realpathSync(root)
-      } catch {
-        // Configured root that doesn't resolve is a config error — skip
-        // it rather than failing the whole check, but it can't match.
-        continue
-      }
-      anyRootResolved = true
-      if (isPathWithin(realCwd, realRoot)) return null
-    }
+  const { configured, real: realRoots } = resolveWorkspaceRoots(config)
+  if (configured > 0) {
+    if (realRoots.some((realRoot) => isPathWithin(realCwd, realRoot))) return null
     // If at least ONE root resolved, enforce strictly. Otherwise every
     // configured root is stale (mount offline, typo, removed dir) and
     // the user would be silently locked out of every session. Fall
     // through to the home-fallback in that case rather than denying
     // everything. Found by Copilot review on PR #2808.
-    if (anyRootResolved) {
-      return `Directory is not within any configured workspace root (${roots.length} configured)`
+    if (realRoots.length > 0) {
+      return `Directory is not within any configured workspace root (${configured} configured)`
     }
     // else fall through to layer 4 home fallback
   }

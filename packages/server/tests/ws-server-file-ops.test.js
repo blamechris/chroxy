@@ -302,6 +302,73 @@ describe('directory listing', () => {
     ws.close()
   })
 
+  // Issue 8303 — the WsServer must thread config.workspaceRoots and the session
+  // manager's default cwd into the directory browser (the unit tests build the
+  // browser directly and would not notice if this wiring were dropped).
+  describe('Browse honours workspaceRoots and the default cwd through WsServer (issue 8303)', () => {
+    let base
+    let fakeHome
+    let root
+    let outside
+
+    beforeEach(() => {
+      base = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-test-8303-ws-')))
+      fakeHome = join(base, 'home')
+      root = join(base, 'root')
+      outside = join(base, 'outside')
+      for (const d of [fakeHome, root, join(root, 'sub'), outside]) mkdirSync(d, { recursive: true })
+    })
+
+    afterEach(() => {
+      rmSync(base, { recursive: true, force: true })
+    })
+
+    async function listVia(opts, path) {
+      server = new WsServer({ port: 0, apiToken: TOKEN, authRequired: true, ...opts })
+      const port = await startServerAndGetPort(server)
+      const { ws, messages } = await createClient(port, false)
+      send(ws, { type: 'auth', token: TOKEN })
+      await waitForMessage(messages, 'auth_ok', 2000)
+      messages.length = 0
+      send(ws, { type: 'list_directory', path })
+      const listing = await waitForMessage(messages, 'directory_listing', 2000)
+      ws.close()
+      return listing
+    }
+
+    it('lists a configured workspace root outside $HOME', async () => {
+      const listing = await listVia({
+        cliSession: createMockSession(),
+        config: { homeOverride: fakeHome, workspaceRoots: [root] },
+      }, root)
+      assert.equal(listing.error, null)
+      assert.deepEqual(listing.entries.map(e => e.name), ['sub'])
+    })
+
+    it('refuses the same directory when it is not a configured root', async () => {
+      const listing = await listVia({
+        cliSession: createMockSession(),
+        config: { homeOverride: fakeHome },
+      }, root)
+      assert.match(listing.error, /^Access denied/)
+    })
+
+    it("lists the session manager's default cwd when it passes validateCwdAllowed", async () => {
+      const manager = new EventEmitter()
+      manager.defaultCwd = join(root, 'sub')
+      manager.getSession = () => undefined
+      manager.listSessions = () => []
+      manager.getHistory = () => []
+      manager.isBudgetPaused = () => false
+      Object.defineProperty(manager, 'firstSessionId', { get: () => null })
+      const listing = await listVia({
+        sessionManager: manager,
+        config: { homeOverride: fakeHome, workspaceRoots: [root] },
+      }, join(root, 'sub'))
+      assert.equal(listing.error, null)
+    })
+  })
+
   it('works in multi-session mode', async () => {
     const manager = new EventEmitter()
     const mockSession = createMockSession()

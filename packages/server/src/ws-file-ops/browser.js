@@ -6,8 +6,14 @@ import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
+import { browseBoundaries, credentialDirDenialReason, resolveCwdPolicyHome } from '../handler-utils.js'
 
 const log = createLogger('ws')
+
+// Issue 8303 — the one denial every refused listing carries (outside every
+// boundary, a credential/config directory, or a check that could not finish).
+// Names the workspace roots too: Browse honours them like Create does.
+const LISTING_DENIAL = 'Access denied: directory listing is restricted to the home directory and configured workspace roots'
 
 // #8012 — the message list_directory / browse_files send when `realpath()`
 // failed with one of these codes for a path INSIDE their boundary. Any other
@@ -25,15 +31,23 @@ const LISTING_UNRESOLVABLE_REASONS = {
  * @param {Function} sendFn - (ws, message) => void
  * @param {Function} resolveSessionCwd - shared CWD resolver
  * @param {Function} validatePathWithinCwd - shared path validator
+ * @param {Object} [options]
+ * @param {Function} [options.getConfig] - () => runtime config (workspaceRoots, test-only homeOverride); late-bound so it tracks config changes
+ * @param {Function} [options.getDefaultCwd] - () => the daemon's configured default cwd
  * @returns {Object} browser operation methods
  */
-export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
+export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, options = {}) {
+  const getConfig = options.getConfig || (() => null)
+  const getDefaultCwd = options.getDefaultCwd || (() => null)
 
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath) {
     let absPath = null
     try {
-      const home = homedir()
+      const config = getConfig()
+      const home = (config?.homeOverride && typeof config.homeOverride === 'string')
+        ? config.homeOverride
+        : homedir()
       if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
         absPath = home
       } else {
@@ -57,13 +71,22 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           // raw message with the server path in it. Only a path inside home
           // keeps a specific message now; everything else is the denial.
           const homeReal = await realpath(home).catch(() => null)
+          // Boundary list for choosing a SPECIFIC message only (never for
+          // granting access): a path inside any browsable root keeps its reason.
+          // A credential/config directory always gets the plain denial.
+          let error = LISTING_DENIAL
+          if (!(homeReal && credentialDirDenialReason(absPath, homeReal))) {
+            for (const boundary of browseBoundaries(config, getDefaultCwd())) {
+              const candidate = await unresolvablePathError(err, absPath, boundary, LISTING_UNRESOLVABLE_REASONS, LISTING_DENIAL)
+              if (candidate !== LISTING_DENIAL) { error = candidate; break }
+            }
+          }
           sendFn(ws, {
             type: 'directory_listing',
             path: absPath,
             parentPath: null,
             entries: [],
-            error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
-              'Access denied: directory listing is restricted to the home directory'),
+            error,
           })
           return
         }
@@ -80,15 +103,20 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           containmentUnknown = true
         }
       }
-      const homeReal = await realpath(home)
+      const homeReal = resolveCwdPolicyHome(config)
+      // Same predicate Create uses for the credential-dir / config-dir layers,
+      // then the Browse allow-set: $HOME + workspace roots + a valid default cwd.
+      const denied = containmentUnknown
+        || credentialDirDenialReason(realAbsPath, homeReal) !== null
+        || !browseBoundaries(config, getDefaultCwd()).some(b => isPathWithin(realAbsPath, b))
 
-      if (containmentUnknown || !isPathWithin(realAbsPath, homeReal)) {
+      if (denied) {
         sendFn(ws, {
           type: 'directory_listing',
           path: absPath,
           parentPath: null,
           entries: [],
-          error: 'Access denied: directory listing is restricted to the home directory',
+          error: LISTING_DENIAL,
         })
         return
       }
