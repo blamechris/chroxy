@@ -338,7 +338,7 @@ describe('directory listing', () => {
     ws.close()
   })
 
-  it('restricts listing to home directory', async () => {
+  it('restricts listing to home when workspace roots are not configured', async () => {
     server = new WsServer({
       port: 0,
       apiToken: TOKEN,
@@ -356,7 +356,7 @@ describe('directory listing', () => {
 
     const listing = await waitForMessage(messages, 'directory_listing', 2000)
     assert.ok(listing, 'Should receive directory_listing')
-    assert.ok(listing.error.includes('restricted'), 'Should get access denied error')
+    assert.equal(listing.error, 'Access denied: directory is outside the allowed workspace or is a blocked credential/config directory', 'Should get the shared cwd-policy denial')
     assert.deepEqual(listing.entries, [])
 
     ws.close()
@@ -396,7 +396,7 @@ describe('directory listing', () => {
       const listing = await waitForMessage(messages, 'directory_listing', 2000)
       assert.ok(listing, 'Should receive directory_listing')
       assert.ok(listing.error, 'Should return an error for symlink outside home')
-      assert.match(listing.error, /restricted/i)
+      assert.equal(listing.error, 'Access denied: directory is outside the allowed workspace or is a blocked credential/config directory')
       assert.deepEqual(listing.entries, [])
 
       ws.close()

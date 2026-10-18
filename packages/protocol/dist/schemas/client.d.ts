@@ -877,6 +877,7 @@ export declare const UserQuestionResponseSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const ListDirectorySchema: z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
+    requestId: z.ZodOptional<z.ZodString>;
     path: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const BrowseFilesSchema: z.ZodObject<{
@@ -1783,6 +1784,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     freeformText: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
+    requestId: z.ZodOptional<z.ZodString>;
     path: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"browse_files">;

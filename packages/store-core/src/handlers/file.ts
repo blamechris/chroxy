@@ -49,6 +49,8 @@ function extractEntriesPayload(
 
 /** Parsed payload for a `directory_listing` message. */
 export interface DirectoryListingPayload {
+  /** Optional nonce echoed by daemons supporting path-independent correlation. */
+  requestId?: string
   /** Directory path that was listed (raw string, not trimmed). Null if missing/non-string. */
   path: string | null
   /** Parent directory path (raw string). Null if missing/non-string. */
@@ -70,7 +72,9 @@ export interface DirectoryListingPayload {
 export function handleDirectoryListing(
   msg: Record<string, unknown>,
 ): DirectoryListingPayload {
-  return extractEntriesPayload(msg)
+  const payload: DirectoryListingPayload = extractEntriesPayload(msg)
+  if (typeof msg.requestId === 'string') payload.requestId = msg.requestId
+  return payload
 }
 
 /** Parsed payload for a `file_listing` message. */

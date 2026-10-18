@@ -932,6 +932,7 @@ export const UserQuestionResponseSchema = z.object({
 });
 export const ListDirectorySchema = z.object({
     type: z.literal('list_directory'),
+    requestId: z.string().max(200).optional(),
     path: z.string().max(4096).optional(),
 });
 export const BrowseFilesSchema = z.object({
