@@ -868,6 +868,7 @@ export function sendClientVisible(socket: WebSocket | null, visible: boolean): v
 
 // Re-export encrypt for wsSend (import is used inside the function)
 import { encrypt } from './crypto';
+import { dispatchDirectoryListingProbes } from './directory-listing-probes';
 import { isOwnDaemonUrl } from '../utils/daemon-origin';
 import { detectStaleBundle, getClientBuildId, getClientVersion, handleStaleBundle } from '../utils/stale-bundle';
 
@@ -6599,10 +6600,11 @@ function dispatchFrame(raw: unknown, ctxOverride?: ConnectionContext, encryptedF
 
     case 'directory_listing': {
       const cb = get()._directoryListingCallback;
-      if (cb) {
-        const payload = sharedDirectoryListing(msg);
-        cb({ ...payload, entries: payload.entries as DirectoryEntry[] });
-      }
+      const payload = sharedDirectoryListing(msg);
+      const listing = { ...payload, entries: payload.entries as DirectoryEntry[] };
+      if (cb) cb(listing);
+      // One-shot path-matched probes sit beside the single slot (#8303).
+      dispatchDirectoryListingProbes(listing);
       break;
     }
 

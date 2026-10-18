@@ -10,6 +10,7 @@ import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
+import { addDirectoryListingProbe } from '../store/directory-listing-probes'
 import { buildProviderLimitationNote, selectOwnModelsForProvider, selectPermissionModesForProvider } from '@chroxy/store-core'
 import type { ModelsByProvider, PermissionMode } from '@chroxy/store-core'
 import {
@@ -405,6 +406,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const currentPreset = trimmedCwd ? sessionPresetSnapshots?.[trimmedCwd] : undefined
   useEffect(() => { setPresetExpanded(false) }, [trimmedCwd])
 
+  // Pending not-browsable probe (#8303); released on close, unmount or re-open.
+  const probeUnsubRef = useRef<(() => void) | null>(null)
+  const releaseProbe = () => { probeUnsubRef.current?.(); probeUnsubRef.current = null }
+  // No unmount cleanup: StrictMode's simulated unmount would drop the live probe
+  // (the fresh-open effect below does not re-run); a one-shot left on a truly
+  // unmounted modal fires at most once into a no-op setState.
+  useEffect(() => {
+    if (!open) releaseProbe()
+  }, [open])
+
   const prevOpenRef = useRef(false)
   useEffect(() => {
     // Only reset form state on fresh open (closed → open transition).
@@ -447,18 +458,19 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       nameValRef.current = ''
     }
     // #8303: probe the prefilled cwd once so the "Browse can't open this directory"
-    // note is there before the user clicks Browse. The probe callback only ever sets
-    // the note; handleBrowseNavigate replaces it (the store holds one callback), and
-    // a response for any other path is ignored, so it cannot clobber a user listing.
+    // note is there before the user clicks Browse. The probe is a one-shot listener
+    // matched on the exact response path, registered beside the store's single
+    // callback slot (autocomplete and Browse both overwrite that), so neither can
+    // swallow it. A `~` cwd is skipped: the server echoes only the expanded path
+    // (or a workspace-root fallback), so there is nothing to match the request on.
     // Skipped under Tauri, where Browse is the native picker and never lists.
     const inTauri = typeof window !== 'undefined' &&
       !!(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
-    if (cwdValue.trim() && !inTauri) {
-      const probePath = cwdValue.trim()
-      setCwdBrowseNote(null)
-      setDirectoryListingCallback((listing: DirectoryListing) => {
-        const responsePath = listing.path || listing.parentPath || ''
-        if (!browsePathsMatch(probePath, responsePath)) return
+    const probePath = cwdValue.trim()
+    releaseProbe()
+    setCwdBrowseNote(null)
+    if (probePath && !probePath.startsWith('~') && !inTauri) {
+      probeUnsubRef.current = addDirectoryListingProbe(probePath, (listing: DirectoryListing) => {
         setCwdBrowseNote(listing.error ? { path: probePath, message: listing.error } : null)
       })
       requestDirectoryListing(probePath)
