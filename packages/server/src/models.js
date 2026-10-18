@@ -1545,7 +1545,7 @@ export function createModelsRegistry(hooks = {}) {
      * or the reported value already matches.
      */
     updateContextWindow(modelId, contextWindow) {
-      if (typeof modelId !== 'string' || typeof contextWindow !== 'number' || contextWindow <= 0) {
+      if (typeof modelId !== 'string' || !Number.isFinite(contextWindow) || contextWindow <= 0) {
         return false
       }
       let changed = false

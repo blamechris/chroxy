@@ -1312,17 +1312,14 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
   })
 
   it('a NaN ratchet is never written into the learned map (#7771)', () => {
-    // updateContextWindow's OWN input guard (`typeof contextWindow !== 'number'
-    // || contextWindow <= 0`) admits NaN — `typeof NaN === 'number'` is true and
-    // `NaN <= 0` is false, so neither clause fires. That is a pre-existing gap
-    // tracked separately (#7771); what THIS fix must not do is compound it by
-    // writing a NaN through the new persistence path. `activeModels` is allowed
-    // to carry the NaN in-process (unrelated, out of scope) — the learned MAP
-    // specifically must refuse it.
+    // updateContextWindow's input guard used to admit NaN (`typeof NaN ===
+    // 'number'` and `NaN <= 0` is false); #7771 made it reject non-finite
+    // values outright. Keep the downstream assertions as defence in depth: the
+    // learned MAP must never carry a NaN to disk either.
     const reg = makeNoSeamRegistry(cachePath)
     reg.applyOverlay(overlayMap({ 'my-model': {} }))
-    assert.equal(reg.updateContextWindow('my-model', NaN), true,
-      'sanity: the pre-existing top-level guard does not reject NaN (#7771)')
+    assert.equal(reg.updateContextWindow('my-model', NaN), false,
+      'the top-level guard rejects NaN (#7771)')
 
     assert.equal(reg.saveCache(cachePath), true)
     const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
