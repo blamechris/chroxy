@@ -56,8 +56,9 @@ export function modelChoices(models: readonly ModelInfo[]): ModelInfo[] {
       && (other.fullId || other.id).replace(/^claude-/, '') === target.replace(/^claude-/, ''))
     return { ...m, label: ambiguous ? `${label} (${target})` : candidate }
   })
-  return choices.map(m => choices.filter(other => other.label === m.label).length > 1
-    ? { ...m, label: `${baseLabel(m)} (${m.fullId || m.id})` } : m)
+  // Recover the original base label (not the augmented one) for the final fallback.
+  return choices.map((m, i) => choices.filter(other => other.label === m.label).length > 1
+    ? { ...m, label: `${baseLabel(unique[i]!)} (${m.fullId || m.id})` } : m)
 }
 
 /** Shared header/status label. The family fallback is display-only, Claude-only,

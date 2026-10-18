@@ -16,6 +16,15 @@ describe('model presentation (#8260)', () => {
     expect(choices.map(m => m.label)).toEqual(['Haiku 4.5 (provider alias)', 'Haiku 4.5 (pinned 4.5)', 'Haiku 4.5 (pinned 20251001)'])
     expect(models[0]!.label).toBe('Haiku 4.5')
   })
+  it('uses the base label for the full-target fallback across families', () => {
+    const rows = [
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' },
+    ]
+    const choices = modelChoices(rows)
+    expect(choices.map(m => m.id)).toEqual(['alpha', 'beta'])
+    expect(choices.map(m => m.label)).toEqual(['Custom (claude-alpha-1-0)', 'Custom (claude-beta-1-0)'])
+  })
   it('collapses only identical targets while preserving exact alias resolution', () => {
     const duplicate = { ...models[1]!, id: 'second-alias' }
     expect(modelChoices([...models, duplicate])).toHaveLength(3)
