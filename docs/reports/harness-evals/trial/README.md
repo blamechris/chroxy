@@ -76,8 +76,9 @@ local Claude session in the chroxy checkout.
    merge" measure in `PROTOCOL.md` §6 is `not observable`.
 5. **Dry runs (one tiny docs-only issue, 45-minute cap, not a queue issue).**
    **[supervisor]** cuts `trial/dry-cy-claude`, `trial/dry-cy-codex` and
-   `trial/dry-cx` from `main` at T0, like the four bases, and fast-forwards them
-   with the bases on any re-cut; the dry missions are in
+   `trial/dry-cx` from `main` at T0, like the four bases; a dry branch
+   fast-forwards with the bases on a re-cut only until a dry run has committed
+   to it, after which it stays on its cut as evidence. The dry missions are in
    [`missions/dry/`](missions/dry/) and use a synthetic docs-only task, so no
    backlog issue is touched. **[owner]** also opens one scratch issue, writes
    `Trial-Closes: <its number>` (no `#`) in a dry-run PR body, and confirms the
