@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import net from 'node:net'
 import { runDoctorChecks } from '../src/doctor.js'
 
 /**
@@ -12,7 +13,16 @@ import { runDoctorChecks } from '../src/doctor.js'
  * never read or written.
  */
 
-async function portRow({ env = {}, config, port }) {
+// OS-assigned free port: bind 0 on loopback, read it, release it.
+async function freePort() {
+  const srv = net.createServer()
+  await new Promise(r => srv.listen(0, '127.0.0.1', r))
+  const { port } = srv.address()
+  await new Promise(r => srv.close(r))
+  return port
+}
+
+async function portRow({ env = {}, config, port, full = false }) {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-port-'))
   if (config !== undefined) writeFileSync(join(dir, 'config.json'), JSON.stringify(config))
   const saved = {}
@@ -24,7 +34,8 @@ async function portRow({ env = {}, config, port }) {
   }
   try {
     const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], port })
-    return checks.find(c => c.name === 'Port').message
+    const row = checks.find(c => c.name === 'Port')
+    return full ? row : row.message
   } finally {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k]
@@ -36,27 +47,49 @@ async function portRow({ env = {}, config, port }) {
 
 describe('runDoctorChecks port resolution', () => {
   it('uses the config file port when no flag or env is given', async () => {
-    const msg = await portRow({ config: { port: 48794 } })
-    assert.ok(msg.startsWith('48794 '), msg)
+    const p = await freePort()
+    const msg = await portRow({ config: { port: p } })
+    assert.ok(msg.startsWith(`${p} `), msg)
   })
 
   it('the explicit port option beats the config file', async () => {
-    const msg = await portRow({ config: { port: 48794 }, port: 48795 })
-    assert.ok(msg.startsWith('48795 '), msg)
+    const [a, b] = [await freePort(), await freePort()]
+    const msg = await portRow({ config: { port: a }, port: b })
+    assert.ok(msg.startsWith(`${b} `), msg)
   })
 
   it('env PORT beats the config file, like start', async () => {
-    const msg = await portRow({ config: { port: 48794 }, env: { PORT: '48796' } })
-    assert.ok(msg.startsWith('48796 '), msg)
+    const [a, b] = [await freePort(), await freePort()]
+    const msg = await portRow({ config: { port: a }, env: { PORT: String(b) } })
+    assert.ok(msg.startsWith(`${b} `), msg)
   })
 
   it('the explicit port option beats env PORT', async () => {
-    const msg = await portRow({ env: { PORT: '48796' }, port: 48795 })
-    assert.ok(msg.startsWith('48795 '), msg)
+    const [a, b] = [await freePort(), await freePort()]
+    const msg = await portRow({ env: { PORT: String(a) }, port: b })
+    assert.ok(msg.startsWith(`${b} `), msg)
   })
 
   it('falls back to 8765 with no flag, env or config port', async () => {
     const msg = await portRow({ config: {} })
     assert.ok(msg.startsWith('8765 '), msg)
   })
+
+  it('blank PORT falls through to 8765 like start', async () => {
+    const msg = await portRow({ config: {}, env: { PORT: '' } })
+    assert.ok(msg.startsWith('8765 '), msg)
+  })
+
+  for (const [label, opts] of [
+    ['PORT=abc', { env: { PORT: 'abc' }, config: {} }],
+    ['config port 0', { config: { port: 0 } }],
+    ['config port 70000', { config: { port: 70000 } }],
+    ['-p abc', { config: {}, port: 'abc' }],
+  ]) {
+    it(`${label} fails as an invalid port`, async () => {
+      const row = await portRow({ ...opts, full: true })
+      assert.equal(row.status, 'fail', row.message)
+      assert.ok(row.message.startsWith('Invalid port'), row.message)
+    })
+  }
 })

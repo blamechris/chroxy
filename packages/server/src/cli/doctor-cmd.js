@@ -10,7 +10,10 @@ export function registerDoctorCommand(program) {
     .action(async (options) => {
       const { runDoctorChecks } = await import('../doctor.js')
 
-      const port = options.port ? parseInt(options.port, 10) : undefined
+      // A non-numeric -p is passed through raw so doctor reports it as an
+      // invalid port instead of silently ignoring the flag.
+      const parsedPort = options.port ? parseInt(options.port, 10) : undefined
+      const port = Number.isNaN(parsedPort) ? options.port : parsedPort
       const providers = options.provider
         ? options.provider.split(',').map(s => s.trim()).filter(Boolean)
         : undefined
