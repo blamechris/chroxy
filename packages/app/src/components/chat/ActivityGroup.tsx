@@ -18,8 +18,8 @@ import {
   summarizeToolCounts,
   formatToolBreakdown,
   formatToolName,
-  describeTurnTermination,
 } from '@chroxy/store-core';
+import { getToolTermination, TerminatedIcon } from './ToolTermination';
 
 function ActivityEntry({
   message,
@@ -82,15 +82,9 @@ function ActivityEntry({
     message.toolResult !== undefined ||
     (message.toolResultImages?.length ?? 0) > 0;
   const imageCount = message.toolResultImages?.length || 0;
-  // #7376: a tool cut off because its TURN was terminated underneath it
-  // (permission-mode switch, Stop, crash, watchdog) never reported a result. It
-  // is not "the command failed", so it gets its own amber state instead of the
-  // red alert icon, and its (server-synthesized) result text is replaced by a
-  // "check whether it took effect before retrying" sentence. Wins over `toolResultIsError`, which the
-  // server also sets on these synthetic results.
-  const termination = hasResult && message.toolResultTerminatedReason
-    ? describeTurnTermination(message.toolResultTerminatedReason)
-    : null;
+  // #7376: see getToolTermination -- a terminated tool gets its own amber
+  // state, and its summary replaces the synthesized result text below.
+  const termination = getToolTermination(hasResult, message.toolResultTerminatedReason);
 
   // Use the shared formatter so per-row labels match the header breakdown
   // produced by `summarizeToolCounts` (e.g. "GitHub: List Repos" appears
@@ -134,7 +128,7 @@ function ActivityEntry({
             red alert icon instead of the green check. */}
         {hasResult ? (
           termination ? (
-            <Icon name="stop" size={12} color={COLORS.accentOrange} testID={`activity-entry-terminated-${message.id}`} accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
+            <TerminatedIcon termination={termination} markerId={`activity-entry-terminated-${message.id}`} />
           ) : message.toolResultIsError ? (
             <Icon name="alertCircle" size={12} color={COLORS.accentRed} testID={`activity-entry-error-${message.id}`} accessibilityLabel="tool failed" />
           ) : (

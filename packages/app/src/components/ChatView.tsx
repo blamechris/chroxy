@@ -221,7 +221,7 @@ export function ChatView({
   const [showScrollToTop, setShowScrollToTop] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const showScrollToBottomRef = useRef(false);
-  const [toolDetail, setToolDetail] = useState<{ toolName: string; rawToolName?: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
+  const [toolDetail, setToolDetail] = useState<{ toolName: string; rawToolName?: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string; toolResultTerminatedReason?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
   // #5750 (item 2) — assertively announce a newly-arrived permission prompt to
@@ -331,8 +331,8 @@ export function ChatView({
   // #6982: `rawToolName` is the UNFORMATTED `message.tool`, carried alongside
   // the display `toolName` so ToolDetailModal can route WebSearch/WebFetch
   // results through the structured renderer.
-  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => {
-    setToolDetail({ toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
+  const handleOpenDetail = (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string, toolResultTerminatedReason?: string) => {
+    setToolDetail({ toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, toolResultTerminatedReason });
   };
 
   // #4806: shared ChatView message pipeline (lifted from dashboard's
@@ -693,6 +693,7 @@ export function ChatView({
         toolResult={toolDetail?.toolResult}
         toolResultTruncated={toolDetail?.toolResultTruncated}
         toolResultImages={toolDetail?.toolResultImages}
+        toolResultTerminatedReason={toolDetail?.toolResultTerminatedReason}
         serverName={toolDetail?.serverName}
         onClose={() => setToolDetail(null)}
         onImagePress={(uri) => { setToolDetail(null); setViewerUri(uri); }}
