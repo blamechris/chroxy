@@ -8,11 +8,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+  DEFAULT_BYPASS_CATEGORIES as PROTOCOL_DEFAULT_BYPASS,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS as PROTOCOL_LABELS,
   NOTIFICATION_CATEGORY_ORDER as PROTOCOL_ORDER,
 } from '@chroxy/protocol';
 import {
+  DEFAULT_BYPASS_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
 } from '../../components/settings/constants';
@@ -261,6 +263,12 @@ describe('SettingsScreen — Quiet hours editor section (#4544)', () => {
     expect(settingsSource).toMatch(/buildQuietHoursTimezoneList\(/);
     // The duplicate local constant from PR #4565 must be gone.
     expect(settingsSource).not.toMatch(/const\s+QUIET_HOURS_TIMEZONE_CHOICES\s*=/);
+  });
+
+  it('DEFAULT_BYPASS_CATEGORIES is the protocol set itself, not a local copy', () => {
+    expect(DEFAULT_BYPASS_CATEGORIES).toBe(PROTOCOL_DEFAULT_BYPASS);
+    expect([...DEFAULT_BYPASS_CATEGORIES].sort()).toEqual(['activity_error', 'permission']);
+    expect(settingsSource).not.toMatch(/DEFAULT_BYPASS_CATEGORIES(?::[^=]+)?\s*=\s*\[/);
   });
 
   it('falls back to DEFAULT_BYPASS_CATEGORIES when the snapshot omits the list', () => {
