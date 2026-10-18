@@ -17,6 +17,8 @@ describe('isLoopbackHost', () => {
   it('treats IPv4-mapped IPv6 loopback as loopback', () => {
     assert.equal(isLoopbackHost('::ffff:127.0.0.1'), true)
     assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('::FFFF:127.0.0.1'), true)
+    assert.equal(isLoopbackHost('::FFFF:7F00:1'), true)
     assert.equal(isLoopbackHost('::ffff:7FFF:abcd'), true)
   })
 
