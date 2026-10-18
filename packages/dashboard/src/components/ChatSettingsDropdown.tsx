@@ -8,7 +8,7 @@
  * The modal renders above everything via the shared `Modal` overlay, so it's
  * likewise clipping-immune.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { findModelEntry, modelDisplayTarget, formatActiveModelLabel } from '@chroxy/store-core'
 import type { ModelInfo } from '../store/types'
 import type { PermissionMode } from '@chroxy/store-core'
@@ -224,6 +224,7 @@ export function ChatSettingsDropdown({
 
       {/* Permission Mode */}
       {showPermissionMode && availablePermissionModes.length > 0 && (
+        <SelectFit kind="permission" labels={availablePermissionModes.filter(m => m.supported !== false).map(m => m.label)}>
         <select
           data-kind="permission"
           aria-label="Permission mode"
@@ -242,6 +243,7 @@ export function ChatSettingsDropdown({
             <option key={m.id} value={m.id} title={m.description} disabled={m.supported === false}>{m.label}</option>
           ))}
         </select>
+        </SelectFit>
       )}
 
       {/* #6901: read-only Codex sandbox badge. Codex applies the sandbox once at
@@ -268,6 +270,7 @@ export function ChatSettingsDropdown({
 
       {/* Thinking Level */}
       {showThinkingLevel && (
+        <SelectFit kind="thinking" labels={thinkingLevelChoices.options.map(o => o.label)}>
         <select
           data-kind="thinking"
           aria-label="Thinking level"
@@ -278,7 +281,41 @@ export function ChatSettingsDropdown({
             <option key={id} value={id}>{label}</option>
           ))}
         </select>
+        </SelectFit>
       )}
     </>
+  )
+}
+
+/**
+ * #8618: size a native header <select> to the widest label it can show.
+ *
+ * A native <select> with `width: auto` does not grow to its label in WebKit
+ * (#5197): it collapses to its `min-width` and cuts the text mid-glyph, which
+ * is how `xhigh` rendered as "Xhi" on a codex session once five controls
+ * squeezed the center column. Every earlier fix (#3705, #3720, #5181, #5197,
+ * #4464) tuned a fixed per-kind floor, and each floor was right only for the
+ * roster that existed when it was written — #7730 made the thinking roster the
+ * binary's own, and a hardcoded width beside a growing roster is the class
+ * docs/false-safety-guards.md records.
+ *
+ * So the width comes from the roster instead: every label is rendered once as
+ * an invisible sizer in the same grid cell as the <select>, with the select's
+ * own chrome (padding, border, room for the native arrow), and the select is
+ * stretched to the cell. The cell is as wide as the widest label actually
+ * renders in the current font — no character count, no per-kind constant —
+ * and the wrapper does not shrink, because a select narrower than its label is
+ * the bug. The sizers are `aria-hidden` and `visibility: hidden`, so they are
+ * neither read nor clickable. `scripts/header-layout.test.mjs` measures the
+ * result in a real browser against each option.
+ */
+function SelectFit({ kind, labels, children }: { kind: 'permission' | 'thinking'; labels: string[]; children: ReactNode }) {
+  return (
+    <span className="header-select-fit" data-kind={kind} data-testid={`header-select-fit-${kind}`}>
+      {labels.map((label, i) => (
+        <span key={`${i}:${label}`} className="header-select-fit-sizer" aria-hidden="true">{label}</span>
+      ))}
+      {children}
+    </span>
   )
 }

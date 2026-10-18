@@ -202,13 +202,49 @@
   min-width: 160px;
   max-width: 240px;
 }
-.header-center select[data-kind="permission"] {
-  min-width: 110px;
-  max-width: 160px;
+/* #8618: the permission and thinking selects carry NO per-kind floor or cap
+   any more. Each sits in a `.header-select-fit` cell that is exactly as wide as
+   the widest label its roster renders (see below), so a roster the dashboard
+   has never seen — codex's `xhigh`, a future `Accept Edits`-length mode — fits
+   by construction instead of waiting for the next floor adjustment. The model
+   control keeps its floor: it is a button whose label is a free-form model id
+   with a deliberate truncation cap. */
+
+/* #8618: a native <select> sized by its own roster. The wrapper is a one-cell
+   grid; every label of the roster is rendered once as an invisible sizer with
+   the select's chrome (padding, border, and room for the native arrow), and the
+   select is stretched over the cell. The cell therefore measures the widest
+   label in the current font — WebKit, which does not grow a `width: auto`
+   select to its label (#5197), gets the width from the sizers; Chromium's own
+   intrinsic select width also contributes to the cell. The wrapper does not
+   shrink: a select narrower than its label is the defect, so under pressure
+   the sandbox badge (shrinkable, full text in its title) gives way first. */
+.header-select-fit {
+  display: inline-grid;
+  grid-template-columns: minmax(0, max-content);
+  align-items: center;
+  flex-shrink: 0;
+  min-width: 0;
 }
-.header-center select[data-kind="thinking"] {
-  min-width: 80px;
-  max-width: 110px;
+.header-select-fit > * {
+  grid-area: 1 / 1;
+}
+.header-select-fit-sizer {
+  visibility: hidden;
+  pointer-events: none;
+  white-space: nowrap;
+  font-size: var(--text-base);
+  /* The select's padding + border, plus room for the native arrow. 1.5em is
+     wider than either engine's arrow at this font size; the browser's own
+     intrinsic width (Chromium) is honoured too, so this only ever ADDS room. */
+  padding: 4px calc(8px + 1.5em) 4px 8px;
+  border: 1px solid transparent;
+}
+.header-center .header-select-fit select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  box-sizing: border-box;
 }
 
 .header-center select:focus {
@@ -329,6 +365,19 @@
   min-width: 160px;
   max-width: 240px;
   display: inline-block;
+}
+/* #8618: the codex sandbox badge (#6901) shares the pill's chrome but NOT the
+   model slot's floor and cap — it sits beside the model control, not in its
+   place, so the 160px floor only padded "Sandbox: Read-only" and the 240px cap
+   plus `flex-shrink: 1` truncated "Sandbox: Workspace write" while the badge
+   still took a model dropdown's width. It now sizes to its own text. It stays
+   shrinkable (ellipsis, full text in `title`), so when the center column
+   really cannot fit every control it is the badge that gives way, never an
+   interactive select. */
+.chat-settings-readonly-badge[data-kind="codex-sandbox"] {
+  width: auto;
+  min-width: 0;
+  max-width: none;
 }
 
 /* (#3185 prompt-evaluator-toggle CSS removed — toggle moved from the
@@ -8348,8 +8397,15 @@ button.sidebar-token-view-session-row:hover {
   /* Narrow-viewport floors: relaxed across all kinds (#3705) so the grid's
      center column can shrink without overflow. Per-kind ratios preserved. */
   .header-center select[data-kind="model"] { min-width: 80px; max-width: 160px; }
-  .header-center select[data-kind="permission"] { min-width: 80px; max-width: 110px; }
-  .header-center select[data-kind="thinking"] { min-width: 60px; max-width: 80px; }
+  /* #8618: the model control has been a BUTTON since #6220, and the phone
+     floor above was never carried over to it — it kept the 160px desktop floor
+     on phones, which on a codex header (five controls) pushed the thinking
+     select past the column's hidden overflow. Same floors as the select rule. */
+  .header-center .chat-settings-model-btn { min-width: 80px; max-width: 160px; font-size: var(--text-sm); padding: 3px 6px; }
+  /* #8618: no narrow-viewport floors for permission/thinking either — the
+     `.header-select-fit` cell sizes them from their roster at every width;
+     only the sizer's font steps down with the select's. */
+  .header-select-fit-sizer { font-size: var(--text-sm); padding: 3px calc(6px + 1.5em) 3px 6px; }
   /* #4464: match the model <select>'s narrow-viewport floors. Without
      this rule the read-only badge keeps the 180–240px desktop floor and
      overflows the header center column on phone widths. */
@@ -8358,6 +8414,11 @@ button.sidebar-token-view-session-row:hover {
     max-width: 160px;
     font-size: var(--text-sm);
     padding: 3px 6px;
+  }
+  /* #8618: the sandbox badge keeps its own-text sizing on phones too. */
+  .header-center .chat-settings-readonly-badge[data-kind="codex-sandbox"] {
+    min-width: 0;
+    max-width: none;
   }
   .header-center { gap: 4px; }
   .header-right { gap: 4px; }

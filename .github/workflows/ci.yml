@@ -2196,6 +2196,16 @@ jobs:
           node packages/dashboard/scripts/tool-layout.test.mjs | tee /tmp/chroxy-tool-layout.tap
           node scripts/lib/assert-test-count.mjs --min 15 cat /tmp/chroxy-tool-layout.tap > /dev/null
 
+      - name: Verify header controls layout
+        # #8618 — the codex header's thinking select and sandbox badge measured
+        # in a real browser against every option they can show. 9 = 3 cases
+        # (roomy / tight / phone) × 3 checks; the floor catches a run that
+        # discovered nothing (#7447's class).
+        run: |
+          set -o pipefail
+          node packages/dashboard/scripts/header-layout.test.mjs | tee /tmp/chroxy-header-layout.tap
+          node scripts/lib/assert-test-count.mjs --min 9 cat /tmp/chroxy-header-layout.tap > /dev/null
+
       - name: Run dashboard smoke test
         working-directory: packages/server
         # SMOKE_REQUIRE_IDE=1 — the daemon above has features.ide on + the fixture
