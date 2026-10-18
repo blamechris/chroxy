@@ -17,6 +17,7 @@ describe('isLoopbackHost', () => {
   it('treats IPv4-mapped IPv6 loopback as loopback', () => {
     assert.equal(isLoopbackHost('::ffff:127.0.0.1'), true)
     assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('::ffff:7FFF:abcd'), true)
   })
 
   it('matches localhost case-insensitively', () => {
@@ -28,6 +29,12 @@ describe('isLoopbackHost', () => {
     // Only valid IPv4 literals in 127.0.0.0/8 count — not arbitrary hostnames.
     assert.equal(isLoopbackHost('127.example.com'), false)
     assert.equal(isLoopbackHost('127.0.0.1.nip.io'), false)
+    assert.equal(isLoopbackHost('::ffff:7f:1'), false)
+    assert.equal(isLoopbackHost('::ffff:7f'), false)
+    assert.equal(isLoopbackHost('::ffff:7f00'), false)
+    assert.equal(isLoopbackHost('::ffff:7fzz:1'), false)
+    assert.equal(isLoopbackHost('::ffff:127.'), false)
+    assert.equal(isLoopbackHost('::ffff:127.example.com'), false)
   })
 
   it('does not treat 0.0.0.0, LAN IPs, or undefined as loopback', () => {
