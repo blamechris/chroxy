@@ -20,6 +20,12 @@ let browser
 let vite
 let url
 
+// The codex binary's own reasoning roster (`supportedReasoningEfforts`, #7730),
+// written by hand here because this is a test (scripts/lint-thinking-level-roster.sh
+// exempts tests on purpose) and handed to the fixture on the query string.
+const CODEX_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh']
+const SELECTED_LEVEL = 'xhigh'
+
 const CASES = [
   // [case, viewport width, the sandbox the fixture renders for it]
   ['roomy', 1660, 'Read-only'],
@@ -81,7 +87,7 @@ describe('header controls layout (#8618)', () => {
         name: 'header-layout-fixture',
         configureServer(server) {
           server.middlewares.use(async (req, res, next) => {
-            if (req.url !== '/__header-layout') return next()
+            if (!req.url.startsWith('/__header-layout')) return next()
             try {
               const html = await server.transformIndexHtml(req.url, '<!doctype html><html><head></head><body><div id="root"></div><script type="module" src="/scripts/header-layout.fixture.tsx"></script></body></html>')
               res.setHeader('Content-Type', 'text/html')
@@ -94,7 +100,7 @@ describe('header controls layout (#8618)', () => {
       }],
     })
     await vite.listen()
-    url = `http://127.0.0.1:${vite.httpServer.address().port}/__header-layout`
+    url = `http://127.0.0.1:${vite.httpServer.address().port}/__header-layout?levels=${encodeURIComponent(CODEX_LEVELS.join(','))}&selected=${SELECTED_LEVEL}`
     browser = await chromium.launch({ headless: true })
     const probe = await browser.newPage()
     try {
