@@ -548,6 +548,23 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
     assert.equal(updateContextWindow('claude-opus-4-8', 'big'), false)
   })
 
+  for (const [label, bad] of [['NaN', Number.NaN], ['Infinity', Infinity], ['-Infinity', -Infinity]]) {
+    it(`rejects ${label} and leaves the model list and override map untouched`, () => {
+      const before = getModels().find(m => m.id === 'sonnet-5-5')
+      assert.ok(before, 'sonnet-5-5 is in the default list')
+      const snapshot = getModels().map(m => m.contextWindow)
+      assert.equal(updateContextWindow('sonnet-5-5', bad), false)
+      assert.equal(updateContextWindow(before.fullId, bad), false)
+      assert.deepEqual(getModels().map(m => m.contextWindow), snapshot)
+      // The override map is private; a refresh would rebuild rows from it
+      // (top precedence), so a leaked non-finite override shows up here.
+      updateModels([{ value: before.fullId, displayName: 'Sonnet', description: '' }])
+      const after = getModels().find(m => m.fullId === before.fullId)
+      assert.ok(after, 'target row survives the refresh')
+      assert.equal(after.contextWindow, before.contextWindow, 'no non-finite override leaked')
+    })
+  }
+
   it('override survives subsequent updateModels refreshes (regression for #2820)', () => {
     // _fetchSupportedModels() fires on every SDK session init, so the first
     // updateModels() rebuild cannot clobber a value we already learned from
