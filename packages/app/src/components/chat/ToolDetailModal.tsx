@@ -13,9 +13,10 @@ import {
 import type { ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
+import { resolveToolTermination, TerminatedIcon, TerminatedNote } from './ToolTermination';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 
-export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
+export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, toolResultTerminatedReason, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
   /**
@@ -33,13 +34,16 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   toolResultTruncated?: boolean;
   toolResultImages?: ToolResultImage[];
   serverName?: string;
+  /** #8364: set when the tool was cut off by a terminated turn; replaces the synthesized result text. */
+  toolResultTerminatedReason?: string;
   onClose: () => void;
   onImagePress: (uri: string) => void;
 }) {
   // #6982: structured WebSearch/WebFetch render, parse-with-fallback —
   // `null` (non-web tool, absent or unparseable result) keeps the existing
   // `<Text selectable>` dump below.
-  const webParsed = parseWebToolResult(rawToolName, toolResult);
+  const termination = resolveToolTermination(toolResult != null, toolResultTerminatedReason);
+  const webParsed = termination ? null : parseWebToolResult(rawToolName, toolResult);
   return (
     <Modal
       visible={visible}
@@ -98,7 +102,12 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
             {toolResult != null ? (
               <>
                 <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
-                {webParsed ? (
+                {termination ? (
+                  <>
+                    <TerminatedIcon termination={termination} iconTestID="tool-detail-terminated" />
+                    <TerminatedNote termination={termination} />
+                  </>
+                ) : webParsed ? (
                   <WebToolResultView parsed={webParsed} />
                 ) : (
                   <Text selectable style={styles.toolModalContent}>{toolResult}</Text>
