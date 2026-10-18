@@ -183,10 +183,14 @@ export function ChatSettingsDropdown({
 
   // #8619 + #8618: the permission <option>s as rendered — label, title and
   // disabled state — computed once, so the roster sizers (SelectFit) measure
-  // exactly the labels the options show, the gated suffix included. The config
-  // gate is a separate reason from adapter support: only an otherwise-supported
-  // Auto gets the "disabled on this server" suffix, so the two never read the
-  // same.
+  // exactly the labels the control can DISPLAY: every selectable option, plus
+  // the selected one even when it is disabled (App.tsx keeps `plan` while it is
+  // unavailable). A disabled label the value can never show — "Auto (disabled
+  // on this server)", "Plan (unavailable)" — must not widen the control; the
+  // sizers govern the cell precisely so the select's own intrinsic width,
+  // which counts disabled options, cannot. The config gate is a separate reason
+  // from adapter support: only an otherwise-supported Auto gets the "disabled
+  // on this server" suffix, so the two never read the same.
   const permissionOptions = useMemo(() => availablePermissionModes.map(m => {
     const gated = m.id === 'auto' && m.supported !== false && autoPermissionModeAllowed === false
     return {
@@ -249,7 +253,7 @@ export function ChatSettingsDropdown({
 
       {/* Permission Mode */}
       {showPermissionMode && availablePermissionModes.length > 0 && (
-        <SelectFit kind="permission" labels={permissionOptions.map(o => o.label)}>
+        <SelectFit kind="permission" labels={permissionOptions.filter(o => !o.disabled || o.id === permissionMode).map(o => o.label)}>
           <select
             data-kind="permission"
             aria-label="Permission mode"
@@ -324,25 +328,27 @@ export function ChatSettingsDropdown({
  * binary's own, and a hardcoded width beside a growing roster is the class
  * docs/false-safety-guards.md records.
  *
- * So the width comes from the roster instead: every label — a disabled one
- * included, since a disabled option can still be the selected value (App.tsx
- * keeps `plan` while it is unavailable) and Chromium's own intrinsic width
- * counts it anyway — is rendered once as an invisible sizer in the same grid
- * cell as the <select>, with the select's chrome (padding, border, room for the
- * native arrow), and the select is stretched to the cell. The cell is as wide
- * as the widest label actually renders in the select's font — no character
- * count, no per-kind constant — and the wrapper does not shrink, because a
- * select narrower than its label is the bug. The sizers are `aria-hidden`,
- * `visibility: hidden` and zero-height, so they are neither read, clickable,
- * nor a change to the row's height.
+ * So the width comes from the roster instead: every label the control can
+ * display is rendered once as an invisible sizer in the same grid cell as the
+ * <select>, with the select's chrome (padding, border, room for the native
+ * arrow), and the select — `width: 0; min-width: 100%`, so its own intrinsic
+ * width contributes nothing — is stretched to the cell. The cell is as wide as
+ * the widest of those labels actually renders in the select's font — no
+ * character count, no per-kind constant — and the wrapper does not shrink,
+ * because a select narrower than its label is the bug. The sizers are
+ * `aria-hidden`, `visibility: hidden` and zero-height, so they are neither
+ * read, clickable, nor a change to the row's height.
  *
- * What is proven, and by what: `scripts/header-layout.test.mjs` runs in
- * Chromium, where a select's intrinsic width already spans its widest option,
- * so there the removal of the floors/caps and the non-shrinking wrapper are
- * what the test proves (its red run names the clipped labels). The sizers are
- * the WebKit guard — the engine the Tauri shell uses, where #5197 observed a
- * `width: auto` select collapsing to its floor — and that engine is not run
- * by the test; the sizers can only ever widen the cell, never narrow it.
+ * The sizers govern, rather than the select's intrinsic width, for two
+ * reasons. A native select's intrinsic width spans its widest option, disabled
+ * ones included, and the default configuration (no `allowAutoPermissionMode`)
+ * renders "Auto (disabled on this server)" and "Plan (unavailable)" — labels
+ * the value never shows — which would hold the control near 220px and
+ * non-shrinking. And it makes the mechanism provable in Chromium, the engine
+ * `scripts/header-layout.test.mjs` runs: without the sizers the select
+ * collapses and the test reports the clipped label, instead of the sizers
+ * mattering only on WebKit (the Tauri shell, where #5197 observed a
+ * `width: auto` select collapsing to its floor).
  */
 function SelectFit({ kind, labels, children }: { kind: 'permission' | 'thinking'; labels: string[]; children: ReactNode }) {
   return (

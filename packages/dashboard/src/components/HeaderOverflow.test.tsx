@@ -150,8 +150,12 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(fit![0]).toMatch(/flex-shrink:\s*0/)
     const fitSelect = css.match(/\.header-center \.header-select-fit select\s*\{[^}]*\}/s)
     expect(fitSelect).toBeTruthy()
-    expect(fitSelect![0]).toMatch(/width:\s*100%/)
-    expect(fitSelect![0]).toMatch(/min-width:\s*0/)
+    // The select contributes nothing to the track (`width: 0`) and stretches
+    // over the sizer-defined cell (`min-width: 100%`), so a disabled option's
+    // long label cannot widen the control through the select's own intrinsic
+    // width — scripts/header-layout.test.mjs's gate-off case measures this.
+    expect(fitSelect![0]).toMatch(/[^-]width:\s*0;/)
+    expect(fitSelect![0]).toMatch(/min-width:\s*100%/)
     expect(fitSelect![0]).toMatch(/max-width:\s*none/)
   })
 

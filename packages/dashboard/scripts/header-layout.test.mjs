@@ -32,6 +32,7 @@ const CASES = [
   ['tight', 1660, 'Workspace write'],
   ['phone', 390, 'Workspace write'],
   ['no-badge', 1660, null],
+  ['gate-off', 1660, 'Workspace write'],
 ]
 
 async function measure(page, name) {
@@ -139,6 +140,16 @@ describe('header controls layout (#8618)', () => {
       assert.ok(m.selects.some(s => s.kind === 'permission'), 'the fixture renders the permission select')
       const clipped = m.selects.flatMap(s => s.needs.filter(n => s.width + 0.5 < n.needed).map(n => `${s.kind} is ${s.width.toFixed(1)}px but "${n.label}" needs ${n.needed.toFixed(1)}px`))
       assert.deepEqual(clipped, [], 'a select narrower than one of its labels clips that label mid-glyph')
+      if (name === 'gate-off') {
+        // The roster also carries "Auto (disabled on this server)" and "Plan
+        // (unavailable)", which the value never shows. A select sized by its
+        // own intrinsic width (every option, disabled ones included) would be
+        // some 100px wider than its widest selectable label and could not
+        // shrink; the sizers must govern instead.
+        const permission = m.selects.find(s => s.kind === 'permission')
+        const widest = Math.max(...permission.needs.map(n => n.needed))
+        assert.ok(permission.width <= widest + 8, `permission select is ${permission.width.toFixed(1)}px for a widest selectable label needing ${widest.toFixed(1)}px — sized by a label it never shows`)
+      }
     }))
 
     test(`${name}: every control sits inside the center column instead of past its hidden overflow`, () => withPage(m => {

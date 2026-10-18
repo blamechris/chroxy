@@ -178,6 +178,9 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  /* Reaches the model control's slot only: the permission and thinking selects
+     are grid items inside `.header-select-fit` (#8618), where flex-shrink is
+     inert and the wrapper governs shrink. */
   flex-shrink: 1;
 }
 
@@ -222,13 +225,20 @@
    than its label is the defect, so under pressure the sandbox badge
    (shrinkable, full text in its title) gives way first.
 
-   What each part is for, and what is proven: in Chromium a select's intrinsic
-   width already spans its widest option, so there the removed floors/caps and
-   the non-shrinking wrapper are the fix, and scripts/header-layout.test.mjs
-   proves exactly that (red on the old rules, by label). The sizers are the
-   guard for WebKit — the Tauri shell's engine, where #5197 observed a
-   `width: auto` select collapsing to its floor — which the test does not run;
-   they can only widen the cell, never narrow it. */
+   The sizers GOVERN the cell: the select is `width: 0; min-width: 100%`, so
+   its own intrinsic width contributes nothing to the track and it stretches
+   to whatever the sizers measure. That matters in both engines. A native
+   select's intrinsic width spans its widest option, DISABLED ones included,
+   and with `allowAutoPermissionMode` unset (the default) the permission roster
+   carries "Auto (disabled on this server)" and "Plan (unavailable)" — labels no
+   selected value ever shows — which would hold the control near 220px and
+   non-shrinking. The sizers are built from the labels the select can actually
+   display (ChatSettingsDropdown's SelectFit), so the cell is the widest of
+   those. It also makes the mechanism provable: remove the sizers and the
+   select collapses to nothing, which scripts/header-layout.test.mjs reports
+   as a clipped label in Chromium — the engine it runs — rather than only on
+   WebKit, the Tauri shell's engine, where #5197 first observed a `width: auto`
+   select collapsing to its floor. */
 .header-select-fit {
   display: inline-grid;
   grid-template-columns: minmax(0, max-content);
@@ -244,18 +254,22 @@
   white-space: nowrap;
   font-size: var(--text-base);
   /* Width only: the select's horizontal padding + border, plus room for the
-     native arrow (1.5em is wider than either engine's arrow at this size).
-     Zero height, so the sizers never change the row's height — a sizer with the
-     select's vertical padding stood 2.5px taller than the select itself. */
+     native arrow. Chromium's menulist arrow measures about 1.6em at this size
+     (the layout test's per-option clone shows the real chrome); 2em leaves a
+     few px of slack for either engine. Zero height, so the sizers never change
+     the row's height — a sizer with the select's vertical padding stood 2.5px
+     taller than the select itself. */
   height: 0;
   overflow: hidden;
-  padding: 0 calc(8px + 1.5em) 0 8px;
+  padding: 0 calc(8px + 2em) 0 8px;
   border: 0 solid transparent;
   border-width: 0 1px;
 }
 .header-center .header-select-fit select {
-  width: 100%;
-  min-width: 0;
+  /* `width: 0` keeps the select's intrinsic width out of the track;
+     `min-width: 100%` then stretches it over the sizer-defined cell. */
+  width: 0;
+  min-width: 100%;
   max-width: none;
   box-sizing: border-box;
 }
@@ -8418,7 +8432,7 @@ button.sidebar-token-view-session-row:hover {
   /* #8618: no narrow-viewport floors for permission/thinking either — the
      `.header-select-fit` cell sizes them from their roster at every width;
      only the sizer's font steps down with the select's. */
-  .header-select-fit-sizer { font-size: var(--text-sm); padding: 0 calc(6px + 1.5em) 0 6px; }
+  .header-select-fit-sizer { font-size: var(--text-sm); padding: 0 calc(6px + 2em) 0 6px; }
   /* #4464: match the model <select>'s narrow-viewport floors. Without
      this rule the read-only badge keeps the 180–240px desktop floor and
      overflows the header center column on phone widths. */

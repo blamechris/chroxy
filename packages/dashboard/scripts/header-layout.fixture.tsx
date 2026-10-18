@@ -31,11 +31,23 @@ const MODES = [
   { id: 'auto', label: 'Auto', description: 'Auto', supported: true, enforcement: 'unknown' as const },
 ]
 
-function HeaderCase({ name, centerWidth, sandbox }: { name: string; centerWidth: number; sandbox: 'read-only' | 'workspace-write' | null }) {
+// The default configuration's permission roster, as ws-history sends it to the
+// dashboard when the daemon has no `allowAutoPermissionMode` and the provider
+// has no plan mode: Auto is advertised as supported (the dropdown then renders
+// it "(disabled on this server)" from the gate) and Plan is "(unavailable)".
+// Labels the value can never show must not widen the control.
+const GATE_OFF_MODES = [
+  ...MODES,
+  { id: 'plan', label: 'Plan (unavailable)', description: 'Unavailable', supported: false, enforcement: 'unsupported' as const },
+]
+
+function HeaderCase({ name, centerWidth, sandbox, gateOff = false }: { name: string; centerWidth: number; sandbox: 'read-only' | 'workspace-write' | null; gateOff?: boolean }) {
   // The real header is `#header > .header-main` (a 3-column grid, 16px gaps,
-  // 16px side padding) with `.header-center` in the middle column. The side
-  // zones are stand-ins of a fixed width so the center column lands at exactly
-  // `centerWidth` whatever the viewport is.
+  // 16px side padding; 12px padding under the 600px media query, so the
+  // "phone" case's column comes out 8px wider than named) with `.header-center`
+  // in the middle column. The side zones are stand-ins of a fixed width so the
+  // center column lands at about `centerWidth` whatever the viewport is; the
+  // test measures the column's real box, never this number.
   return (
     <div data-case={name} id="header" style={{ width: centerWidth + 2 * 16 + 2 * 16 + 2 * 40, boxSizing: 'border-box' }}>
       <div className="header-main">
@@ -47,9 +59,10 @@ function HeaderCase({ name, centerWidth, sandbox }: { name: string; centerWidth:
             defaultModelId="gpt-5.5"
             onModelChange={() => {}}
             providerLabel="Codex"
-            availablePermissionModes={MODES}
+            availablePermissionModes={gateOff ? GATE_OFF_MODES : MODES}
             permissionMode="acceptEdits"
             onPermissionModeChange={() => {}}
+            autoPermissionModeAllowed={gateOff ? false : undefined}
             codexSandbox={sandbox}
             showThinkingLevel
             thinkingLevel={SELECTED_LEVEL}
@@ -74,6 +87,12 @@ function HeaderLayoutFixture() {
           where a wrapper that refuses to shrink would first show as a control
           cut at the column edge. */}
       <HeaderCase name="no-badge" centerWidth={500} sandbox={null} />
+      {/* The default configuration on a codex session: the permission roster
+          carries "Auto (disabled on this server)" and "Plan (unavailable)",
+          labels the value never shows. The control must size to "Accept
+          Edits", not to them, or the five controls no longer fit the tight
+          column. */}
+      <HeaderCase name="gate-off" centerWidth={500} sandbox="workspace-write" gateOff />
     </main>
   )
 }
