@@ -2,9 +2,8 @@
 
 Run `A1-cd` of the controlled harness trial (`../../PROTOCOL.md`), mission
 `../../missions/A1-cd.md`. Every queue item was worked to a merged PR on
-`trial/a1-cd`; none was flagged blocked. One review observation was handed to
-the owner privately and is not part of this report, so the run is not reported
-as clean (see "Withheld").
+`trial/a1-cd`; none was flagged blocked. One finding is withheld (see
+"Withheld"), so the run is not reported as clean.
 
 ## Run fields
 
@@ -21,7 +20,7 @@ as clean (see "Withheld").
 | Human approvals during the run | 0 |
 | Base branch / T0 | `trial/a1-cd` / `932bd3a4` (`git merge-base origin/trial/a1-cd origin/main`) |
 | Start (first command) | 2026-10-18T04:07:01Z |
-| End (report PR opened) | 2026-10-18T05:50:29Z |
+| End (report finalized; PR opened 05:50:45Z) | 2026-10-18T05:50:29Z |
 | Compactions / restarts | 0 / 0 |
 
 ## Queue outcome
@@ -55,8 +54,8 @@ Synchronous squash merges only; no `--auto`, no `--admin`.
 
 Several PRs passed CI against an earlier base (no up-to-date requirement on
 `trial/a1-cd`), and two pairs touched the same files (8635/8640 in
-`SettingsPanel.tsx`; 8636/8641 in the doctor area). On the final tip
-`38d3aa30`: dashboard `tsc --noEmit` clean and 365 targeted Settings/New Session
+`SettingsPanel.tsx`; 8636/8641 in the doctor area). In a local checkout
+fast-forwarded to the final tip `38d3aa30` right after the last merge: dashboard `tsc --noEmit` clean and 365 targeted Settings/New Session
 tests pass; app `tsc --noEmit` clean; protocol 578/578; 286 tests across every
 touched server test file plus all eleven server lint scripts pass. The full
 server and dashboard suites were not re-run on the tip.
@@ -109,7 +108,7 @@ estimate. (Plan meters read through the app at 05:3xZ, for context only: 5-hour
 ## Decisions taken (no panel was convened; all coordinator decisions, recorded)
 
 - 8303 design: Browse allow-set = `$HOME` ∪ `workspaceRoots` ∪ the configured default cwd only when it passes `validateCwdAllowed`; same deny-list/config-dir block; `$HOME` stays browsable; blank-cwd Create unchanged (startup warning only, the issue's stated minimum).
-- 8303 treated as HIGH (security-relevant boundary): Opus reviewer plus a read-only Codex pass on the first stable head and one post-fix delta pass; two full rounds and one delta round (the cap).
+- 8303 reviewed at HIGH depth under the review-scaling policy (path-containment change): Opus reviewer plus a read-only Codex pass on the first stable head and one post-fix delta pass; two full rounds and one delta round (the cap).
 - 8282: delivered as a criterion-by-criterion audit with tests-only gap closure, because the feature had already landed on the base.
 - 7771: a review-suggested comment edit in `codex-app-server-session.js` was reverted so the PR stayed outside the mechanical smoke scope; the now-stale comment is a follow-up.
 - 8233: the reviewer's "malformed `PORT` now reaches the probe" suggestion was classed blocking (new behaviour introduced by the PR: `PORT=abc` bound a socket file in cwd) and fixed before merge. Side effect, accepted: `start`'s preflight now refuses a range-invalid configured port at preflight instead of failing at bind.
@@ -137,9 +136,7 @@ estimate. (Plan meters read through the app at 05:3xZ, for context only: 5-hour
 
 ## Withheld
 
-1 finding withheld. It was handed to the owner privately under the
-repository's disclosure rule and is not described here, in any PR, commit or
-comment. Owner action is pending.
+1 finding withheld; handed to the owner privately; not described here.
 
 ## Isolation self-report (mission rule 5)
 
