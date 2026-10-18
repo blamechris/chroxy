@@ -548,6 +548,27 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
     assert.equal(updateContextWindow('claude-opus-4-8', 'big'), false)
   })
 
+  for (const contextWindow of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    for (const existingOverride of [undefined, 500_000]) {
+      it(`rejects ${contextWindow} without changing models or ${existingOverride === undefined ? 'creating' : 'replacing'} an override`, () => {
+        const model = { value: 'claude-sonnet-4-5', displayName: 'Sonnet 4.5', description: '' }
+        updateModels([model])
+        if (existingOverride !== undefined) {
+          assert.equal(updateContextWindow(model.value, existingOverride), true)
+        }
+        const before = structuredClone(getModels())
+
+        assert.equal(updateContextWindow(model.value, contextWindow), false)
+        assert.deepEqual(getModels(), before)
+
+        // A refresh exposes the private override map: an absent override must
+        // allow the new report through, while an existing one must still win.
+        updateModels([{ ...model, contextWindow: 300_000 }])
+        assert.equal(getModels()[0].contextWindow, existingOverride ?? 300_000)
+      })
+    }
+  }
+
   it('override survives subsequent updateModels refreshes (regression for #2820)', () => {
     // _fetchSupportedModels() fires on every SDK session init, so the first
     // updateModels() rebuild cannot clobber a value we already learned from
