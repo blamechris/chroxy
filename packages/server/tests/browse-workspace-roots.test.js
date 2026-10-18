@@ -112,7 +112,9 @@ describe('Browse honours workspaceRoots and the default cwd (#8303)', () => {
     writeFileSync(join(root, 'elsewhere', 'file.txt'), 'x')
     const config = { homeOverride: fakeHome, workspaceRoots: [join(root, 'ws')] }
     const r = await list(join(root, 'elsewhere', 'file.txt', 'sub'), { getConfig: () => config })
-    assert.ok(r.error && /workspace roots/.test(r.error) && !/home directory/.test(r.error), r.error)
+    // POSIX answers ENOTDIR (the unresolvable branch); Windows answers ENOENT and
+    // takes the containment branch. Either way the denial names the roots.
+    assert.ok(r.error && /workspace root/.test(r.error) && !/home directory/.test(r.error), r.error)
   })
 
   it('a blank or ~ request with roots excluding $HOME lists the first usable root', async () => {
