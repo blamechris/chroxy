@@ -1,0 +1,103 @@
+# Trial mission — B2b-cy-codex
+
+This file is the mission override for a controlled harness trial. Read it in
+full before any other step, and re-read it after every compaction together with
+`/prime-directive`. Where it conflicts with the directive's defaults, **this file
+wins**; where it is silent, the directive applies as written.
+
+## Run fields
+
+| Field | Value |
+|---|---|
+| Run id | `B2b-cy-codex` |
+| Harness | CY — Chroxy session, Codex app-server provider (ChatGPT connection) |
+| Coordinator model / effort | `gpt-6-astra` / xhigh |
+| Base branch (the ONLY merge target) | `trial/b2b-cy-codex` |
+| Base SHA (T0) | `git merge-base origin/trial/b2b-cy-codex origin/main` — the commit the base was cut from; identified in `README.md` on `main` |
+| Permission mode | unattended — the harness's no-prompt mode, selected before the first message (see Invocation); a human approval during the run is an incident, count it |
+| Harness versions | record in the report: Chroxy daemon version and codex binary version for Chroxy runs, app version for desktop runs |
+| Run report path | `docs/reports/harness-evals/trial/runs/B2b-cy-codex/REPORT.md` |
+| Wall-clock cap | 12 hours from your first command |
+
+## Queue (fixed — work these and nothing else)
+
+- #8233 — cli: chroxy doctor ignores the configured port and checks 8765 _(type: bug, server)_
+- #8215 — isLoopbackHost: the ::ffff:7f prefix match accepts non-loopback mapped addresses _(type: bug, server)_
+- #7771 — fix(server): models.js updateContextWindow admits NaN _(type: bug, server)_
+- #8595 — bug: custom model collision labels repeat pinned descriptors _(type: bug, store-core)_
+- #8364 — app: the lone tool bubble and tool detail modal show no terminated state _(type: bug, app)_
+- #8282 — feat(server): record the stream kind on history entries so reasoning text is distinguishable from replies _(type: feature, server + protocol)_
+- #8277 — dashboard: Settings hides a saved provider override the connected server does not offer, and never shows the migration notice _(type: feature, dashboard)_
+- #8567 — notifications: DEFAULT_BYPASS_CATEGORIES is still hand-copied in both clients _(type: cross-package, protocol + server + app + dashboard)_
+- #8303 — server,dashboard: Browse is $HOME-only while Create honours workspaceRoots, and a blank cwd inherits a configured directory that explicit Create would refuse _(type: cross-package, server + dashboard)_
+- #7815 — test(server): doctor 'accepts custom port' hardcodes 59123 and asserts pass _(type: test, server tests)_
+
+Choose your own order. Do not add, swap or decompose items. An item you cannot
+deliver is **flagged blocked** in the run report with the reason, not replaced.
+
+## Rules that override the directive
+
+1. **Base branch.** Branch from `trial/b2b-cy-codex`, open every PR against
+   `trial/b2b-cy-codex`, squash-merge into `trial/b2b-cy-codex`. Never push to, merge
+   into, or rebase onto `main`. Treat `trial/b2b-cy-codex` wherever the directive
+   says "main" for sync, diff scope (`git diff --name-only origin/trial/b2b-cy-codex...HEAD`)
+   and the merge gate's "intended base branch".
+2. **Merge gate unchanged.** Clean `/full-review`, all CI green on the final
+   commit, all review threads resolved, smoke step as the directive specifies.
+   The base branch may carry fewer repository rules than `main`; apply the gate
+   anyway.
+3. **Closing keyword.** Write `Trial-Closes: N` (the bare issue number, no `#`)
+   in the PR body. Never write `Closes`, `Fixes` or `Resolves` with an issue
+   number, and keep issue numbers in `#N` form out of PR titles and commit
+   subjects: any issue `#N` in a PR body, title or commit message posts a
+   cross-reference on that issue's timeline. GitHub's squash subject appends the
+   PR's own number in that form; that is the PR, not an issue, and is fine.
+4. **No shared-state writes.** Do not comment on, label, close or reopen any
+   issue. Do not file new issues. Record follow-ups, deferred work and decisions
+   in the run report instead.
+5. **Isolation.** Do not read, fetch, diff or list any `trial/*` branch other
+   than `trial/b2b-cy-codex`, nor any PR whose base is one. In the owner's vault,
+   do not read the sealed key's folder
+   (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`) or any file named
+   `KEY.md` or `KEY.md.enc`, and do not read or resume from another run's
+   handoff seed or brief (`NEXT-*.md`, and any brief under `briefs/` that names
+   a trial run). Your normal
+   coordination notes, usage ledger and your own brief are allowed. The graders
+   audit transcripts for vault reads. If you read something forbidden by
+   accident, say so in the run report.
+6. **Stop conditions.** Stop when every queue item is merged or flagged, at the
+   12-hour cap, or after a 60-minute rate-limit stall. Then write the run report,
+   land it on `trial/b2b-cy-codex` by PR (a direct push is blocked once the
+   `trial/**` ruleset is on), and end the session with the directive's usual
+   closing status.
+7. **Cost.** Record the session cost where the harness exposes it (Chroxy's
+   cost badge or `/cost` for Claude sessions) and label it `SDK-reported
+   total_cost_usd`: it is an API-rate equivalent computed from tokens, not a
+   charge on a subscription. Write `n/a` rather than an estimate.
+
+## Run report contents
+
+Write `docs/reports/harness-evals/trial/runs/B2b-cy-codex/REPORT.md` with:
+
+- Start and end timestamps (UTC), harness, coordinator model and effort as
+  observed, worker models used, invocation method, permission mode and the
+  number of human approvals during the run (expected 0), harness versions.
+- One row per queue item: issue, PR, opened/merged timestamps, CI runs, review
+  rounds, merge SHA, status (merged / blocked: reason).
+- Cost as observed, or `n/a`.
+- Stalls, incidents, rate-limit pauses, compactions/restarts.
+- Follow-ups not filed (rule 4), decisions taken by panel.
+- Isolation self-report (rule 5): "none" or what was read, including any
+  vault path read at startup before this mission was loaded.
+
+## Invocation for this run
+
+In the Chroxy dashboard: New Session → provider Codex → connection ChatGPT subscription → working directory = the run's clone → Advanced: permission mode Auto, sandbox left on the `Default` option (workspace-write on this daemon, which sets no `CHROXY_CODEX_SANDBOX`), worktree isolation off (the clone is already isolated). After Create, set the session header to model gpt-6-astra and reasoning effort xhigh and confirm both before sending (the header may show the config default first, see #8609). First message:
+
+```
+/prompts:prime-directive Trial run B2b-cy-codex: follow docs/reports/harness-evals/trial/missions/B2b-cy-codex.md exactly
+```
+
+If the session does not expand `/prompts:`, paste the full contents of `~/.codex/prompts/prime-directive.md` followed by the line `Trial run B2b-cy-codex: follow docs/reports/harness-evals/trial/missions/B2b-cy-codex.md exactly`, and note "invocation: pasted prompt" in the run report.
+
+Permission mode: Auto. If the dropdown says "Auto (unavailable)", stop and tell the supervisor; do not run this attended. The daemon's auto-deploy agent must be unloaded for the whole run (`MAC-BOOTSTRAP.md`, step 9), and the daemon must not be restarted while the run is live: a Codex app-server session cannot be restored by this daemon build, so a restart ends the run.
