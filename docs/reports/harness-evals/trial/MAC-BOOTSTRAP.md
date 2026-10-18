@@ -91,7 +91,7 @@ status: `README.md`.
    npm install -g @openai/codex@latest && codex --version
    ```
 
-## Before every Chroxy run (runs 3 and 4, and any B2 re-run)
+## Before every Chroxy run (run 3 and any B2 re-run; run 4 is a desktop-app run)
 
 9. **Stop the daemon's auto-deploy agent for the duration of the run.** Run 2 was
    killed at 07:52Z by a deploy tick that judged the daemon idle while the codex
