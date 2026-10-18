@@ -78,6 +78,12 @@ export interface ChatSettingsDropdownProps {
   // a permission-mode switch (e.g. Codex). Default true keeps Claude behavior
   // unchanged. #3835.
   showPermissionMode?: boolean
+  // #8619: the server's `allowAutoPermissionMode` opt-in, from
+  // auth_ok.capabilities.autoPermissionMode. `false` disables the Auto option
+  // and says why in its label (a switch would be refused with
+  // AUTO_MODE_DISABLED_BY_CONFIG); `undefined` (older daemon) leaves the
+  // option exactly as the roster describes it.
+  autoPermissionModeAllowed?: boolean
   // #6901: the active/resolved Codex sandbox mode for a running codex session
   // (from session_list — only codex sessions carry it). When set, a READ-ONLY
   // badge renders showing the current sandbox. Codex applies the sandbox once at
@@ -119,6 +125,7 @@ export function ChatSettingsDropdown({
   permissionMode,
   onPermissionModeChange,
   showPermissionMode = true,
+  autoPermissionModeAllowed,
   codexSandbox = null,
   showThinkingLevel,
   thinkingLevel,
@@ -174,6 +181,24 @@ export function ChatSettingsDropdown({
 
   const activeLabel = formatActiveModelLabel(availableModels, activeModel, defaultModelId, providerLabel)
 
+  // #8619 + #8618: the permission <option>s as rendered — label, title and
+  // disabled state — computed once, so the roster sizers (SelectFit) measure
+  // exactly the labels the options show, the gated suffix included. The config
+  // gate is a separate reason from adapter support: only an otherwise-supported
+  // Auto gets the "disabled on this server" suffix, so the two never read the
+  // same.
+  const permissionOptions = useMemo(() => availablePermissionModes.map(m => {
+    const gated = m.id === 'auto' && m.supported !== false && autoPermissionModeAllowed === false
+    return {
+      id: m.id,
+      label: gated ? `${m.label} (disabled on this server)` : m.label,
+      title: gated
+        ? 'Auto is disabled on this server: set allowAutoPermissionMode: true in the server config file on the dev machine, then restart the daemon.'
+        : m.description,
+      disabled: m.supported === false || gated,
+    }
+  }), [availablePermissionModes, autoPermissionModeAllowed])
+
   return (
     <>
       {/* Model — #6220: a button that opens the modal picker. Reads
@@ -224,7 +249,7 @@ export function ChatSettingsDropdown({
 
       {/* Permission Mode */}
       {showPermissionMode && availablePermissionModes.length > 0 && (
-        <SelectFit kind="permission" labels={availablePermissionModes.map(m => m.label)}>
+        <SelectFit kind="permission" labels={permissionOptions.map(o => o.label)}>
           <select
             data-kind="permission"
             aria-label="Permission mode"
@@ -239,8 +264,8 @@ export function ChatSettingsDropdown({
             // it's harmless and feeds AT-friendly machinery for those that do.
             title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
           >
-            {availablePermissionModes.map(m => (
-              <option key={m.id} value={m.id} title={m.description} disabled={m.supported === false}>{m.label}</option>
+            {permissionOptions.map(o => (
+              <option key={o.id} value={o.id} title={o.title} disabled={o.disabled}>{o.label}</option>
             ))}
           </select>
         </SelectFit>

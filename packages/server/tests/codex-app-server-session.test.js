@@ -965,7 +965,10 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     assert.equal(c.permissions, true)
     assert.equal(c.inProcessPermissions, true)
     assert.equal(c.permissionFloor, false, 'native approval RPCs do not intercept every tool')
-    assert.equal(c.autoPermissionMode, false)
+    // #8619: Auto keeps approvalPolicy 'on-request', so every native approval
+    // still reaches the PermissionManager and its floor — the adapter CAN run
+    // unattended without losing the pre-execution seam #7825 required.
+    assert.equal(c.autoPermissionMode, true)
     assert.equal(c.nativeSandbox, true)
     assert.equal(c.permissionModeSwitch, true)
   })
@@ -977,9 +980,9 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     cleanup()
   })
 
-  it('approvalPolicy: auto → never, every other mode → on-request', () => {
+  it('approvalPolicy: every mode → on-request, Auto included (#8619: never is never emitted)', () => {
     const { s, cleanup } = mkSession()
-    s.permissionMode = 'auto'; assert.equal(s._approvalPolicy(), 'never')
+    s.permissionMode = 'auto'; assert.equal(s._approvalPolicy(), 'on-request')
     s.permissionMode = 'approve'; assert.equal(s._approvalPolicy(), 'on-request')
     s.permissionMode = 'acceptEdits'; assert.equal(s._approvalPolicy(), 'on-request')
     cleanup()
@@ -1146,6 +1149,103 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     assert.equal(reqs.length, 0, 'auto mode does not prompt')
     assert.deepEqual(responded, [[10, { decision: 'accept' }]])
     cleanup()
+  })
+
+  // #8619 — unattended codex. Auto keeps `approvalPolicy: 'on-request'`, so
+  // every native approval still reaches the PermissionManager; its auto-mode
+  // path resolves whatever passes the protected-path / secret-read floor and a
+  // floor hit still prompts. These go through the REAL entry points (the
+  // constructor and setPermissionMode) rather than poking `permissionMode`
+  // the way mkApprovalSession does, so an adapter that refuses Auto — the
+  // pre-#8619 state — fails on the first assertion instead of passing by
+  // accident.
+  describe('unattended Auto (#8619)', () => {
+    function mkAutoSession() {
+      const { s, cleanup: rmTmp } = mkSession({ permissionMode: 'auto' })
+      const responded = []
+      s._processReady = true
+      s._turnAbort = new AbortController()
+      s._client = {
+        respond: (id, r) => responded.push([id, r]),
+        respondError: (id, code, message) => responded.push([id, { error: { code, message } }]),
+      }
+      // destroy() first: a prompt left pending by a failing assertion carries a
+      // 5-minute timer, and a red test that then hangs reads as flake (#7340).
+      const cleanup = () => { s.destroy(); rmTmp() }
+      return { s, cleanup, responded }
+    }
+
+    it('constructs in Auto and resolves a shell-command requestApproval as accept with no client response', async () => {
+      const { s, cleanup, responded } = mkAutoSession()
+      assert.equal(s.permissionMode, 'auto')
+      assert.equal(s._approvalPolicy(), 'on-request', 'Auto never maps to approvalPolicy never')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 40, method: 'item/commandExecution/requestApproval', params: { command: 'gh pr list', cwd: '/tmp', reason: 'List PRs' } })
+      await tick()
+      assert.equal(reqs.length, 0, 'no permission_request reached any client')
+      assert.deepEqual(responded, [[40, { decision: 'accept' }]])
+      cleanup()
+    })
+
+    it('setPermissionMode(auto) is accepted and a later shell-command requestApproval resolves accept', async () => {
+      const { s, cleanup, responded } = mkApprovalSession('approve')
+      assert.equal(s.setPermissionMode('auto'), true, 'the switch is accepted')
+      assert.equal(s.permissionMode, 'auto')
+      const reqs = capture(s, ['permission_request'])
+      s._onServerRequest({ id: 41, method: 'item/commandExecution/requestApproval', params: { command: 'npm test', cwd: '/tmp' } })
+      await tick()
+      assert.equal(reqs.length, 0, 'Auto does not prompt for a shell command')
+      assert.deepEqual(responded, [[41, { decision: 'accept' }]])
+      cleanup()
+    })
+
+    it('a protected-path edit in Auto still waits for a decision (the floor forces a prompt)', async () => {
+      const { s, cleanup, responded } = mkAutoSession()
+      const reqs = capture(s, ['permission_request'])
+      // The fileChange approval carries no diff; the floor reads the cached
+      // item's `changes[].path` (#6805/#6828) against the session cwd (/tmp).
+      s._pendingFileChanges.set('fc-floor', [{ path: '.git/config', kind: 'update', diff: '+[core]' }])
+      s._onServerRequest({ id: 42, method: 'item/fileChange/requestApproval', params: { itemId: 'fc-floor', grantRoot: '/tmp', reason: 'edit git config' } })
+      await tick()
+      assert.equal(reqs.length, 1, 'the floor forced a real prompt under Auto')
+      assert.deepEqual(responded, [], 'codex is not answered until a human decides')
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      await tick()
+      assert.deepEqual(responded, [[42, { decision: 'denied' }]])
+      cleanup()
+    })
+
+    it('a benign edit in Auto resolves approved without a prompt (positive control for the floor test)', async () => {
+      const { s, cleanup, responded } = mkAutoSession()
+      const reqs = capture(s, ['permission_request'])
+      s._pendingFileChanges.set('fc-ok', [{ path: 'src/a.js', kind: 'update', diff: '+x' }])
+      s._onServerRequest({ id: 43, method: 'item/fileChange/requestApproval', params: { itemId: 'fc-ok', grantRoot: '/tmp', reason: 'edit' } })
+      await tick()
+      assert.equal(reqs.length, 0, 'an ordinary project file does not prompt')
+      assert.deepEqual(responded, [[43, { decision: 'approved' }]])
+      cleanup()
+    })
+
+    it('a sandbox-scope escalation (request_permissions) in Auto still waits for a decision (#7975 posture)', async () => {
+      const { s, cleanup, responded } = mkAutoSession()
+      const reqs = capture(s, ['permission_request'])
+      // No path field for the floor to see, yet a turn-scoped grant would
+      // authorize later writes without any fileChange RPC — so the grant is a
+      // human's to give, fresh here exactly as autoAllowPending leaves it pending.
+      s._onServerRequest({ id: 44, method: 'item/permissions/requestApproval', params: {
+        cwd: '/tmp', itemId: 'i-esc', threadId: 't1', turnId: 'turn1', startedAtMs: 0, reason: 'write hooks',
+        permissions: { fileSystem: { entries: [{ access: 'write', path: { type: 'path', path: '/tmp/.git' } }] }, network: { enabled: true } },
+      } })
+      await tick()
+      assert.equal(reqs.length, 1, 'Auto does not auto-grant a sandbox-scope escalation')
+      assert.equal(reqs[0][1].tool, 'request_permissions')
+      assert.deepEqual(responded, [], 'codex is not answered until a human decides')
+      s.respondToPermission(reqs[0][1].requestId, 'deny')
+      await tick()
+      assert.equal(responded.length, 1)
+      assert.deepEqual(responded[0][1].permissions, {}, 'deny grants nothing')
+      cleanup()
+    })
   })
 
   describe('permissions-escalation surfacing (#6610)', () => {
@@ -1392,17 +1492,16 @@ describe('CodexAppServerSession — approval surfacing (#6605 Phase 2)', () => {
     cleanup()
   })
 
-  it('rejecting an unsupported Auto switch does not silently drain a pending approval', async () => {
+  it('switching to Auto drains a pending shell approval as accept (#3729 panic button, #8619)', async () => {
     const { s, cleanup, responded } = mkApprovalSession('approve')
     const requests = capture(s, ['permission_request'])
     s._onServerRequest({ id: 21, method: 'item/commandExecution/requestApproval', params: { command: 'x' } })
-    assert.equal(s.setPermissionMode('auto'), false)
+    assert.equal(requests.length, 1, 'Approve prompts for the command')
+    assert.equal(s.setPermissionMode('auto'), true, 'the switch is accepted')
     await tick()
-    assert.equal(s.permissionMode, 'approve')
-    assert.deepEqual(responded, [], 'unsupported Auto must not convert a real prompt into acceptance')
-    s.respondToPermission(requests[0][1].requestId, 'deny')
-    await tick()
-    assert.deepEqual(responded, [[21, { decision: 'decline' }]])
+    assert.equal(s.permissionMode, 'auto')
+    assert.deepEqual(responded, [[21, { decision: 'accept' }]], 'the pending prompt is drained as accept')
+    s.destroy() // a prompt left pending by a failing switch would otherwise hang the run on its timer
     cleanup()
   })
 
@@ -2451,9 +2550,12 @@ describe('CodexAppServerSession — param builders (#7729)', () => {
   it('the approvalPolicy tracks the permission mode on BOTH builders', () => {
     const { s, cleanup } = mkSession()
     try {
+      // #8619: Auto no longer maps to `never` — the builders carry the SAME
+      // on-request policy for every mode, so a session switched to Auto keeps
+      // routing approvals through the PermissionManager's floor.
       s.permissionMode = 'auto'
-      assert.equal(s._buildThreadParams('read-only').approvalPolicy, 'never')
-      assert.equal(s._buildTurnParams([]).approvalPolicy, 'never')
+      assert.equal(s._buildThreadParams('read-only').approvalPolicy, 'on-request')
+      assert.equal(s._buildTurnParams([]).approvalPolicy, 'on-request')
     } finally {
       s.destroy()
       cleanup()

@@ -233,6 +233,12 @@ export function App() {
   const userShellSupported = useConnectionStore(s => s.serverCapabilities?.userShell === true)
   // #6473 — gate the Cmd+P quick-open palette on the opt-in `ide` capability.
   const ideEnabled = useConnectionStore(s => s.serverCapabilities?.ide === true)
+  // #8619 — the server's `allowAutoPermissionMode` opt-in, so the header's
+  // mode picker can disable Auto with the real reason. Deliberately NOT
+  // coerced with `=== true`: `undefined` (a daemon that predates the flag)
+  // must stay distinguishable from `false` (gate off) — the picker leaves an
+  // unadvertised gate alone, because that daemon still enforces it itself.
+  const autoPermissionModeAllowed = useConnectionStore(s => s.serverCapabilities?.autoPermissionMode)
   // #6006 — the operator panic button (Revoke token) is available only when the
   // server has a rotating TokenManager (auth on) AND this client holds the
   // primary token, both reflected in the `tokenRevoke` capability. Gating on it
@@ -2888,6 +2894,7 @@ export function App() {
         permissionMode={permissionMode}
         onPermissionModeChange={setPermissionMode}
         showPermissionMode={dropdownFlags.showPermissionMode}
+        autoPermissionModeAllowed={autoPermissionModeAllowed}
         codexSandbox={activeSessionCodexSandbox}
         showThinkingLevel={dropdownFlags.showThinkingLevel}
         thinkingLevel={thinkingLevel}
