@@ -78,6 +78,12 @@ export interface ChatSettingsDropdownProps {
   // a permission-mode switch (e.g. Codex). Default true keeps Claude behavior
   // unchanged. #3835.
   showPermissionMode?: boolean
+  // #8619: the server's `allowAutoPermissionMode` opt-in, from
+  // auth_ok.capabilities.autoPermissionMode. `false` disables the Auto option
+  // and says why in its label (a switch would be refused with
+  // AUTO_MODE_DISABLED_BY_CONFIG); `undefined` (older daemon) leaves the
+  // option exactly as the roster describes it.
+  autoPermissionModeAllowed?: boolean
   // #6901: the active/resolved Codex sandbox mode for a running codex session
   // (from session_list — only codex sessions carry it). When set, a READ-ONLY
   // badge renders showing the current sandbox. Codex applies the sandbox once at
@@ -119,6 +125,7 @@ export function ChatSettingsDropdown({
   permissionMode,
   onPermissionModeChange,
   showPermissionMode = true,
+  autoPermissionModeAllowed,
   codexSandbox = null,
   showThinkingLevel,
   thinkingLevel,
@@ -238,9 +245,19 @@ export function ChatSettingsDropdown({
           // it's harmless and feeds AT-friendly machinery for those that do.
           title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
         >
-          {availablePermissionModes.map(m => (
-            <option key={m.id} value={m.id} title={m.description} disabled={m.supported === false}>{m.label}</option>
-          ))}
+          {availablePermissionModes.map(m => {
+            // #8619: the config gate is a separate reason from adapter support
+            // — only an otherwise-supported Auto gets the "disabled on this
+            // server" suffix, so the two never read the same.
+            const gated = m.id === 'auto' && m.supported !== false && autoPermissionModeAllowed === false
+            const label = gated ? `${m.label} (disabled on this server)` : m.label
+            const title = gated
+              ? 'Auto is disabled on this server: set allowAutoPermissionMode: true in the server config file on the dev machine, then restart the daemon.'
+              : m.description
+            return (
+              <option key={m.id} value={m.id} title={title} disabled={m.supported === false || gated}>{label}</option>
+            )
+          })}
         </select>
       )}
 

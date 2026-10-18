@@ -41,7 +41,10 @@ const MODE_DESCRIPTIONS = {
   codex: {
     approve: 'Default. Approval requests sent by codex are shown in Chroxy; sandbox-authorized actions may run without a request.',
     acceptEdits: 'Auto-approve codex file-edit approval requests (apply_patch). Other native approval requests still prompt; sandbox-authorized actions may run without a request.',
-    auto: 'Auto-approve every codex action without prompting (codex runs with approvalPolicy `never`).',
+    // #8619: codex keeps approvalPolicy `on-request` in Auto (never `never`), so
+    // every native approval request still reaches Chroxy's floor; the sandbox
+    // gap is the same in every mode and is stated here rather than implied.
+    auto: 'Auto-approve codex command, file-edit and connector approval requests that pass the protected-path / secret-read floor; floor hits and sandbox-scope escalation requests still prompt (codex keeps approvalPolicy `on-request`). Sandbox-authorized actions never raise a request in any mode.',
     plan: 'Not a distinct codex mode — behaves like Approve (codex has no plan enforcement).',
   },
 }

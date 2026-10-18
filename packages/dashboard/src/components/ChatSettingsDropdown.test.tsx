@@ -51,6 +51,51 @@ describe('ChatSettingsDropdown', () => {
     expect(auto.disabled).toBe(true)
   })
 
+  // #8619: the server's allowAutoPermissionMode gate is a SECOND reason Auto
+  // can be unavailable, distinct from adapter support — and the header has no
+  // Permissions section, so the reason has to live in the option's own label.
+  describe('allowAutoPermissionMode gate (#8619)', () => {
+    const roster = [
+      { id: 'approve', label: 'Approve', supported: true, enforcement: 'unknown' as const },
+      { id: 'auto', label: 'Auto', description: 'Auto copy', supported: true, enforcement: 'unknown' as const },
+    ]
+    const autoOption = (container: HTMLElement) =>
+      container.querySelector('select[data-kind="permission"] option[value="auto"]') as HTMLOptionElement
+
+    it('disables Auto and says why in its label when the server reports the gate off', () => {
+      const { container } = renderDropdown({ availablePermissionModes: roster, autoPermissionModeAllowed: false })
+      const auto = autoOption(container)
+      expect(auto.disabled).toBe(true)
+      expect(auto.textContent).toBe('Auto (disabled on this server)')
+      expect(auto.title).toMatch(/allowAutoPermissionMode: true/)
+    })
+
+    it('offers Auto as the roster describes it when the gate is on', () => {
+      const { container } = renderDropdown({ availablePermissionModes: roster, autoPermissionModeAllowed: true })
+      const auto = autoOption(container)
+      expect(auto.disabled).toBe(false)
+      expect(auto.textContent).toBe('Auto')
+      expect(auto.title).toBe('Auto copy')
+    })
+
+    it('leaves Auto alone when the daemon does not advertise the gate', () => {
+      const { container } = renderDropdown({ availablePermissionModes: roster })
+      const auto = autoOption(container)
+      expect(auto.disabled).toBe(false)
+      expect(auto.textContent).toBe('Auto')
+    })
+
+    it('keeps the adapter-unsupported label when both reasons apply (adapter reason wins)', () => {
+      const { container } = renderDropdown({
+        availablePermissionModes: [{ id: 'auto', label: 'Auto (unavailable)', supported: false, enforcement: 'unsupported' }],
+        autoPermissionModeAllowed: false,
+      })
+      const auto = autoOption(container)
+      expect(auto.disabled).toBe(true)
+      expect(auto.textContent).toBe('Auto (unavailable)')
+    })
+  })
+
   // #6220 — the model picker is now a button that opens a modal (was a native
   // <select>). Only permission + thinking remain native <select> comboboxes.
   describe('model trigger button (#6220)', () => {
