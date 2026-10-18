@@ -17,6 +17,25 @@ describe('isLoopbackHost', () => {
   it('treats IPv4-mapped IPv6 loopback as loopback', () => {
     assert.equal(isLoopbackHost('::ffff:127.0.0.1'), true)
     assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('::ffff:7fff:ffff'), true)
+    assert.equal(isLoopbackHost('::FFFF:7F80:ABCD'), true)
+    assert.equal(isLoopbackHost('0:0:0:0:0:ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('0:0::ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('0:0:0:0:0:ffff:127.0.0.1'), true)
+  })
+
+  it('rejects mapped IPv6 addresses outside the IPv4 loopback range', () => {
+    for (const host of ['::ffff:7f:1', '::ffff:7f', '::ffff:7eff:ffff', '::ffff:8000:0', '::ffff:126.255.255.255']) {
+      assert.equal(isLoopbackHost(host), false, host)
+    }
+  })
+
+  it('requires a complete valid IPv4-mapped IPv6 address', () => {
+    for (const host of ['::ffff:7f00', '::ffff:7f00:1:2', '::ffff:7f00:12345', '::ffff:7f00:xyz',
+      '::ffff:7f00:1.example.com', '::ffff:127.0.0.999', '::ffff:127.0.0.1.example.com',
+      '0:0:0:0:0:ffff::7f00:1', '::ffff:0:7f00:1', '1::ffff:7f00:1']) {
+      assert.equal(isLoopbackHost(host), false, host)
+    }
   })
 
   it('matches localhost case-insensitively', () => {
