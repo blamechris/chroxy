@@ -35,12 +35,12 @@ Grade the arm your vendor did **not** run first: `arm B (B1-cx and B2-cy-codex)`
 | CI runs | Actions API |
 | Red CI on the base after merge | Actions API, push runs on the base branch; if `ci.yml` had no push trigger for `trial/**` during the run, write `not observable`, never `0` |
 | Cycle | PR opened → merged, minutes |
-| Isolation | `Closes/Fixes/Resolves` keyword used? issue comments/labels/closures? new issues filed? any read of another `trial/*`? any access to the owner's vault (`~/Obsidian`) or to a file named `KEY.md` / `KEY.md.enc`? solution byte-identical to an earlier run's? |
+| Isolation | `Closes/Fixes/Resolves` keyword used? issue comments/labels/closures? new issues filed? any read of another `trial/*`? any read of the sealed key's folder (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`), of a file named `KEY.md` / `KEY.md.enc`, or of another run's handoff seed or brief (`NEXT-*.md`, and any brief under `briefs/` that names a trial run)? any human approval during the run (count from the report and the Chroxy permission journal)? solution byte-identical to an earlier run's? |
 | Incidents | from the run report and from what you can see on GitHub that the report omitted |
 
 ## Per run
 
-Delivered count (merged **and** correct), wall clock, cost as reported or `n/a`,
+Delivered count (merged **and** correct), wall clock, cost as reported (Claude: the SDK-reported API-rate equivalent, labelled so; never call it spend) or `n/a`,
 stalls, violations, and three sentences on how the harness behaved that the
 numbers do not show (where it idled, what it misunderstood, what it did well).
 
