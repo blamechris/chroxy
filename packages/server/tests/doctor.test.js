@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkClaudeLogin, checkTunnelRoutability } from '../src/doctor.js'
@@ -304,23 +305,63 @@ describe('runDoctorChecks', () => {
     assert.ok(portCheck)
   })
 
-  it('accepts custom port', async () => {
-    // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
+  // Doctor probes ports on 127.0.0.1, so the fixtures bind there too. An
+  // OS-assigned port (listen(0)) replaces the old hardcoded literals: the test
+  // owns the port's state instead of hoping nothing on the machine holds it.
+  const holdPort = () => new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }))
+  })
+  const closeServer = (server) => new Promise((resolve) => server.close(() => resolve()))
+  const freePort = async () => {
+    const { server, port } = await holdPort()
+    await closeServer(server)
+    return port
+  }
+
+  it('accepts custom port (free port reports pass)', async () => {
+    const port = await freePort()
+    const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const portCheck = checks.find(c => c.name === 'Port')
     assert.ok(portCheck)
-    assert.ok(portCheck.message.includes('59123'))
+    assert.ok(portCheck.message.includes(String(port)))
     assert.equal(portCheck.status, 'pass')
   })
 
+  it('a custom port that is already bound reports warn', async () => {
+    const { server, port } = await holdPort()
+    try {
+      const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = checks.find(c => c.name === 'Port')
+      assert.ok(portCheck)
+      assert.ok(portCheck.message.includes(String(port)))
+      assert.equal(portCheck.status, 'warn')
+    } finally {
+      await closeServer(server)
+    }
+  })
+
   it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
+    const port = await freePort()
+    const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
     } else {
       // On some systems, checks may fail — that's ok for integration tests
       assert.equal(passed, false)
+    }
+  })
+
+  it('a bound port is only a warning: it does not by itself fail the run', async () => {
+    const { server, port } = await holdPort()
+    try {
+      const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      assert.equal(checks.find(c => c.name === 'Port').status, 'warn')
+      assert.equal(passed, checks.every(c => c.status !== 'fail'))
+    } finally {
+      await closeServer(server)
     }
   })
 
