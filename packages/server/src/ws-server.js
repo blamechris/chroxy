@@ -1074,6 +1074,13 @@ export class WsServer {
       // `ide` capability so clients gate IDE UI. Late-bound getter so a test
       // mutating self.config is seen.
       get ideEnabled() { return isIdeFeatureEnabled(self.config) },
+      // #8619: whether the operator has opted in to Auto permission mode
+      // (`allowAutoPermissionMode: true` in the local config) — the same gate
+      // `set_permission_mode` enforces (settings-handlers.js). Surfaced as the
+      // `autoPermissionMode` capability so a client can disable Auto in its
+      // mode pickers and say WHY. Late-bound getter so a test mutating
+      // self.config is seen.
+      get autoPermissionModeAllowed() { return self.config?.allowAutoPermissionMode === true },
       // #6691: whether the orchestration harness is enabled on THIS server,
       // surfaced as the `orchestration` capability so the dashboard reveals the
       // Runs surface. Server-wide gate, not token-scoped; fail-closed.

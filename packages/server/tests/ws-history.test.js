@@ -464,6 +464,34 @@ describe('sendPostAuthInfo — userShell capability (#5986)', () => {
   })
 })
 
+// #8619: the `autoPermissionMode` capability advertises whether the operator has
+// opted in to Auto permission mode (`allowAutoPermissionMode: true` in the local
+// config) — the same gate `set_permission_mode` enforces. A server-WIDE gate like
+// `ide`, not token-scoped: a client reads it to disable Auto in its mode pickers
+// and say WHY (not merely to tooltip a disabled option). Absent (older server) →
+// a client treats the gate as unknown and leaves its existing behaviour alone.
+describe('sendPostAuthInfo — autoPermissionMode capability (#8619)', () => {
+  it('advertises autoPermissionMode:true when the config gate is on, for ANY client class', () => {
+    for (const primary of [true, false, undefined]) {
+      const ctx = makeCtx({ autoPermissionModeAllowed: true })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, primary === undefined ? {} : { isPrimaryToken: primary })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.autoPermissionMode, true)
+    }
+  })
+
+  it('advertises autoPermissionMode:false when the gate is off or absent (fail-closed)', () => {
+    for (const v of [false, undefined, 'true', 1]) {
+      const ctx = makeCtx(v === undefined ? {} : { autoPermissionModeAllowed: v })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, { isPrimaryToken: true })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.autoPermissionMode, false)
+    }
+  })
+})
+
 // #6481 (epic #6469): the `ide` capability advertises that the opt-in IDE feature
 // surface is enabled on this server (config.features.ide / CHROXY_ENABLE_IDE).
 // Unlike userShell/tokenRevoke it is a server-WIDE gate, not token-scoped —

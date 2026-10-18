@@ -58,6 +58,8 @@ export interface AppHeaderProps {
   permissionMode: ComponentProps<typeof ChatSettingsDropdown>['permissionMode']
   onPermissionModeChange: ComponentProps<typeof ChatSettingsDropdown>['onPermissionModeChange']
   showPermissionMode: boolean
+  // #8619: the server's allowAutoPermissionMode gate (undefined = not advertised).
+  autoPermissionModeAllowed?: ComponentProps<typeof ChatSettingsDropdown>['autoPermissionModeAllowed']
   // #6901: active codex session's resolved sandbox mode (read-only badge).
   codexSandbox: ComponentProps<typeof ChatSettingsDropdown>['codexSandbox']
   showThinkingLevel: boolean
@@ -239,6 +241,7 @@ export function AppHeader(props: AppHeaderProps) {
           permissionMode={props.permissionMode}
           onPermissionModeChange={props.onPermissionModeChange}
           showPermissionMode={props.showPermissionMode}
+          autoPermissionModeAllowed={props.autoPermissionModeAllowed}
           codexSandbox={props.codexSandbox}
           showThinkingLevel={props.showThinkingLevel}
           thinkingLevel={props.thinkingLevel}

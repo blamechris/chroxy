@@ -48,21 +48,24 @@ documented fallback with no approval surface.**
 ## 2. Permission matrix — mode × request class
 
 Permission modes are the shared enum `approve | acceptEdits | auto | plan`.
-Codex maps them to a Codex `approvalPolicy` per turn: `auto → never` (Codex never
-asks), every other mode → `on-request`. `plan` is **not** a real Codex mode
-(Codex has no plan enforcement) — it behaves like `approve`.
+Codex runs with `approvalPolicy: 'on-request'` in **every** mode (#8619 — `auto`
+used to map to `never`, which emits no approval RPC and so left Chroxy no
+pre-execution seam; see §7 and `docs/security/permission-floor.md` §3). `plan` is
+**not** a real Codex mode (Codex has no plan enforcement) — it behaves like
+`approve`.
 
 | Request class → | `shell` (command exec) | `apply_patch` (file edit) | `request_permissions` (scope-escalation) | `mcp_elicitation` (connector) |
 |---|---|---|---|---|
 | **approve** (default) | Prompt | Prompt | Prompt | Prompt |
-| **acceptEdits** | Prompt | **Auto-approve** | Prompt | Prompt |
-| **auto** | No prompt (Codex `never`) | No prompt | No prompt | Auto-allow |
+| **acceptEdits** | Prompt | **Auto-approve** (floor hit → prompt) | Prompt | Prompt |
+| **auto** | Auto-allow | Auto-allow (floor hit → prompt) | Auto-allow | Auto-allow |
 | **plan** | Prompt (= approve) | Prompt | Prompt | Prompt |
 
 Why the cells are what they are:
 - `apply_patch` is in `ACCEPT_EDITS_TOOLS`, so `acceptEdits` auto-approves Codex edits (the analogue of auto-approving Claude Write/Edit).
 - `shell`, `request_permissions`, and `mcp_elicitation` are in `NEVER_AUTO_ALLOW` — they always prompt (except under `auto`).
-- Under `auto`, `PermissionManager.handlePermission` short-circuits to allow, so requests are drained without a prompt. (`shell`/`apply_patch`/`request_permissions` also don't get *sent* under `auto` since Codex's `approvalPolicy` is `never`; a connector `mcp_elicitation` is a standalone MCP request that can still arrive, and is auto-allowed.)
+- Under `auto`, `PermissionManager.handlePermission` short-circuits to allow every request that passes the protected-path / secret-read floor (`isFlooredTarget`), so Codex is answered without a prompt; a floored `apply_patch` (a `changes[].path` under `.git/`, `.claude/`, a `.env*`, key material, …) still prompts, exactly as under `acceptEdits`. The gate on *entering* `auto` is the same as Claude's: `allowAutoPermissionMode: true` in the local config, primary-token clients only.
+- **No mode sees a sandbox-authorized action.** Codex only sends a `requestApproval` for an action its sandbox would block; what the sandbox already permits runs with no RPC, in `auto` as in `approve`. That is why the codex adapter keeps `permissionFloor: false` and every codex mode reports enforcement `unknown` (§5).
 - **`mcp_elicitation`** = a connector eliciting the user (#6635), surfaced as accept/decline — the confirmation case. See §8 for what's still open (form `content`, url-mode). The connector tool *execution* (`mcpToolCall`) now renders as a `tool_start`/`tool_result` (#6684 part 4).
 
 ---
@@ -180,7 +183,7 @@ Both clients render these via the existing `PermissionPrompt` (`<tool>:
 
 - **Timeout:** a pending approval times out after the `PermissionManager` default (5 min) → resolved as deny → Codex answered with the family's deny value.
 - **Interrupt / Stop / destroy:** aborting the turn (`_turnAbort`) resolves every pending approval as deny, so Codex is always answered (never left waiting) and the turn unblocks.
-- **Switch to `auto` mid-turn:** drains pending prompts as accept (the panic-button drain).
+- **Switch to `auto` mid-turn:** drains pending `shell` / `apply_patch` / `mcp_elicitation` prompts as accept (the panic-button drain). A pending prompt the floor forced, and a pending `request_permissions`, are left pending for a human (#7975). The switch itself is gated like Claude's (`allowAutoPermissionMode`, primary token); `approvalPolicy` stays `on-request` after it (#8619).
 - **Switch to `acceptEdits` mid-turn:** applies to *subsequent* requests; an already-pending `apply_patch` prompt is not retroactively auto-approved.
 
 ---

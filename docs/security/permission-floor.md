@@ -264,16 +264,27 @@ HOOK-ROUTED (claude-tui = the DEFAULT provider, cli-session)
   the tool name and input through the same `PermissionManager`: benign operations
   return immediately without a prompt, while a protected target waits for the real
   user decision. The callback contains no path predicate of its own.
-- **Codex app-server Auto is unavailable.** Its Auto mapping is
-  `approvalPolicy: 'never'`, and that protocol exposes Chroxy's approval callbacks
-  only through approval requests which `never` does not emit. Chroxy therefore
-  rejects this provider/mode pair before session construction, including configured
-  defaults and restored sessions, and refuses an in-session switch. Approve,
-  Accept Edits, and Plan remain available. Codex `read-only`, `workspace-write`,
-  and `danger-full-access` are native sandbox settings reported separately; they do
-  not prove that Chroxy's prompt floor ran. The supported modes use `on-request`,
-  which can execute sandbox-authorized actions without an approval RPC. Their
-  Chroxy floor enforcement is therefore `unknown`, not `chroxy`.
+- **Codex app-server Auto keeps `approvalPolicy: 'on-request'` (#8619).** That
+  protocol exposes Chroxy's approval callbacks only through approval requests,
+  which `never` does not emit — so Auto is never mapped to `never`. Every mode
+  uses `on-request`; under Auto the `PermissionManager`'s auto-mode path answers
+  each `requestApproval` without a prompt unless `isFlooredTarget` reserves it
+  for a human (a protected-path or secret-read `apply_patch` still prompts), which
+  is exactly the floor coverage Approve and Accept Edits have. The
+  `allowAutoPermissionMode` config gate and the bound-client refusal apply to a
+  codex switch exactly as they do to Claude (`settings-handlers.js`), and the
+  daemon advertises the gate as `auth_ok.capabilities.autoPermissionMode` so a
+  client can disable Auto with the real reason. The pre-#8619 state — Auto
+  rejected at create/restore/switch — is the history behind `#7825`. What no mode
+  covers: an action the native sandbox already authorizes runs without any RPC,
+  in Auto as in Approve, so `permissionFloor` stays `false` and the enforcement
+  reported for every codex mode is `unknown`, not `chroxy`. Codex `read-only`,
+  `workspace-write`, and `danger-full-access` are native sandbox settings reported
+  separately; they do not prove that Chroxy's prompt floor ran. A codex
+  sandbox-scope escalation (`request_permissions`) raised fresh under Auto is
+  auto-granted like any other unfloored request, while one that was already
+  pending when the session switched to Auto stays pending for a human
+  (`autoAllowPending`, #7975).
 
 Permission-mode metadata reports both `supported` and `enforcement`. Current
 adapters use `chroxy`, `unsupported`, or `unknown`; Codex sandbox copy identifies

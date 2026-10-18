@@ -16,6 +16,7 @@ import { tmpdir, homedir } from 'node:os'
 import { isPathWithin } from '../src/utils/path-containment.js'
 import { nsCtx, makeSessionIndexCtx } from './test-helpers.js'
 import { createClientSender } from '../src/ws-client-sender.js'
+import { CodexAppServerSession } from '../src/codex-app-server-session.js'
 import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 import {
@@ -1766,6 +1767,23 @@ describe('getPermissionModes provider-aware copy (#6638)', () => {
       assert.ok(m.label && m.label.length > 0, `${m.id} has a label`)
       assert.ok(m.description && m.description.length > 0, `${m.id} has a description`)
     }
+  })
+
+  // #8619: the codex app-server adapter runs unattended through the
+  // PermissionManager's auto-mode path (approvalPolicy stays `on-request`), so
+  // the roster must list Auto as a real, selectable mode — not "(unavailable)".
+  // Its floor enforcement stays `unknown`, because sandbox-authorized actions
+  // never raise a request in any mode, and the copy has to say so.
+  it('codex app-server lists Auto as supported when the adapter declares autoPermissionMode (#8619)', () => {
+    const modes = getPermissionModes('codex', CodexAppServerSession)
+    const auto = byId(modes, 'auto')
+    assert.equal(auto.supported, true)
+    assert.equal(auto.label, 'Auto', 'no "(unavailable)" suffix')
+    assert.equal(auto.enforcement, 'unknown', 'permissionFloor stays false for codex')
+    assert.ok(/on-request/.test(auto.description), 'names the approvalPolicy Auto keeps')
+    assert.ok(/floor/i.test(auto.description), 'says floor hits still prompt')
+    assert.ok(/sandbox-authorized actions never raise a request in any mode/i.test(auto.description), 'states the sandbox gap')
+    assert.ok(!/`never`/.test(auto.description), 'no longer describes approvalPolicy never')
   })
 })
 

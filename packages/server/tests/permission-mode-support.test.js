@@ -48,40 +48,37 @@ describe('permission-mode adapter support (#7825)', () => {
   describe('codex app-server', () => {
     const ProviderClass = CodexAppServerSession
 
-    it('rejects Auto at direct construction, before a turn can start', () => {
-      assert.throws(
-        () => new ProviderClass({ cwd: tempDir, permissionMode: 'auto' }),
-        /Auto permission mode.*unsupported.*protected-path/i,
-      )
+    // #8619: Auto is a real mode on this adapter. It keeps `approvalPolicy:
+    // 'on-request'`, so every native approval still reaches the
+    // PermissionManager and its floor — the pre-execution seam #7825
+    // required — and the auto-mode path resolves what passes the floor. The
+    // create / restore / switch chokepoints must therefore all accept it.
+    it('accepts Auto at direct construction', () => {
+      const session = new ProviderClass({ cwd: tempDir, permissionMode: 'auto' })
+      assert.equal(session.permissionMode, 'auto')
+      session.destroy()
     })
 
-    it('rejects explicit Auto in the SessionManager create plan', () => {
+    it('accepts explicit Auto in the SessionManager create plan', () => {
       const mgr = manager('codex')
-      assert.throws(
-        () => mgr._resolveCreateSessionPlan({
-          provider: 'codex',
-          permissionMode: 'auto',
-        }),
-        /Auto permission mode.*unsupported.*protected-path/i,
-      )
+      const plan = mgr._resolveCreateSessionPlan({ provider: 'codex', permissionMode: 'auto' })
+      assert.equal(plan.resolvedPermissionMode, 'auto')
     })
 
-    it('rejects a configured Auto default before provider construction', () => {
+    it('accepts a configured Auto default before provider construction', () => {
       const mgr = manager('codex', 'auto')
-      assert.throws(
-        () => mgr._resolveCreateSessionPlan({ provider: 'codex' }),
-        /Auto permission mode.*unsupported.*protected-path/i,
-      )
+      const plan = mgr._resolveCreateSessionPlan({ provider: 'codex' })
+      assert.equal(plan.resolvedPermissionMode, 'auto')
     })
 
-    it('rejects a persisted Auto session during restore before provider construction', () => {
+    it('restores a persisted Auto session up to provider construction', () => {
       const mgr = manager('codex')
       // Exercise _attemptRestoreOne's production option forwarding while
-      // stopping after the shared create-plan validation. If the guard is
-      // removed, this throws a distinct sentinel instead of starting codex.
+      // stopping after the shared create-plan validation. The sentinel
+      // proves the plan was ACCEPTED and construction was reached.
       mgr.createSession = (args) => {
-        mgr._resolveCreateSessionPlan(args)
-        throw new Error('provider construction reached')
+        const plan = mgr._resolveCreateSessionPlan(args)
+        throw new Error(`provider construction reached with ${plan.resolvedPermissionMode}`)
       }
       assert.throws(
         () => mgr._attemptRestoreOne({
@@ -92,9 +89,8 @@ describe('permission-mode adapter support (#7825)', () => {
           permissionMode: 'auto',
           history: [],
         }, true),
-        /Auto permission mode.*unsupported.*protected-path/i,
+        /provider construction reached with auto/,
       )
-      assert.equal(mgr.listSessions().length, 0)
     })
 
     it('keeps Approve, Accept Edits, and Plan available', () => {
@@ -105,22 +101,22 @@ describe('permission-mode adapter support (#7825)', () => {
       }
     })
 
-    it('cannot switch an existing session to Auto', () => {
+    it('can switch an existing session to Auto', () => {
       const session = new ProviderClass({ cwd: tempDir, permissionMode: 'approve' })
-      assert.equal(session.setPermissionMode('auto'), false)
-      assert.equal(session.permissionMode, 'approve')
+      assert.equal(session.setPermissionMode('auto'), true)
+      assert.equal(session.permissionMode, 'auto')
       session.destroy()
     })
 
-    it('advertises Auto as unsupported and leaves other modes unverified by Chroxy', () => {
+    it('advertises Auto as supported with floor enforcement unknown (sandbox-authorized actions never raise a request)', () => {
       const modes = getPermissionModes('codex', ProviderClass)
       const auto = modes.find((mode) => mode.id === 'auto')
       assert.deepEqual(
         { supported: auto?.supported, enforcement: auto?.enforcement },
-        { supported: false, enforcement: 'unsupported' },
+        { supported: true, enforcement: 'unknown' },
       )
-      assert.match(auto?.label || '', /unavailable/i)
-      assert.match(auto?.description || '', /cannot intercept.*before execution/i)
+      assert.equal(auto?.label, 'Auto')
+      assert.ok(/on-request/.test(auto?.description || ''), 'names the policy Auto keeps')
       // #8090: `plan` moved out of this "stays supported" loop, alongside
       // `auto` — codex-app-server ALSO declares `capabilities.planMode:
       // false`, and the advertised list now follows that capability

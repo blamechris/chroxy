@@ -127,9 +127,9 @@ const CODEX_FIRST_PARTY_NATIVE_BASE_URL = 'https://chatgpt.com/backend-api/codex
  * notifications onto Chroxy's standard event contract.
  *
  * PHASE 2 (#6605) surfaces codex's APPROVALS through Chroxy's permission
- * pipeline. `approvalPolicy` is derived from the session's permission mode
- * (`auto` → `never`, else `on-request`), so codex asks before running a command
- * or editing a file; the server → client approval RPC
+ * pipeline. `approvalPolicy` is `on-request` in EVERY permission mode (#8619:
+ * Auto included — `never` would emit no approval RPC at all), so codex asks
+ * before running a command or editing a file; the server → client approval RPC
  * (`item/commandExecution/requestApproval` / `item/fileChange/requestApproval`)
  * is routed into a PermissionManager exactly like SdkSession's `canUseTool`
  * bridge — it emits `permission_request`, waits for the user's
@@ -213,14 +213,18 @@ export class CodexAppServerSession extends BaseSession {
       // Phase 2 (#6605): approvals are surfaced through the permission pipeline.
       permissions: true,
       inProcessPermissions: true, // requires respondToPermission + respondToQuestion
-      // #7825: `approvalPolicy:'never'` emits no requestApproval RPC, so this
-      // adapter has no pre-execution seam through which Chroxy can preserve the
-      // protected-path floor in Auto. Keep native sandbox truth separate.
-      // Supported modes only surface approvals requested by the native
-      // runtime. Sandbox-authorized tools can execute without an RPC, so
-      // those modes cannot claim complete Chroxy floor interception either.
+      // #7825/#8619: Auto is a real mode on this adapter because it does NOT
+      // map to `approvalPolicy:'never'` (which emits no requestApproval RPC and
+      // so has no pre-execution seam). Every mode keeps `on-request`, so every
+      // native approval still reaches the PermissionManager, whose auto-mode
+      // path resolves what passes the protected-path / secret-read floor and
+      // prompts on a floor hit. Keep native sandbox truth separate: every mode
+      // only surfaces approvals the native runtime requests, and sandbox-
+      // authorized tools execute without an RPC in ANY mode — so no mode can
+      // claim complete Chroxy floor interception, and `permissionFloor` stays
+      // false (enforcement `unknown`, never `chroxy`).
       permissionFloor: false,
-      autoPermissionMode: false,
+      autoPermissionMode: true,
       nativeSandbox: true,
       modelSwitch: true,
       permissionModeSwitch: true, // mode drives approvalPolicy + PermissionManager
@@ -2128,13 +2132,16 @@ export class CodexAppServerSession extends BaseSession {
       : `Codex connector "${server}": is requesting your input${url}`
   }
 
-  // Codex's underlying Auto mapping is `never`, which emits no approval RPC
-  // for Chroxy to intercept. The provider support gate rejects Auto before
-  // construction or switching; retain the mapping here as protocol truth for
-  // direct state inspection and older persisted objects. Every supported mode
-  // uses `on-request`, where PermissionManager applies its rules and floor.
+  // #8619: `on-request` in EVERY mode, Auto included. codex's own `never`
+  // policy would emit no approval RPC, which is exactly the seam Chroxy's
+  // protected-path / secret-read floor needs (#7825) — so Auto never maps to
+  // it. Under Auto the PermissionManager's auto-mode path answers each request
+  // without a prompt unless the floor reserves it for a human, which is the
+  // same floor coverage Approve and Accept Edits have. What no mode covers is
+  // an action the native sandbox already authorizes: codex runs those without
+  // any RPC, in Auto as in Approve.
   _approvalPolicy() {
-    return this.permissionMode === 'auto' ? 'never' : 'on-request'
+    return 'on-request'
   }
 
   // In-process permission responses (capabilities.inProcessPermissions) — thin
