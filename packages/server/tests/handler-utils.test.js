@@ -698,17 +698,22 @@ describe('validateCwdWithinHome', () => {
     assert.match(err, /within your home directory/)
   })
 
-  it('rejects the platform temp dir when it is outside home', () => {
+  it('classifies the native platform temp dir relative to home', (t) => {
     // #7273 — was hardcoded to '/tmp' with a `realTmp.startsWith(home + '/')`
     // guard, which is the very spelling this PR removed everywhere else. On
-    // Windows os.tmpdir() is C:\Users\<u>\AppData\Local\Temp — INSIDE home —
-    // so the guard is doing real work here, not just guarding a POSIX literal.
-    const realTmp = realpathSync(tmpdir())
-    const home = realpathSync(homedir())
-    if (isPathWithin(realTmp, home)) return   // legitimately inside home (Windows)
+    // Windows os.tmpdir() can be C:\Users\<u>\AppData\Local\Temp, inside home.
+    // Compare native spellings like the policy: legacy realpathSync preserves
+    // Windows TEMP's 8.3 names while homedir() may use the long profile name.
+    const realTmp = realpathSync.native(tmpdir())
+    const home = realpathSync.native(homedir())
     const err = validateCwdWithinHome(realTmp)
-    assert.ok(err)
-    assert.match(err, /within your home directory/)
+    const withinHome = isPathWithin(realTmp, home)
+    t.diagnostic(`native platform temp is ${withinHome ? 'inside' : 'outside'} home`)
+    if (withinHome) assert.equal(err, null, 'temp inside home must be accepted')
+    else {
+      assert.ok(err)
+      assert.match(err, /within your home directory/)
+    }
   })
 
   it('rejects a directory outside home', () => {

@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync, writeFileSync } from 'node:fs'
-import { realpath } from 'node:fs/promises'
+import { realpath, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
@@ -79,10 +79,24 @@ describe('Browse shares the Create cwd policy', () => {
     symlinkSync(join(home, '.ssh'), join(home, 'credential-link'))
     assert.match((await list(join(home, 'credential-link'), cfg)).error, /^Access denied/)
   })
-  it('keeps error classification within the same policy for non-directory targets', async () => {
+  it('keeps error classification within the same policy for non-directory targets', async (t) => {
     writeFileSync(join(root, 'file'), '')
     writeFileSync(join(outside, 'file'), '')
-    assert.equal((await list(join(root, 'file', 'child'))).error, 'Not a directory')
+    const target = join(root, 'file', 'child')
+    // Windows reports a missing path below a file; POSIX reports ENOTDIR.
+    // Prove the actual filesystem result before expecting its Browse message.
+    const expectedCode = process.platform === 'win32' ? 'ENOENT' : 'ENOTDIR'
+    let listingCode
+    for (const [name, operation] of [['realpath', realpath], ['readdir', readdir]]) {
+      await assert.rejects(operation(target), (err) => {
+        assert.equal(err.code, expectedCode, `${name} file-child errno`)
+        t.diagnostic(`${name} file-child errno: ${err.code}`)
+        if (name === 'readdir') listingCode = err.code
+        return true
+      })
+    }
+    const expectedMessage = { ENOENT: 'Directory not found', ENOTDIR: 'Not a directory' }[listingCode]
+    assert.equal((await list(target)).error, expectedMessage)
     assert.match((await list(join(outside, 'file', 'child'))).error, /^Access denied/)
   })
   it('refuses a symlink cycle', { skip: SKIP_NO_SYMLINK }, async () => {
