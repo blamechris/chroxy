@@ -19,7 +19,7 @@ import {
 } from '@chroxy/protocol'
 import type { DirectoryListing, DirectoryEntry } from '../store/types'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
-import type { SessionDefaultsNotice } from '../store/session-defaults'
+import { SessionDefaultsNotice } from './SessionDefaultsNotice'
 import { isImeComposing } from '../utils/ime'
 
 export interface CreateSessionData {
@@ -248,20 +248,6 @@ export function renderHintWithCode(hint: string): Array<string | { code: string 
     i = end + 1
   }
   return out
-}
-
-/**
- * #8265: the one-time notice shown after migrateSessionDefaults cleared a
- * legacy saved default. A pure helper so the copy is unit-testable.
- */
-export function sessionDefaultsNoticeText(notice: SessionDefaultsNotice): string {
-  const parts: string[] = []
-  if (notice.provider) parts.push(`provider ${PROVIDER_LABELS[notice.provider] || notice.provider}`)
-  if (notice.model) parts.push(`model ${notice.model}`)
-  const follows: string[] = []
-  if (notice.provider) follows.push("the server's default provider")
-  if (notice.model) follows.push("the provider's own default model")
-  return `A saved default from an older version was cleared (${parts.join(', ')}). New sessions now use ${follows.join(' and ')}. To keep the old choice, pick it again in Settings → Session Defaults.`
 }
 
 export function resolveCreateSessionModel(
@@ -912,19 +898,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               </span>
             </span>
           ) : null}
-          {sessionDefaultsNotice ? (
-            <div className="provider-fix-hint session-defaults-notice" role="status" data-testid="session-defaults-notice">
-              <span className="provider-fix-hint-body">{sessionDefaultsNoticeText(sessionDefaultsNotice)}</span>
-              <button
-                type="button"
-                className="session-defaults-notice-dismiss"
-                onClick={dismissSessionDefaultsNotice}
-                data-testid="session-defaults-notice-dismiss"
-              >
-                Dismiss
-              </button>
-            </div>
-          ) : null}
+          <SessionDefaultsNotice notice={sessionDefaultsNotice} onDismiss={dismissSessionDefaultsNotice} />
 
           {selectedProviderInfo?.connections?.length ? (
             <div className="form-group" data-testid="agent-connection-field">

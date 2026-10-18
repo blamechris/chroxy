@@ -16,7 +16,8 @@ vi.mock('../store/connection', () => ({
     selector(mockStoreState),
 }))
 
-import { CreateSessionModal, sessionDefaultsNoticeText } from './CreateSessionModal'
+import { CreateSessionModal } from './CreateSessionModal'
+import { sessionDefaultsNoticeText } from './SessionDefaultsNotice'
 
 const READY = { ready: true, source: 'login', envVar: null, envVars: [], detail: '', hint: '' }
 const PROVIDERS = [
