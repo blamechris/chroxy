@@ -92,7 +92,7 @@ Write `docs/reports/harness-evals/trial/runs/B2b-cy-codex/REPORT.md` with:
 
 ## Invocation for this run
 
-In the Chroxy dashboard: New Session → provider Codex → connection ChatGPT subscription → working directory = the run's clone → Advanced: permission mode Auto, sandbox left at its default (workspace-write), worktree isolation off (the clone is already isolated). After Create, set the session header to model gpt-6-astra and reasoning effort xhigh and confirm both before sending (the header may show the config default first, see #8609). First message:
+In the Chroxy dashboard: New Session → provider Codex → connection ChatGPT subscription → working directory = the run's clone → Advanced: permission mode Auto, sandbox left on the `Default` option (workspace-write on this daemon, which sets no `CHROXY_CODEX_SANDBOX`), worktree isolation off (the clone is already isolated). After Create, set the session header to model gpt-6-astra and reasoning effort xhigh and confirm both before sending (the header may show the config default first, see #8609). First message:
 
 ```
 /prompts:prime-directive Trial run B2b-cy-codex: follow docs/reports/harness-evals/trial/missions/B2b-cy-codex.md exactly
