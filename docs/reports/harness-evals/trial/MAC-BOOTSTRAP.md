@@ -91,9 +91,24 @@ status: `README.md`.
    npm install -g @openai/codex@latest && codex --version
    ```
 
+## Before every Chroxy run (runs 3 and 4, and any B2 re-run)
+
+9. **Stop the daemon's auto-deploy agent for the duration of the run.** Run 2 was
+   killed at 07:52Z by a deploy tick that judged the daemon idle while the codex
+   session was mid-turn, then restarted it under the run (`README.md`, run 2 row).
+   The tick only acts when `main` moves, and the supervisor's status-table merges
+   move it, so take the agent out before the session is created and put it back
+   after the trial. The daemon itself stays up on the commit it already runs:
+   ```bash
+   launchctl bootout   gui/$UID ~/Library/LaunchAgents/com.chroxy.deploy.plist   # before the run
+   launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.chroxy.deploy.plist   # after the trial
+   ```
+   Confirm with `launchctl print gui/$UID/com.chroxy.deploy`, which must report
+   that the service is not found while a run is live.
+
 ## Per run
 
-9. Launch per `missions/<RUN_ID>.md` → *Invocation*. The A1-cd session is the
+10. Launch per `missions/<RUN_ID>.md` → *Invocation*. The A1-cd session is the
    subject itself: the owner types that one directly in the Claude desktop app.
    Say "starting <RUN_ID>" to the supervisor when you type the invocation and
    "done <RUN_ID>" (plus the Codex cost from the usage page for the two GPT runs)
