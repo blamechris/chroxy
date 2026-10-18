@@ -79,6 +79,18 @@ status: `README.md`.
    The identity comes from your global git config, echoed first so you can stop
    if it is not your GitHub identity.
 
+## Before run 2 (Chroxy with Codex)
+
+7. **Unattended Codex in Chroxy.** Needs the fix for #8619 merged and the daemon
+   updated, plus `allowAutoPermissionMode: true` in the daemon config (already on
+   if Auto was accepted on the Claude dry run). Restart the daemon only when no
+   trial run is live.
+8. **Codex binary parity (#8609).** Upgrade the PATH codex so Chroxy sees the
+   same model roster as the Codex app, otherwise the arm-B worker tiers differ:
+   ```bash
+   npm install -g @openai/codex@latest && codex --version
+   ```
+
 ## Per run
 
 7. Launch per `missions/<RUN_ID>.md` → *Invocation*. The A1-cd session is the

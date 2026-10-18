@@ -55,6 +55,22 @@ systematically a CY property.
 - **Checkout.** A fresh clone per run at `T0`, never the daemon's checkout; same
   git identity in all four (the diagnostic found a second identity on the daemon
   checkout that confounded attribution); Node 22; same `gh` account.
+- **Permission mode.** Every run is unattended. The harness's no-prompt mode is
+  selected before the first message: in the Claude desktop app the same mode the
+  Oct 7–11 chain used; in Chroxy, Auto (needs `allowAutoPermissionMode: true` in
+  the daemon config, and for Codex sessions the fix for #8619); in the Codex
+  desktop app, full access. No human approves anything during a run. A human
+  approval is an incident, and the run report records the count (expected 0).
+  The dry runs measured the Codex-in-Chroxy gap at more than forty approvals for
+  a one-file change (`DRY-RUNS.md`).
+- **Versions.** Chroxy runs record the daemon version and the codex binary
+  version in the run report; desktop runs record the app version. The codex
+  binary on PATH, which Chroxy launches, must offer the same model roster as the
+  Codex app's bundled client, or the two arm-B harnesses delegate to different
+  worker models (dry runs: CX workers on `gpt-6.1-sol`, CY-codex workers on
+  `gpt-5.6-luna` / `gpt-5.6-sol`, because the older PATH binary cannot use
+  `gpt-6.1-sol` on a ChatGPT login, #8609). Upgrade the PATH binary before
+  run 2.
 - **Skill source.** `/prime-directive` and the skills it composes come from the
   same commit (`T0`): the compiled `.claude/skills/*` for Claude harnesses, and
   `~/.codex/prompts/*` for Codex harnesses, compiled from a `trial/*` clone
@@ -62,9 +78,13 @@ systematically a CY property.
   codex`, README step 7), with the compile SHA written into the run report.
   Compiling from `main` earlier would let the two vendor arms run different skill
   text if `main` moved in between. The invocation method is recorded per run as
-  a harness attribute, not hidden.
+  a harness attribute, not hidden. In the dry runs `/prompts:prime-directive`
+  did not expand in either Codex harness; both read the prompt file themselves
+  and proceeded, so the Codex missions now state that fallback explicitly.
 - **Worker tier.** Each harness's default worker models; the run report records
-  what was actually used. Within an arm they are expected to match (same vendor).
+  what was actually used. Within an arm they match only if both harnesses see
+  the same model roster (see Versions); the graders report the observed tiers
+  side by side either way.
 - **Stop.** A run ends when the queue is exhausted (each issue merged into the
   base or flagged blocked with a reason), at 12 h wall clock from the first
   command, or after a 60-minute rate-limit stall — whichever comes first. The run
@@ -79,20 +99,28 @@ runs' work. Rules, in order of how much they buy:
 1. **Merges into `trial/*` never close issues.** GitHub only auto-closes on merge
    into the default branch, so every run sees the same open queue.
 2. **`Trial-Closes: N` (bare number, no `#`) instead of `Closes #N`** in PR
-   bodies, and no `#N` in PR titles or commit subjects. A closing keyword would
-   link the PR into the issue's timeline, where the next run's "read the issue
-   and linked threads" step would find it — and any `#N` anywhere in a PR body,
-   title or commit message posts a cross-reference event on that timeline even
-   without a keyword. Whether GitHub treats `Trial-Closes:` itself as a closing
+   bodies, and no issue number in `#N` form in PR titles or commit subjects. A
+   closing keyword would link the PR into the issue's timeline, where the next
+   run's "read the issue and linked threads" step would find it — and any issue
+   `#N` anywhere in a PR body, title or commit message posts a cross-reference
+   event on that timeline even without a keyword. GitHub's default squash
+   subject appends the PR's own number in that form; that references the PR, not
+   an issue, and is allowed. Whether GitHub treats `Trial-Closes:` itself as a closing
    keyword is unverified; README step 5 checks it on a scratch issue before run 1.
 3. **No writes to shared state during a run:** no comments, labels or closures on
    queue issues, no new issues. Follow-ups go in the run report, and the owner
    files them after run 4.
 4. **Never read another run's branch or PRs** (`trial/*` other than your own, or
-   PRs whose base is one), and **never read the owner's vault** (`~/Obsidian`)
-   or any file named `KEY.md` / `KEY.md.enc`: the sealed answer key (section 5)
-   lives there, on the same Mac the runs use. Self-report any accidental read in
-   the run report.
+   PRs whose base is one). In the owner's vault, **never read the sealed key's
+   folder** (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`) or any file
+   named `KEY.md` / `KEY.md.enc`, and **never read or resume from another run's
+   handoff seed or brief** (`NEXT-*.md`, anything under `briefs/` that names a
+   trial run). The rest of the vault is the harness's normal working surface
+   (coordination notes, the usage ledger, its own brief) and stays allowed: the
+   dry runs showed that a blanket vault ban both tripped on the machine-level
+   startup read of `coordination/Core Goal.md` in every Codex harness and made
+   the runs suppress their normal vault writes, which changes the harness under
+   test. Self-report any accidental read in the run report.
 5. **Graders audit** PR bodies and transcripts for violations of 2–4 and for
    solutions that are byte-identical to an earlier run's.
 
@@ -137,7 +165,7 @@ diagnostic's scripts adapted to trial branches (reproducible, inputs committed):
 |---|---|
 | Delivered: merged into base **and** grader-verified correct | PR + grader |
 | Wall clock: first command → run report committed | run report, PR timestamps |
-| Cost: Claude session cost (`/cost` or ccusage) ; Codex from the owner's usage page, else `n/a` | run report / owner |
+| Cost: Claude — the SDK-reported `total_cost_usd` (Chroxy's cost badge, `/cost`), which is an API-rate equivalent computed from tokens and not a charge on a subscription (#8624), labelled as such; Codex — not exposed, the owner's usage page, else `n/a` | run report / owner |
 | CI runs per PR | Actions API |
 | Red CI on the base after a merge | Actions API — **observable only if** the owner adds `trial/**` to `on.push.branches` in `ci.yml` before T0 (README step 4); `ci.yml` runs on `pull_request` to any base but on `push` only to `main`, so without that change a merge into `trial/*` triggers nothing. Graders then record `not observable`, never `0`. |
 | Review rounds, split Copilot vs owner-account bodies | PR reviews |
@@ -167,6 +195,9 @@ Blinding is not possible — each harness leaves fingerprints in PR bodies, bran
 names and review patterns — so the cross-origin pairing is the substitute.
 
 ## 8. Caveats
+
+- **Dry-run findings** (2026-10-18) are recorded in `DRY-RUNS.md`; the
+  permission-mode, versions and vault rules above came from them.
 
 - **n = 1 per cell.** This is a pilot. Report effect sizes with the raw numbers;
   make no significance claims.

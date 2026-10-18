@@ -11,9 +11,10 @@ prompts: [`graders/`](graders/). This file is the step list and the live status.
 | Queue | set 2026-10-17, 10 issues — see [`queue.md`](queue.md) |
 | Sealed key | sealed 2026-10-17T23:17Z; SHA-256 committed in [`KEY-COMMITMENT.md`](KEY-COMMITMENT.md) |
 | Run 1 `A1-cd` | base cut from T0 on the owner's go; then waits for dry runs, clones and the owner's "starting A1-cd" |
-| Run 2 `B2-cy-codex` | not started |
+| Run 2 `B2-cy-codex` | blocked until #8619 is merged and the daemon updated, and the PATH codex binary is upgraded (#8609); if that is not done when run 1 ends, B2 moves to last (order A1, A2, B1, B2) |
 | Run 3 `A2-cy-claude` | not started |
 | Run 4 `B1-cx` | not started |
+| Dry runs | 3 of 3 complete 2026-10-18 — see [`DRY-RUNS.md`](DRY-RUNS.md); vault rule narrowed and permission-mode control added as a result |
 | Grading | not started |
 
 ## Who can do what
@@ -85,8 +86,9 @@ local Claude session in the chroxy checkout.
    the dry mission. **[supervisor]** verifies on GitHub that the skill loaded, a
    PR targeted the dry base, the gate completed and a run report was written,
    and lists blockers. Fix blockers before run 1 (step 8); if a fix lands on
-   `main` after the bases were cut, step 6 re-cuts them. Then delete the dry
-   branches.
+   `main` after the bases were cut, step 6 re-cuts them. Keep the dry branches
+   until the trial report is written; they are its evidence. **Done 2026-10-18:
+   see [`DRY-RUNS.md`](DRY-RUNS.md).**
 6. **[supervisor, on the owner's explicit go] Cut the bases.** Only after this
    package has merged, since the clones must contain the missions. T0 is the
    `main` commit the bases are cut from; the missions do not bake it in (a
@@ -113,7 +115,8 @@ local Claude session in the chroxy checkout.
    ```
 8. **Run 1 — `A1-cd`.** **[owner]** waits for the Claude weekly reset if the
    allowance is low, tells the supervisor "starting A1-cd" (that timestamp is the
-   run's start), then follows `missions/A1-cd.md` → *Invocation*.
+   run's start), sets the no-prompt permission mode before the first message,
+   then follows `missions/A1-cd.md` → *Invocation*.
    **[supervisor]** arms a 3-hour check-in, watches PRs and CI on `trial/a1-cd`
    and the CCR session list, and reports stalls (> 90 min quiet), red CI on the
    base (only observable if step 4's push trigger was added), or rule violations
