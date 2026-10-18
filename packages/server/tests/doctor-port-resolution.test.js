@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import net from 'node:net'
 import { runDoctorChecks } from '../src/doctor.js'
+import { parseDoctorPortFlag } from '../src/cli/doctor-cmd.js'
 
 /**
  * `chroxy doctor` must check the same port `chroxy start` would bind:
@@ -95,6 +96,7 @@ describe('runDoctorChecks port resolution', () => {
     ['PORT=abc', { env: { PORT: 'abc' }, config: {} }],
     ['config port 70000', { config: { port: 70000 } }],
     ['-p abc', { config: {}, port: 'abc' }],
+    ['a NaN port from a direct caller', { config: {}, port: Number.NaN }],
   ]) {
     it(`${label} fails as an invalid port`, async () => {
       const row = await portRow({ ...opts, full: true })
@@ -102,4 +104,19 @@ describe('runDoctorChecks port resolution', () => {
       assert.ok(row.message.startsWith('Invalid port'), row.message)
     })
   }
+})
+
+describe('parseDoctorPortFlag', () => {
+  it('parses a numeric -p value', () => {
+    assert.equal(parseDoctorPortFlag('8794'), 8794)
+  })
+
+  it('passes a non-numeric -p value through raw so doctor reports it', () => {
+    assert.equal(parseDoctorPortFlag('abc'), 'abc')
+  })
+
+  it('treats an absent or empty -p as unset', () => {
+    assert.equal(parseDoctorPortFlag(undefined), undefined)
+    assert.equal(parseDoctorPortFlag(''), undefined)
+  })
 })

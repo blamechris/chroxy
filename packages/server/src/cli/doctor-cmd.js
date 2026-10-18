@@ -1,6 +1,17 @@
 /**
  * chroxy doctor — Check dependencies and environment
  */
+
+/**
+ * Parse the -p flag. A non-numeric value is passed through raw so doctor
+ * reports it as an invalid port instead of silently ignoring the flag.
+ */
+export function parseDoctorPortFlag(raw) {
+  if (!raw) return undefined
+  const parsed = parseInt(raw, 10)
+  return Number.isNaN(parsed) ? raw : parsed
+}
+
 export function registerDoctorCommand(program) {
   program
     .command('doctor')
@@ -10,10 +21,7 @@ export function registerDoctorCommand(program) {
     .action(async (options) => {
       const { runDoctorChecks } = await import('../doctor.js')
 
-      // A non-numeric -p is passed through raw so doctor reports it as an
-      // invalid port instead of silently ignoring the flag.
-      const parsedPort = options.port ? parseInt(options.port, 10) : undefined
-      const port = Number.isNaN(parsedPort) ? options.port : parsedPort
+      const port = parseDoctorPortFlag(options.port)
       const providers = options.provider
         ? options.provider.split(',').map(s => s.trim()).filter(Boolean)
         : undefined

@@ -165,7 +165,7 @@ export function isBundledOrSupervisedContext() {
  * @param {string[]} [args.providers] - doctor's own explicit `--provider a,b`
  *   flag; still the highest-precedence override when present.
  * @param {object} args.merged - the mergeConfig result computed once per doctor
- *   run (so its warnings are not emitted twice).
+ *   run and shared with the port check.
  */
 function resolveProviders({ providers, merged }) {
   if (Array.isArray(providers) && providers.length > 0) return providers
@@ -1023,13 +1023,16 @@ export async function runDoctorChecks({
   // cases fail here because start cannot bind them either: a non-numeric string
   // (PORT=abc, -p abc) is a fatal "Invalid type" config error in start, and an
   // out-of-range value (70000) passes start's non-fatal warning but then crashes
-  // on listen with ERR_SOCKET_BAD_PORT.
-  const checkPort = !merged.port ? 8765 : merged.port
+  // on listen with ERR_SOCKET_BAD_PORT. NaN is not "unset": it is spelled out
+  // so it fails instead of riding the falsy fall-through to 8765.
+  const unset = merged.port == null || merged.port === '' || merged.port === 0
+  const checkPort = unset ? 8765 : merged.port
   if (!Number.isInteger(checkPort) || checkPort < 1 || checkPort > 65535) {
+    const shown = typeof checkPort === 'string' ? JSON.stringify(checkPort) : String(checkPort)
     checks.push({
       name: 'Port',
       status: 'fail',
-      message: `Invalid port ${JSON.stringify(checkPort)} — must be an integer from 1 to 65535 (check -p, PORT, or config.json "port")`,
+      message: `Invalid port ${shown} — must be an integer from 1 to 65535 (check -p, PORT, or config.json "port")`,
     })
   } else {
     try {
