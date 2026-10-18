@@ -164,14 +164,11 @@ export function isBundledOrSupervisedContext() {
  * @param {object} args
  * @param {string[]} [args.providers] - doctor's own explicit `--provider a,b`
  *   flag; still the highest-precedence override when present.
- * @param {object|null} [args.parsedConfig] - the raw parsed config.json (or
- *   null/absent), fed to mergeConfig as the file tier.
+ * @param {object} args.merged - the mergeConfig result computed once per doctor
+ *   run and shared with the port check.
  */
-function resolveProviders({ providers, parsedConfig }) {
+function resolveProviders({ providers, merged }) {
   if (Array.isArray(providers) && providers.length > 0) return providers
-  const merged = mergeConfig({
-    fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
-  })
   return [resolveDaemonDefaultProvider(merged)]
 }
 
@@ -842,7 +839,14 @@ export async function runDoctorChecks({
   // own binary and credential checks. Providers not in the user's config
   // are skipped entirely — a Gemini-only install does NOT fail because
   // `claude` is missing (#2951).
-  const resolvedProviders = resolveProviders({ providers, parsedConfig })
+  // One merge per run (CLI port flag > ENV > file > default), shared by the
+  // provider and port resolution so mergeConfig's warnings print once.
+  const merged = mergeConfig({
+    fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
+    cliOverrides: port !== undefined ? { port } : {},
+    defaults: { port: 8765 },
+  })
+  const resolvedProviders = resolveProviders({ providers, merged })
   for (const providerName of resolvedProviders) {
     const providerChecks = checkProvider(providerName, { platform, provenance: provenanceOptions, verifyProvenance })
     for (const c of providerChecks) checks.push(c)
@@ -1011,12 +1015,32 @@ export async function runDoctorChecks({
   }
 
   // 7. Port availability
-  const checkPort = port || 8765
-  try {
-    await checkPortAvailable(checkPort)
-    checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
-  } catch {
-    checks.push({ name: 'Port', status: 'warn', message: `${checkPort} is in use (server may already be running)` })
+  // Same precedence `chroxy start` uses (mergeConfig): explicit flag > env PORT >
+  // config.json `port` > 8765. Any falsy merged port (`PORT=`, config/flag/env 0)
+  // falls through to 8765 exactly like start's `config.port || 8765`
+  // (cli/server-cmd.js preflight) — start only warns (non-fatal "Invalid value")
+  // on a config port of 0. Everything else must be an integer in 1..65535. Two
+  // cases fail here because start cannot bind them either: a non-numeric string
+  // (PORT=abc, -p abc) is a fatal "Invalid type" config error in start, and an
+  // out-of-range value (70000) passes start's non-fatal warning but then crashes
+  // on listen with ERR_SOCKET_BAD_PORT. NaN is not "unset": it is spelled out
+  // so it fails instead of riding the falsy fall-through to 8765.
+  const unset = merged.port == null || merged.port === '' || merged.port === 0
+  const checkPort = unset ? 8765 : merged.port
+  if (!Number.isInteger(checkPort) || checkPort < 1 || checkPort > 65535) {
+    const shown = typeof checkPort === 'string' ? JSON.stringify(checkPort) : String(checkPort)
+    checks.push({
+      name: 'Port',
+      status: 'fail',
+      message: `Invalid port ${shown} — must be an integer from 1 to 65535 (check -p, PORT, or config.json "port")`,
+    })
+  } else {
+    try {
+      await checkPortAvailable(checkPort)
+      checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
+    } catch {
+      checks.push({ name: 'Port', status: 'warn', message: `${checkPort} is in use (server may already be running)` })
+    }
   }
 
   const passed = checks.every(c => c.status !== 'fail')
