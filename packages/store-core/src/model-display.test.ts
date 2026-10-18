@@ -58,6 +58,28 @@ describe('model presentation (#8260)', () => {
     expect(modelChoices([...models, long]).map(m => m.label)).toContain('Haiku 4.5 (pinned 4.5, 1M)')
     expect(formatActiveModelLabel(models, 'claude-haiku-4-5-20251101[1m]', null, 'claude-sdk')).toBe('Haiku 4.5 (pinned 20251101, 1M)')
   })
+  it('adds one full-target discriminator when cross-family custom rows share a descriptor', () => {
+    const custom = [
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' },
+    ]
+    const choices = modelChoices(custom)
+    expect(choices.map(m => m.id)).toEqual(['alpha', 'beta'])
+    expect(choices.map(m => m.fullId)).toEqual(['claude-alpha-1-0', 'claude-beta-1-0'])
+    expect(choices.map(m => m.label)).toEqual(['Custom (claude-alpha-1-0)', 'Custom (claude-beta-1-0)'])
+    for (const m of choices) {
+      expect(m.label.includes('pinned')).toBe(false)
+      expect(m.label.split('(').length - 1).toBe(1)
+    }
+    expect(custom[0]!.label).toBe('Custom')
+  })
+  it('keeps the pinned descriptor when it alone disambiguates same-label rows', () => {
+    const rows = [
+      { id: 'a', fullId: 'claude-alpha-1-0', label: 'Custom' },
+      { id: 'b', fullId: 'claude-alpha-2-0', label: 'Custom' },
+    ]
+    expect(modelChoices(rows).map(m => m.label)).toEqual(['Custom (pinned 1.0)', 'Custom (pinned 2.0)'])
+  })
   it('uses only the selected provider roster', () => {
     let map = mergeModelsByProvider({}, 'claude-sdk', { models, defaultModelId: 'haiku' })
     map = mergeModelsByProvider(map, 'codex', { models: [{ id: 'gpt', fullId: 'gpt', label: 'GPT' }], defaultModelId: 'gpt' })

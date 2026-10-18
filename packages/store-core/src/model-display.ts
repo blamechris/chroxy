@@ -42,7 +42,7 @@ export function modelChoices(models: readonly ModelInfo[]): ModelInfo[] {
   })
   const choices = unique.map(m => {
     const label = baseLabel(m)
-    if (unique.filter(other => baseLabel(other) === label).length < 2) return { ...m, label }
+    if (unique.filter(other => baseLabel(other) === label).length < 2) return { base: label, choice: { ...m, label } }
     const target = m.fullId || m.id
     const date = target.match(/-(\d{8})(\[1m\])?$/)?.[1]
     const version = target.match(/^(?:claude-)?[a-z]+-(\d+)-(\d+)(?:-\d{8})?(?:\[1m\])?$/)
@@ -54,10 +54,12 @@ export function modelChoices(models: readonly ModelInfo[]): ModelInfo[] {
     // Different provider aliases/custom targets may still share a descriptor.
     const ambiguous = unique.some(other => other !== m && baseLabel(other) === label
       && (other.fullId || other.id).replace(/^claude-/, '') === target.replace(/^claude-/, ''))
-    return { ...m, label: ambiguous ? `${label} (${target})` : candidate }
+    return { base: label, choice: { ...m, label: ambiguous ? `${label} (${target})` : candidate } }
   })
-  return choices.map(m => choices.filter(other => other.label === m.label).length > 1
-    ? { ...m, label: `${baseLabel(m)} (${m.fullId || m.id})` } : m)
+  // The augmented label is not a base label: the final fallback restarts from the
+  // original one so a shared descriptor is replaced, not repeated, by the target.
+  return choices.map(({ base, choice }) => choices.filter(other => other.choice.label === choice.label).length > 1
+    ? { ...choice, label: `${base} (${choice.fullId || choice.id})` } : choice)
 }
 
 /** Shared header/status label. The family fallback is display-only, Claude-only,
