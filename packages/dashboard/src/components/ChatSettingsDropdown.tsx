@@ -8,7 +8,7 @@
  * The modal renders above everything via the shared `Modal` overlay, so it's
  * likewise clipping-immune.
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { findModelEntry, modelDisplayTarget, formatActiveModelLabel } from '@chroxy/store-core'
 import type { ModelInfo } from '../store/types'
 import type { PermissionMode } from '@chroxy/store-core'
@@ -181,6 +181,28 @@ export function ChatSettingsDropdown({
 
   const activeLabel = formatActiveModelLabel(availableModels, activeModel, defaultModelId, providerLabel)
 
+  // #8619 + #8618: the permission <option>s as rendered — label, title and
+  // disabled state — computed once, so the roster sizers (SelectFit) measure
+  // exactly the labels the control can DISPLAY: every selectable option, plus
+  // the selected one even when it is disabled (App.tsx keeps `plan` while it is
+  // unavailable). A disabled label the value can never show — "Auto (disabled
+  // on this server)", "Plan (unavailable)" — must not widen the control; the
+  // sizers govern the cell precisely so the select's own intrinsic width,
+  // which counts disabled options, cannot. The config gate is a separate reason
+  // from adapter support: only an otherwise-supported Auto gets the "disabled
+  // on this server" suffix, so the two never read the same.
+  const permissionOptions = useMemo(() => availablePermissionModes.map(m => {
+    const gated = m.id === 'auto' && m.supported !== false && autoPermissionModeAllowed === false
+    return {
+      id: m.id,
+      label: gated ? `${m.label} (disabled on this server)` : m.label,
+      title: gated
+        ? 'Auto is disabled on this server: set allowAutoPermissionMode: true in the server config file on the dev machine, then restart the daemon.'
+        : m.description,
+      disabled: m.supported === false || gated,
+    }
+  }), [availablePermissionModes, autoPermissionModeAllowed])
+
   return (
     <>
       {/* Model — #6220: a button that opens the modal picker. Reads
@@ -231,34 +253,26 @@ export function ChatSettingsDropdown({
 
       {/* Permission Mode */}
       {showPermissionMode && availablePermissionModes.length > 0 && (
-        <select
-          data-kind="permission"
-          aria-label="Permission mode"
-          value={permissionMode || ''}
-          onChange={e => onPermissionModeChange(e.target.value)}
-          // #4019: server-side PERMISSION_MODES carries a `description` for
-          // every mode (including the Auto protected-path exception).
-          // Surface the description for the currently-selected option as a
-          // title so the user gets the same trade-off explanation mid-session
-          // they get at creation time. Each <option> also carries its own
-          // title — most browsers don't show option tooltips reliably, but
-          // it's harmless and feeds AT-friendly machinery for those that do.
-          title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
-        >
-          {availablePermissionModes.map(m => {
-            // #8619: the config gate is a separate reason from adapter support
-            // — only an otherwise-supported Auto gets the "disabled on this
-            // server" suffix, so the two never read the same.
-            const gated = m.id === 'auto' && m.supported !== false && autoPermissionModeAllowed === false
-            const label = gated ? `${m.label} (disabled on this server)` : m.label
-            const title = gated
-              ? 'Auto is disabled on this server: set allowAutoPermissionMode: true in the server config file on the dev machine, then restart the daemon.'
-              : m.description
-            return (
-              <option key={m.id} value={m.id} title={title} disabled={m.supported === false || gated}>{label}</option>
-            )
-          })}
-        </select>
+        <SelectFit kind="permission" labels={permissionOptions.filter(o => !o.disabled || o.id === permissionMode).map(o => o.label)}>
+          <select
+            data-kind="permission"
+            aria-label="Permission mode"
+            value={permissionMode || ''}
+            onChange={e => onPermissionModeChange(e.target.value)}
+            // #4019: server-side PERMISSION_MODES carries a `description` for
+            // every mode (including the Auto protected-path exception).
+            // Surface the description for the currently-selected option as a
+            // title so the user gets the same trade-off explanation mid-session
+            // they get at creation time. Each <option> also carries its own
+            // title — most browsers don't show option tooltips reliably, but
+            // it's harmless and feeds AT-friendly machinery for those that do.
+            title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
+          >
+            {permissionOptions.map(o => (
+              <option key={o.id} value={o.id} title={o.title} disabled={o.disabled}>{o.label}</option>
+            ))}
+          </select>
+        </SelectFit>
       )}
 
       {/* #6901: read-only Codex sandbox badge. Codex applies the sandbox once at
@@ -285,17 +299,64 @@ export function ChatSettingsDropdown({
 
       {/* Thinking Level */}
       {showThinkingLevel && (
-        <select
-          data-kind="thinking"
-          aria-label="Thinking level"
-          value={thinkingLevelChoices.selected}
-          onChange={e => onThinkingLevelChange(e.target.value)}
-        >
-          {thinkingLevelChoices.options.map(({ id, label }) => (
-            <option key={id} value={id}>{label}</option>
-          ))}
-        </select>
+        <SelectFit kind="thinking" labels={thinkingLevelChoices.options.map(o => o.label)}>
+          <select
+            data-kind="thinking"
+            aria-label="Thinking level"
+            value={thinkingLevelChoices.selected}
+            onChange={e => onThinkingLevelChange(e.target.value)}
+          >
+            {thinkingLevelChoices.options.map(({ id, label }) => (
+              <option key={id} value={id}>{label}</option>
+            ))}
+          </select>
+        </SelectFit>
       )}
     </>
+  )
+}
+
+/**
+ * #8618: size a native header <select> to the widest label it can show.
+ *
+ * A native <select> with `width: auto` does not grow to its label in WebKit
+ * (#5197): it collapses to its `min-width` and cuts the text mid-glyph, which
+ * is how `xhigh` rendered as "Xhi" on a codex session once five controls
+ * squeezed the center column. Every earlier fix (#3705, #3720, #5181, #5197,
+ * #4464) tuned a fixed per-kind floor, and each floor was right only for the
+ * roster that existed when it was written — #7730 made the thinking roster the
+ * binary's own, and a hardcoded width beside a growing roster is the class
+ * docs/false-safety-guards.md records.
+ *
+ * So the width comes from the roster instead: every label the control can
+ * display is rendered once as an invisible sizer in the same grid cell as the
+ * <select>, with the select's chrome (padding, border, room for the native
+ * arrow), and the select — `width: 0; min-width: 100%`, so its own intrinsic
+ * width contributes nothing — is stretched to the cell. The cell is as wide as
+ * the widest of those labels actually renders in the select's font — no
+ * character count, no per-kind constant — and the wrapper does not shrink,
+ * because a select narrower than its label is the bug. The sizers are
+ * `aria-hidden`, `visibility: hidden` and zero-height, so they are neither
+ * read, clickable, nor a change to the row's height.
+ *
+ * The sizers govern, rather than the select's intrinsic width, for two
+ * reasons. A native select's intrinsic width spans its widest option, disabled
+ * ones included, and the default configuration (no `allowAutoPermissionMode`)
+ * renders "Auto (disabled on this server)" and "Plan (unavailable)" — labels
+ * the value never shows — which would hold the control near 220px and
+ * non-shrinking. And it makes the mechanism provable in Chromium, the engine
+ * `scripts/header-layout.test.mjs` runs: without the sizers the select
+ * collapses and the test reports the clipped label, instead of the sizers
+ * mattering only on WebKit (the Tauri shell, where #5197 observed a
+ * `width: auto` select collapsing to its floor).
+ */
+function SelectFit({ kind, labels, children }: { kind: 'permission' | 'thinking'; labels: string[]; children: ReactNode }) {
+  return (
+    <span className="header-select-fit" data-kind={kind} data-testid={`header-select-fit-${kind}`}>
+      {labels.map((label, i) => (
+        <span key={`${i}:${label}`} className="header-select-fit-sizer" aria-hidden="true">{label}</span>
+      ))}
+      {children}
+    </span>
   )
 }

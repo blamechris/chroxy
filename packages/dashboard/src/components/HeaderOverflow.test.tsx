@@ -119,7 +119,7 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/text-overflow:\s*ellipsis/)
   })
 
-  it('.header-center select widths are per-kind so the model dropdown does not impose its width on the smaller permission/thinking selects', () => {
+  it('.header-center select widths: the model select keeps its floor, the permission/thinking selects have NO fixed floor or cap (#8618)', () => {
     // Pre-#3720 a single rule applied 180–240px to all three header
     // selects. That floor was right for the model select but visually
     // crowded the right zone for the permission ("Approve"/"Accept Edits")
@@ -127,11 +127,7 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     // are far shorter. Per-kind data attributes let each select get a
     // width that matches its content.
     const model = css.match(/\.header-center select\[data-kind="model"\]\s*\{[^}]*\}/s)
-    const permission = css.match(/\.header-center select\[data-kind="permission"\]\s*\{[^}]*\}/s)
-    const thinking = css.match(/\.header-center select\[data-kind="thinking"\]\s*\{[^}]*\}/s)
     expect(model).toBeTruthy()
-    expect(permission).toBeTruthy()
-    expect(thinking).toBeTruthy()
     // #5197: a native <select> with `width: auto` does NOT grow to its
     // label in WebKit — it collapses to min-width and truncates the rest
     // ("Sonnet 4.6" → "Sonnet …"). The floor must fit the common model
@@ -140,10 +136,35 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(model![0]).toMatch(/width:\s*auto/)
     expect(model![0]).toMatch(/min-width:\s*160px/)
     expect(model![0]).toMatch(/max-width:\s*240px/)
-    expect(permission![0]).toMatch(/min-width:\s*110px/)
-    expect(permission![0]).toMatch(/max-width:\s*160px/)
-    expect(thinking![0]).toMatch(/min-width:\s*80px/)
-    expect(thinking![0]).toMatch(/max-width:\s*110px/)
+    // #8618: the permission and thinking selects no longer carry a per-kind
+    // floor or cap at all. Each floor was right only for the roster that
+    // existed when it was written (#7730 made the thinking roster the codex
+    // binary's own, and `xhigh` rendered as "Xhi" at the 80px floor). They
+    // are sized by `.header-select-fit` from their roster instead — the real
+    // measurement lives in scripts/header-layout.test.mjs, in a browser.
+    expect(css.match(/\.header-center select\[data-kind="permission"\]\s*\{[^}]*\}/s)).toBeNull()
+    expect(css.match(/\.header-center select\[data-kind="thinking"\]\s*\{[^}]*\}/s)).toBeNull()
+    const fit = css.match(/\.header-select-fit\s*\{[^}]*\}/s)
+    expect(fit).toBeTruthy()
+    expect(fit![0]).toMatch(/display:\s*inline-grid/)
+    expect(fit![0]).toMatch(/flex-shrink:\s*0/)
+    const fitSelect = css.match(/\.header-center \.header-select-fit select\s*\{[^}]*\}/s)
+    expect(fitSelect).toBeTruthy()
+    // The select contributes nothing to the track (`width: 0`) and stretches
+    // over the sizer-defined cell (`min-width: 100%`), so a disabled option's
+    // long label cannot widen the control through the select's own intrinsic
+    // width — scripts/header-layout.test.mjs's gate-off case measures this.
+    expect(fitSelect![0]).toMatch(/[^-]width:\s*0;/)
+    expect(fitSelect![0]).toMatch(/min-width:\s*100%/)
+    expect(fitSelect![0]).toMatch(/max-width:\s*none/)
+  })
+
+  it('the codex sandbox badge sizes to its own text instead of the model slot floor (#8618)', () => {
+    const badge = css.match(/\.chat-settings-readonly-badge\[data-kind="codex-sandbox"\]\s*\{[^}]*\}/s)
+    expect(badge).toBeTruthy()
+    expect(badge![0]).toMatch(/width:\s*auto/)
+    expect(badge![0]).toMatch(/min-width:\s*0/)
+    expect(badge![0]).toMatch(/max-width:\s*none/)
   })
 
   // Note: the prompt-evaluator-toggle moved out of the header into
@@ -202,8 +223,15 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     // aren't padded into a wide box; the 160px cap keeps long ids from
     // pushing the right cluster off-screen on phones.
     expect(block![0]).toMatch(/select\[data-kind="model"\]\s*\{\s*min-width:\s*80px;\s*max-width:\s*160px/)
-    expect(block![0]).toMatch(/select\[data-kind="permission"\]\s*\{\s*min-width:\s*80px;\s*max-width:\s*110px/)
-    expect(block![0]).toMatch(/select\[data-kind="thinking"\]\s*\{\s*min-width:\s*60px;\s*max-width:\s*80px/)
+    // #8618: no narrow floors for permission/thinking — the fit cell sizes
+    // them from their roster; only the sizer's font/padding step down.
+    expect(block![0]).not.toMatch(/select\[data-kind="permission"\]/)
+    expect(block![0]).not.toMatch(/select\[data-kind="thinking"\]/)
+    expect(block![0]).toMatch(/\.header-select-fit-sizer\s*\{\s*font-size:\s*var\(--text-sm\)/)
+    // #8618: the model BUTTON (#6220) gets the same phone floors the model
+    // select rule above carries — it had kept the 160px desktop floor.
+    expect(block![0]).toMatch(/\.chat-settings-model-btn\s*\{\s*min-width:\s*80px;\s*max-width:\s*160px/)
+    expect(block![0]).toMatch(/\.chat-settings-readonly-badge\[data-kind="codex-sandbox"\]\s*\{\s*min-width:\s*0;\s*max-width:\s*none/)
   })
 
   // #5179 (C1): the token meter stacks the fill bar beneath the label.
