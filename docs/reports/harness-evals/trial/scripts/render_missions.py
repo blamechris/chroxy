@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the four trial missions from TEMPLATE.md + runs.json + queue.json.
+"""Render the trial missions from TEMPLATE.md + runs.json + queue.json.
 
 Usage: python3 render_missions.py            (from any cwd)
 Writes ../missions/<RUN_ID>.md for every run. Re-run after changing the queue

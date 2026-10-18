@@ -92,7 +92,7 @@ Write `docs/reports/harness-evals/trial/runs/A2b-cy-claude/REPORT.md` with:
 
 ## Invocation for this run
 
-In the Chroxy dashboard: New Session → provider Claude (SDK) → model claude-opus-5-5 → worktree isolation off (the clone is already isolated) → working directory = the run's clone. Effort is not set from the dashboard: the header's thinking level is a thinking-token budget that Opus 5.5 ignores, and it stays at Auto. Before the session is created, the owner saves the level in the user settings so the SDK session inherits it: `~/.claude/settings.json` → `modelSettings` → `claude-opus-5-5` → `effortLevel: "high"`. Run 3 (A2-cy-claude) ran at the model default, medium, because this was unset; this run is its controlled repeat at high. First message:
+In the Chroxy dashboard: New Session → provider Claude (SDK) → model claude-opus-5-5 → worktree isolation off (the clone is already isolated) → working directory = the run's clone. Effort is not set from the dashboard: the header's thinking level sets a `maxThinkingTokens` budget, not Claude Code's effort level, and at Auto it sets none, so leave it at Auto. Before the session is created, save the level in the user settings so the SDK session inherits it: `~/.claude/settings.json` → `modelSettings` → `claude-opus-5-5` → `effortLevel: "high"`, and confirm it with `grep -A3 modelSettings ~/.claude/settings.json`. First message:
 
 ```
 /prime-directive "Trial run A2b-cy-claude: follow docs/reports/harness-evals/trial/missions/A2b-cy-claude.md exactly"
