@@ -114,7 +114,9 @@ const PERMISSION_MODE_DESCRIPTIONS: Record<'default' | 'codex', Record<string, s
   codex: {
     approve: 'Default. Approval requests sent by codex are shown in Chroxy; sandbox-authorized actions may run without a request.',
     acceptEdits: 'Auto-approve codex file-edit approval requests (apply_patch). Other native approval requests still prompt; sandbox-authorized actions may run without a request.',
-    auto: 'Auto-approve every codex action without prompting (codex runs with approvalPolicy `never`).',
+    // #8619: mirrors handler-utils.js — codex keeps approvalPolicy `on-request`
+    // in Auto, so every native approval request still reaches Chroxy's floor.
+    auto: 'Auto-approve codex command, file-edit and connector approval requests that pass the protected-path / secret-read floor; floor hits and sandbox-scope escalation requests still prompt (codex keeps approvalPolicy `on-request`). Sandbox-authorized actions never raise a request in any mode.',
     plan: 'Not a distinct codex mode — behaves like Approve (codex has no plan enforcement).',
   },
 }
@@ -290,6 +292,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const defaultModel = useConnectionStore(s => s.defaultModel)
   const modelsByProvider = useConnectionStore(s => s.modelsByProvider) || EMPTY_MODELS_BY_PROVIDER
   const availableProviders = useConnectionStore(s => s.availableProviders)
+  // #8619: `true` / `false` from a daemon that advertises its
+  // allowAutoPermissionMode gate; `undefined` from one that predates it.
+  const autoPermissionModeAllowed = useConnectionStore(s => s.serverCapabilities?.autoPermissionMode)
   // #4019: read the server's PERMISSION_MODES list (including the
   // `description` field) so the picker + hint stay in lockstep with the
   // server's source of truth. Pre-#4019 the modal hardcoded its own copy
@@ -485,12 +490,28 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     ? selectedConnectionUnready
     : selectedProviderInfo?.auth?.ready === false
   const selectedProviderAutoUnsupported = selectedProviderInfo?.capabilities?.autoPermissionMode === false
+  // #8619: the server's `allowAutoPermissionMode` opt-in, advertised in
+  // auth_ok.capabilities.autoPermissionMode. `false` means the gate is off and
+  // a switch to Auto would be refused (AUTO_MODE_DISABLED_BY_CONFIG);
+  // `undefined` is an older daemon that does not advertise it, which leaves
+  // the picker exactly as it was (the server still enforces the gate itself).
+  const autoPermissionModeGateOff = autoPermissionModeAllowed === false
+  const selectedProviderAutoBlocked = selectedProviderAutoUnsupported || autoPermissionModeGateOff
+  // The REASON Auto cannot be picked, rendered in the Permissions section
+  // itself (not only as a disabled option's tooltip), so a user sees why
+  // before they create the session. The adapter reason wins: a provider with
+  // no Auto at all stays unavailable however the server is configured.
+  const autoUnavailableNote: string | null = selectedProviderAutoUnsupported
+    ? `Auto is unavailable for ${PROVIDER_LABELS[provider] || provider}: its adapter cannot intercept protected-path or secret-read actions before execution.`
+    : autoPermissionModeGateOff
+      ? 'Auto is disabled on this server: allowAutoPermissionMode is not enabled, so no session can switch to Auto. Set allowAutoPermissionMode: true in the server config file on the dev machine (Settings → Security in the desktop app), then restart the daemon.'
+      : null
 
   // A mode selected for the previous provider must not survive a provider
-  // switch when the new adapter cannot enforce it.
+  // switch when the new adapter cannot enforce it, or the server's gate is off.
   useEffect(() => {
-    if (permissionMode === 'auto' && selectedProviderAutoUnsupported) setPermissionMode('approve')
-  }, [permissionMode, selectedProviderAutoUnsupported])
+    if (permissionMode === 'auto' && selectedProviderAutoBlocked) setPermissionMode('approve')
+  }, [permissionMode, selectedProviderAutoBlocked])
 
   const submit = useCallback(() => {
     const trimmed = nameValRef.current.trim()
@@ -503,7 +524,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     // visually disabled, but the click path checks here for defence in
     // depth (e.g. keyboard activation racing a store update).
     if (selectedProviderUnready) return
-    if (permissionMode === 'auto' && selectedProviderAutoUnsupported) return
+    if (permissionMode === 'auto' && selectedProviderAutoBlocked) return
     const model = resolveCreateSessionModel(provider, defaultModel, modelsByProvider)
     // #4208/#4244: gate on the TUI provider at submit time as well as in the
     // UI. The radio group is hidden for non-TUI providers, but a user who
@@ -524,7 +545,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     const codexSandboxOut: CodexSandboxMode | undefined =
       provider === CODEX_PROVIDER && codexSandbox ? codexSandbox : undefined
     onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, connectionId: connectionId || undefined, permissionMode: permissionMode || undefined, model, worktree: effectiveWorktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut, codexSandbox: codexSandboxOut })
-  }, [onCreate, provider, connectionId, permissionMode, defaultModel, modelsByProvider, effectiveWorktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoUnsupported])
+  }, [onCreate, provider, connectionId, permissionMode, defaultModel, modelsByProvider, effectiveWorktree, environmentId, skipPermissions, codexSandbox, selectedProviderUnready, selectedProviderAutoBlocked])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -1071,7 +1092,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               value={permissionMode}
               onChange={e => setPermissionMode(e.target.value)}
               aria-label="Permission mode"
-              aria-describedby="permission-mode-hint"
+              // #8619: the reason Auto is disabled is part of the select's
+              // description, so a screen reader announces it on focus.
+              aria-describedby={autoUnavailableNote ? 'permission-mode-hint permission-mode-auto-note' : 'permission-mode-hint'}
             >
               <option value="">Server default</option>
               {/* #4019: mode IDs come from availablePermissionModes. Labels
@@ -1089,18 +1112,37 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 // own capability instead of inheriting stale mode metadata.
                 const selectedSupport = permissionModeSupport(m.id, selectedProviderInfo?.capabilities)
                 const unsupported = !selectedSupport.supported
+                // #8619: the server's config gate disables Auto too, with its
+                // own suffix so the two reasons never read the same.
+                const gated = m.id === 'auto' && !unsupported && autoPermissionModeGateOff
                 const label = permissionModesProvider === provider
                   ? m.label
                   : (PERMISSION_MODE_LABELS[m.id] ?? m.label)
                 return (
-                  <option key={m.id} value={m.id} disabled={unsupported}>
+                  <option key={m.id} value={m.id} disabled={unsupported || gated}>
                     {unsupported
                       ? (label.includes('unavailable') ? label : `${label} (unavailable)`)
-                      : label}
+                      : gated
+                        ? `${label} (disabled on this server)`
+                        : label}
                   </option>
                 )
               })}
             </select>
+            {/* #8619: why Auto cannot be picked, in the Permissions section
+                itself. A disabled <option>'s tooltip is not shown by most
+                browsers and never before the picker is opened; this note is
+                visible whichever mode is currently selected. */}
+            {autoUnavailableNote && (
+              <div
+                id="permission-mode-auto-note"
+                className="form-hint"
+                role="note"
+                data-testid="permission-mode-auto-note"
+              >
+                {autoUnavailableNote}
+              </div>
+            )}
             <span id="permission-mode-hint" className="form-hint">
               {/* #4019/#7845: use a server description only when its provider,
                   support bit, and enforcement metadata match the selected

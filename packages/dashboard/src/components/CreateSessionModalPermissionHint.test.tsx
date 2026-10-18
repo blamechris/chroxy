@@ -358,3 +358,87 @@ describe('CreateSessionModal disables Plan for a provider with planMode: false (
     expect(plan?.disabled).toBe(false)
   })
 })
+
+// #8619: codex app-server runs unattended through the PermissionManager's
+// auto-mode path, so its adapter now declares `autoPermissionMode: true` and the
+// modal must OFFER Auto for it. When Auto cannot be picked — the adapter has no
+// Auto, or the server's `allowAutoPermissionMode` gate is off — the reason is
+// rendered in the Permissions section itself, not only as the disabled option's
+// tooltip (which most browsers never show, and never before the picker opens).
+describe('CreateSessionModal Auto availability + reason note (#8619)', () => {
+  const autoNote = (container: HTMLElement) =>
+    container.querySelector('[data-testid="permission-mode-auto-note"]')
+
+  it('offers Auto for codex once the adapter declares autoPermissionMode and the server gate is on', () => {
+    mockStoreState.defaultProvider = 'codex'
+    mockStoreState.availableProviders = [
+      { name: 'codex', label: 'Codex', capabilities: { permissionFloor: false, autoPermissionMode: true } },
+    ]
+    mockStoreState.serverCapabilities = { autoPermissionMode: true }
+    const { container } = renderModal()
+    expandAdvanced(container)
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(false)
+    expect(auto?.textContent).toBe('Auto')
+    expect(autoNote(container)).toBeNull()
+    selectPermissionMode(container, 'auto')
+    expect(getHint(container)).toMatch(/approvalPolicy `on-request`/)
+    expect(getHint(container)).toMatch(/Sandbox-authorized actions never raise a request in any mode/)
+  })
+
+  it('says in the Permissions section why Auto is unavailable for a provider whose adapter cannot enforce it', () => {
+    mockStoreState.defaultProvider = 'codex-exec'
+    mockStoreState.availableProviders = [
+      { name: 'codex-exec', label: 'Codex (exec)', capabilities: { permissionFloor: false, autoPermissionMode: false } },
+    ]
+    mockStoreState.serverCapabilities = { autoPermissionMode: true }
+    const { container } = renderModal()
+    expandAdvanced(container)
+    // Visible with the default (server-default) selection — no need to pick
+    // Auto first, which the disabled option would not even allow.
+    const note = autoNote(container)
+    expect(note?.textContent).toMatch(/Auto is unavailable for codex-exec/)
+    expect(note?.textContent).toMatch(/cannot intercept protected-path or secret-read actions before execution/)
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(true)
+    expect(auto?.textContent).toMatch(/unavailable/)
+  })
+
+  it('says in the Permissions section that Auto is disabled on this server when allowAutoPermissionMode is off', () => {
+    mockStoreState.serverCapabilities = { autoPermissionMode: false }
+    const { container } = renderModal()
+    expandAdvanced(container)
+    const note = autoNote(container)
+    expect(note?.textContent).toMatch(/Auto is disabled on this server/)
+    expect(note?.textContent).toMatch(/allowAutoPermissionMode: true/)
+    const select = container.querySelector('select[aria-label="Permission mode"]') as HTMLSelectElement
+    expect(select.getAttribute('aria-describedby')).toBe('permission-mode-hint permission-mode-auto-note')
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(true)
+    expect(auto?.textContent).toBe('Auto (disabled on this server)')
+  })
+
+  it('snaps a slipped-through Auto selection back to Approve when the server gate is off', () => {
+    mockStoreState.serverCapabilities = { autoPermissionMode: false }
+    const { container } = renderModal()
+    expandAdvanced(container)
+    // Force the value the way a stale option would (jsdom lets a change event
+    // select a disabled option): the reset effect snaps it back to Approve,
+    // the same path a provider switch takes for an adapter without Auto.
+    selectPermissionMode(container, 'auto')
+    const select = container.querySelector('select[aria-label="Permission mode"]') as HTMLSelectElement
+    expect(select.value).toBe('approve')
+  })
+
+  it('leaves Auto alone and renders no note when the daemon does not advertise the gate (older server)', () => {
+    delete mockStoreState.serverCapabilities
+    const { container } = renderModal()
+    expandAdvanced(container)
+    const auto = container.querySelector('option[value="auto"]') as HTMLOptionElement | null
+    expect(auto?.disabled).toBe(false)
+    expect(auto?.textContent).toBe('Auto')
+    expect(autoNote(container)).toBeNull()
+    const select = container.querySelector('select[aria-label="Permission mode"]') as HTMLSelectElement
+    expect(select.getAttribute('aria-describedby')).toBe('permission-mode-hint')
+  })
+})

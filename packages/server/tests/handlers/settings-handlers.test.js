@@ -467,6 +467,51 @@ describe('settings-handlers', () => {
       assert.match(ctx._sent[0].message, /cannot use.*auto.*protected-path/i)
     })
 
+    // #8619: codex app-server now declares `autoPermissionMode: true`. The
+    // switch therefore runs through the SAME config gate Claude does — the
+    // adapter capability only decides whether the mode exists, never whether
+    // this server allows it.
+    describe('codex Auto goes through the allowAutoPermissionMode gate (#8619)', () => {
+      function codexSession() {
+        const session = createMockSession()
+        Object.defineProperty(session, 'constructor', {
+          value: { capabilities: { permissionFloor: false, autoPermissionMode: true, permissionModeSwitch: true } },
+          configurable: true,
+        })
+        return session
+      }
+
+      it('rejects a confirmed codex Auto switch with AUTO_MODE_DISABLED_BY_CONFIG when the gate is off', () => {
+        const sessions = new Map()
+        const session = codexSession()
+        sessions.set('s1', { session, name: 'Codex', cwd: '/tmp', provider: 'codex' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto', confirmed: true, requestId: 'codex-gated' }, ctx)
+
+        assert.equal(session.setPermissionMode.callCount, 0)
+        assert.equal(ctx._sent.length, 1)
+        assert.equal(ctx._sent[0].type, 'error')
+        assert.equal(ctx._sent[0].code, 'AUTO_MODE_DISABLED_BY_CONFIG')
+        assert.equal(ctx._sent[0].requestId, 'codex-gated')
+      })
+
+      it('applies a confirmed codex Auto switch when the gate is on', () => {
+        const sessions = new Map()
+        const session = codexSession()
+        sessions.set('s1', { session, name: 'Codex', cwd: '/tmp', provider: 'codex' })
+        const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto', confirmed: true, requestId: 'codex-auto' }, ctx)
+
+        assert.equal(session.setPermissionMode.callCount, 1)
+        assert.equal(session.setPermissionMode.lastCall[0], 'auto')
+        assert.equal(ctx._sent.filter((m) => m.type === 'error').length, 0, 'no error frame')
+      })
+    })
+
     // #5609: the confirm_permission_mode warning must name the interrupt
     // consequence when (a) the provider interrupts the turn on auto-switch
     // (CLI panic-button) AND (b) a turn is in flight. SDK/TUI and idle CLI

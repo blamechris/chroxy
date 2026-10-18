@@ -427,12 +427,14 @@ Chroxy's `PermissionManager` decides whether to prompt or auto-resolve:
 |---|---|---|
 | `approve` (default) | `on-request` | Every codex command / file edit prompts for your approval. |
 | `acceptEdits` | `on-request` | Codex **file edits auto-approve**; **commands still prompt**. |
-| `auto` | `never` | Codex runs without asking (bypass). Switching *to* `auto` also drains any pending prompts. |
+| `auto` | `on-request` | Codex command, file-edit and connector approval requests that pass Chroxy's protected-path / secret-read floor are **auto-allowed** without a prompt; a floor hit and a sandbox-scope escalation (`request_permissions`) still prompt. Gated by `allowAutoPermissionMode` like Claude's Auto (#8619). Switching *to* `auto` also drains pending prompts (floor hits and escalations excepted). |
 | `plan` | `on-request` | Not a real codex mode (codex has no plan enforcement) — behaves like `approve`. |
 
 The `CHROXY_CODEX_SANDBOX` override still applies: codex asks before any action
 its sandbox would block (e.g. a write under `read-only`), and an approval
-escalates that single action. `apply_patch` (codex's file edit) is treated like
+escalates that single action. The converse holds in every mode, `auto`
+included: an action the sandbox already authorizes runs with no approval
+request at all, so Chroxy never sees it. `apply_patch` (codex's file edit) is treated like
 `Write`/`Edit`, and `shell` (codex's command execution) like `Bash` — so
 arbitrary codex command execution can't be permanently rule-whitelisted.
 

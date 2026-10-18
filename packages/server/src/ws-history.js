@@ -483,6 +483,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // surfaced as the `orchestration` capability so the dashboard reveals the
     // Runs surface. Optional — absent → false (fail-closed) for old servers.
     orchestrationEnabled,
+    // #8619: whether `allowAutoPermissionMode: true` is set in the local
+    // config, surfaced as the `autoPermissionMode` capability so clients can
+    // disable Auto in their mode pickers and say why. Optional — absent →
+    // false (fail-closed) for old callers / test harnesses.
+    autoPermissionModeAllowed,
     // #6006: whether the server has a rotating TokenManager (i.e. auth is on),
     // so the operator panic button (`revoke_token`) can fire. Surfaced as the
     // `tokenRevoke` capability, gated to primary-token clients below. Optional —
@@ -725,6 +730,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // Clients gate the Runs surface on this flag; absent/false (default, or older
     // servers) → no orchestration chrome (fail-closed).
     orchestration: orchestrationEnabled === true,
+    // #8619: the operator's `allowAutoPermissionMode` opt-in. Server-wide, not
+    // token-scoped, and NOT a promise that any one session can switch: a
+    // paired (bound) client is still refused (AUTO_MODE_FORBIDDEN_BOUND_CLIENT)
+    // and an adapter without `autoPermissionMode` still has no Auto. It tells
+    // a client only whether the config gate would admit a switch, so it can
+    // disable Auto with the real reason instead of a generic tooltip.
+    autoPermissionMode: autoPermissionModeAllowed === true,
     // #6871 (epic #6784): this server has the scheduled-tasks WS surface
     // (scheduled_tasks_request / scheduled_task_action / set_scheduler_enabled +
     // the `scheduled_tasks` snapshot). CONSTANT true — deliberately NOT tied to
