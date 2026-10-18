@@ -60,10 +60,10 @@ function basename(p: string): string {
   return p.replace(/[/\\]+$/, '').split(/[/\\]/).pop() || p
 }
 
-/** Normalize a browse path for comparison: strip trailing slashes. */
+/** Normalize a browse path for comparison: strip trailing slashes and backslashes. */
 function normalizeBrowsePath(p: string): string {
   if (!p || p === '/') return p
-  return p.replace(/\/+$/, '')
+  return p.replace(/[/\\]+$/, '')
 }
 
 /** Check if two browse paths refer to the same directory, accounting for server normalization. */
@@ -73,6 +73,17 @@ function browsePathsMatch(requested: string, response: string): boolean {
   // Server expands ~ to home dir — if request started with ~, accept the server's canonical path
   if (requested.startsWith('~')) return true
   return false
+}
+
+/**
+ * Strict match for the prefilled-cwd probe: the reply must name exactly the
+ * directory that was asked about. Unlike {@link browsePathsMatch} it never
+ * accepts a reply with no path or any reply to a `~` request, so a stale reply
+ * for another directory cannot set the note.
+ */
+function probeReplyMatches(requested: string, response: string | null | undefined): boolean {
+  if (!response) return false
+  return normalizeBrowsePath(response) === normalizeBrowsePath(requested)
 }
 
 /** Generate a default session name from a directory path, avoiding collisions. */
@@ -354,8 +365,20 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // every workspace root, or a credential directory). Holds the exact path that
   // was probed so the note disappears as soon as the user changes the field.
   const [unbrowsableCwd, setUnbrowsableCwd] = useState<string | null>(null)
+  // Unsubscribe handle for the prefilled-cwd probe's listener.
+  const probeUnsubRef = useRef<(() => void) | null>(null)
+  const stopProbe = useCallback(() => {
+    probeUnsubRef.current?.()
+    probeUnsubRef.current = null
+  }, [])
+  // The probe must not outlive the dialog: drop it on close and on unmount.
+  useEffect(() => {
+    if (!open) stopProbe()
+  }, [open, stopProbe])
+  useEffect(() => stopProbe, [stopProbe])
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
+  const addDirectoryListingListener = useConnectionStore(s => s.addDirectoryListingListener)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   // #5553: per-repo session preset disclosure. When the chosen cwd has an
   // ACTIVE preset, surface a compact, expandable indicator so the operator can
@@ -438,23 +461,25 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setBrowsing(false)
     setBrowseEntries([])
     setUnbrowsableCwd(null)
-    if (cwdValue) {
-      // Issue 8303: ask the daemon whether Browse can open the prefilled
-      // directory, so a refusal is explained here instead of surfacing only
-      // after the user clicks Browse. Reuses the existing directory listing
-      // round trip; the reply is matched by path, so a stale or autocomplete
-      // reply for another directory is ignored.
-      setDirectoryListingCallback((listing: DirectoryListing) => {
-        const responsePath = listing.path || listing.parentPath || ''
-        if (!browsePathsMatch(cwdValue, responsePath)) return
+    stopProbe()
+    setDirectoryListingCallback(null)
+    // Issue 8303: ask the daemon whether Browse can open the prefilled
+    // directory, so a refusal is explained here instead of surfacing only
+    // after the user clicks Browse. The reply is delivered through a listener
+    // path autocomplete and Browse cannot replace (they share the single
+    // callback slot; autocomplete takes it over 200 ms after open, and a reply
+    // over a tunnel is often slower), and matched by exact path. A `~` path is
+    // not probed: the server answers with the expanded path, which cannot be
+    // matched to the request.
+    if (cwdValue && !cwdValue.startsWith('~')) {
+      probeUnsubRef.current = addDirectoryListingListener((listing: DirectoryListing) => {
+        if (!probeReplyMatches(cwdValue, listing.path)) return
         setUnbrowsableCwd(
           typeof listing.error === 'string' && /^Access denied/i.test(listing.error) ? cwdValue : null,
         )
-        setDirectoryListingCallback(null)
+        stopProbe()
       })
       requestDirectoryListing(cwdValue)
-    } else {
-      setDirectoryListingCallback(null)
     }
     if (cwdValue) {
       const generated = generateDefaultName(cwdValue, existingNames)
@@ -464,7 +489,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
       setName('')
       nameValRef.current = ''
     }
-  }, [open, initialCwd, existingNames, availableProviders, defaultProvider, requestDirectoryListing, setDirectoryListingCallback])
+  }, [open, initialCwd, existingNames, availableProviders, defaultProvider, requestDirectoryListing, setDirectoryListingCallback, addDirectoryListingListener, stopProbe])
 
   // Keep provider in sync while modal is open: if availableProviders changes
   // and the current provider is no longer valid, fall back to first available.

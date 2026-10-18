@@ -227,6 +227,21 @@ export async function isUnresolvablePathWithin(absPath, rootReal) {
 }
 
 /**
+ * The canonical path of the part of `absPath` the server can see: the walk
+ * {@link isUnresolvablePathWithin} uses, exposed so a handler can run a
+ * deny-list over a RESOLVED path when `realpath(absPath)` itself failed (EACCES,
+ * ENOTDIR, …). Testing the raw, unresolved `absPath` instead compares an
+ * unresolved path against a resolved root, and a symlink (or a symlinked
+ * $HOME) hides the match. Throws when the walk cannot finish; callers deny.
+ *
+ * @param {string} absPath - Absolute path whose `realpath()` failed
+ * @returns {Promise<string>}
+ */
+export async function resolveVisibleAncestor(absPath) {
+  return deepestAncestorWalk(absPath, STEP_OVER_UNSEEABLE)
+}
+
+/**
  * #8012 — the error text a handler sends when `realpath(absPath)` failed with
  * `err` (not ENOENT). Inside the boundary it is the handler's short reason for
  * `err.code`, when it has one; anywhere else — outside, a cycle, a check that

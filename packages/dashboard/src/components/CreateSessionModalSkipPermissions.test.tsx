@@ -52,6 +52,7 @@ function mockStore(defaultProvider: string, providers = [TUI_PROVIDER, SDK_PROVI
         environments: [],
         requestDirectoryListing: () => {},
         setDirectoryListingCallback: () => {},
+        addDirectoryListingListener: () => () => {},
         defaultCwd: null,
       }),
   }))

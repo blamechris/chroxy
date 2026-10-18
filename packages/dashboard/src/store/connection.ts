@@ -148,6 +148,7 @@ import {
   resetTranscriptFetchTracking,
   armEnvironmentDestroyTimer,
   cancelAllEnvironmentDestroyTimers,
+  registerDirectoryListingListener,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
 // #6871: the scheduled-task create/update payload shape (wire contract).
@@ -5273,6 +5274,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setDirectoryListingCallback: (cb) => {
     set({ _directoryListingCallback: cb });
   },
+
+  addDirectoryListingListener: (cb) => registerDirectoryListingListener(cb),
 
   requestDirectoryListing: (path?: string) => {
     const { socket } = get();

@@ -10,7 +10,7 @@ vi.mock('../hooks/usePathAutocomplete', () => ({
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) =>
-    selector({ defaultProvider: 'claude-sdk', availableProviders: [], requestDirectoryListing: () => {}, setDirectoryListingCallback: () => {}, defaultCwd: null }),
+    selector({ defaultProvider: 'claude-sdk', availableProviders: [], requestDirectoryListing: () => {}, setDirectoryListingCallback: () => {}, addDirectoryListingListener: () => () => {}, defaultCwd: null }),
 }))
 
 import { CreateSessionModal } from './CreateSessionModal'

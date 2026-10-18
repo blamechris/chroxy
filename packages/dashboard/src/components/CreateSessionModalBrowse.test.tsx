@@ -25,6 +25,7 @@ vi.mock('../store/connection', () => ({
       availableProviders: [],
       requestDirectoryListing: mockRequestDirectoryListing,
       setDirectoryListingCallback: mockSetDirectoryListingCallback,
+      addDirectoryListingListener: () => () => {},
       defaultCwd: null,
     }),
 }))

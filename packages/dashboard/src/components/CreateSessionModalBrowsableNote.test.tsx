@@ -1,22 +1,32 @@
 /**
  * Issue 8303 — New Session used to prefill a working directory that Browse
- * could not open (it was outside $HOME and every workspace root) and said
- * nothing: Browse just failed. The modal now probes the prefilled directory
- * with a directory listing when it opens and, on an access-denied answer,
- * shows a one-line note.
+ * could not open (outside $HOME and every workspace root) and said nothing.
+ * The modal now probes the prefilled directory with a directory listing when it
+ * opens and, on an access-denied answer, shows a one-line note.
+ *
+ * The REAL usePathAutocomplete hook is used on purpose: it shares the store's
+ * single directory-listing callback slot with the probe and takes it over after
+ * its 200 ms debounce, so a probe reply slower than that (normal over a tunnel)
+ * must still reach the modal. The store double below delivers a reply the way
+ * the real message handler does: to every registered listener, then to whoever
+ * holds the single slot.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 
-let capturedCallback: ((listing: Record<string, unknown>) => void) | null = null
+type Listing = Record<string, unknown>
+let slot: ((listing: Listing) => void) | null = null
+const listeners = new Set<(listing: Listing) => void>()
 const mockRequestDirectoryListing = vi.fn()
 const mockSetDirectoryListingCallback = vi.fn((cb: unknown) => {
-  capturedCallback = cb as typeof capturedCallback
+  slot = cb as typeof slot
 })
-
-vi.mock('../hooks/usePathAutocomplete', () => ({
-  usePathAutocomplete: () => ({ suggestions: [] }),
-}))
+const mockAddDirectoryListingListener = vi.fn((cb: (listing: Listing) => void) => {
+  listeners.add(cb)
+  return () => {
+    listeners.delete(cb)
+  }
+})
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) =>
@@ -25,40 +35,51 @@ vi.mock('../store/connection', () => ({
       availableProviders: [],
       requestDirectoryListing: mockRequestDirectoryListing,
       setDirectoryListingCallback: mockSetDirectoryListingCallback,
+      addDirectoryListingListener: mockAddDirectoryListingListener,
       defaultCwd: null,
     }),
 }))
 
 import { CreateSessionModal, type CreateSessionModalProps } from './CreateSessionModal'
 
+beforeEach(() => {
+  vi.useFakeTimers()
+})
+
 afterEach(() => {
   cleanup()
-  capturedCallback = null
+  vi.useRealTimers()
+  slot = null
+  listeners.clear()
   mockRequestDirectoryListing.mockClear()
   mockSetDirectoryListingCallback.mockClear()
+  mockAddDirectoryListingListener.mockClear()
 })
 
 function renderModal(props: Partial<CreateSessionModalProps> = {}) {
-  return render(
-    <CreateSessionModal
-      open
-      onClose={vi.fn()}
-      onCreate={vi.fn()}
-      initialCwd="/srv/outside"
-      knownCwds={[]}
-      existingNames={[]}
-      {...props}
-    />,
-  )
+  const base: CreateSessionModalProps = {
+    open: true,
+    onClose: vi.fn(),
+    onCreate: vi.fn(),
+    initialCwd: '/srv/outside',
+    knownCwds: [],
+    existingNames: [],
+  }
+  const ui = (p: Partial<CreateSessionModalProps>) => <CreateSessionModal {...base} {...props} {...p} />
+  const result = render(ui({}))
+  return { ...result, rerenderWith: (p: Partial<CreateSessionModalProps>) => result.rerender(ui(p)) }
 }
 
-function reply(listing: Record<string, unknown>) {
-  expect(capturedCallback).not.toBeNull()
+/** Deliver a reply the way the store's message handler does. */
+function deliver(listing: Listing) {
   act(() => {
-    capturedCallback!(listing)
+    for (const l of [...listeners]) l(listing)
+    slot?.(listing)
   })
 }
 
+const DENIED =
+  'Access denied: directory listing is restricted to the home directory and configured workspace roots'
 const NOTE = /outside the browsable roots/i
 
 describe('CreateSessionModal: prefilled cwd that Browse cannot open (issue 8303)', () => {
@@ -69,54 +90,86 @@ describe('CreateSessionModal: prefilled cwd that Browse cannot open (issue 8303)
 
   it('shows a one-line note when the probe is refused with Access denied', () => {
     renderModal()
-    reply({
-      path: '/srv/outside',
-      parentPath: null,
-      entries: [],
-      error: 'Access denied: directory listing is restricted to the home directory and configured workspace roots',
+    deliver({ path: '/srv/outside', parentPath: null, entries: [], error: DENIED })
+    expect(screen.getByText(NOTE)).toBeInTheDocument()
+  })
+
+  it('still shows the note when the reply arrives after the autocomplete debounce took over the callback slot', () => {
+    renderModal()
+    act(() => {
+      vi.advanceTimersByTime(300)
     })
+    // Autocomplete has now requested the PARENT and replaced the single slot.
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/srv')
+    deliver({ path: '/srv/outside', parentPath: null, entries: [], error: DENIED })
     expect(screen.getByText(NOTE)).toBeInTheDocument()
   })
 
   it('shows no note when the prefilled directory lists fine', () => {
     renderModal()
-    reply({ path: '/srv/outside', parentPath: '/srv', entries: [], error: null })
+    deliver({ path: '/srv/outside', parentPath: '/srv', entries: [], error: null })
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
   })
 
   it('shows no note for an error that is not an access denial (a missing directory is a different problem)', () => {
     renderModal()
-    reply({ path: '/srv/outside', parentPath: null, entries: [], error: 'Directory not found' })
+    deliver({ path: '/srv/outside', parentPath: null, entries: [], error: 'Directory not found' })
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
   })
 
-  it('ignores a listing for some other path (a stale or autocomplete reply)', () => {
+  it('ignores a denial for some other path (a stale or autocomplete reply)', () => {
     renderModal()
-    reply({
-      path: '/srv',
-      parentPath: null,
-      entries: [],
-      error: 'Access denied: directory listing is restricted to the home directory and configured workspace roots',
-    })
+    deliver({ path: '/srv', parentPath: null, entries: [], error: DENIED })
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
+  })
+
+  it('treats a trailing slash or backslash as the same directory (Windows paths)', () => {
+    renderModal({ initialCwd: 'C:\\repo\\' })
+    deliver({ path: 'C:\\repo', parentPath: null, entries: [], error: DENIED })
+    expect(screen.getByText(NOTE)).toBeInTheDocument()
+  })
+
+  it('does not probe a ~ path, and a stray denial cannot set the note for it', () => {
+    renderModal({ initialCwd: '~/proj' })
+    expect(mockRequestDirectoryListing).not.toHaveBeenCalledWith('~/proj')
+    expect(mockAddDirectoryListingListener).not.toHaveBeenCalled()
+    deliver({ path: '/anywhere', parentPath: null, entries: [], error: DENIED })
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
   })
 
   it('drops the note once the user edits the working directory', () => {
     renderModal()
-    reply({
-      path: '/srv/outside',
-      parentPath: null,
-      entries: [],
-      error: 'Access denied: directory listing is restricted to the home directory and configured workspace roots',
-    })
+    deliver({ path: '/srv/outside', parentPath: null, entries: [], error: DENIED })
     expect(screen.getByText(NOTE)).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Working directory'), { target: { value: '/home/me/proj' } })
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
   })
 
+  it('removes its listener once answered', () => {
+    renderModal()
+    expect(listeners.size).toBe(1)
+    deliver({ path: '/srv/outside', parentPath: null, entries: [], error: null })
+    expect(listeners.size).toBe(0)
+  })
+
+  it('removes its listener when the modal closes before a reply arrives', () => {
+    const { rerenderWith } = renderModal()
+    expect(listeners.size).toBe(1)
+    rerenderWith({ open: false })
+    expect(listeners.size).toBe(0)
+  })
+
+  it('removes its listener when the modal unmounts', () => {
+    const { unmount } = renderModal()
+    expect(listeners.size).toBe(1)
+    unmount()
+    expect(listeners.size).toBe(0)
+  })
+
   it('does not probe, and shows no note, when there is no prefilled directory', () => {
     renderModal({ initialCwd: '' })
     expect(mockRequestDirectoryListing).not.toHaveBeenCalled()
+    expect(listeners.size).toBe(0)
     expect(screen.queryByText(NOTE)).not.toBeInTheDocument()
   })
 })

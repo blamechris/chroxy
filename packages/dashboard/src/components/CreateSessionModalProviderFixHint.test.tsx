@@ -90,6 +90,7 @@ beforeEach(() => {
     environments: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},
+    addDirectoryListingListener: () => () => {},
     defaultCwd: null,
   })
 })

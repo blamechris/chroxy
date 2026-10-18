@@ -29,9 +29,9 @@ describe('Path normalization in stale-response guard (#1592)', () => {
     expect(modalSource).toMatch(/normalizeBrowsePath\(requested\)/)
   })
 
-  it('strips trailing slashes in normalization', () => {
-    // The normalize function should strip trailing slashes
-    expect(modalSource).toMatch(/replace\(\/\\\/\+\$\//)
+  it('strips trailing slashes and backslashes in normalization', () => {
+    // The normalize function should strip trailing POSIX and Windows separators
+    expect(modalSource).toMatch(/function normalizeBrowsePath[\s\S]{0,200}replace\(\/\[\/\\\\\]\+\$\//)
   })
 
   it('accepts server response when request started with tilde', () => {

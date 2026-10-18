@@ -38,6 +38,7 @@ vi.mock('../store/connection', () => ({
       }],
       requestDirectoryListing: () => {},
       setDirectoryListingCallback: () => {},
+      addDirectoryListingListener: () => () => {},
       defaultCwd: null,
     }),
 }))

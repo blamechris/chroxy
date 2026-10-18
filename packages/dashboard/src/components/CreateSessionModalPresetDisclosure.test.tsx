@@ -32,6 +32,7 @@ vi.mock('../store/connection', () => ({
       availableProviders: [],
       requestDirectoryListing: () => {},
       setDirectoryListingCallback: () => {},
+      addDirectoryListingListener: () => () => {},
       defaultCwd: null,
       requestSessionPreset: () => true,
       sessionPresetSnapshots: { '/Users/me/projects': presetForCwd } as Record<string, Preset | null>,

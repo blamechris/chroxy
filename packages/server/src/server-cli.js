@@ -677,9 +677,13 @@ export function formatStartupSkillPolicyDiagnostic(diagnostics) {
  *
  * @param {object} config merged daemon config
  * @param {object} sessionManagerOptions remaining daemon constructor options
+ * @param {{ warn: Function }} [warnLog] logger for the configured-cwd warning
  * @returns {{ sessionManager: SessionManager, startupSkillPolicy: object }}
  */
-export function createDaemonSessionManager(config, sessionManagerOptions) {
+export function createDaemonSessionManager(config, sessionManagerOptions, warnLog = log) {
+  // The configured cwd becomes the manager's default here, so this is where a
+  // cwd that explicit Create would refuse is reported (once, at startup).
+  warnIfConfiguredCwdRefused(config, warnLog)
   const startupSkillPolicy = resolveStartupSkillPolicy(config)
   const sessionManager = new SessionManager({
     ...sessionManagerOptions,
@@ -1150,7 +1154,6 @@ export async function startCliServer(config) {
   // line below can't drift apart, and any over-ceiling operator value emits
   // a single warning here at boot (not three on each tunable).
   const startupTimeouts = resolveStartupTimeouts(config, log)
-  warnIfConfiguredCwdRefused(config, log)
 
   // #7601: wire the proactive container-liveness poll's inspect seam. A dedicated
   // DockerBackend (a stateless docker-CLI wrapper — same shape server-cli already

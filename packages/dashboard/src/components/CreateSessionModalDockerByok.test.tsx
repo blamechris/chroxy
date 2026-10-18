@@ -73,6 +73,7 @@ function buildState(defaultProvider: string, providers: ProviderInfo[]) {
     environments: [],
     requestDirectoryListing: () => {},
     setDirectoryListingCallback: () => {},
+    addDirectoryListingListener: () => () => {},
     defaultCwd: null,
   }
 }

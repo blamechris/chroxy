@@ -1,11 +1,12 @@
 import { readdir, readFile, stat, realpath } from 'fs/promises'
+import { realpathSync } from 'fs'
 import { homedir } from 'os'
 import { join, resolve, normalize, relative, sep } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
-import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
+import { realpathOfDeepestAncestor, resolveVisibleAncestor, unresolvablePathError } from './common.js'
 import { browseBoundaries, credentialDirDenialReason, resolveCwdPolicyHome } from '../handler-utils.js'
 
 const log = createLogger('ws')
@@ -34,11 +35,16 @@ const LISTING_UNRESOLVABLE_REASONS = {
  * @param {Object} [options]
  * @param {Function} [options.getConfig] - () => runtime config (workspaceRoots, test-only homeOverride); late-bound so it tracks config changes
  * @param {Function} [options.getDefaultCwd] - () => the daemon's configured default cwd
+ * @param {Function} [options.realpath] - sync resolver for the boundaries (default: realpathSync.native); injectable for tests
  * @returns {Object} browser operation methods
  */
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, options = {}) {
   const getConfig = options.getConfig || (() => null)
   const getDefaultCwd = options.getDefaultCwd || (() => null)
+  // The boundaries (home, roots, default cwd, config dir) are resolved with the
+  // SAME native resolver the listed path is resolved with (fs/promises realpath
+  // is libuv's), so the two spell a directory identically on every platform.
+  const boundaryRealpath = options.realpath || realpathSync.native
 
   /** List directories at a given path, sending a directory_listing response */
   async function listDirectory(ws, requestedPath) {
@@ -70,13 +76,24 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           // where a readable one answers "Access denied", and sent ELOOP's
           // raw message with the server path in it. Only a path inside home
           // keeps a specific message now; everything else is the denial.
-          const homeReal = await realpath(home).catch(() => null)
-          // Boundary list for choosing a SPECIFIC message only (never for
-          // granting access): a path inside any browsable root keeps its reason.
-          // A credential/config directory always gets the plain denial.
+          const homeReal = resolveCwdPolicyHome(config, boundaryRealpath)
+          // A credential/config directory always gets the plain denial, and
+          // that decision is made on the RESOLVED visible ancestor: the raw
+          // path would be compared unresolved against a resolved home, so a
+          // symlink (or a symlinked $HOME) would let `<denied>/<file>/x`
+          // answer "Not a directory" while `<denied>/<missing>/x` is denied.
+          // A walk that cannot finish denies.
           let error = LISTING_DENIAL
-          if (!(homeReal && credentialDirDenialReason(absPath, homeReal))) {
-            for (const boundary of browseBoundaries(config, getDefaultCwd())) {
+          let deniedDir = true
+          try {
+            deniedDir = credentialDirDenialReason(await resolveVisibleAncestor(absPath), homeReal, boundaryRealpath) !== null
+          } catch {
+            // deniedDir stays true: could not check, so deny
+          }
+          if (!deniedDir) {
+            // Boundary list for choosing a SPECIFIC message only (never for
+            // granting access): a path inside any browsable root keeps its reason.
+            for (const boundary of browseBoundaries(config, getDefaultCwd(), { realpath: boundaryRealpath })) {
               const candidate = await unresolvablePathError(err, absPath, boundary, LISTING_UNRESOLVABLE_REASONS, LISTING_DENIAL)
               if (candidate !== LISTING_DENIAL) { error = candidate; break }
             }
@@ -103,12 +120,12 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           containmentUnknown = true
         }
       }
-      const homeReal = resolveCwdPolicyHome(config)
+      const homeReal = resolveCwdPolicyHome(config, boundaryRealpath)
       // Same predicate Create uses for the credential-dir / config-dir layers,
       // then the Browse allow-set: $HOME + workspace roots + a valid default cwd.
       const denied = containmentUnknown
-        || credentialDirDenialReason(realAbsPath, homeReal) !== null
-        || !browseBoundaries(config, getDefaultCwd()).some(b => isPathWithin(realAbsPath, b))
+        || credentialDirDenialReason(realAbsPath, homeReal, boundaryRealpath) !== null
+        || !browseBoundaries(config, getDefaultCwd(), { realpath: boundaryRealpath }).some(b => isPathWithin(realAbsPath, b))
 
       if (denied) {
         sendFn(ws, {

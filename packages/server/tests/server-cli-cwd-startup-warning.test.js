@@ -1,13 +1,13 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { warnIfConfiguredCwdRefused } from '../src/server-cli.js'
+import { warnIfConfiguredCwdRefused, createDaemonSessionManager } from '../src/server-cli.js'
 
 /**
  * Issue 8303 — a blank cwd on Create inherits `config.cwd` with no
- * validateCwdAllowed, so an operator whose configured cwd explicit Create would
+ * validateCwdAllowed, so an operator whose configured cwd an explicit Create would
  * refuse got no hint. The daemon now logs ONE warning at startup, naming the
  * reason. Temp dirs and the homeOverride pattern only: no real ~/.ssh.
  */
@@ -64,11 +64,35 @@ describe('startup warning for a configured cwd that fails validateCwdAllowed (is
     assert.deepEqual(warnings, [])
   })
 
-  it('is wired into startCliServer (the helper alone would never warn at boot)', () => {
-    const src = readFileSync(new URL('../src/server-cli.js', import.meta.url), 'utf8')
-    const startAt = src.indexOf('export async function startCliServer')
-    assert.ok(startAt > 0, 'startCliServer must exist')
-    assert.ok(/\bwarnIfConfiguredCwdRefused\(config, log\)/.test(src.slice(startAt)),
-      'startCliServer must call warnIfConfiguredCwdRefused(config, log)')
+  describe('through the daemon session-manager factory startCliServer uses', () => {
+    let managers = []
+    afterEach(() => {
+      while (managers.length) {
+        try { managers.pop().destroyAll() } catch { /* already destroyed */ }
+      }
+    })
+
+    function build(config) {
+      const { sessionManager } = createDaemonSessionManager(config, {
+        skipPreflight: true,
+        defaultCwd: config.cwd || fakeHome,
+        stateFilePath: join(base, 'session-state.json'),
+        persistDebounceMs: 0,
+      }, log)
+      managers.push(sessionManager)
+      return sessionManager
+    }
+
+    it('logs exactly one warning, naming the reason, for a refused config cwd', () => {
+      build({ cwd: outside, homeOverride: fakeHome })
+      assert.equal(warnings.length, 1)
+      assert.ok(warnings[0].includes(outside))
+      assert.ok(/within your home directory/.test(warnings[0]))
+    })
+
+    it('logs nothing for an allowed config cwd', () => {
+      build({ cwd: join(fakeHome, 'proj'), homeOverride: fakeHome })
+      assert.deepEqual(warnings, [])
+    })
   })
 })

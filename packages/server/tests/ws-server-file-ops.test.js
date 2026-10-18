@@ -312,7 +312,9 @@ describe('directory listing', () => {
     let outside
 
     beforeEach(() => {
-      base = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-test-8303-ws-')))
+      // native resolver: the same spelling Browse resolves the listed path to (Windows
+      // expands 8.3 short temp names such as RUNNER~1 only in the native one)
+      base = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-test-8303-ws-')))
       fakeHome = join(base, 'home')
       root = join(base, 'root')
       outside = join(base, 'outside')
@@ -353,7 +355,11 @@ describe('directory listing', () => {
       assert.match(listing.error, /^Access denied/)
     })
 
-    it("lists the session manager's default cwd when it passes validateCwdAllowed", async () => {
+    // Wiring smoke only: the default cwd here is inside a configured root, so the
+    // root admits it whether or not getDefaultCwd is wired. That the default-cwd
+    // boundary itself is admitted is covered in browse-workspace-roots.test.js
+    // (browseBoundaries).
+    it('a session manager with a default cwd inside a configured root still lists it', async () => {
       const manager = new EventEmitter()
       manager.defaultCwd = join(root, 'sub')
       manager.getSession = () => undefined
