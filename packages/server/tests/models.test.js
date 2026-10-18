@@ -559,7 +559,9 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
       // The override map is private; a refresh would rebuild rows from it
       // (top precedence), so a leaked non-finite override shows up here.
       updateModels([{ value: before.fullId, displayName: 'Sonnet', description: '' }])
-      assert.ok(Number.isFinite(getModels()[0].contextWindow), 'no non-finite override leaked')
+      const after = getModels().find(m => m.fullId === before.fullId)
+      assert.ok(after, 'target row survives the refresh')
+      assert.equal(after.contextWindow, before.contextWindow, 'no non-finite override leaked')
     })
   }
 

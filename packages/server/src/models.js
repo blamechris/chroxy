@@ -465,10 +465,10 @@ function usableContextWindow(source) {
  * trust that every byte on disk went through a well-behaved write path (a
  * hand-edit, an older/corrupted build, a partial write), so it re-validates
  * independently rather than passing the parsed value straight through — #7771
- * found `updateContextWindow`'s OWN input guard admits NaN (`typeof NaN ===
- * 'number'` and `NaN <= 0` is false, so the existing `contextWindow <= 0`
- * check never fires for it), which is exactly the kind of value this map
- * must not resurrect from disk. A missing/absent field (an old-format cache
+ * found `updateContextWindow`'s input guard once admitted NaN (it now uses
+ * `Number.isFinite`), and that guard still admits finite non-integers; NaN,
+ * Infinity and fractions are exactly the values this map must not resurrect
+ * from disk. A missing/absent field (an old-format cache
  * written before this key existed) and a non-object value both yield an
  * empty map rather than throwing — loadCache() must keep working with the
  * map absent.
@@ -1569,10 +1569,9 @@ export function createModelsRegistry(hooks = {}) {
           // Record it under its own key so `saveCache`/`loadCache` can carry
           // the window without the row. Re-validated with the same
           // finite-positive-integer check the read side enforces — the guard
-          // above admits NaN (#7771: `typeof NaN === 'number'` and
-          // `NaN <= 0` is false, so it never fires), and this new
-          // persistence path must not write a value it would refuse to load
-          // back.
+          // above is only finite-and-positive (#7771), so it still admits
+          // fractions like 272000.5, and this persistence path must not
+          // write a value it would refuse to load back.
           if (isUnpersistableDeclaredRow(m.fullId) && Number.isInteger(contextWindow) && contextWindow > 0) {
             learnedContextWindows.set(m.fullId, contextWindow)
           }
