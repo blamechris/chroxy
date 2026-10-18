@@ -4,7 +4,7 @@
  * Splits the input into parent dir + partial segment, requests a directory
  * listing from the server for the parent, and filters results by prefix match.
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useId } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { DirectoryListing } from '../store/types'
 
@@ -40,13 +40,22 @@ export function usePathAutocomplete(input: string, checkedPath = '', enabled = t
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastParentRef = useRef('')
+  const checkPrefix = useId()
+  const checkSequenceRef = useRef(0)
+  const checkRequestRef = useRef<string | null>(null)
 
   const inputRef = useRef(input)
   inputRef.current = input
 
   const handleListing = useCallback((listing: DirectoryListing) => {
     const responsePath = listing.path || listing.parentPath || ''
-    if (checkedPath && responsePath.replace(/\/+$/, '') === checkedPath.replace(/\/+$/, '')) {
+    // The server can expand/normalize the requested path. A nonce correlates
+    // that reply without guessing its canonical spelling or accepting a stale
+    // parent/check reply. Older daemons retain exact-path matching.
+    const matchesCheck = listing.requestId
+      ? listing.requestId === checkRequestRef.current
+      : responsePath.replace(/\/+$/, '') === checkedPath.replace(/\/+$/, '')
+    if (checkedPath && checkRequestRef.current && matchesCheck) {
       setPathCheck({ path: checkedPath, error: listing.error || null })
     }
     // The exact prefill check and autocomplete share the existing response
@@ -72,6 +81,7 @@ export function usePathAutocomplete(input: string, checkedPath = '', enabled = t
 
   useEffect(() => {
     setPathCheck(null)
+    checkRequestRef.current = null
     if (!enabled) return
     const { parent } = splitPath(input)
     if ((!input || input.length < 2 || !parent) && !checkedPath) {
@@ -89,14 +99,19 @@ export function usePathAutocomplete(input: string, checkedPath = '', enabled = t
     debounceRef.current = setTimeout(() => {
       lastParentRef.current = queryPath
       setDirectoryListingCallback(handleListing)
-      if (queryPath) requestDirectoryListing(queryPath)
-      if (checkedPath && checkedPath !== queryPath) requestDirectoryListing(checkedPath)
+      if (checkedPath) {
+        const requestId = `${checkPrefix}-${++checkSequenceRef.current}`
+        checkRequestRef.current = requestId
+        requestDirectoryListing(checkedPath, requestId)
+      }
+      if (queryPath && queryPath !== checkedPath) requestDirectoryListing(queryPath)
     }, DEBOUNCE_MS)
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
+      checkRequestRef.current = null
     }
-  }, [input, checkedPath, enabled, handleListing, requestDirectoryListing, setDirectoryListingCallback])
+  }, [input, checkedPath, enabled, checkPrefix, handleListing, requestDirectoryListing, setDirectoryListingCallback])
 
   // Cleanup callback on unmount
   useEffect(() => {

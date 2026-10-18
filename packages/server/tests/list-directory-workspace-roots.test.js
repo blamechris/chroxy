@@ -24,6 +24,14 @@ describe('Browse shares the Create cwd policy', () => {
     assert.equal(sent.length, 1)
     return sent[0]
   }
+  it('echoes optional request nonces for allowed, denied, missing and normalized paths', async () => {
+    for (const path of [root, root + '//child', outside, join(root, 'missing')]) {
+      const sent = []
+      await createFileOps((_, msg) => sent.push(msg)).listDirectory(null, path, config, 'check-current')
+      assert.equal(sent[0].requestId, 'check-current')
+    }
+    assert.equal(Object.hasOwn(await list(root), 'requestId'), false)
+  })
   it('lists an allowed root and child outside home, matching explicit Create', async () => {
     for (const path of [root, join(root, 'child')]) {
       assert.equal(validateCwdAllowed(path, config), null)

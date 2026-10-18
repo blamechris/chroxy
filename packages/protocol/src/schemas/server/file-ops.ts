@@ -104,6 +104,7 @@ export const ServerFileContentSchema = z.object({
 // entries carry size).
 export const ServerDirectoryListingSchema = z.object({
   type: z.literal('directory_listing'),
+  requestId: z.string().max(200).optional(),
   path: z.string().nullable(),
   parentPath: z.string().nullable(),
   entries: z.array(z.object({

@@ -370,9 +370,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const cwdValRef = useRef('')
 
   // Autocomplete suggestions from server
-  const prefilledCwd = initialCwd || defaultCwd || ''
+  const prefilledCwd = cwd.trim() ? (initialCwd || defaultCwd || '') : (defaultCwd || '')
   const { suggestions: autocompleteSuggestions, pathCheck } = usePathAutocomplete(cwd, prefilledCwd, open && !browsing)
-  const prefilledCwdError = pathCheck?.path === prefilledCwd && (cwd === prefilledCwd || !cwd)
+  const prefilledCwdError = pathCheck?.path === prefilledCwd && (cwd === prefilledCwd || !cwd.trim())
     ? pathCheck.error
     : null
 

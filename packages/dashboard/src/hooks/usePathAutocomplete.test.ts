@@ -158,7 +158,7 @@ describe('prefilled directory check', () => {
   it('checks the exact prefilled directory separately from its parent', () => {
     const { result } = renderHook(() => usePathAutocomplete('/outside/project', '/outside/project'))
     act(() => { vi.advanceTimersByTime(200) })
-    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/outside/project')
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/outside/project', expect.any(String))
     act(() => capturedCallback?.({ path: '/outside', entries: [], error: 'Access denied' }))
     expect(result.current.pathCheck).toBeNull()
     act(() => capturedCallback?.({ path: '/outside/project', entries: [], error: 'Access denied' }))
@@ -174,12 +174,45 @@ describe('prefilled directory check', () => {
   it('checks the inherited default when input is blank and suspends during Browse', () => {
     const { result, rerender } = renderHook(({ enabled }) => usePathAutocomplete('', '/default', enabled), { initialProps: { enabled: true } })
     act(() => { vi.advanceTimersByTime(200) })
-    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/default')
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/default', expect.any(String))
     act(() => capturedCallback?.({ path: '/default', entries: [], error: 'Access denied' }))
     expect(result.current.pathCheck?.error).toBe('Access denied')
     mockRequestDirectoryListing.mockClear()
     rerender({ enabled: false })
     act(() => { vi.advanceTimersByTime(200) })
     expect(mockRequestDirectoryListing).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('prefill reply correlation', () => {
+  it.each([
+    ['/outside//project', '/outside/project'],
+    ['../outside/project', '/server/outside/project'],
+    ['~/outside', '/home/user/outside'],
+    ['C:\\outside\\project', 'C:/outside/project'],
+  ])('checks normalized %s replies without relying on path spelling', (requested, resolved) => {
+    const { result } = renderHook(() => usePathAutocomplete(requested, requested))
+    act(() => { vi.advanceTimersByTime(200) })
+    const requestId = mockRequestDirectoryListing.mock.calls.find(call => call[0] === requested)?.[1]
+    expect(requestId).toEqual(expect.any(String))
+    act(() => capturedCallback?.({ path: resolved, requestId, entries: [], error: 'Access denied' }))
+    expect(result.current.pathCheck).toEqual({ path: requested, error: 'Access denied' })
+  })
+
+  it('ignores overlapping parent and superseded check replies', () => {
+    const { result, rerender } = renderHook(({ path }) => usePathAutocomplete(path, path), { initialProps: { path: '/outside//old' } })
+    act(() => { vi.advanceTimersByTime(200) })
+    const oldId = mockRequestDirectoryListing.mock.calls.find(call => call[0] === '/outside//old')?.[1]
+    rerender({ path: '/outside//new' })
+    act(() => { vi.advanceTimersByTime(200) })
+    const currentId = mockRequestDirectoryListing.mock.calls.find(call => call[0] === '/outside//new')?.[1]
+    expect(currentId).toEqual(expect.any(String))
+    expect(currentId).not.toBe(oldId)
+    act(() => capturedCallback?.({ path: '/outside/new', requestId: oldId, entries: [], error: 'stale' }))
+    act(() => capturedCallback?.({ path: '/outside', entries: [], error: 'parent' }))
+    expect(result.current.pathCheck).toBeNull()
+    act(() => capturedCallback?.({ path: '/outside/new', requestId: currentId, entries: [], error: 'Access denied' }))
+    expect(result.current.pathCheck?.error).toBe('Access denied')
   })
 })

@@ -3956,3 +3956,13 @@ describe('ServerMcpServersSchema scope (#7028)', () => {
     }
   })
 })
+
+
+describe('directory listing reply correlation', () => {
+  it('preserves optional request nonces in both wire directions', async () => {
+    const { ListDirectorySchema } = await import('../src/schemas/client.ts')
+    const { ServerDirectoryListingSchema } = await import('../src/schemas/server/file-ops.ts')
+    assert.equal(ListDirectorySchema.parse({ type: 'list_directory', path: '../outside', requestId: 'cwd-check' }).requestId, 'cwd-check')
+    assert.equal(ServerDirectoryListingSchema.parse({ type: 'directory_listing', path: '/outside', parentPath: null, entries: [], error: 'Access denied', requestId: 'cwd-check' }).requestId, 'cwd-check')
+  })
+})

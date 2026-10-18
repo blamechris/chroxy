@@ -8,6 +8,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 
+let mockDefaultCwd: string | null = null
+const mockAutocomplete = vi.fn()
 let mockPathCheck: { path: string; error: string | null } | null = null
 let capturedCallback: ((listing: Record<string, unknown>) => void) | null = null
 const mockRequestDirectoryListing = vi.fn()
@@ -16,7 +18,7 @@ const mockSetDirectoryListingCallback = vi.fn((cb: unknown) => {
 })
 
 vi.mock('../hooks/usePathAutocomplete', () => ({
-  usePathAutocomplete: () => ({ suggestions: [], pathCheck: mockPathCheck }),
+  usePathAutocomplete: (...args: unknown[]) => { mockAutocomplete(...args); return { suggestions: [], pathCheck: mockPathCheck } },
 }))
 
 vi.mock('../store/connection', () => ({
@@ -26,7 +28,7 @@ vi.mock('../store/connection', () => ({
       availableProviders: [],
       requestDirectoryListing: mockRequestDirectoryListing,
       setDirectoryListingCallback: mockSetDirectoryListingCallback,
-      defaultCwd: null,
+      defaultCwd: mockDefaultCwd,
     }),
 }))
 
@@ -34,6 +36,8 @@ import { CreateSessionModal, type CreateSessionModalProps } from './CreateSessio
 
 afterEach(() => {
   cleanup()
+  mockDefaultCwd = null
+  mockAutocomplete.mockClear()
   mockPathCheck = null
   capturedCallback = null
   mockRequestDirectoryListing.mockClear()
@@ -263,5 +267,22 @@ describe('prefilled directory note', () => {
     mockPathCheck = { path: '/allowed', error: null }
     renderModal({ initialCwd: '/allowed' })
     expect(screen.queryByText(/Prefilled directory is not browsable/)).not.toBeInTheDocument()
+  })
+})
+
+
+describe('cleared prefill inheritance warning', () => {
+  it.each([
+    ['/allowed', '/outside', 'Access denied'],
+    ['/outside', '/allowed', null],
+  ])('checks inherited %s → %s after clearing', (initialCwd, defaultCwd, error) => {
+    mockDefaultCwd = defaultCwd
+    mockPathCheck = { path: initialCwd, error: initialCwd === '/outside' ? 'Access denied' : null }
+    renderModal({ initialCwd })
+    mockPathCheck = { path: defaultCwd, error }
+    fireEvent.change(screen.getByLabelText('Working directory'), { target: { value: '' } })
+    expect(mockAutocomplete).toHaveBeenLastCalledWith('', defaultCwd, true)
+    if (error) expect(screen.getByRole('status')).toHaveTextContent('Prefilled directory is not browsable: Access denied')
+    else expect(screen.queryByText(/Prefilled directory is not browsable/)).not.toBeInTheDocument()
   })
 })

@@ -88,6 +88,7 @@ export declare const ServerFileContentSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const ServerDirectoryListingSchema: z.ZodObject<{
     type: z.ZodLiteral<"directory_listing">;
+    requestId: z.ZodOptional<z.ZodString>;
     path: z.ZodNullable<z.ZodString>;
     parentPath: z.ZodNullable<z.ZodString>;
     entries: z.ZodArray<z.ZodObject<{

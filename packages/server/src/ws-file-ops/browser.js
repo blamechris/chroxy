@@ -30,7 +30,11 @@ const LISTING_UNRESOLVABLE_REASONS = {
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
 
   /** List directories at a given path, sending a directory_listing response */
-  async function listDirectory(ws, requestedPath, config = null) {
+  async function listDirectory(ws, requestedPath, config = null, requestId) {
+    const sendListing = (message) => {
+      if (typeof requestId === 'string') message.requestId = requestId
+      sendFn(ws, message)
+    }
     let absPath = null
     try {
       const home = config?.homeOverride || homedir()
@@ -58,7 +62,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           // where a readable one answers "Access denied", and sent ELOOP's
           // raw message with the server path in it. Only an allowed path
           // keeps a specific message now; everything else is the denial.
-          sendFn(ws, {
+          sendListing({
             type: 'directory_listing',
             path: absPath,
             parentPath: null,
@@ -81,7 +85,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
         }
       }
       if (containmentUnknown || !allowed(realAbsPath)) {
-        sendFn(ws, {
+        sendListing({
           type: 'directory_listing',
           path: absPath,
           parentPath: null,
@@ -99,7 +103,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
 
       const parentPath = absPath === '/' ? null : resolve(absPath, '..')
 
-      sendFn(ws, {
+      sendListing({
         type: 'directory_listing',
         path: absPath,
         parentPath,
@@ -113,7 +117,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       else if (err.code === 'ENOTDIR') errorMessage = 'Not a directory'
       else errorMessage = err.message || 'Unknown error'
 
-      sendFn(ws, {
+      sendListing({
         type: 'directory_listing',
         path: absPath || requestedPath || null,
         parentPath: null,

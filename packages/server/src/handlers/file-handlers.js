@@ -47,7 +47,7 @@ function rejectMutationIfBound(ws, client, msg, ctx, op) {
 }
 
 function handleListDirectory(ws, client, msg, ctx) {
-  ctx.services.fileOps.listDirectory(ws, msg.path, ctx.services.config)
+  ctx.services.fileOps.listDirectory(ws, msg.path, ctx.services.config, msg.requestId)
 }
 
 function handleBrowseFiles(ws, client, msg, ctx) {
