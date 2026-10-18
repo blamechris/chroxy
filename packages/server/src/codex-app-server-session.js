@@ -1532,9 +1532,9 @@ export class CodexAppServerSession extends BaseSession {
    *     substitute a default. A brand-new session that has not completed a turn
    *     therefore has NO window and its meter stays dashed; fabricating one
    *     would be worse than none (#5444).
-   *   - **`Number.isFinite` guards the call.** `registry.updateContextWindow`
-   *     tests `typeof === 'number' && > 0`, which NaN passes (`NaN <= 0` is
-   *     false) — it would then write NaN, since `x !== NaN` is always true.
+   *   - **`Number.isFinite` guards the call** as defence in depth.
+   *     `registry.updateContextWindow` rejects non-finite values itself, but
+   *     the check here keeps a NaN or Infinity from ever reaching it.
    *
    * @returns {boolean} true when the registry entry changed.
    */

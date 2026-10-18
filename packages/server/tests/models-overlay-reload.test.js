@@ -1332,6 +1332,21 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
     assert.equal(row?.contextWindow, 4242, 'a restart falls back to the heuristic, never NaN')
   })
 
+  it('a fractional ratchet is never written into the learned map', () => {
+    // A fractional window is finite and positive, so the top-level guard in
+    // updateContextWindow admits it. Only the learned-map write's own integer
+    // check keeps it off disk, where the read side would refuse to load it.
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(overlayMap({ 'my-model': {} }))
+    assert.equal(reg.updateContextWindow('my-model', 272000.5), true,
+      'sanity: a finite fractional window passes the top-level guard')
+
+    assert.equal(reg.saveCache(cachePath), true)
+    const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.equal(Object.prototype.hasOwnProperty.call(payload.learnedContextWindows ?? {}, 'my-model'), false,
+      'the fractional ratchet must not reach the learned map on disk')
+  })
+
   // Review addendum (#7810) — `applyOverlay` is a THIRD place that rebuilds a
   // declaration-only row (`docs/false-safety-guards.md`'s "guard wired to only
   // some of its callers" shape, #7888's exact lesson for this same registry):
