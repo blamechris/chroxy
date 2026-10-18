@@ -1011,7 +1011,14 @@ export async function runDoctorChecks({
   }
 
   // 7. Port availability
-  const checkPort = port || 8765
+  // Same precedence `chroxy start` uses (mergeConfig): explicit flag > env PORT >
+  // config.json `port` > 8765. The merge is the single implementation; doctor
+  // only layers its own `-p` flag on top as the CLI tier.
+  const checkPort = mergeConfig({
+    fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
+    cliOverrides: port ? { port } : {},
+    defaults: { port: 8765 },
+  }).port
   try {
     await checkPortAvailable(checkPort)
     checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
