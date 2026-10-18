@@ -170,6 +170,10 @@
   border-radius: 6px;
   padding: 4px 8px;
   font-size: var(--text-base);
+  /* #8618: the UI font rather than the engine's form-control default, so the
+     roster sizers (`.header-select-fit-sizer`, which inherit it) measure the
+     same face the select renders. */
+  font-family: inherit;
   cursor: pointer;
   overflow: hidden;
   white-space: nowrap;
@@ -214,17 +218,22 @@
    grid; every label of the roster is rendered once as an invisible sizer with
    the select's chrome (padding, border, and room for the native arrow), and the
    select is stretched over the cell. The cell therefore measures the widest
-   label in the current font — WebKit, which does not grow a `width: auto`
-   select to its label (#5197), gets the width from the sizers; Chromium's own
-   intrinsic select width also contributes to the cell. The wrapper does not
-   shrink: a select narrower than its label is the defect, so under pressure
-   the sandbox badge (shrinkable, full text in its title) gives way first. */
+   label in the select's font. The wrapper does not shrink: a select narrower
+   than its label is the defect, so under pressure the sandbox badge
+   (shrinkable, full text in its title) gives way first.
+
+   What each part is for, and what is proven: in Chromium a select's intrinsic
+   width already spans its widest option, so there the removed floors/caps and
+   the non-shrinking wrapper are the fix, and scripts/header-layout.test.mjs
+   proves exactly that (red on the old rules, by label). The sizers are the
+   guard for WebKit — the Tauri shell's engine, where #5197 observed a
+   `width: auto` select collapsing to its floor — which the test does not run;
+   they can only widen the cell, never narrow it. */
 .header-select-fit {
   display: inline-grid;
   grid-template-columns: minmax(0, max-content);
   align-items: center;
   flex-shrink: 0;
-  min-width: 0;
 }
 .header-select-fit > * {
   grid-area: 1 / 1;
@@ -234,11 +243,15 @@
   pointer-events: none;
   white-space: nowrap;
   font-size: var(--text-base);
-  /* The select's padding + border, plus room for the native arrow. 1.5em is
-     wider than either engine's arrow at this font size; the browser's own
-     intrinsic width (Chromium) is honoured too, so this only ever ADDS room. */
-  padding: 4px calc(8px + 1.5em) 4px 8px;
-  border: 1px solid transparent;
+  /* Width only: the select's horizontal padding + border, plus room for the
+     native arrow (1.5em is wider than either engine's arrow at this size).
+     Zero height, so the sizers never change the row's height — a sizer with the
+     select's vertical padding stood 2.5px taller than the select itself. */
+  height: 0;
+  overflow: hidden;
+  padding: 0 calc(8px + 1.5em) 0 8px;
+  border: 0 solid transparent;
+  border-width: 0 1px;
 }
 .header-center .header-select-fit select {
   width: 100%;
@@ -8405,7 +8418,7 @@ button.sidebar-token-view-session-row:hover {
   /* #8618: no narrow-viewport floors for permission/thinking either — the
      `.header-select-fit` cell sizes them from their roster at every width;
      only the sizer's font steps down with the select's. */
-  .header-select-fit-sizer { font-size: var(--text-sm); padding: 3px calc(6px + 1.5em) 3px 6px; }
+  .header-select-fit-sizer { font-size: var(--text-sm); padding: 0 calc(6px + 1.5em) 0 6px; }
   /* #4464: match the model <select>'s narrow-viewport floors. Without
      this rule the read-only badge keeps the 180–240px desktop floor and
      overflows the header center column on phone widths. */

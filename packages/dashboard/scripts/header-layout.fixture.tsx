@@ -1,4 +1,3 @@
-import React from 'react'
 import { createRoot } from 'react-dom/client'
 import '../src/theme/theme.css'
 import '../src/theme/global.css'
@@ -32,7 +31,7 @@ const MODES = [
   { id: 'auto', label: 'Auto', description: 'Auto', supported: true, enforcement: 'unknown' as const },
 ]
 
-function HeaderCase({ name, centerWidth, sandbox }: { name: string; centerWidth: number; sandbox: 'read-only' | 'workspace-write' }) {
+function HeaderCase({ name, centerWidth, sandbox }: { name: string; centerWidth: number; sandbox: 'read-only' | 'workspace-write' | null }) {
   // The real header is `#header > .header-main` (a 3-column grid, 16px gaps,
   // 16px side padding) with `.header-center` in the middle column. The side
   // zones are stand-ins of a fixed width so the center column lands at exactly
@@ -70,6 +69,11 @@ function HeaderLayoutFixture() {
       <HeaderCase name="roomy" centerWidth={900} sandbox="read-only" />
       <HeaderCase name="tight" centerWidth={500} sandbox="workspace-write" />
       <HeaderCase name="phone" centerWidth={330} sandbox="workspace-write" />
+      {/* No badge: the shape every non-codex session renders (model button,
+          permission, thinking). With nothing shrinkable in the row, this is
+          where a wrapper that refuses to shrink would first show as a control
+          cut at the column edge. */}
+      <HeaderCase name="no-badge" centerWidth={500} sandbox={null} />
     </main>
   )
 }

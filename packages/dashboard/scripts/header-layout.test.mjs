@@ -27,10 +27,11 @@ const CODEX_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh']
 const SELECTED_LEVEL = 'xhigh'
 
 const CASES = [
-  // [case, viewport width, the sandbox the fixture renders for it]
+  // [case, viewport width, the sandbox label the fixture renders for it (null: no badge)]
   ['roomy', 1660, 'Read-only'],
   ['tight', 1660, 'Workspace write'],
   ['phone', 390, 'Workspace write'],
+  ['no-badge', 1660, null],
 ]
 
 async function measure(page, name) {
@@ -60,18 +61,21 @@ async function measure(page, name) {
       return { kind: select.dataset.kind, selected: select.selectedOptions[0]?.textContent ?? null, ...box(select), needs }
     })
     const badge = center.querySelector('[data-testid="codex-sandbox-badge"]')
-    if (!badge) throw new Error('Fixture must render the codex sandbox badge')
-    const twin = badge.cloneNode(true)
-    twin.style.cssText = 'width:auto;min-width:0;max-width:none;flex:none;position:absolute;visibility:hidden'
-    center.appendChild(twin)
-    const natural = twin.getBoundingClientRect().width
-    twin.remove()
+    let badgeMeasure = null
+    if (badge) {
+      const twin = badge.cloneNode(true)
+      twin.style.cssText = 'width:auto;min-width:0;max-width:none;flex:none;position:absolute;visibility:hidden'
+      center.appendChild(twin)
+      const natural = twin.getBoundingClientRect().width
+      twin.remove()
+      badgeMeasure = { text: badge.textContent, title: badge.getAttribute('title') ?? '', ...box(badge), natural, scrollWidth: badge.scrollWidth, clientWidth: badge.clientWidth }
+    }
     const controls = [...center.children].map(el => ({ tag: el.tagName, kind: el.dataset.kind ?? null, ...box(el) }))
     return {
       center: box(center),
       selects,
       controls,
-      badge: { text: badge.textContent, title: badge.getAttribute('title') ?? '', ...box(badge), natural, scrollWidth: badge.scrollWidth, clientWidth: badge.clientWidth },
+      badge: badgeMeasure,
     }
   })
 }
@@ -138,12 +142,17 @@ describe('header controls layout (#8618)', () => {
     }))
 
     test(`${name}: every control sits inside the center column instead of past its hidden overflow`, () => withPage(m => {
-      assert.ok(m.controls.length >= 4, `model, permission, badge and thinking are all mounted (got ${m.controls.length})`)
+      const expected = sandboxLabel === null ? 3 : 4
+      assert.equal(m.controls.length, expected, `model, permission${sandboxLabel === null ? '' : ', badge'} and thinking are all mounted (got ${m.controls.length})`)
       const outside = m.controls.filter(c => c.left < m.center.left - 0.5 || c.right > m.center.right + 0.5).map(c => `${c.tag}[${c.kind}] ${c.left.toFixed(1)}..${c.right.toFixed(1)} vs column ${m.center.left.toFixed(1)}..${m.center.right.toFixed(1)}`)
       assert.deepEqual(outside, [], 'a control past the column edge is cut off by .header-center { overflow: hidden }')
     }))
 
     test(`${name}: the sandbox badge carries its full label and sizes to its own text`, () => withPage(m => {
+      if (sandboxLabel === null) {
+        assert.equal(m.badge, null, 'a session without a codex sandbox renders no badge')
+        return
+      }
       assert.ok(m.badge.title.includes(sandboxLabel), `title names the sandbox (${m.badge.title})`)
       assert.ok(m.badge.text.includes(sandboxLabel), `the visible text is the full label (${m.badge.text})`)
       // Wider than its own text means it inherited the model slot's floor

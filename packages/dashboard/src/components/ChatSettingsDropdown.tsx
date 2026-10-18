@@ -224,25 +224,25 @@ export function ChatSettingsDropdown({
 
       {/* Permission Mode */}
       {showPermissionMode && availablePermissionModes.length > 0 && (
-        <SelectFit kind="permission" labels={availablePermissionModes.filter(m => m.supported !== false).map(m => m.label)}>
-        <select
-          data-kind="permission"
-          aria-label="Permission mode"
-          value={permissionMode || ''}
-          onChange={e => onPermissionModeChange(e.target.value)}
-          // #4019: server-side PERMISSION_MODES carries a `description` for
-          // every mode (including the Auto protected-path exception).
-          // Surface the description for the currently-selected option as a
-          // title so the user gets the same trade-off explanation mid-session
-          // they get at creation time. Each <option> also carries its own
-          // title — most browsers don't show option tooltips reliably, but
-          // it's harmless and feeds AT-friendly machinery for those that do.
-          title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
-        >
-          {availablePermissionModes.map(m => (
-            <option key={m.id} value={m.id} title={m.description} disabled={m.supported === false}>{m.label}</option>
-          ))}
-        </select>
+        <SelectFit kind="permission" labels={availablePermissionModes.map(m => m.label)}>
+          <select
+            data-kind="permission"
+            aria-label="Permission mode"
+            value={permissionMode || ''}
+            onChange={e => onPermissionModeChange(e.target.value)}
+            // #4019: server-side PERMISSION_MODES carries a `description` for
+            // every mode (including the Auto protected-path exception).
+            // Surface the description for the currently-selected option as a
+            // title so the user gets the same trade-off explanation mid-session
+            // they get at creation time. Each <option> also carries its own
+            // title — most browsers don't show option tooltips reliably, but
+            // it's harmless and feeds AT-friendly machinery for those that do.
+            title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
+          >
+            {availablePermissionModes.map(m => (
+              <option key={m.id} value={m.id} title={m.description} disabled={m.supported === false}>{m.label}</option>
+            ))}
+          </select>
         </SelectFit>
       )}
 
@@ -271,16 +271,16 @@ export function ChatSettingsDropdown({
       {/* Thinking Level */}
       {showThinkingLevel && (
         <SelectFit kind="thinking" labels={thinkingLevelChoices.options.map(o => o.label)}>
-        <select
-          data-kind="thinking"
-          aria-label="Thinking level"
-          value={thinkingLevelChoices.selected}
-          onChange={e => onThinkingLevelChange(e.target.value)}
-        >
-          {thinkingLevelChoices.options.map(({ id, label }) => (
-            <option key={id} value={id}>{label}</option>
-          ))}
-        </select>
+          <select
+            data-kind="thinking"
+            aria-label="Thinking level"
+            value={thinkingLevelChoices.selected}
+            onChange={e => onThinkingLevelChange(e.target.value)}
+          >
+            {thinkingLevelChoices.options.map(({ id, label }) => (
+              <option key={id} value={id}>{label}</option>
+            ))}
+          </select>
         </SelectFit>
       )}
     </>
@@ -299,15 +299,25 @@ export function ChatSettingsDropdown({
  * binary's own, and a hardcoded width beside a growing roster is the class
  * docs/false-safety-guards.md records.
  *
- * So the width comes from the roster instead: every label is rendered once as
- * an invisible sizer in the same grid cell as the <select>, with the select's
- * own chrome (padding, border, room for the native arrow), and the select is
- * stretched to the cell. The cell is as wide as the widest label actually
- * renders in the current font — no character count, no per-kind constant —
- * and the wrapper does not shrink, because a select narrower than its label is
- * the bug. The sizers are `aria-hidden` and `visibility: hidden`, so they are
- * neither read nor clickable. `scripts/header-layout.test.mjs` measures the
- * result in a real browser against each option.
+ * So the width comes from the roster instead: every label — a disabled one
+ * included, since a disabled option can still be the selected value (App.tsx
+ * keeps `plan` while it is unavailable) and Chromium's own intrinsic width
+ * counts it anyway — is rendered once as an invisible sizer in the same grid
+ * cell as the <select>, with the select's chrome (padding, border, room for the
+ * native arrow), and the select is stretched to the cell. The cell is as wide
+ * as the widest label actually renders in the select's font — no character
+ * count, no per-kind constant — and the wrapper does not shrink, because a
+ * select narrower than its label is the bug. The sizers are `aria-hidden`,
+ * `visibility: hidden` and zero-height, so they are neither read, clickable,
+ * nor a change to the row's height.
+ *
+ * What is proven, and by what: `scripts/header-layout.test.mjs` runs in
+ * Chromium, where a select's intrinsic width already spans its widest option,
+ * so there the removal of the floors/caps and the non-shrinking wrapper are
+ * what the test proves (its red run names the clipped labels). The sizers are
+ * the WebKit guard — the engine the Tauri shell uses, where #5197 observed a
+ * `width: auto` select collapsing to its floor — and that engine is not run
+ * by the test; the sizers can only ever widen the cell, never narrow it.
  */
 function SelectFit({ kind, labels, children }: { kind: 'permission' | 'thinking'; labels: string[]; children: ReactNode }) {
   return (
