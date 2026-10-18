@@ -3364,6 +3364,30 @@ describe('@chroxy/protocol schemas', () => {
         assert.deepEqual(replayed.data.thinkingPrecedes, { kind: 'tool_use', toolUseId: 'toolu_1' })
       })
 
+      it('ServerMessageSchema keeps the optional replay `kind` (issue 8282), accepts a kind it does not know, and validates without it', async () => {
+        const { ServerMessageSchema } = await import('../src/schemas/server.ts')
+        const base = { type: 'message', messageType: 'response', content: 'x', timestamp: 1 }
+        // zod strips keys the schema does not declare, so success alone would not notice the field being dropped.
+        const reasoning = ServerMessageSchema.safeParse({ ...base, kind: 'thinking' })
+        assert.ok(reasoning.success, JSON.stringify(reasoning.error?.issues))
+        assert.equal(reasoning.data.kind, 'thinking')
+        // A kind a newer server adds must not make an older client reject the frame.
+        const future = ServerMessageSchema.safeParse({ ...base, kind: 'something_new' })
+        assert.ok(future.success)
+        assert.equal(future.data.kind, 'something_new')
+        // An entry or older server with no kind is a reply, and carries no kind key after parsing.
+        const reply = ServerMessageSchema.safeParse(base)
+        assert.ok(reply.success)
+        assert.equal(reply.data.kind, undefined)
+        // An older client's schema does not know the field at all: a frame carrying a key the schema
+        // does not declare must still parse, with the key dropped (the schema is not strict).
+        const unknown = ServerMessageSchema.safeParse({ ...base, kind: 'thinking', someFutureField: 1 })
+        assert.ok(unknown.success, JSON.stringify(unknown.error?.issues))
+        assert.ok(!('someFutureField' in unknown.data), 'an unrecognised key is ignored, not carried or rejected')
+        // Bounded like the other short tags.
+        assert.ok(!ServerMessageSchema.safeParse({ ...base, kind: 'x'.repeat(33) }).success)
+      })
+
       it('ServerStreamEndSchema accepts the #6391 footer-stat thinkingDurationMs + thinkingTokens', async () => {
         const { ServerStreamEndSchema } = await import('../src/schemas/server.ts')
         // Both stats present (a provider that separates reasoning tokens).
