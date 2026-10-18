@@ -58,6 +58,8 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     setTheme: mockSetTheme,
     defaultProvider: 'claude-sdk',
     setDefaultProvider: vi.fn(),
+    sessionDefaultsNotice: null,
+    dismissSessionDefaultsNotice: vi.fn(),
     inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' },
     updateInputSettings: mockUpdateInputSettings,
     // #5184: header cost-badge display mode default + setter spy.
@@ -254,6 +256,59 @@ describe('SettingsPanel', () => {
       fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: '' } })
       expect(setDefaultProvider).toHaveBeenCalledWith('')
     })
+
+    it('keeps an unavailable saved override visible and dormant until the user chooses another provider', () => {
+      const setDefaultProvider = vi.fn()
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultProviderSource: 'user',
+        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+        setDefaultProvider,
+      })
+      const { rerender } = render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+      expect(select.value).toBe('gemini')
+      expect(screen.getByRole('option', { name: /Gemini.*unavailable/i })).toBeDisabled()
+      expect(screen.getByText(/saved override is kept/i)).toBeInTheDocument()
+      expect(select).toHaveAccessibleDescription(/unavailable on this server/i)
+      expect(setDefaultProvider).not.toHaveBeenCalled()
+
+      // Connecting to a server that offers the saved provider makes it usable
+      // again without changing the origin-global override.
+      mockState.availableProviders = [{ name: 'gemini' }, { name: 'codex' }]
+      rerender(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(select.value).toBe('gemini')
+      expect(screen.getByRole('option', { name: 'Gemini (CLI)' })).not.toBeDisabled()
+      expect(screen.queryByText(/saved override is kept/i)).not.toBeInTheDocument()
+      expect(setDefaultProvider).not.toHaveBeenCalled()
+
+      fireEvent.change(select, { target: { value: 'codex' } })
+      expect(setDefaultProvider).toHaveBeenCalledWith('codex')
+    })
+  })
+
+  describe('Session Defaults migration notice', () => {
+    it('shows what was cleared and dismisses through the same store action as New Session', () => {
+      const dismiss = vi.fn(() => { mockState.sessionDefaultsNotice = null })
+      setMockState({
+        sessionDefaultsNotice: { provider: 'claude-cli', model: 'opus-4-6' },
+        dismissSessionDefaultsNotice: dismiss,
+      })
+      const { rerender } = render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const notice = screen.getByTestId('session-defaults-notice')
+      expect(notice.closest('section')).toContainElement(screen.getByText('Session Defaults'))
+      expect(notice).toHaveTextContent('Claude Code (CLI)')
+      expect(notice).toHaveTextContent('opus-4-6')
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+      expect(dismiss).toHaveBeenCalledTimes(1)
+      rerender(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+    })
+
+    it('shows no notice after dismissal or when no migration was needed', () => {
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+    })
   })
 
   describe('Default model select reads the default provider OWN roster (#7728)', () => {
@@ -291,11 +346,7 @@ describe('SettingsPanel', () => {
       expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
-    it('follows the NORMALIZED provider the <select> above actually shows', () => {
-      // The persisted defaultProvider is absent from the server's list, so the
-      // provider <select> renders availableProviders[0]. Reading the raw
-      // persisted value here computed the roster for a provider that by
-      // construction can never have broadcast one, and the field vanished.
+    it('offers only the usable fallback provider models while the saved override is dormant', () => {
       setMockState({
         defaultProvider: 'gemini',
         defaultProviderSource: 'user',
@@ -304,7 +355,7 @@ describe('SettingsPanel', () => {
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
-      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
       expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
     })
 

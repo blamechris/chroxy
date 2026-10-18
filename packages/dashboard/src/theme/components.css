@@ -9156,6 +9156,7 @@ button.sidebar-token-view-session-row:hover {
 
 .settings-field select {
   width: 100%;
+  min-height: 44px;
   padding: 8px 10px;
   background: var(--bg-input);
   color: var(--text-primary);
