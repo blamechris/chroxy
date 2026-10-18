@@ -38,6 +38,8 @@ import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './l
 import { configDir, configPath } from './config-dir.js'
 import { detectStrandedState, missingTokenAdvice, startupStrandedWarning } from './config-dir-migration.js'
 
+import { warnIfDefaultCwdDisallowed } from './handler-utils.js'
+
 const log = createLogger('cli')
 // #5368 slice (b): QRCode + writeConnectionInfo moved to startup-display.js with
 // displayQr; only removeConnectionInfo (shutdown) is still used here.
@@ -1143,6 +1145,7 @@ export async function startCliServer(config) {
     inspectContainerLiveness((cid) => livenessBackend.getEnvironmentStatus(cid), containerId)
 
   // 1. Create session manager
+  warnIfDefaultCwdDisallowed(config)
   const { sessionManager, startupSkillPolicy } = createDaemonSessionManager(config, {
     maxSessions: config.maxSessions || 5,
     port: PORT,

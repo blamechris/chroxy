@@ -10,6 +10,7 @@ import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
+import { addDirectoryListingProbe } from '../store/directory-listing-probes'
 import { buildProviderLimitationNote, selectOwnModelsForProvider, selectPermissionModesForProvider } from '@chroxy/store-core'
 import type { ModelsByProvider, PermissionMode } from '@chroxy/store-core'
 import {
@@ -354,6 +355,10 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // before the next event fires, so we can't read from the DOM in submit.
   const nameValRef = useRef('')
   const cwdValRef = useRef('')
+  // #8303: set when the server refuses to list the field's own cwd (typically a
+  // prefilled default cwd outside what Browse may open). Keyed by path so editing
+  // the field hides it without needing a reset effect.
+  const [cwdBrowseNote, setCwdBrowseNote] = useState<{ path: string; message: string } | null>(null)
 
   // Autocomplete suggestions from server
   const { suggestions: autocompleteSuggestions } = usePathAutocomplete(cwd)
@@ -386,6 +391,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   // preset). Collapse the expanded preview whenever the cwd changes.
   const currentPreset = trimmedCwd ? sessionPresetSnapshots?.[trimmedCwd] : undefined
   useEffect(() => { setPresetExpanded(false) }, [trimmedCwd])
+
+  // Pending not-browsable probe (#8303); released on close, unmount or re-open.
+  const probeUnsubRef = useRef<(() => void) | null>(null)
+  const releaseProbe = () => { probeUnsubRef.current?.(); probeUnsubRef.current = null }
+  // No unmount cleanup: StrictMode's simulated unmount would drop the live probe
+  // (the fresh-open effect below does not re-run); a one-shot left on a truly
+  // unmounted modal fires at most once into a no-op setState.
+  useEffect(() => {
+    if (!open) releaseProbe()
+  }, [open])
 
   const prevOpenRef = useRef(false)
   useEffect(() => {
@@ -427,6 +442,24 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     } else {
       setName('')
       nameValRef.current = ''
+    }
+    // #8303: probe the prefilled cwd once so the "Browse can't open this directory"
+    // note is there before the user clicks Browse. The probe is a one-shot listener
+    // matched on the exact response path, registered beside the store's single
+    // callback slot (autocomplete and Browse both overwrite that), so neither can
+    // swallow it. A `~` cwd is skipped: the server echoes only the expanded path
+    // (or a workspace-root fallback), so there is nothing to match the request on.
+    // Skipped under Tauri, where Browse is the native picker and never lists.
+    const inTauri = typeof window !== 'undefined' &&
+      !!(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    const probePath = cwdValue.trim()
+    releaseProbe()
+    setCwdBrowseNote(null)
+    if (probePath && !probePath.startsWith('~') && !inTauri) {
+      probeUnsubRef.current = addDirectoryListingProbe(probePath, (listing: DirectoryListing) => {
+        setCwdBrowseNote(listing.error ? { path: probePath, message: listing.error } : null)
+      })
+      requestDirectoryListing(probePath)
     }
   }, [open, initialCwd, existingNames, availableProviders, defaultProvider])
 
@@ -561,6 +594,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
         setBrowsePath(responsePath)
       }
       setBrowseLoading(false)
+      if (requestedPath === cwdValRef.current.trim()) {
+        setCwdBrowseNote(listing.error ? { path: requestedPath, message: listing.error } : null)
+      }
       if (listing.error) {
         setBrowseError(listing.error)
         setBrowseEntries([])
@@ -795,6 +831,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           </div>
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
+          )}
+          {cwdBrowseNote && cwdBrowseNote.path === cwd.trim() && (
+            <span className="cwd-hint cwd-browse-note" role="note" data-testid="cwd-browse-note">
+              <span title={cwdBrowseNote.message}>Browse can&apos;t open this directory on this server.</span>
+            </span>
           )}
           {currentPreset && (
             <div className="repo-preset-disclosure" data-testid="repo-preset-disclosure">

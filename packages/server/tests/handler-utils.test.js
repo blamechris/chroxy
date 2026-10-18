@@ -703,8 +703,11 @@ describe('validateCwdWithinHome', () => {
     // guard, which is the very spelling this PR removed everywhere else. On
     // Windows os.tmpdir() is C:\Users\<u>\AppData\Local\Temp — INSIDE home —
     // so the guard is doing real work here, not just guarding a POSIX literal.
-    const realTmp = realpathSync(tmpdir())
-    const home = realpathSync(homedir())
+    // Native realpath, like the policy: the JS flavour keeps Windows 8.3 short
+    // names (C:\Users\RUNNER~1\...), so this guard would misjudge a temp dir
+    // that IS inside home as outside it.
+    const realTmp = realpathSync.native(tmpdir())
+    const home = realpathSync.native(homedir())
     if (isPathWithin(realTmp, home)) return   // legitimately inside home (Windows)
     const err = validateCwdWithinHome(realTmp)
     assert.ok(err)
