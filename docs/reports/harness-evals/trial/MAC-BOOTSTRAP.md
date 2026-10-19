@@ -118,7 +118,7 @@ status: `README.md`.
     Say "starting <RUN_ID>" to the supervisor when you type the invocation and
     "done <RUN_ID>" (plus the Codex cost from the usage page for the two GPT runs)
     when the session ends.
-    **Chroxy dashboard runs: press Enter once, then hands off that session.** The
+    **Chroxy dashboard runs: press Enter once, then keep your hands off that session.** The
     dashboard binds Escape to "interrupt the current turn" and turns the Send button
     into Stop while a turn runs, so a keystroke meant to dismiss the slash palette's
     "No commands found" popup (cosmetic; it closes by itself) or a second press on the
