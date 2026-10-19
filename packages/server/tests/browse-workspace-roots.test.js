@@ -20,7 +20,10 @@ import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
  * Windows; there the positive "root outside home" cases skip (the same cases run
  * on POSIX) rather than pass trivially.
  */
-const TMP_IS_OUTSIDE_HOME = !isPathWithin(realpathSync(tmpdir()), realpathSync(homedir()))
+// Resolved with the NATIVE realpath, the way Browse resolves (fs.promises.realpath):
+// the JS `realpathSync` keeps Windows 8.3 short names (`NETWOR~1`) that the native
+// one expands, so a sync comparison called a temp dir "outside" a profile it sits in.
+const TMP_IS_OUTSIDE_HOME = !isPathWithin(realpathSync.native(tmpdir()), realpathSync.native(homedir()))
 const SKIP_TMP_INSIDE_HOME = TMP_IS_OUTSIDE_HOME ? false : 'os.tmpdir() is inside $HOME on this platform'
 
 function listWith(config, requestedPath) {
