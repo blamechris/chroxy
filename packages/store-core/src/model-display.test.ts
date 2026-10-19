@@ -58,6 +58,16 @@ describe('model presentation (#8260)', () => {
     expect(modelChoices([...models, long]).map(m => m.label)).toContain('Haiku 4.5 (pinned 4.5, 1M)')
     expect(formatActiveModelLabel(models, 'claude-haiku-4-5-20251101[1m]', null, 'claude-sdk')).toBe('Haiku 4.5 (pinned 20251101, 1M)')
   })
+  it('cross-family custom targets that share a descriptor get one full-target discriminator', () => {
+    const custom = [
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' },
+    ]
+    const choices = modelChoices(custom)
+    expect(choices.map(m => m.label)).toEqual(['Custom (claude-alpha-1-0)', 'Custom (claude-beta-1-0)'])
+    expect(choices.map(m => m.id)).toEqual(['alpha', 'beta'])
+    expect(choices.map(m => m.fullId)).toEqual(['claude-alpha-1-0', 'claude-beta-1-0'])
+  })
   it('uses only the selected provider roster', () => {
     let map = mergeModelsByProvider({}, 'claude-sdk', { models, defaultModelId: 'haiku' })
     map = mergeModelsByProvider(map, 'codex', { models: [{ id: 'gpt', fullId: 'gpt', label: 'GPT' }], defaultModelId: 'gpt' })
