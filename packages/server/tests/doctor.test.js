@@ -1475,6 +1475,23 @@ describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
     assert.equal(checks.find(c => c.name === 'Tunnel routability'), undefined)
   })
 
+  it('Port check uses the configured port when no explicit port is passed, and an explicit port still wins', async () => {
+    const { writeFileSync, rmSync } = await import('node:fs')
+    const cfgPath = join(process.env.CHROXY_CONFIG_DIR, 'config.json')
+    const savedEnv = process.env.PORT
+    delete process.env.PORT
+    writeFileSync(cfgPath, JSON.stringify({ port: 59131 }))
+    try {
+      const fromConfig = await runDoctorChecks({ providers: ['claude-sdk'] })
+      assert.ok(fromConfig.checks.find(c => c.name === 'Port').message.startsWith('59131 '))
+      const explicit = await runDoctorChecks({ port: 59132, providers: ['claude-sdk'] })
+      assert.ok(explicit.checks.find(c => c.name === 'Port').message.startsWith('59132 '))
+    } finally {
+      rmSync(cfgPath, { force: true })
+      if (savedEnv !== undefined) process.env.PORT = savedEnv
+    }
+  })
+
   it('runDoctorChecks fires the probe for a configured named tunnel, incl. the cloudflare:named alias', async () => {
     const { writeFileSync, rmSync } = await import('node:fs')
     // _setup.mjs points CHROXY_CONFIG_DIR at a writable tmp dir and doctor's
