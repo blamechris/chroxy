@@ -28,7 +28,10 @@ export function isLoopbackHost(host) {
   // 127.0.0.0/8, but only for real IPv4 literals.
   if (isIPv4(h) && h.startsWith('127.')) return true
   // IPv4-mapped IPv6 loopback, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1.
-  if (h.startsWith('::ffff:127.') || h.startsWith('::ffff:7f')) return true
+  // The hex form is loopback only when the first mapped hextet is four digits
+  // in 7f00-7fff; a bare `7f` prefix also matched `::ffff:7f:1` (0.127.0.1).
+  if (h.startsWith('::ffff:127.')) return isIPv6(h)
+  if (/^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(h)) return true
   return false
 }
 
