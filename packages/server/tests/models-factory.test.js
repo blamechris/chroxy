@@ -685,6 +685,19 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
     assert.equal(entry.contextWindow, 400_000)
   })
 
+  it('updateContextWindow rejects non-finite windows and leaves the roster untouched', () => {
+    const registry = nonClaudeRegistry()
+    registry.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }])
+    for (const bad of [Number.NaN, Infinity, -Infinity]) {
+      assert.equal(registry.updateContextWindow('gpt-5.5', bad), false, `${bad} must be rejected`)
+    }
+    const entry = registry.getModels().find((m) => m.fullId === 'gpt-5.5')
+    assert.equal(entry.contextWindow, 272_000)
+    // No override was recorded: a later refresh still takes the catalogue value.
+    registry.updateModels([{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 300_000 }])
+    assert.equal(registry.getModels().find((m) => m.fullId === 'gpt-5.5').contextWindow, 300_000)
+  })
+
   it('an unusable caller window falls through to the registry heuristic', () => {
     const registry = nonClaudeRegistry()
     registry.updateModels([
