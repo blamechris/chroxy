@@ -165,7 +165,8 @@ describe('directory listings use the session workspace policy', () => {
     assert.equal((await list(join(workspace, 'missing'))).error, 'Directory not found')
     writeFileSync(join(workspace, 'file'), 'fixture')
     const reply = await list(join(workspace, 'file', 'child'))
-    assert.equal(reply.error, 'Not a directory')
+    // Windows native realpath reports ENOENT through a file; POSIX reports ENOTDIR.
+    assert.equal(reply.error, process.platform === 'win32' ? 'Directory not found' : 'Not a directory')
     assert.deepEqual(reply.entries, [])
   })
   it('reports in-policy unreadable targets without exposing outside path state', { skip: POSIX_PERM_SKIP }, async () => {
