@@ -438,7 +438,7 @@ export function ChatView({
   // and the #4496 tail-only stream-stall retry wiring preserved.
   const renderItem = useCallback(
     ({ item: group }: ListRenderItemInfo<DisplayGroup>) => {
-      if (group.type === 'activity') {
+      if (group.type === 'activity' && group.messages.length > 1) {
         const firstMsg = group.messages[0];
         return (
           <AnimatedMessage
@@ -461,7 +461,7 @@ export function ChatView({
           </AnimatedMessage>
         );
       }
-      const msg = group.message;
+      const msg = group.type === 'activity' ? group.messages[0] : group.message;
       // #6972 — distinct "Context compacted" marker for a system message
       // carrying `compactMetadata` (reinserted by insertCompactionMarkers
       // above). Replaces the whole row — same early-return-before-the-

@@ -8,8 +8,8 @@ jest.mock('../../store/connection', () => ({
 }));
 import { ToolBubble } from '../chat/ToolBubble';
 import { ToolDetailModal } from '../chat/ToolDetailModal';
-import { MessageBubble } from '../chat/MessageBubble';
 import { ChatView } from '../ChatView';
+import { ActivityGroup } from '../chat/ActivityGroup';
 const trees: renderer.ReactTestRenderer[] = [];
 const noop = () => {};
 beforeAll(() => {
@@ -83,13 +83,28 @@ describe('tool detail termination state', () => {
     expect(text(tree)).toContain('hi');
     expect(text(tree)).not.toContain('terminated');
   });
-  it('carries the callback through ChatView state into the real modal', () => {
-    const tree = render(<ChatView messages={[{ id: 'reply', type: 'response', content: 'reply', timestamp: 1 }]} scrollViewRef={React.createRef<FlatList>()} claudeReady onSelectOption={noop} isCliMode={false} selectedIds={new Set()} isSelecting={false} isSelectingRef={{ current: false }} onToggleSelection={noop} streamingMessageId={null} />);
-    const openDetail = tree.root.findByType(MessageBubble).props.onOpenDetail;
-    const lone = bubble(message({ toolResult: 'cancelled', toolResultTerminatedReason: 'process_exit' }), openDetail);
-    tap(lone); tap(lone);
+  it('routes a stopped lone tool through the real ChatView into its detail modal', () => {
+    const data = message({ toolResult: 'raw provider cancellation', toolResultIsError: true, toolResultTerminatedReason: 'user_stop_before_run' });
+    const tree = render(<ChatView messages={[data]} scrollViewRef={React.createRef<FlatList>()} claudeReady onSelectOption={noop} isCliMode={false} selectedIds={new Set()} isSelecting={false} isSelectingRef={{ current: false }} onToggleSelection={noop} streamingMessageId={null} />);
+    expect(tree.root.findAllByType(ActivityGroup)).toHaveLength(0);
+    const tool = tree.root.findByType(ToolBubble);
+    expect(text(tree)).toContain(describeTurnTermination('user_stop_before_run').summary);
+    expect(text(tree)).not.toContain('raw provider cancellation');
+    expect(tree.root.findAllByProps({ testID: 'tool-bubble-pulse-tu-1' })).toHaveLength(0);
+    act(() => { tool.findAllByProps({ activeOpacity: 0.7 })[0]!.props.onPress(); });
+    act(() => { tool.findAllByProps({ activeOpacity: 0.7 })[0]!.props.onPress(); });
     expect(tree.root.findByType(ToolDetailModal).props.visible).toBe(true);
-    expect(tree.root.findByType(ToolDetailModal).props.toolResultTerminatedReason).toBe('process_exit');
-    expect(text(tree)).toContain(describeTurnTermination('process_exit').summary);
+    expect(tree.root.findByType(ToolDetailModal).props.toolResultTerminatedReason).toBe('user_stop_before_run');
+    expect(text(tree)).toContain(describeTurnTermination('user_stop_before_run').summary);
+  });
+  it('keeps an ordinary pending lone tool running through the real ChatView', () => {
+    const tree = render(<ChatView messages={[message()]} scrollViewRef={React.createRef<FlatList>()} claudeReady onSelectOption={noop} isCliMode={false} selectedIds={new Set()} isSelecting={false} isSelectingRef={{ current: false }} onToggleSelection={noop} streamingMessageId={null} />);
+    expect(tree.root.findAllByType(ToolBubble)).toHaveLength(1);
+    expect(tree.root.findAllByProps({ testID: 'tool-bubble-pulse-tu-1' }).length).toBeGreaterThan(0);
+  });
+  it('keeps two-tool activity groups on the grouped renderer', () => {
+    const tree = render(<ChatView messages={[message(), message({ id: 'tool-2', toolUseId: 'tu-2', timestamp: 2 })]} scrollViewRef={React.createRef<FlatList>()} claudeReady onSelectOption={noop} isCliMode={false} selectedIds={new Set()} isSelecting={false} isSelectingRef={{ current: false }} onToggleSelection={noop} streamingMessageId={null} />);
+    expect(tree.root.findAllByType(ActivityGroup)).toHaveLength(1);
+    expect(tree.root.findAllByType(ToolBubble)).toHaveLength(0);
   });
 });
