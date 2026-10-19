@@ -438,7 +438,66 @@ function pathTouchesConfigDir(absPath) {
     // realpathSync, so it cannot be inside a directory that is not there.
     return false
   }
-  return isPathWithin(absPath, realConfigDir)
+  if (isPathWithin(absPath, realConfigDir)) return true
+  // #8303: `realpathSync` keeps the caller's spelling of a path's case, while
+  // `fs.promises.realpath` (which Browse resolves with) canonicalises it. On a
+  // case-insensitive filesystem a `CHROXY_CONFIG_DIR` spelled differently from the
+  // on-disk name therefore never matches a canonical `absPath`. Also test the
+  // native-canonical form, so the deny-list holds for both resolvers.
+  try {
+    const nativeConfigDir = realpathSync.native(configDir())
+    return nativeConfigDir !== realConfigDir && isPathWithin(absPath, nativeConfigDir)
+  } catch {
+    return false
+  }
+}
+
+/** The realpath-resolved home directory (honouring the test-only `homeOverride`). */
+function resolvedHome(config) {
+  const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
+    ? config.homeOverride
+    : homedir()
+  try {
+    return realpathSync(rawHome)
+  } catch {
+    return rawHome
+  }
+}
+
+/**
+ * The credential-directory deny-list (layers 2 and 2b of `validateCwdAllowed`),
+ * factored out so directory BROWSING applies the same rule as session creation
+ * (#8303): one deny-list, two callers.
+ *
+ * `homeOverride` exists so tests can use a hermetic fake home directory instead
+ * of creating throwaway dirs under the user's real ~/.config. Never used in
+ * production — config.js does not declare or forward homeOverride from user
+ * config.
+ * #7273 review — BOTH sides must be realpath-resolved or the comparison is
+ * meaningless. `realPath` is the caller's resolved path; `homedir()` is not.
+ * When $HOME is itself a symlink (common on macOS//home layouts and in
+ * containers), the resolved path and the unresolved home share no prefix,
+ * `pathTouchesForbiddenSubdir` returns false for every path, and the whole
+ * credential deny-list — ~/.ssh, ~/.aws, ~/.config/gcloud — silently stops
+ * denying. Falls back to the raw value if it cannot be resolved, which is the
+ * conservative direction: an unresolvable $HOME still gets a prefix test.
+ *
+ * @param {string} realPath - A realpath-resolved absolute path
+ * @param {object} [config] - Optional runtime config (only `homeOverride` is read)
+ * @returns {string|null} Error message or null when the path is not a credential/config directory
+ */
+export function credentialDirError(realPath, config = null) {
+  const home = resolvedHome(config)
+  if (pathTouchesForbiddenSubdir(realPath, home)) {
+    return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
+  }
+  // The daemon's OWN state root, wherever CHROXY_CONFIG_DIR put it. Separate from
+  // the set above because that one matches literal first segments under $HOME and
+  // cannot follow a relocated root (#7052).
+  if (pathTouchesConfigDir(realPath)) {
+    return 'Directory is not allowed: the chroxy config/state directory is blocked for security'
+  }
+  return null
 }
 
 /**
@@ -483,38 +542,10 @@ export function validateCwdAllowed(cwd, config = null) {
     return `Cannot resolve path: ${cwd}`
   }
 
-  // Layer 2: credential-directory deny-list (always active).
-  // `homeOverride` exists so tests can use a hermetic fake home
-  // directory instead of creating throwaway dirs under the user's
-  // real ~/.config. Never used in production — config.js does not
-  // declare or forward homeOverride from user config.
-  // #7273 review — BOTH sides must be realpath-resolved or the comparison is
-  // meaningless. `realCwd` above is resolved; `homedir()` is not. When $HOME is
-  // itself a symlink (common on macOS//home layouts and in containers), the
-  // resolved cwd and the unresolved home share no prefix, `pathTouchesForbiddenSubdir`
-  // returns false for every path, and the whole credential deny-list — ~/.ssh,
-  // ~/.aws, ~/.config/gcloud — silently stops denying. Reproduced with a
-  // positive control. Falls back to the raw value if it cannot be resolved,
-  // which is the conservative direction: an unresolvable $HOME still gets a
-  // prefix test rather than none.
-  const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
-    ? config.homeOverride
-    : homedir()
-  let home
-  try {
-    home = realpathSync(rawHome)
-  } catch {
-    home = rawHome
-  }
-  if (pathTouchesForbiddenSubdir(realCwd, home)) {
-    return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
-  }
-  // Layer 2b: the daemon's OWN state root, wherever CHROXY_CONFIG_DIR put it.
-  // Separate from the set above because that one matches literal first segments
-  // under $HOME and cannot follow a relocated root (#7052).
-  if (pathTouchesConfigDir(realCwd)) {
-    return 'Directory is not allowed: the chroxy config/state directory is blocked for security'
-  }
+  // Layers 2 + 2b: credential-directory deny-list and the daemon's own state root
+  // (always active). The rule and its rationale live in `credentialDirError`.
+  const credentialError = credentialDirError(realCwd, config)
+  if (credentialError) return credentialError
 
   // Layer 3: explicit allowlist (opt-in, strict)
   const roots = Array.isArray(config?.workspaceRoots)
@@ -546,10 +577,27 @@ export function validateCwdAllowed(cwd, config = null) {
   }
 
   // Layer 4: home fallback (default)
-  if (!isPathWithin(realCwd, home)) {
+  if (!isPathWithin(realCwd, resolvedHome(config))) {
     return 'Directory must be within your home directory'
   }
   return null
+}
+
+/**
+ * #8303 — the startup warning for a configured default cwd that fails the same
+ * check an explicit session cwd gets. A session created with a blank cwd inherits
+ * `config.cwd` without `validateCwdAllowed`, so without this the daemon gives
+ * three different answers for one directory and says nothing.
+ *
+ * @param {object} [config] - Runtime config (`cwd`, `workspaceRoots`)
+ * @returns {string|null} A warning line, or null when no cwd is configured or it passes
+ */
+export function configuredCwdWarning(config = null) {
+  const cwd = config?.cwd
+  if (typeof cwd !== 'string' || cwd.length === 0) return null
+  const problem = validateCwdAllowed(cwd, config)
+  if (!problem) return null
+  return `Configured cwd ${cwd} fails the session-cwd check (${problem}). Sessions created with a blank cwd still start there, but an explicit cwd in that directory is refused and Browse cannot list it.`
 }
 
 /**

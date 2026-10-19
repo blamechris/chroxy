@@ -196,6 +196,24 @@ async function unresolvedLinkTarget(cursor, stepOver) {
 }
 
 /**
+ * #8303 — the deepest ancestor of `absPath` that `realpath()` resolves, stepping
+ * over the same components {@link isUnresolvablePathWithin} does, or `null` when
+ * the walk cannot finish. Like it, FOR CHOOSING AN ERROR MESSAGE ONLY: Browse uses
+ * it to give a path under a credential directory the credential denial instead of
+ * a specific reason ("Not a directory"), which would tell an existing file apart
+ * from a missing one inside that directory.
+ * @param {string} absPath - Absolute path whose `realpath()` failed
+ * @returns {Promise<string|null>}
+ */
+export async function unresolvableAncestor(absPath) {
+  try {
+    return await deepestAncestorWalk(absPath, STEP_OVER_UNSEEABLE)
+  } catch {
+    return null
+  }
+}
+
+/**
  * #8012 — FOR CHOOSING AN ERROR MESSAGE ONLY; never for granting access.
  *
  * `realpath(absPath)` failed with something other than ENOENT (EACCES, EPERM,
