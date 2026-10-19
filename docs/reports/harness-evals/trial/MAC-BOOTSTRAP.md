@@ -127,8 +127,8 @@ status: `README.md`.
     found" while typing a command with arguments is cosmetic and closes on send. Run 5's
     first attempt ended on such an interrupt within seconds of the send: the daemon
     logged `[ws] Interrupt from <client>` and `Query aborted after user stop`, and
-    Claude Code's transcript ended with a single user entry, "[Request interrupted by
-    user]", with no model usage. Do not change the model or permission mode after
+    Claude Code's transcript recorded no model usage and its last conversation entry
+    was a single user message, "[Request interrupted by user]". Do not change the model or permission mode after
     sending either: the daemon refuses a mid-turn model change, and a switch to Auto
     applies live and changes the run's conditions. If the first tool call has not
     appeared within a few minutes, check the daemon log for an `Interrupt` line before
