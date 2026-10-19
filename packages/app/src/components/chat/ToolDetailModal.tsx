@@ -10,12 +10,13 @@ import {
   Pressable,
   Image,
 } from 'react-native';
+import { describeTurnTermination } from '@chroxy/store-core';
 import type { ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 
-export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
+export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, toolResultTerminatedReason, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
   /**
@@ -33,12 +34,14 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   toolResultTruncated?: boolean;
   toolResultImages?: ToolResultImage[];
   serverName?: string;
+  toolResultTerminatedReason?: string;
   onClose: () => void;
   onImagePress: (uri: string) => void;
 }) {
   // #6982: structured WebSearch/WebFetch render, parse-with-fallback —
   // `null` (non-web tool, absent or unparseable result) keeps the existing
   // `<Text selectable>` dump below.
+  const termination = toolResultTerminatedReason ? describeTurnTermination(toolResultTerminatedReason) : null;
   const webParsed = parseWebToolResult(rawToolName, toolResult);
   return (
     <Modal
@@ -66,6 +69,12 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.toolModalScroll}>
+            {termination ? (
+              <View style={styles.terminationNotice}>
+                <Text style={[styles.toolModalSectionLabel, styles.terminationText]}>{termination.label}</Text>
+                <Text selectable style={[styles.toolModalContent, styles.terminationText]}>{termination.summary}</Text>
+              </View>
+            ) : null}
             {content ? (
               <>
                 <Text style={styles.toolModalSectionLabel}>Input</Text>
@@ -95,7 +104,7 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
                 </View>
               </>
             ) : null}
-            {toolResult != null ? (
+            {toolResult != null && !termination ? (
               <>
                 <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
                 {webParsed ? (
@@ -161,6 +170,12 @@ const styles = StyleSheet.create({
   },
   toolModalScroll: {
     padding: 16,
+  },
+  terminationNotice: {
+    marginBottom: 12,
+  },
+  terminationText: {
+    color: COLORS.accentOrange,
   },
   toolModalContent: {
     color: COLORS.textSecondary,

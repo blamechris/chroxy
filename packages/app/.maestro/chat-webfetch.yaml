@@ -26,24 +26,18 @@ name: ChatView WebFetch structured tool result
 - tapOn:
     id: "chat-message-input"
 - inputText: "show-webfetch"
+- hideKeyboard
 
 - tapOn:
     id: "chat-send-button"
 
+# Expand the singleton ToolBubble once to reveal its structured result.
 - extendedWaitUntil:
     visible:
-      id: "activity-group"
+      id: "tool-collapsed-preview"
     timeout: 10000
-
 - tapOn:
-    id: "activity-group-header"
-- waitForAnimationToEnd
-
-# Expand the WebFetch entry by tapping its collapsed-preview text (the
-# head of the raw tool_result, which begins with the Prompt: line). Same
-# tap-by-text rationale as chat-todolist.yaml / chat-websearch.yaml.
-- tapOn:
-    text: ".*Summarize this page.*"
+    id: "tool-collapsed-preview"
 - waitForAnimationToEnd
 
 - extendedWaitUntil:

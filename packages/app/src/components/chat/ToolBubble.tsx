@@ -7,7 +7,7 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
-import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
+import { describeTurnTermination, getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -46,11 +46,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   isSelected: boolean;
   isSelecting: boolean;
   onToggleSelection: () => void;
-  /** The trailing `rawToolName` is the UNFORMATTED `message.tool` (#6982) —
+  /** The `rawToolName` argument is the UNFORMATTED `message.tool` (#6982) —
    *  the detail modal needs it to route WebSearch/WebFetch results through
    *  the structured renderer, since `toolName` has already been through
    *  `formatToolName`. */
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string, toolResultTerminatedReason?: string) => void;
   /** #5517: seed + persist expand state in ChatView's id-keyed registry so
    *  it survives FlatList row recycling. */
   getInitialExpanded?: (id: string) => boolean;
@@ -86,7 +86,10 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     ? formatPartialPreview(message.toolInputPartial)
     : '';
   const rawContent = message.content?.trim() || '';
-  const isPlaceholderContent = !rawContent || rawContent === message.tool;
+  // Empty input is also a placeholder while sanitized input deltas arrive.
+  // Keep finalized input and completed empty-input tools authoritative.
+  const isPlaceholderContent = !rawContent || rawContent === message.tool
+    || (rawContent === '{}' && message.toolResult === undefined && !(message.toolResultImages?.length));
   // #6018 — the NON-streaming path also leaks: when `tool_start` carries `input`,
   // store-core serializes it into `message.content` (`content: msg.input ?
   // JSON.stringify(msg.input) : tool`), so `rawContent` is the raw `{"questions":
@@ -115,7 +118,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   // the same predicate used by the ActivityIndicator above.
   const hasResult =
     message.toolResult !== undefined || (message.toolResultImages?.length ?? 0) > 0;
-  const inFlight = !hasResult;
+  const termination = message.toolResultTerminatedReason
+    ? describeTurnTermination(message.toolResultTerminatedReason)
+    : null;
+  const ordinaryError = !termination && Boolean(message.toolResultIsError);
+  const inFlight = !hasResult && !termination && !ordinaryError;
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -126,7 +133,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool, message.toolResultTerminatedReason);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -177,7 +184,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const previewSource = partialSummary && isPlaceholderContent
     ? partialSummary
     : (contentSummary || (suppressRawInput ? '' : content));
-  const preview = previewSource.length > 60 ? previewSource.slice(0, 60) + '...' : previewSource;
+  const preview = termination ? termination.summary : previewSource.length > 60 ? previewSource.slice(0, 60) + '...' : previewSource;
 
   // #4180: TodoWrite tool_result is rendered as a structured checklist
   // when expanded. Parse once (only when expanded + tool matches + the
@@ -217,6 +224,12 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     >
       <View style={styles.toolHeader}>
         {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
+        {termination && (
+          <Icon name="stop" size={12} color={COLORS.accentOrange} accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
+        )}
+        {ordinaryError && (
+          <Icon name="alertCircle" size={12} color={COLORS.accentRed} accessibilityLabel="tool failed" />
+        )}
         {inFlight && (
           <View
             style={styles.pulse}
@@ -235,17 +248,20 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
             <>Tool: {displayTool}</>
           )}
         </Text>
+        {termination && <Text style={styles.terminationLabel}>{termination.label}</Text>}
       </View>
       {expanded ? (
         <>
-          {todoParsed ? (
+          {termination ? (
+            <Text selectable style={[styles.toolContentExpanded, styles.terminationText]}>{termination.summary}</Text>
+          ) : todoParsed ? (
             <TodoList parsed={todoParsed} />
           ) : webParsed ? (
             <WebToolResultView parsed={webParsed} />
           ) : isLongContent && !resultExpanded ? (
             <>
               <Text selectable style={styles.toolContentExpanded}>{content.split('\n').slice(0, TOOL_OUTPUT_COLLAPSE_HEAD_LINES).join('\n')}</Text>
-              <TouchableOpacity onPress={() => setResultExpanded(true)} testID={`tool-result-expand-${message.id}`}>
+              <TouchableOpacity style={styles.toolResultToggle} onPress={() => setResultExpanded(true)} testID={`tool-result-expand-${message.id}`}>
                 <Text style={styles.toolResultExpand}>Show {contentLineCount - TOOL_OUTPUT_COLLAPSE_HEAD_LINES} more lines</Text>
               </TouchableOpacity>
             </>
@@ -253,7 +269,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
             <>
               <Text selectable style={styles.toolContentExpanded}>{content}</Text>
               {isLongContent && (
-                <TouchableOpacity onPress={() => setResultExpanded(false)} testID={`tool-result-collapse-${message.id}`}>
+                <TouchableOpacity style={styles.toolResultToggle} onPress={() => setResultExpanded(false)} testID={`tool-result-collapse-${message.id}`}>
                   <Text style={styles.toolResultExpand}>Show less</Text>
                 </TouchableOpacity>
               )}
@@ -312,6 +328,14 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
   },
+  terminationLabel: {
+    color: COLORS.accentOrange,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  terminationText: {
+    color: COLORS.accentOrange,
+  },
   mcpServerTag: {
     color: COLORS.textMuted,
     fontSize: 10,
@@ -331,6 +355,12 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   // #6391 (mobile auto-collapse): the "Show N more lines" / "Show less" pill.
+  toolResultToggle: {
+    minHeight: 48,
+    minWidth: 48,
+    justifyContent: 'center',
+    alignSelf: 'flex-start',
+  },
   toolResultExpand: {
     color: COLORS.accentBlue,
     fontSize: 12,

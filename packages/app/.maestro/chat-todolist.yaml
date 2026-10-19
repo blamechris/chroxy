@@ -3,8 +3,7 @@ name: ChatView TodoWrite tool rendering
 ---
 
 # #4195 — End-to-end coverage for TodoWrite tool rendering in the chat
-# flow. Post-#4201 ActivityEntry has its own per-entry expand state,
-# so tapping a TodoWrite row inside an expanded activity group reveals
+# flow. Expanding a singleton TodoWrite ToolBubble reveals
 # the structured TodoList inline (header + per-item rows with status
 # markers + optional truncation marker). This flow exercises that
 # full path end-to-end.
@@ -31,48 +30,22 @@ name: ChatView TodoWrite tool rendering
 - tapOn:
     id: "chat-message-input"
 - inputText: "show-todos"
+- hideKeyboard
 
 # Send the message — testID added in InputBar.tsx (the ↑ icon button
 # isn't text-matchable in Maestro on iOS).
 - tapOn:
     id: "chat-send-button"
 
-# Dismiss the keyboard so the activity group's bounds line up with the
-# unscrolled screen — the keyboard pushes content up by ~50% and would
-# move the entry row out from under our point-tap.
-
-# Wait for the activity group to land. testID set on the outer View
-# in ActivityGroup.tsx (the View wraps the header + body).
+# One tool renders directly as ToolBubble. Expand its preview once to
+# reveal the structured TodoList, without an activity-group wrapper.
 - extendedWaitUntil:
     visible:
-      id: "activity-group"
+      id: "tool-collapsed-preview"
     timeout: 10000
-
-# Screenshot the collapsed activity group ("1 tool used — 1 TodoWrite")
-- takeScreenshot: chat-todolist-activity-group-collapsed
-
-# Expand the activity group by tapping its header. The outer
-# `activity-group` is a View — its testID is for assertion only; the
-# onPress handler is on the inner `activity-group-header` TouchableOpacity.
+- takeScreenshot: chat-todolist-collapsed
 - tapOn:
-    id: "activity-group-header"
-- waitForAnimationToEnd
-
-# Screenshot the collapsed-entry state (group expanded, entry not).
-- takeScreenshot: chat-todolist-entry-collapsed
-
-# Tap the TodoWrite entry to expand it → parseTodoList(message.toolResult)
-# runs and renders <TodoList /> inline. Maestro's iOS XCUITest tap-by-id
-# on a nested TouchableOpacity doesn't always propagate to React Native's
-# touch responder system, so tap the entry's collapsed-preview TEXT
-# ("Todo list (3 items): …" from the mock fixture) — the tap resolves to
-# that element's coordinates, which keeps it on the entry row on every
-# device. (The previous fixed point-tap at 50%,55% was calibrated for
-# iPhone 17 Pro Max and misses the row on iPhone 16 Pro.) We do NOT
-# double-tap with both id and point because if BOTH succeed they toggle
-# the state twice and collapse the entry — flaky.
-- tapOn:
-    text: ".*Todo list \\(3 items\\).*"
+    id: "tool-collapsed-preview"
 - waitForAnimationToEnd
 
 # LayoutAnimation can defer the state→render commit on iOS; give it a
@@ -84,7 +57,7 @@ name: ChatView TodoWrite tool rendering
 
 # Assert the structured renderer is present. Each testID is set in
 # packages/app/src/components/chat/TodoList.tsx — if the parser missed
-# the canonical header (regression in TODO_LINE_RE) or ActivityEntry
+# the canonical header (regression in TODO_LINE_RE) or ToolBubble
 # parses the wrong field (regression on #4194's content→toolResult fix
 # re-introduced at the new call site), these would not render and the
 # assertions would fail.

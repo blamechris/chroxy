@@ -6,8 +6,8 @@ name: ChatView WebSearch structured tool result
 # renderer (packages/app/src/components/chat/WebToolResult.tsx),
 # reaching it through the real WS protocol path: mock-server emits a
 # synthetic WebSearch tool_start + tool_result, store-core's
-# handleToolStart/handleToolResult process it, the message lands in an
-# ActivityGroup, and expanding the entry runs
+# handleToolStart/handleToolResult process it, the message lands in a
+# singleton ToolBubble, and expanding it runs
 # parseWebToolResult(message.tool, message.toolResult) →
 # <WebSearchResultList />.
 #
@@ -36,32 +36,19 @@ name: ChatView WebSearch structured tool result
 - tapOn:
     id: "chat-message-input"
 - inputText: "show-websearch"
+- hideKeyboard
 
 - tapOn:
     id: "chat-send-button"
 
-# Wait for the activity group wrapping the WebSearch tool row.
+# Expand the singleton ToolBubble once to reveal its structured result.
 - extendedWaitUntil:
     visible:
-      id: "activity-group"
+      id: "tool-collapsed-preview"
     timeout: 10000
-
-- takeScreenshot: chat-websearch-activity-group-collapsed
-
-# Expand the activity group — the onPress lives on the inner
-# `activity-group-header` TouchableOpacity (the outer `activity-group`
-# testID is for assertion only).
+- takeScreenshot: chat-websearch-collapsed
 - tapOn:
-    id: "activity-group-header"
-- waitForAnimationToEnd
-
-# Expand the WebSearch entry. Same rationale as chat-todolist.yaml: an
-# iOS XCUITest tap-by-id on a nested TouchableOpacity doesn't reliably
-# reach RN's touch responder, so tap the entry's collapsed-preview TEXT
-# (the head of the raw JSON tool_result, which contains the fixture's
-# query) — that resolves to coordinates on the entry row on every device.
-- tapOn:
-    text: ".*chroxy remote terminal.*"
+    id: "tool-collapsed-preview"
 - waitForAnimationToEnd
 
 # LayoutAnimation can defer the state→render commit on iOS.
