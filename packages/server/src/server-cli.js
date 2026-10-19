@@ -7,6 +7,7 @@ import {
   ProviderBinaryVersionError,
   ProviderCredentialMissingError,
 } from './session-manager.js'
+import { validateCwdAllowed } from './handler-utils.js'
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
@@ -491,6 +492,14 @@ function wireTunnelEvents(tunnel, wsServer) {
 function isWithinHome(dir) {
   const rel = relative(homedir(), dir)
   return !rel.startsWith('..') && !rel.startsWith(sep)
+}
+
+/** Keep the configured default compatible, while making policy mismatches visible. */
+export function resolveDefaultCwd(config = {}, logger = log) {
+  const cwd = config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir())
+  const error = validateCwdAllowed(cwd, config)
+  if (error) logger.warn(`Default directory cannot be browsed or used explicitly: ${error}. Update cwd or workspaceRoots.`)
+  return cwd
 }
 
 /**
@@ -1147,7 +1156,7 @@ export async function startCliServer(config) {
     maxSessions: config.maxSessions || 5,
     port: PORT,
     apiToken: API_TOKEN,
-    defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
+    defaultCwd: resolveDefaultCwd(config, log),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
     // #7552: so a session created with an `environmentId` is TAGGED onto that

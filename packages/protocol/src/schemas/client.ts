@@ -1024,6 +1024,7 @@ export const UserQuestionResponseSchema = z.object({
 export const ListDirectorySchema = z.object({
   type: z.literal('list_directory'),
   path: z.string().max(4096).optional(),
+  requestId: z.string().max(200).optional(),
 })
 
 export const BrowseFilesSchema = z.object({

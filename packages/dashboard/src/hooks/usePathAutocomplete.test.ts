@@ -152,3 +152,96 @@ describe('usePathAutocomplete', () => {
     expect(result.current.suggestions).toEqual([])
   })
 })
+
+describe('exact directory access probe', () => {
+  const listing = (path: string, error: string | null = null) => ({ path, error, entries: [{ name: 'project', isDirectory: true }] })
+
+  it('checks the exact cwd and keeps parent suggestions when its probe is rejected', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/workspace/pro', { checkDirectory: true }))
+    expect(result.current.directoryAccess?.status).toBe('pending')
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/workspace/pro', expect.any(String))
+    act(() => { capturedCallback?.(listing('/workspace')) })
+    expect(result.current.suggestions).toEqual(['/workspace/project'])
+    act(() => { capturedCallback?.(listing('/workspace/pro', 'Access denied')) })
+    expect(result.current.directoryAccess).toEqual({ path: '/workspace/pro', status: 'denied', error: 'Access denied' })
+    expect(result.current.suggestions).toEqual(['/workspace/project'])
+  })
+
+  it('accepts an exact success and ignores stale successes and errors', () => {
+    const { result, rerender } = renderHook(({ input }) => usePathAutocomplete(input, { checkDirectory: true }), { initialProps: { input: '/old/project' } })
+    act(() => { vi.advanceTimersByTime(200) })
+    const oldCallback = capturedCallback
+    rerender({ input: '/new/project' })
+    act(() => { vi.advanceTimersByTime(200) })
+    act(() => {
+      oldCallback?.(listing('/old/project'))
+      oldCallback?.(listing('/old/project', 'Access denied'))
+      capturedCallback?.(listing('/old/project', 'Access denied'))
+    })
+    expect(result.current.directoryAccess?.status).toBe('pending')
+    act(() => { capturedCallback?.(listing('/new/project')) })
+    expect(result.current.directoryAccess).toEqual({ path: '/new/project', status: 'allowed', error: null })
+  })
+
+  it('does not clear current suggestions for a stale parent error', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/new/pro', { checkDirectory: true }))
+    act(() => { vi.advanceTimersByTime(200) })
+    act(() => { capturedCallback?.(listing('/new')) })
+    act(() => { capturedCallback?.(listing('/old', 'Access denied')) })
+    expect(result.current.suggestions).toEqual(['/new/project'])
+  })
+
+  it('bounds no-response pending state and never calls it allowed', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/workspace/project', { checkDirectory: true }))
+    act(() => { vi.advanceTimersByTime(2200) })
+    expect(result.current.directoryAccess).toEqual({ path: '/workspace/project', status: 'unknown', error: null })
+  })
+
+  it('suspends requests while Browse owns the callback and ignores its old probe', () => {
+    const { result, rerender } = renderHook(({ enabled }) => usePathAutocomplete('/workspace/project', { checkDirectory: true, enabled }), { initialProps: { enabled: true } })
+    act(() => { vi.advanceTimersByTime(200) })
+    const oldCallback = capturedCallback
+    const browseCallback = vi.fn()
+    stableSetCallback(browseCallback)
+    rerender({ enabled: false })
+    mockRequestDirectoryListing.mockClear()
+    act(() => { vi.advanceTimersByTime(5000); oldCallback?.(listing('/workspace/project')) })
+    expect(capturedCallback).toBe(browseCallback)
+    expect(mockRequestDirectoryListing).not.toHaveBeenCalled()
+    expect(result.current.directoryAccess?.status).not.toBe('allowed')
+  })
+})
+
+describe('directory correlation after server normalization', () => {
+  it.each(['/workspace//project', '/workspace/child/../project', '~/project', 'project'])('correlates normalized success and rejection for %s by request id', input => {
+    const { result } = renderHook(() => usePathAutocomplete(input, { checkDirectory: true }))
+    act(() => { vi.advanceTimersByTime(200) })
+    const requestId = mockRequestDirectoryListing.mock.calls.find(call => call[0] === input)?.[1]
+    expect(typeof requestId).toBe('string')
+    act(() => { capturedCallback?.({ path: '/workspace/project', entries: [], error: null, requestId }) })
+    expect(result.current.directoryAccess?.status).toBe('allowed')
+    act(() => { capturedCallback?.({ path: '/workspace/project', entries: [], error: 'Access denied', requestId }) })
+    expect(result.current.directoryAccess?.status).toBe('denied')
+  })
+})
+
+describe('directory request generations', () => {
+  it('ignores an old nonce even when a later request returns to the same path', () => {
+    const { result, rerender } = renderHook(({ input }) => usePathAutocomplete(input, { checkDirectory: true }), { initialProps: { input: '/workspace/project' } })
+    act(() => { vi.advanceTimersByTime(200) })
+    const oldId = mockRequestDirectoryListing.mock.calls[mockRequestDirectoryListing.mock.calls.length - 1]?.[1]
+    rerender({ input: '/workspace/other' })
+    act(() => { vi.advanceTimersByTime(200) })
+    rerender({ input: '/workspace/project' })
+    act(() => { vi.advanceTimersByTime(200) })
+    const currentId = mockRequestDirectoryListing.mock.calls[mockRequestDirectoryListing.mock.calls.length - 1]?.[1]
+    expect(currentId).not.toBe(oldId)
+    for (const error of [null, 'Access denied']) {
+      act(() => { capturedCallback?.({ path: '/workspace/project', entries: [], error, requestId: oldId }) })
+      expect(result.current.directoryAccess?.status).toBe('pending')
+    }
+    act(() => { capturedCallback?.({ path: '/workspace/project', entries: [], error: null, requestId: currentId }) })
+    expect(result.current.directoryAccess?.status).toBe('allowed')
+  })
+})

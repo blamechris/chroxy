@@ -57,20 +57,25 @@ export interface DirectoryListingPayload {
   entries: unknown[]
   /** Error string from the server, if any. Null when missing/non-string. */
   error: string | null
+  /** Optional opaque request id; absent on legacy frames. */
+  requestId?: string
 }
 
 /**
  * Parse a `directory_listing` message into the fields the dashboard and app
  * forward to their `_directoryListingCallback` / `getCallback('directoryListing')`.
  *
- * Behaviour-preserving: delegates to {@link extractEntriesPayload} (#3131).
- * Per-element shape of `entries` is NOT validated — callers cast to their
- * own concrete entry type when invoking the callback.
+ * Common fields delegate to {@link extractEntriesPayload} (#3131); the
+ * optional request id stays opaque. Legacy payloads keep their shape.
+ * Per-element entries are forwarded for the platform callback to render.
  */
 export function handleDirectoryListing(
   msg: Record<string, unknown>,
 ): DirectoryListingPayload {
-  return extractEntriesPayload(msg)
+  return {
+    ...extractEntriesPayload(msg),
+    ...(typeof msg.requestId === 'string' ? { requestId: msg.requestId } : {}),
+  }
 }
 
 /** Parsed payload for a `file_listing` message. */
