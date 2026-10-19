@@ -698,17 +698,19 @@ describe('validateCwdWithinHome', () => {
     assert.match(err, /within your home directory/)
   })
 
-  it('rejects the platform temp dir when it is outside home', () => {
-    // #7273 — was hardcoded to '/tmp' with a `realTmp.startsWith(home + '/')`
-    // guard, which is the very spelling this PR removed everywhere else. On
-    // Windows os.tmpdir() is C:\Users\<u>\AppData\Local\Temp — INSIDE home —
-    // so the guard is doing real work here, not just guarding a POSIX literal.
-    const realTmp = realpathSync(tmpdir())
-    const home = realpathSync(homedir())
-    if (isPathWithin(realTmp, home)) return   // legitimately inside home (Windows)
+  it('validates the platform temp dir against its native canonical home', () => {
+    // On Windows the temp directory can be inside home, and JS realpath can
+    // retain an alias that native realpath expands. Match the policy's native
+    // canonical paths before selecting the expected containment outcome.
+    const realTmp = realpathSync.native(tmpdir())
+    const home = realpathSync.native(homedir())
     const err = validateCwdWithinHome(realTmp)
-    assert.ok(err)
-    assert.match(err, /within your home directory/)
+    if (isPathWithin(realTmp, home)) {
+      assert.strictEqual(err, null, 'a temp directory inside home must be allowed')
+    } else {
+      assert.ok(err)
+      assert.match(err, /within your home directory/)
+    }
   })
 
   it('rejects a directory outside home', () => {
