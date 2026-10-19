@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
+import { createServer } from 'node:net'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkClaudeLogin, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 import { registerProvider, DEFAULT_PROVIDER } from '../src/providers.js'
@@ -18,6 +19,21 @@ import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
  * on whichever provider is configured in the developer's local
  * ~/.chroxy/config.json (which would otherwise make the suite flaky).
  */
+
+async function withOccupiedPort(fn) {
+  const server = createServer()
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  try {
+    return await fn(server.address().port)
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve())
+    })
+  }
+}
 
 describe('runDoctorChecks', () => {
   it('returns checks array, passed boolean, and providers list', async () => {
@@ -304,24 +320,25 @@ describe('runDoctorChecks', () => {
     assert.ok(portCheck)
   })
 
-  it('accepts custom port', async () => {
-    // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
-    const portCheck = checks.find(c => c.name === 'Port')
-    assert.ok(portCheck)
-    assert.ok(portCheck.message.includes('59123'))
-    assert.equal(portCheck.status, 'pass')
+  it('reports a custom occupied port', async () => {
+    await withOccupiedPort(async port => {
+      const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = checks.find(c => c.name === 'Port')
+      assert.ok(portCheck)
+      assert.equal(portCheck.status, 'warn')
+      assert.ok(portCheck.message.includes(String(port)))
+    })
   })
 
-  it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
-    const failures = checks.filter(c => c.status === 'fail')
-    if (failures.length === 0) {
-      assert.equal(passed, true)
-    } else {
-      // On some systems, checks may fail — that's ok for integration tests
-      assert.equal(passed, false)
-    }
+  it('a busy port warning does not count as a failure', async () => {
+    await withOccupiedPort(async port => {
+      const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = checks.find(c => c.name === 'Port')
+      assert.ok(portCheck)
+      assert.equal(portCheck.status, 'warn')
+      assert.ok(portCheck.message.includes(String(port)))
+      assert.equal(passed, checks.every(c => c.status !== 'fail'))
+    })
   })
 
   it('passed is false when any check fails', async () => {
