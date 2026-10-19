@@ -1311,18 +1311,14 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
     assert.deepEqual(payload.learnedContextWindows ?? {}, {}, 'nothing learned survives a reset')
   })
 
-  it('a NaN ratchet is never written into the learned map (#7771)', () => {
-    // updateContextWindow's OWN input guard (`typeof contextWindow !== 'number'
-    // || contextWindow <= 0`) admits NaN — `typeof NaN === 'number'` is true and
-    // `NaN <= 0` is false, so neither clause fires. That is a pre-existing gap
-    // tracked separately (#7771); what THIS fix must not do is compound it by
-    // writing a NaN through the new persistence path. `activeModels` is allowed
-    // to carry the NaN in-process (unrelated, out of scope) — the learned MAP
-    // specifically must refuse it.
+  it('a NaN ratchet changes neither the served model nor the learned map (#7771)', () => {
+    // The top-level guard rejects NaN before it can reach either the active
+    // model roster or the learned persistence path.
     const reg = makeNoSeamRegistry(cachePath)
     reg.applyOverlay(overlayMap({ 'my-model': {} }))
-    assert.equal(reg.updateContextWindow('my-model', NaN), true,
-      'sanity: the pre-existing top-level guard does not reject NaN (#7771)')
+    const before = reg.getModels()
+    assert.equal(reg.updateContextWindow('my-model', NaN), false)
+    assert.deepEqual(reg.getModels(), before, 'a rejected ratchet leaves the served roster unchanged')
 
     assert.equal(reg.saveCache(cachePath), true)
     const payload = JSON.parse(readFileSync(cachePath, 'utf8'))

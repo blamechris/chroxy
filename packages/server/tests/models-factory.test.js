@@ -685,6 +685,25 @@ describe('updateModels carries the caller-supplied metadata (#7723)', () => {
     assert.equal(entry.contextWindow, 400_000)
   })
 
+  for (const [label, value] of [['NaN', NaN], ['Infinity', Infinity], ['negative Infinity', -Infinity]]) {
+    it(`rejects ${label} without changing the model or its learned override`, () => {
+      const registry = nonClaudeRegistry()
+      const sdkModels = [{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }]
+      registry.updateModels(sdkModels)
+      const before = registry.getModels()
+
+      assert.equal(registry.updateContextWindow('gpt-5.5', value), false)
+      assert.deepEqual(registry.getModels(), before, 'the served model must be unchanged')
+      registry.updateModels(sdkModels)
+      assert.deepEqual(registry.getModels(), before, 'a refresh must not reveal a poisoned override')
+
+      assert.equal(registry.updateContextWindow('gpt-5.5', 400_000), true)
+      assert.equal(registry.getModels().find((m) => m.fullId === 'gpt-5.5').contextWindow, 400_000)
+      registry.updateModels(sdkModels)
+      assert.equal(registry.getModels().find((m) => m.fullId === 'gpt-5.5').contextWindow, 400_000)
+    })
+  }
+
   it('an unusable caller window falls through to the registry heuristic', () => {
     const registry = nonClaudeRegistry()
     registry.updateModels([
