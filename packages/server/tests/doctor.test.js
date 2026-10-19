@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { createServer } from 'node:net'
+import { once } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -9,6 +11,17 @@ import { registerProvider, DEFAULT_PROVIDER } from '../src/providers.js'
 import { SdkSession } from '../src/sdk-session.js'
 import { sdkClaudeCodeVersion, CLAUDE_SDK_MIN_CLI_VERSION } from '../src/utils/agent-sdk-version.js'
 import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
+
+async function holdLoopbackPort(t) {
+  const server = createServer()
+  const listening = once(server, 'listening')
+  server.listen(0, '127.0.0.1')
+  await listening
+  t.after(() => new Promise((resolve, reject) => {
+    server.close(error => error ? reject(error) : resolve())
+  }))
+  return server.address().port
+}
 
 /**
  * Integration tests for doctor.js.
@@ -304,17 +317,20 @@ describe('runDoctorChecks', () => {
     assert.ok(portCheck)
   })
 
-  it('accepts custom port', async () => {
-    // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
+  it('accepts custom port', async (t) => {
+    // Keep ownership through the check so availability cannot race another process.
+    const port = await holdLoopbackPort(t)
+    const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const portCheck = checks.find(c => c.name === 'Port')
     assert.ok(portCheck)
-    assert.ok(portCheck.message.includes('59123'))
-    assert.equal(portCheck.status, 'pass')
+    assert.equal(portCheck.message, `${port} is in use (server may already be running)`)
+    assert.equal(portCheck.status, 'warn')
   })
 
-  it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
+  it('passed is true when no failures', async (t) => {
+    const port = await holdLoopbackPort(t)
+    const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+    assert.equal(checks.find(c => c.name === 'Port')?.status, 'warn')
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
