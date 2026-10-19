@@ -1011,7 +1011,11 @@ export async function runDoctorChecks({
   }
 
   // 7. Port availability
-  const checkPort = port || 8765
+  // #8233: with no explicit `-p/--port`, resolve the port exactly as `chroxy
+  // start` does (ENV > config file > 8765 default) instead of hardcoding 8765.
+  const checkPort = port || mergeConfig({
+    fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
+  }).port || 8765
   try {
     await checkPortAvailable(checkPort)
     checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
