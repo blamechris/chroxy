@@ -1010,13 +1010,23 @@ export async function runDoctorChecks({
     }
   }
 
-  // 7. Port availability
-  const checkPort = port || 8765
-  try {
-    await checkPortAvailable(checkPort)
-    checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
-  } catch {
-    checks.push({ name: 'Port', status: 'warn', message: `${checkPort} is in use (server may already be running)` })
+  // 7. Port availability — match start's CLI > ENV > file > default precedence.
+  const { port: checkPort } = mergeConfig({
+    fileConfig: parsedConfig && typeof parsedConfig === 'object' ? parsedConfig : {},
+    cliOverrides: { port },
+    defaults: { port: 8765 },
+  })
+  // net.listen accepts strings as socket paths; malformed config must remain a
+  // diagnostic rather than accidentally probing or creating a filesystem socket.
+  if (!Number.isInteger(checkPort) || checkPort < 1 || checkPort > 65535) {
+    checks.push({ name: 'Port', status: 'fail', message: 'Invalid port — expected an integer from 1 to 65535' })
+  } else {
+    try {
+      await checkPortAvailable(checkPort)
+      checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
+    } catch {
+      checks.push({ name: 'Port', status: 'warn', message: `${checkPort} is in use (server may already be running)` })
+    }
   }
 
   const passed = checks.every(c => c.status !== 'fail')

@@ -5,7 +5,7 @@ export function registerDoctorCommand(program) {
   program
     .command('doctor')
     .description('Check that all dependencies are installed and configured correctly')
-    .option('-p, --port <port>', 'Port to check availability (default: 8765)')
+    .option('-p, --port <port>', 'Port to check availability (default: PORT env, config port, or 8765)')
     .option('--provider <name>', 'Override provider(s) to preflight (comma-separated)')
     .action(async (options) => {
       const { runDoctorChecks } = await import('../doctor.js')
