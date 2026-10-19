@@ -438,7 +438,18 @@ function pathTouchesConfigDir(absPath) {
     // realpathSync, so it cannot be inside a directory that is not there.
     return false
   }
-  return isPathWithin(absPath, realConfigDir)
+  if (isPathWithin(absPath, realConfigDir)) return true
+  // #8303: `realpathSync` keeps the caller's spelling of a path's case, while
+  // `fs.promises.realpath` (which Browse resolves with) canonicalises it. On a
+  // case-insensitive filesystem a `CHROXY_CONFIG_DIR` spelled differently from the
+  // on-disk name therefore never matches a canonical `absPath`. Also test the
+  // native-canonical form, so the deny-list holds for both resolvers.
+  try {
+    const nativeConfigDir = realpathSync.native(configDir())
+    return nativeConfigDir !== realConfigDir && isPathWithin(absPath, nativeConfigDir)
+  } catch {
+    return false
+  }
 }
 
 /** The realpath-resolved home directory (honouring the test-only `homeOverride`). */

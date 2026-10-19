@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, realpathSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, statSync } from 'node:fs'
+import { join, dirname, basename } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
 import { resolveSessionCwd, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
@@ -127,6 +127,43 @@ describe('Browse applies the credential-directory deny-list (#8303)', () => {
   it('still lists an ordinary directory under the same home (control: the deny-list is not deny-everything)', async () => {
     const reply = await listWith(config(), join(home, 'projects'))
     assert.equal(reply.error, null)
+  })
+})
+
+// A config dir spelled with different case than on disk only differs on a
+// case-insensitive filesystem; elsewhere the variant simply does not exist.
+function caseVariantResolves(p) {
+  try { statSync(join(dirname(p), basename(p).toUpperCase())); return true } catch { return false }
+}
+
+describe('Browse refuses the daemon state root through a mis-cased CHROXY_CONFIG_DIR (#8303)', () => {
+  let state
+  let savedConfigDir
+
+  beforeEach(() => {
+    state = realpathSync(mkdtempSync(join(homedir(), '.chroxy-test-8303-state-')))
+    mkdirSync(join(state, 'sessions'))
+    savedConfigDir = process.env.CHROXY_CONFIG_DIR
+  })
+
+  afterEach(() => {
+    if (savedConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = savedConfigDir
+    rmSync(state, { recursive: true, force: true })
+  })
+
+  it('refuses the state root and its children whatever the spelling of CHROXY_CONFIG_DIR', { skip: !caseVariantResolves(homedir()) && 'filesystem is case-sensitive' }, async () => {
+    process.env.CHROXY_CONFIG_DIR = join(dirname(state), basename(state).toUpperCase())
+    for (const target of [state, join(state, 'sessions')]) {
+      const reply = await listWith({}, target)
+      assert.match(reply.error, /^Access denied: credential and configuration directories/, target)
+    }
+  })
+
+  it('refuses the state root spelled exactly as on disk (control: the plain case)', async () => {
+    process.env.CHROXY_CONFIG_DIR = state
+    const reply = await listWith({}, join(state, 'sessions'))
+    assert.match(reply.error, /^Access denied: credential and configuration directories/)
   })
 })
 
