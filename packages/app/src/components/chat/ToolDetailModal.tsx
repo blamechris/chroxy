@@ -10,12 +10,13 @@ import {
   Pressable,
   Image,
 } from 'react-native';
+import { describeTurnTermination } from '@chroxy/store-core';
 import type { ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 
-export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
+export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, toolResultTerminatedReason, serverName, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
   /**
@@ -32,6 +33,7 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   toolResult?: string;
   toolResultTruncated?: boolean;
   toolResultImages?: ToolResultImage[];
+  toolResultTerminatedReason?: string;
   serverName?: string;
   onClose: () => void;
   onImagePress: (uri: string) => void;
@@ -39,7 +41,10 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   // #6982: structured WebSearch/WebFetch render, parse-with-fallback —
   // `null` (non-web tool, absent or unparseable result) keeps the existing
   // `<Text selectable>` dump below.
-  const webParsed = parseWebToolResult(rawToolName, toolResult);
+  const termination = toolResult !== undefined && toolResultTerminatedReason
+    ? describeTurnTermination(toolResultTerminatedReason)
+    : null;
+  const webParsed = termination ? null : parseWebToolResult(rawToolName, toolResult);
   return (
     <Modal
       visible={visible}
@@ -97,8 +102,19 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
             ) : null}
             {toolResult != null ? (
               <>
-                <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
-                {webParsed ? (
+                <View style={[styles.toolResultHeader, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>
+                  {termination && (
+                    <Icon name="stop" size={12} color={COLORS.accentOrange}
+                      testID="tool-detail-terminated"
+                      accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
+                  )}
+                  <Text style={[styles.toolModalSectionLabel, termination && styles.terminationLabel]}>
+                    {termination ? termination.label : `Result${toolResultTruncated ? ' (truncated)' : ''}`}
+                  </Text>
+                </View>
+                {termination ? (
+                  <Text selectable style={styles.terminationSummary}>{termination.summary}</Text>
+                ) : webParsed ? (
                   <WebToolResultView parsed={webParsed} />
                 ) : (
                   <Text selectable style={styles.toolModalContent}>{toolResult}</Text>
@@ -175,6 +191,19 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: 6,
+  },
+  toolResultHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  terminationLabel: {
+    color: COLORS.accentOrange,
+  },
+  terminationSummary: {
+    color: COLORS.accentOrange,
+    fontSize: 13,
+    lineHeight: 20,
   },
   toolImageGrid: {
     flexDirection: 'row',
