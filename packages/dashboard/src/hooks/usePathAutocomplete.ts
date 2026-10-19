@@ -4,9 +4,10 @@
  * Splits the input into parent dir + partial segment, requests a directory
  * listing from the server for the parent, and filters results by prefix match.
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { DirectoryListing } from '../store/types'
+import { nextDirectoryRequestId } from '../utils/directory-request-id'
 
 /** Split a path into the parent directory and the partial segment being typed.
  *  Handles both POSIX (/) and Windows (\) separators. */
@@ -33,78 +34,93 @@ export function splitPath(input: string): { parent: string; partial: string } {
 
 const DEBOUNCE_MS = 200
 
-export function usePathAutocomplete(input: string) {
+type DirectoryAccess = {
+  path: string
+  status: 'pending' | 'allowed' | 'denied' | 'unknown'
+  error: string | null
+}
+
+const normalizeListingPath = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+
+export function usePathAutocomplete(input: string, { enabled = true, checkDirectory = false } = {}) {
   const [suggestions, setSuggestions] = useState<string[]>([])
+  const [directoryAccess, setDirectoryAccess] = useState<DirectoryAccess | null>(null)
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastParentRef = useRef('')
 
-  const inputRef = useRef(input)
-  inputRef.current = input
-
-  const handleListing = useCallback((listing: DirectoryListing) => {
-    if (listing.error || !listing.entries) {
+  useEffect(() => {
+    // Browse installs its callback synchronously before this effect runs.
+    // Suspending must leave that callback in place.
+    if (!enabled) {
+      setDirectoryAccess(null)
+      return
+    }
+    const target = input.trim()
+    setDirectoryAccess(checkDirectory && target ? { path: target, status: 'pending', error: null } : null)
+    if (!target || (!checkDirectory && target.length < 2)) {
       setSuggestions([])
+      setDirectoryListingCallback(null)
       return
     }
-
-    // Guard against out-of-order responses — only accept listings matching the last request
-    const responsePath = listing.path || listing.parentPath || ''
-    if (responsePath && lastParentRef.current && responsePath !== lastParentRef.current) {
+    const { parent, partial } = splitPath(target)
+    if (!parent && !checkDirectory) {
+      setSuggestions([])
+      setDirectoryListingCallback(null)
       return
     }
-
-    const { partial } = splitPath(inputRef.current)
-    const parentPath = responsePath
-    const dirs = listing.entries
-      .filter(e => e.isDirectory)
-      .filter(e => !partial || e.name.toLowerCase().startsWith(partial.toLowerCase()))
-      .map(e => {
-        const sep = parentPath.endsWith('/') || parentPath.endsWith('\\') ? '' : '/'
-        return `${parentPath}${sep}${e.name}`
+    const queryPath = /[/\\]$/.test(target) ? target.replace(/[/\\]+$/, '') || target : parent
+    const parentRequestId = checkDirectory && queryPath ? nextDirectoryRequestId() : null
+    const exactRequestId = checkDirectory
+      ? (queryPath === target ? parentRequestId : nextDirectoryRequestId()) : null
+    let active = true
+    let checkTimer: ReturnType<typeof setTimeout> | undefined
+    const debounce = setTimeout(() => {
+      if (checkDirectory) {
+        checkTimer = setTimeout(() => {
+          if (active) setDirectoryAccess(current => current?.status === 'pending'
+            ? { path: target, status: 'unknown', error: null } : current)
+        }, 2000)
+      }
+      setDirectoryListingCallback((listing: DirectoryListing) => {
+        if (!active) return
+        const responsePath = listing.path || listing.parentPath || ''
+        const hasRequestId = typeof listing.requestId === 'string'
+        const exactMatch = hasRequestId
+          ? listing.requestId === exactRequestId
+          : Boolean(responsePath) && normalizeListingPath(responsePath) === normalizeListingPath(target)
+        if (checkDirectory && exactMatch) {
+          clearTimeout(checkTimer)
+          setDirectoryAccess({ path: target, status: listing.error ? 'denied' : 'allowed', error: listing.error || null })
+        }
+        // Correlate failures too: an old error must not clear fresh suggestions,
+        // and an exact-cwd probe must not replace its parent's useful entries.
+        const parentMatch = queryPath && (hasRequestId
+          ? listing.requestId === parentRequestId
+          : (responsePath ? normalizeListingPath(responsePath) === normalizeListingPath(queryPath) : !checkDirectory))
+        if (!parentMatch) return
+        if (listing.error || !listing.entries) {
+          setSuggestions([])
+          return
+        }
+        const dirs = listing.entries
+          .filter(entry => entry.isDirectory)
+          .filter(entry => !partial || entry.name.toLowerCase().startsWith(partial.toLowerCase()))
+          .map(entry => `${responsePath}${/[/\\]$/.test(responsePath) ? '' : '/'}${entry.name}`)
+        setSuggestions(dirs)
       })
-
-    setSuggestions(dirs)
-  }, [])
-
-  useEffect(() => {
-    if (!input || input.length < 2) {
-      setSuggestions([])
-      setDirectoryListingCallback(null)
-      return
-    }
-
-    const { parent } = splitPath(input)
-
-    // Need at least a parent directory to query
-    if (!parent) {
-      setSuggestions([])
-      setDirectoryListingCallback(null)
-      return
-    }
-
-    // If input ends with a separator, query the full path (user wants contents of this dir)
-    const endsWithSep = input.endsWith('/') || input.endsWith('\\')
-    const queryPath = endsWithSep ? input.replace(/[/\\]+$/, '') : parent
-
-    if (debounceRef.current) clearTimeout(debounceRef.current)
-
-    debounceRef.current = setTimeout(() => {
-      lastParentRef.current = queryPath
-      setDirectoryListingCallback(handleListing)
-      requestDirectoryListing(queryPath)
+      if (queryPath) {
+        if (parentRequestId) requestDirectoryListing(queryPath, parentRequestId)
+        else requestDirectoryListing(queryPath)
+      }
+      if (exactRequestId && exactRequestId !== parentRequestId) requestDirectoryListing(target, exactRequestId)
     }, DEBOUNCE_MS)
-
     return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current)
+      active = false
+      clearTimeout(debounce)
+      clearTimeout(checkTimer)
     }
-  }, [input, handleListing, requestDirectoryListing, setDirectoryListingCallback])
+  }, [input, enabled, checkDirectory, requestDirectoryListing, setDirectoryListingCallback])
 
-  // Cleanup callback on unmount
-  useEffect(() => {
-    return () => setDirectoryListingCallback(null)
-  }, [setDirectoryListingCallback])
-
-  return { suggestions }
+  useEffect(() => () => setDirectoryListingCallback(null), [setDirectoryListingCallback])
+  return { suggestions, directoryAccess }
 }

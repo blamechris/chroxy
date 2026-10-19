@@ -483,6 +483,16 @@ export function validateCwdAllowed(cwd, config = null) {
     return `Cannot resolve path: ${cwd}`
   }
 
+  return validateCanonicalCwdAllowed(realCwd, config)
+}
+
+/**
+ * Apply the workspace policy to an already canonical path. This checks
+ * authorization only; callers must establish directory existence before
+ * granting access. Listings also use canonical unresolved paths to select
+ * safe error text, without granting a listing.
+ */
+export function validateCanonicalCwdAllowed(realCwd, config = null) {
   // Layer 2: credential-directory deny-list (always active).
   // `homeOverride` exists so tests can use a hermetic fake home
   // directory instead of creating throwaway dirs under the user's

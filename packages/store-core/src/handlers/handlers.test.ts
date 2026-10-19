@@ -3541,6 +3541,15 @@ describe('handleSessionSwitched', () => {
 // handleDirectoryListing
 // ---------------------------------------------------------------------------
 describe('handleDirectoryListing', () => {
+  it('preserves a directory request id without adding fields to legacy payloads', () => {
+    expect(handleDirectoryListing({ requestId: 'directory-1' })).toEqual({
+      path: null, parentPath: null, entries: [], error: null, requestId: 'directory-1',
+    })
+    expect(handleDirectoryListing({ requestId: 3 })).toEqual({
+      path: null, parentPath: null, entries: [], error: null,
+    })
+  })
+
   it('extracts all fields from a valid payload', () => {
     const entries = [{ name: 'src', isDirectory: true }, { name: 'README.md', isDirectory: false }]
     expect(

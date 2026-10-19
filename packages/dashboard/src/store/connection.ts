@@ -5274,11 +5274,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ _directoryListingCallback: cb });
   },
 
-  requestDirectoryListing: (path?: string) => {
+  requestDirectoryListing: (path?: string, requestId?: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, string> = { type: 'list_directory' };
       if (path) msg.path = path;
+      if (requestId !== undefined) msg.requestId = requestId;
       wsSend(socket, msg);
     }
   },

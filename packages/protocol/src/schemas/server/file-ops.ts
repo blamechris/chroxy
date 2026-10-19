@@ -98,7 +98,7 @@ export const ServerFileContentSchema = z.object({
   requestId: z.string().max(200).optional(),
 })
 
-// `browse_files` response (HOME-dir restricted). `entries` are directories only
+// `list_directory` response (workspace-policy restricted). `entries` are directories only
 // ({ name, isDirectory: true }); `parentPath` is legitimately null at the root
 // (not just on error). Distinct from the `file_listing` family (CWD-restricted,
 // entries carry size).
@@ -111,6 +111,7 @@ export const ServerDirectoryListingSchema = z.object({
     isDirectory: z.boolean(),
   })),
   error: z.string().nullable(),
+  requestId: z.string().max(200).optional(),
 })
 
 // #6876 — `git_create_pr` response. The server pushes the current branch and

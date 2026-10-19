@@ -6,6 +6,7 @@
  *          git_commit, git_create_pr, list_slash_commands, list_agents
  */
 import { resolveSession, sendError } from '../handler-utils.js'
+import { isBoundClient } from '../environments/authority.js'
 import { loggerForSession } from '../logger.js'
 
 /**
@@ -47,7 +48,15 @@ function rejectMutationIfBound(ws, client, msg, ctx, op) {
 }
 
 function handleListDirectory(ws, client, msg, ctx) {
-  ctx.services.fileOps.listDirectory(ws, msg.path)
+  if (isBoundClient(client)) {
+    ctx.transport.send(ws, {
+      type: 'directory_listing', path: null, parentPath: null, entries: [],
+      error: 'Directory listing is unavailable',
+      ...(typeof msg.requestId === 'string' ? { requestId: msg.requestId } : {}),
+    })
+    return
+  }
+  ctx.services.fileOps.listDirectory(ws, msg.path, ctx.services.config, msg.requestId)
 }
 
 function handleBrowseFiles(ws, client, msg, ctx) {

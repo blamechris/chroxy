@@ -4,8 +4,8 @@ import { join, resolve, normalize, relative, sep } from 'path'
 import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
-import { isPathWithin } from '../utils/path-containment.js'
-import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
+import { realpathOfDeepestAncestor, resolveUnresolvablePathForError, unresolvablePathError } from './common.js'
+import { validateCwdAllowed, validateCanonicalCwdAllowed } from '../handler-utils.js'
 
 const log = createLogger('ws')
 
@@ -30,8 +30,14 @@ const LISTING_UNRESOLVABLE_REASONS = {
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
 
   /** List directories at a given path, sending a directory_listing response */
-  async function listDirectory(ws, requestedPath) {
+  async function listDirectory(ws, requestedPath, config = null, requestId) {
     let absPath = null
+    const denial = 'Access denied: directory listing is restricted to allowed workspace directories'
+    const reply = (error, entries = [], parentPath = null) => sendFn(ws, {
+      type: 'directory_listing', path: absPath || requestedPath || null,
+      parentPath, entries, error,
+      ...(typeof requestId === 'string' ? { requestId } : {}),
+    })
     try {
       const home = homedir()
       if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
@@ -45,83 +51,48 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       absPath = normalize(absPath)
 
       let realAbsPath
-      let containmentUnknown = false
+      let resolutionError = null
       try {
         realAbsPath = await realpath(absPath)
       } catch (err) {
-        if (err.code !== 'ENOENT') {
-          // #8012 — any OTHER failure (EACCES, EPERM, ENOTDIR, ELOOP, …) used
-          // to skip the containment check: the outer catch answered
-          // "Permission denied" / "Not a directory" for a path outside home,
-          // where a readable one answers "Access denied", and sent ELOOP's
-          // raw message with the server path in it. Only a path inside home
-          // keeps a specific message now; everything else is the denial.
-          const homeReal = await realpath(home).catch(() => null)
-          sendFn(ws, {
-            type: 'directory_listing',
-            path: absPath,
-            parentPath: null,
-            entries: [],
-            error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
-              'Access denied: directory listing is restricted to the home directory'),
-          })
+        resolutionError = err
+        try {
+          // These walks follow dangling links as well as existing ancestors.
+          // The result can select an error, but can never grant a listing.
+          realAbsPath = err.code === 'ENOENT'
+            ? await realpathOfDeepestAncestor(absPath)
+            : await resolveUnresolvablePathForError(absPath)
+        } catch {
+          reply(denial)
           return
         }
-        // #8011 — a MISSING target is contained canonically too: realpath
-        // its deepest existing ancestor. This used to fall back to the raw
-        // lexical `absPath`, so `~/link-to-outside/missing` looked like a
-        // path inside home and answered "Directory not found", while an
-        // EXISTING subdirectory out there answered "Access denied" — two
-        // answers keyed on whether something outside home exists.
-        // A walk that cannot finish denies; it never reads as "not found".
-        try {
-          realAbsPath = await realpathOfDeepestAncestor(absPath)
-        } catch {
-          containmentUnknown = true
-        }
       }
-      const homeReal = await realpath(home)
-
-      if (containmentUnknown || !isPathWithin(realAbsPath, homeReal)) {
-        sendFn(ws, {
-          type: 'directory_listing',
-          path: absPath,
-          parentPath: null,
-          entries: [],
-          error: 'Access denied: directory listing is restricted to the home directory',
-        })
+      if (validateCanonicalCwdAllowed(realAbsPath, config)) {
+        reply(denial)
+        return
+      }
+      if (resolutionError) {
+        reply(resolutionError.code === 'ENOENT'
+          ? 'Directory not found'
+          : LISTING_UNRESOLVABLE_REASONS[resolutionError.code] || denial)
         return
       }
 
       const dirents = await readdir(realAbsPath, { withFileTypes: true })
+      // Revalidate the existing directory's check-time policy before publishing.
+      // Pathname checks here do not establish an atomic filesystem snapshot.
+      if (validateCwdAllowed(realAbsPath, config)) {
+        reply(denial)
+        return
+      }
       const entries = dirents
         .filter(d => d.isDirectory() && !d.name.startsWith('.'))
         .sort((a, b) => a.name.localeCompare(b.name))
         .map(d => ({ name: d.name, isDirectory: true }))
-
-      const parentPath = absPath === '/' ? null : resolve(absPath, '..')
-
-      sendFn(ws, {
-        type: 'directory_listing',
-        path: absPath,
-        parentPath,
-        entries,
-        error: null,
-      })
+      reply(null, entries, absPath === '/' ? null : resolve(absPath, '..'))
     } catch (err) {
-      let errorMessage
-      if (err.code === 'ENOENT') errorMessage = 'Directory not found'
-      else if (err.code === 'EACCES') errorMessage = 'Permission denied'
-      else if (err.code === 'ENOTDIR') errorMessage = 'Not a directory'
-      else errorMessage = err.message || 'Unknown error'
-
-      sendFn(ws, {
-        type: 'directory_listing',
-        path: absPath || requestedPath || null,
-        parentPath: null,
-        entries: [],
-        error: errorMessage,
-      })
+      const reason = err.code === 'ENOENT' ? 'Directory not found' : LISTING_UNRESOLVABLE_REASONS[err.code]
+      reply(reason || denial)
     }
   }
 
