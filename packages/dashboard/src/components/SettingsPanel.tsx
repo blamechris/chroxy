@@ -1177,8 +1177,8 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   //    catalog to contain the id. Offering ids from an untagged roster here
   //    would let Settings show a default that create-time silently drops.
   const availableModels = useMemo(
-    () => selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
-    [modelsByProvider, effectiveProvider],
+    () => dormantProvider ? [] : selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
+    [modelsByProvider, effectiveProvider, dormantProvider],
   )
 
   const defaultModelChoices = useMemo(() => modelChoices(availableModels), [availableModels])

@@ -309,12 +309,13 @@ describe('SettingsPanel', () => {
     })
 
     it('hides models when the saved provider override is dormant', () => {
+      const staleGeminiRoster = { models: [{ id: 'gemini-pro', label: 'Gemini Pro', fullId: 'gemini-pro' }], defaultModelId: 'gemini-pro' }
       setMockState({
         defaultProvider: 'gemini',
         defaultProviderSource: 'user',
         defaultModel: '',
         availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
-        modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
+        modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster, gemini: staleGeminiRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
       expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
