@@ -7,7 +7,7 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
-import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
+import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, describeTurnTermination, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -49,8 +49,9 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   /** The trailing `rawToolName` is the UNFORMATTED `message.tool` (#6982) —
    *  the detail modal needs it to route WebSearch/WebFetch results through
    *  the structured renderer, since `toolName` has already been through
-   *  `formatToolName`. */
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
+   *  `formatToolName`. The last argument is `toolResultTerminatedReason`
+   *  (#8364), so the detail modal can show the terminated state too. */
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string, toolResultTerminatedReason?: string) => void;
   /** #5517: seed + persist expand state in ChatView's id-keyed registry so
    *  it survives FlatList row recycling. */
   getInitialExpanded?: (id: string) => boolean;
@@ -116,6 +117,12 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const hasResult =
     message.toolResult !== undefined || (message.toolResultImages?.length ?? 0) > 0;
   const inFlight = !hasResult;
+  // #8364 (mirrors ActivityGroup, #7376): a tool cut off because its TURN was
+  // terminated never reported a result. It gets the amber terminated state and
+  // the "check whether it took effect" sentence instead of the raw synthetic text.
+  const termination = hasResult && message.toolResultTerminatedReason
+    ? describeTurnTermination(message.toolResultTerminatedReason)
+    : null;
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -126,7 +133,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool, message.toolResultTerminatedReason);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -225,6 +232,15 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
             importantForAccessibility="no-hide-descendants"
           />
         )}
+        {termination && (
+          <Icon
+            name="stop"
+            size={12}
+            color={COLORS.accentOrange}
+            testID={`tool-bubble-terminated-${message.id}`}
+            accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'}
+          />
+        )}
         <Text style={styles.senderLabelTool}>
           {message.serverName ? (
             <>
@@ -258,6 +274,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
                 </TouchableOpacity>
               )}
             </>
+          )}
+          {termination && (
+            <Text selectable style={styles.terminatedSummary} testID={`tool-bubble-terminated-summary-${message.id}`}>
+              {termination.summary}
+            </Text>
           )}
           {/* #5060 — Task subagent nested progress. The child's
               intermediate tool_start/tool_result/tool_input_delta/
@@ -335,6 +356,12 @@ const styles = StyleSheet.create({
     color: COLORS.accentBlue,
     fontSize: 12,
     marginTop: 6,
+  },
+  terminatedSummary: {
+    color: COLORS.accentOrange,
+    fontSize: 12,
+    marginTop: 6,
+    lineHeight: 18,
   },
   selectedBubble: {
     borderColor: COLORS.accentBlue,
