@@ -588,6 +588,28 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     requestDirectoryListing(path)
   }, [requestDirectoryListing, setDirectoryListingCallback])
 
+  // #8303: the directory this dialog will start from (the project, else the daemon's
+  // configured default cwd) can be one Browse refuses to list (outside $HOME and
+  // every workspace root) while Create accepts it. Probe it once when the dialog
+  // opens and say so, instead of letting Browse fail on it later. The probe uses
+  // the same single listing slot Browse does, and Browse replaces it on first use.
+  const [notBrowsablePath, setNotBrowsablePath] = useState<string | null>(null)
+  const probedOpenRef = useRef(false)
+  useEffect(() => {
+    const freshOpen = open && !probedOpenRef.current
+    probedOpenRef.current = open
+    if (!freshOpen) return
+    setNotBrowsablePath(null)
+    const probePath = initialCwd || defaultCwd || ''
+    if (!probePath || typeof requestDirectoryListing !== 'function' || typeof setDirectoryListingCallback !== 'function') return
+    setDirectoryListingCallback((listing: DirectoryListing) => {
+      const responsePath = listing.path || listing.parentPath || ''
+      if (!browsePathsMatch(probePath, responsePath)) return
+      setNotBrowsablePath(listing.error && /^Access denied/.test(listing.error) ? probePath : null)
+    })
+    requestDirectoryListing(probePath)
+  }, [open, initialCwd, defaultCwd, requestDirectoryListing, setDirectoryListingCallback])
+
   const handleBrowseOpen = useCallback(async () => {
     // In Tauri context, use native OS folder picker via IPC command.
     // Detect via __TAURI_INTERNALS__ (consistent with useTauriIPC.ts) rather than
@@ -809,6 +831,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           </div>
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
+          )}
+          {notBrowsablePath && (cwd || notBrowsablePath) === notBrowsablePath && (
+            <span className="cwd-hint" role="note" data-testid="cwd-not-browsable-note">
+              Browse can't list {notBrowsablePath} (it is outside your home directory and the configured workspace roots). You can still type a path.
+            </span>
           )}
           {currentPreset && (
             <div className="repo-preset-disclosure" data-testid="repo-preset-disclosure">

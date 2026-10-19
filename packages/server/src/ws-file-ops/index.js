@@ -12,9 +12,11 @@ import { createMemoryOps } from './memory.js'
  *
  * @param {Function} sendFn - (ws, message) => void — sends a message to a single client
  * @param {string} [workspaceRoot] - Optional workspace root to restrict git operations (defaults to home directory)
+ * @param {object} [browse] - `{ getConfig }`, a late-bound getter so Browse honours the same
+ *   workspaceRoots allowlist as session creation (#8303); omitted, Browse is home-only as before
  * @returns {Object} File operation methods
  */
-export function createFileOps(sendFn, workspaceRoot) {
+export function createFileOps(sendFn, workspaceRoot, browse = {}) {
   // Cache resolved CWD real paths with TTL to avoid repeated syscalls
   // while allowing stale entries to be refreshed if symlinks change.
   const _cwdRealCache = new Map()
@@ -27,7 +29,7 @@ export function createFileOps(sendFn, workspaceRoot) {
   // Git operations are restricted to the workspace root (defaults to home directory)
   const gitWorkspaceRoot = workspaceRoot || homedir()
 
-  const browser = createBrowserOps(sendFn, boundResolve, boundValidate)
+  const browser = createBrowserOps(sendFn, boundResolve, boundValidate, browse)
   const reader = createReaderOps(sendFn, boundResolve, boundValidate)
   const git = createGitOps(sendFn, boundResolve, boundValidate, gitWorkspaceRoot)
   const memory = createMemoryOps(sendFn, boundResolve)

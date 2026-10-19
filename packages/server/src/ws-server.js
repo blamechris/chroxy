@@ -805,7 +805,9 @@ export class WsServer {
     // Pass explicit workspace root so file ops resolve paths against the
     // session manager's default cwd instead of falling back to homedir.
     const workspaceRoot = sessionManager?.defaultCwd || process.cwd()
-    this._fileOps = createFileOps(sendFn, workspaceRoot)
+    // #8303: Browse follows the allowlist session creation uses — late-bound so
+    // `config` mutated after construction is seen.
+    this._fileOps = createFileOps(sendFn, workspaceRoot, { getConfig: () => self.config })
     this._permissions = createPermissionHandler({
       sendFn,
       broadcastFn,

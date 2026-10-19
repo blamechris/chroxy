@@ -10,6 +10,7 @@ import {
 import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
 import { DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
+import { configuredCwdWarning } from './handler-utils.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { WsServer } from './ws-server.js'
 import { BillingCanaryMonitor } from './billing-canary-monitor.js'
@@ -1141,6 +1142,11 @@ export async function startCliServer(config) {
   const livenessBackend = new LivenessDockerBackend()
   const containerInspect = (containerId) =>
     inspectContainerLiveness((cid) => livenessBackend.getEnvironmentStatus(cid), containerId)
+
+  // #8303: a configured default cwd that session creation would refuse is still
+  // used for blank-cwd sessions; say so once at boot.
+  const cwdWarning = configuredCwdWarning(config)
+  if (cwdWarning) log.warn(cwdWarning)
 
   // 1. Create session manager
   const { sessionManager, startupSkillPolicy } = createDaemonSessionManager(config, {
