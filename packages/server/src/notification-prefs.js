@@ -123,6 +123,11 @@ export const CATEGORY_DEFAULTS = Object.freeze(
  *
  * Users can opt out per-device (`bypassCategories: []`) or extend the
  * global list to silence even errors if they want.
+ *
+ * #8567: the clients derive their copy from the `defaultBypass` flag on
+ * `NOTIFICATION_CATEGORIES` in `@chroxy/protocol`. This literal stays the
+ * daemon's own, and `tests/notification-category-roster.test.js` pins the two
+ * together in both directions: change one, change the other.
  */
 export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(['permission', 'activity_error'])
 
