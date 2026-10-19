@@ -119,7 +119,11 @@ status: `README.md`.
     "done <RUN_ID>" (plus the Codex cost from the usage page for the two GPT runs)
     when the session ends.
 
-    **Chroxy dashboard runs: press Enter once, then keep your hands off that session.**
+    **Chroxy dashboard runs: set the header model first, then press Enter once, then keep
+    your hands off that session.** A new Claude (SDK) dashboard session starts on the
+    daemon's default model, Sonnet 5.5, unless the dashboard's Settings → Default model is
+    set; confirm the header shows the mission's model before sending (run 5's second
+    attempt ran on the default).
     Escape in the composer (with no picker open), the Stop button that takes Send's
     place while a turn runs, and Cmd+. anywhere in the dashboard all interrupt the
     turn (the composer's hint reads "Escape to interrupt"), so a second press on the
