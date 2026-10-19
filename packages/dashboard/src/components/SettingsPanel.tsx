@@ -10,6 +10,7 @@ import { useConnectionStore, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionRule, PermissionAuditEntry } from '../store/types'
 import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
 import { ProviderCredentialsPane } from './ProviderCredentialsPane'
+import { SessionDefaultsNotice } from './SessionDefaultsNotice'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
@@ -1146,7 +1147,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     }
   }, [])
 
-  // Normalize: if persisted defaultProvider isn't in server's list, use first available
+  // Creation/model fallback is separate from the saved preference shown below.
   const effectiveProvider = useMemo(() => {
     if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
       return availableProviders[0]!.name
@@ -1154,21 +1155,14 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     return defaultProvider
   }, [availableProviders, defaultProvider])
 
-  // #7728 — the Default-model picker belongs to the DEFAULT PROVIDER selected
-  // just above it, so it reads that provider's roster instead of whichever
-  // provider broadcast last. Empty (field hidden) until that roster arrives —
-  // offering another provider's ids as a default is what this replaces.
-  //
-  // Two deliberate details (PR #7758 review):
-  //  - `effectiveProvider`, not `defaultProvider`. The <select> below renders
-  //    `effectiveProvider`, so reading the raw persisted value would compute the
-  //    roster for a provider the server does not offer — one that by
-  //    construction can never have broadcast a roster — and the field would
-  //    vanish whenever the two diverge.
-  //  - the EVIDENCE-side read. This block produces `defaultModel`, and its
-  //    consumer (`resolveCreateSessionModel`) requires the chosen provider's OWN
-  //    catalog to contain the id. Offering ids from an untagged roster here
-  //    would let Settings show a default that create-time silently drops.
+  const providerOptions = availableProviders.length > 0
+    ? availableProviders
+    : [{ name: 'claude-sdk' }, { name: 'claude-cli' }]
+  const unavailableDefaultProvider = defaultProviderSource === 'user' && !!defaultProvider
+    && !providerOptions.some(p => p.name === defaultProvider)
+
+  // Match New Session's runtime fallback and use only that provider's own
+  // catalog. The saved provider remains visible even when it is unavailable.
   const availableModels = useMemo(
     () => selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
     [modelsByProvider, effectiveProvider],
@@ -1255,6 +1249,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
 
           <section className="settings-section">
             <h3>Session Defaults</h3>
+            <SessionDefaultsNotice />
             <div className="settings-field">
               <label htmlFor="default-provider">Default provider</label>
               {/* #8265: "Server default" (value '') clears the override so
@@ -1263,7 +1258,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
               <select
                 id="default-provider"
                 aria-label="Default provider"
-                value={defaultProviderSource === 'user' ? effectiveProvider : ''}
+                value={defaultProviderSource === 'user' ? defaultProvider : ''}
                 onChange={handleProviderChange}
               >
                 <option value="">
@@ -1271,18 +1266,20 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     ? `Server default (${PROVIDER_LABELS[serverDefaultProvider] || serverDefaultProvider})`
                     : 'Server default'}
                 </option>
-                {availableProviders.length > 0
-                  ? availableProviders.map(p => (
-                      <option key={p.name} value={p.name}>
-                        {PROVIDER_LABELS[p.name] || p.name}
-                      </option>
-                    ))
-                  : <>
-                      <option value="claude-sdk">Claude Code (SDK)</option>
-                      <option value="claude-cli">Claude Code (CLI)</option>
-                    </>
-                }
+                {unavailableDefaultProvider && (
+                  <option value={defaultProvider} disabled>{PROVIDER_LABELS[defaultProvider] || defaultProvider} (unavailable)</option>
+                )}
+                {providerOptions.map(p => (
+                  <option key={p.name} value={p.name}>{PROVIDER_LABELS[p.name] || p.name}</option>
+                ))}
               </select>
+              {unavailableDefaultProvider && (
+                <p className="settings-hint" role="status" data-testid="default-provider-unavailable-hint">
+                  Your saved provider is unavailable on this server. {availableProviders.length > 0
+                    ? `New sessions and model choices use ${PROVIDER_LABELS[effectiveProvider] || effectiveProvider} until it is available again.`
+                    : 'New sessions will follow the available provider list when this server reports it.'} Your saved choice is kept.
+                </p>
+              )}
             </div>
             {availableModels.length > 0 && (
               <div className="settings-field">

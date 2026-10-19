@@ -9,6 +9,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
 import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES } from '@chroxy/protocol'
 import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
+import { CreateSessionModal, sessionDefaultsNoticeText } from './CreateSessionModal'
 
 // Mock theme-engine
 vi.mock('../theme/theme-engine', () => ({
@@ -291,11 +292,9 @@ describe('SettingsPanel', () => {
       expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
-    it('follows the NORMALIZED provider the <select> above actually shows', () => {
-      // The persisted defaultProvider is absent from the server's list, so the
-      // provider <select> renders availableProviders[0]. Reading the raw
-      // persisted value here computed the roster for a provider that by
-      // construction can never have broadcast one, and the field vanished.
+    it('shows a dormant provider override while models follow the runtime fallback', () => {
+      // Keep the saved provider visible; creation and model availability still
+      // follow the connected server's first available provider.
       setMockState({
         defaultProvider: 'gemini',
         defaultProviderSource: 'user',
@@ -304,7 +303,7 @@ describe('SettingsPanel', () => {
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
-      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
       expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
     })
 
@@ -3218,5 +3217,45 @@ describe('Session Defaults model identity (#8260)', () => {
     expect(setDefaultModel).toHaveBeenCalledWith('date')
     fireEvent.change(select, { target: { value: 'long' } })
     expect(setDefaultModel).toHaveBeenLastCalledWith('long')
+  })
+})
+
+
+describe('Session Defaults dormant provider and migration notice', () => {
+  afterEach(() => localStorage.removeItem('chroxy_default_provider'))
+
+  it('keeps the saved unavailable provider selected without rewriting the preference', () => {
+    const setDefaultProvider = vi.fn()
+    localStorage.setItem('chroxy_default_provider', 'gemini')
+    setMockState({ defaultProvider: 'gemini', defaultProviderSource: 'user', setDefaultProvider,
+      availableProviders: [{ name: 'claude-sdk' }], modelsByProvider: {} })
+    render(<SettingsPanel isOpen onClose={vi.fn()} />)
+    const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+    expect(select.value).toBe('gemini')
+    expect(select.selectedOptions[0]!.disabled).toBe(true)
+    expect(select.selectedOptions[0]!.textContent).toMatch(/unavailable/i)
+    expect(screen.getByTestId('default-provider-unavailable-hint').textContent).toMatch(/saved.*unavailable.*new sessions/i)
+    expect(localStorage.getItem('chroxy_default_provider')).toBe('gemini')
+    expect(setDefaultProvider).not.toHaveBeenCalled()
+    fireEvent.change(select, { target: { value: '' } })
+    expect(setDefaultProvider).toHaveBeenCalledWith('')
+  })
+
+  it('shows one shared notice in Settings and New Session and dismisses both through the store', () => {
+    const notice = { provider: 'claude-cli', model: 'opus-4-6' }
+    const dismiss = vi.fn(() => { mockState.sessionDefaultsNotice = null })
+    setMockState({ defaultProviderSource: 'server', sessionDefaultsNotice: notice, dismissSessionDefaultsNotice: dismiss,
+      defaultModel: '', modelsByProvider: {}, permissionModesByProvider: {}, environments: [],
+      requestDirectoryListing: () => {}, setDirectoryListingCallback: () => {}, defaultCwd: null,
+      availableProviders: [{ name: 'claude-sdk', capabilities: {} }] })
+    const surfaces = () => <><SettingsPanel isOpen onClose={vi.fn()} /><CreateSessionModal open onClose={vi.fn()} onCreate={vi.fn()} initialCwd="/tmp/x" knownCwds={[]} existingNames={[]} /></>
+    const view = render(surfaces())
+    const notices = screen.getAllByTestId('session-defaults-notice')
+    expect(notices).toHaveLength(2)
+    for (const entry of notices) expect(entry.textContent).toContain(sessionDefaultsNoticeText(notice))
+    fireEvent.click(screen.getAllByTestId('session-defaults-notice-dismiss')[0]!)
+    expect(dismiss).toHaveBeenCalledTimes(1)
+    view.rerender(surfaces())
+    expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
   })
 })
