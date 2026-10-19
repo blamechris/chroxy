@@ -43,10 +43,8 @@ function ActivityEntry({
   // #4201: per-entry expand state so each tool row can independently reveal
   // its structured renderer (TodoList for TodoWrite, future MCP tools,
   // etc.) without expanding every sibling. The pre-#4201 row was a static
-  // truncated-text preview — ToolBubble's structured renderer was dead
-  // code for chat because ChatView never routes tool_use through
-  // MessageBubble → ToolBubble (groupMessages always wraps in activity
-  // groups).
+  // truncated-text preview. Multi-entry runs render here; singleton
+  // activity rows use MessageBubble → ToolBubble in ChatView.
   //
   // #5517: seed from the ChatView registry so a recycled row reopens to
   // the user's last choice instead of resetting to collapsed.

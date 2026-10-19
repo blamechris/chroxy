@@ -3,10 +3,9 @@
  * wiring (#4201).
  *
  * Background: PR #4194/#4180 added the mobile TodoList renderer to
- * `ToolBubble`. `ChatView` only routes `group.type === 'single'` messages
- * through `MessageBubble → ToolBubble`, but `groupMessages()` in store-core
- * always bundles `tool_use` into `'activity'` groups — so `ToolBubble` was
- * dead code for chat. The structured renderer never appeared in the app.
+ * `ToolBubble`. Multi-entry activity runs use `ActivityEntry` instead;
+ * singleton activity rows now route through `MessageBubble → ToolBubble`.
+ * These tests pin structured renderers inside the grouped path.
  *
  * Fix: `ActivityEntry` now has its own per-entry expand state. When an
  * entry is tapped (outside selection mode), it expands inline. For TodoWrite
