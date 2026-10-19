@@ -26,6 +26,8 @@ describe('isLoopbackHost', () => {
     assert.equal(isLoopbackHost('::ffff:7fff:ffff'), true)
     assert.equal(isLoopbackHost('::ffff:7f00'), false)
     assert.equal(isLoopbackHost('::ffff:7f000:1'), false)
+    assert.equal(isLoopbackHost('::ffff:127.1'), false) // not a dotted IPv4
+    assert.equal(isLoopbackHost('::FFFF:7F00:1'), true)
   })
 
   it('matches localhost case-insensitively', () => {
