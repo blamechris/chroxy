@@ -10,6 +10,7 @@ import { useConnectionStore, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionRule, PermissionAuditEntry } from '../store/types'
 import { ShortcutsSection } from '../shortcuts/ShortcutsSection'
 import { ProviderCredentialsPane } from './ProviderCredentialsPane'
+import { SessionDefaultsNotice } from './SessionDefaultsNotice'
 import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
@@ -678,6 +679,8 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   const defaultProviderSource = useConnectionStore(s => s.defaultProviderSource)
   const serverDefaultProvider = useConnectionStore(s => s.serverDefaultProvider)
   const setDefaultProvider = useConnectionStore(s => s.setDefaultProvider)
+  const sessionDefaultsNotice = useConnectionStore(s => s.sessionDefaultsNotice)
+  const dismissSessionDefaultsNotice = useConnectionStore(s => s.dismissSessionDefaultsNotice)
   const defaultModel = useConnectionStore(s => s.defaultModel)
   const setDefaultModel = useConnectionStore(s => s.setDefaultModel)
   const modelsByProvider = useConnectionStore(s => s.modelsByProvider)
@@ -1146,13 +1149,20 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
     }
   }, [])
 
-  // Normalize: if persisted defaultProvider isn't in server's list, use first available
+  // A saved override absent from this server is still the saved choice. Keep it
+  // visible as dormant instead of representing another provider as selected.
+  const dormantProvider = defaultProviderSource === 'user'
+    && availableProviders.length > 0
+    && !availableProviders.some(p => p.name === defaultProvider)
+
+  // Inherited defaults can use the first advertised provider as a display
+  // fallback; a dormant user override must retain its own value.
   const effectiveProvider = useMemo(() => {
-    if (availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
+    if (!dormantProvider && availableProviders.length > 0 && !availableProviders.some(p => p.name === defaultProvider)) {
       return availableProviders[0]!.name
     }
     return defaultProvider
-  }, [availableProviders, defaultProvider])
+  }, [availableProviders, defaultProvider, dormantProvider])
 
   // #7728 — the Default-model picker belongs to the DEFAULT PROVIDER selected
   // just above it, so it reads that provider's roster instead of whichever
@@ -1160,18 +1170,15 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   // offering another provider's ids as a default is what this replaces.
   //
   // Two deliberate details (PR #7758 review):
-  //  - `effectiveProvider`, not `defaultProvider`. The <select> below renders
-  //    `effectiveProvider`, so reading the raw persisted value would compute the
-  //    roster for a provider the server does not offer — one that by
-  //    construction can never have broadcast a roster — and the field would
-  //    vanish whenever the two diverge.
+  //  - Use the provider represented by the select. For a dormant override,
+  //    there is no roster from this server, so the model field stays hidden.
   //  - the EVIDENCE-side read. This block produces `defaultModel`, and its
   //    consumer (`resolveCreateSessionModel`) requires the chosen provider's OWN
   //    catalog to contain the id. Offering ids from an untagged roster here
   //    would let Settings show a default that create-time silently drops.
   const availableModels = useMemo(
-    () => selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
-    [modelsByProvider, effectiveProvider],
+    () => dormantProvider ? [] : selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
+    [modelsByProvider, effectiveProvider, dormantProvider],
   )
 
   const defaultModelChoices = useMemo(() => modelChoices(availableModels), [availableModels])
@@ -1255,6 +1262,9 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
 
           <section className="settings-section">
             <h3>Session Defaults</h3>
+            {sessionDefaultsNotice ? (
+              <SessionDefaultsNotice notice={sessionDefaultsNotice} onDismiss={dismissSessionDefaultsNotice} />
+            ) : null}
             <div className="settings-field">
               <label htmlFor="default-provider">Default provider</label>
               {/* #8265: "Server default" (value '') clears the override so
@@ -1271,6 +1281,11 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     ? `Server default (${PROVIDER_LABELS[serverDefaultProvider] || serverDefaultProvider})`
                     : 'Server default'}
                 </option>
+                {dormantProvider && (
+                  <option value={defaultProvider} disabled>
+                    {PROVIDER_LABELS[defaultProvider] || defaultProvider} (unavailable on this server)
+                  </option>
+                )}
                 {availableProviders.length > 0
                   ? availableProviders.map(p => (
                       <option key={p.name} value={p.name}>
@@ -1283,6 +1298,11 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     </>
                 }
               </select>
+              {dormantProvider && (
+                <p className="settings-hint" data-testid="default-provider-dormant">
+                  Your saved provider is unavailable on this server. Choose another provider or Server default to change it.
+                </p>
+              )}
             </div>
             {availableModels.length > 0 && (
               <div className="settings-field">

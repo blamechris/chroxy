@@ -57,7 +57,10 @@ function setMockState(extra: Record<string, unknown> = {}): void {
     activeTheme: 'default',
     setTheme: mockSetTheme,
     defaultProvider: 'claude-sdk',
+    defaultProviderSource: 'server',
     setDefaultProvider: vi.fn(),
+    sessionDefaultsNotice: null,
+    dismissSessionDefaultsNotice: vi.fn(),
     inputSettings: { chatEnterToSend: true, terminalEnterToSend: false, voiceInputMode: 'continuous' },
     updateInputSettings: mockUpdateInputSettings,
     // #5184: header cost-badge display mode default + setter spy.
@@ -241,6 +244,20 @@ describe('SettingsPanel', () => {
       expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('claude-cli')
     })
 
+    it('shows an unavailable saved override as dormant without selecting another provider', () => {
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultProviderSource: 'user',
+        serverDefaultProvider: 'codex',
+        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+      expect(select.value).toBe('gemini')
+      expect(select.selectedOptions[0]?.textContent).toMatch(/Gemini.*unavailable/i)
+      expect(screen.getByTestId('default-provider-dormant').textContent).toMatch(/saved.*unavailable.*server/i)
+    })
+
     it('choosing "Server default" clears the override (setDefaultProvider(""))', () => {
       const setDefaultProvider = vi.fn()
       setMockState({
@@ -291,21 +308,18 @@ describe('SettingsPanel', () => {
       expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
-    it('follows the NORMALIZED provider the <select> above actually shows', () => {
-      // The persisted defaultProvider is absent from the server's list, so the
-      // provider <select> renders availableProviders[0]. Reading the raw
-      // persisted value here computed the roster for a provider that by
-      // construction can never have broadcast one, and the field vanished.
+    it('hides models when the saved provider override is dormant', () => {
+      const staleGeminiRoster = { models: [{ id: 'gemini-pro', label: 'Gemini Pro', fullId: 'gemini-pro' }], defaultModelId: 'gemini-pro' }
       setMockState({
         defaultProvider: 'gemini',
         defaultProviderSource: 'user',
         defaultModel: '',
         availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
-        modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
+        modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster, gemini: staleGeminiRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
-      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
-      expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
+      expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
     it('offers NOTHING from an untagged roster (this block feeds an evidence-side consumer)', () => {
@@ -320,6 +334,27 @@ describe('SettingsPanel', () => {
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
       expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('Session Defaults migration notice', () => {
+    it('shows the same migrated values as New Session and uses the shared dismiss action', () => {
+      const dismiss = vi.fn()
+      setMockState({
+        sessionDefaultsNotice: { provider: 'claude-cli', model: 'opus-4-6' },
+        dismissSessionDefaultsNotice: dismiss,
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const notice = screen.getByTestId('session-defaults-notice')
+      expect(notice.textContent).toMatch(/Claude Code \(CLI\)/)
+      expect(notice.textContent).toMatch(/opus-4-6/)
+      fireEvent.click(screen.getByTestId('session-defaults-notice-dismiss'))
+      expect(dismiss).toHaveBeenCalledOnce()
+    })
+
+    it('does not show a dismissed notice', () => {
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
     })
   })
 
