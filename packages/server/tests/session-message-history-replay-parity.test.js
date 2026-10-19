@@ -7,7 +7,7 @@
 import { describe, it, beforeEach, afterEach, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager } from '../src/session-manager.js'
@@ -102,6 +102,21 @@ describe('SessionMessageHistory: replay parity (#6630)', () => {
       history.recordHistory(S, 'stream_delta', { messageId: id, delta: 'thinking hard', thinking: true })
       history.recordHistory(S, 'stream_end', { messageId: id, thinking: true, ...extra })
     }
+
+    it('retains a start-only thinking flag for an opaque id and leaves an ordinary reply untagged', () => {
+      history.recordHistory(S, 'stream_start', { messageId: 'opaque-a', thinking: true })
+      history.recordHistory(S, 'stream_delta', { messageId: 'opaque-a', delta: 'weighing options' })
+      history.recordHistory(S, 'stream_end', { messageId: 'opaque-a' })
+      history.recordHistory(S, 'stream_start', { messageId: 'opaque-b' })
+      history.recordHistory(S, 'stream_delta', { messageId: 'opaque-b', delta: 'the answer' })
+      history.recordHistory(S, 'stream_end', { messageId: 'opaque-b' })
+
+      const [thinking, reply] = history.getHistory(S)
+      assert.equal(thinking.kind, 'thinking')
+      assert.equal(streamKindOf(thinking), 'thinking')
+      assert.equal(reply.kind, undefined)
+      assert.equal(streamKindOf(reply), undefined)
+    })
 
     it('tags a reasoning stream kind:thinking and keeps its duration', () => {
       reason('t1-thinking-0', { thinkingDurationMs: 1500 })
@@ -329,6 +344,94 @@ function tmpStateFile() {
   return join(tmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
 }
 after(() => { if (tmpDir) rmSync(tmpDir, { recursive: true, force: true }) })
+
+describe('SessionManager: stream kind survives persisted history', () => {
+  const managers = []
+  afterEach(() => {
+    mock.restoreAll()
+    for (const manager of managers.splice(0)) manager.destroyAll()
+  })
+
+  function makeManager(stateFile) {
+    const manager = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    managers.push(manager)
+    return manager
+  }
+
+  function attachSession(manager, id = S) {
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    manager._sessions.set(id, { session, name: id, cwd: tmpdir(), provider: 'claude-sdk', createdAt: Date.now() })
+    manager._wireSessionEvents(id, session)
+    return session
+  }
+
+  function restoreManager(stateFile) {
+    const manager = makeManager(stateFile)
+    // Replace only provider construction; the JSON reader, restore recipe,
+    // history seeding and replay emitter all remain the production paths.
+    mock.method(manager, 'createSession', ({ preserveId }) => {
+      attachSession(manager, preserveId)
+      return preserveId
+    })
+    assert.equal(manager.restoreState(), S)
+    return manager
+  }
+
+  it('truncates a large reasoning entry on disk and restores its kind for replay', () => {
+    const stateFile = tmpStateFile()
+    const original = makeManager(stateFile)
+    const session = attachSession(original)
+    const content = 'x'.repeat(60 * 1024)
+    session.emit('stream_start', { messageId: 'opaque-large', thinking: true })
+    session.emit('stream_delta', { messageId: 'opaque-large', delta: content })
+    session.emit('stream_end', { messageId: 'opaque-large' })
+    original.serializeState()
+
+    const saved = JSON.parse(readFileSync(stateFile, 'utf8')).sessions[0].history[0]
+    assert.equal(saved.kind, 'thinking')
+    assert.equal(saved.content.length, 50 * 1024 + '[truncated]'.length)
+    assert.ok(saved.content.endsWith('[truncated]'))
+    assert.equal(original.getHistory(S)[0].content, content, 'persistence must not truncate the live entry')
+
+    const restarted = restoreManager(stateFile)
+    const [entry] = restarted.getHistory(S)
+    assert.equal(entry.kind, 'thinking')
+    assert.equal(streamKindOf(entry), 'thinking')
+    assert.equal(entry.content, saved.content)
+    const frames = []
+    sendHistoryEntry((_ws, frame) => frames.push(frame), null, S, entry, null)
+    assert.equal(frames[0].kind, 'thinking')
+    assert.equal(frames[0].content, saved.content)
+  })
+
+  it('restores a pre-kind JSON entry as reasoning by its legacy id while keeping replies distinct', () => {
+    const stateFile = tmpStateFile()
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1, timestamp: Date.now(),
+      sessions: [{
+        id: S, name: S, cwd: tmpdir(), provider: 'claude-sdk',
+        history: [
+          { type: 'message', messageType: 'response', messageId: 'old-thinking-2', content: 'old thought', timestamp: 1 },
+          { type: 'message', messageType: 'response', messageId: 'old-reply', content: 'old answer', timestamp: 2 },
+        ],
+      }],
+    }))
+
+    const restarted = restoreManager(stateFile)
+    const [thinking, reply] = restarted.getHistory(S)
+    assert.equal(thinking.kind, undefined, 'the old file has no explicit kind field')
+    assert.equal(streamKindOf(thinking), 'thinking')
+    assert.equal(streamKindOf(reply), undefined)
+    const frames = []
+    for (const entry of [thinking, reply]) {
+      sendHistoryEntry((_ws, frame) => frames.push(frame), null, S, entry, null)
+    }
+    assert.equal(frames[0].kind, 'thinking')
+    assert.equal(frames[1].kind, undefined)
+  })
+})
 
 describe('SessionManager: an error is stamped once (#6630)', () => {
   let mgr
