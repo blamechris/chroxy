@@ -170,6 +170,7 @@ The following nonblockers remain recorded here because the mission forbids issue
 | `packages/app/src/components/chat/MessageBubble.tsx:176` | Documentation calls `rawToolName` trailing after a new final optional argument was added; documentation-only nonblocker. |
 | `packages/app/src/components/chat/MessageBubble.tsx:412` | Empty thinking indicator remained visible after a stopped turn in real smoke; independent review confirmed the renderer was unchanged, so retained as a nonblocking follow-up. |
 | Typed `~/` paths | Browse expands tilde before resolving while explicit Create's existing validation stats the raw cwd. This preexisting syntax gap is outside absolute workspace/default-path acceptance; Browse Select supplies the canonical path. |
+| Local full-server validation | Investigate unchanged guard-file timeouts and load-sensitive failures under bounded full-suite execution; retain as an unfiled stability follow-up, separate from the completed item acceptance and successful final CI. |
 
 ## Isolation self-report
 
