@@ -19,6 +19,15 @@ describe('isLoopbackHost', () => {
     assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
   })
 
+  it('rejects mapped hex forms whose first hextet is not 7f00-7fff', () => {
+    assert.equal(isLoopbackHost('::ffff:7f:1'), false) // 0.127.0.1
+    assert.equal(isLoopbackHost('::ffff:7f'), false) // incomplete address
+    assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('::ffff:7fff:ffff'), true)
+    assert.equal(isLoopbackHost('::ffff:7f00'), false)
+    assert.equal(isLoopbackHost('::ffff:7f000:1'), false)
+  })
+
   it('matches localhost case-insensitively', () => {
     assert.equal(isLoopbackHost('LocalHost'), true)
     assert.equal(isLoopbackHost('LOCALHOST'), true)
