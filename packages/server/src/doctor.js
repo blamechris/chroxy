@@ -565,7 +565,7 @@ export function checkUserLevelChroxyHook({ settingsPath } = {}) {
  * warned about missing `codex` or `OPENAI_API_KEY` (issue #2951).
  *
  * @param {Object} [options]
- * @param {number} [options.port] - Port to test availability for
+ * @param {number} [options.port] - CLI port override for the availability check
  * @param {string[]} [options.providers] - Override configured providers (mainly for tests)
  * @param {boolean} [options.verbose]
  * @param {string} [options.pkgDir] - Override directory used to locate node_modules for the
@@ -1011,7 +1011,13 @@ export async function runDoctorChecks({
   }
 
   // 7. Port availability
-  const checkPort = port || 8765
+  // Resolve the same flag > env > config > default port that `start` uses.
+  // The config was already read above for the other doctor checks.
+  const checkPort = mergeConfig({
+    fileConfig: parsedConfig || {},
+    cliOverrides: { port },
+    defaults: { port: 8765 },
+  }).port || 8765
   try {
     await checkPortAvailable(checkPort)
     checks.push({ name: 'Port', status: 'pass', message: `${checkPort} is available` })
