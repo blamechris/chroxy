@@ -12,7 +12,7 @@
  */
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
-import { Text } from 'react-native';
+import { Text, StyleSheet } from 'react-native';
 import { ToolBubble } from '../chat/ToolBubble';
 import type { ChatMessage } from '../../store/connection';
 
@@ -96,7 +96,9 @@ describe('ToolBubble — TodoWrite integration (#4180)', () => {
         .filter((c): c is string => typeof c === 'string')
         .join(' ');
     // Collapsed: the Show-more pill is present; head (line12) shown, tail (line13) hidden.
-    expect(findByTestId(root, 'tool-result-expand-tool-long')[0]).toBeTruthy();
+    const expand = findByTestId(root, 'tool-result-expand-tool-long')[0]!;
+    expect(expand).toBeTruthy();
+    expect(StyleSheet.flatten(expand.props.style)).toEqual(expect.objectContaining({ minWidth: 48, minHeight: 48 }));
     expect(allText()).toContain('line12');
     expect(allText()).not.toContain('line13');
     // Expand → full result visible.
@@ -104,6 +106,11 @@ describe('ToolBubble — TodoWrite integration (#4180)', () => {
       findByTestId(root, 'tool-result-expand-tool-long')[0]!.props.onPress();
     });
     expect(allText()).toContain('line20');
+    const collapse = findByTestId(root, 'tool-result-collapse-tool-long')[0]!;
+    expect(StyleSheet.flatten(collapse.props.style)).toEqual(expect.objectContaining({ minWidth: 48, minHeight: 48 }));
+    act(() => { collapse.props.onPress(); });
+    expect(allText()).not.toContain('line20');
+    expect(findByTestId(root, 'tool-result-expand-tool-long')[0]).toBeTruthy();
   });
 
   it('parses message.toolResult — not message.content (pins #4194 regression)', () => {

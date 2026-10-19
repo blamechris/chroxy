@@ -1,7 +1,9 @@
 import React from 'react';
 import renderer, { act } from 'react-test-renderer';
 import { AccessibilityInfo, FlatList, Text } from 'react-native';
-import { describeTurnTermination } from '@chroxy/store-core';
+import { describeTurnTermination, handleToolStart, handleToolInputDelta } from '@chroxy/store-core';
+import { Icon } from '../Icon';
+import { COLORS } from '../../constants/colors';
 import type { ChatMessage } from '../../store/connection';
 jest.mock('../../store/connection', () => ({
   useConnectionStore: (selector: (state: { sendInput: () => void; activeSessionId: null }) => unknown) => selector({ sendInput: () => {}, activeSessionId: null }),
@@ -18,8 +20,8 @@ beforeAll(() => {
 });
 afterAll(() => jest.restoreAllMocks());
 beforeEach(() => jest.useFakeTimers());
-afterEach(() => {
-  act(() => { for (const tree of trees.splice(0)) tree.unmount(); });
+afterEach(async () => {
+  await act(async () => { for (const tree of trees.splice(0)) tree.unmount(); });
   jest.useRealTimers();
 });
 function render(element: React.ReactElement) {
@@ -46,6 +48,7 @@ describe('lone tool termination state', () => {
     expect(text(tree)).toContain(describeTurnTermination(reason).label);
     expect(text(tree)).toContain(describeTurnTermination(reason).summary);
     expect(text(tree)).not.toContain('raw provider cancellation');
+    expect(tree.root.findAllByProps({ accessibilityLabel: 'tool failed' })).toHaveLength(0);
     expect(tree.root.findAllByProps({ testID: 'tool-bubble-pulse-tu-1' })).toHaveLength(0);
     tap(tree);
     expect(text(tree)).toContain(describeTurnTermination(reason).summary);
@@ -61,6 +64,17 @@ describe('lone tool termination state', () => {
     const complete = bubble(message({ toolResult: '' }));
     expect(complete.root.findAllByProps({ testID: 'tool-bubble-pulse-tu-1' })).toHaveLength(0);
     expect(text(complete)).not.toContain('terminated');
+  });
+  it('preserves completed empty input and useful finalized input over old partials', () => {
+    for (const content of ['{}', '{"command":"final-cmd"}']) {
+      const tree = bubble(message({ content, toolResult: 'done', toolInputPartial: '{"command":"streaming-stale"}' }));
+      expect(text(tree)).not.toContain('streaming-stale');
+      tap(tree);
+      expect(text(tree)).toContain(content);
+    }
+    const pendingEmpty = bubble(message({ content: '{}' }));
+    expect(text(pendingEmpty)).toContain('{}');
+    expect(pendingEmpty.root.findAllByProps({ testID: 'tool-bubble-pulse-tu-1' }).length).toBeGreaterThan(0);
   });
   it('forwards the reason alongside all existing detail arguments', () => {
     const onOpenDetail = jest.fn();
@@ -101,6 +115,31 @@ describe('tool detail termination state', () => {
     const tree = render(<ChatView messages={[message()]} scrollViewRef={React.createRef<FlatList>()} claudeReady onSelectOption={noop} isCliMode={false} selectedIds={new Set()} isSelecting={false} isSelectingRef={{ current: false }} onToggleSelection={noop} streamingMessageId={null} />);
     expect(tree.root.findAllByType(ToolBubble)).toHaveLength(1);
     expect(tree.root.findAllByProps({ testID: 'tool-bubble-pulse-tu-1' }).length).toBeGreaterThan(0);
+  });
+  it.each(['command failed', undefined])('shows an ordinary lone tool error before running state (result: %s)', toolResult => {
+    const data = message({ toolResult, toolResultIsError: true });
+    const tree = render(<ChatView messages={[data]} scrollViewRef={React.createRef<FlatList>()} claudeReady onSelectOption={noop} isCliMode={false} selectedIds={new Set()} isSelecting={false} isSelectingRef={{ current: false }} onToggleSelection={noop} streamingMessageId={null} />);
+    expect(tree.root.findAllByType(ActivityGroup)).toHaveLength(0);
+    const errorIcon = tree.root.findAllByType(Icon).find(icon => icon.props.accessibilityLabel === 'tool failed');
+    expect(errorIcon).toBeDefined();
+    expect(errorIcon?.props.name).toBe('alertCircle');
+    expect(errorIcon?.props.color).toBe(COLORS.accentRed);
+    expect(tree.root.findAllByProps({ testID: 'tool-bubble-pulse-tu-1' })).toHaveLength(0);
+    expect(text(tree)).not.toContain('terminated');
+  });
+  it('shows the real empty-input streaming fixture through ChatView', () => {
+    const start = handleToolStart({ type: 'tool_start', sessionId: 'mock-sess-1', tool: 'Bash', input: {}, messageId: 'tool-bash-partial-mock-1', toolUseId: 'tu-bash-partial-mock-1' }, 'mock-sess-1', false, []);
+    let messages: ChatMessage[] = [start.chatMessage!];
+    expect(messages[0]!.content).toBe('{}');
+    for (const partialJson of ['{"comm', 'and":"', 'ls -la /tmp"}']) {
+      const delta = handleToolInputDelta({ type: 'tool_input_delta', sessionId: 'mock-sess-1', toolUseId: 'tu-bash-partial-mock-1', partialJson }, 'mock-sess-1');
+      messages = delta!.applyTo(messages);
+    }
+    const tree = render(<ChatView messages={messages} scrollViewRef={React.createRef<FlatList>()} claudeReady onSelectOption={noop} isCliMode={false} selectedIds={new Set()} isSelecting={false} isSelectingRef={{ current: false }} onToggleSelection={noop} streamingMessageId={null} />);
+    const tool = tree.root.findByType(ToolBubble);
+    expect(tool.findByProps({ testID: 'tool-collapsed-preview' }).props.children).toBe('ls -la /tmp');
+    act(() => { tool.findAllByProps({ activeOpacity: 0.7 })[0]!.props.onPress(); });
+    expect(text(tree)).toContain('ls -la /tmp');
   });
   it('keeps two-tool activity groups on the grouped renderer', () => {
     const tree = render(<ChatView messages={[message(), message({ id: 'tool-2', toolUseId: 'tu-2', timestamp: 2 })]} scrollViewRef={React.createRef<FlatList>()} claudeReady onSelectOption={noop} isCliMode={false} selectedIds={new Set()} isSelecting={false} isSelectingRef={{ current: false }} onToggleSelection={noop} streamingMessageId={null} />);

@@ -86,7 +86,10 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     ? formatPartialPreview(message.toolInputPartial)
     : '';
   const rawContent = message.content?.trim() || '';
-  const isPlaceholderContent = !rawContent || rawContent === message.tool;
+  // Empty input is also a placeholder while sanitized input deltas arrive.
+  // Keep finalized input and completed empty-input tools authoritative.
+  const isPlaceholderContent = !rawContent || rawContent === message.tool
+    || (rawContent === '{}' && message.toolResult === undefined && !(message.toolResultImages?.length));
   // #6018 — the NON-streaming path also leaks: when `tool_start` carries `input`,
   // store-core serializes it into `message.content` (`content: msg.input ?
   // JSON.stringify(msg.input) : tool`), so `rawContent` is the raw `{"questions":
@@ -118,7 +121,8 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const termination = message.toolResultTerminatedReason
     ? describeTurnTermination(message.toolResultTerminatedReason)
     : null;
-  const inFlight = !hasResult && !termination;
+  const ordinaryError = !termination && Boolean(message.toolResultIsError);
+  const inFlight = !hasResult && !termination && !ordinaryError;
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -223,6 +227,9 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
         {termination && (
           <Icon name="stop" size={12} color={COLORS.accentOrange} accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
         )}
+        {ordinaryError && (
+          <Icon name="alertCircle" size={12} color={COLORS.accentRed} accessibilityLabel="tool failed" />
+        )}
         {inFlight && (
           <View
             style={styles.pulse}
@@ -254,7 +261,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
           ) : isLongContent && !resultExpanded ? (
             <>
               <Text selectable style={styles.toolContentExpanded}>{content.split('\n').slice(0, TOOL_OUTPUT_COLLAPSE_HEAD_LINES).join('\n')}</Text>
-              <TouchableOpacity onPress={() => setResultExpanded(true)} testID={`tool-result-expand-${message.id}`}>
+              <TouchableOpacity style={styles.toolResultToggle} onPress={() => setResultExpanded(true)} testID={`tool-result-expand-${message.id}`}>
                 <Text style={styles.toolResultExpand}>Show {contentLineCount - TOOL_OUTPUT_COLLAPSE_HEAD_LINES} more lines</Text>
               </TouchableOpacity>
             </>
@@ -262,7 +269,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
             <>
               <Text selectable style={styles.toolContentExpanded}>{content}</Text>
               {isLongContent && (
-                <TouchableOpacity onPress={() => setResultExpanded(false)} testID={`tool-result-collapse-${message.id}`}>
+                <TouchableOpacity style={styles.toolResultToggle} onPress={() => setResultExpanded(false)} testID={`tool-result-collapse-${message.id}`}>
                   <Text style={styles.toolResultExpand}>Show less</Text>
                 </TouchableOpacity>
               )}
@@ -348,6 +355,12 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   // #6391 (mobile auto-collapse): the "Show N more lines" / "Show less" pill.
+  toolResultToggle: {
+    minHeight: 48,
+    minWidth: 48,
+    justifyContent: 'center',
+    alignSelf: 'flex-start',
+  },
   toolResultExpand: {
     color: COLORS.accentBlue,
     fontSize: 12,
