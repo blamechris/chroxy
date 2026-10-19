@@ -35,6 +35,7 @@ export const NOTIFICATION_CATEGORIES = Object.freeze([
         key: 'permission',
         label: 'Permission requests',
         hint: 'Tool-use prompts that need an allow / deny decision.',
+        defaultBypass: true,
     },
     {
         key: 'activity_waiting',
@@ -45,6 +46,7 @@ export const NOTIFICATION_CATEGORIES = Object.freeze([
         key: 'activity_error',
         label: 'Session errors',
         hint: 'Crashes, tunnel drops, and unrecoverable session failures.',
+        defaultBypass: true,
     },
     {
         key: 'activity_update',
@@ -104,6 +106,12 @@ export const NOTIFICATION_CATEGORIES = Object.freeze([
         hint: 'iOS Dynamic Island / lock-screen Live Activity updates.',
     },
 ].map((c) => Object.freeze(c)));
+/**
+ * Categories that bypass quiet hours when the user has not chosen a list
+ * (derived from `defaultBypass` — never a second list). Used by both clients
+ * when a snapshot omits `bypassCategories` (older server, fresh install).
+ */
+export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(NOTIFICATION_CATEGORIES.filter((c) => c.defaultBypass === true).map((c) => c.key));
 /** Render order for the known categories (derived — never a second list). */
 export const NOTIFICATION_CATEGORY_ORDER = Object.freeze(NOTIFICATION_CATEGORIES.map((c) => c.key));
 /**
