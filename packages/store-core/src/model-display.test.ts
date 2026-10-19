@@ -21,6 +21,20 @@ describe('model presentation (#8260)', () => {
     expect(modelChoices([...models, duplicate])).toHaveLength(3)
     expect(findModelEntry([...models, duplicate], 'second-alias')).toBe(duplicate)
   })
+  it('uses one full-target discriminator when custom families share a pinned descriptor', () => {
+    const alpha = { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' }
+    const beta = { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' }
+    const alphaAlias = { ...alpha, id: 'alpha-alias' }
+    const roster = [alpha, beta, alphaAlias]
+    const choices = modelChoices(roster)
+
+    expect(choices.map(({ id, fullId, label }) => ({ id, fullId, label }))).toEqual([
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom (claude-alpha-1-0)' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom (claude-beta-1-0)' },
+    ])
+    expect(roster.map(m => m.label)).toEqual(['Custom', 'Custom', 'Custom'])
+    expect(findModelEntry(roster, 'alpha-alias')).toBe(alphaAlias)
+  })
   it('resolves exact id before an earlier full-ID alias', () => {
     const collision = [{ id: 'other', fullId: 'haiku-4-5', label: 'Other' }, ...models]
     expect(findModelEntry(collision, 'haiku-4-5')).toBe(models[1])
