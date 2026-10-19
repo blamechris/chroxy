@@ -16,6 +16,20 @@ describe('model presentation (#8260)', () => {
     expect(choices.map(m => m.label)).toEqual(['Haiku 4.5 (provider alias)', 'Haiku 4.5 (pinned 4.5)', 'Haiku 4.5 (pinned 20251001)'])
     expect(models[0]!.label).toBe('Haiku 4.5')
   })
+  it('uses the base label once when different custom families share a pinned descriptor', () => {
+    const custom = [
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' },
+      { id: 'alpha-alias', fullId: 'claude-alpha-1-0', label: 'Ignored duplicate' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' },
+    ]
+    const before = custom.map(model => ({ ...model }))
+    expect(modelChoices(custom)).toEqual([
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom (claude-alpha-1-0)' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom (claude-beta-1-0)' },
+    ])
+    expect(custom).toEqual(before)
+    expect(findModelEntry(custom, 'alpha-alias')).toBe(custom[1])
+  })
   it('collapses only identical targets while preserving exact alias resolution', () => {
     const duplicate = { ...models[1]!, id: 'second-alias' }
     expect(modelChoices([...models, duplicate])).toHaveLength(3)
