@@ -220,3 +220,61 @@ describe('ToolBubble — in-flight pulse marker (#4321 / #4308)', () => {
     expect(findByTestId(root, 'tool-bubble-pulse-tu-inflight')).toHaveLength(0);
   });
 });
+
+describe('ToolBubble — terminated state (#8364)', () => {
+  const cut = (overrides: Partial<ChatMessage> = {}) => makeToolMessage({
+    id: 'tool-cut',
+    tool: 'Bash',
+    content: 'sleep 60',
+    toolResult: 'synthesized placeholder',
+    toolResultIsError: true,
+    toolResultTerminatedReason: 'permission_mode_switch',
+    ...overrides,
+  });
+
+  it('shows the amber terminated icon and the check-before-retrying sentence for a cut-off tool', () => {
+    const root = renderBubble(cut());
+    expect(findByTestId(root, 'tool-bubble-terminated-tool-cut')[0]).toBeTruthy();
+    tapToExpand(root);
+    const summary = findByTestId(root, 'tool-bubble-terminated-summary-tool-cut')[0];
+    expect(summary).toBeTruthy();
+    expect(String(summary!.props.children)).toContain('Check whether it took effect');
+  });
+
+  it('labels a Stop that cancelled a pending permission as stopped', () => {
+    const root = renderBubble(cut({ toolResultTerminatedReason: 'user_stop_before_run' }));
+    expect(findByTestId(root, 'tool-bubble-terminated-tool-cut')[0]!.props.accessibilityLabel).toBe('stopped');
+  });
+
+  it('renders no terminated state for a normal or failed result (control)', () => {
+    const ok = renderBubble(cut({ toolResultIsError: false, toolResultTerminatedReason: undefined }));
+    tapToExpand(ok);
+    expect(findByTestId(ok, 'tool-bubble-terminated-tool-cut')).toHaveLength(0);
+    expect(findByTestId(ok, 'tool-bubble-terminated-summary-tool-cut')).toHaveLength(0);
+  });
+
+  it('renders no terminated state while the tool is still running, even with a stale reason', () => {
+    const root = renderBubble(cut({ toolResult: undefined }));
+    expect(findByTestId(root, 'tool-bubble-terminated-tool-cut')).toHaveLength(0);
+  });
+
+  it('passes the terminated reason to the detail modal on the second tap', () => {
+    const calls: unknown[][] = [];
+    let root!: renderer.ReactTestRenderer;
+    act(() => {
+      root = renderer.create(
+        <ToolBubble
+          message={cut()}
+          isSelected={false}
+          isSelecting={false}
+          onToggleSelection={() => {}}
+          onOpenDetail={(...args) => { calls.push(args); }}
+        />,
+      );
+    });
+    tapToExpand(root);
+    tapToExpand(root);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![7]).toBe('permission_mode_switch');
+  });
+});

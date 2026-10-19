@@ -13,9 +13,10 @@ import {
 import type { ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
+import { describeTurnTermination } from '@chroxy/store-core';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 
-export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, onClose, onImagePress }: {
+export function ToolDetailModal({ visible, toolName, rawToolName, content, toolResult, toolResultTruncated, toolResultImages, serverName, toolResultTerminatedReason, onClose, onImagePress }: {
   visible: boolean;
   toolName: string;
   /**
@@ -33,6 +34,9 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   toolResultTruncated?: boolean;
   toolResultImages?: ToolResultImage[];
   serverName?: string;
+  /** #8364: set when the tool was cut off by a terminated turn; replaces the
+   *  raw synthetic result text with the shared terminated sentence. */
+  toolResultTerminatedReason?: string;
   onClose: () => void;
   onImagePress: (uri: string) => void;
 }) {
@@ -40,6 +44,9 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   // `null` (non-web tool, absent or unparseable result) keeps the existing
   // `<Text selectable>` dump below.
   const webParsed = parseWebToolResult(rawToolName, toolResult);
+  const termination = toolResult != null && toolResultTerminatedReason
+    ? describeTurnTermination(toolResultTerminatedReason)
+    : null;
   return (
     <Modal
       visible={visible}
@@ -98,7 +105,12 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
             {toolResult != null ? (
               <>
                 <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
-                {webParsed ? (
+                {termination ? (
+                  <View style={styles.terminatedRow} testID="tool-detail-terminated">
+                    <Icon name="stop" size={14} color={COLORS.accentOrange} accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
+                    <Text selectable style={styles.terminatedText}>{termination.summary}</Text>
+                  </View>
+                ) : webParsed ? (
                   <WebToolResultView parsed={webParsed} />
                 ) : (
                   <Text selectable style={styles.toolModalContent}>{toolResult}</Text>
@@ -113,6 +125,17 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
 }
 
 const styles = StyleSheet.create({
+  terminatedRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
+  },
+  terminatedText: {
+    flex: 1,
+    color: COLORS.accentOrange,
+    fontSize: 13,
+    lineHeight: 18,
+  },
   toolModalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
