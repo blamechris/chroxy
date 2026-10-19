@@ -6,7 +6,7 @@ import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { credentialDirError } from '../handler-utils.js'
-import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
+import { realpathOfDeepestAncestor, unresolvablePathError, unresolvableAncestor } from './common.js'
 
 const log = createLogger('ws')
 
@@ -34,6 +34,7 @@ const LISTING_UNRESOLVABLE_REASONS = {
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd, { getConfig = () => null } = {}) {
 
   const DENIED_HOME_ONLY = 'Access denied: directory listing is restricted to the home directory'
+  const CREDENTIAL_DENIED = 'Access denied: credential and configuration directories cannot be listed'
   const DENIED_WITH_ROOTS = 'Access denied: directory listing is restricted to the home directory and the configured workspace roots'
 
   /**
@@ -84,6 +85,14 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           const homeReal = await realpath(home).catch(() => null)
           const { roots, extended } = homeReal ? await resolveBrowseRoots(homeReal) : { roots: [], extended: false }
           const denial = extended ? DENIED_WITH_ROOTS : DENIED_HOME_ONLY
+          // A path under a credential/config directory gets the credential denial
+          // here too (not "Not a directory" / "Permission denied"), in the same
+          // order as the ENOENT path below: boundary first, then credential.
+          const ancestorReal = await unresolvableAncestor(absPath)
+          if (ancestorReal && roots.some(root => isPathWithin(ancestorReal, root)) && credentialDirError(ancestorReal, getConfig())) {
+            sendFn(ws, { type: 'directory_listing', path: absPath, parentPath: null, entries: [], error: CREDENTIAL_DENIED })
+            return
+          }
           // The specific reason is only for a path inside SOME browsable root.
           let error = denial
           for (const root of roots) {
@@ -134,7 +143,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           path: absPath,
           parentPath: null,
           entries: [],
-          error: 'Access denied: credential and configuration directories cannot be listed',
+          error: CREDENTIAL_DENIED,
         })
         return
       }

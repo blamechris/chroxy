@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, realpathSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, realpathSync, statSync, writeFileSync, symlinkSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
@@ -8,6 +8,7 @@ import { resolveSessionCwd, validatePathWithinCwd } from '../src/ws-file-ops/com
 import { configuredCwdWarning, validateCwdAllowed } from '../src/handler-utils.js'
 import { isPathWithin } from '../src/utils/path-containment.js'
 import { OUTSIDE_HOME_DIR } from './helpers/outside-home.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
  * #8303 — Browse (`list_directory`) honours the allowlist session creation
@@ -84,6 +85,17 @@ describe('Browse honours workspaceRoots (#8303)', () => {
     assert.match(outside.error, /^Access denied/)
   })
 
+  it('a MISSING path under a root answers "not found", and one through a link out of the root answers the denial (#8011 holds with roots)', { skip: SKIP_TMP_INSIDE_HOME || SKIP_NO_SYMLINK }, async () => {
+    symlinkSync(OUTSIDE_HOME_DIR, join(root, 'link-out'))
+    const config = { workspaceRoots: [root] }
+    const missing = await listWith(config, join(root, 'proj-a', 'no-such-dir'))
+    assert.equal(missing.error, 'Directory not found')
+    const viaLink = await listWith(config, join(root, 'link-out', 'no-such-dir-8303'))
+    assert.match(viaLink.error, /^Access denied/)
+    const viaLinkExisting = await listWith(config, join(root, 'link-out'))
+    assert.match(viaLinkExisting.error, /^Access denied/)
+  })
+
   it('the default cwd under a root is browsable, and one outside every root is not', { skip: SKIP_TMP_INSIDE_HOME }, async () => {
     const config = { workspaceRoots: [root], cwd: join(root, 'proj-b') }
     assert.equal(validateCwdAllowed(config.cwd, config), null)
@@ -117,6 +129,14 @@ describe('Browse applies the credential-directory deny-list (#8303)', () => {
       assert.match(reply.error, /^Access denied: credential and configuration directories/, target)
       assert.deepEqual(reply.entries, [])
     }
+  })
+
+  it('answers a path UNDER a credential directory the same way whether or not it exists (no existence oracle)', async () => {
+    writeFileSync(join(home, '.ssh', 'id_test'), 'x')
+    const throughFile = await listWith(config(), join(home, '.ssh', 'id_test', 'child')) // ENOTDIR
+    const missing = await listWith(config(), join(home, '.ssh', 'no-such', 'child')) // ENOENT
+    assert.match(throughFile.error, /^Access denied: credential and configuration directories/)
+    assert.equal(throughFile.error, missing.error)
   })
 
   it('is case-insensitive about the credential directory name', async () => {

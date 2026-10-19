@@ -81,6 +81,18 @@ describe('CreateSessionModal not-browsable note (#8303)', () => {
     expect(screen.queryByTestId('cwd-not-browsable-note')).not.toBeInTheDocument()
   })
 
+  it('shows no note when the refusal is the credential deny-list (that is not "outside the roots")', () => {
+    renderModal({ initialCwd: '/home/u/.ssh' })
+    reply({ path: '/home/u/.ssh', error: 'Access denied: credential and configuration directories cannot be listed' })
+    expect(screen.queryByTestId('cwd-not-browsable-note')).not.toBeInTheDocument()
+  })
+
+  it('shows the note for the wording used when workspace roots are configured', () => {
+    renderModal({ initialCwd: '/srv/work/proj' })
+    reply({ path: '/srv/work/proj', error: 'Access denied: directory listing is restricted to the home directory and the configured workspace roots' })
+    expect(screen.getByTestId('cwd-not-browsable-note')).toBeInTheDocument()
+  })
+
   it('shows no note for an unrelated error (not found is not "outside the roots")', () => {
     renderModal({ initialCwd: '/home/u/gone' })
     reply({ path: '/home/u/gone', error: 'Directory not found' })

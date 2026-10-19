@@ -605,7 +605,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setDirectoryListingCallback((listing: DirectoryListing) => {
       const responsePath = listing.path || listing.parentPath || ''
       if (!browsePathsMatch(probePath, responsePath)) return
-      setNotBrowsablePath(listing.error && /^Access denied/.test(listing.error) ? probePath : null)
+      setNotBrowsablePath(listing.error && /^Access denied: directory listing is restricted/.test(listing.error) ? probePath : null)
     })
     requestDirectoryListing(probePath)
   }, [open, initialCwd, defaultCwd, requestDirectoryListing, setDirectoryListingCallback])
