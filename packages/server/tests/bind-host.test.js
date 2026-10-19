@@ -17,6 +17,21 @@ describe('isLoopbackHost', () => {
   it('treats IPv4-mapped IPv6 loopback as loopback', () => {
     assert.equal(isLoopbackHost('::ffff:127.0.0.1'), true)
     assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
+    assert.equal(isLoopbackHost('::ffff:7f00:0'), true)
+    assert.equal(isLoopbackHost('::ffff:7fff:ffff'), true)
+    assert.equal(isLoopbackHost('::FFFF:7FaB:cD'), true)
+    assert.equal(isLoopbackHost('::ffff:127.255.255.255'), true)
+  })
+
+  it('rejects mapped IPv6 addresses outside 127.0.0.0/8 and malformed lookalikes', () => {
+    for (const host of [
+      '::ffff:7f:1', '::ffff:7f', '::ffff:7eff:ffff', '::ffff:8000:0',
+      '::ffff:126.255.255.255', '::ffff:128.0.0.0',
+      '::ffff:7f000:1', '::ffff:7f00:1:2', '::ffff:7fgg:1',
+      '::ffff:127.0.0.256', '::ffff:127.0.0.1.example', '::ffff:127.0.0.1:80',
+    ]) {
+      assert.equal(isLoopbackHost(host), false, host)
+    }
   })
 
   it('matches localhost case-insensitively', () => {
@@ -95,6 +110,15 @@ describe('maybeWarnNonLoopbackBind', () => {
     }
   })
 
+  it('warns for shortened mapped prefixes that are not loopback', () => {
+    for (const bindHost of ['::ffff:7f:1', '::ffff:7f']) {
+      const { warns, log } = captureLogger()
+      assert.equal(maybeWarnNonLoopbackBind({ bindHost, log }), true, bindHost)
+      assert.equal(warns.length, 1)
+      assert.ok(warns[0].includes(bindHost))
+    }
+  })
+
   it('says LAN peers can reach auth/pairing endpoints and how to restrict', () => {
     const { warns, log } = captureLogger()
     maybeWarnNonLoopbackBind({ bindHost: undefined, log })
@@ -105,7 +129,7 @@ describe('maybeWarnNonLoopbackBind', () => {
   })
 
   it('stays silent for loopback binds', () => {
-    for (const bindHost of ['127.0.0.1', '127.0.0.53', 'localhost', '::1']) {
+    for (const bindHost of ['127.0.0.1', '127.0.0.53', 'localhost', '::1', '::ffff:7f00:1', '::ffff:127.0.0.1']) {
       const { warns, log } = captureLogger()
       assert.equal(maybeWarnNonLoopbackBind({ bindHost, log }), false)
       assert.equal(warns.length, 0, `no warning for ${bindHost}`)
