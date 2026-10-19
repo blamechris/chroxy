@@ -40,9 +40,9 @@ export function modelChoices(models: readonly ModelInfo[]): ModelInfo[] {
     targets.add(target)
     return true
   })
-  const choices = unique.map(m => {
+  const entries = unique.map(m => {
     const label = baseLabel(m)
-    if (unique.filter(other => baseLabel(other) === label).length < 2) return { ...m, label }
+    if (unique.filter(other => baseLabel(other) === label).length < 2) return { base: label, choice: { ...m, label } }
     const target = m.fullId || m.id
     const date = target.match(/-(\d{8})(\[1m\])?$/)?.[1]
     const version = target.match(/^(?:claude-)?[a-z]+-(\d+)-(\d+)(?:-\d{8})?(?:\[1m\])?$/)
@@ -54,12 +54,12 @@ export function modelChoices(models: readonly ModelInfo[]): ModelInfo[] {
     // Different provider aliases/custom targets may still share a descriptor.
     const ambiguous = unique.some(other => other !== m && baseLabel(other) === label
       && (other.fullId || other.id).replace(/^claude-/, '') === target.replace(/^claude-/, ''))
-    return { ...m, label: ambiguous ? `${label} (${target})` : candidate }
+    return { base: label, choice: { ...m, label: ambiguous ? `${label} (${target})` : candidate } }
   })
-  // The fallback must rebuild from the ORIGINAL base label (`unique[i]`), not the
-  // already-augmented `choices[i].label`, or the descriptor would repeat.
-  return choices.map((m, i) => choices.filter(other => other.label === m.label).length > 1
-    ? { ...m, label: `${baseLabel(unique[i])} (${m.fullId || m.id})` } : m)
+  // The fallback must rebuild from the ORIGINAL base label (`base`), not the
+  // already-augmented choice label, or the descriptor would repeat.
+  return entries.map(({ base, choice }) => entries.filter(other => other.choice.label === choice.label).length > 1
+    ? { ...choice, label: `${base} (${choice.fullId || choice.id})` } : choice)
 }
 
 /** Shared header/status label. The family fallback is display-only, Claude-only,
