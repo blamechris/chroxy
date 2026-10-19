@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { ServerDirectoryListingSchema } from '@chroxy/protocol/schemas'
 import { fileHandlers } from '../../src/handlers/file-handlers.js'
 import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
@@ -49,6 +50,21 @@ function makeWs() {
 
 describe('file-handlers', () => {
   describe('list_directory', () => {
+    for (const boundSessionId of ['session-1', '']) {
+      it(`returns an unavailable directory listing for a scoped client (${JSON.stringify(boundSessionId)})`, () => {
+        const send = createSpy()
+        const ctx = makeCtx(new Map(), { transport: { send } })
+        Object.defineProperty(ctx.services, 'config', { get: () => { throw new Error('config should not be read') } })
+        fileHandlers.list_directory(makeWs(), makeClient({ boundSessionId }), { requestId: 'directory-1' }, ctx)
+        assert.equal(ctx.services.fileOps.listDirectory.callCount, 0)
+        assert.deepEqual(send.lastCall[1], {
+          type: 'directory_listing', path: null, parentPath: null, entries: [],
+          error: 'Directory listing is unavailable', requestId: 'directory-1',
+        })
+        assert.equal(ServerDirectoryListingSchema.safeParse(send.lastCall[1]).success, true)
+      })
+    }
+
     it('delegates to fileOps.listDirectory with the provided path', () => {
       const ctx = makeCtx()
       const ws = makeWs()

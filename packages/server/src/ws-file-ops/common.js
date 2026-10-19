@@ -195,6 +195,11 @@ async function unresolvedLinkTarget(cursor, stepOver) {
   return resolveTargetComponentwiseAsync(await realpath(dirname(cursor)), link)
 }
 
+/** Resolve an unseeable target for error classification only, never access. */
+export async function resolveUnresolvablePathForError(absPath) {
+  return deepestAncestorWalk(absPath, STEP_OVER_UNSEEABLE)
+}
+
 /**
  * #8012 — FOR CHOOSING AN ERROR MESSAGE ONLY; never for granting access.
  *
@@ -220,7 +225,7 @@ async function unresolvedLinkTarget(cursor, stepOver) {
 export async function isUnresolvablePathWithin(absPath, rootReal) {
   if (!rootReal) return false
   try {
-    return isPathWithin(await deepestAncestorWalk(absPath, STEP_OVER_UNSEEABLE), rootReal)
+    return isPathWithin(await resolveUnresolvablePathForError(absPath), rootReal)
   } catch {
     return false
   }

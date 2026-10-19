@@ -432,7 +432,7 @@ function pathTouchesForbiddenSubdir(absPath, home) {
 function pathTouchesConfigDir(absPath) {
   let realConfigDir
   try {
-    realConfigDir = realpathSync(configDir())
+    realConfigDir = realpathSync.native(configDir())
   } catch {
     // The root does not exist yet. `absPath` already resolved through
     // realpathSync, so it cannot be inside a directory that is not there.
@@ -478,11 +478,21 @@ export function validateCwdAllowed(cwd, config = null) {
   }
   let realCwd
   try {
-    realCwd = realpathSync(cwd)
+    realCwd = realpathSync.native(cwd)
   } catch {
     return `Cannot resolve path: ${cwd}`
   }
 
+  return validateCanonicalCwdAllowed(realCwd, config)
+}
+
+/**
+ * Apply the workspace policy to an already canonical path. This checks
+ * authorization only; callers must establish directory existence before
+ * granting access. Listings also use canonical unresolved paths to select
+ * safe error text, without granting a listing.
+ */
+export function validateCanonicalCwdAllowed(realCwd, config = null) {
   // Layer 2: credential-directory deny-list (always active).
   // `homeOverride` exists so tests can use a hermetic fake home
   // directory instead of creating throwaway dirs under the user's
@@ -502,7 +512,7 @@ export function validateCwdAllowed(cwd, config = null) {
     : homedir()
   let home
   try {
-    home = realpathSync(rawHome)
+    home = realpathSync.native(rawHome)
   } catch {
     home = rawHome
   }
@@ -525,7 +535,7 @@ export function validateCwdAllowed(cwd, config = null) {
     for (const root of roots) {
       let realRoot
       try {
-        realRoot = realpathSync(root)
+        realRoot = realpathSync.native(root)
       } catch {
         // Configured root that doesn't resolve is a config error — skip
         // it rather than failing the whole check, but it can't match.

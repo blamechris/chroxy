@@ -82,8 +82,30 @@ describe('CreateSessionModal browse mode (#1585)', () => {
     renderModal({ initialCwd: '/home/user/projects' })
     fireEvent.click(screen.getByText('Browse...'))
 
-    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/home/user/projects')
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/home/user/projects', expect.any(String))
     expect(mockSetDirectoryListingCallback).toHaveBeenCalled()
+  })
+
+  it.each(['/home/user//projects', '/home/user/sub/../projects', '~/projects'].flatMap(initialCwd => ['success', 'error'].map(staleKind => ({ initialCwd, staleKind }))))('ignores a stale $staleKind before accepting a normalized Browse reply for $initialCwd', ({ initialCwd, staleKind }) => {
+    renderModal({ initialCwd })
+    fireEvent.click(screen.getByText('Browse...'))
+    const requestId = mockRequestDirectoryListing.mock.calls[mockRequestDirectoryListing.mock.calls.length - 1]?.[1]
+    expect(typeof requestId).toBe('string')
+    // A normalized path cannot identify a request: an old success or failure
+    // must leave the current navigation pending until its own reply arrives.
+    act(() => { capturedCallback?.({
+      path: '/home/user/projects',
+      entries: staleKind === 'success' ? [{ name: 'stale-child', isDirectory: true }] : [],
+      error: staleKind === 'error' ? 'old error' : null,
+      requestId: 'old-request',
+    }) })
+    expect(screen.queryByText('stale-child')).not.toBeInTheDocument()
+    expect(screen.queryByText('old error')).not.toBeInTheDocument()
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    act(() => { capturedCallback?.({ path: '/home/user/projects', entries: [{ name: 'child', isDirectory: true }], error: null, requestId }) })
+    expect(screen.getByText('child')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('Select'))
+    expect(screen.getByLabelText('Working directory')).toHaveValue('/home/user/projects')
   })
 
   it('shows loading state before listing arrives', () => {
@@ -224,7 +246,7 @@ describe('CreateSessionModal browse mode (#1585)', () => {
     // Click on a directory entry to navigate into it
     fireEvent.click(screen.getByText('projects'))
 
-    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/home/user/projects')
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/home/user/projects', expect.any(String))
   })
 
   it('does not auto-rename when user manually edited name before browsing', () => {

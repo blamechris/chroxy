@@ -4,6 +4,7 @@
  * The CWD field is a combobox: shows known directories from existing sessions
  * as suggestions, but also accepts free-form typed paths.
  */
+import { nextDirectoryRequestId } from '../utils/directory-request-id'
 import { useState, useEffect, useCallback, useRef, useMemo, useId, type KeyboardEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { Modal } from './Modal'
@@ -355,7 +356,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const cwdValRef = useRef('')
 
   // Autocomplete suggestions from server
-  const { suggestions: autocompleteSuggestions } = usePathAutocomplete(cwd)
+  const { suggestions: autocompleteSuggestions, directoryAccess } = usePathAutocomplete(cwd, { enabled: open && !browsing, checkDirectory: true })
 
   // Merge autocomplete with known cwds, deduplicate and sort
   const suggestions = useMemo(() => {
@@ -550,11 +551,14 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setBrowseEntries([])
     setBrowseError(null)
     const requestedPath = path
+    const requestId = nextDirectoryRequestId()
     setDirectoryListingCallback((listing: DirectoryListing) => {
       // Guard: ignore stale responses from previous navigations (#1584)
       // Normalize paths before comparing — server may expand ~ or add/strip slashes (#1592)
       const responsePath = listing.path || listing.parentPath || ''
-      if (!browsePathsMatch(requestedPath, responsePath)) return // stale
+      if (listing.requestId != null) {
+        if (listing.requestId !== requestId) return
+      } else if (!browsePathsMatch(requestedPath, responsePath)) return // legacy reply
       // Update browsePath to the server's canonical path when it differs
       if (responsePath && responsePath !== requestedPath) {
         setBrowsePath(responsePath)
@@ -570,7 +574,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
         setBrowseEntries(listing.entries)
       }
     })
-    requestDirectoryListing(path)
+    requestDirectoryListing(path, requestId)
   }, [requestDirectoryListing, setDirectoryListingCallback])
 
   const handleBrowseOpen = useCallback(async () => {
@@ -792,7 +796,14 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Browse...
             </button>
           </div>
-          {cwd && !suggestions.includes(cwd) && (
+          {directoryAccess?.path === cwd.trim() && directoryAccess.status !== 'allowed' && (
+            <span className="cwd-hint" data-testid="cwd-access-hint" role="status">
+              {directoryAccess.status === 'pending' ? 'Checking directory access…'
+                : directoryAccess.status === 'unknown' ? 'Directory access could not be checked. Reconnect or choose another directory.'
+                  : `Browse cannot open this directory: ${directoryAccess.error}`}
+            </span>
+          )}
+          {directoryAccess?.path === cwd.trim() && directoryAccess.status === 'allowed' && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
           )}
           {currentPreset && (
