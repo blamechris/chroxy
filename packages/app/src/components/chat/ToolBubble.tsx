@@ -7,7 +7,7 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
-import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
+import { describeTurnTermination, getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -50,7 +50,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
    *  the detail modal needs it to route WebSearch/WebFetch results through
    *  the structured renderer, since `toolName` has already been through
    *  `formatToolName`. */
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string, toolResultTerminatedReason?: string) => void;
   /** #5517: seed + persist expand state in ChatView's id-keyed registry so
    *  it survives FlatList row recycling. */
   getInitialExpanded?: (id: string) => boolean;
@@ -116,6 +116,9 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const hasResult =
     message.toolResult !== undefined || (message.toolResultImages?.length ?? 0) > 0;
   const inFlight = !hasResult;
+  const termination = hasResult && message.toolResultTerminatedReason
+    ? describeTurnTermination(message.toolResultTerminatedReason)
+    : null;
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -126,7 +129,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool, message.toolResultTerminatedReason);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -217,6 +220,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     >
       <View style={styles.toolHeader}>
         {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
+        {termination && (
+          <Icon name="stop" size={12} color={COLORS.accentOrange}
+            testID={`tool-bubble-terminated-${message.id}`}
+            accessibilityLabel={termination.label === 'stopped' ? 'stopped' : 'turn terminated'} />
+        )}
         {inFlight && (
           <View
             style={styles.pulse}
@@ -238,6 +246,11 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
       </View>
       {expanded ? (
         <>
+          {termination && (
+            <Text selectable testID={`tool-bubble-termination-summary-${message.id}`} style={styles.terminationSummary}>
+              {termination.summary}
+            </Text>
+          )}
           {todoParsed ? (
             <TodoList parsed={todoParsed} />
           ) : webParsed ? (
@@ -276,7 +289,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
           testID="tool-collapsed-preview"
           style={styles.toolContentCollapsed}
           numberOfLines={1}
-        >{preview}</Text>
+        >{termination ? termination.summary : preview}</Text>
       )}
     </TouchableOpacity>
   );
@@ -327,6 +340,12 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     fontSize: 12,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  terminationSummary: {
+    color: COLORS.accentOrange,
+    fontSize: 12,
     marginTop: 6,
     lineHeight: 18,
   },

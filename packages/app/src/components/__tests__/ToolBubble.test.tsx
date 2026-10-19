@@ -220,3 +220,52 @@ describe('ToolBubble — in-flight pulse marker (#4321 / #4308)', () => {
     expect(findByTestId(root, 'tool-bubble-pulse-tu-inflight')).toHaveLength(0);
   });
 });
+
+describe('ToolBubble — terminated result', () => {
+  it('shows the stopped state and shared explanation in a lone tool bubble', () => {
+    const root = renderBubble(makeToolMessage({
+      id: 'tool-stopped',
+      tool: 'Bash',
+      content: '{"command":"echo hello"}',
+      toolResult: "The user doesn't want to proceed with this tool use.",
+      toolResultIsError: true,
+      toolResultTerminatedReason: 'user_stop_before_run',
+    }));
+    const marker = findByTestId(root, 'tool-bubble-terminated-tool-stopped')[0];
+    expect(marker).toBeTruthy();
+    expect(marker.props.accessibilityLabel).toBe('stopped');
+    expect(findByTestId(root, 'tool-collapsed-preview')[0].props.children).toContain('never approved');
+    tapToExpand(root);
+    const summary = findByTestId(root, 'tool-bubble-termination-summary-tool-stopped')[0];
+    expect(summary.props.children).toContain('never approved');
+    expect(findByTestId(root, 'tool-bubble-pulse-toolu_xyz')).toHaveLength(0);
+  });
+
+  it('passes the reason to tool details and leaves ordinary failures unmarked', () => {
+    const onOpenDetail = jest.fn();
+    let root!: renderer.ReactTestRenderer;
+    const terminated = makeToolMessage({
+      id: 'tool-cut', tool: 'Bash', content: '{"command":"echo hello"}',
+      toolResult: 'synthetic result', toolResultIsError: true,
+      toolResultTerminatedReason: 'permission_mode_switch',
+    });
+    act(() => {
+      root = renderer.create(
+        <ToolBubble message={terminated} isSelected={false} isSelecting={false}
+          onToggleSelection={() => {}} onOpenDetail={onOpenDetail} />,
+      );
+    });
+    expect(findByTestId(root, 'tool-bubble-terminated-tool-cut')[0].props.accessibilityLabel).toBe('turn terminated');
+    tapToExpand(root);
+    act(() => { root.root.findAllByProps({ activeOpacity: 0.7 })[0]!.props.onPress(); });
+    expect(onOpenDetail).toHaveBeenCalledWith(
+      'Bash', '{"command":"echo hello"}', 'synthetic result',
+      undefined, undefined, undefined, 'Bash', 'permission_mode_switch',
+    );
+
+    const failed = renderBubble(makeToolMessage({
+      id: 'tool-failed', tool: 'Bash', toolResult: 'command failed', toolResultIsError: true,
+    }));
+    expect(findByTestId(failed, 'tool-bubble-terminated-tool-failed')).toHaveLength(0);
+  });
+});
