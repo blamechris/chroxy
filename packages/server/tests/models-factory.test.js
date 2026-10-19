@@ -655,6 +655,39 @@ function claudeRegistryWithMetadata(meta) {
   })
 }
 
+describe('updateContextWindow rejects non-finite values', () => {
+  for (const contextWindow of [NaN, Infinity, -Infinity]) {
+    for (const hasOverride of [false, true]) {
+      it(`rejects ${contextWindow} without changing models or ${hasOverride ? 'an existing' : 'creating an'} override`, () => {
+        const registry = nonClaudeRegistry()
+        const models = [{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }]
+        registry.updateModels(models)
+        if (hasOverride) {
+          assert.equal(registry.updateContextWindow('gpt-5.5', 400_000), true)
+        }
+        const before = registry.getModels()
+
+        assert.equal(registry.updateContextWindow('gpt-5.5', contextWindow), false)
+        assert.deepEqual(registry.getModels(), before)
+
+        // A refresh reads contextWindowOverrides, exposing any rejected value
+        // that leaked into the private map even if the active row stayed intact.
+        registry.updateModels(models)
+        assert.deepEqual(registry.getModels(), before)
+      })
+    }
+  }
+
+  it('accepts a finite positive fractional window', () => {
+    const registry = nonClaudeRegistry()
+    const models = [{ value: 'gpt-5.5', displayName: 'GPT-5.5', contextWindow: 272_000 }]
+    registry.updateModels(models)
+    assert.equal(registry.updateContextWindow('gpt-5.5', 400_000.5), true)
+    registry.updateModels(models)
+    assert.equal(registry.getModels()[0].contextWindow, 400_000.5)
+  })
+})
+
 describe('updateModels carries the caller-supplied metadata (#7723)', () => {
   it("a discovery result's contextWindow reaches getModels() with that exact number", () => {
     // #7723 is a PRECEDENCE CLARIFICATION, not a repair of a dropped window on
