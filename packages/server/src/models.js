@@ -460,15 +460,12 @@ function usableContextWindow(source) {
 
 /**
  * #7810 — validate the cache file's `learnedContextWindows` field on read.
- * Each value must be the same shape `updateContextWindow` itself is willing
- * to STORE into the map (a finite positive integer): this reader cannot
+ * Each value must be a finite positive integer, matching the learned-map
+ * write path in `updateContextWindow`: this reader cannot
  * trust that every byte on disk went through a well-behaved write path (a
  * hand-edit, an older/corrupted build, a partial write), so it re-validates
- * independently rather than passing the parsed value straight through — #7771
- * found `updateContextWindow`'s OWN input guard admits NaN (`typeof NaN ===
- * 'number'` and `NaN <= 0` is false, so the existing `contextWindow <= 0`
- * check never fires for it), which is exactly the kind of value this map
- * must not resurrect from disk. A missing/absent field (an old-format cache
+ * independently rather than passing the parsed value straight through.
+ * A missing/absent field (an old-format cache
  * written before this key existed) and a non-object value both yield an
  * empty map rather than throwing — loadCache() must keep working with the
  * map absent.
@@ -1545,7 +1542,7 @@ export function createModelsRegistry(hooks = {}) {
      * or the reported value already matches.
      */
     updateContextWindow(modelId, contextWindow) {
-      if (typeof modelId !== 'string' || typeof contextWindow !== 'number' || contextWindow <= 0) {
+      if (typeof modelId !== 'string' || !Number.isFinite(contextWindow) || contextWindow <= 0) {
         return false
       }
       let changed = false
@@ -1568,11 +1565,9 @@ export function createModelsRegistry(hooks = {}) {
           // ratchet learned here would be thrown away on every restart.
           // Record it under its own key so `saveCache`/`loadCache` can carry
           // the window without the row. Re-validated with the same
-          // finite-positive-integer check the read side enforces — the guard
-          // above admits NaN (#7771: `typeof NaN === 'number'` and
-          // `NaN <= 0` is false, so it never fires), and this new
-          // persistence path must not write a value it would refuse to load
-          // back.
+          // finite-positive-integer check the read side enforces. The live
+          // guard permits fractional windows, but this persistence path must
+          // not write a value it would refuse to load back.
           if (isUnpersistableDeclaredRow(m.fullId) && Number.isInteger(contextWindow) && contextWindow > 0) {
             learnedContextWindows.set(m.fullId, contextWindow)
           }
