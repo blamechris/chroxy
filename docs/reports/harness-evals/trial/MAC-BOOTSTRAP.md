@@ -118,14 +118,18 @@ status: `README.md`.
     Say "starting <RUN_ID>" to the supervisor when you type the invocation and
     "done <RUN_ID>" (plus the Codex cost from the usage page for the two GPT runs)
     when the session ends.
-    **Chroxy dashboard runs: press Enter once, then keep your hands off that session.** The
-    dashboard binds Escape to "interrupt the current turn" and turns the Send button
-    into Stop while a turn runs, so a keystroke meant to dismiss the slash palette's
-    "No commands found" popup (cosmetic; it closes by itself) or a second press on the
-    button cancels the run. Run 5's first attempt ended that way three seconds after
-    the send, with the chat showing only the user bubble: the daemon logged
-    `[ws] Interrupt from <client>` and `Query aborted after user stop`, and Claude Code's
-    transcript held a single turn, "[Request interrupted by user]". Do not change the
-    model or permission mode after sending either. If the first tool call has not
+
+    **Chroxy dashboard runs: press Enter once, then keep your hands off that session.**
+    Escape in the composer (with no picker open), the Stop button that takes Send's
+    place while a turn runs, and Cmd+. anywhere in the dashboard all interrupt the
+    turn (the composer's hint reads "Escape to interrupt"), so a second press on the
+    button or a stray cancel keystroke ends the run. The slash palette's "No commands
+    found" while typing a command with arguments is cosmetic and closes on send. Run 5's
+    first attempt ended on such an interrupt within seconds of the send: the daemon
+    logged `[ws] Interrupt from <client>` and `Query aborted after user stop`, and
+    Claude Code's transcript ended with a single user entry, "[Request interrupted by
+    user]", with no model usage. Do not change the model or permission mode after
+    sending either: the daemon refuses a mid-turn model change, and a switch to Auto
+    applies live and changes the run's conditions. If the first tool call has not
     appeared within a few minutes, check the daemon log for an `Interrupt` line before
     assuming a stall.
