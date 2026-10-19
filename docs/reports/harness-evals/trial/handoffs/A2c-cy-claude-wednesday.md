@@ -54,6 +54,7 @@ Reminders.app, or a Calendar event with an alert, for 4:05 PM local on 2026-10-2
 5. The clone, at the mission commit, clean:
 
    ```
+   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
    git clone --branch trial/a2c-cy-claude https://github.com/blamechris/chroxy ~/trial/a2c-cy-claude \
      && cd ~/trial/a2c-cy-claude && npm ci --no-audit --no-fund >/dev/null \
      && git status --short && git log --oneline -1          # expect 78ad56cd, nothing else printed
@@ -78,8 +79,12 @@ the first message must go out while the meters are still fresh.
    the second attempt went wrong. Confirm the daemon recorded it for this session:
 
    ```
-   grep -n "Model change" ~/.chroxy/logs/chroxy.log | tail -2   # both lines: the new session's id, ending in `opus`
+   grep -n "Model change" ~/.chroxy/logs/chroxy.log | tail -2
    ```
+
+   Both lines must end in `opus`. The first, `Model change from <client> on session <id>: opus`,
+   carries the new session's id; the second, `Model changed to opus`, carries none (the run
+   entry in `scripts/runs.json` says "both lines" show the id, which is stricter than the log).
 
 3. Header thinking level stays **Auto** (it sets a thinking budget, not the effort level).
    Permission mode **Auto** in the header dropdown; if it reads "Auto (unavailable)", stop
@@ -95,7 +100,7 @@ the first message must go out while the meters are still fresh.
    and note "invocation: natural-language skill call" for the record.
 5. Hands off that session from this moment. Escape in the composer, Cmd+. anywhere in the
    dashboard, and the Stop button that takes Send's place all interrupt the turn; the first
-   attempt died that way two seconds after the send. The slash palette's "No commands
+   attempt died that way within seconds of the send, two seconds before Claude Code's init. The slash palette's "No commands
    found" while typing is cosmetic and closes on send.
 6. **WRITE (a local note, not GitHub).** Record in `~/trial/A2c-start-note.md`: the UTC time
    of the send, the three meter readings, the `claude --version` output and the `Model
@@ -111,8 +116,10 @@ grep -nE "\[(result|error|stream_end)\]|Interrupt from|Inactivity|stall|query:" 
 ```
 
 The first prints PRs, commits, the untouched queue issues and whether the report exists; the
-second shows the daemon's view of the session (a `[result]` line ends a turn; `[error]` names
-a failure; `Interrupt from` is a client interrupt; the inactivity warning is informational).
+second shows the daemon's view of the session: a `[result]` line normally ends a turn (a stream
+stall also produces one, after a `Stream stalled` line); `[error]` names a failed turn;
+`Interrupt from` is a client interrupt, followed by `Query aborted after user stop`; the
+inactivity warning only says the session has been quiet for 30 minutes.
 Reading the dashboard is fine. What to do with what you see:
 
 - PRs merging into `trial/a2c-cy-claude` and no `[error]`: the run is working. Nothing to do.
@@ -122,6 +129,8 @@ Reading the dashboard is fine. What to do with what you see:
   time. It is an incident for the record, not a reason to intervene.
 - A permission prompt waiting in the dashboard under Auto: do not answer it; note the time.
   Answering is a counted human approval.
+- The dashboard's check-in chip ("Status update?") that appears after 30 quiet minutes: do not
+  click it. Its button sends a human message into the session, which is an intervention.
 
 ## End of the run
 
@@ -141,5 +150,5 @@ since the first command. Then, in this order:
 - Touch the trial session, the daemon, the clone or any `trial/*` branch.
 - Interpret an idle-looking dashboard as a stopped run: this daemon build has shown a
   session idle while its agent worked for two hours (Codex app-server, daemon defect
-  filed as 8710). For Claude SDK sessions the `[result]` line in the daemon log is the
-  signal that the turn actually ended.
+  filed as 8710). For Claude SDK sessions the daemon-log grep above is the signal: `[result]`
+  (normal end or stall), `[error]` (failed turn) or `Interrupt from` (user stop).

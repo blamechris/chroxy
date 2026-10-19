@@ -7,7 +7,8 @@
 # Prints: the base branch tip, every commit on the base since T0, every PR whose base is
 # the run's branch, the ten queue issues (state, comment count, last update: all must be
 # untouched during a run), the main tip, and whether the run report exists on the base.
-# Needs `gh` authenticated for the repo. Exit code is 0 whatever it finds: read the output.
+# Needs `gh` authenticated for the repo. Exits non-zero only when a `gh` call fails (auth,
+# network, a base branch that does not exist yet); otherwise 0 whatever it finds: read the output.
 set -euo pipefail
 RUN_ID="${1:?usage: check-run.sh RUN_ID [OWNER/REPO]}"
 REPO="${2:-blamechris/chroxy}"
@@ -51,8 +52,11 @@ echo "-- main tip (a change here is the supervisor's; the daemon must not be red
 gh api "repos/$REPO/branches/main" --jq '.commit.sha[0:8] + "  " + .commit.commit.committer.date'
 
 echo "-- run report on the base?"
-if gh api "repos/$REPO/contents/docs/reports/harness-evals/trial/runs/$RUN_ID/REPORT.md?ref=$BASE" --jq '.sha' >/dev/null 2>&1; then
+if probe="$(gh api "repos/$REPO/contents/docs/reports/harness-evals/trial/runs/$RUN_ID/REPORT.md?ref=$BASE" --jq '.sha' 2>&1)"; then
   echo "yes: docs/reports/harness-evals/trial/runs/$RUN_ID/REPORT.md is on $BASE (the run is over)"
-else
+elif printf '%s' "$probe" | grep -q "404"; then
   echo "no report yet"
+else
+  echo "report probe failed: $probe" >&2
+  exit 1
 fi
