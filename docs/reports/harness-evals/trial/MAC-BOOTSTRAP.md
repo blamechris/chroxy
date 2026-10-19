@@ -118,3 +118,14 @@ status: `README.md`.
     Say "starting <RUN_ID>" to the supervisor when you type the invocation and
     "done <RUN_ID>" (plus the Codex cost from the usage page for the two GPT runs)
     when the session ends.
+    **Chroxy dashboard runs: press Enter once, then hands off that session.** The
+    dashboard binds Escape to "interrupt the current turn" and turns the Send button
+    into Stop while a turn runs, so a keystroke meant to dismiss the slash palette's
+    "No commands found" popup (cosmetic; it closes by itself) or a second press on the
+    button cancels the run. Run 5's first attempt ended that way three seconds after
+    the send, with the chat showing only the user bubble: the daemon logged
+    `[ws] Interrupt from <client>` and `Query aborted after user stop`, and Claude Code's
+    transcript held a single turn, "[Request interrupted by user]". Do not change the
+    model or permission mode after sending either. If the first tool call has not
+    appeared within a few minutes, check the daemon log for an `Interrupt` line before
+    assuming a stall.
