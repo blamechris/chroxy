@@ -54,7 +54,7 @@ gh api "repos/$REPO/branches/main" --jq '.commit.sha[0:8] + "  " + .commit.commi
 echo "-- run report on the base?"
 if probe="$(gh api "repos/$REPO/contents/docs/reports/harness-evals/trial/runs/$RUN_ID/REPORT.md?ref=$BASE" --jq '.sha' 2>&1)"; then
   echo "yes: docs/reports/harness-evals/trial/runs/$RUN_ID/REPORT.md is on $BASE (the run is over)"
-elif printf '%s' "$probe" | grep -q "404"; then
+elif [[ "$probe" == *"404"* ]]; then
   echo "no report yet"
 else
   echo "report probe failed: $probe" >&2
