@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
+import { createServer } from 'node:net'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkClaudeLogin, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 import { registerProvider, DEFAULT_PROVIDER } from '../src/providers.js'
@@ -304,17 +305,46 @@ describe('runDoctorChecks', () => {
     assert.ok(portCheck)
   })
 
+  // The Port check probes 127.0.0.1, so these tests choose their port by BINDING
+  // it, never by hoping a literal is free on whatever machine runs them (#7815).
+  const bindLoopback = () => new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }))
+  })
+  const closeServer = (server) => new Promise((resolve) => server.close(() => resolve()))
+  // An OS-assigned port, released: free for the doctor's own bind a moment later.
+  const freePort = async () => {
+    const { server, port } = await bindLoopback()
+    await closeServer(server)
+    return port
+  }
+
   it('accepts custom port', async () => {
-    // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
+    const port = await freePort()
+    const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const portCheck = checks.find(c => c.name === 'Port')
     assert.ok(portCheck)
-    assert.ok(portCheck.message.includes('59123'))
+    assert.ok(portCheck.message.includes(String(port)))
     assert.equal(portCheck.status, 'pass')
   })
 
+  it('warns when the custom port is already in use', async () => {
+    const { server, port } = await bindLoopback()
+    try {
+      const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = checks.find(c => c.name === 'Port')
+      assert.ok(portCheck)
+      assert.ok(portCheck.message.includes(String(port)))
+      assert.equal(portCheck.status, 'warn')
+      assert.ok(portCheck.message.includes('in use'))
+    } finally {
+      await closeServer(server)
+    }
+  })
+
   it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
+    const { passed, checks } = await runDoctorChecks({ port: await freePort(), providers: ['claude-sdk'] })
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
