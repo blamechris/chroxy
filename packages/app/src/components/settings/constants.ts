@@ -26,13 +26,8 @@ export const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?
 /** Render order for known categories. Unknown keys append in snapshot order. */
 export const NOTIFICATION_CATEGORY_ORDER: readonly string[] = PROTOCOL_NOTIFICATION_CATEGORY_ORDER;
 
-/**
- * #4544: documented defaults for the quiet-hours bypass list. Mirrors
- * `DEFAULT_BYPASS_CATEGORIES` from packages/server/src/notification-prefs.js.
- * Used when a snapshot omits the field (older server, fresh install) so
- * the UI shows the right initial checkboxes.
- */
-export const DEFAULT_BYPASS_CATEGORIES = ['permission', 'activity_error'];
+/** Shared fallback for snapshots that omit a quiet-hours bypass override. */
+export { DEFAULT_BYPASS_CATEGORIES } from '@chroxy/protocol';
 
 /**
  * #4544: HH:MM validation predicate. Mirrors the server-side regex in

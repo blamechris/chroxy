@@ -10,6 +10,12 @@ import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
 import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES } from '@chroxy/protocol'
 import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
 
+// A known-category sentinel proves the rendered fallback consumes the shared export.
+vi.mock('@chroxy/protocol', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@chroxy/protocol')>()
+  return { ...actual, DEFAULT_BYPASS_CATEGORIES: Object.freeze(['permission', 'activity_error', 'ci_complete']) }
+})
+
 // Mock theme-engine
 vi.mock('../theme/theme-engine', () => ({
   getAvailableThemes: () => [
@@ -2098,6 +2104,22 @@ describe('SettingsPanel', () => {
       const errCheck = screen.getByTestId('quiet-hours-bypass-toggle-activity_error') as HTMLInputElement
       expect(permCheck.checked).toBe(true)
       expect(errCheck.checked).toBe(true)
+    })
+
+    it('renders the protocol bypass fallback and preserves an explicit empty override', () => {
+      const notificationPrefs = {
+        ...baseSnapshot,
+        categories: { ...categories, ci_complete: true },
+        quietHours: { start: '22:00', end: '07:00', timezone: 'UTC' },
+      }
+      setMockState({ notificationPrefs })
+      const view = render(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      expect((screen.getByTestId('quiet-hours-bypass-toggle-ci_complete') as HTMLInputElement).checked).toBe(true)
+      setMockState({ notificationPrefs: { ...notificationPrefs, bypassCategories: [] } })
+      view.rerender(<SettingsPanel isOpen={true} onClose={vi.fn()} />)
+      for (const category of ['permission', 'activity_error', 'ci_complete']) {
+        expect((screen.getByTestId(`quiet-hours-bypass-toggle-${category}`) as HTMLInputElement).checked).toBe(false)
+      }
     })
 
     // #4570: snapshot broadcasts must not clobber unsaved edits.

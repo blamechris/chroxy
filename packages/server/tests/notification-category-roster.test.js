@@ -26,11 +26,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  DEFAULT_BYPASS_CATEGORIES as PROTOCOL_BYPASS,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
 } from '@chroxy/protocol'
-import { ALL_CATEGORIES } from '../src/notification-prefs.js'
+import { ALL_CATEGORIES, DEFAULT_BYPASS_CATEGORIES, defaultPrefs, resolveBypassCategories } from '../src/notification-prefs.js'
 import { RATE_LIMITS } from '../src/push.js'
 
 const PROTOCOL_FILE = 'packages/protocol/src/notification-categories.ts'
@@ -84,5 +85,22 @@ describe('notification category roster: server <-> clients (#7429)', () => {
       assert.ok(!seen.has(c.key), `${c.key}: listed twice in ${PROTOCOL_FILE}`)
       seen.add(c.key)
     }
+  })
+})
+
+describe('shared quiet-hours defaults', () => {
+  it('re-exports the protocol default without a second copy', () => {
+    assert.equal(DEFAULT_BYPASS_CATEGORIES, PROTOCOL_BYPASS)
+  })
+
+  it('returns mutable defensive copies and preserves explicit empty overrides', () => {
+    const fresh = defaultPrefs()
+    const fallback = resolveBypassCategories({})
+    fresh.bypassCategories.push('result')
+    fallback.length = 0
+    assert.deepEqual(PROTOCOL_BYPASS, ['permission', 'activity_error'])
+    assert.deepEqual(defaultPrefs().bypassCategories, PROTOCOL_BYPASS)
+    assert.deepEqual(resolveBypassCategories({ bypassCategories: [] }), [])
+    assert.deepEqual(resolveBypassCategories({ bypassCategories: ['permission'], devices: { phone: { bypassCategories: [] } } }, 'phone'), [])
   })
 })

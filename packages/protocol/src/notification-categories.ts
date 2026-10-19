@@ -132,3 +132,11 @@ export const NOTIFICATION_CATEGORY_LABELS: Readonly<Record<string, { label: stri
       NOTIFICATION_CATEGORIES.map((c) => [c.key, Object.freeze({ label: c.label, hint: c.hint })]),
     ),
   )
+
+/**
+ * Categories that bypass quiet hours unless the user supplies an override.
+ * Permission requests need a decision; session errors need attention. An
+ * explicit empty list disables every bypass. Consumers copy this frozen
+ * default before editing or persisting preferences.
+ */
+export const DEFAULT_BYPASS_CATEGORIES: readonly string[] = Object.freeze(['permission', 'activity_error'])
