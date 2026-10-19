@@ -1,7 +1,10 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import { realpath } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
 import { mkdtempSync, mkdirSync, rmSync, realpathSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { fileHandlers } from '../src/handlers/file-handlers.js'
@@ -13,6 +16,8 @@ import { POSIX_PERM_SKIP } from './test-helpers.js'
 describe('directory listings use the session workspace policy', () => {
   let base, home, workspace, outside, config, ops, sent, savedEnv
   beforeEach(() => {
+    // Retain the JS realpath spelling: Windows CI supplies an 8.3 temp path,
+    // so these fixtures exercise a different spelling from native realpath.
     base = realpathSync(mkdtempSync(join(tmpdir(), 'browse-policy-')))
     home = join(base, 'home')
     workspace = join(base, 'workspace')
@@ -56,7 +61,10 @@ describe('directory listings use the session workspace policy', () => {
     assert.equal(resolveDefaultCwd(config, { warn: message => warnings.push(message) }), workspace)
     assert.deepEqual(warnings, [])
   })
-  it('warns when the computed default is outside the configured roots', () => {
+  it('warns when the computed default is outside the configured roots', (t) => {
+    // Make this branch deterministic even when cwd and HOME are on different
+    // Windows drives; that unrelated default-selection behavior is not this test.
+    t.mock.method(process, 'cwd', () => home)
     const warnings = []
     assert.equal(resolveDefaultCwd({ homeOverride: home, workspaceRoots: [workspace] }, { warn: message => warnings.push(message) }), home)
     assert.equal(warnings.length, 1)
@@ -74,6 +82,43 @@ describe('directory listings use the session workspace policy', () => {
     const reply = await list(config.cwd)
     assert.equal(reply.error, null)
     assert.deepEqual(reply.entries.map(entry => entry.name), ['project'])
+  })
+  it('applies the same policy to native paths and equivalent alias spellings', async (t) => {
+    const alias = join(base, 'alias')
+    // Junctions need no symlink privilege on Windows; on POSIX this is a normal
+    // directory symlink. Both spellings must physically name the same target.
+    symlinkSync(base, alias, 'junction')
+    assert.equal(await realpath(alias), await realpath(base))
+    const aliasHome = join(alias, 'home')
+    const aliasWorkspace = join(alias, 'workspace')
+    const aliasOutside = join(alias, 'outside')
+    const aliasPolicy = { ...config, homeOverride: aliasHome, workspaceRoots: [aliasWorkspace] }
+    process.env.CHROXY_CONFIG_DIR = join(alias, 'state')
+
+    // Emulate Windows JS realpath retaining an alias, while native/async
+    // realpath expands it. This reproduces that difference on POSIX too.
+    const original = fs.realpathSync
+    const mocked = t.mock.method(fs, 'realpathSync', (path, ...args) => {
+      const resolved = original(path, ...args)
+      return resolved === base || resolved.startsWith(base + sep)
+        ? alias + resolved.slice(base.length)
+        : resolved
+    })
+    mocked.native = original.native
+    syncBuiltinESMExports()
+    try {
+      assert.equal(validateCwdAllowed(aliasWorkspace, aliasPolicy), null)
+      assert.equal((await list(aliasWorkspace, aliasPolicy)).error, null)
+      assert.ok(validateCwdAllowed(aliasOutside, aliasPolicy))
+      assert.ok((await list(aliasOutside, aliasPolicy)).error?.startsWith('Access denied'))
+      assert.equal((await list(aliasHome, { ...aliasPolicy, workspaceRoots: [] })).error, null)
+      mkdirSync(join(home, '.ssh'))
+      assert.ok((await list(join(aliasHome, '.ssh'), { ...aliasPolicy, workspaceRoots: [aliasHome] })).error?.startsWith('Access denied'))
+      assert.ok((await list(process.env.CHROXY_CONFIG_DIR, { ...aliasPolicy, workspaceRoots: [alias] })).error?.startsWith('Access denied'))
+    } finally {
+      mocked.mock.restore()
+      syncBuiltinESMExports()
+    }
   })
   it('forwards the current runtime config on every request', async () => {
     let pending
