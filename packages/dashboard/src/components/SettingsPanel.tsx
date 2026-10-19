@@ -14,6 +14,7 @@ import { getAvailableThemes, applyTheme } from '../theme/theme-engine'
 import { getThemeById } from '../theme/themes'
 import type { ThemeDefinition } from '../theme/themes'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
+import { SessionDefaultsNoticeBanner } from './SessionDefaultsNoticeBanner'
 import {
   COST_BADGE_MODES,
   COST_BADGE_MODE_LABELS,
@@ -1169,6 +1170,15 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   //    consumer (`resolveCreateSessionModel`) requires the chosen provider's OWN
   //    catalog to contain the id. Offering ids from an untagged roster here
   //    would let Settings show a default that create-time silently drops.
+  // #8277 S5: the saved override is origin-global, not per server. When it is not
+  // offered by the connected server it is DORMANT here: `effectiveProvider` (the
+  // first available provider) still drives the model roster below, but the
+  // provider <select> must show what is stored instead of silently showing
+  // another provider as selected.
+  const dormantProvider = defaultProviderSource === 'user' && defaultProvider !== effectiveProvider
+    ? defaultProvider
+    : null
+
   const availableModels = useMemo(
     () => selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
     [modelsByProvider, effectiveProvider],
@@ -1263,7 +1273,7 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
               <select
                 id="default-provider"
                 aria-label="Default provider"
-                value={defaultProviderSource === 'user' ? effectiveProvider : ''}
+                value={defaultProviderSource === 'user' ? (dormantProvider ?? effectiveProvider) : ''}
                 onChange={handleProviderChange}
               >
                 <option value="">
@@ -1271,6 +1281,11 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     ? `Server default (${PROVIDER_LABELS[serverDefaultProvider] || serverDefaultProvider})`
                     : 'Server default'}
                 </option>
+                {dormantProvider && (
+                  <option value={dormantProvider} disabled>
+                    {`${PROVIDER_LABELS[dormantProvider] || dormantProvider} (saved, not offered by this server)`}
+                  </option>
+                )}
                 {availableProviders.length > 0
                   ? availableProviders.map(p => (
                       <option key={p.name} value={p.name}>
@@ -1283,7 +1298,15 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
                     </>
                 }
               </select>
+              {dormantProvider && (
+                <p className="settings-hint" role="status" data-testid="default-provider-dormant-hint">
+                  Your saved default provider ({PROVIDER_LABELS[dormantProvider] || dormantProvider}) is not
+                  offered by this server, so it is not used here. Choose a provider below to replace it, or
+                  pick Server default.
+                </p>
+              )}
             </div>
+            <SessionDefaultsNoticeBanner />
             {availableModels.length > 0 && (
               <div className="settings-field">
                 <label htmlFor="default-model">Default model</label>
