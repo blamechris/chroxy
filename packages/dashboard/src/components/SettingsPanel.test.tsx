@@ -241,6 +241,61 @@ describe('SettingsPanel', () => {
       expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('claude-cli')
     })
 
+    it('shows a saved override the connected server does not offer as dormant, not as another provider (#8277)', () => {
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultProviderSource: 'user',
+        serverDefaultProvider: 'claude-sdk',
+        availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+      expect(select.value).toBe('gemini')
+      const dormant = Array.from(select.options).find(o => o.value === 'gemini')!
+      expect(dormant.disabled).toBe(true)
+      expect(dormant.textContent).toContain('not offered by this server')
+      expect(screen.getByTestId('default-provider-dormant-hint')).toBeInTheDocument()
+    })
+
+    it('shows no dormant option or hint when the override is offered, or when following the server (#8277)', () => {
+      setMockState({
+        defaultProvider: 'claude-cli',
+        defaultProviderSource: 'user',
+        availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+      })
+      const { unmount } = render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('default-provider-dormant-hint')).not.toBeInTheDocument()
+      unmount()
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultProviderSource: 'server',
+        availableProviders: [{ name: 'claude-sdk' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('default-provider-dormant-hint')).not.toBeInTheDocument()
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('')
+    })
+
+    it('shows the undismissed migration notice in Session Defaults with the same dismiss (#8277)', () => {
+      const dismissSessionDefaultsNotice = vi.fn()
+      setMockState({
+        sessionDefaultsNotice: { provider: 'claude-cli', model: 'opus-4-6' },
+        dismissSessionDefaultsNotice,
+        availableProviders: [{ name: 'claude-sdk' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const notice = screen.getByTestId('session-defaults-notice')
+      expect(notice.textContent).toContain('A saved default from an older version was cleared')
+      fireEvent.click(screen.getByTestId('session-defaults-notice-dismiss'))
+      expect(dismissSessionDefaultsNotice).toHaveBeenCalledTimes(1)
+    })
+
+    it('shows no migration notice in Settings when there is none (#8277)', () => {
+      setMockState({ sessionDefaultsNotice: null, availableProviders: [{ name: 'claude-sdk' }] })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+    })
+
     it('choosing "Server default" clears the override (setDefaultProvider(""))', () => {
       const setDefaultProvider = vi.fn()
       setMockState({
@@ -304,7 +359,9 @@ describe('SettingsPanel', () => {
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
-      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
+      // #8277: the provider <select> now shows the STORED (dormant) override, not
+      // the first available provider; the model roster still follows codex.
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
       expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
     })
 
