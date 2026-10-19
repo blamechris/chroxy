@@ -30,6 +30,14 @@ export interface NotificationCategoryMeta {
     readonly label: string;
     /** One-line explanation shown under the label. */
     readonly hint: string;
+    /**
+     * True when this category bypasses quiet hours by default (#8567). The
+     * default bypass set is derived from this flag, so the clients cannot keep
+     * their own copy; the server's `DEFAULT_BYPASS_CATEGORIES` is an
+     * independent literal pinned to it, in both directions, by
+     * `packages/server/tests/notification-category-roster.test.js`.
+     */
+    readonly defaultBypass?: boolean;
 }
 /**
  * Every notification category, in the order the clients render them. The
@@ -39,6 +47,12 @@ export interface NotificationCategoryMeta {
  * never hidden).
  */
 export declare const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[];
+/**
+ * Categories that bypass quiet hours when the user has not chosen a list
+ * (derived from `defaultBypass` — never a second list). Used by both clients
+ * when a snapshot omits `bypassCategories` (older server, fresh install).
+ */
+export declare const DEFAULT_BYPASS_CATEGORIES: readonly string[];
 /** Render order for the known categories (derived — never a second list). */
 export declare const NOTIFICATION_CATEGORY_ORDER: readonly string[];
 /**

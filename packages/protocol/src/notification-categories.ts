@@ -31,6 +31,14 @@ export interface NotificationCategoryMeta {
   readonly label: string
   /** One-line explanation shown under the label. */
   readonly hint: string
+  /**
+   * True when this category bypasses quiet hours by default (#8567). The
+   * default bypass set is derived from this flag, so the clients cannot keep
+   * their own copy; the server's `DEFAULT_BYPASS_CATEGORIES` is an
+   * independent literal pinned to it, in both directions, by
+   * `packages/server/tests/notification-category-roster.test.js`.
+   */
+  readonly defaultBypass?: boolean
 }
 
 /**
@@ -45,6 +53,7 @@ export const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[] = Obje
     key: 'permission',
     label: 'Permission requests',
     hint: 'Tool-use prompts that need an allow / deny decision.',
+    defaultBypass: true,
   },
   {
     key: 'activity_waiting',
@@ -55,6 +64,7 @@ export const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[] = Obje
     key: 'activity_error',
     label: 'Session errors',
     hint: 'Crashes, tunnel drops, and unrecoverable session failures.',
+    defaultBypass: true,
   },
   {
     key: 'activity_update',
@@ -114,6 +124,15 @@ export const NOTIFICATION_CATEGORIES: readonly NotificationCategoryMeta[] = Obje
     hint: 'iOS Dynamic Island / lock-screen Live Activity updates.',
   },
 ].map((c) => Object.freeze(c)))
+
+/**
+ * Categories that bypass quiet hours when the user has not chosen a list
+ * (derived from `defaultBypass` — never a second list). Used by both clients
+ * when a snapshot omits `bypassCategories` (older server, fresh install).
+ */
+export const DEFAULT_BYPASS_CATEGORIES: readonly string[] = Object.freeze(
+  NOTIFICATION_CATEGORIES.filter((c) => c.defaultBypass === true).map((c) => c.key),
+)
 
 /** Render order for the known categories (derived — never a second list). */
 export const NOTIFICATION_CATEGORY_ORDER: readonly string[] = Object.freeze(

@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { UNTAGGED_MODELS_PROVIDER } from '@chroxy/store-core'
-import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES } from '@chroxy/protocol'
+import { NOTIFICATION_CATEGORY_ORDER, NOTIFICATION_CATEGORIES, DEFAULT_BYPASS_CATEGORIES } from '@chroxy/protocol'
 import { SettingsPanel, describePermissionAuditEntry } from './SettingsPanel'
 
 // Mock theme-engine
@@ -2155,6 +2155,13 @@ describe('SettingsPanel', () => {
       const errCheck = screen.getByTestId('quiet-hours-bypass-toggle-activity_error') as HTMLInputElement
       expect(permCheck.checked).toBe(true)
       expect(errCheck.checked).toBe(true)
+      // #8567: exactly the shared default set is checked, and nothing else — the
+      // dashboard keeps no copy of the set, so it cannot drift from the protocol.
+      const checked = NOTIFICATION_CATEGORY_ORDER.filter(
+        (k) => (screen.queryByTestId(`quiet-hours-bypass-toggle-${k}`) as HTMLInputElement | null)?.checked,
+      )
+      expect(checked.sort()).toEqual([...DEFAULT_BYPASS_CATEGORIES].sort())
+      expect(checked.sort()).toEqual(['activity_error', 'permission'])
     })
 
     // #4570: snapshot broadcasts must not clobber unsaved edits.
