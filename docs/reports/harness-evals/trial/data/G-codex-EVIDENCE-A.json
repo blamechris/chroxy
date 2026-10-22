@@ -1,0 +1,4377 @@
+{
+  "collected_at_utc": "2026-10-22T18:04:47.453111+00:00",
+  "key_sha256": "fb5599f33ddac7eb230b7edc29f0fefd5b3be7c39c746bf5dcd7055d24d40f23",
+  "main_sha": "f48cda8d5fa5838c50fee2810cf7e598dd366e63",
+  "evaluation_input_sha": "7b92999d8a5c90f0992ddadbc4dd3310e691e0cb",
+  "methods": "See GRADING.md measurement rules. CI counts are ci.yml IDs during each run window; latest run_attempt is retained. Review IDs exclude blank bodies. No subject tests rerun.",
+  "runs": {
+    "A1-cd": {
+      "base_tip": "fe7ea87ec8b704a4f1bff92266d99f7478563e82",
+      "T0": "932bd3a4ef40bc9634cab390e6cf0facadd801d7",
+      "start": "2026-10-18T04:07:01Z",
+      "report_merged_or_cutoff": "2026-10-18T06:06:54Z",
+      "wall_minutes": 119.883,
+      "base_push_actions": [],
+      "merged_queue_prs": 10,
+      "queue_ci_runs": 21,
+      "queue_ci_attempts": 21,
+      "merged_ci_runs": 21,
+      "median_cycle_minutes": 58.0835,
+      "p90_cycle_minutes": 72.217,
+      "prs": [
+        {
+          "issue": 8595,
+          "pr": 8632,
+          "state": "merged",
+          "head_branch": "fix/model-collision-labels",
+          "head_sha": "dc9ed76f0f1651a4ad3b4a6c0f69436035998f07",
+          "opened_at": "2026-10-18T04:11:30Z",
+          "merged_at": "2026-10-18T05:00:10Z",
+          "merge_sha": "6e7362397a01b6f29243f5fa7b52e61c69e09920",
+          "cycle_minutes": 48.667,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6245542604
+          ],
+          "copilot_review_ids": [
+            5561394186
+          ],
+          "ci_runs": [
+            {
+              "id": 39096444136,
+              "head_sha": "dc9ed76f0f1651a4ad3b4a6c0f69436035998f07",
+              "created_at": "2026-10-18T04:15:11Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096237152,
+              "head_sha": "e17a1b01303294bd2920353245eecea6af50f06e",
+              "created_at": "2026-10-18T04:11:33Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 44,
+          "diff_deleted": 4,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39096444136,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "dc9ed76f0f1651a4ad3b4a6c0f69436035998f07",
+              "created_at": "2026-10-18T04:15:11Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096444131,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "dc9ed76f0f1651a4ad3b4a6c0f69436035998f07",
+              "created_at": "2026-10-18T04:15:11Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096241142,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "e17a1b01303294bd2920353245eecea6af50f06e",
+              "created_at": "2026-10-18T04:11:38Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39096237112,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e17a1b01303294bd2920353245eecea6af50f06e",
+              "created_at": "2026-10-18T04:11:33Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096237152,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "e17a1b01303294bd2920353245eecea6af50f06e",
+              "created_at": "2026-10-18T04:11:33Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8364,
+          "pr": 8633,
+          "state": "merged",
+          "head_branch": "fix/app-tool-terminated-state",
+          "head_sha": "3683da7ad60318bcb065f52b18ca6aec3cc6b370",
+          "opened_at": "2026-10-18T04:16:34Z",
+          "merged_at": "2026-10-18T05:25:47Z",
+          "merge_sha": "2da32ee3c7145e83a7163bf9da8ca30175a1514b",
+          "cycle_minutes": 69.217,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6245588090
+          ],
+          "copilot_review_ids": [
+            5561411376
+          ],
+          "ci_runs": [
+            {
+              "id": 39097016549,
+              "head_sha": "3683da7ad60318bcb065f52b18ca6aec3cc6b370",
+              "created_at": "2026-10-18T04:25:08Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096526386,
+              "head_sha": "d82e7c3634fd1474fa86d12016403e263a32fb8c",
+              "created_at": "2026-10-18T04:16:37Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 393,
+          "diff_deleted": 19,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39097016555,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "3683da7ad60318bcb065f52b18ca6aec3cc6b370",
+              "created_at": "2026-10-18T04:25:08Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097016549,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "3683da7ad60318bcb065f52b18ca6aec3cc6b370",
+              "created_at": "2026-10-18T04:25:08Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096532066,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "d82e7c3634fd1474fa86d12016403e263a32fb8c",
+              "created_at": "2026-10-18T04:16:43Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39096526380,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "d82e7c3634fd1474fa86d12016403e263a32fb8c",
+              "created_at": "2026-10-18T04:16:37Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096526386,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "d82e7c3634fd1474fa86d12016403e263a32fb8c",
+              "created_at": "2026-10-18T04:16:37Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 7771,
+          "pr": 8634,
+          "state": "merged",
+          "head_branch": "fix/models-context-window-finite",
+          "head_sha": "b0d8f045a8c98527124b860a076a60c5555e648a",
+          "opened_at": "2026-10-18T04:18:53Z",
+          "merged_at": "2026-10-18T05:03:36Z",
+          "merge_sha": "58f765783d0c07091c2ab9618845a7b89ed39923",
+          "cycle_minutes": 44.717,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6245593336
+          ],
+          "copilot_review_ids": [
+            5561413709
+          ],
+          "ci_runs": [
+            {
+              "id": 39097052514,
+              "head_sha": "b0d8f045a8c98527124b860a076a60c5555e648a",
+              "created_at": "2026-10-18T04:25:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096997910,
+              "head_sha": "76b1099d3e29db70481a8868379467c55f06d9b7",
+              "created_at": "2026-10-18T04:24:48Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096657905,
+              "head_sha": "b410ebc4d916fc2278a113dc8ca6a1e929fc9bdb",
+              "created_at": "2026-10-18T04:18:56Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 3,
+          "ci_attempt_count": 3,
+          "diff_added": 43,
+          "diff_deleted": 18,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39097052562,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "b0d8f045a8c98527124b860a076a60c5555e648a",
+              "created_at": "2026-10-18T04:25:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097052514,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "b0d8f045a8c98527124b860a076a60c5555e648a",
+              "created_at": "2026-10-18T04:25:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096997764,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "76b1099d3e29db70481a8868379467c55f06d9b7",
+              "created_at": "2026-10-18T04:24:48Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096997910,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "76b1099d3e29db70481a8868379467c55f06d9b7",
+              "created_at": "2026-10-18T04:24:48Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096661951,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "b410ebc4d916fc2278a113dc8ca6a1e929fc9bdb",
+              "created_at": "2026-10-18T04:19:01Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39096657991,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "b410ebc4d916fc2278a113dc8ca6a1e929fc9bdb",
+              "created_at": "2026-10-18T04:18:56Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096657905,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "b410ebc4d916fc2278a113dc8ca6a1e929fc9bdb",
+              "created_at": "2026-10-18T04:18:56Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 7,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8277,
+          "pr": 8635,
+          "state": "merged",
+          "head_branch": "feat/settings-dormant-provider-notice",
+          "head_sha": "a7cf3bba9ee47be0d12b006aef86f9633e66865b",
+          "opened_at": "2026-10-18T04:19:25Z",
+          "merged_at": "2026-10-18T05:03:40Z",
+          "merge_sha": "f53cfe46c7edc4bf8c845024cfddfa565011a8bd",
+          "cycle_minutes": 44.25,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6245626224
+          ],
+          "copilot_review_ids": [
+            5561416672
+          ],
+          "ci_runs": [
+            {
+              "id": 39096684089,
+              "head_sha": "a7cf3bba9ee47be0d12b006aef86f9633e66865b",
+              "created_at": "2026-10-18T04:19:28Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 150,
+          "diff_deleted": 33,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39096688443,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "a7cf3bba9ee47be0d12b006aef86f9633e66865b",
+              "created_at": "2026-10-18T04:19:32Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39096684087,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "a7cf3bba9ee47be0d12b006aef86f9633e66865b",
+              "created_at": "2026-10-18T04:19:28Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39096684089,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "a7cf3bba9ee47be0d12b006aef86f9633e66865b",
+              "created_at": "2026-10-18T04:19:28Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8233,
+          "pr": 8636,
+          "state": "merged",
+          "head_branch": "fix/doctor-config-port",
+          "head_sha": "2b851f3a599940a21ed8da5c18b1dfd7d66fc924",
+          "opened_at": "2026-10-18T04:29:16Z",
+          "merged_at": "2026-10-18T05:37:52Z",
+          "merge_sha": "c375e66eae3bb85b655d73b5187f25ff2d5b03b7",
+          "cycle_minutes": 68.6,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6245717097
+          ],
+          "copilot_review_ids": [
+            5561438811
+          ],
+          "ci_runs": [
+            {
+              "id": 39097944436,
+              "head_sha": "2b851f3a599940a21ed8da5c18b1dfd7d66fc924",
+              "created_at": "2026-10-18T04:41:06Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097256906,
+              "head_sha": "8bc87c51dcdd2538d51973219103d4acb59e35a7",
+              "created_at": "2026-10-18T04:29:18Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 239,
+          "diff_deleted": 8,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39097944446,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "2b851f3a599940a21ed8da5c18b1dfd7d66fc924",
+              "created_at": "2026-10-18T04:41:06Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097944436,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "2b851f3a599940a21ed8da5c18b1dfd7d66fc924",
+              "created_at": "2026-10-18T04:41:06Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097260549,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "8bc87c51dcdd2538d51973219103d4acb59e35a7",
+              "created_at": "2026-10-18T04:29:22Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39097256938,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "8bc87c51dcdd2538d51973219103d4acb59e35a7",
+              "created_at": "2026-10-18T04:29:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097256906,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "8bc87c51dcdd2538d51973219103d4acb59e35a7",
+              "created_at": "2026-10-18T04:29:18Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8282,
+          "pr": 8637,
+          "state": "merged",
+          "head_branch": "feat/history-stream-kind",
+          "head_sha": "7b9ad63eb36125830a812069f162cd19166de404",
+          "opened_at": "2026-10-18T04:29:16Z",
+          "merged_at": "2026-10-18T05:27:01Z",
+          "merge_sha": "27d74dc1ec07a31ac3ef1c5eaa61c2756ec00ba8",
+          "cycle_minutes": 57.75,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6245680735
+          ],
+          "copilot_review_ids": [
+            5561440353
+          ],
+          "ci_runs": [
+            {
+              "id": 39097495265,
+              "head_sha": "7b9ad63eb36125830a812069f162cd19166de404",
+              "created_at": "2026-10-18T04:33:13Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097256572,
+              "head_sha": "9de13f287b33dfe84d47062df5a8581b66c520c6",
+              "created_at": "2026-10-18T04:29:18Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 150,
+          "diff_deleted": 0,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39097495246,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "7b9ad63eb36125830a812069f162cd19166de404",
+              "created_at": "2026-10-18T04:33:13Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097495265,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "7b9ad63eb36125830a812069f162cd19166de404",
+              "created_at": "2026-10-18T04:33:13Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097261621,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "9de13f287b33dfe84d47062df5a8581b66c520c6",
+              "created_at": "2026-10-18T04:29:24Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39097256550,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "9de13f287b33dfe84d47062df5a8581b66c520c6",
+              "created_at": "2026-10-18T04:29:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097256572,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "9de13f287b33dfe84d47062df5a8581b66c520c6",
+              "created_at": "2026-10-18T04:29:18Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8215,
+          "pr": 8638,
+          "state": "merged",
+          "head_branch": "fix/loopback-mapped-hex",
+          "head_sha": "b399d35d37941e1f8ff05f1d91889984fec4e201",
+          "opened_at": "2026-10-18T04:31:57Z",
+          "merged_at": "2026-10-18T05:44:10Z",
+          "merge_sha": "0402cad09c3f48b0f72dfbcff5b83e5d00652aa2",
+          "cycle_minutes": 72.217,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6245875080
+          ],
+          "copilot_review_ids": [
+            5561443272
+          ],
+          "ci_runs": [
+            {
+              "id": 39098956996,
+              "head_sha": "b399d35d37941e1f8ff05f1d91889984fec4e201",
+              "created_at": "2026-10-18T04:58:58Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097423143,
+              "head_sha": "4eaff18b68aec43143e10b2a2df3cb58d89fb1e6",
+              "created_at": "2026-10-18T04:32:01Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 36,
+          "diff_deleted": 2,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39098956996,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "b399d35d37941e1f8ff05f1d91889984fec4e201",
+              "created_at": "2026-10-18T04:58:58Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39098956994,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "b399d35d37941e1f8ff05f1d91889984fec4e201",
+              "created_at": "2026-10-18T04:58:58Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097427544,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "4eaff18b68aec43143e10b2a2df3cb58d89fb1e6",
+              "created_at": "2026-10-18T04:32:05Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39097423143,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "4eaff18b68aec43143e10b2a2df3cb58d89fb1e6",
+              "created_at": "2026-10-18T04:32:01Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097423079,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "4eaff18b68aec43143e10b2a2df3cb58d89fb1e6",
+              "created_at": "2026-10-18T04:32:01Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "partial"
+        },
+        {
+          "issue": 8303,
+          "pr": 8639,
+          "state": "merged",
+          "head_branch": "fix/browse-honours-workspace-roots",
+          "head_sha": "45a97b6c7c66257f4386ff8a754e366d87f9a1d8",
+          "opened_at": "2026-10-18T04:33:54Z",
+          "merged_at": "2026-10-18T05:48:59Z",
+          "merge_sha": "38d3aa304a5a20ad0c17b1d7e34c6667a8283924",
+          "cycle_minutes": 75.083,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 2,
+          "owner_all_comment_bodies": 3,
+          "review_comment_ids": [
+            6245770023,
+            6246136076
+          ],
+          "copilot_review_ids": [
+            5561458826
+          ],
+          "ci_runs": [
+            {
+              "id": 39101063983,
+              "head_sha": "45a97b6c7c66257f4386ff8a754e366d87f9a1d8",
+              "created_at": "2026-10-18T05:35:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39100468325,
+              "head_sha": "bdbbedab4ede5907bbd64dd97706db32dcdb8fac",
+              "created_at": "2026-10-18T05:25:01Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097536158,
+              "head_sha": "c822c13bfeb55a2b6766915465a32b66c13307ca",
+              "created_at": "2026-10-18T04:33:57Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 3,
+          "ci_attempt_count": 3,
+          "diff_added": 1184,
+          "diff_deleted": 83,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39101085368,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "45a97b6c7c66257f4386ff8a754e366d87f9a1d8",
+              "created_at": "2026-10-18T05:35:39Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39101063949,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "45a97b6c7c66257f4386ff8a754e366d87f9a1d8",
+              "created_at": "2026-10-18T05:35:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39101063983,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "45a97b6c7c66257f4386ff8a754e366d87f9a1d8",
+              "created_at": "2026-10-18T05:35:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39100468325,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "bdbbedab4ede5907bbd64dd97706db32dcdb8fac",
+              "created_at": "2026-10-18T05:25:01Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39100468303,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "bdbbedab4ede5907bbd64dd97706db32dcdb8fac",
+              "created_at": "2026-10-18T05:25:01Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097540148,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "c822c13bfeb55a2b6766915465a32b66c13307ca",
+              "created_at": "2026-10-18T04:34:01Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39097536121,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "c822c13bfeb55a2b6766915465a32b66c13307ca",
+              "created_at": "2026-10-18T04:33:57Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097536158,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "c822c13bfeb55a2b6766915465a32b66c13307ca",
+              "created_at": "2026-10-18T04:33:57Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 8,
+          "correct_vs_key": "partial"
+        },
+        {
+          "issue": 8567,
+          "pr": 8640,
+          "state": "merged",
+          "head_branch": "refactor/notification-bypass-single-source",
+          "head_sha": "f1ffa1ec721ad0c60a97f03df395a8606fd44b14",
+          "opened_at": "2026-10-18T04:33:56Z",
+          "merged_at": "2026-10-18T05:32:21Z",
+          "merge_sha": "b47a85a63cfb76a91df3538b09e1aa61d2abb343",
+          "cycle_minutes": 58.417,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6245712762
+          ],
+          "copilot_review_ids": [
+            5561450847
+          ],
+          "ci_runs": [
+            {
+              "id": 39097749771,
+              "head_sha": "f1ffa1ec721ad0c60a97f03df395a8606fd44b14",
+              "created_at": "2026-10-18T04:37:43Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097538424,
+              "head_sha": "396289fe240e56de9f3f65bce2b864f0979fd4b1",
+              "created_at": "2026-10-18T04:33:59Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 152,
+          "diff_deleted": 16,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39097749771,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "f1ffa1ec721ad0c60a97f03df395a8606fd44b14",
+              "created_at": "2026-10-18T04:37:43Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097749750,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "f1ffa1ec721ad0c60a97f03df395a8606fd44b14",
+              "created_at": "2026-10-18T04:37:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097543316,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "396289fe240e56de9f3f65bce2b864f0979fd4b1",
+              "created_at": "2026-10-18T04:34:04Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39097538388,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "396289fe240e56de9f3f65bce2b864f0979fd4b1",
+              "created_at": "2026-10-18T04:33:59Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097538424,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "396289fe240e56de9f3f65bce2b864f0979fd4b1",
+              "created_at": "2026-10-18T04:33:59Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 7815,
+          "pr": 8641,
+          "state": "merged",
+          "head_branch": "test/doctor-port-deterministic",
+          "head_sha": "e023f43c7bd6ccfad267ab98aa6abb71cb0742b2",
+          "opened_at": "2026-10-18T04:34:01Z",
+          "merged_at": "2026-10-18T05:25:50Z",
+          "merge_sha": "34c3dadbf39f074215dd06d74b6417f50e6397cc",
+          "cycle_minutes": 51.817,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6245714045
+          ],
+          "copilot_review_ids": [
+            5561448879
+          ],
+          "ci_runs": [
+            {
+              "id": 39097763084,
+              "head_sha": "e023f43c7bd6ccfad267ab98aa6abb71cb0742b2",
+              "created_at": "2026-10-18T04:37:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097542658,
+              "head_sha": "e5d46f57dc84b93026ba716232654c0e7ae76b0a",
+              "created_at": "2026-10-18T04:34:03Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 50,
+          "diff_deleted": 5,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39097763105,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e023f43c7bd6ccfad267ab98aa6abb71cb0742b2",
+              "created_at": "2026-10-18T04:37:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097763084,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "e023f43c7bd6ccfad267ab98aa6abb71cb0742b2",
+              "created_at": "2026-10-18T04:37:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097547097,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "e5d46f57dc84b93026ba716232654c0e7ae76b0a",
+              "created_at": "2026-10-18T04:34:08Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39097542690,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e5d46f57dc84b93026ba716232654c0e7ae76b0a",
+              "created_at": "2026-10-18T04:34:03Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39097542658,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "e5d46f57dc84b93026ba716232654c0e7ae76b0a",
+              "created_at": "2026-10-18T04:34:03Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": null,
+          "pr": 8642,
+          "state": "merged",
+          "head_branch": "docs/trial-a1-cd-run-report",
+          "head_sha": "36d1a3a410ee936427bd7d0ee03fce364fe1d0da",
+          "opened_at": "2026-10-18T05:50:45Z",
+          "merged_at": "2026-10-18T06:06:54Z",
+          "merge_sha": "fe7ea87ec8b704a4f1bff92266d99f7478563e82",
+          "cycle_minutes": 16.15,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 2,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6246279263,
+            6246288318
+          ],
+          "copilot_review_ids": [
+            5561653229
+          ],
+          "ci_runs": [
+            {
+              "id": 39102067483,
+              "head_sha": "36d1a3a410ee936427bd7d0ee03fce364fe1d0da",
+              "created_at": "2026-10-18T05:52:47Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39101954463,
+              "head_sha": "fef280b7b01c8bde5fd6b83e74e35a11ea5c9bc4",
+              "created_at": "2026-10-18T05:50:48Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 157,
+          "diff_deleted": 0,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false
+        }
+      ],
+      "queue_all_pr_workflow_runs": 53,
+      "report_last_commit": {
+        "sha": "36d1a3a410ee936427bd7d0ee03fce364fe1d0da",
+        "committer_date": "2026-10-18T05:52:42Z"
+      },
+      "wall_to_report_commit_minutes": 105.683,
+      "strict_key_delivered": 8
+    },
+    "A2c-cy-claude": {
+      "base_tip": "bda6f2e677dc531b573e93f8a0e7d3755281b9f9",
+      "T0": "932bd3a4ef40bc9634cab390e6cf0facadd801d7",
+      "start": "2026-10-22T07:05:21Z",
+      "report_merged_or_cutoff": "2026-10-22T09:42:38Z",
+      "wall_minutes": 157.283,
+      "base_push_actions": [],
+      "merged_queue_prs": 10,
+      "queue_ci_runs": 20,
+      "queue_ci_attempts": 20,
+      "merged_ci_runs": 20,
+      "median_cycle_minutes": 39.875,
+      "p90_cycle_minutes": 53.6,
+      "prs": [
+        {
+          "issue": 7771,
+          "pr": 8728,
+          "state": "merged",
+          "head_branch": "fix/models-context-window-finite",
+          "head_sha": "87c58450e2271728e45600c4a32f1c6e406696e5",
+          "opened_at": "2026-10-22T07:45:32Z",
+          "merged_at": "2026-10-22T08:22:23Z",
+          "merge_sha": "2429d74b26a46c2bc5191754d46d1ccfdeacb26a",
+          "cycle_minutes": 36.85,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6335575942
+          ],
+          "copilot_review_ids": [
+            5610838199
+          ],
+          "ci_runs": [
+            {
+              "id": 39745271645,
+              "head_sha": "87c58450e2271728e45600c4a32f1c6e406696e5",
+              "created_at": "2026-10-22T08:06:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742750929,
+              "head_sha": "28aeec3e72dcf75aa7998836ffa2c83621475ab5",
+              "created_at": "2026-10-22T07:45:36Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 42,
+          "diff_deleted": 20,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39745271705,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "87c58450e2271728e45600c4a32f1c6e406696e5",
+              "created_at": "2026-10-22T08:06:18Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39745271645,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "87c58450e2271728e45600c4a32f1c6e406696e5",
+              "created_at": "2026-10-22T08:06:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742767321,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "28aeec3e72dcf75aa7998836ffa2c83621475ab5",
+              "created_at": "2026-10-22T07:45:44Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39742750929,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "28aeec3e72dcf75aa7998836ffa2c83621475ab5",
+              "created_at": "2026-10-22T07:45:36Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742750912,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "28aeec3e72dcf75aa7998836ffa2c83621475ab5",
+              "created_at": "2026-10-22T07:45:36Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8215,
+          "pr": 8729,
+          "state": "merged",
+          "head_branch": "fix/loopback-mapped-hex",
+          "head_sha": "a85d16c3b47b61454eeef07620887893a93461ed",
+          "opened_at": "2026-10-22T07:45:36Z",
+          "merged_at": "2026-10-22T08:22:27Z",
+          "merge_sha": "c3bd7d1f938e7f9f890f6fbd47d972e05aa46ae5",
+          "cycle_minutes": 36.85,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6335580253
+          ],
+          "copilot_review_ids": [
+            5610848584
+          ],
+          "ci_runs": [
+            {
+              "id": 39745271366,
+              "head_sha": "a85d16c3b47b61454eeef07620887893a93461ed",
+              "created_at": "2026-10-22T08:06:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742757309,
+              "head_sha": "0ce8643c630f6c5d0e4a65779d79f3953676c2a1",
+              "created_at": "2026-10-22T07:45:39Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 44,
+          "diff_deleted": 4,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39745271485,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "a85d16c3b47b61454eeef07620887893a93461ed",
+              "created_at": "2026-10-22T08:06:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39745271366,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "a85d16c3b47b61454eeef07620887893a93461ed",
+              "created_at": "2026-10-22T08:06:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742769787,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "0ce8643c630f6c5d0e4a65779d79f3953676c2a1",
+              "created_at": "2026-10-22T07:45:45Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39742757627,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "0ce8643c630f6c5d0e4a65779d79f3953676c2a1",
+              "created_at": "2026-10-22T07:45:39Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742757309,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "0ce8643c630f6c5d0e4a65779d79f3953676c2a1",
+              "created_at": "2026-10-22T07:45:39Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "partial"
+        },
+        {
+          "issue": 8233,
+          "pr": 8730,
+          "state": "merged",
+          "head_branch": "fix/doctor-config-port",
+          "head_sha": "f0a5445b461b4bca25ccaa1a39924a05be659a0e",
+          "opened_at": "2026-10-22T07:45:40Z",
+          "merged_at": "2026-10-22T08:13:46Z",
+          "merge_sha": "f295618ef5439ff18a9975ce5fcab6cc8d5df990",
+          "cycle_minutes": 28.1,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6335595221
+          ],
+          "copilot_review_ids": [
+            5610851293
+          ],
+          "ci_runs": [
+            {
+              "id": 39742764850,
+              "head_sha": "f0a5445b461b4bca25ccaa1a39924a05be659a0e",
+              "created_at": "2026-10-22T07:45:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 76,
+          "diff_deleted": 3,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39742776968,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "f0a5445b461b4bca25ccaa1a39924a05be659a0e",
+              "created_at": "2026-10-22T07:45:48Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39742764850,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "f0a5445b461b4bca25ccaa1a39924a05be659a0e",
+              "created_at": "2026-10-22T07:45:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742764859,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "f0a5445b461b4bca25ccaa1a39924a05be659a0e",
+              "created_at": "2026-10-22T07:45:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 7815,
+          "pr": 8731,
+          "state": "merged",
+          "head_branch": "test/doctor-port-deterministic",
+          "head_sha": "214a5c0ad3f05307bb3af11a02ba397602953852",
+          "opened_at": "2026-10-22T07:45:53Z",
+          "merged_at": "2026-10-22T08:39:23Z",
+          "merge_sha": "bb2f9e4b268880bcfe8f2dc347c54b36dd42c63a",
+          "cycle_minutes": 53.5,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 2,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6335579656,
+            6336426572
+          ],
+          "copilot_review_ids": [
+            5610845756
+          ],
+          "ci_runs": [
+            {
+              "id": 39746270510,
+              "head_sha": "214a5c0ad3f05307bb3af11a02ba397602953852",
+              "created_at": "2026-10-22T08:14:25Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39745274985,
+              "head_sha": "7adaab9eb327d5d21334fb2de21f8fec217e265e",
+              "created_at": "2026-10-22T08:06:20Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742793735,
+              "head_sha": "25454618123ccc91d1ab25cd27d54b5a07922198",
+              "created_at": "2026-10-22T07:45:56Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 3,
+          "ci_attempt_count": 3,
+          "diff_added": 42,
+          "diff_deleted": 20,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39746270398,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "214a5c0ad3f05307bb3af11a02ba397602953852",
+              "created_at": "2026-10-22T08:14:25Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39746270510,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "214a5c0ad3f05307bb3af11a02ba397602953852",
+              "created_at": "2026-10-22T08:14:25Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39745274985,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "7adaab9eb327d5d21334fb2de21f8fec217e265e",
+              "created_at": "2026-10-22T08:06:20Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39745274920,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "7adaab9eb327d5d21334fb2de21f8fec217e265e",
+              "created_at": "2026-10-22T08:06:19Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742805276,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "25454618123ccc91d1ab25cd27d54b5a07922198",
+              "created_at": "2026-10-22T07:46:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39742793741,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "25454618123ccc91d1ab25cd27d54b5a07922198",
+              "created_at": "2026-10-22T07:45:56Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742793735,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "25454618123ccc91d1ab25cd27d54b5a07922198",
+              "created_at": "2026-10-22T07:45:56Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 7,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8595,
+          "pr": 8732,
+          "state": "merged",
+          "head_branch": "fix/model-collision-label-base",
+          "head_sha": "4236afc33162db01d5866fea478ea29c57b0303b",
+          "opened_at": "2026-10-22T07:45:57Z",
+          "merged_at": "2026-10-22T08:39:33Z",
+          "merge_sha": "6a13499525611430acfcb46e91db86f40f513627",
+          "cycle_minutes": 53.6,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 2,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6335579120,
+            6336426924
+          ],
+          "copilot_review_ids": [
+            5610836353
+          ],
+          "ci_runs": [
+            {
+              "id": 39746160101,
+              "head_sha": "4236afc33162db01d5866fea478ea29c57b0303b",
+              "created_at": "2026-10-22T08:13:32Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742800555,
+              "head_sha": "c13cd258fd14cda4c7e00445a7468e639fb94f08",
+              "created_at": "2026-10-22T07:46:00Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 17,
+          "diff_deleted": 2,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39747162973,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "4236afc33162db01d5866fea478ea29c57b0303b",
+              "created_at": "2026-10-22T08:21:47Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39746160185,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "4236afc33162db01d5866fea478ea29c57b0303b",
+              "created_at": "2026-10-22T08:13:32Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39746160101,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "4236afc33162db01d5866fea478ea29c57b0303b",
+              "created_at": "2026-10-22T08:13:32Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742812563,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "c13cd258fd14cda4c7e00445a7468e639fb94f08",
+              "created_at": "2026-10-22T07:46:06Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39742800441,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "c13cd258fd14cda4c7e00445a7468e639fb94f08",
+              "created_at": "2026-10-22T07:46:00Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39742800555,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "c13cd258fd14cda4c7e00445a7468e639fb94f08",
+              "created_at": "2026-10-22T07:46:00Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 6,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8282,
+          "pr": 8733,
+          "state": "merged",
+          "head_branch": "feat/history-stream-kind",
+          "head_sha": "12b0f178df25782d2ac041a39f26d4b5f0753c8a",
+          "opened_at": "2026-10-22T08:32:46Z",
+          "merged_at": "2026-10-22T09:12:34Z",
+          "merge_sha": "7b30239297c9016a5cb916d6dcf5521a0f3c4136",
+          "cycle_minutes": 39.8,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 2,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6336424792,
+            6336796714
+          ],
+          "copilot_review_ids": [
+            5611434923
+          ],
+          "ci_runs": [
+            {
+              "id": 39749887261,
+              "head_sha": "12b0f178df25782d2ac041a39f26d4b5f0753c8a",
+              "created_at": "2026-10-22T08:43:31Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748543835,
+              "head_sha": "698d1cd0235d34e6f04c239fc0d2c17f00bfc11a",
+              "created_at": "2026-10-22T08:32:49Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 121,
+          "diff_deleted": 0,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39749887099,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "12b0f178df25782d2ac041a39f26d4b5f0753c8a",
+              "created_at": "2026-10-22T08:43:31Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749887261,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "12b0f178df25782d2ac041a39f26d4b5f0753c8a",
+              "created_at": "2026-10-22T08:43:31Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748557418,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "698d1cd0235d34e6f04c239fc0d2c17f00bfc11a",
+              "created_at": "2026-10-22T08:32:56Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39748543835,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "698d1cd0235d34e6f04c239fc0d2c17f00bfc11a",
+              "created_at": "2026-10-22T08:32:49Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748543905,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "698d1cd0235d34e6f04c239fc0d2c17f00bfc11a",
+              "created_at": "2026-10-22T08:32:49Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8567,
+          "pr": 8734,
+          "state": "merged",
+          "head_branch": "refactor/shared-default-bypass-categories",
+          "head_sha": "05871b07a7739a28f34573b0620437cad337bc88",
+          "opened_at": "2026-10-22T08:32:50Z",
+          "merged_at": "2026-10-22T09:12:38Z",
+          "merge_sha": "7d39e9861349aa64ebce3c32808fec4901878181",
+          "cycle_minutes": 39.8,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6336423301
+          ],
+          "copilot_review_ids": [
+            5611412548
+          ],
+          "ci_runs": [
+            {
+              "id": 39748553526,
+              "head_sha": "05871b07a7739a28f34573b0620437cad337bc88",
+              "created_at": "2026-10-22T08:32:54Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 69,
+          "diff_deleted": 6,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39751188980,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "05871b07a7739a28f34573b0620437cad337bc88",
+              "created_at": "2026-10-22T08:53:41Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748564532,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "05871b07a7739a28f34573b0620437cad337bc88",
+              "created_at": "2026-10-22T08:32:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39748553652,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "05871b07a7739a28f34573b0620437cad337bc88",
+              "created_at": "2026-10-22T08:32:54Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748553526,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "05871b07a7739a28f34573b0620437cad337bc88",
+              "created_at": "2026-10-22T08:32:54Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 4,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8364,
+          "pr": 8735,
+          "state": "merged",
+          "head_branch": "fix/app-tool-terminated-state",
+          "head_sha": "4b1cd2818035fcfa9d951ea4fe2fa0ad47262506",
+          "opened_at": "2026-10-22T08:33:15Z",
+          "merged_at": "2026-10-22T09:16:38Z",
+          "merge_sha": "d97dae8b2e3e531d627ad12d5b76c5a8649de9e9",
+          "cycle_minutes": 43.383,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 2,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6336427330,
+            6336797052
+          ],
+          "copilot_review_ids": [
+            5611433020
+          ],
+          "ci_runs": [
+            {
+              "id": 39749891873,
+              "head_sha": "4b1cd2818035fcfa9d951ea4fe2fa0ad47262506",
+              "created_at": "2026-10-22T08:43:33Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748605473,
+              "head_sha": "8f18665a70d3466a72357cabc32e4cee8b922dfc",
+              "created_at": "2026-10-22T08:33:18Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 203,
+          "diff_deleted": 15,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39753526288,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "4b1cd2818035fcfa9d951ea4fe2fa0ad47262506",
+              "created_at": "2026-10-22T09:11:45Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749891906,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "4b1cd2818035fcfa9d951ea4fe2fa0ad47262506",
+              "created_at": "2026-10-22T08:43:33Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749891873,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "4b1cd2818035fcfa9d951ea4fe2fa0ad47262506",
+              "created_at": "2026-10-22T08:43:33Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748624163,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "8f18665a70d3466a72357cabc32e4cee8b922dfc",
+              "created_at": "2026-10-22T08:33:27Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39748605473,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "8f18665a70d3466a72357cabc32e4cee8b922dfc",
+              "created_at": "2026-10-22T08:33:18Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748605401,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "8f18665a70d3466a72357cabc32e4cee8b922dfc",
+              "created_at": "2026-10-22T08:33:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 6,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8277,
+          "pr": 8736,
+          "state": "merged",
+          "head_branch": "feat/settings-dormant-provider-override",
+          "head_sha": "0f42d90c223dd603e4d5f9f3f9390e252b281ff6",
+          "opened_at": "2026-10-22T08:33:19Z",
+          "merged_at": "2026-10-22T09:13:16Z",
+          "merge_sha": "f9ac84ac01c91dc924e48ae5b301ab9956fbefb2",
+          "cycle_minutes": 39.95,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 2,
+          "owner_all_comment_bodies": 2,
+          "review_comment_ids": [
+            6336440320,
+            6336796943
+          ],
+          "copilot_review_ids": [
+            5611418782
+          ],
+          "ci_runs": [
+            {
+              "id": 39749897169,
+              "head_sha": "0f42d90c223dd603e4d5f9f3f9390e252b281ff6",
+              "created_at": "2026-10-22T08:43:36Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748615885,
+              "head_sha": "86b07a59490ba25705ad4edcc36f4c041068a6dd",
+              "created_at": "2026-10-22T08:33:23Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 158,
+          "diff_deleted": 39,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39751194651,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "0f42d90c223dd603e4d5f9f3f9390e252b281ff6",
+              "created_at": "2026-10-22T08:53:44Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749897149,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "0f42d90c223dd603e4d5f9f3f9390e252b281ff6",
+              "created_at": "2026-10-22T08:43:36Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749897169,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "0f42d90c223dd603e4d5f9f3f9390e252b281ff6",
+              "created_at": "2026-10-22T08:43:36Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748629497,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "86b07a59490ba25705ad4edcc36f4c041068a6dd",
+              "created_at": "2026-10-22T08:33:30Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39748615885,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "86b07a59490ba25705ad4edcc36f4c041068a6dd",
+              "created_at": "2026-10-22T08:33:23Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748615971,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "86b07a59490ba25705ad4edcc36f4c041068a6dd",
+              "created_at": "2026-10-22T08:33:23Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 6,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8303,
+          "pr": 8737,
+          "state": "merged",
+          "head_branch": "fix/browse-honours-workspace-roots",
+          "head_sha": "e2a3b2ace2602f3f85d907f7fafa1695f1d21d75",
+          "opened_at": "2026-10-22T08:33:24Z",
+          "merged_at": "2026-10-22T09:30:26Z",
+          "merge_sha": "9021940aa269380f8c5dd3b7daefb08494adec34",
+          "cycle_minutes": 57.033,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 3,
+          "owner_all_comment_bodies": 3,
+          "review_comment_ids": [
+            6336453633,
+            6336805530,
+            6337224974
+          ],
+          "copilot_review_ids": [
+            5611461045
+          ],
+          "ci_runs": [
+            {
+              "id": 39754150599,
+              "head_sha": "e2a3b2ace2602f3f85d907f7fafa1695f1d21d75",
+              "created_at": "2026-10-22T09:16:32Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749916879,
+              "head_sha": "965e23759e969551e30c58e465b7de43ecf0d708",
+              "created_at": "2026-10-22T08:43:45Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748623001,
+              "head_sha": "a1c214d0c4583c11f2494d56801ebd23ecd5ee06",
+              "created_at": "2026-10-22T08:33:27Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 3,
+          "ci_attempt_count": 3,
+          "diff_added": 559,
+          "diff_deleted": 65,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39754413462,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e2a3b2ace2602f3f85d907f7fafa1695f1d21d75",
+              "created_at": "2026-10-22T09:18:36Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39754150589,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e2a3b2ace2602f3f85d907f7fafa1695f1d21d75",
+              "created_at": "2026-10-22T09:16:32Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39754150599,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "e2a3b2ace2602f3f85d907f7fafa1695f1d21d75",
+              "created_at": "2026-10-22T09:16:32Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39751200726,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "965e23759e969551e30c58e465b7de43ecf0d708",
+              "created_at": "2026-10-22T08:53:47Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749916894,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "965e23759e969551e30c58e465b7de43ecf0d708",
+              "created_at": "2026-10-22T08:43:45Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749916879,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "965e23759e969551e30c58e465b7de43ecf0d708",
+              "created_at": "2026-10-22T08:43:45Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39749450587,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "a1c214d0c4583c11f2494d56801ebd23ecd5ee06",
+              "created_at": "2026-10-22T08:40:05Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748636283,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "a1c214d0c4583c11f2494d56801ebd23ecd5ee06",
+              "created_at": "2026-10-22T08:33:33Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39748623001,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "a1c214d0c4583c11f2494d56801ebd23ecd5ee06",
+              "created_at": "2026-10-22T08:33:27Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39748622959,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "a1c214d0c4583c11f2494d56801ebd23ecd5ee06",
+              "created_at": "2026-10-22T08:33:27Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 10,
+          "correct_vs_key": "partial"
+        },
+        {
+          "issue": null,
+          "pr": 8738,
+          "state": "merged",
+          "head_branch": "docs/a2c-cy-claude-run-report",
+          "head_sha": "141aab34ce310db86bb1206e4faa32caa4dd2ad7",
+          "opened_at": "2026-10-22T09:30:55Z",
+          "merged_at": "2026-10-22T09:42:38Z",
+          "merge_sha": "bda6f2e677dc531b573e93f8a0e7d3755281b9f9",
+          "cycle_minutes": 11.717,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6337505881
+          ],
+          "copilot_review_ids": [
+            5612133848
+          ],
+          "ci_runs": [
+            {
+              "id": 39756022698,
+              "head_sha": "141aab34ce310db86bb1206e4faa32caa4dd2ad7",
+              "created_at": "2026-10-22T09:30:58Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 112,
+          "diff_deleted": 0,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false
+        }
+      ],
+      "queue_all_pr_workflow_runs": 57,
+      "report_last_commit": {
+        "sha": "141aab34ce310db86bb1206e4faa32caa4dd2ad7",
+        "committer_date": "2026-10-22T09:30:51Z"
+      },
+      "wall_to_report_commit_minutes": 145.5,
+      "strict_key_delivered": 8
+    },
+    "A2-cy-claude": {
+      "base_tip": "bc0b6c9e407d15196512b046a84af7c8b36ec2da",
+      "T0": "932bd3a4ef40bc9634cab390e6cf0facadd801d7",
+      "start": "2026-10-18T16:04:16Z",
+      "report_merged_or_cutoff": "2026-10-18T18:14:56Z",
+      "wall_minutes": 130.667,
+      "base_push_actions": [],
+      "merged_queue_prs": 10,
+      "queue_ci_runs": 21,
+      "queue_ci_attempts": 22,
+      "merged_ci_runs": 21,
+      "median_cycle_minutes": 65.9335,
+      "p90_cycle_minutes": 76.117,
+      "prs": [
+        {
+          "issue": 8215,
+          "pr": 8648,
+          "state": "merged",
+          "head_branch": "fix/loopback-mapped-hex",
+          "head_sha": "f158fc68f290aa67fc47a32fdfe1a8a978ba3f9a",
+          "opened_at": "2026-10-18T16:10:10Z",
+          "merged_at": "2026-10-18T17:19:34Z",
+          "merge_sha": "7241b459cff9ff7b17b814b8e3523d54c458386b",
+          "cycle_minutes": 69.4,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252595599
+          ],
+          "copilot_review_ids": [
+            5563828434
+          ],
+          "ci_runs": [
+            {
+              "id": 39145813816,
+              "head_sha": "f158fc68f290aa67fc47a32fdfe1a8a978ba3f9a",
+              "created_at": "2026-10-18T16:37:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143779261,
+              "head_sha": "0c84ede3ac2bb5f198883cc3222df0b19ae53090",
+              "created_at": "2026-10-18T16:10:13Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 19,
+          "diff_deleted": 3,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39145813816,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "f158fc68f290aa67fc47a32fdfe1a8a978ba3f9a",
+              "created_at": "2026-10-18T16:37:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145813886,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "f158fc68f290aa67fc47a32fdfe1a8a978ba3f9a",
+              "created_at": "2026-10-18T16:37:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143786398,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "0c84ede3ac2bb5f198883cc3222df0b19ae53090",
+              "created_at": "2026-10-18T16:10:18Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39143779440,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "0c84ede3ac2bb5f198883cc3222df0b19ae53090",
+              "created_at": "2026-10-18T16:10:13Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143779261,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "0c84ede3ac2bb5f198883cc3222df0b19ae53090",
+              "created_at": "2026-10-18T16:10:13Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "partial"
+        },
+        {
+          "issue": 8595,
+          "pr": 8649,
+          "state": "merged",
+          "head_branch": "fix/model-collision-labels",
+          "head_sha": "e89cca58b680e87f2f53fd0a3a0fb533922528a7",
+          "opened_at": "2026-10-18T16:10:18Z",
+          "merged_at": "2026-10-18T17:04:17Z",
+          "merge_sha": "07dc9d6714e7587c95e88f30623b24489612c6e4",
+          "cycle_minutes": 53.983,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252658359
+          ],
+          "copilot_review_ids": [
+            5563816902
+          ],
+          "ci_runs": [
+            {
+              "id": 39143791213,
+              "head_sha": "e89cca58b680e87f2f53fd0a3a0fb533922528a7",
+              "created_at": "2026-10-18T16:10:21Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 12,
+          "diff_deleted": 2,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39143797509,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "e89cca58b680e87f2f53fd0a3a0fb533922528a7",
+              "created_at": "2026-10-18T16:10:26Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39143791245,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e89cca58b680e87f2f53fd0a3a0fb533922528a7",
+              "created_at": "2026-10-18T16:10:21Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143791213,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "e89cca58b680e87f2f53fd0a3a0fb533922528a7",
+              "created_at": "2026-10-18T16:10:21Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 7815,
+          "pr": 8650,
+          "state": "merged",
+          "head_branch": "test/doctor-port-deterministic",
+          "head_sha": "5771a4db78e15ac575f64d45b125885dff8f0978",
+          "opened_at": "2026-10-18T16:11:14Z",
+          "merged_at": "2026-10-18T16:57:50Z",
+          "merge_sha": "80ace565e7a98f43a306aa32017e6e15fc434b1c",
+          "cycle_minutes": 46.6,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252595423
+          ],
+          "copilot_review_ids": [
+            5563820327
+          ],
+          "ci_runs": [
+            {
+              "id": 39143859181,
+              "head_sha": "5771a4db78e15ac575f64d45b125885dff8f0978",
+              "created_at": "2026-10-18T16:11:17Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 38,
+          "diff_deleted": 4,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39143866990,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "5771a4db78e15ac575f64d45b125885dff8f0978",
+              "created_at": "2026-10-18T16:11:23Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39143859185,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "5771a4db78e15ac575f64d45b125885dff8f0978",
+              "created_at": "2026-10-18T16:11:17Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143859181,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "5771a4db78e15ac575f64d45b125885dff8f0978",
+              "created_at": "2026-10-18T16:11:17Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8233,
+          "pr": 8651,
+          "state": "merged",
+          "head_branch": "fix/doctor-config-port",
+          "head_sha": "4bc241e9cfef756ad1f4feb12f1f3c2b1d7dc308",
+          "opened_at": "2026-10-18T16:11:25Z",
+          "merged_at": "2026-10-18T17:19:41Z",
+          "merge_sha": "d1cbafd36c8a3cc4a8df687d93b0f90dd3f273dd",
+          "cycle_minutes": 68.267,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252819337
+          ],
+          "copilot_review_ids": [
+            5563825330
+          ],
+          "ci_runs": [
+            {
+              "id": 39147254597,
+              "head_sha": "4bc241e9cfef756ad1f4feb12f1f3c2b1d7dc308",
+              "created_at": "2026-10-18T16:56:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146185433,
+              "head_sha": "e27181dc66e51a5eb7ed7ea76225c5d89faf6605",
+              "created_at": "2026-10-18T16:41:55Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145888770,
+              "head_sha": "64c3310225d2db7b9378f432fed26b3e41c0e0e0",
+              "created_at": "2026-10-18T16:38:02Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143891813,
+              "head_sha": "20f99a840ea5f96464ac1b57253c68b5704b14cf",
+              "created_at": "2026-10-18T16:11:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143873866,
+              "head_sha": "81cc2430a54c44b3e80d9ab9395ed555dfd7e659",
+              "created_at": "2026-10-18T16:11:28Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 5,
+          "ci_attempt_count": 5,
+          "diff_added": 172,
+          "diff_deleted": 15,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39147254627,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "4bc241e9cfef756ad1f4feb12f1f3c2b1d7dc308",
+              "created_at": "2026-10-18T16:56:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39147254597,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "4bc241e9cfef756ad1f4feb12f1f3c2b1d7dc308",
+              "created_at": "2026-10-18T16:56:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146185433,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "e27181dc66e51a5eb7ed7ea76225c5d89faf6605",
+              "created_at": "2026-10-18T16:41:55Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146185448,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e27181dc66e51a5eb7ed7ea76225c5d89faf6605",
+              "created_at": "2026-10-18T16:41:55Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145888770,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "64c3310225d2db7b9378f432fed26b3e41c0e0e0",
+              "created_at": "2026-10-18T16:38:02Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145888769,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "64c3310225d2db7b9378f432fed26b3e41c0e0e0",
+              "created_at": "2026-10-18T16:38:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143891825,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "20f99a840ea5f96464ac1b57253c68b5704b14cf",
+              "created_at": "2026-10-18T16:11:42Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143891813,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "20f99a840ea5f96464ac1b57253c68b5704b14cf",
+              "created_at": "2026-10-18T16:11:42Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143880673,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "81cc2430a54c44b3e80d9ab9395ed555dfd7e659",
+              "created_at": "2026-10-18T16:11:33Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39143873932,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "81cc2430a54c44b3e80d9ab9395ed555dfd7e659",
+              "created_at": "2026-10-18T16:11:28Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143873866,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "81cc2430a54c44b3e80d9ab9395ed555dfd7e659",
+              "created_at": "2026-10-18T16:11:28Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 11,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 7771,
+          "pr": 8652,
+          "state": "merged",
+          "head_branch": "fix/context-window-finite",
+          "head_sha": "1ecaea07cda9f53a444f69302b281e32fffee213",
+          "opened_at": "2026-10-18T16:11:44Z",
+          "merged_at": "2026-10-18T17:04:22Z",
+          "merge_sha": "0d565e102b1e22b9caad2e2495fda6fec38d5079",
+          "cycle_minutes": 52.633,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252595782
+          ],
+          "copilot_review_ids": [
+            5563830725
+          ],
+          "ci_runs": [
+            {
+              "id": 39145900256,
+              "head_sha": "1ecaea07cda9f53a444f69302b281e32fffee213",
+              "created_at": "2026-10-18T16:38:11Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143900108,
+              "head_sha": "0c565ac27a6e6beaf1d14e0111dd55fec2e62f24",
+              "created_at": "2026-10-18T16:11:48Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 51,
+          "diff_deleted": 18,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39145900256,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "1ecaea07cda9f53a444f69302b281e32fffee213",
+              "created_at": "2026-10-18T16:38:11Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145900257,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "1ecaea07cda9f53a444f69302b281e32fffee213",
+              "created_at": "2026-10-18T16:38:11Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143904865,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "0c565ac27a6e6beaf1d14e0111dd55fec2e62f24",
+              "created_at": "2026-10-18T16:11:52Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39143900030,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "0c565ac27a6e6beaf1d14e0111dd55fec2e62f24",
+              "created_at": "2026-10-18T16:11:48Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39143900108,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "0c565ac27a6e6beaf1d14e0111dd55fec2e62f24",
+              "created_at": "2026-10-18T16:11:48Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8364,
+          "pr": 8653,
+          "state": "merged",
+          "head_branch": "fix/app-tool-terminated-state",
+          "head_sha": "a6c4ea671c3fd67ed9d7c8ef1b455d1aeb4aee59",
+          "opened_at": "2026-10-18T16:22:56Z",
+          "merged_at": "2026-10-18T17:26:32Z",
+          "merge_sha": "22c14da2833bdd842ba64831f52c22c0fc1ab17d",
+          "cycle_minutes": 63.6,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252891913
+          ],
+          "copilot_review_ids": [
+            5563865708
+          ],
+          "ci_runs": [
+            {
+              "id": 39144741631,
+              "head_sha": "a6c4ea671c3fd67ed9d7c8ef1b455d1aeb4aee59",
+              "created_at": "2026-10-18T16:22:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 178,
+          "diff_deleted": 14,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39144749502,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "a6c4ea671c3fd67ed9d7c8ef1b455d1aeb4aee59",
+              "created_at": "2026-10-18T16:23:05Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39144741686,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "a6c4ea671c3fd67ed9d7c8ef1b455d1aeb4aee59",
+              "created_at": "2026-10-18T16:23:00Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39144741631,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "a6c4ea671c3fd67ed9d7c8ef1b455d1aeb4aee59",
+              "created_at": "2026-10-18T16:22:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8567,
+          "pr": 8654,
+          "state": "merged",
+          "head_branch": "refactor/shared-bypass-categories",
+          "head_sha": "dc064576424132a097cb22f55761dd1afe7af3a4",
+          "opened_at": "2026-10-18T16:28:09Z",
+          "merged_at": "2026-10-18T17:19:47Z",
+          "merge_sha": "48fc9ca9880f9f6c1fb7039cc38f2a9df9dfc0ab",
+          "cycle_minutes": 51.633,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252819936
+          ],
+          "copilot_review_ids": [
+            5563877300
+          ],
+          "ci_runs": [
+            {
+              "id": 39145132118,
+              "head_sha": "dc064576424132a097cb22f55761dd1afe7af3a4",
+              "created_at": "2026-10-18T16:28:12Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 75,
+          "diff_deleted": 7,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39145138926,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "dc064576424132a097cb22f55761dd1afe7af3a4",
+              "created_at": "2026-10-18T16:28:17Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39145132118,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "dc064576424132a097cb22f55761dd1afe7af3a4",
+              "created_at": "2026-10-18T16:28:12Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145132096,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "dc064576424132a097cb22f55761dd1afe7af3a4",
+              "created_at": "2026-10-18T16:28:12Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8277,
+          "pr": 8655,
+          "state": "merged",
+          "head_branch": "feat/settings-dormant-provider",
+          "head_sha": "45e99efd984552eada3ac4b50978b250c23ce69c",
+          "opened_at": "2026-10-18T16:28:23Z",
+          "merged_at": "2026-10-18T17:39:26Z",
+          "merge_sha": "3854587eb0519cb1ce2d69116e3d463230fb0b5b",
+          "cycle_minutes": 71.05,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252892084
+          ],
+          "copilot_review_ids": [
+            5563877903
+          ],
+          "ci_runs": [
+            {
+              "id": 39146189548,
+              "head_sha": "45e99efd984552eada3ac4b50978b250c23ce69c",
+              "created_at": "2026-10-18T16:41:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145150537,
+              "head_sha": "8d9fe2c6dd97fc09419f294e60a7cab2d120f7d6",
+              "created_at": "2026-10-18T16:28:27Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 165,
+          "diff_deleted": 38,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39147269089,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "45e99efd984552eada3ac4b50978b250c23ce69c",
+              "created_at": "2026-10-18T16:56:14Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146189548,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "45e99efd984552eada3ac4b50978b250c23ce69c",
+              "created_at": "2026-10-18T16:41:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146189605,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "45e99efd984552eada3ac4b50978b250c23ce69c",
+              "created_at": "2026-10-18T16:41:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145154959,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "8d9fe2c6dd97fc09419f294e60a7cab2d120f7d6",
+              "created_at": "2026-10-18T16:28:31Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39145150537,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "8d9fe2c6dd97fc09419f294e60a7cab2d120f7d6",
+              "created_at": "2026-10-18T16:28:27Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145150566,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "8d9fe2c6dd97fc09419f294e60a7cab2d120f7d6",
+              "created_at": "2026-10-18T16:28:27Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 6,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8303,
+          "pr": 8656,
+          "state": "merged",
+          "head_branch": "fix/browse-workspace-roots",
+          "head_sha": "9e697a1c46a5ddf9dd512acd2c2c6714e10b5c0f",
+          "opened_at": "2026-10-18T16:33:43Z",
+          "merged_at": "2026-10-18T18:01:18Z",
+          "merge_sha": "b23c2db87137d67ce120b45585dffb0991b50493",
+          "cycle_minutes": 87.583,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 3,
+          "owner_all_comment_bodies": 3,
+          "review_comment_ids": [
+            6252892770,
+            6253066799,
+            6253187123
+          ],
+          "copilot_review_ids": [
+            5563908541
+          ],
+          "ci_runs": [
+            {
+              "id": 39151601346,
+              "head_sha": "9e697a1c46a5ddf9dd512acd2c2c6714e10b5c0f",
+              "created_at": "2026-10-18T17:52:55Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39150542829,
+              "head_sha": "7c3ac2cbbe18ba652239e4ee401805d9de0c4db8",
+              "created_at": "2026-10-18T17:38:47Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39147142714,
+              "head_sha": "9d4d674661d01a235d07c552c85115c2429b9311",
+              "created_at": "2026-10-18T16:54:32Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146417014,
+              "head_sha": "187d7c00db88b4ef578af16c7f22038a9695faaa",
+              "created_at": "2026-10-18T16:44:59Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145562205,
+              "head_sha": "ff79c3b36a0a1810598f7d92344b59eaeeb2cffb",
+              "created_at": "2026-10-18T16:33:46Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 5,
+          "ci_attempt_count": 5,
+          "diff_added": 591,
+          "diff_deleted": 30,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39151601402,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "9e697a1c46a5ddf9dd512acd2c2c6714e10b5c0f",
+              "created_at": "2026-10-18T17:52:55Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39151601346,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "9e697a1c46a5ddf9dd512acd2c2c6714e10b5c0f",
+              "created_at": "2026-10-18T17:52:55Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39150542825,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "7c3ac2cbbe18ba652239e4ee401805d9de0c4db8",
+              "created_at": "2026-10-18T17:38:47Z",
+              "conclusion": "success",
+              "run_attempt": 2,
+              "event": "pull_request"
+            },
+            {
+              "id": 39150542829,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "7c3ac2cbbe18ba652239e4ee401805d9de0c4db8",
+              "created_at": "2026-10-18T17:38:47Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39147142714,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "9d4d674661d01a235d07c552c85115c2429b9311",
+              "created_at": "2026-10-18T16:54:32Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39147142763,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "9d4d674661d01a235d07c552c85115c2429b9311",
+              "created_at": "2026-10-18T16:54:32Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146425357,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "187d7c00db88b4ef578af16c7f22038a9695faaa",
+              "created_at": "2026-10-18T16:45:05Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146416978,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "187d7c00db88b4ef578af16c7f22038a9695faaa",
+              "created_at": "2026-10-18T16:44:59Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39146417014,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "187d7c00db88b4ef578af16c7f22038a9695faaa",
+              "created_at": "2026-10-18T16:44:59Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145568652,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "ff79c3b36a0a1810598f7d92344b59eaeeb2cffb",
+              "created_at": "2026-10-18T16:33:51Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39145562205,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "ff79c3b36a0a1810598f7d92344b59eaeeb2cffb",
+              "created_at": "2026-10-18T16:33:46Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145562103,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "ff79c3b36a0a1810598f7d92344b59eaeeb2cffb",
+              "created_at": "2026-10-18T16:33:45Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 12,
+          "correct_vs_key": "partial"
+        },
+        {
+          "issue": 8282,
+          "pr": 8657,
+          "state": "merged",
+          "head_branch": "feat/history-stream-kind",
+          "head_sha": "c5efc59b42ec484c5900a6aa2bf931db895e3aa6",
+          "opened_at": "2026-10-18T16:38:58Z",
+          "merged_at": "2026-10-18T17:55:05Z",
+          "merge_sha": "72c4e6b94077c2a5c1fd3d6d33357114eaf7d0c6",
+          "cycle_minutes": 76.117,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6252893136
+          ],
+          "copilot_review_ids": [
+            5563916201
+          ],
+          "ci_runs": [
+            {
+              "id": 39145962815,
+              "head_sha": "c5efc59b42ec484c5900a6aa2bf931db895e3aa6",
+              "created_at": "2026-10-18T16:39:01Z",
+              "conclusion": "success",
+              "run_attempt": 2,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 2,
+          "diff_added": 118,
+          "diff_deleted": 0,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39145970307,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "c5efc59b42ec484c5900a6aa2bf931db895e3aa6",
+              "created_at": "2026-10-18T16:39:07Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39145962815,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "c5efc59b42ec484c5900a6aa2bf931db895e3aa6",
+              "created_at": "2026-10-18T16:39:01Z",
+              "conclusion": "success",
+              "run_attempt": 2,
+              "event": "pull_request"
+            },
+            {
+              "id": 39145962778,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "c5efc59b42ec484c5900a6aa2bf931db895e3aa6",
+              "created_at": "2026-10-18T16:39:01Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": null,
+          "pr": 8659,
+          "state": "merged",
+          "head_branch": "docs/a2-cy-claude-run-report",
+          "head_sha": "3363a5d444e75060ccf1c2e1edc54a5d64000755",
+          "opened_at": "2026-10-18T18:01:49Z",
+          "merged_at": "2026-10-18T18:14:56Z",
+          "merge_sha": "bc0b6c9e407d15196512b046a84af7c8b36ec2da",
+          "cycle_minutes": 13.117,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6253270036
+          ],
+          "copilot_review_ids": [
+            5564198082
+          ],
+          "ci_runs": [
+            {
+              "id": 39152272106,
+              "head_sha": "3363a5d444e75060ccf1c2e1edc54a5d64000755",
+              "created_at": "2026-10-18T18:01:52Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 79,
+          "diff_deleted": 0,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false
+        }
+      ],
+      "queue_all_pr_workflow_runs": 54,
+      "report_last_commit": {
+        "sha": "3363a5d444e75060ccf1c2e1edc54a5d64000755",
+        "committer_date": "2026-10-18T18:01:44Z"
+      },
+      "wall_to_report_commit_minutes": 117.467,
+      "strict_key_delivered": 8
+    },
+    "A2b-cy-claude": {
+      "base_tip": "f882b5e928cd2806e8d27c74d19d7b27c5495676",
+      "T0": "932bd3a4ef40bc9634cab390e6cf0facadd801d7",
+      "start": "2026-10-19T00:52:53Z",
+      "report_merged_or_cutoff": "2026-10-19T02:45:22Z",
+      "wall_minutes": 112.483,
+      "base_push_actions": [],
+      "merged_queue_prs": 9,
+      "queue_ci_runs": 16,
+      "queue_ci_attempts": 16,
+      "merged_ci_runs": 16,
+      "median_cycle_minutes": 21.45,
+      "p90_cycle_minutes": 65.167,
+      "prs": [
+        {
+          "issue": 8233,
+          "pr": 8678,
+          "state": "merged",
+          "head_branch": "fix/doctor-config-port",
+          "head_sha": "4c26a023cb4a6465a9f35c1b20ccc8ba7a571145",
+          "opened_at": "2026-10-19T00:54:10Z",
+          "merged_at": "2026-10-19T01:08:11Z",
+          "merge_sha": "3d1bfc8ae96f9fab06d9d3784484888224943435",
+          "cycle_minutes": 14.017,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6257495486
+          ],
+          "copilot_review_ids": [
+            5565943786
+          ],
+          "ci_runs": [
+            {
+              "id": 39182850203,
+              "head_sha": "4c26a023cb4a6465a9f35c1b20ccc8ba7a571145",
+              "created_at": "2026-10-19T00:54:12Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 23,
+          "diff_deleted": 2,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39182859434,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "4c26a023cb4a6465a9f35c1b20ccc8ba7a571145",
+              "created_at": "2026-10-19T00:54:19Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39182850193,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "4c26a023cb4a6465a9f35c1b20ccc8ba7a571145",
+              "created_at": "2026-10-19T00:54:12Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39182850203,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "4c26a023cb4a6465a9f35c1b20ccc8ba7a571145",
+              "created_at": "2026-10-19T00:54:12Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8215,
+          "pr": 8679,
+          "state": "merged",
+          "head_branch": "fix/loopback-mapped-hex",
+          "head_sha": "57a5471880af1aa9c2e7bf6e98224b58224a7a48",
+          "opened_at": "2026-10-19T00:59:41Z",
+          "merged_at": "2026-10-19T01:19:38Z",
+          "merge_sha": "48564cbfe680cbe587956d99c43b36d27cafe4dc",
+          "cycle_minutes": 19.95,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6257499327
+          ],
+          "copilot_review_ids": [
+            5565965084
+          ],
+          "ci_runs": [
+            {
+              "id": 39183321453,
+              "head_sha": "57a5471880af1aa9c2e7bf6e98224b58224a7a48",
+              "created_at": "2026-10-19T01:00:25Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39183261593,
+              "head_sha": "b44a893f2b7e2a100290bf84a7c64d2b1b09a635",
+              "created_at": "2026-10-19T00:59:44Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 17,
+          "diff_deleted": 3,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39183321477,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "57a5471880af1aa9c2e7bf6e98224b58224a7a48",
+              "created_at": "2026-10-19T01:00:26Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39183321453,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "57a5471880af1aa9c2e7bf6e98224b58224a7a48",
+              "created_at": "2026-10-19T01:00:25Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39183267939,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "b44a893f2b7e2a100290bf84a7c64d2b1b09a635",
+              "created_at": "2026-10-19T00:59:49Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39183261562,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "b44a893f2b7e2a100290bf84a7c64d2b1b09a635",
+              "created_at": "2026-10-19T00:59:44Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39183261593,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "b44a893f2b7e2a100290bf84a7c64d2b1b09a635",
+              "created_at": "2026-10-19T00:59:44Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "partial"
+        },
+        {
+          "issue": 7771,
+          "pr": 8680,
+          "state": "merged",
+          "head_branch": "fix/context-window-nan",
+          "head_sha": "16fc9f33ed1df272dbf13e1678eeaaf9e237fb38",
+          "opened_at": "2026-10-19T01:05:07Z",
+          "merged_at": "2026-10-19T02:10:17Z",
+          "merge_sha": "d13765cfd66f14ff3031ec66b1824024ac6b2df4",
+          "cycle_minutes": 65.167,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6257499756
+          ],
+          "copilot_review_ids": [
+            5565990031
+          ],
+          "ci_runs": [
+            {
+              "id": 39186899245,
+              "head_sha": "16fc9f33ed1df272dbf13e1678eeaaf9e237fb38",
+              "created_at": "2026-10-19T01:46:44Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39185455395,
+              "head_sha": "30ecf12eff4caf979d16b391e63b375e07ff70c6",
+              "created_at": "2026-10-19T01:27:44Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39183694370,
+              "head_sha": "a76d8f501f40db3ae99ea0aa81b2db66cbf3c0b1",
+              "created_at": "2026-10-19T01:05:10Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 3,
+          "ci_attempt_count": 3,
+          "diff_added": 27,
+          "diff_deleted": 19,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39186899279,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "16fc9f33ed1df272dbf13e1678eeaaf9e237fb38",
+              "created_at": "2026-10-19T01:46:44Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39186899245,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "16fc9f33ed1df272dbf13e1678eeaaf9e237fb38",
+              "created_at": "2026-10-19T01:46:44Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39185455378,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "30ecf12eff4caf979d16b391e63b375e07ff70c6",
+              "created_at": "2026-10-19T01:27:44Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39185455395,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "30ecf12eff4caf979d16b391e63b375e07ff70c6",
+              "created_at": "2026-10-19T01:27:44Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39183700992,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "a76d8f501f40db3ae99ea0aa81b2db66cbf3c0b1",
+              "created_at": "2026-10-19T01:05:15Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39183694370,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "a76d8f501f40db3ae99ea0aa81b2db66cbf3c0b1",
+              "created_at": "2026-10-19T01:05:10Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39183694490,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "a76d8f501f40db3ae99ea0aa81b2db66cbf3c0b1",
+              "created_at": "2026-10-19T01:05:10Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 7,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8595,
+          "pr": 8681,
+          "state": "merged",
+          "head_branch": "fix/model-choice-collision-label",
+          "head_sha": "e42ac771892a39d09a2efc3a78791d86cd4aae0a",
+          "opened_at": "2026-10-19T01:09:42Z",
+          "merged_at": "2026-10-19T01:46:52Z",
+          "merge_sha": "90d29ddc401d3f79daab3a2e5136a954e225578a",
+          "cycle_minutes": 37.167,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6257713913
+          ],
+          "copilot_review_ids": [
+            5565998670
+          ],
+          "ci_runs": [
+            {
+              "id": 39184704414,
+              "head_sha": "e42ac771892a39d09a2efc3a78791d86cd4aae0a",
+              "created_at": "2026-10-19T01:17:45Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39184062379,
+              "head_sha": "be3fbbea3f121e99c76aa1c054f42273deafc62b",
+              "created_at": "2026-10-19T01:09:45Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 17,
+          "diff_deleted": 5,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39184800968,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e42ac771892a39d09a2efc3a78791d86cd4aae0a",
+              "created_at": "2026-10-19T01:19:02Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39184704414,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "e42ac771892a39d09a2efc3a78791d86cd4aae0a",
+              "created_at": "2026-10-19T01:17:45Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39184704372,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "e42ac771892a39d09a2efc3a78791d86cd4aae0a",
+              "created_at": "2026-10-19T01:17:45Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39184521791,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "be3fbbea3f121e99c76aa1c054f42273deafc62b",
+              "created_at": "2026-10-19T01:15:25Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39184079323,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "be3fbbea3f121e99c76aa1c054f42273deafc62b",
+              "created_at": "2026-10-19T01:09:58Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39184069124,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "be3fbbea3f121e99c76aa1c054f42273deafc62b",
+              "created_at": "2026-10-19T01:09:50Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39184062379,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "be3fbbea3f121e99c76aa1c054f42273deafc62b",
+              "created_at": "2026-10-19T01:09:45Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39184062525,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "be3fbbea3f121e99c76aa1c054f42273deafc62b",
+              "created_at": "2026-10-19T01:09:45Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 8,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8364,
+          "pr": 8682,
+          "state": "merged",
+          "head_branch": "fix/app-lone-tool-terminated",
+          "head_sha": "42cb54ce012874252c0278a0ae52d35bfdfd62dd",
+          "opened_at": "2026-10-19T01:26:48Z",
+          "merged_at": "2026-10-19T01:47:05Z",
+          "merge_sha": "9a3f05bdef31212880d624ce65de9e782f2adf96",
+          "cycle_minutes": 20.283,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6257713695
+          ],
+          "copilot_review_ids": [
+            5566085083
+          ],
+          "ci_runs": [
+            {
+              "id": 39185390202,
+              "head_sha": "42cb54ce012874252c0278a0ae52d35bfdfd62dd",
+              "created_at": "2026-10-19T01:26:51Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 167,
+          "diff_deleted": 10,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39185396936,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "42cb54ce012874252c0278a0ae52d35bfdfd62dd",
+              "created_at": "2026-10-19T01:26:56Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39185390171,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "42cb54ce012874252c0278a0ae52d35bfdfd62dd",
+              "created_at": "2026-10-19T01:26:51Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39185390202,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "42cb54ce012874252c0278a0ae52d35bfdfd62dd",
+              "created_at": "2026-10-19T01:26:51Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8277,
+          "pr": 8683,
+          "state": "merged",
+          "head_branch": "feat/settings-dormant-provider",
+          "head_sha": "20a92db98f7df6c84034d4fb0d61be1e75cc2421",
+          "opened_at": "2026-10-19T01:45:26Z",
+          "merged_at": "2026-10-19T02:10:31Z",
+          "merge_sha": "825c6a16a7c8ac757b5719698b039671965eb384",
+          "cycle_minutes": 25.083,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6257907787
+          ],
+          "copilot_review_ids": [
+            5566157526
+          ],
+          "ci_runs": [
+            {
+              "id": 39186809095,
+              "head_sha": "20a92db98f7df6c84034d4fb0d61be1e75cc2421",
+              "created_at": "2026-10-19T01:45:29Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 129,
+          "diff_deleted": 31,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39186816055,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "20a92db98f7df6c84034d4fb0d61be1e75cc2421",
+              "created_at": "2026-10-19T01:45:35Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39186809141,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "20a92db98f7df6c84034d4fb0d61be1e75cc2421",
+              "created_at": "2026-10-19T01:45:29Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39186809095,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "20a92db98f7df6c84034d4fb0d61be1e75cc2421",
+              "created_at": "2026-10-19T01:45:29Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8567,
+          "pr": 8684,
+          "state": "merged",
+          "head_branch": "fix/default-bypass-single-source",
+          "head_sha": "17eddc4753f03073b2e75c6647d2159397f063a7",
+          "opened_at": "2026-10-19T01:51:16Z",
+          "merged_at": "2026-10-19T02:12:43Z",
+          "merge_sha": "06114d686f9fae9c849571423c8463d705351ad7",
+          "cycle_minutes": 21.45,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6257962035
+          ],
+          "copilot_review_ids": [
+            5566181193
+          ],
+          "ci_runs": [
+            {
+              "id": 39187309834,
+              "head_sha": "17eddc4753f03073b2e75c6647d2159397f063a7",
+              "created_at": "2026-10-19T01:52:23Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39187232870,
+              "head_sha": "d5e205f5c6c8dc4328163908934ef13c84da982c",
+              "created_at": "2026-10-19T01:51:20Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 2,
+          "ci_attempt_count": 2,
+          "diff_added": 111,
+          "diff_deleted": 16,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39187309814,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "17eddc4753f03073b2e75c6647d2159397f063a7",
+              "created_at": "2026-10-19T01:52:23Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39187309834,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "17eddc4753f03073b2e75c6647d2159397f063a7",
+              "created_at": "2026-10-19T01:52:23Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39187238768,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "d5e205f5c6c8dc4328163908934ef13c84da982c",
+              "created_at": "2026-10-19T01:51:25Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39187232884,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "d5e205f5c6c8dc4328163908934ef13c84da982c",
+              "created_at": "2026-10-19T01:51:20Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39187232870,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "d5e205f5c6c8dc4328163908934ef13c84da982c",
+              "created_at": "2026-10-19T01:51:20Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 5,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": 8303,
+          "pr": 8685,
+          "state": "merged",
+          "head_branch": "fix/browse-honours-workspace-roots",
+          "head_sha": "40c75927e1652ad0eab3de23a9fc749dd970c269",
+          "opened_at": "2026-10-19T02:06:30Z",
+          "merged_at": "2026-10-19T02:34:14Z",
+          "merge_sha": "cfe84e3eeaa224f1c99d14e80f5018cdad6667c0",
+          "cycle_minutes": 27.733,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6258147264
+          ],
+          "copilot_review_ids": [
+            5566269593
+          ],
+          "ci_runs": [
+            {
+              "id": 39189720877,
+              "head_sha": "40c75927e1652ad0eab3de23a9fc749dd970c269",
+              "created_at": "2026-10-19T02:23:20Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39188567217,
+              "head_sha": "847c4fba4e6075c5fee67aae5eb899a5b3b98b8d",
+              "created_at": "2026-10-19T02:08:41Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39188392595,
+              "head_sha": "94cf4cef262b2fc5d4f6746f1949150c880cbbbd",
+              "created_at": "2026-10-19T02:06:33Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 3,
+          "ci_attempt_count": 3,
+          "diff_added": 536,
+          "diff_deleted": 43,
+          "pr_body_issue_references": [
+            "8011"
+          ],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39189720877,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "40c75927e1652ad0eab3de23a9fc749dd970c269",
+              "created_at": "2026-10-19T02:23:20Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39189720884,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "40c75927e1652ad0eab3de23a9fc749dd970c269",
+              "created_at": "2026-10-19T02:23:20Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39188648275,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "847c4fba4e6075c5fee67aae5eb899a5b3b98b8d",
+              "created_at": "2026-10-19T02:09:43Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39188567238,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "847c4fba4e6075c5fee67aae5eb899a5b3b98b8d",
+              "created_at": "2026-10-19T02:08:41Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39188567217,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "847c4fba4e6075c5fee67aae5eb899a5b3b98b8d",
+              "created_at": "2026-10-19T02:08:41Z",
+              "conclusion": "failure",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39188400565,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "94cf4cef262b2fc5d4f6746f1949150c880cbbbd",
+              "created_at": "2026-10-19T02:06:39Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39188392562,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "94cf4cef262b2fc5d4f6746f1949150c880cbbbd",
+              "created_at": "2026-10-19T02:06:33Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39188392595,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "94cf4cef262b2fc5d4f6746f1949150c880cbbbd",
+              "created_at": "2026-10-19T02:06:33Z",
+              "conclusion": "cancelled",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 8,
+          "correct_vs_key": "partial"
+        },
+        {
+          "issue": 7815,
+          "pr": 8686,
+          "state": "merged",
+          "head_branch": "test/doctor-port-deterministic",
+          "head_sha": "b69d9e059519d6a31be6f7fe0687f8eb3e54f5cf",
+          "opened_at": "2026-10-19T02:14:13Z",
+          "merged_at": "2026-10-19T02:27:12Z",
+          "merge_sha": "ec45d7d3a943538551aea642d6d96fc94d31ffce",
+          "cycle_minutes": 12.983,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6258215049
+          ],
+          "copilot_review_ids": [
+            5566276088
+          ],
+          "ci_runs": [
+            {
+              "id": 39189014384,
+              "head_sha": "b69d9e059519d6a31be6f7fe0687f8eb3e54f5cf",
+              "created_at": "2026-10-19T02:14:16Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 34,
+          "diff_deleted": 4,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false,
+          "all_pr_workflow_runs": [
+            {
+              "id": 39189020821,
+              "name": "Running Copilot Code Review",
+              "path": "dynamic/agents/copilot-pull-request-reviewer",
+              "head_sha": "b69d9e059519d6a31be6f7fe0687f8eb3e54f5cf",
+              "created_at": "2026-10-19T02:14:21Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "dynamic"
+            },
+            {
+              "id": 39189014384,
+              "name": "CI",
+              "path": ".github/workflows/ci.yml",
+              "head_sha": "b69d9e059519d6a31be6f7fe0687f8eb3e54f5cf",
+              "created_at": "2026-10-19T02:14:16Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            },
+            {
+              "id": 39189014378,
+              "name": "Repo Relay",
+              "path": ".github/workflows/repo-relay.yml",
+              "head_sha": "b69d9e059519d6a31be6f7fe0687f8eb3e54f5cf",
+              "created_at": "2026-10-19T02:14:16Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "all_pr_workflow_run_count": 3,
+          "correct_vs_key": "yes"
+        },
+        {
+          "issue": null,
+          "pr": 8687,
+          "state": "merged",
+          "head_branch": "docs/a2b-cy-claude-run-report",
+          "head_sha": "39a17cbe2f5a4dc379a9e65c14bbdc887d70918f",
+          "opened_at": "2026-10-19T02:36:07Z",
+          "merged_at": "2026-10-19T02:45:22Z",
+          "merge_sha": "f882b5e928cd2806e8d27c74d19d7b27c5495676",
+          "cycle_minutes": 9.25,
+          "copilot_review_bodies": 1,
+          "owner_formal_review_bodies": 0,
+          "owner_review_comment_bodies": 1,
+          "owner_all_comment_bodies": 1,
+          "review_comment_ids": [
+            6258454388
+          ],
+          "copilot_review_ids": [
+            5566380905
+          ],
+          "ci_runs": [
+            {
+              "id": 39190743719,
+              "head_sha": "39a17cbe2f5a4dc379a9e65c14bbdc887d70918f",
+              "created_at": "2026-10-19T02:36:10Z",
+              "conclusion": "success",
+              "run_attempt": 1,
+              "event": "pull_request"
+            }
+          ],
+          "ci_run_count": 1,
+          "ci_attempt_count": 1,
+          "diff_added": 152,
+          "diff_deleted": 0,
+          "pr_body_issue_references": [],
+          "forbidden_closing_keyword": false
+        }
+      ],
+      "queue_all_pr_workflow_runs": 45,
+      "report_last_commit": {
+        "sha": "39a17cbe2f5a4dc379a9e65c14bbdc887d70918f",
+        "committer_date": "2026-10-19T02:36:04Z"
+      },
+      "wall_to_report_commit_minutes": 103.183,
+      "strict_key_delivered": 7
+    }
+  },
+  "observed_trial_timeline_events": [
+    {
+      "issue": 7771,
+      "event": "cross-referenced",
+      "at": "2026-10-18T07:48:27Z",
+      "actor": "Copilot",
+      "source_pr": 8645,
+      "id": null
+    },
+    {
+      "issue": 7771,
+      "event": "cross-referenced",
+      "at": "2026-10-19T01:09:27Z",
+      "actor": "Copilot",
+      "source_pr": 8680,
+      "id": null
+    },
+    {
+      "issue": 7771,
+      "event": "cross-referenced",
+      "at": "2026-10-19T20:18:20Z",
+      "actor": "Copilot",
+      "source_pr": 8716,
+      "id": null
+    },
+    {
+      "issue": 7771,
+      "event": "cross-referenced",
+      "at": "2026-10-22T07:46:55Z",
+      "actor": "blamechris",
+      "source_pr": 8728,
+      "id": null
+    },
+    {
+      "issue": 8011,
+      "event": "cross-referenced",
+      "at": "2026-10-19T02:09:42Z",
+      "actor": "blamechris",
+      "source_pr": 8685,
+      "id": null
+    },
+    {
+      "issue": 8215,
+      "event": "cross-referenced",
+      "at": "2026-10-18T16:15:56Z",
+      "actor": "Copilot",
+      "source_pr": 8648,
+      "id": null
+    },
+    {
+      "issue": 8215,
+      "event": "cross-referenced",
+      "at": "2026-10-18T19:23:54Z",
+      "actor": "Copilot",
+      "source_pr": 8668,
+      "id": null
+    },
+    {
+      "issue": 8215,
+      "event": "cross-referenced",
+      "at": "2026-10-19T01:02:58Z",
+      "actor": "Copilot",
+      "source_pr": 8679,
+      "id": null
+    },
+    {
+      "issue": 8215,
+      "event": "cross-referenced",
+      "at": "2026-10-19T20:45:15Z",
+      "actor": "Copilot",
+      "source_pr": 8720,
+      "id": null
+    },
+    {
+      "issue": 8282,
+      "event": "cross-referenced",
+      "at": "2026-10-18T04:33:32Z",
+      "actor": "Copilot",
+      "source_pr": 8637,
+      "id": null
+    },
+    {
+      "issue": 8282,
+      "event": "cross-referenced",
+      "at": "2026-10-18T16:43:26Z",
+      "actor": "Copilot",
+      "source_pr": 8657,
+      "id": null
+    },
+    {
+      "issue": 8567,
+      "event": "cross-referenced",
+      "at": "2026-10-19T21:10:33Z",
+      "actor": "Copilot",
+      "source_pr": 8722,
+      "id": null
+    },
+    {
+      "issue": 8595,
+      "event": "cross-referenced",
+      "at": "2026-10-18T04:13:58Z",
+      "actor": "Copilot",
+      "source_pr": 8632,
+      "id": null
+    }
+  ]
+}
