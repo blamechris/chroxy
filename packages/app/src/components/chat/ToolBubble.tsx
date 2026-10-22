@@ -15,6 +15,7 @@ import { formatToolName } from './chat-utils';
 import { TodoList, parseTodoList } from './TodoList';
 import { WebToolResultView, parseWebToolResult } from './WebToolResult';
 import { ChildAgentEventList } from './ChildAgentEventList';
+import { resolveToolTermination, renderTerminatedIcon, TerminatedNote } from './ToolTermination';
 
 /**
  * #4081: while a `tool_use` is streaming its input via
@@ -50,7 +51,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
    *  the detail modal needs it to route WebSearch/WebFetch results through
    *  the structured renderer, since `toolName` has already been through
    *  `formatToolName`. */
-  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string) => void;
+  onOpenDetail: (toolName: string, content: string, toolResult?: string, toolResultTruncated?: boolean, toolResultImages?: ToolResultImage[], serverName?: string, rawToolName?: string, toolResultTerminatedReason?: string) => void;
   /** #5517: seed + persist expand state in ChatView's id-keyed registry so
    *  it survives FlatList row recycling. */
   getInitialExpanded?: (id: string) => boolean;
@@ -116,6 +117,8 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const hasResult =
     message.toolResult !== undefined || (message.toolResultImages?.length ?? 0) > 0;
   const inFlight = !hasResult;
+  // #8364: same amber terminated state ActivityGroup shows (shared helper).
+  const termination = resolveToolTermination(hasResult, message.toolResultTerminatedReason);
 
   const handlePress = () => {
     // Suppress the tap that fires on release after a long-press
@@ -126,7 +129,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     if (isSelecting) {
       onToggleSelection();
     } else if (expanded) {
-      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool);
+      onOpenDetail(displayTool, content, message.toolResult, message.toolResultTruncated, message.toolResultImages, message.serverName, message.tool, message.toolResultTerminatedReason);
     } else {
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setExpanded(true);
@@ -217,6 +220,7 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     >
       <View style={styles.toolHeader}>
         {expanded ? <Icon name="chevronDown" size={12} color={COLORS.textMuted} /> : <Icon name="chevronRight" size={12} color={COLORS.textMuted} />}
+        {termination && renderTerminatedIcon(termination, `tool-bubble-terminated-icon-${message.id}`)}
         {inFlight && (
           <View
             style={styles.pulse}
@@ -258,6 +262,9 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
                 </TouchableOpacity>
               )}
             </>
+          )}
+          {termination && (
+            <TerminatedNote termination={termination} testID={`tool-bubble-terminated-${message.id}`} />
           )}
           {/* #5060 — Task subagent nested progress. The child's
               intermediate tool_start/tool_result/tool_input_delta/
