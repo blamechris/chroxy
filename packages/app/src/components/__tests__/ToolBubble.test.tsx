@@ -220,3 +220,60 @@ describe('ToolBubble — in-flight pulse marker (#4321 / #4308)', () => {
     expect(findByTestId(root, 'tool-bubble-pulse-tu-inflight')).toHaveLength(0);
   });
 });
+
+describe('ToolBubble — terminated state (#8364)', () => {
+  const cut = () => makeToolMessage({
+    id: 'tb-1',
+    tool: 'Bash',
+    content: '{"command":"sleep 100"}',
+    toolResult: 'synthesized placeholder',
+    toolResultIsError: true,
+    toolResultTerminatedReason: 'permission_mode_switch',
+  });
+  const textOf = (root: renderer.ReactTestRenderer) =>
+    root.root.findAllByType(Text)
+      .flatMap((t) => (Array.isArray(t.props.children) ? t.props.children : [t.props.children]))
+      .filter((c): c is string => typeof c === 'string')
+      .join(' ');
+
+  it('shows the amber terminated icon in the header and the reason note once expanded', () => {
+    const root = renderBubble(cut());
+    expect(findByTestId(root, 'tool-bubble-terminated-icon-tb-1')[0]).toBeTruthy();
+    expect(findByTestId(root, 'tool-bubble-terminated-tb-1')).toHaveLength(0);
+    tapToExpand(root);
+    const note = findByTestId(root, 'tool-bubble-terminated-tb-1')[0];
+    expect(note).toBeTruthy();
+    expect(textOf(root)).toContain('Check whether it took effect before retrying');
+    expect(textOf(root)).not.toContain('synthesized placeholder');
+  });
+
+  it('labels a user Stop as stopped, other reasons as turn terminated', () => {
+    const stopped = renderBubble({ ...cut(), toolResultTerminatedReason: 'user_stop' });
+    expect(findByTestId(stopped, 'tool-bubble-terminated-icon-tb-1')[0]!.props.accessibilityLabel).toBe('stopped');
+    const other = renderBubble(cut());
+    expect(findByTestId(other, 'tool-bubble-terminated-icon-tb-1')[0]!.props.accessibilityLabel).toBe('turn terminated');
+  });
+
+  it('passes the reason to onOpenDetail when the expanded bubble is tapped', () => {
+    const onOpenDetail = jest.fn();
+    let root!: renderer.ReactTestRenderer;
+    act(() => {
+      root = renderer.create(
+        <ToolBubble message={cut()} isSelected={false} isSelecting={false} onToggleSelection={() => {}} onOpenDetail={onOpenDetail} />,
+      );
+    });
+    tapToExpand(root);
+    tapToExpand(root);
+    expect(onOpenDetail).toHaveBeenCalledTimes(1);
+    expect(onOpenDetail.mock.calls[0]![7]).toBe('permission_mode_switch');
+  });
+
+  it('renders no terminated state without a reason, or while the result is pending', () => {
+    const plain = renderBubble(makeToolMessage({ id: 'tb-2', tool: 'Bash', toolResult: 'ok' }));
+    tapToExpand(plain);
+    expect(findByTestId(plain, 'tool-bubble-terminated-icon-tb-2')).toHaveLength(0);
+    expect(findByTestId(plain, 'tool-bubble-terminated-tb-2')).toHaveLength(0);
+    const pending = renderBubble(makeToolMessage({ id: 'tb-3', tool: 'Bash', toolResult: undefined, toolResultTerminatedReason: 'user_stop' }));
+    expect(findByTestId(pending, 'tool-bubble-terminated-icon-tb-3')).toHaveLength(0);
+  });
+});
