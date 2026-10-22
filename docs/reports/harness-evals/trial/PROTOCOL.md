@@ -52,6 +52,16 @@ B2 on the ChatGPT plan), so wait for the vendor's reset between them as section
 is lost for arm B. If the fallback is used it is recorded in section 8 and in
 the trial report.
 
+**Actual runs (2026-10-18 to 2026-10-22).** The order above held for runs 1–4
+(A1-cd, B2-cy-codex, A2-cy-claude, B1-cx). Run 2 was killed by the daemon's
+auto-deploy and run 3 ran at Claude Code's default effort (`medium`), so arm B was
+re-run twice (B2b-cy-codex, stopped by Codex quota exhaustion; B2c-cy-codex,
+complete) and arm A twice (A2b-cy-claude at Sonnet 5.5 / medium by a setup
+deviation; A2c-cy-claude at Opus 5.5 / high, the controlled run). The README status
+table is the authoritative roster with each run's conditions; the paired contrasts
+are A1-cd vs A2c-cy-claude and B1-cx vs B2c-cy-codex, and the other CY runs are
+descriptive data points.
+
 ## 3. Controls (what is held fixed)
 
 - **Base.** All four base branches are cut from one `main` SHA, `T0`, identified
@@ -121,7 +131,7 @@ runs' work. Rules, in order of how much they buy:
    keyword is unverified; README step 5 checks it on a scratch issue before run 1.
 3. **No writes to shared state during a run:** no comments, labels or closures on
    queue issues, no new issues. Follow-ups go in the run report, and the owner
-   files them after run 4.
+   files them after the last run.
 4. **Never read another run's branch or PRs** (`trial/*` other than your own, or
    PRs whose base is one). In the owner's vault, **never read the sealed key's
    folder** (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`) or any file
@@ -156,10 +166,10 @@ cross-package items and one test or tooling item, spread across packages.
 **Sealed answer key.** Before run 1 starts, the owner writes a private note per
 issue in the vault (outside the repository): expected root cause, acceptance
 checks, and whether the fix is already known. Nothing from it enters the repo
-until all four runs are done, but its SHA-256 is committed in
-`KEY-COMMITMENT.md` before run 1 so a later edit is detectable. After run 4 the
+until the last run is done, but its SHA-256 is committed in
+`KEY-COMMITMENT.md` before run 1 so a later edit is detectable. After the last run the
 key is committed to `trial/eval` for the graders, who verify the digest first.
-Where the owner does not know the answer, the four implementations are
+Where the owner does not know the answer, the completed runs' implementations are
 cross-checked against each other, CI and the issue's own acceptance criteria —
 that is the realistic case and is graded as such.
 
@@ -197,7 +207,9 @@ Two graders, cross-origin, fresh context, both using `graders/GRADER-PROMPT.md`:
 | `G-claude` | `claude-fable-5-1` | a fresh cloud session spawned by the supervisor | arm B |
 | `G-codex` | `gpt-6-astra` (xhigh) | Codex desktop, started by the owner | arm A |
 
-Each grades all four runs, writes to its own branch (`trial/eval-claude`,
+Each grades every run in the README status table (the two controlled CY runs for
+the paired contrasts, the other CY runs as descriptive rows, the incomplete runs for
+their merged PRs only), writes to its own branch (`trial/eval-claude`,
 `trial/eval-codex`), then the two cross-review through the mailbox protocol in
 `../mailbox/README.md`. Disputes go to the owner, who decides with the sealed
 key. A third, CY-hosted grader is deliberately omitted: CY is a subject here, and
@@ -233,7 +245,7 @@ names and review patterns — so the cross-origin pairing is the substitute.
 
 | Who | Does |
 |---|---|
-| Owner (Mac) | picks the queue and writes the sealed key; compiles codex prompts; makes the four clones; adds the ruleset; launches each run and types its invocation; records Codex cost; starts `G-codex`; unseals the key after run 4; files deferred follow-ups |
+| Owner (Mac) | picks the queue and writes the sealed key; compiles codex prompts; makes the four clones; adds the ruleset; launches each run and types its invocation; records Codex cost; starts `G-codex`; unseals the key after the last run; files deferred follow-ups |
 | Cloud supervisor (the session this protocol came from) | cuts `trial/*` at `T0` on the owner's go; renders missions; watches GitHub and the CCR session list on a 3-hour check-in while a run is live; reports stalls and violations; never messages a running subject; spawns and supervises `G-claude`; runs the measurement scripts; writes the trial report |
 
 The supervisor cannot reach the Mac: it cannot start the desktop apps or the

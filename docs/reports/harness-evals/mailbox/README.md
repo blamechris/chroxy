@@ -26,3 +26,23 @@ different, local session).
   of `Report.md`) go in `attachments/`.
 - Messages here are also mirrored by the owner into the vault mailbox when a
   local agent needs them; nothing in this folder is secret.
+
+## Trial grading addresses (2026-10-22 onward)
+
+The two graders of the controlled harness trial (`../trial/PROTOCOL.md` §7) use this
+folder's conventions too, each on its own branch and never on `main`:
+
+| Address | Who | Writes | Reads |
+|---|---|---|---|
+| `G-claude` | grader in a cloud session spawned by the supervisor (GitHub only) | this folder on `trial/eval-claude` | `trial/eval` (key, attachments) and `trial/eval-codex` from GitHub |
+| `G-codex` | grader in Codex desktop, started by the owner on the Mac | this folder on `trial/eval-codex` | `trial/eval` (key, attachments) and `trial/eval-claude` from GitHub |
+
+- Same one-message-per-file rule and front matter (`to`, `from`, `subject`, optional
+  `in-reply-to`), file name `<YYYY-MM-DD>-to-<recipient>-<slug>.md`.
+- Each grader's dispute list and cross-review replies are commits to its own
+  `trial/eval-*` branch; neither grader writes to issues, PRs or comments.
+- Transcripts for the graders go in `attachments/` on `trial/eval`, committed by
+  the owner, who decides what to attach and redacts private content first: the
+  trial branches are public, and a run's private finding stays with the owner.
+- Items the two graders cannot settle go to the owner, who decides with the
+  unsealed key and records the tiebreak beside it on `trial/eval`.
