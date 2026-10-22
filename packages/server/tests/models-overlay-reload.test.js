@@ -1312,17 +1312,13 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
   })
 
   it('a NaN ratchet is never written into the learned map (#7771)', () => {
-    // updateContextWindow's OWN input guard (`typeof contextWindow !== 'number'
-    // || contextWindow <= 0`) admits NaN — `typeof NaN === 'number'` is true and
-    // `NaN <= 0` is false, so neither clause fires. That is a pre-existing gap
-    // tracked separately (#7771); what THIS fix must not do is compound it by
-    // writing a NaN through the new persistence path. `activeModels` is allowed
-    // to carry the NaN in-process (unrelated, out of scope) — the learned MAP
-    // specifically must refuse it.
+    // updateContextWindow's own input guard now rejects NaN (#7771), so it
+    // never reaches activeModels or the learned map. The disk assertions below
+    // stay as a second line of defence for the persistence path.
     const reg = makeNoSeamRegistry(cachePath)
     reg.applyOverlay(overlayMap({ 'my-model': {} }))
-    assert.equal(reg.updateContextWindow('my-model', NaN), true,
-      'sanity: the pre-existing top-level guard does not reject NaN (#7771)')
+    assert.equal(reg.updateContextWindow('my-model', NaN), false,
+      'the top-level guard rejects NaN (#7771)')
 
     assert.equal(reg.saveCache(cachePath), true)
     const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
@@ -1334,6 +1330,20 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
     assert.equal(restarted.loadCache(cachePath), true)
     const row = restarted.getModels().find((m) => m.fullId === 'my-model')
     assert.equal(row?.contextWindow, 4242, 'a restart falls back to the heuristic, never NaN')
+  })
+
+  it('a finite non-integer ratchet passes the top guard but is never written into the learned map', () => {
+    // 272000.5 is finite and positive, so updateContextWindow's top guard
+    // admits it; only the Number.isInteger check on the persistence branch
+    // keeps it out of learnedContextWindows (and so off disk).
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(overlayMap({ 'my-model': {} }))
+    reg.updateContextWindow('my-model', 272000.5)
+
+    assert.equal(reg.saveCache(cachePath), true)
+    const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.equal(Object.prototype.hasOwnProperty.call(payload.learnedContextWindows ?? {}, 'my-model'), false,
+      'a non-integer ratchet must not reach the learned map on disk')
   })
 
   // Review addendum (#7810) — `applyOverlay` is a THIRD place that rebuilds a
