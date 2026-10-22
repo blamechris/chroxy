@@ -408,6 +408,18 @@ function pathTouchesForbiddenSubdir(absPath, home) {
 }
 
 /**
+ * Which synchronous realpath to canonicalize with. Create (`validateCwdAllowed`)
+ * pairs the JS `realpathSync` on both its cwd and its roots; Browse resolves the
+ * requested path with libuv's native realpath (`fs/promises`), which expands
+ * Windows 8.3 short names and reports on-disk letter case. A containment
+ * comparison is only meaningful when both sides came from the same
+ * implementation, so Browse asks for `native` on every side it controls.
+ */
+function realpathFor(native) {
+  return native ? realpathSync.native : realpathSync
+}
+
+/**
  * Returns true if `absPath` is the daemon's own config/state root, or inside it.
  *
  * `FORBIDDEN_HOME_SUBDIRS` alone cannot express this (#7052). That set is a
@@ -429,10 +441,10 @@ function pathTouchesForbiddenSubdir(absPath, home) {
  * Resolved per call, and derived from `configDir()` rather than a second copy
  * of the path — the whole point of #7052 is that there is one resolver.
  */
-function pathTouchesConfigDir(absPath) {
+function pathTouchesConfigDir(absPath, native = false) {
   let realConfigDir
   try {
-    realConfigDir = realpathSync(configDir())
+    realConfigDir = realpathFor(native)(configDir())
   } catch {
     // The root does not exist yet. `absPath` already resolved through
     // realpathSync, so it cannot be inside a directory that is not there.
@@ -524,11 +536,12 @@ function configuredWorkspaceRoots(config) {
  * realpath each configured root; a root that does not resolve is a config error
  * and is skipped (it cannot match anything).
  */
-function resolveWorkspaceRoots(roots) {
+function resolveWorkspaceRoots(roots, native = false) {
   const out = []
+  const rp = realpathFor(native)
   for (const root of roots) {
     try {
-      out.push(realpathSync(root))
+      out.push(rp(root))
     } catch {
       // stale / mistyped / offline root
     }
@@ -545,12 +558,12 @@ function resolveWorkspaceRoots(roots) {
  * Falls back to the raw value if it cannot be resolved — the conservative
  * direction: an unresolvable $HOME still gets a prefix test rather than none.
  */
-export function resolveRealHome(config = null) {
+export function resolveRealHome(config = null, { native = false } = {}) {
   const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
     ? config.homeOverride
     : homedir()
   try {
-    return realpathSync(rawHome)
+    return realpathFor(native)(rawHome)
   } catch {
     return rawHome
   }
@@ -565,14 +578,17 @@ export function resolveRealHome(config = null) {
  *
  * @param {string} realPath - realpath-resolved absolute path
  * @param {object} [config]
+ * @param {{native?: boolean}} [opts] - `native`: canonicalize home / config dir
+ *   with `realpathSync.native`, to match a path resolved by `fs/promises`
+ *   realpath (Browse). Create leaves it off and keeps its `realpathSync` pairing.
  * @returns {string|null}
  */
-export function credentialDenyReason(realPath, config = null) {
-  if (pathTouchesForbiddenSubdir(realPath, resolveRealHome(config))) {
+export function credentialDenyReason(realPath, config = null, { native = false } = {}) {
+  if (pathTouchesForbiddenSubdir(realPath, resolveRealHome(config, { native }))) {
     return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
   }
   // The daemon's OWN state root, wherever CHROXY_CONFIG_DIR put it (#7052).
-  if (pathTouchesConfigDir(realPath)) {
+  if (pathTouchesConfigDir(realPath, native)) {
     return 'Directory is not allowed: the chroxy config/state directory is blocked for security'
   }
   return null
@@ -593,7 +609,12 @@ export function resolveBrowsableRoots(config = null) {
   // accepts a path inside a resolvable workspace root or (no usable root) inside
   // $HOME — both already in this list. Adding it separately could only ever
   // widen Browse past what Create accepts.
-  return [resolveRealHome(config), ...resolveWorkspaceRoots(configuredWorkspaceRoots(config))]
+  // Native realpath, matching Browse's `fs/promises` realpath of the requested
+  // path (see realpathFor). Create does not use this list.
+  return [
+    resolveRealHome(config, { native: true }),
+    ...resolveWorkspaceRoots(configuredWorkspaceRoots(config), true),
+  ]
 }
 
 /**

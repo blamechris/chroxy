@@ -73,7 +73,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           let error = denial
           let underDenied = false
           try {
-            underDenied = !!credentialDenyReason(await realpathOfDeepestSeeableAncestor(absPath), config)
+            underDenied = !!credentialDenyReason(await realpathOfDeepestSeeableAncestor(absPath), config, { native: true })
           } catch {
             // A walk that cannot finish keeps the generic answer below.
           }
@@ -108,7 +108,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       // Deny-list is checked on the canonical path, so a symlink into ~/.ssh
       // is refused too. Same refusal text as a path outside the allowed set,
       // so the deny-list is not an existence oracle.
-      if (!insideAllowed || credentialDenyReason(realAbsPath, config)) {
+      if (!insideAllowed || credentialDenyReason(realAbsPath, config, { native: true })) {
         sendFn(ws, {
           type: 'directory_listing',
           path: absPath,

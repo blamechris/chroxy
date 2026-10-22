@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync, existsSync } from 'node:fs'
+import { join, basename } from 'node:path'
 import { tmpdir } from 'node:os'
 import { validateCwdAllowed, defaultCwdStartupWarning } from '../src/handler-utils.js'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
@@ -139,6 +139,35 @@ describe('list_directory honours workspaceRoots and the default cwd (#8303)', ()
     const r = await list(join(outside, 'root', 'escape'), { workspaceRoots: [join(outside, 'root')] })
     assert.ok(/^Access denied/.test(r.error), r.error)
   })
+
+  // Browse resolves the requested path with the native realpath, so the roots
+  // and home it compares against must come from the same implementation. On a
+  // case-insensitive volume the JS realpath keeps the caller's spelling while the
+  // native one reports the on-disk spelling; a mismatch lists nothing.
+  const caseProbe = mkdtempSync(join(tmpdir(), 'chroxy-8303c-'))
+  const caseInsensitive = existsSync(join(caseProbe, '..', basename(caseProbe).toUpperCase()))
+  rmSync(caseProbe, { recursive: true, force: true })
+
+  it('Browse canonicalizes the roots, home and requested path the same way',
+    { skip: caseInsensitive ? false : 'filesystem is case-sensitive' }, async () => {
+      const diskHome = join(base, 'casehome')
+      const diskRoot = join(base, 'caseroot')
+      mkdirSync(join(diskHome, 'proj'), { recursive: true })
+      mkdirSync(join(diskHome, '.ssh', 'keys'), { recursive: true })
+      mkdirSync(join(diskRoot, 'sub'), { recursive: true })
+      const config = {
+        homeOverride: join(base, 'CASEHOME'),
+        workspaceRoots: [join(base, 'CASEROOT')],
+      }
+      const home = await list(diskHome, config)
+      assert.equal(home.error, null)
+      assert.deepEqual(home.entries.map(e => e.name), ['proj'])
+      const root = await list(join(diskRoot, 'sub'), config)
+      assert.equal(root.error, null)
+      const denied = await list(join(diskHome, '.ssh'), config)
+      assert.ok(denied.error && denied.error.startsWith('Access denied'), String(denied.error))
+      assert.deepEqual(denied.entries, [])
+    })
 })
 
 describe('list_directory handler passes the daemon config to Browse (#8303)', () => {
