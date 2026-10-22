@@ -26,11 +26,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  DEFAULT_BYPASS_CATEGORIES as SHARED_DEFAULT_BYPASS_CATEGORIES,
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_CATEGORY_LABELS,
   NOTIFICATION_CATEGORY_ORDER,
 } from '@chroxy/protocol'
-import { ALL_CATEGORIES } from '../src/notification-prefs.js'
+import { ALL_CATEGORIES, DEFAULT_BYPASS_CATEGORIES } from '../src/notification-prefs.js'
 import { RATE_LIMITS } from '../src/push.js'
 
 const PROTOCOL_FILE = 'packages/protocol/src/notification-categories.ts'
@@ -84,5 +85,22 @@ describe('notification category roster: server <-> clients (#7429)', () => {
       assert.ok(!seen.has(c.key), `${c.key}: listed twice in ${PROTOCOL_FILE}`)
       seen.add(c.key)
     }
+  })
+
+  it('the server default bypass set equals the shared one, in both directions', () => {
+    assert.ok(SHARED_DEFAULT_BYPASS_CATEGORIES.length >= 1, `shared DEFAULT_BYPASS_CATEGORIES is empty (${PROTOCOL_FILE}); is protocol built?`)
+    assert.ok(DEFAULT_BYPASS_CATEGORIES.length >= 1, 'server DEFAULT_BYPASS_CATEGORIES is empty')
+    const shared = new Set(SHARED_DEFAULT_BYPASS_CATEGORIES)
+    const server = new Set(DEFAULT_BYPASS_CATEGORIES)
+    const serverOnly = [...server].filter((k) => !shared.has(k))
+    const sharedOnly = [...shared].filter((k) => !server.has(k))
+    assert.deepEqual(serverOnly, [], `bypass by default in ${SERVER_FILE} but not defaultBypass in ${PROTOCOL_FILE}: ${serverOnly.join(', ')}`)
+    assert.deepEqual(sharedOnly, [], `defaultBypass in ${PROTOCOL_FILE} but missing from DEFAULT_BYPASS_CATEGORIES in ${SERVER_FILE}: ${sharedOnly.join(', ')}`)
+  })
+
+  it('every default-bypass category is a real category', () => {
+    const keys = new Set(NOTIFICATION_CATEGORIES.map((c) => c.key))
+    const stray = DEFAULT_BYPASS_CATEGORIES.filter((k) => !keys.has(k))
+    assert.deepEqual(stray, [], `default bypass names unknown categories: ${stray.join(', ')}`)
   })
 })
