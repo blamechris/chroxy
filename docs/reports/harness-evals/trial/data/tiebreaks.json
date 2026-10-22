@@ -1,0 +1,16 @@
+{
+  "source": "docs/reports/harness-evals/trial/eval/TIEBREAKS.md @ 6a955c27 (trial/eval)",
+  "overrides": [
+    {"id": "T1", "issue": 8215, "verdict": "yes", "runs": "all", "ruling": "behavioural: tightening the dotted branch against malformed input is acceptable"},
+    {"id": "T2", "issue": 8303, "verdict": "yes", "runs": ["A1-cd", "A2-cy-claude", "A2c-cy-claude"], "ruling": "a non-canonical spelling slipping past the note is a follow-up, not a miss"},
+    {"id": "T3", "issue": 8303, "verdict": "partial", "runs": ["A2b-cy-claude"], "ruling": "suppressing the note for a covered class by design narrows the check"},
+    {"id": "T4", "issue": 7815, "verdict": "partial", "runs": ["B2c-cy-codex", "B2b-cy-codex"], "ruling": "the key preferred both directions; one was delivered"}
+  ],
+  "conventions": {
+    "T5": "8282 with no PR: already satisfied, no delivery",
+    "T6": "#N in a PR comment or to a non-queue issue: recorded cross-reference, no violation finding",
+    "T7": "wall-clock headline: first command to last report commit; report-merge column kept",
+    "T8": "CI runs: all ci.yml runs in the run window (own-commit figure noted where it differs)",
+    "T9": "review bodies: in-window review/disposition bodies, smoke-only comments excluded"
+  }
+}
