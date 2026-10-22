@@ -1,6 +1,6 @@
 # Independent grading — controlled harness trial
 
-Initial independent round; cross-review has not started. This file contains arm A first, followed by arm B when its separate grading commit lands. No product fixes, test executions, mutations, CI reruns, issue writes or PR comments were made by this grading session.
+Initial independent round; cross-review has not started. This file contains arm A first, then arm B, delivered in separate grading commits. No product fixes, test executions, mutations, CI reruns, issue writes or PR comments were made by this grading session.
 
 ## Evidence and interpretation
 
@@ -210,3 +210,187 @@ Isolation: no closing keywords and no direct queue comment/label/closure events 
 
 Byte-identity audit: no two arm A PRs have an identical **complete changed production-file set** (path plus final Git blob). Mechanical subsets do match: MessageBubble’s added callback argument has blob `27aaf4982d9769ece5af98c1fc26acb5d5a9aa86` in all four 8364 PRs; ChatView matches A1/A2c (`64ca6b55…`) and A2/A2b (`90dab343…`); QuietHoursEditor’s readonly prop matches A1/A2b (`63c30dda…`). These tiny constrained wiring edits are not evidence of copying. No transcript-based leakage conclusion is possible.
 
+## Arm B — controlled pair and interrupted runs
+
+The controlled comparison is **B1-cx vs B2c-cy-codex**. B1’s observed sandbox/approval setting differs from the mission’s requested full-access setup; both completed runs used manual invocation fallbacks and reported sandbox escalations. B2b is a quota-exhaustion run with a separate Chroxy visibility failure; B2 is an auto-deploy interruption. Neither incomplete run substitutes for the controlled B2c cell. Incomplete runs are graded **only for merged PRs**: “not graded” below does not assert that their open code is incorrect.
+
+[EVIDENCE-B.json](EVIDENCE-B.json) supplies immutable PR/run/timestamp records, manual review-body exclusions and the cross-run byte-identity audit. All rows inherit the evidence limitations and measurement definitions above. Every merged Arm B final head has a matching successful `ci.yml` run in the Actions records; the base-after-merge measure remains **not observable** throughout.
+
+| Measure | B1-cx (CX) | B2c (CY, controlled) | B2b (CY, quota stop) | B2 (CY, auto-deploy stop) |
+|---|---|---|---|---|
+| Merged queue PRs | 9 | 10 | 4 | 0 |
+| Strict key delivery / 10 | 8 | 9 | 4 | 0 |
+| Merged partials | 1 | 1 | 0 | 0 |
+| Already satisfied, no PR | 1 (reported blocked) | 0 | not counted | not counted |
+| Wall to last report commit, minutes | 143.5 | 211.626 | n/a — no report | n/a — no report |
+| Wall to report landing / stop, minutes | 158.017 | 223.243 | 121.423 to quota; 720.001 to cap | ~23.367 to SIGTERM |
+| Queue CI IDs / attempts | 11 / 11 | 15 / 15 | 7 / 7 | 2 / 2 |
+| CI IDs on merged PRs only | 10 | 10 | 5 | 0 |
+| All PR workflow IDs (including relay/review) | 41 | 68 | 23 | 6 |
+| Merged cycle median / p90, minutes | 30.92 / 42.30 | 14.78 / 16.97 | 28.34 / 90.87 | n/a |
+| Cost | n/a | n/a | n/a | n/a |
+| Compactions / coordinator restarts | 5 / 0 reported | 7 / 0 reported | at least 1 compaction; no complete audit | daemon restart; session restore failed |
+| Human approvals | 0 reported; exact journal unavailable | 0 reported; exact journal unavailable | 0 reported; exact journal unavailable | 0 reported; exact journal unavailable |
+| Red base CI | not observable | not observable | not observable | not observable |
+
+B2c took **211.63 minutes** to its last report commit versus **143.50** for B1 (68.13 minutes longer), while its merged-PR median was **14.78** versus **30.92** minutes. B2c’s extra delivered item is the test-only 8282 coverage; B1 verified that feature at T0 and made no PR, so 9 versus 8 strict delivered items does not mean one extra product defect fixed. Waiving the literal dotted-branch restriction changes the delivery totals to **B1 9 and B2c 10**, without changing either implementation. There is **n = 1** per controlled cell, unequal setup/permission conditions, different review/smoke scope and later rerun ordering: these are observed contrasts, not a ranking or significance claim.
+
+The reports’ queue cutoffs are `2026-10-18T20:55:44.226162Z` for B1 and `2026-10-19T22:45:44Z` for B2c; neither is the report-commit timestamp. B2b’s 12-hour administrative observation is not 12 hours of active execution. B2c’s owner-read weekly allowance fell from 100% left before the start to 50% after completion, with concurrent consumption unisolated; this is neither a dollar cost nor a measured run-only token total (D10).
+
+### B1-cx
+
+Final base [`3a521964`](https://github.com/blamechris/chroxy/commit/3a521964d131e876f972158da974056cdbb6e048). [Run report](https://github.com/blamechris/chroxy/blob/3a521964d131e876f972158da974056cdbb6e048/docs/reports/harness-evals/trial/runs/B1-cx/REPORT.md); last report commit [`bbef3fe4`](https://github.com/blamechris/chroxy/commit/bbef3fe4bd38f0b1d1a8760adf976f359298dbac) at `2026-10-18T20:56:11Z`.
+
+| Issue | Outcome / correct vs key | Acceptance, tests and sensitivity |
+|---|---|---|
+| 8233 | merged [8666](https://github.com/blamechris/chroxy/pull/8666) / **yes** | P,P,P. `doctor.js` uses the shared merger; added `doctor-port.test.js` calls the real config reader and captures the actual socket argument for flag/env/file/default. The config/env cases fail with the old constant-port path. The fixture uses a different valid port, which is equivalent. |
+| 8215 | merged [8668](https://github.com/blamechris/chroxy/pull/8668) / **partial** | P,P,P,**F**. Complete IPv6 validation plus `mappedV6ToV4` fixes both short forms; `bind-host.test.js` pins the four required inputs and expanded valid forms. It also replaces the dotted prefix branch, contrary to K4, as in arm A (D1). New negative cases fail the old prefix. |
+| 7771 | merged [8662](https://github.com/blamechris/chroxy/pull/8662) / **yes** | P,P,R. Finite guard before mutation, active snapshots and absent/existing override refresh assertions in added `models.test.js` cases; obsolete overlay expectation changed. NaN would return true with the old guard. Red-first execution is reported, not replayed here. |
+| 8595 | merged [8664](https://github.com/blamechris/chroxy/pull/8664) / **yes** | P,P. Indexed `unique[index]` supplies the original base; added cross-family test pins both exact labels, IDs, full IDs and source immutability. Old code repeats the pinned descriptor. Production file matches B2c byte-for-byte, tests differ (D11). |
+| 8364 | merged [8669](https://github.com/blamechris/chroxy/pull/8669) / **yes** | P,P,R. Shared `ToolTerminationNote` supplies amber reason text in both components, forwarded through ChatView; `ToolTermination.test.tsx` tests reason variants, detail forwarding and normal controls. Removing the UI fails the new positives. Like ActivityGroup, termination is gated on a result/image being present; no new reason-only wire contract is assumed. The lone route remains unreachable in ordinary chat, which the sealed key does not require fixing (D3). |
+| 8282 | blocked (reported; already satisfied) / **yes on T0** | P,P,P,P,R on T0; reported **blocked** because no scoped implementation delta was needed, not because behavior was missing. No PR/new tests. Baseline classifier, recorder, truncation and schema satisfy the feature; reported 245 tests and six scratch probes are unverified execution. Zero incremental merged delivery (D2). |
+| 8277 | merged [8667](https://github.com/blamechris/chroxy/pull/8667) / **yes** | P,P,P. Selected disabled dormant provider and shared `SessionDefaultsNotice`/store dismissal; added Settings tests verify retention, available-provider recovery and both notice states. Model choices continue to use the usable fallback. Old Settings fails the new positives. |
+| 8567 | merged [8670](https://github.com/blamechris/chroxy/pull/8670) / **yes** | P,P,R,P. One frozen protocol definition is re-exported by the server and app and imported by dashboard. A new dependency-free protocol subpath serves the server; source/dist agree. Added identity and exact default/override tests detect a consumer retaining an independent array; changed dashboard tests compare all selected values. Reported unilateral mutations remain execution-unverified. |
+| 8303 | merged [8672](https://github.com/blamechris/chroxy/pull/8672) / **yes** | P,P,P,P,P,P. Shared resolved cwd policy retains credential/config boundaries and canonicalizes target/root/home natively. Added workspace/default/deny-list and startup-factory tests cover K1/K2/K4/K5; nonce-preserving schemas/store/handler plus hook and Browse tests cover normalized and stale replies for the prefill note. Blank Create semantics unchanged. Reverting policy or nonce propagation would fail distinct positive/negative tests; final patch repairs the arm-A normalization gap (D4/D9). |
+| 7815 | merged [8663](https://github.com/blamechris/chroxy/pull/8663) / **yes** | P,P,R. Both literals become owned occupied listeners with warn assertions; a separate pass case redirects the actual bind to port zero and verifies the requested port/host. No release/rebind gap in the occupied tests. Changed tests detect an always-pass probe; old-literals red proof is reported (D7). |
+
+| Issue / PR | Merge or attempt state | Copilot / owner review-disposition bodies | CI IDs / attempts (all workflows) | Cycle minutes |
+|---|---|---|---|---|
+| 8233 / [8666](https://github.com/blamechris/chroxy/pull/8666) | [`61c03c8e`](https://github.com/blamechris/chroxy/commit/61c03c8e5619ac94055549d13492f23282cd942d) | 1 / 1 | 1 / 1 (3) | 28.08 |
+| 8215 / [8668](https://github.com/blamechris/chroxy/pull/8668) | [`38bea06f`](https://github.com/blamechris/chroxy/commit/38bea06f0e7b22d317beaf4380bb431758e452f2) | 1 / 1 | 1 / 1 (4) | 42.30 |
+| 7771 / [8662](https://github.com/blamechris/chroxy/pull/8662) | [`7d992a43`](https://github.com/blamechris/chroxy/commit/7d992a43922c131b4fd849dfe52f9925e40ab291) | 1 / 2 | 1 / 1 (3) | 15.93 |
+| 8595 / [8664](https://github.com/blamechris/chroxy/pull/8664) | [`e737889e`](https://github.com/blamechris/chroxy/commit/e737889ed97d5325587fcb4cb8f26fa7de070f9f) | 1 / 2 | 1 / 1 (4) | 33.08 |
+| 8364 / [8669](https://github.com/blamechris/chroxy/pull/8669) | [`60abf9f7`](https://github.com/blamechris/chroxy/commit/60abf9f7939597f0ae0e8314f90a491a54e4132d) | 1 / 1 | 1 / 1 (4) | 29.13 |
+| 8282 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 8277 / [8667](https://github.com/blamechris/chroxy/pull/8667) | [`8f6a53ba`](https://github.com/blamechris/chroxy/commit/8f6a53bacbf8e1c4b5b4ad3015129e7c3289251d) | 1 / 1 | 1 / 1 (4) | 38.83 |
+| 8567 / [8670](https://github.com/blamechris/chroxy/pull/8670) | [`d7d1edaf`](https://github.com/blamechris/chroxy/commit/d7d1edaf90fd04a533c75e60d2ea50f436e251d8) | 1 / 1 | 1 / 1 (4) | 31.50 |
+| 8303 / [8671](https://github.com/blamechris/chroxy/pull/8671) | closed; unmerged | 1 / 2 | 1 / 1 (5) | n/a |
+| 8303 / [8672](https://github.com/blamechris/chroxy/pull/8672) | [`9865eb62`](https://github.com/blamechris/chroxy/commit/9865eb624293725ef1f6d725430cda3622010234) | 1 / 3 | 2 / 2 (7) | 30.92 |
+| 7815 / [8663](https://github.com/blamechris/chroxy/pull/8663) | [`9a6661ff`](https://github.com/blamechris/chroxy/commit/9a6661ff6baae122e8d1da0ccee50b41ae917a88) | 1 / 2 | 1 / 1 (3) | 20.17 |
+
+The desktop run recovered from automatic approval rejections and five compactions without reported human intervention or a restart. Browse’s first PR 8671 failed Windows CI and closed unmerged; retry 8672 fixed native path spelling, then real smoke exposed a separate Browse reply-correlation gap that was also fixed before final CI passed. The report keeps four reproduced T0 suite failures and an additional readiness leak separate from passing hosted CI; it also admits unnecessarily stopping a nonoverlapping suite. No >90-minute stall is reported or visible in the queue activity. These are report-backed execution observations; raw local logs/smoke are unavailable.
+
+Review-body counts include final gate summaries on 8662/8663/8664, the close/disposition on 8671 and the justification for a delta on 8672. They are not counts of fresh independent reviewers: for example 8672 has two approval bodies plus a review-justification body. B1’s report lists ancillary Relay run IDs alongside CI; the standardized count is 11 `ci.yml` IDs including the failed attempt, or 41 total PR-triggered workflows, rather than treating every listed workflow as CI (D5/D9).
+
+Isolation: queue PR bodies use bare `Trial-Closes`, authored titles/squash subjects contain no queue numbers, and original queue-PR commit messages contain no issue references. No direct queue comments/labels/closures or new issues occur in-window. Copilot’s PR 8668 review creates a timeline cross-reference on 8215, separately attributable to the service. The report also records another trial’s process command line being incidentally exposed, startup reads before mission completion, and no deliberate other-trial/key/seed/brief reads. The latter and its zero-human-approval total cannot be independently certified without transcripts/journal. The byte match on 8595 is discussed in D11.
+
+### B2c-cy-codex
+
+Final base [`c612f842`](https://github.com/blamechris/chroxy/commit/c612f8422054102db22316d75584eaa631eb8c09). [Run report](https://github.com/blamechris/chroxy/blob/c612f8422054102db22316d75584eaa631eb8c09/docs/reports/harness-evals/trial/runs/B2c-cy-codex/REPORT.md); last report commit [`8bf88eae`](https://github.com/blamechris/chroxy/commit/8bf88eae66cbcbb7906ebeda4745700f53c6fda3) at `2026-10-19T22:49:38Z`.
+
+| Issue | Outcome / correct vs key | Acceptance, tests and sensitivity |
+|---|---|---|
+| 8233 | merged [8719](https://github.com/blamechris/chroxy/pull/8719) / **yes** | P,P,P. Shared flag/env/file/default merge plus explicit invalid-port diagnostic. Added real CLI subprocess tests hold chosen ports and inspect their reported numbers, including flag-over-env-over-file. Old code fails configured/env cases. A different valid fixture port from the key is equivalent. |
+| 8215 | merged [8720](https://github.com/blamechris/chroxy/pull/8720) / **partial** | P,P,P,**F**. `isIPv6` plus full mapped-hextet regex rejects the two short inputs and tests retain both required positives. The validator also changes malformed dotted input behavior contrary to K4 (D1). New negatives fail the original prefix. |
+| 7771 | merged [8716](https://github.com/blamechris/chroxy/pull/8716) / **yes** | P,P,R. Finite guard plus factory tests for NaN/±Infinity, absent/existing overrides, refresh and a valid fractional control; overlay expectation corrected. Old guard returns true and mutates state. Historical RED/GREEN is report evidence. |
+| 8595 | merged [8714](https://github.com/blamechris/chroxy/pull/8714) / **yes** | P,P. Original index-aligned base; added test puts a duplicate alias between the two unique targets and pins exact labels/IDs/full IDs/immutability. Old fallback fails. Complete changed production set matches B1, while tests differ (D11). |
+| 8364 | merged [8723](https://github.com/blamechris/chroxy/pull/8723) / **yes** | P,P,R. Both components show shared amber termination guidance, and reason-only input also stops the pulse. Added component/ChatView tests pin forwarding and normal/error/group behavior. The run additionally routes singleton activity through ToolBubble and repairs its input preview, targets and four Maestro flows; that extra scope and retry cost earns no extra key point (D3/D9). |
+| 8282 | merged [8721](https://github.com/blamechris/chroxy/pull/8721) / **yes** | P,P,P,P,R. Test-only `session-message-history-replay-parity.test.js` adds opaque start-only thinking, >50 KiB real serialization/disk/restore/replay and a pre-kind state file; baseline schema covers optional kind. Production already satisfied the key. Removing recorder retention fails direct kind assertions (D2). |
+| 8277 | merged [8717](https://github.com/blamechris/chroxy/pull/8717) / **yes** | P,P,P. Dormant disabled selected option/hint, preserved fallback model roster and shared store-backed `SessionDefaultsNotice`. Added test mounts Settings and New Session together and dismisses both through one action; old UI fails the new assertions. |
+| 8567 | merged [8722](https://github.com/blamechris/chroxy/pull/8722) / **yes** | P,P,**unverified**,P. Shared frozen protocol export consumed by server and both clients; source/dist agree. Added server/app identity guards detect restored literals; dashboard test supplies an alternate mocked shared default and asserts empty overrides remain empty. This proves consumption beyond a same-subject equality. The available PR records identity RED/GREEN and a freeze mutation, but do not document the exact one-place category-addition mutation; its sensitivity follows statically (D12). |
+| 8303 | merged [8725](https://github.com/blamechris/chroxy/pull/8725) / **yes** | P,P,P,P,P,P. Shared canonical policy, native root/home/target spelling, explicit credential/config denial and startup diagnostic are implemented and tested. Optional request IDs survive the schema/store/handler round trip; exact-cwd probes show denied/pending/unknown states, suspend for Browse and ignore stale replies. Added policy, alias, hook, modal and real store-correlation tests fail without corresponding changes. Blank Create remains unchanged. Bound-client refusal is additional scope; no key penalty (D4/D9). |
+| 7815 | merged [8718](https://github.com/blamechris/chroxy/pull/8718) / **yes** | P,P,R. Both literals replaced by owned ephemeral listeners held through the checks; each asserts warn, with aggregate pass/fail semantics retained. No new free-port pass case was added. This meets the allowed nonpreferred alternative because warning coverage is explicit; it is not a pass/warn assertion deletion (D7). Historical bound-old-port red is reported. |
+
+| Issue / PR | Merge or attempt state | Copilot / owner review-disposition bodies | CI IDs / attempts (all workflows) | Cycle minutes |
+|---|---|---|---|---|
+| 8233 / [8719](https://github.com/blamechris/chroxy/pull/8719) | [`cd203db4`](https://github.com/blamechris/chroxy/commit/cd203db4c04df3357285373ee62508e85d00aebb) | 1 / 2 | 1 / 1 (5) | 10.68 |
+| 8215 / [8720](https://github.com/blamechris/chroxy/pull/8720) | [`a8aed1cf`](https://github.com/blamechris/chroxy/commit/a8aed1cfc747ab681ab3a94414d2bfc82abf3c40) | 1 / 2 | 1 / 1 (5) | 21.75 |
+| 7771 / [8716](https://github.com/blamechris/chroxy/pull/8716) | [`227965ce`](https://github.com/blamechris/chroxy/commit/227965ceb4f6c4eac511431284e9a780ccc0051e) | 1 / 2 | 1 / 1 (5) | 16.97 |
+| 8595 / [8714](https://github.com/blamechris/chroxy/pull/8714) | [`cbc6c2c5`](https://github.com/blamechris/chroxy/commit/cbc6c2c5b295de11476d92d02393c857c31af222) | 1 / 2 | 1 / 1 (6) | 16.30 |
+| 8364 / [8715](https://github.com/blamechris/chroxy/pull/8715) | closed; unmerged | 1 / 3 | 3 / 3 (13) | n/a |
+| 8364 / [8723](https://github.com/blamechris/chroxy/pull/8723) | [`869fb60c`](https://github.com/blamechris/chroxy/commit/869fb60c7be8f5a3871e284f5b87060f2e8c2911) | 1 / 2 | 1 / 1 (5) | 12.85 |
+| 8282 / [8721](https://github.com/blamechris/chroxy/pull/8721) | [`8e90c68d`](https://github.com/blamechris/chroxy/commit/8e90c68ddb7b7cc22159ef01a6f550ad7a5813a8) | 1 / 2 | 1 / 1 (3) | 9.78 |
+| 8277 / [8717](https://github.com/blamechris/chroxy/pull/8717) | [`73a6c85e`](https://github.com/blamechris/chroxy/commit/73a6c85e76357116dcb6c8eea21a23b936582c04) | 1 / 2 | 1 / 1 (6) | 14.93 |
+| 8567 / [8722](https://github.com/blamechris/chroxy/pull/8722) | [`f42cfc55`](https://github.com/blamechris/chroxy/commit/f42cfc5547268edc37bb4c7b3a900a82971941a0) | 1 / 2 | 1 / 1 (4) | 15.87 |
+| 8303 / [8724](https://github.com/blamechris/chroxy/pull/8724) | closed; unmerged | 1 / 3 | 2 / 2 (8) | n/a |
+| 8303 / [8725](https://github.com/blamechris/chroxy/pull/8725) | [`6c369095`](https://github.com/blamechris/chroxy/commit/6c369095b254b2304e0568fc02a67210feaa90f2) | 1 / 2 | 1 / 1 (3) | 13.45 |
+| 7815 / [8718](https://github.com/blamechris/chroxy/pull/8718) | [`cebafe9d`](https://github.com/blamechris/chroxy/commit/cebafe9d56c1b632ee6a699d1fadfea79cca322c) | 1 / 2 | 1 / 1 (5) | 14.63 |
+
+Chroxy completed all ten merges through three bounded waves and seven compactions, with no reported restart or rate-limit stall. It spent additional work making the singleton mobile route reachable, preserving ordinary errors/input previews and repairing Maestro selectors; first attempt 8715 closed after 84.52 minutes, then final 8723 opened much later in the work. Browse similarly closed 8724 after 33.97 minutes of Windows failures and completed as 8725; the final-PR cycle alone hides that earlier work. Local full-server failures/timeouts remain failures despite isolated passes and final green hosted CI. No >90-minute activity stall appears in the public attempt sequence.
+
+The owner README reports 26 final check runs for 8725 (25 green plus one conditional skip), versus the report’s 24 + 1; those are job/check contexts, not the 15 workflow runs counted here. Sandbox retries, an omitted outbound requestId, native-path differences, missing dependencies and device setup caused recoverable work. The blue sidebar dot in an early owner screenshot raises a possible recurrence of false idle but does **not** prove a frozen chat for this run; the later daemon notification audit is unavailable. Isolated smoke invoked Haiku within this run, so reported worker setup is not proof of single-vendor quota consumption (D10).
+
+Isolation: all queue bodies use bare markers and no closing keyword; the sole numeric body reference, 8723→8715, names its own earlier PR. Titles/original commit messages have no queue issue references; squash subjects have only their own permitted PR suffix. There are no direct queue comment/label/closure events or new issues in-window. Copilot reviews create cross-references 8716→7771, 8720→8215 and 8722→8567. Reported UI/process exposure of other session names, a private preview credential incident and imperfect mission-read ordering are retained as incidents; no credential value is reproduced. No clean forbidden-read or zero-approval certificate is possible without the missing journal/transcripts.
+
+### B2b-cy-codex
+
+Final base [`6762573b`](https://github.com/blamechris/chroxy/commit/6762573ba52c59805e4a903f8cde41a8c3eaef49). No run report. Stop/setup evidence comes from the [owner’s README record](https://github.com/blamechris/chroxy/blob/f48cda8d5fa5838c50fee2810cf7e598dd366e63/docs/reports/harness-evals/trial/README.md) and linked public PR records; raw daemon/transcript evidence is not attached.
+
+| Issue | Outcome / correct vs key | Acceptance, tests and sensitivity |
+|---|---|---|
+| 8233 | blocked/open [8696](https://github.com/blamechris/chroxy/pull/8696) / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. Checks completed after quota exhaustion; green/open is not merged delivery. |
+| 8215 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 7771 | merged [8695](https://github.com/blamechris/chroxy/pull/8695) / **yes** | P,P,R. Finite guard, added factory rejection/refresh/valid-update tests and changed overlay/cache assertions; old guard returns true. PR evidence reports red against the old guard, with raw execution unverified. |
+| 8595 | merged [8692](https://github.com/blamechris/chroxy/pull/8692) / **yes** | P,P. Indexed original base; added cross-family/alias test asserts exact labels, IDs/full IDs and unchanged source labels. Old fallback repeats the descriptor. |
+| 8364 | blocked/open [8693](https://github.com/blamechris/chroxy/pull/8693) / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. Draft remains; reported smoke item could not be checked. |
+| 8282 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. The common T0 implementation is already satisfied as established in D2; no delivery credited here. |
+| 8277 | merged [8694](https://github.com/blamechris/chroxy/pull/8694) / **yes** | P,P,P. Dormant selected option/hint and shared notice/dismissal; added/changed Settings tests cover both. The corrective change hides the model picker for dormant providers, the same additional behavior concern as A2 (D8), without failing the two requested criteria. |
+| 8567 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 8303 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 7815 | merged [8691](https://github.com/blamechris/chroxy/pull/8691) / **yes** | P,P,R. Both sites hold owned OS-assigned listeners and assert warn, with explicit aggregate status assertion. No new free-port pass case; same nonpreferred permitted interpretation as B2c (D7). PR records original held-port red proof; tests are sensitive to incorrect warn behavior. |
+
+| Issue / PR | Merge or attempt state | Copilot / owner review-disposition bodies | CI IDs / attempts (all workflows) | Cycle minutes |
+|---|---|---|---|---|
+| 8233 / [8696](https://github.com/blamechris/chroxy/pull/8696) | open; unmerged | 1 / 1 | 1 / 1 (3) | n/a |
+| 8215 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 7771 / [8695](https://github.com/blamechris/chroxy/pull/8695) | [`6762573b`](https://github.com/blamechris/chroxy/commit/6762573ba52c59805e4a903f8cde41a8c3eaef49) | 1 / 2 | 1 / 1 (3) | 14.00 |
+| 8595 / [8692](https://github.com/blamechris/chroxy/pull/8692) | [`ddd52bc2`](https://github.com/blamechris/chroxy/commit/ddd52bc28964c4771b43dd9d448b8ca34e42e544) | 1 / 2 | 1 / 1 (3) | 13.27 |
+| 8364 / [8693](https://github.com/blamechris/chroxy/pull/8693) | open; unmerged | 1 / 1 | 1 / 1 (5) | n/a |
+| 8282 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 8277 / [8694](https://github.com/blamechris/chroxy/pull/8694) | [`536c826b`](https://github.com/blamechris/chroxy/commit/536c826b5317644b49554baf0cb0da631a0e7e31) | 1 / 3 | 2 / 2 (5) | 42.68 |
+| 8567 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 8303 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 7815 / [8691](https://github.com/blamechris/chroxy/pull/8691) | [`b475ff31`](https://github.com/blamechris/chroxy/commit/b475ff3104dff8e013be65578a6a8cdc3b565424) | 1 / 2 | 1 / 1 (4) | 90.87 |
+
+Four merged changes meet the key; open 8693 and 8696 are not delivery, even though 8696 later had green checks. The owner’s post-cap diagnosis records a quota stop at `2026-10-19T06:16:45.324Z`, after about 121.42 minutes; the daemon had already marked the turn complete at 04:26:37 and stopped forwarding later work/errors, leaving the dashboard idle. Thus the failure has two components: shared-plan exhaustion and a Chroxy visibility/termination defect, not an unexplained twelve-hour reasoning stall. The long quiet tail through the 16:15:20 cap exceeds the protocol’s 90-minute threshold; active execution and administrative observation must not be conflated. No run report exists, so further compaction/restart counts, forbidden reads and exact approval events are unverified.
+
+Isolation: the six PR bodies have bare markers, no forbidden closing keyword or issue reference; titles/original commit messages are clean, squash subjects carry only their own PR suffix. Queue timelines contain no direct comments/labels/closures or cross-references during this run window, and the new-issue audit finds none. Owner reports no human approvals. Smoke-only comments 6259875724, 6260013192 and 6260303581 are excluded from review-body counts despite mentioning review prerequisites: 8692 has two review/disposition bodies and 8694 has three, not three and five independent rounds. PR 8694’s model-field hiding is retained as D8, while the requested dormant-option/notice checks pass.
+
+### B2-cy-codex
+
+Final base [`932bd3a4`](https://github.com/blamechris/chroxy/commit/932bd3a4ef40bc9634cab390e6cf0facadd801d7). No run report. Stop/setup evidence comes from the [owner’s README record](https://github.com/blamechris/chroxy/blob/f48cda8d5fa5838c50fee2810cf7e598dd366e63/docs/reports/harness-evals/trial/README.md) and linked public PR records; raw daemon/transcript evidence is not attached.
+
+| Issue | Outcome / correct vs key | Acceptance, tests and sensitivity |
+|---|---|---|
+| 8233 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 8215 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 7771 | blocked/open [8645](https://github.com/blamechris/chroxy/pull/8645) / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 8595 | blocked/open [8646](https://github.com/blamechris/chroxy/pull/8646) / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 8364 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 8282 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. The common T0 implementation is already satisfied as established in D2; no delivery credited here. |
+| 8277 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 8567 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 8303 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+| 7815 | untouched / **not graded** | No merged trial change; acceptance/tests/sensitivity not graded under the merged-only instruction. |
+
+| Issue / PR | Merge or attempt state | Copilot / owner review-disposition bodies | CI IDs / attempts (all workflows) | Cycle minutes |
+|---|---|---|---|---|
+| 8233 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 8215 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 7771 / [8645](https://github.com/blamechris/chroxy/pull/8645) | open; unmerged | 1 / 1 | 1 / 1 (3) | n/a |
+| 8595 / [8646](https://github.com/blamechris/chroxy/pull/8646) | open; unmerged | 0 / 0 | 1 / 1 (3) | n/a |
+| 8364 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 8282 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 8277 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 8567 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 8303 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+| 7815 / none | no PR | 0 / 0 | 0 / 0 (0) | n/a |
+
+This run delivered zero merged items before the daemon’s auto-deploy sent SIGTERM at 07:52:22, about 23.37 minutes after the approximate 07:29 start. The owner record says the daemon incorrectly judged an active session idle, restarted and could not restore it because its native locator was missing. Two green/open PRs do not compensate for this harness interruption; no report or independent local telemetry is available. This is a terminated run, not a >90-minute stall or a demonstrated task-correctness failure.
+
+Isolation: both PRs use bare markers and no closing keyword/title/commit issue references; neither was merged. Copilot’s 8645 review cross-referenced 7771 within the window. Copilot’s 8646 body arrived after the SIGTERM cutoff, so its run-window count is zero, not “never reviewed.” No direct queue comments/labels/closures or new issues occur in-window. Human approvals are zero per the owner record, with journal verification unavailable; other-trial/key/seed/brief reads remain unverified. Unmerged solutions are deliberately excluded from both correctness and byte-identity grading.
+
+### Arm B findings expected to need cross-review
+
+- **D1 extends to 8668 and 8720.** Both satisfy the stated bad/good loopback examples but reject malformed dotted inputs the old branch accepted. Apply the same literal-key `partial` as arm A, with the alternate delivery count shown. No safety failure is alleged.
+- **D2/D3 — asymmetric extra work is not asymmetric acceptance.** B1’s already-satisfied 8282 is a zero-delivery no-change outcome, whereas B2c’s test-only PR counts as a merged correct item. B2c additionally activates the singleton tool path; B1 and arm A do not fail the key for leaving that path dormant. Historical red/mutation/replay execution is reported, not independently replayed.
+- **D4 — Arm B Browse differs from Arm A.** Final 8672 and 8725 carry request IDs through client schema, server reply, shared parser and UI. Their normalized-path/stale-reply tests directly address the Arm A gap, so both receive `yes`. A home-only blank listing request on 8725 does not fail the separate requirement that an explicitly requested, policy-allowed configured cwd is browsable; blank Create policy was explicitly deferred.
+- **D7 — owned warning cases.** B2c 8718 and B2b 8691 retain deterministic warn assertions at both formerly literal sites but add no free-port pass case. I accept this under the key’s nonpreferred alternative: ambient dependency is removed and warn coverage is explicit. B1 8663 additionally has a socket-boundary pass control. A reviewer may prefer two real bind directions; the key labels that design preferred, not mandatory.
+- **D8 extends to 8694.** Hiding the entire model field for a dormant provider can hide a still-active fallback model override. As with A2 8655, the requested provider/notice behavior passes; this additional concern is not converted into an invented key criterion.
+- **D9 — attempts, reviews and timing denominators.** Include failed/closed queue attempts in CI counts; exclude them from merged-cycle median/p90 but retain their elapsed work in wall time. B1: 11 CI IDs/41 all workflows; B2c: 15/68; B2b: 7/23; B2: 2/6. Review/disposition bodies include coordinator gates, close notes and justifications, never an inferred number of hidden worker rounds. Smoke-only bodies are excluded. Report-commit times differ from queue cutoff and report merge; interrupted runs have no comparable report endpoint.
+- **D10 — stop/cost/visibility attribution.** B2b’s underlying quota stop is distinct from Chroxy’s early false-idle/unsurfaced error. B2 was actively killed by auto-deploy and failed restoration. B2c’s early blue dot is only a possible visibility issue; no later daemon audit was attached. Weekly allowance readings are conditional owner observations, not exact run cost; cross-vendor smoke calls further limit attribution. No zero human approval or forbidden-read claim is independently verified without the journal/transcripts.
+- **D11 — byte identity without a copying inference.** 8664 and 8714 produce the exact same changed production file, `model-display.ts` blob `43cf1d8ec9c65153b8de8db114013a5006d97849`; both independently express the same two-line indexed fallback, but their tests differ. No merged PR pair across all eight runs has an identical complete changed-file set including tests. Shared mechanical blobs also occur for `MessageBubble.tsx` (all six completed implementations), `QuietHoursEditor.tsx` and the one-line `ws-server.js` nonce roster. These constrained edits do not establish forbidden reading; the audit records the matches instead of certifying absence of leakage.
+
+- **D12 — historical execution versus static sensitivity.** No grader tests or mutations were run. A `yes` certifies the inspected implementation and test sensitivity, with historical execution separately reported or unverified. In particular, 8722 documents identity RED/GREEN and a freeze mutation, not the exact category-addition mutant requested by the key; its added identity/default-consumption tests are statically sensitive to unilateral drift. Missing raw proof is not silently represented as an observed red run. A stricter proof-only scoring convention would need to be applied across all cells, whose raw mutation logs are likewise unattached.
+
+Initial independent grading is complete. No other grader output was read and no cross-review reply has been attempted. The separate mailbox lists the anticipated disputes for the later round; owner tiebreaks remain pending that round rather than being silently incorporated here.
