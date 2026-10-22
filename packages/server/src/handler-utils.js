@@ -7,7 +7,7 @@
  */
 import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
+import { join, resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
 import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
@@ -386,6 +386,27 @@ export function canClientSeeWebTask(client, task, sessionManager) {
 export const isPathWithin = isPathWithinCanonical
 
 /**
+ * Resolve `p` to the spelling the filesystem itself reports.
+ *
+ * Every side of the working-directory policy (the cwd, `$HOME`, each
+ * workspace root, the daemon config root) goes through THIS function, so they
+ * are compared in the same spelling. The JS `realpathSync` follows symlinks but
+ * keeps the caller's letter case, and `isPathWithin` compares case-sensitively
+ * on POSIX; on a case-insensitive volume (the macOS default) a path spelled
+ * `/Users/CHRIS/.ssh` names the same directory as `/Users/chris/.ssh` yet
+ * shares no prefix with it. `realpathSync.native` reports the on-disk letter
+ * case (the same answer `fs/promises` `realpath` gives the file-ops layer), so
+ * all sides agree on one spelling whichever way the caller typed it.
+ *
+ * The native function is looked up at CALL time on purpose: tests replace
+ * `fs.realpathSync.native`, and a module-level alias would keep pointing at the
+ * original.
+ */
+function canonicalRealpath(p) {
+  return realpathSync.native(p)
+}
+
+/**
  * Returns true if `absPath` touches any FORBIDDEN_HOME_SUBDIRS entry
  * at any depth below $HOME. E.g. `/home/user/.ssh` and
  * `/home/user/.config/gcloud/credentials` both match.
@@ -398,13 +419,57 @@ export const isPathWithin = isPathWithinCanonical
  * case-sensitive filesystems nobody sensibly creates two distinct
  * `.ssh`/`.SSH` directories, so the broader match is safe.
  * Found by agent review on PR #2808.
+ *
+ * The name test only sees the first segment of the RESOLVED path. When one of
+ * those entries is itself a symlink (`~/.ssh -> ~/dotfiles/ssh` is a common
+ * dotfiles layout), the resolved path starts with `dotfiles`, so a second test
+ * asks whether `absPath` lies inside where any existing entry actually leads.
+ * That test applies to a path outside `$HOME` too, because an entry may lead
+ * out of it.
  */
 function pathTouchesForbiddenSubdir(absPath, home) {
-  if (!isPathWithin(absPath, home)) return false
-  const rel = relative(home, absPath)
-  if (rel === '') return false
-  const firstSegment = rel.split(sep)[0].toLowerCase()
-  return FORBIDDEN_HOME_SUBDIRS.has(firstSegment)
+  if (isPathWithin(absPath, home)) {
+    const rel = relative(home, absPath)
+    if (rel !== '') {
+      const firstSegment = rel.split(sep)[0].toLowerCase()
+      if (FORBIDDEN_HOME_SUBDIRS.has(firstSegment)) return true
+    }
+  }
+  return isInsideForbiddenEntryTarget(absPath, home)
+}
+
+/**
+ * Returns true if `absPath` is inside the resolved target of any existing
+ * `$HOME/<FORBIDDEN_HOME_SUBDIRS entry>`.
+ *
+ * Per entry:
+ *   - ENOENT / ENOTDIR: nothing is there (absent, or a dangling link). Skipped,
+ *     so a stale entry cannot lock anyone out.
+ *   - any other error (permissions, a link loop): where the entry leads is
+ *     unknown, so it is compared by its own `$HOME`-relative spelling instead.
+ *     The name test in the caller already covers that spelling, so this keeps
+ *     an unresolvable entry from silently dropping out of the check rather than
+ *     adding a rule; it must never throw out of the policy.
+ *   - target is `$HOME` or an ancestor: skipped (not credential-only; the name test still covers the entry).
+ *
+ * Some entries are files (`.netrc`, `.npmrc`, ...). A directory cwd can never
+ * be inside a file, so they need no special case. Containment goes through
+ * `isPathWithin`, the repo's one implementation.
+ */
+function isInsideForbiddenEntryTarget(absPath, home) {
+  for (const name of FORBIDDEN_HOME_SUBDIRS) {
+    const entry = join(home, name)
+    let target
+    try {
+      target = canonicalRealpath(entry)
+    } catch (err) {
+      if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') continue
+      target = entry
+    }
+    if (isPathWithin(home, target)) continue
+    if (isPathWithin(absPath, target)) return true
+  }
+  return false
 }
 
 /**
@@ -432,10 +497,12 @@ function pathTouchesForbiddenSubdir(absPath, home) {
 function pathTouchesConfigDir(absPath) {
   let realConfigDir
   try {
-    realConfigDir = realpathSync(configDir())
+    // Canonical spelling, like `absPath`: a config root typed in another
+    // letter case names the same directory on a case-insensitive volume.
+    realConfigDir = canonicalRealpath(configDir())
   } catch {
-    // The root does not exist yet. `absPath` already resolved through
-    // realpathSync, so it cannot be inside a directory that is not there.
+    // The root does not exist yet. `absPath` already resolved to an existing
+    // path, so it cannot be inside a directory that is not there.
     return false
   }
   return isPathWithin(absPath, realConfigDir)
@@ -447,12 +514,16 @@ function pathTouchesConfigDir(absPath) {
  * Layers (each must pass):
  *
  * 1. Path hygiene — must exist, be a directory, and be realpath-
- *    resolvable. Catches broken or non-directory paths up front.
+ *    resolvable. Catches broken or non-directory paths up front. Every
+ *    path in this function is resolved to the filesystem's own letter case
+ *    (canonicalRealpath), so differently spelled names of one directory compare
+ *    equal on a case-insensitive volume.
  *
  * 2. Credential-directory deny-list — regardless of any allowlist, the
  *    cwd must NOT be inside any FORBIDDEN_HOME_SUBDIRS entry below
  *    $HOME. Closes the 2026-04-11 audit Adversary A1 attack where an
  *    authenticated client could set cwd to ~/.ssh to read credentials.
+ *    An entry that is itself a symlink also denies the directory it leads to.
  *
  * 3. Workspace allowlist (opt-in) — if `config.workspaceRoots` is a
  *    non-empty array, the cwd must be inside at least one of the
@@ -478,7 +549,7 @@ export function validateCwdAllowed(cwd, config = null) {
   }
   let realCwd
   try {
-    realCwd = realpathSync(cwd)
+    realCwd = canonicalRealpath(cwd)
   } catch {
     return `Cannot resolve path: ${cwd}`
   }
@@ -497,12 +568,16 @@ export function validateCwdAllowed(cwd, config = null) {
   // positive control. Falls back to the raw value if it cannot be resolved,
   // which is the conservative direction: an unresolvable $HOME still gets a
   // prefix test rather than none.
+  // Both sides are also resolved to the filesystem's own letter case
+  // (canonicalRealpath), so a cwd or a $HOME typed in another case than the one
+  // on disk still shares a prefix with the other side on a case-insensitive
+  // volume.
   const rawHome = (config?.homeOverride && typeof config.homeOverride === 'string')
     ? config.homeOverride
     : homedir()
   let home
   try {
-    home = realpathSync(rawHome)
+    home = canonicalRealpath(rawHome)
   } catch {
     home = rawHome
   }
@@ -525,7 +600,9 @@ export function validateCwdAllowed(cwd, config = null) {
     for (const root of roots) {
       let realRoot
       try {
-        realRoot = realpathSync(root)
+        // Canonical spelling, so a root typed in another letter case still
+        // matches a cwd resolved from the same directory.
+        realRoot = canonicalRealpath(root)
       } catch {
         // Configured root that doesn't resolve is a config error — skip
         // it rather than failing the whole check, but it can't match.

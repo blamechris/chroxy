@@ -5,13 +5,13 @@
  * or writing arbitrary files on the host. Covers path traversal prevention,
  * absolute path rejection, symlink escape detection, and edge cases.
  */
-import { describe, it, before, after } from 'node:test'
+import { describe, it, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import {
+import fs, {
   mkdtempSync, writeFileSync, mkdirSync, rmSync,
-  symlinkSync, realpathSync, existsSync
+  symlinkSync, realpathSync, existsSync, statSync
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep, dirname } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
 import { isPathWithin } from '../src/utils/path-containment.js'
 import { nsCtx, makeSessionIndexCtx } from './test-helpers.js'
@@ -1053,6 +1053,306 @@ describe('validateCwdAllowed — workspaceRoots allowlist', () => {
       rmSync(subdir, { recursive: true, force: true })
       rmSync(realRoot, { recursive: true, force: true })
     }
+  })
+})
+
+// ============================================================
+// validateCwdAllowed — letter case and symlinked credential directories
+// ============================================================
+
+const CRED_DENY = 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
+const CONFIG_DIR_DENY = 'Directory is not allowed: the chroxy config/state directory is blocked for security'
+
+// Does the volume under the temp dir treat two spellings that differ only in
+// letter case as one name (macOS APFS and Windows NTFS defaults)? Probed once,
+// at import, in a directory of its own: a dir is created in ONE case and then
+// looked up in another BEFORE any other test creates a variant spelling, so
+// nothing a later test makes can change the answer.
+function probeCaseInsensitiveVolume() {
+  let dir = null
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-case-probe-'))
+    mkdirSync(join(dir, 'probe-dir'))
+    try {
+      statSync(join(dir, 'PROBE-DIR'))
+      return true
+    } catch {
+      return false
+    }
+  } catch {
+    return false
+  } finally {
+    if (dir) {
+      try { rmSync(dir, { recursive: true, force: true }) } catch { /* best effort */ }
+    }
+  }
+}
+const CASE_INSENSITIVE_VOLUME = probeCaseInsensitiveVolume()
+
+describe('validateCwdAllowed — letter case and symlinked credential directories', () => {
+  // On a case-insensitive volume `<base>/users/CHRIS/.ssh` and
+  // `<base>/users/chris/.ssh` name the same directory, and `realpathSync.native`
+  // reports the on-disk spelling while the JS `realpathSync` keeps the caller's.
+  // CI's Linux job cannot create that situation for real, so the cases below
+  // SIMULATE the volume: every variant spelling is created as a real directory
+  // (a no-op on a case-insensitive volume, a separate directory on Linux, so
+  // statSync passes either way) and `fs.realpathSync.native` is replaced with a
+  // function that reports the canonical spelling for the variant prefix and
+  // defers to the real implementation for everything else. A case that went
+  // through the JS `realpathSync` would see the variant spelling unchanged.
+  let base
+  let quietConfigDir
+  let originalConfigDir
+  let seq = 0
+
+  before(() => {
+    // Resolved up front so every path below is already in the form the
+    // resolver reports (macOS /var -> /private/var, Windows short names).
+    base = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-cwd-case-')))
+    quietConfigDir = join(base, 'quiet-config')
+    mkdirSync(quietConfigDir)
+    originalConfigDir = process.env.CHROXY_CONFIG_DIR
+  })
+  beforeEach(() => {
+    // Keep the daemon config root out of the way (and off the real ~/.chroxy)
+    // unless a case sets it deliberately.
+    process.env.CHROXY_CONFIG_DIR = quietConfigDir
+  })
+  after(() => {
+    if (originalConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = originalConfigDir
+    if (base) rmSync(base, { recursive: true, force: true })
+  })
+
+  function newRoot() {
+    const root = join(base, `case-${++seq}`)
+    mkdirSync(root)
+    return root
+  }
+  function mkdirs(...dirs) {
+    for (const dir of dirs) mkdirSync(dir, { recursive: true })
+  }
+  /**
+   * @param {object} t - node:test context (the mock is restored after the test)
+   * @param {Array<[string, string]>} folds - [variantPrefix, canonicalPrefix] pairs
+   * @returns {string[]} every path the simulated volume actually folded
+   */
+  function simulateCaseFoldedVolume(t, folds) {
+    const original = fs.realpathSync.native
+    const folded = []
+    t.mock.method(fs.realpathSync, 'native', (p, ...rest) => {
+      if (typeof p === 'string') {
+        for (const [variant, canonical] of folds) {
+          if (p === variant || p.startsWith(variant + sep)) {
+            folded.push(p)
+            return original(canonical + p.slice(variant.length), ...rest)
+          }
+        }
+      }
+      return original(p, ...rest)
+    })
+    return folded
+  }
+
+  it('denies a credential directory named through a variant spelling of the cwd', (t) => {
+    const root = newRoot()
+    const home = join(root, 'users', 'chris')
+    const cwd = join(root, 'users', 'CHRIS', '.ssh')
+    mkdirs(join(home, '.ssh'), cwd)
+    const folded = simulateCaseFoldedVolume(t, [[join(root, 'users', 'CHRIS'), home]])
+
+    const err = validateCwdAllowed(cwd, { homeOverride: home, workspaceRoots: [join(root, 'users')] })
+
+    assert.equal(err, CRED_DENY)
+    assert.ok(folded.includes(cwd), 'the simulated volume must have been consulted for the cwd')
+  })
+
+  it('denies a credential directory when $HOME itself is spelled in another letter case', (t) => {
+    const root = newRoot()
+    const home = join(root, 'users', 'chris')
+    const homeVariant = join(root, 'USERS', 'chris')
+    const cwd = join(home, '.ssh')
+    mkdirs(cwd, homeVariant)
+    const folded = simulateCaseFoldedVolume(t, [[join(root, 'USERS'), join(root, 'users')]])
+
+    const err = validateCwdAllowed(cwd, { homeOverride: homeVariant, workspaceRoots: [root] })
+
+    assert.equal(err, CRED_DENY)
+    assert.ok(folded.includes(homeVariant), 'the simulated volume must have been consulted for $HOME')
+  })
+
+  it('denies the config/state directory when the cwd is spelled in another letter case', (t) => {
+    const root = newRoot()
+    const home = join(root, 'users', 'chris')
+    const configRoot = join(root, 'state', 'chroxy-cfg')
+    const cwd = join(root, 'STATE', 'chroxy-cfg')
+    mkdirs(home, configRoot, cwd)
+    process.env.CHROXY_CONFIG_DIR = configRoot
+    const folded = simulateCaseFoldedVolume(t, [[join(root, 'STATE'), join(root, 'state')]])
+
+    const err = validateCwdAllowed(cwd, { homeOverride: home, workspaceRoots: [root] })
+
+    assert.equal(err, CONFIG_DIR_DENY)
+    assert.ok(folded.includes(cwd), 'the simulated volume must have been consulted for the cwd')
+  })
+
+  it('denies the config/state directory when CHROXY_CONFIG_DIR is spelled in another letter case', (t) => {
+    const root = newRoot()
+    const home = join(root, 'users', 'chris')
+    const cwd = join(root, 'state', 'chroxy-cfg')
+    const configVariant = join(root, 'STATE', 'chroxy-cfg')
+    mkdirs(home, cwd, configVariant)
+    process.env.CHROXY_CONFIG_DIR = configVariant
+    const folded = simulateCaseFoldedVolume(t, [[join(root, 'STATE'), join(root, 'state')]])
+
+    const err = validateCwdAllowed(cwd, { homeOverride: home, workspaceRoots: [root] })
+
+    assert.equal(err, CONFIG_DIR_DENY)
+    assert.ok(folded.includes(configVariant), 'the simulated volume must have been consulted for the config root')
+  })
+
+  it('accepts an ordinary project when the workspace root is spelled in another letter case', (t) => {
+    const root = newRoot()
+    const home = join(root, 'users', 'chris')
+    const project = join(home, 'project')
+    const rootVariant = join(root, 'USERS')
+    mkdirs(project, rootVariant)
+    const folded = simulateCaseFoldedVolume(t, [[rootVariant, join(root, 'users')]])
+
+    const err = validateCwdAllowed(project, { homeOverride: home, workspaceRoots: [rootVariant] })
+
+    assert.equal(err, null, `a root and a cwd naming the same directory must match, got: ${err}`)
+    assert.ok(folded.includes(rootVariant), 'the simulated volume must have been consulted for the root')
+  })
+
+  it('POSITIVE CONTROL: under the same simulated volume, ordinary directories and $HOME stay allowed', (t) => {
+    // Without this, the denials above would also pass if the resolver rejected
+    // everything it was handed a variant spelling of.
+    const root = newRoot()
+    const home = join(root, 'users', 'chris')
+    const homeVariant = join(root, 'users', 'CHRIS')
+    mkdirs(join(home, 'project'), join(homeVariant, 'project'))
+    simulateCaseFoldedVolume(t, [[homeVariant, home]])
+    const config = { homeOverride: home, workspaceRoots: [join(root, 'users')] }
+
+    const cases = {
+      'project, canonical spelling': join(home, 'project'),
+      'project, variant spelling': join(homeVariant, 'project'),
+      '$HOME, canonical spelling': home,
+      '$HOME, variant spelling': homeVariant,
+    }
+    for (const [label, cwd] of Object.entries(cases)) {
+      assert.equal(validateCwdAllowed(cwd, config), null, `${label} must be allowed`)
+    }
+  })
+
+  it('live case-insensitive volume: denies a credential directory named through a variant spelling',
+    { skip: CASE_INSENSITIVE_VOLUME ? false : 'case-insensitive volume only; the simulated cases cover CI' },
+    () => {
+      // No mock: this is the real volume reporting its own on-disk spelling.
+      // It supplements the simulated cases, which are what CI actually runs.
+      const root = newRoot()
+      const home = join(root, 'users', 'chris')
+      mkdirs(join(home, '.ssh'))
+      const cwd = join(root, 'users', 'CHRIS', '.ssh')
+      assert.ok(statSync(cwd).isDirectory(), 'precondition: the variant spelling names the directory created in canonical case')
+
+      const err = validateCwdAllowed(cwd, { homeOverride: home, workspaceRoots: [join(root, 'users')] })
+
+      assert.equal(err, CRED_DENY)
+    })
+
+  describe('a credential directory that is itself a symlink', () => {
+    function makeHome() {
+      const home = join(newRoot(), 'home')
+      mkdirs(home)
+      return home
+    }
+
+    for (const parts of [['.ssh'], ['dotfiles', 'ssh'], ['dotfiles', 'ssh', 'sub']]) {
+      it(`denies ~/${parts.join('/')} when ~/.ssh points at ~/dotfiles/ssh`, { skip: SKIP_NO_SYMLINK }, () => {
+        const home = makeHome()
+        mkdirs(join(home, 'dotfiles', 'ssh', 'sub'), join(home, 'dotfiles', 'other'))
+        symlinkSync(join(home, 'dotfiles', 'ssh'), join(home, '.ssh'))
+
+        const err = validateCwdAllowed(join(home, ...parts), { homeOverride: home })
+
+        assert.equal(err, CRED_DENY)
+      })
+    }
+
+    it('POSITIVE CONTROL: siblings and the parent of the link target stay allowed', { skip: SKIP_NO_SYMLINK }, () => {
+      const home = makeHome()
+      mkdirs(join(home, 'dotfiles', 'ssh', 'sub'), join(home, 'dotfiles', 'other'))
+      symlinkSync(join(home, 'dotfiles', 'ssh'), join(home, '.ssh'))
+
+      for (const parts of [['dotfiles', 'other'], ['dotfiles'], []]) {
+        const cwd = join(home, ...parts)
+        assert.equal(validateCwdAllowed(cwd, { homeOverride: home }), null, `${cwd} is not inside the link target`)
+      }
+    })
+
+    it('denies a directory inside the target of a symlinked ~/.config', { skip: SKIP_NO_SYMLINK }, () => {
+      const home = makeHome()
+      mkdirs(join(home, 'dotfiles', 'config', 'gh'))
+      symlinkSync(join(home, 'dotfiles', 'config'), join(home, '.config'))
+
+      const err = validateCwdAllowed(join(home, 'dotfiles', 'config', 'gh'), { homeOverride: home })
+
+      assert.equal(err, CRED_DENY)
+    })
+
+    // A credential entry whose target holds $HOME itself cannot be a
+    // credential-only directory; treating it as one would deny every directory
+    // under home, $HOME included. Each case keeps a real ~/.ssh in the same test
+    // so it cannot pass by denying nothing.
+    it('a credential entry that points at $HOME itself does not lock out the home directory', { skip: SKIP_NO_SYMLINK }, () => {
+      const home = makeHome()
+      mkdirs(join(home, 'proj'), join(home, '.ssh'))
+      symlinkSync(home, join(home, '.config'))
+
+      assert.equal(validateCwdAllowed(join(home, 'proj'), { homeOverride: home }), null, 'ordinary project')
+      assert.equal(validateCwdAllowed(home, { homeOverride: home }), null, '$HOME itself')
+      assert.equal(validateCwdAllowed(join(home, '.ssh'), { homeOverride: home }), CRED_DENY, 'a real credential directory stays denied')
+    })
+
+    it('a credential entry that points at an ancestor of $HOME does not lock out the home directory', { skip: SKIP_NO_SYMLINK }, () => {
+      const home = makeHome()
+      mkdirs(join(home, 'proj'), join(home, '.ssh'))
+      symlinkSync(dirname(home), join(home, '.m2'))
+
+      assert.equal(validateCwdAllowed(join(home, 'proj'), { homeOverride: home }), null, 'ordinary project')
+      assert.equal(validateCwdAllowed(home, { homeOverride: home }), null, '$HOME itself')
+      assert.equal(validateCwdAllowed(join(home, '.ssh'), { homeOverride: home }), CRED_DENY, 'a real credential directory stays denied')
+    })
+
+    it('a dangling credential-directory symlink does not lock out ordinary projects', { skip: SKIP_NO_SYMLINK }, () => {
+      const home = makeHome()
+      mkdirs(join(home, 'project'))
+      symlinkSync(join(home, 'missing'), join(home, '.docker'))
+
+      assert.equal(validateCwdAllowed(join(home, 'project'), { homeOverride: home }), null)
+    })
+
+    it('a credential entry that cannot be resolved for any other reason does not break validation', (t) => {
+      // No real symlink needed: the resolver is made to fail for one entry.
+      const home = makeHome()
+      mkdirs(join(home, 'project'), join(home, '.ssh'))
+      const blocked = join(home, '.aws')
+      const original = fs.realpathSync.native
+      let failures = 0
+      t.mock.method(fs.realpathSync, 'native', (p, ...rest) => {
+        if (p === blocked) {
+          failures++
+          throw Object.assign(new Error(`EACCES: permission denied, realpath '${p}'`), { code: 'EACCES' })
+        }
+        return original(p, ...rest)
+      })
+
+      assert.equal(validateCwdAllowed(join(home, 'project'), { homeOverride: home }), null)
+      assert.equal(validateCwdAllowed(join(home, '.ssh'), { homeOverride: home }), CRED_DENY)
+      assert.ok(failures > 0, 'the unresolvable entry must actually have been looked up')
+    })
   })
 })
 
