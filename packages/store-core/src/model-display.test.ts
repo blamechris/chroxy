@@ -66,6 +66,19 @@ describe('model presentation (#8260)', () => {
   })
 })
 
+describe('cross-family label collisions', () => {
+  it('keeps exactly one discriminator when base label and pinned descriptor both collide', () => {
+    const models = [
+      { id: 'alpha', fullId: 'claude-alpha-1-0', label: 'Custom' },
+      { id: 'beta', fullId: 'claude-beta-1-0', label: 'Custom' },
+    ] as any
+    const out = modelChoices(models)
+    expect(out.map(m => m.label)).toEqual(['Custom (claude-alpha-1-0)', 'Custom (claude-beta-1-0)'])
+    expect(out.map(m => m.id)).toEqual(['alpha', 'beta'])
+    expect(out.map(m => m.fullId)).toEqual(['claude-alpha-1-0', 'claude-beta-1-0'])
+  })
+})
+
 describe('current model versus new-session recommendation (#8603)', () => {
   const roster = [
     { id: 'sonnet-5-5', fullId: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
