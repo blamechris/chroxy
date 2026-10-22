@@ -317,8 +317,9 @@ export async function validatePathWithinCwd(absPath, sessionCwd, cwdRealCache, c
 }
 
 /**
- * The refusal text for a generic file mutation aimed at the daemon's config
- * directory (#8331). Shared so every mutation path says the same thing.
+ * The refusal text for a generic file read or mutation aimed at the daemon's
+ * config directory (#8331). Shared so every read and write path says the same
+ * thing.
  */
 export const CONFIG_DIR_REFUSAL = 'Access denied: the chroxy config directory is managed by the daemon'
 
@@ -328,12 +329,14 @@ const sameDir = (a, b) => isPathWithin(a, b) && isPathWithin(b, a)
  * Is `absPath` the daemon's config directory itself, a FILE DIRECTLY IN it, or a
  * write that would create (or pass through) a NEW direct child of it?
  *
- * Generic file writes refuse exactly that, so the deploy control files
- * (`deploy-request.json`, `deploy-postpone.json`) and the rest of the daemon's
- * top-level state can only be written through the daemon's own paths
- * (`daemon_update_action` applies the primary-token gate and the busy-session
- * confirmation). Subtrees stay writable on purpose: chroxy's own session worktrees
- * live at `<configDir>/worktrees/<id>` and orchestration worktrees at
+ * Generic file reads (`read_file`) and writes refuse exactly that: files directly
+ * in the config directory are daemon-managed state, so the file viewer treats
+ * reads the same way as writes. The deploy control files (`deploy-request.json`,
+ * `deploy-postpone.json`) and the rest of the daemon's top-level state can only be
+ * written through the daemon's own paths (`daemon_update_action` applies the
+ * primary-token gate and the busy-session confirmation). Subtrees stay writable and
+ * readable on purpose: chroxy's own session worktrees live at
+ * `<configDir>/worktrees/<id>` and orchestration worktrees at
  * `<configDir>/orchestration/worktrees`, and ordinary editing inside them must work.
  *
  * BOTH sides are resolved with `realpathOfDeepestAncestor` (an existing path by
@@ -346,7 +349,7 @@ const sameDir = (a, b) => isPathWithin(a, b) && isPathWithin(b, a)
  * FAILS CLOSED: a path that cannot be resolved (EACCES on an ancestor, a link
  * cycle) is reported as protected, never as outside.
  *
- * @param {string} absPath - Absolute path of the mutation target
+ * @param {string} absPath - Absolute path of the read or mutation target
  * @returns {Promise<boolean>}
  */
 export async function isConfigDirOrDirectChild(absPath) {

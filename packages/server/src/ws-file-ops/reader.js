@@ -212,6 +212,24 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
             })
             return
           }
+          // Files directly in the config directory are daemon-managed state, so
+          // reads follow the same rule as writes: a missing name there answers
+          // the refusal an existing one does, never "File not found". Only
+          // reached once the path is known to be inside the project, where the
+          // deepest-ancestor walk has already resolved this same path; a check
+          // that cannot be answered denies, as it does for writes.
+          if (await isConfigDirOrDirectChild(absPath)) {
+            send({
+              type: 'file_content',
+              path: absPath,
+              content: null,
+              language: null,
+              size: null,
+              truncated: false,
+              error: CONFIG_DIR_REFUSAL,
+            })
+            return
+          }
           send({
             type: 'file_content',
             path: absPath,
@@ -255,6 +273,24 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           size: null,
           truncated: false,
           error: 'Access denied: file reading is restricted to the project directory',
+        })
+        return
+      }
+
+      // The config directory itself and any file directly in it are
+      // daemon-managed state, so the file viewer treats reads the same way as
+      // writes. Checked on the resolved path (a symlink into the config directory
+      // is judged by where it lands) and BEFORE `stat`, so no size or type of a
+      // refused file is revealed.
+      if (await isConfigDirOrDirectChild(resolvedAbsPath)) {
+        send({
+          type: 'file_content',
+          path: absPath,
+          content: null,
+          language: null,
+          size: null,
+          truncated: false,
+          error: CONFIG_DIR_REFUSAL,
         })
         return
       }
