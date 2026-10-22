@@ -12,6 +12,7 @@
 import { isIPv4, isIPv6 } from 'node:net'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '::1'])
+const MAPPED_HEX_LOOPBACK = /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/
 
 /**
  * True for any loopback bind address (127.0.0.0/8, ::1, localhost).
@@ -28,7 +29,13 @@ export function isLoopbackHost(host) {
   // 127.0.0.0/8, but only for real IPv4 literals.
   if (isIPv4(h) && h.startsWith('127.')) return true
   // IPv4-mapped IPv6 loopback, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1.
-  if (h.startsWith('::ffff:127.') || h.startsWith('::ffff:7f')) return true
+  // Both forms must be real IPv6 literals; the hex form needs a complete
+  // ::ffff:XXXX:YYYY whose first hextet is exactly 7f00-7fff (so `::ffff:7f:1`,
+  // i.e. 0.127.0.1, and the incomplete `::ffff:7f` are not loopback).
+  if (isIPv6(h)) {
+    if (h.startsWith('::ffff:127.')) return true
+    if (MAPPED_HEX_LOOPBACK.test(h)) return true
+  }
   return false
 }
 
