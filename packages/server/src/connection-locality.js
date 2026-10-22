@@ -57,8 +57,9 @@ export function isLocalOrLanPeer(req) {
 
 /**
  * Strict loopback parse for AUTHORIZATION use. Not `isLoopbackHost`, which is a
- * bind-host helper that accepts anything starting `::ffff:7f` — so
- * `::ffff:7f00:1:2`, which is not an address at all, would pass. Accepts exactly:
+ * bind-host helper that also accepts the mapped-hex form
+ * (`::ffff:7f00:1`) and ignores a `%zone` suffix. It now requires a valid IPv6
+ * literal, but this predicate stays narrower on purpose. Accepts exactly:
  *   - a dotted IPv4 literal in 127.0.0.0/8,
  *   - `::1`,
  *   - an IPv4-mapped `::ffff:a.b.c.d` whose dotted part is in 127.0.0.0/8.
