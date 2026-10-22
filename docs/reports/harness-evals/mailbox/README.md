@@ -34,8 +34,8 @@ folder's conventions too, each on its own branch and never on `main`:
 
 | Address | Who | Writes | Reads |
 |---|---|---|---|
-| `G-claude` | grader in a cloud session spawned by the supervisor (GitHub only) | this folder on `trial/eval-claude` | `trial/eval-codex` from GitHub |
-| `G-codex` | grader in Codex desktop, started by the owner on the Mac | this folder on `trial/eval-codex` | `trial/eval-claude` from GitHub |
+| `G-claude` | grader in a cloud session spawned by the supervisor (GitHub only) | this folder on `trial/eval-claude` | `trial/eval` (key, attachments) and `trial/eval-codex` from GitHub |
+| `G-codex` | grader in Codex desktop, started by the owner on the Mac | this folder on `trial/eval-codex` | `trial/eval` (key, attachments) and `trial/eval-claude` from GitHub |
 
 - Same one-message-per-file rule and front matter (`to`, `from`, `subject`, optional
   `in-reply-to`), file name `<YYYY-MM-DD>-to-<recipient>-<slug>.md`.
