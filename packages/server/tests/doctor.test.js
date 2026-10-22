@@ -306,7 +306,7 @@ describe('runDoctorChecks', () => {
     assert.ok(portCheck)
   })
 
-  // doctor probes 127.0.0.1, so the held listener binds the same address.
+  // Mirrors the bind address used by checkPortAvailable in src/doctor.js, so the held listener is what that probe would hit.
   const listenOnFreePort = () => new Promise((resolve, reject) => {
     const srv = createServer()
     srv.once('error', reject)
@@ -314,6 +314,7 @@ describe('runDoctorChecks', () => {
   })
   const closeServer = (srv) => new Promise((resolve) => srv.close(() => resolve()))
   // OS-assigned port that is free at the moment we return (listener closed and awaited).
+  // Residual race: another process may take the port between close and doctor's probe; accepted, far narrower than a hardcoded port.
   const getFreePort = async () => {
     const srv = await listenOnFreePort()
     const { port } = srv.address()
