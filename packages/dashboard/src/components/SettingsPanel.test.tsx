@@ -350,21 +350,35 @@ describe('SettingsPanel', () => {
       expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
-    it('follows the provider the <select> above actually shows (dormant override => no roster)', () => {
-      // The persisted override names a provider this server does not offer. The
-      // <select> now shows that dormant value (#8277), so the model field
-      // follows it too and stays hidden rather than offering another
-      // provider's ids under a provider label it does not match.
+    it('dormant override: provider select shows it, model field stays bound to the effective provider', () => {
+      // The persisted override names a provider this server does not offer.
+      // New Session falls back to availableProviders[0] and still applies the
+      // stored default model when that provider's catalog contains it, so the
+      // model field must stay visible and editable for that provider. Only
+      // the provider <select> shows the dormant value (#8277).
+      const setDefaultProvider = vi.fn()
+      const setDefaultModel = vi.fn()
       setMockState({
         defaultProvider: 'gemini',
         defaultProviderSource: 'user',
-        defaultModel: '',
-        availableProviders: [{ name: 'codex' }, { name: 'claude-sdk' }],
+        defaultModel: 'claude-opus-4-8',
+        setDefaultProvider,
+        setDefaultModel,
+        availableProviders: [{ name: 'claude-sdk' }, { name: 'codex' }],
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
       expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
-      expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
+      const model = screen.getByLabelText('Default model') as HTMLSelectElement
+      expect(optionLabels()).toEqual(['Server default', 'Opus'])
+      expect(model.value).toBe('opus')
+      // Opening Settings with a dormant override must write nothing.
+      expect(setDefaultProvider).not.toHaveBeenCalled()
+      expect(setDefaultModel).not.toHaveBeenCalled()
+      // The stored default stays clearable.
+      fireEvent.change(model, { target: { value: '' } })
+      expect(setDefaultModel).toHaveBeenCalledWith('')
+      expect(setDefaultProvider).not.toHaveBeenCalled()
     })
 
     it('offers NOTHING from an untagged roster (this block feeds an evidence-side consumer)', () => {

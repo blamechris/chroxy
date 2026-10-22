@@ -1177,13 +1177,18 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
   //    roster for a provider the server does not offer — one that by
   //    construction can never have broadcast a roster — and the field would
   //    vanish whenever the two diverge.
+  //  - NOT the dormant override (#8277). Only the provider <select> shows a
+  //    dormant value; New Session falls back to `effectiveProvider` and still
+  //    applies the stored default model if that provider's catalog has it, so
+  //    the model field must stay bound to `effectiveProvider` or an active
+  //    stored model becomes invisible and un-clearable.
   //  - the EVIDENCE-side read. This block produces `defaultModel`, and its
   //    consumer (`resolveCreateSessionModel`) requires the chosen provider's OWN
   //    catalog to contain the id. Offering ids from an untagged roster here
   //    would let Settings show a default that create-time silently drops.
   const availableModels = useMemo(
-    () => selectOwnModelsForProvider(modelsByProvider, dormantProvider ?? effectiveProvider)?.models ?? [],
-    [modelsByProvider, dormantProvider, effectiveProvider],
+    () => selectOwnModelsForProvider(modelsByProvider, effectiveProvider)?.models ?? [],
+    [modelsByProvider, effectiveProvider],
   )
 
   const defaultModelChoices = useMemo(() => modelChoices(availableModels), [availableModels])
