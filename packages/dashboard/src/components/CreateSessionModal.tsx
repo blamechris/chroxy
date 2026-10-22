@@ -370,7 +370,9 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const cwdValRef = useRef('')
 
   // Autocomplete suggestions from server
-  const { suggestions: autocompleteSuggestions } = usePathAutocomplete(cwd)
+  // #8303: probe the prefilled cwd so the form can say up front that Browse
+  // cannot open it, instead of letting Browse fail on it.
+  const { suggestions: autocompleteSuggestions, probeBrowsable } = usePathAutocomplete(cwd, open ? initialCwd : null)
 
   // Merge autocomplete with known cwds, deduplicate and sort
   const suggestions = useMemo(() => {
@@ -807,6 +809,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               Browse...
             </button>
           </div>
+          {probeBrowsable === false && initialCwd && cwd.trim() === initialCwd && (
+            <span className="cwd-hint" data-testid="cwd-not-browsable-note">
+              Browse can't open this directory (it is outside your home directory and the configured workspace roots).
+            </span>
+          )}
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
           )}

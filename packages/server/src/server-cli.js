@@ -34,6 +34,7 @@ import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
+import { defaultCwdStartupWarning } from './handler-utils.js'
 import { createLogger, setJsonMode, initFileLogging, setConsoleQuiet } from './logger.js'
 import { configDir, configPath } from './config-dir.js'
 import { detectStrandedState, missingTokenAdvice, startupStrandedWarning } from './config-dir-migration.js'
@@ -1141,6 +1142,11 @@ export async function startCliServer(config) {
   const livenessBackend = new LivenessDockerBackend()
   const containerInspect = (containerId) =>
     inspectContainerLiveness((cid) => livenessBackend.getEnvironmentStatus(cid), containerId)
+
+  // #8303: a blank-cwd session inherits config.cwd without validateCwdAllowed;
+  // say so once at boot when explicit Create would refuse the same directory.
+  const defaultCwdWarning = defaultCwdStartupWarning(config)
+  if (defaultCwdWarning) log.warn(defaultCwdWarning)
 
   // 1. Create session manager
   const { sessionManager, startupSkillPolicy } = createDaemonSessionManager(config, {
