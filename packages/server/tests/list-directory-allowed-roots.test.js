@@ -1,11 +1,13 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { validateCwdAllowed, defaultCwdStartupWarning } from '../src/handler-utils.js'
 import { createBrowserOps } from '../src/ws-file-ops/browser.js'
 import { resolveSessionCwd, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
+import { fileHandlers } from '../src/handlers/file-handlers.js'
+import { nsCtx } from './test-helpers.js'
 import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 /**
@@ -117,6 +119,15 @@ describe('list_directory honours workspaceRoots and the default cwd (#8303)', ()
     assert.ok(/^Access denied/.test(r.error), r.error)
   })
 
+  it('gives a path under a denied directory the same refusal whether or not its parent is a directory', async () => {
+    writeFileSync(join(home, '.ssh', 'f'), 'x')
+    const viaFile = await list(join(home, '.ssh', 'f', 'x'), {})
+    const viaMissing = await list(join(home, '.ssh', 'missing', 'x'), {})
+    assert.ok(/^Access denied/.test(viaMissing.error), viaMissing.error)
+    assert.equal(viaFile.error, viaMissing.error)
+    assert.deepEqual(viaFile.entries, [])
+  })
+
   it('refuses a symlink under $HOME that points into a credential dir', { skip: SKIP_NO_SYMLINK }, async () => {
     symlinkSync(join(home, '.ssh'), join(home, 'innocent'))
     const r = await list(join(home, 'innocent'), {})
@@ -127,6 +138,29 @@ describe('list_directory honours workspaceRoots and the default cwd (#8303)', ()
     symlinkSync(join(outside, 'other'), join(outside, 'root', 'escape'))
     const r = await list(join(outside, 'root', 'escape'), { workspaceRoots: [join(outside, 'root')] })
     assert.ok(/^Access denied/.test(r.error), r.error)
+  })
+})
+
+describe('list_directory handler passes the daemon config to Browse (#8303)', () => {
+  it('lists a configured workspace root outside the home directory', async () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-8303h-')))
+    try {
+      const home = join(base, 'home')
+      const root = join(base, 'root')
+      mkdirSync(home, { recursive: true })
+      mkdirSync(join(root, 'sub'), { recursive: true })
+      const sent = []
+      const ops = createBrowserOps((_ws, msg) => sent.push(msg), () => null, () => null)
+      const ctx = nsCtx({ fileOps: ops, config: { homeOverride: home, workspaceRoots: [root] } })
+      await fileHandlers.list_directory({}, { id: 'c1' }, { path: root }, ctx)
+      // listDirectory is not awaited by the handler; let it settle.
+      for (let i = 0; i < 50 && sent.length === 0; i++) await new Promise(r => setTimeout(r, 10))
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].error, null)
+      assert.deepEqual(sent[0].entries.map(e => e.name), ['sub'])
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 })
 

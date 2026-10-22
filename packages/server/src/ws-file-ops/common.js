@@ -227,6 +227,18 @@ export async function isUnresolvablePathWithin(absPath, rootReal) {
 }
 
 /**
+ * The real path of the deepest ancestor of `absPath` that the server can see,
+ * stepping over components it cannot see into (missing, unreadable, or not a
+ * directory). Rejects when the walk cannot finish.
+ *
+ * @param {string} absPath - Absolute path whose `realpath()` failed
+ * @returns {Promise<string>}
+ */
+export async function realpathOfDeepestSeeableAncestor(absPath) {
+  return deepestAncestorWalk(absPath, STEP_OVER_UNSEEABLE)
+}
+
+/**
  * #8012 — the error text a handler sends when `realpath(absPath)` failed with
  * `err` (not ENOENT). Inside the boundary it is the handler's short reason for
  * `err.code`, when it has one; anywhere else — outside, a cycle, a check that

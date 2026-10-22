@@ -6,7 +6,7 @@ import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
 import { credentialDenyReason, resolveBrowsableRoots } from '../handler-utils.js'
-import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
+import { realpathOfDeepestAncestor, realpathOfDeepestSeeableAncestor, unresolvablePathError } from './common.js'
 
 const log = createLogger('ws')
 
@@ -66,9 +66,18 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           // where a readable one answers "Access denied", and sent ELOOP's
           // raw message with the server path in it. Only a path inside home
           // keeps a specific message now; everything else is the denial.
+          // A path under a credential/state directory gets the same generic
+          // refusal as any other denied path, whatever made it unresolvable
+          // (so `<denied>/<file>/x` answers like `<denied>/missing/x`).
           // Specific message only if the path is inside SOME allowed root.
           let error = denial
-          for (const root of resolveBrowsableRoots(config)) {
+          let underDenied = false
+          try {
+            underDenied = !!credentialDenyReason(await realpathOfDeepestSeeableAncestor(absPath), config)
+          } catch {
+            // A walk that cannot finish keeps the generic answer below.
+          }
+          if (!underDenied) for (const root of resolveBrowsableRoots(config)) {
             const msg = await unresolvablePathError(err, absPath, root, LISTING_UNRESOLVABLE_REASONS, denial)
             if (msg !== denial) { error = msg; break }
           }
