@@ -5,9 +5,9 @@
  * import from ws-message-handlers.js or any handler module to avoid
  * circular dependencies.
  */
-import { statSync, realpathSync, readFileSync } from 'fs'
+import fs, { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { join, resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
+import { join, dirname, resolve, relative, sep, posix as posixPath, win32 as win32Path } from 'path'
 import { createLogger } from './logger.js'
 import { configDir } from './config-dir.js'
 import { isPathWithin as isPathWithinCanonical } from './utils/path-containment.js'
@@ -406,6 +406,9 @@ function canonicalRealpath(p) {
   return realpathSync.native(p)
 }
 
+const CREDENTIAL_DIR_DENIED = 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
+const CONFIG_DIR_DENIED = 'Directory is not allowed: the chroxy config/state directory is blocked for security'
+
 /**
  * Returns true if `absPath` touches any FORBIDDEN_HOME_SUBDIRS entry
  * at any depth below $HOME. E.g. `/home/user/.ssh` and
@@ -420,56 +423,144 @@ function canonicalRealpath(p) {
  * `.ssh`/`.SSH` directories, so the broader match is safe.
  * Found by agent review on PR #2808.
  *
- * The name test only sees the first segment of the RESOLVED path. When one of
- * those entries is itself a symlink (`~/.ssh -> ~/dotfiles/ssh` is a common
- * dotfiles layout), the resolved path starts with `dotfiles`, so a second test
- * asks whether `absPath` lies inside where any existing entry actually leads.
- * That test applies to a path outside `$HOME` too, because an entry may lead
- * out of it.
+ * This is a test of the path's SPELLING only. One directory can also be reached
+ * through a symlinked entry or a second mount path; `protectedDirectoryDenial`
+ * recognises those by the filesystem object itself and runs alongside this.
  */
 function pathTouchesForbiddenSubdir(absPath, home) {
-  if (isPathWithin(absPath, home)) {
-    const rel = relative(home, absPath)
-    if (rel !== '') {
-      const firstSegment = rel.split(sep)[0].toLowerCase()
-      if (FORBIDDEN_HOME_SUBDIRS.has(firstSegment)) return true
-    }
+  if (!isPathWithin(absPath, home)) return false
+  const rel = relative(home, absPath)
+  if (rel === '') return false
+  const firstSegment = rel.split(sep)[0].toLowerCase()
+  return FORBIDDEN_HOME_SUBDIRS.has(firstSegment)
+}
+
+/** ENOENT / ENOTDIR: nothing is there (absent, or a dangling link). */
+function isAbsentError(err) {
+  return err?.code === 'ENOENT' || err?.code === 'ENOTDIR'
+}
+
+/** `p` followed by each of its ancestors, ending at the filesystem root. */
+function withAncestors(p) {
+  const chain = [p]
+  let parent = dirname(p)
+  while (parent !== chain[chain.length - 1]) {
+    chain.push(parent)
+    parent = dirname(parent)
   }
-  return isInsideForbiddenEntryTarget(absPath, home)
+  return chain
 }
 
 /**
- * Returns true if `absPath` is inside the resolved target of any existing
- * `$HOME/<FORBIDDEN_HOME_SUBDIRS entry>`.
+ * Which filesystem object is at `p` (following symlinks): a `device:inode` id,
+ * or `id: null` when the filesystem reports inode 0, which every object shares
+ * and so identifies nothing. Throws whatever `stat` throws.
  *
- * Per entry:
+ * Looked up through the `fs` object at CALL time (not the named `statSync`
+ * import), so tests can replace `fs.statSync`.
+ */
+function filesystemIdentity(p) {
+  const st = fs.statSync(p, { bigint: true })
+  return { id: st.ino === 0n ? null : `${st.dev}:${st.ino}`, isDirectory: st.isDirectory() }
+}
+
+/**
+ * Decides, by filesystem object rather than by spelling, whether `realCwd` is
+ * inside a protected directory. Returns the message to refuse with, or null.
+ *
+ * Spelling is not enough: a symlinked `~/.ssh`, an APFS firmlink
+ * (`/System/Volumes/Data/Users/me/.ssh`), a Linux bind mount or a Windows volume
+ * mount point all give one directory several paths, and `realpath` keeps each
+ * spelling. So the protected directories are identified by `device:inode` and
+ * `realCwd` and each of its ancestors is checked against them.
+ *
+ * Protected: each directory `$HOME/<FORBIDDEN_HOME_SUBDIRS entry>` that exists
+ * (found by listing `$HOME` once and matching names case-insensitively, as the
+ * name test does; `stat` follows symlinks, so a symlinked entry counts as the
+ * directory it leads to), and the daemon config root. Per candidate:
  *   - ENOENT / ENOTDIR: nothing is there (absent, or a dangling link). Skipped,
  *     so a stale entry cannot lock anyone out.
- *   - any other error (permissions, a link loop): where the entry leads is
- *     unknown, so it is compared by its own `$HOME`-relative spelling instead.
- *     The name test in the caller already covers that spelling, so this keeps
- *     an unresolvable entry from silently dropping out of the check rather than
- *     adding a rule; it must never throw out of the policy.
- *   - target is `$HOME` or an ancestor: skipped (not credential-only; the name test still covers the entry).
- *
- * Some entries are files (`.netrc`, `.npmrc`, ...). A directory cwd can never
- * be inside a file, so they need no special case. Containment goes through
- * `isPathWithin`, the repo's one implementation.
+ *   - any other error: it exists but cannot be checked, so the call refuses with
+ *     a message naming it (`~/`-relative, never an absolute path).
+ *   - not a directory (`.netrc`, `.npmrc`, ...): a directory cwd cannot be
+ *     inside it, so it is skipped.
+ *   - inode 0: no identity, so it is never matched by id; it falls back to path
+ *     containment against its canonical realpath instead.
+ *   - it is `$HOME` or an ancestor of it: dropped (not credential-only; the name
+ *     test still covers the entry by its own `$HOME`-relative spelling).
+ * A stat error on `$HOME` or one of its ancestors, or on an ancestor of
+ * `realCwd`, also refuses. One loop serves both kinds of protected directory.
  */
-function isInsideForbiddenEntryTarget(absPath, home) {
-  for (const name of FORBIDDEN_HOME_SUBDIRS) {
-    const entry = join(home, name)
-    let target
-    try {
-      target = canonicalRealpath(entry)
-    } catch (err) {
-      if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') continue
-      target = entry
-    }
-    if (isPathWithin(home, target)) continue
-    if (isPathWithin(absPath, target)) return true
+function protectedDirectoryDenial(realCwd, home) {
+  const cannotCheck = (what, err) => `Directory is not allowed: cannot check ${what} (${err?.code ?? 'unknown error'})`
+
+  let homeNames
+  try {
+    homeNames = fs.readdirSync(home)
+  } catch (err) {
+    if (!isAbsentError(err)) return cannotCheck('the home directory', err)
+    homeNames = [] // no home directory, so no entries under it to protect
   }
-  return false
+  const candidates = []
+  for (const name of homeNames) {
+    if (!FORBIDDEN_HOME_SUBDIRS.has(name.toLowerCase())) continue
+    candidates.push({ path: join(home, name), what: `the protected home entry ~/${name}`, denial: CREDENTIAL_DIR_DENIED })
+  }
+  candidates.push({ path: configDir(), what: 'the chroxy config/state directory', denial: CONFIG_DIR_DENIED })
+
+  const byIdentity = new Map()
+  const byPath = []
+  for (const candidate of candidates) {
+    let found
+    try {
+      found = filesystemIdentity(candidate.path)
+    } catch (err) {
+      if (isAbsentError(err)) continue
+      return cannotCheck(candidate.what, err)
+    }
+    if (!found.isDirectory) continue
+    if (found.id === null) byPath.push(candidate)
+    else if (!byIdentity.has(found.id)) byIdentity.set(found.id, candidate)
+  }
+  if (byIdentity.size === 0 && byPath.length === 0) return null
+
+  // Lockout guard: a protected directory that holds $HOME itself (a symlinked
+  // entry pointing at `~` or above) would otherwise refuse every directory.
+  for (const dir of withAncestors(home)) {
+    let found
+    try {
+      found = filesystemIdentity(dir)
+    } catch (err) {
+      if (isAbsentError(err)) continue
+      return cannotCheck('the home directory', err)
+    }
+    if (found.id !== null) byIdentity.delete(found.id)
+  }
+
+  for (const candidate of byPath) {
+    let real
+    try {
+      real = canonicalRealpath(candidate.path)
+    } catch {
+      real = candidate.path
+    }
+    if (isPathWithin(home, real)) continue
+    if (isPathWithin(realCwd, real)) return candidate.denial
+  }
+
+  if (byIdentity.size > 0) {
+    for (const dir of withAncestors(realCwd)) {
+      let found
+      try {
+        found = filesystemIdentity(dir)
+      } catch (err) {
+        return cannotCheck('the parent directories of the working directory', err)
+      }
+      const hit = found.id === null ? undefined : byIdentity.get(found.id)
+      if (hit) return hit.denial
+    }
+  }
+  return null
 }
 
 /**
@@ -493,6 +584,9 @@ function isInsideForbiddenEntryTarget(absPath, home) {
  *
  * Resolved per call, and derived from `configDir()` rather than a second copy
  * of the path — the whole point of #7052 is that there is one resolver.
+ *
+ * This is a test of the resolved SPELLING; a second path to the same directory
+ * is recognised by the filesystem object in `protectedDirectoryDenial`.
  */
 function pathTouchesConfigDir(absPath) {
   let realConfigDir
@@ -523,7 +617,9 @@ function pathTouchesConfigDir(absPath) {
  *    cwd must NOT be inside any FORBIDDEN_HOME_SUBDIRS entry below
  *    $HOME. Closes the 2026-04-11 audit Adversary A1 attack where an
  *    authenticated client could set cwd to ~/.ssh to read credentials.
- *    An entry that is itself a symlink also denies the directory it leads to.
+ *    The entries (and the config root) are also recognised by filesystem
+ *    object, so a symlink or a second mount path of one is denied too, and one
+ *    that exists but cannot be checked refuses (protectedDirectoryDenial).
  *
  * 3. Workspace allowlist (opt-in) — if `config.workspaceRoots` is a
  *    non-empty array, the cwd must be inside at least one of the
@@ -582,14 +678,19 @@ export function validateCwdAllowed(cwd, config = null) {
     home = rawHome
   }
   if (pathTouchesForbiddenSubdir(realCwd, home)) {
-    return 'Directory is not allowed: credential/config directories under $HOME are blocked for security'
+    return CREDENTIAL_DIR_DENIED
   }
   // Layer 2b: the daemon's OWN state root, wherever CHROXY_CONFIG_DIR put it.
   // Separate from the set above because that one matches literal first segments
   // under $HOME and cannot follow a relocated root (#7052).
   if (pathTouchesConfigDir(realCwd)) {
-    return 'Directory is not allowed: the chroxy config/state directory is blocked for security'
+    return CONFIG_DIR_DENIED
   }
+  // Layer 2c: the same protected directories recognised by filesystem object, so
+  // a symlinked entry or a second mount path of one is refused too, and one that
+  // cannot be checked refuses with a message instead of passing.
+  const protectedDenial = protectedDirectoryDenial(realCwd, home)
+  if (protectedDenial) return protectedDenial
 
   // Layer 3: explicit allowlist (opt-in, strict)
   const roots = Array.isArray(config?.workspaceRoots)
