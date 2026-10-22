@@ -256,6 +256,65 @@ describe('SettingsPanel', () => {
     })
   })
 
+  describe('dormant provider override and migration notice (#8277)', () => {
+    it('shows a saved override the server does not offer as a disabled, selected option with a hint', () => {
+      const setDefaultProvider = vi.fn()
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultProviderSource: 'user',
+        setDefaultProvider,
+        availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      const select = screen.getByLabelText('Default provider') as HTMLSelectElement
+      expect(select.value).toBe('gemini')
+      const opt = screen.getByTestId('default-provider-dormant-option') as HTMLOptionElement
+      expect(opt.disabled).toBe(true)
+      expect(opt.textContent).toMatch(/not offered by this server/)
+      expect(screen.getByTestId('default-provider-dormant-hint')).toBeInTheDocument()
+      expect(select.getAttribute('aria-describedby')).toBe('default-provider-dormant')
+      // Picking an offered provider still overwrites the stored override.
+      fireEvent.change(select, { target: { value: 'claude-cli' } })
+      expect(setDefaultProvider).toHaveBeenCalledWith('claude-cli')
+    })
+
+    it('shows no dormant option when the override is offered, or when the default is inherited', () => {
+      setMockState({
+        defaultProvider: 'claude-cli',
+        defaultProviderSource: 'user',
+        availableProviders: [{ name: 'claude-sdk' }, { name: 'claude-cli' }],
+      })
+      const { unmount } = render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('default-provider-dormant-option')).not.toBeInTheDocument()
+      unmount()
+      setMockState({
+        defaultProvider: 'gemini',
+        defaultProviderSource: 'server',
+        availableProviders: [{ name: 'claude-sdk' }],
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('default-provider-dormant-hint')).not.toBeInTheDocument()
+    })
+
+    it('renders the undismissed migration notice in Session Defaults and dismisses through the store', () => {
+      const dismiss = vi.fn()
+      setMockState({
+        sessionDefaultsNotice: { provider: 'claude-tui', model: 'opus-4-6' },
+        dismissSessionDefaultsNotice: dismiss,
+      })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.getByTestId('session-defaults-notice').textContent).toMatch(/opus-4-6/)
+      fireEvent.click(screen.getByTestId('session-defaults-notice-dismiss'))
+      expect(dismiss).toHaveBeenCalledTimes(1)
+    })
+
+    it('renders no migration notice when none is pending', () => {
+      setMockState({ sessionDefaultsNotice: null })
+      render(<SettingsPanel isOpen onClose={vi.fn()} />)
+      expect(screen.queryByTestId('session-defaults-notice')).not.toBeInTheDocument()
+    })
+  })
+
   describe('Default model select reads the default provider OWN roster (#7728)', () => {
     const opus = { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }
     const gpt = { id: 'gpt-5.5', label: 'GPT-5.5', fullId: 'gpt-5.5-2026-01' }
@@ -291,11 +350,11 @@ describe('SettingsPanel', () => {
       expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
-    it('follows the NORMALIZED provider the <select> above actually shows', () => {
-      // The persisted defaultProvider is absent from the server's list, so the
-      // provider <select> renders availableProviders[0]. Reading the raw
-      // persisted value here computed the roster for a provider that by
-      // construction can never have broadcast one, and the field vanished.
+    it('follows the provider the <select> above actually shows (dormant override => no roster)', () => {
+      // The persisted override names a provider this server does not offer. The
+      // <select> now shows that dormant value (#8277), so the model field
+      // follows it too and stays hidden rather than offering another
+      // provider's ids under a provider label it does not match.
       setMockState({
         defaultProvider: 'gemini',
         defaultProviderSource: 'user',
@@ -304,8 +363,8 @@ describe('SettingsPanel', () => {
         modelsByProvider: { codex: codexRoster, 'claude-sdk': claudeRoster },
       })
       render(<SettingsPanel isOpen onClose={vi.fn()} />)
-      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('codex')
-      expect(optionLabels()).toEqual(['Server default', 'GPT-5.5'])
+      expect((screen.getByLabelText('Default provider') as HTMLSelectElement).value).toBe('gemini')
+      expect(screen.queryByLabelText('Default model')).not.toBeInTheDocument()
     })
 
     it('offers NOTHING from an untagged roster (this block feeds an evidence-side consumer)', () => {
