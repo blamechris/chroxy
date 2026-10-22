@@ -151,7 +151,7 @@
     }
   },
   "grading_cost": {
-    "G-claude": "$78.74 initial grading + $18.49 cross-review, SDK-reported API-rate equivalents on the owner's Claude plan (22 min and about 10 min of session time)",
-    "G-codex": "n/a (owner's ChatGPT plan; 27 min 33 s initial grading)"
+    "G-claude": "$78.74 initial grading + $18.49 cross-review, SDK-reported API-rate equivalents on the owner's Claude plan (22 min and about 10 min of session time), read from the grader session's meter by the supervisor; recorded nowhere else",
+    "G-codex": "n/a (owner's ChatGPT plan; 27 min 33 s initial grading per the owner's screenshot)"
   }
 }
