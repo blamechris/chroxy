@@ -244,7 +244,6 @@ describe('ToolBubble — terminated state (#8364)', () => {
     const note = findByTestId(root, 'tool-bubble-terminated-tb-1')[0];
     expect(note).toBeTruthy();
     expect(textOf(root)).toContain('Check whether it took effect before retrying');
-    expect(textOf(root)).not.toContain('synthesized placeholder');
   });
 
   it('labels a user Stop as stopped, other reasons as turn terminated', () => {

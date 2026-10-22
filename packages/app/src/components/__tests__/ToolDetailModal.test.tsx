@@ -40,6 +40,15 @@ describe('ToolDetailModal — terminated state (#8364)', () => {
     expect(textOf(root)).not.toContain('synthesized placeholder');
   });
 
+  it('shows the terminated note for an image-only result', () => {
+    const root = renderModal({
+      toolResult: undefined,
+      toolResultImages: [{ data: 'AAAA', mediaType: 'image/png' }],
+      toolResultTerminatedReason: 'user_stop',
+    });
+    expect(root.root.findAllByProps({ testID: 'tool-detail-terminated' }).length).toBeGreaterThan(0);
+  });
+
   it('renders the raw result and no note when no reason is set', () => {
     const root = renderModal();
     expect(root.root.findAllByProps({ testID: 'tool-detail-terminated' })).toHaveLength(0);

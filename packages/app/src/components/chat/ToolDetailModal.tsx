@@ -42,7 +42,8 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
   // #6982: structured WebSearch/WebFetch render, parse-with-fallback —
   // `null` (non-web tool, absent or unparseable result) keeps the existing
   // `<Text selectable>` dump below.
-  const termination = resolveToolTermination(toolResult != null, toolResultTerminatedReason);
+  const hasResult = toolResult != null || !!toolResultImages?.length;
+  const termination = resolveToolTermination(hasResult, toolResultTerminatedReason);
   const webParsed = termination ? null : parseWebToolResult(rawToolName, toolResult);
   return (
     <Modal
@@ -99,7 +100,7 @@ export function ToolDetailModal({ visible, toolName, rawToolName, content, toolR
                 </View>
               </>
             ) : null}
-            {toolResult != null ? (
+            {(toolResult != null || termination) ? (
               <>
                 <Text style={[styles.toolModalSectionLabel, (content || toolResultImages?.length) ? { marginTop: 12 } : undefined]}>Result{toolResultTruncated ? ' (truncated)' : ''}</Text>
                 {termination ? (
