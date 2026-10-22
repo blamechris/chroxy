@@ -9,6 +9,7 @@ the tables embedded in ../REPORT.md. No network access; run from the repository 
 import json
 import math
 import os
+import re
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,15 +24,33 @@ def load(name):
 
 
 def parse_ts(value):
+    """Parse an ISO-8601 UTC timestamp, with or without fractional seconds.
+
+    The fraction is cut to microseconds and the offset is kept intact; a value
+    with no offset is taken as UTC, never as the host's local time, so the
+    output does not depend on the machine the script runs on.
+    """
     if not value:
         return None
     value = value.replace('Z', '+00:00')
     if '.' in value:
         head, tail = value.split('.', 1)
-        frac = ''.join(ch for ch in tail if ch.isdigit())[:6]
-        tz = tail[len(''.join(ch for ch in tail if ch.isdigit())):]
-        value = f'{head}.{frac.ljust(6, "0")}{tz}'
-    return datetime.fromisoformat(value).astimezone(timezone.utc)
+        match = re.match(r'(\d*)(.*)$', tail)
+        frac, tz = match.group(1), match.group(2)
+        value = f'{head}.{frac[:6].ljust(6, "0")}{tz}'
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _selfcheck():
+    """Fail loudly if the parser ever drifts; runs under every TZ identically."""
+    expect = datetime(2026, 10, 19, 19, 18, 0, 437000, tzinfo=timezone.utc)
+    assert parse_ts('2026-10-19T19:18:00.437Z') == expect, 'fractional Z timestamp'
+    assert parse_ts('2026-10-19T19:18:00.437000+00:00') == expect, 'fractional +00:00 timestamp'
+    assert parse_ts('2026-10-19T19:18:00Z') == expect.replace(microsecond=0), 'whole-second timestamp'
+    assert parse_ts('2026-10-18T20:55:44.226162Z').microsecond == 226162, 'microseconds kept'
 
 
 def minutes(a, b):
@@ -75,6 +94,7 @@ def final_verdict(run, pr, tiebreaks):
 
 
 def main():
+    _selfcheck()
     ev = {}
     for name in ('G-codex-EVIDENCE-A.json', 'G-codex-EVIDENCE-B.json'):
         ev.update(load(name)['runs'])
