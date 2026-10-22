@@ -35,6 +35,7 @@ export const NOTIFICATION_CATEGORIES = Object.freeze([
         key: 'permission',
         label: 'Permission requests',
         hint: 'Tool-use prompts that need an allow / deny decision.',
+        defaultBypass: true,
     },
     {
         key: 'activity_waiting',
@@ -45,6 +46,7 @@ export const NOTIFICATION_CATEGORIES = Object.freeze([
         key: 'activity_error',
         label: 'Session errors',
         hint: 'Crashes, tunnel drops, and unrecoverable session failures.',
+        defaultBypass: true,
     },
     {
         key: 'activity_update',
@@ -113,3 +115,10 @@ export const NOTIFICATION_CATEGORY_ORDER = Object.freeze(NOTIFICATION_CATEGORIES
  * key.
  */
 export const NOTIFICATION_CATEGORY_LABELS = Object.freeze(Object.fromEntries(NOTIFICATION_CATEGORIES.map((c) => [c.key, Object.freeze({ label: c.label, hint: c.hint })])));
+/**
+ * Categories that bypass muted / quiet-hours state by default (derived from
+ * `defaultBypass` — never a second list). The server's own default in
+ * notification-prefs.js is pinned to this in both directions by
+ * `packages/server/tests/notification-category-roster.test.js`.
+ */
+export const DEFAULT_BYPASS_CATEGORIES = Object.freeze(NOTIFICATION_CATEGORIES.filter((c) => c.defaultBypass === true).map((c) => c.key));
