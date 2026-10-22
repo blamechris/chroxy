@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { createServer } from 'node:net'
@@ -305,17 +306,47 @@ describe('runDoctorChecks', () => {
     assert.ok(portCheck)
   })
 
+  // doctor probes 127.0.0.1, so the held listener binds the same address.
+  const listenOnFreePort = () => new Promise((resolve, reject) => {
+    const srv = createServer()
+    srv.once('error', reject)
+    srv.listen(0, '127.0.0.1', () => resolve(srv))
+  })
+  const closeServer = (srv) => new Promise((resolve) => srv.close(() => resolve()))
+  // OS-assigned port that is free at the moment we return (listener closed and awaited).
+  const getFreePort = async () => {
+    const srv = await listenOnFreePort()
+    const { port } = srv.address()
+    await closeServer(srv)
+    return port
+  }
+
   it('accepts custom port', async () => {
-    // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
+    const port = await getFreePort()
+    const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const portCheck = checks.find(c => c.name === 'Port')
     assert.ok(portCheck)
-    assert.ok(portCheck.message.includes('59123'))
+    assert.ok(portCheck.message.includes(String(port)))
     assert.equal(portCheck.status, 'pass')
   })
 
+  it('warns and names the port when the custom port is already in use', async () => {
+    const held = await listenOnFreePort()
+    try {
+      const { port } = held.address()
+      const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = checks.find(c => c.name === 'Port')
+      assert.ok(portCheck)
+      assert.equal(portCheck.status, 'warn')
+      assert.ok(portCheck.message.includes(String(port)))
+    } finally {
+      await closeServer(held)
+    }
+  })
+
   it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
+    const port = await getFreePort()
+    const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
