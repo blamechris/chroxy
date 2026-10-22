@@ -131,7 +131,7 @@ runs' work. Rules, in order of how much they buy:
    keyword is unverified; README step 5 checks it on a scratch issue before run 1.
 3. **No writes to shared state during a run:** no comments, labels or closures on
    queue issues, no new issues. Follow-ups go in the run report, and the owner
-   files them after run 4.
+   files them after the last run.
 4. **Never read another run's branch or PRs** (`trial/*` other than your own, or
    PRs whose base is one). In the owner's vault, **never read the sealed key's
    folder** (`~/Obsidian/no-it-all/reviews/harness-trial-2026-10/`) or any file
@@ -166,10 +166,10 @@ cross-package items and one test or tooling item, spread across packages.
 **Sealed answer key.** Before run 1 starts, the owner writes a private note per
 issue in the vault (outside the repository): expected root cause, acceptance
 checks, and whether the fix is already known. Nothing from it enters the repo
-until all four runs are done, but its SHA-256 is committed in
-`KEY-COMMITMENT.md` before run 1 so a later edit is detectable. After run 4 the
+until the last run is done, but its SHA-256 is committed in
+`KEY-COMMITMENT.md` before run 1 so a later edit is detectable. After the last run the
 key is committed to `trial/eval` for the graders, who verify the digest first.
-Where the owner does not know the answer, the four implementations are
+Where the owner does not know the answer, the completed runs' implementations are
 cross-checked against each other, CI and the issue's own acceptance criteria —
 that is the realistic case and is graded as such.
 
