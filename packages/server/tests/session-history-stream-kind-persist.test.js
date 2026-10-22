@@ -107,14 +107,15 @@ describe('the history stream kind survives persist and restore (issue 8282)', ()
     writeState([
       entry('turn-1-thinking-0', 'old reasoning'),
       entry('turn-1-thinking-12', 'older reasoning'),
+      entry('turn-2-thinking', 'acp reasoning, no numeric suffix'),
       entry('turn-1', 'old reply'),
       entry('turn-1-thinking-x', 'a reply that merely looks similar'),
     ])
     const mgr = newMgr()
     assert.ok(mgr.restoreState(), 'restored')
     const kinds = mgr.getHistory(SID).map(streamKindOf)
-    assert.deepEqual(kinds, ['thinking', 'thinking', undefined, undefined])
+    assert.deepEqual(kinds, ['thinking', 'thinking', 'thinking', undefined, undefined])
     const frames = reasoningFrames(mgr, SID)
-    assert.deepEqual(frames.map((f) => f.kind), ['thinking', 'thinking', undefined, undefined])
+    assert.deepEqual(frames.map((f) => f.kind), ['thinking', 'thinking', 'thinking', undefined, undefined])
   })
 })
