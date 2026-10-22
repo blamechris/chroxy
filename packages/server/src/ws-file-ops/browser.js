@@ -5,7 +5,8 @@ import { createLogger } from '../logger.js'
 import { getBuiltinCommands } from '../builtin-commands.js'
 import { getProvider } from '../providers.js'
 import { isPathWithin } from '../utils/path-containment.js'
-import { realpathOfDeepestAncestor, unresolvablePathError } from './common.js'
+import { credentialDenyReason, resolveBrowsableRoots } from '../handler-utils.js'
+import { realpathOfDeepestAncestor, realpathOfDeepestSeeableAncestor, unresolvablePathError } from './common.js'
 
 const log = createLogger('ws')
 
@@ -29,11 +30,20 @@ const LISTING_UNRESOLVABLE_REASONS = {
  */
 export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
 
-  /** List directories at a given path, sending a directory_listing response */
-  async function listDirectory(ws, requestedPath) {
+  /**
+   * List directories at a given path, sending a directory_listing response.
+   *
+   * #8303 — the allowed set is the SAME one Create honours, plus $HOME for
+   * navigation: $HOME, every `config.workspaceRoots` entry, and the daemon's
+   * configured default cwd when it passes validateCwdAllowed. The credential /
+   * daemon-state deny-list (credentialDenyReason, shared with Create) applies on
+   * top of all of them, so `~/.ssh` is refused even though it is under $HOME.
+   */
+  async function listDirectory(ws, requestedPath, config = null) {
     let absPath = null
+    const denial = 'Access denied: directory listing is restricted to the home directory, the configured workspace roots and the default working directory'
     try {
-      const home = homedir()
+      const home = (config?.homeOverride && typeof config.homeOverride === 'string') ? config.homeOverride : homedir()
       if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
         absPath = home
       } else {
@@ -56,14 +66,27 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           // where a readable one answers "Access denied", and sent ELOOP's
           // raw message with the server path in it. Only a path inside home
           // keeps a specific message now; everything else is the denial.
-          const homeReal = await realpath(home).catch(() => null)
+          // A path under a credential/state directory gets the same generic
+          // refusal as any other denied path, whatever made it unresolvable
+          // (so `<denied>/<file>/x` answers like `<denied>/missing/x`).
+          // Specific message only if the path is inside SOME allowed root.
+          let error = denial
+          let underDenied = false
+          try {
+            underDenied = !!credentialDenyReason(await realpathOfDeepestSeeableAncestor(absPath), config, { native: true })
+          } catch {
+            // A walk that cannot finish keeps the generic answer below.
+          }
+          if (!underDenied) for (const root of resolveBrowsableRoots(config)) {
+            const msg = await unresolvablePathError(err, absPath, root, LISTING_UNRESOLVABLE_REASONS, denial)
+            if (msg !== denial) { error = msg; break }
+          }
           sendFn(ws, {
             type: 'directory_listing',
             path: absPath,
             parentPath: null,
             entries: [],
-            error: await unresolvablePathError(err, absPath, homeReal, LISTING_UNRESOLVABLE_REASONS,
-              'Access denied: directory listing is restricted to the home directory'),
+            error,
           })
           return
         }
@@ -80,15 +103,18 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
           containmentUnknown = true
         }
       }
-      const homeReal = await realpath(home)
-
-      if (containmentUnknown || !isPathWithin(realAbsPath, homeReal)) {
+      const allowedRoots = resolveBrowsableRoots(config)
+      const insideAllowed = !containmentUnknown && allowedRoots.some(root => isPathWithin(realAbsPath, root))
+      // Deny-list is checked on the canonical path, so a symlink into ~/.ssh
+      // is refused too. Same refusal text as a path outside the allowed set,
+      // so the deny-list is not an existence oracle.
+      if (!insideAllowed || credentialDenyReason(realAbsPath, config, { native: true })) {
         sendFn(ws, {
           type: 'directory_listing',
           path: absPath,
           parentPath: null,
           entries: [],
-          error: 'Access denied: directory listing is restricted to the home directory',
+          error: denial,
         })
         return
       }

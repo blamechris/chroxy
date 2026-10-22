@@ -152,3 +152,50 @@ describe('usePathAutocomplete', () => {
     expect(result.current.suggestions).toEqual([])
   })
 })
+
+describe('usePathAutocomplete probe (#8303)', () => {
+  const probe = (path: string, error: string | null) => {
+    act(() => { capturedCallback?.({ path, parentPath: null, entries: [], error }) })
+  }
+
+  it('requests the probe path once and reports false when Browse refuses it', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/tmp/fixture', '/tmp/fixture'))
+    expect(result.current.probeBrowsable).toBeNull()
+    act(() => { vi.advanceTimersByTime(200) })
+    expect(mockRequestDirectoryListing).toHaveBeenCalledWith('/tmp/fixture')
+    probe('/tmp/fixture', 'Access denied: directory listing is restricted to the home directory')
+    expect(result.current.probeBrowsable).toBe(false)
+  })
+
+  it('reports true when the probe path lists', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/tmp/fixture', '/tmp/fixture'))
+    act(() => { vi.advanceTimersByTime(200) })
+    probe('/tmp/fixture', null)
+    expect(result.current.probeBrowsable).toBe(true)
+  })
+
+  it('does not treat a missing directory as a refusal', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/tmp/fixture', '/tmp/fixture'))
+    act(() => { vi.advanceTimersByTime(200) })
+    probe('/tmp/fixture', 'Directory not found')
+    expect(result.current.probeBrowsable).toBe(true)
+  })
+
+  it('a refused probe does not blank autocomplete suggestions', () => {
+    const { result } = renderHook(() => usePathAutocomplete('/home/us', '/tmp/fixture'))
+    act(() => { vi.advanceTimersByTime(200) })
+    act(() => {
+      capturedCallback?.({ path: '/home', parentPath: null, entries: [{ name: 'user', isDirectory: true }], error: null })
+    })
+    probe('/tmp/fixture', 'Access denied: nope')
+    expect(result.current.suggestions).toEqual(['/home/user'])
+    expect(result.current.probeBrowsable).toBe(false)
+  })
+
+  it('sends no probe without a probePath', () => {
+    const { result } = renderHook(() => usePathAutocomplete('x'))
+    act(() => { vi.advanceTimersByTime(300) })
+    expect(mockRequestDirectoryListing).not.toHaveBeenCalled()
+    expect(result.current.probeBrowsable).toBeNull()
+  })
+})
