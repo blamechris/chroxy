@@ -1,9 +1,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
-import { createServer } from 'node:net'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkClaudeLogin, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 import { registerProvider, DEFAULT_PROVIDER } from '../src/providers.js'
@@ -19,6 +19,22 @@ import { resolveDeclaredMinVersion } from '../src/utils/binary-version.js'
  * on whichever provider is configured in the developer's local
  * ~/.chroxy/config.json (which would otherwise make the suite flaky).
  */
+
+// Mirrors the bind address used by checkPortAvailable in src/doctor.js, so the held listener is what that probe would hit.
+const listenOnFreePort = () => new Promise((resolve, reject) => {
+  const srv = createServer()
+  srv.once('error', reject)
+  srv.listen(0, '127.0.0.1', () => resolve(srv))
+})
+const closeServer = (srv) => new Promise((resolve) => srv.close(() => resolve()))
+// OS-assigned port that is free at the moment we return (listener closed and awaited).
+// Residual race: another process may take the port between close and doctor's probe; accepted, far narrower than a hardcoded port.
+const getFreePort = async () => {
+  const srv = await listenOnFreePort()
+  const { port } = srv.address()
+  await closeServer(srv)
+  return port
+}
 
 describe('runDoctorChecks', () => {
   it('returns checks array, passed boolean, and providers list', async () => {
@@ -306,16 +322,31 @@ describe('runDoctorChecks', () => {
   })
 
   it('accepts custom port', async () => {
-    // Use a random high port that's unlikely to be in use
-    const { checks } = await runDoctorChecks({ port: 59123, providers: ['claude-sdk'] })
+    const port = await getFreePort()
+    const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const portCheck = checks.find(c => c.name === 'Port')
     assert.ok(portCheck)
-    assert.ok(portCheck.message.includes('59123'))
+    assert.ok(portCheck.message.includes(String(port)))
     assert.equal(portCheck.status, 'pass')
   })
 
+  it('warns and names the port when the custom port is already in use', async () => {
+    const held = await listenOnFreePort()
+    try {
+      const { port } = held.address()
+      const { checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
+      const portCheck = checks.find(c => c.name === 'Port')
+      assert.ok(portCheck)
+      assert.equal(portCheck.status, 'warn')
+      assert.ok(portCheck.message.includes(String(port)))
+    } finally {
+      await closeServer(held)
+    }
+  })
+
   it('passed is true when no failures', async () => {
-    const { passed, checks } = await runDoctorChecks({ port: 59124, providers: ['claude-sdk'] })
+    const port = await getFreePort()
+    const { passed, checks } = await runDoctorChecks({ port, providers: ['claude-sdk'] })
     const failures = checks.filter(c => c.status === 'fail')
     if (failures.length === 0) {
       assert.equal(passed, true)
@@ -1576,15 +1607,6 @@ describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
 // Issue 8233 — doctor must check the port `chroxy start` would bind:
 // flag > PORT env > config.json `port` > 8765.
 describe('runDoctorChecks port resolution (merged config)', () => {
-  const freePort = () => new Promise((resolvePort, reject) => {
-    const srv = createServer()
-    srv.once('error', reject)
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address()
-      srv.close(() => resolvePort(port))
-    })
-  })
-
   const checkedPort = async ({ env = {}, fileConfig = null, opts = {} }) => {
     const configDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-port-'))
     const keys = ['PORT', 'CHROXY_CONFIG_DIR']
@@ -1609,22 +1631,22 @@ describe('runDoctorChecks port resolution (merged config)', () => {
   const named = (message, port) => message.startsWith(`${port} `)
 
   it('uses the config file port when no flag or env is given', async () => {
-    const filePort = await freePort()
+    const filePort = await getFreePort()
     const msg = await checkedPort({ fileConfig: { port: filePort } })
     assert.ok(named(msg, filePort), `expected port ${filePort} in: ${msg}`)
   })
 
   it('PORT env beats the config file port', async () => {
-    const filePort = await freePort()
-    const envPort = await freePort()
+    const filePort = await getFreePort()
+    const envPort = await getFreePort()
     const msg = await checkedPort({ env: { PORT: String(envPort) }, fileConfig: { port: filePort } })
     assert.ok(named(msg, envPort), `expected port ${envPort} in: ${msg}`)
   })
 
   it('explicit port option beats env and config', async () => {
-    const filePort = await freePort()
-    const envPort = await freePort()
-    const flagPort = await freePort()
+    const filePort = await getFreePort()
+    const envPort = await getFreePort()
+    const flagPort = await getFreePort()
     const msg = await checkedPort({
       env: { PORT: String(envPort) },
       fileConfig: { port: filePort },
