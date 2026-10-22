@@ -31,10 +31,12 @@ export function isLoopbackHost(host) {
   // IPv4-mapped IPv6 loopback, e.g. ::ffff:127.0.0.1 or ::ffff:7f00:1.
   // Both forms must be real IPv6 literals; the hex form needs a complete
   // ::ffff:XXXX:YYYY whose first hextet is exactly 7f00-7fff (so `::ffff:7f:1`,
-  // i.e. 0.127.0.1, and the incomplete `::ffff:7f` are not loopback).
+  // i.e. 0.127.0.1, and `::ffff:7f`, which is not a mapped loopback address,
+  // are not loopback). A `%zone` suffix is ignored for the hex form, matching
+  // the dotted prefix check, which already tolerates one.
   if (isIPv6(h)) {
     if (h.startsWith('::ffff:127.')) return true
-    if (MAPPED_HEX_LOOPBACK.test(h)) return true
+    if (MAPPED_HEX_LOOPBACK.test(h.split('%')[0])) return true
   }
   return false
 }

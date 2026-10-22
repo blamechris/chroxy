@@ -23,13 +23,24 @@ describe('isLoopbackHost', () => {
     assert.equal(isLoopbackHost('::ffff:7f00:1'), true)
     assert.equal(isLoopbackHost('::ffff:7fff:ffff'), true)
     assert.equal(isLoopbackHost('::FFFF:7F00:1'), true)
-    // 0.127.0.1 and an incomplete literal are not loopback
+    // 0.127.0.1 and `::ffff:7f` (not a mapped loopback address) are not loopback
     assert.equal(isLoopbackHost('::ffff:7f:1'), false)
     assert.equal(isLoopbackHost('::ffff:7f'), false)
     assert.equal(isLoopbackHost('::ffff:7f00'), false)
     assert.equal(isLoopbackHost('::ffff:7f00:1:2'), false)
     assert.equal(isLoopbackHost('::ffff:7f0:1'), false)
     assert.equal(isLoopbackHost('::ffff:8000:1'), false)
+  })
+
+  it('treats scoped mapped loopback the same in dotted and hex form', () => {
+    assert.equal(isLoopbackHost('::ffff:127.0.0.1%lo0'), true)
+    assert.equal(isLoopbackHost('::ffff:7f00:1%lo0'), true)
+    assert.equal(isLoopbackHost('::ffff:8000:1%lo0'), false)
+  })
+
+  it('does not treat bracketed or expanded mapped forms as loopback', () => {
+    assert.equal(isLoopbackHost('[::ffff:127.0.0.1]'), false)
+    assert.equal(isLoopbackHost('0:0:0:0:0:ffff:7f00:1'), false)
   })
 
   it('rejects malformed dotted mapped literals', () => {
