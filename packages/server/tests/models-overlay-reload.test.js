@@ -1332,6 +1332,20 @@ describe('a declaration-only row\'s learned contextWindow survives a restart (#7
     assert.equal(row?.contextWindow, 4242, 'a restart falls back to the heuristic, never NaN')
   })
 
+  it('a finite non-integer ratchet passes the top guard but is never written into the learned map', () => {
+    // 272000.5 is finite and positive, so updateContextWindow's top guard
+    // admits it; only the Number.isInteger check on the persistence branch
+    // keeps it out of learnedContextWindows (and so off disk).
+    const reg = makeNoSeamRegistry(cachePath)
+    reg.applyOverlay(overlayMap({ 'my-model': {} }))
+    reg.updateContextWindow('my-model', 272000.5)
+
+    assert.equal(reg.saveCache(cachePath), true)
+    const payload = JSON.parse(readFileSync(cachePath, 'utf8'))
+    assert.equal(Object.prototype.hasOwnProperty.call(payload.learnedContextWindows ?? {}, 'my-model'), false,
+      'a non-integer ratchet must not reach the learned map on disk')
+  })
+
   // Review addendum (#7810) — `applyOverlay` is a THIRD place that rebuilds a
   // declaration-only row (`docs/false-safety-guards.md`'s "guard wired to only
   // some of its callers" shape, #7888's exact lesson for this same registry):
