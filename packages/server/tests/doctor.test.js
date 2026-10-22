@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
+import { createServer } from 'node:net'
 import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkClaudeLogin, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 import { registerProvider, DEFAULT_PROVIDER } from '../src/providers.js'
@@ -1569,5 +1570,71 @@ describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
     } finally {
       rmSync(cfgPath, { force: true })
     }
+  })
+})
+
+// Issue 8233 — doctor must check the port `chroxy start` would bind:
+// flag > PORT env > config.json `port` > 8765.
+describe('runDoctorChecks port resolution (merged config)', () => {
+  const freePort = () => new Promise((resolvePort, reject) => {
+    const srv = createServer()
+    srv.once('error', reject)
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address()
+      srv.close(() => resolvePort(port))
+    })
+  })
+
+  const checkedPort = async ({ env = {}, fileConfig = null, opts = {} }) => {
+    const configDir = mkdtempSync(join(tmpdir(), 'chroxy-doctor-port-'))
+    const keys = ['PORT', 'CHROXY_CONFIG_DIR']
+    const saved = {}
+    for (const k of keys) saved[k] = process.env[k]
+    process.env.CHROXY_CONFIG_DIR = configDir
+    delete process.env.PORT
+    for (const [k, v] of Object.entries(env)) process.env[k] = v
+    if (fileConfig) writeFileSync(join(configDir, 'config.json'), JSON.stringify(fileConfig))
+    try {
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], ...opts })
+      return checks.find(c => c.name === 'Port').message
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k]
+        else process.env[k] = saved[k]
+      }
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  }
+
+  const named = (message, port) => message.startsWith(`${port} `)
+
+  it('uses the config file port when no flag or env is given', async () => {
+    const filePort = await freePort()
+    const msg = await checkedPort({ fileConfig: { port: filePort } })
+    assert.ok(named(msg, filePort), `expected port ${filePort} in: ${msg}`)
+  })
+
+  it('PORT env beats the config file port', async () => {
+    const filePort = await freePort()
+    const envPort = await freePort()
+    const msg = await checkedPort({ env: { PORT: String(envPort) }, fileConfig: { port: filePort } })
+    assert.ok(named(msg, envPort), `expected port ${envPort} in: ${msg}`)
+  })
+
+  it('explicit port option beats env and config', async () => {
+    const filePort = await freePort()
+    const envPort = await freePort()
+    const flagPort = await freePort()
+    const msg = await checkedPort({
+      env: { PORT: String(envPort) },
+      fileConfig: { port: filePort },
+      opts: { port: flagPort },
+    })
+    assert.ok(named(msg, flagPort), `expected port ${flagPort} in: ${msg}`)
+  })
+
+  it('falls back to 8765 with no flag, env or config', async () => {
+    const msg = await checkedPort({})
+    assert.ok(named(msg, 8765), `expected 8765 in: ${msg}`)
   })
 })
