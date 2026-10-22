@@ -548,6 +548,19 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
     assert.equal(updateContextWindow('claude-opus-4-8', 'big'), false)
   })
 
+  it('rejects non-finite context windows and leaves models and overrides untouched (#7771)', () => {
+    const entry = [{ value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' }]
+    updateModels(entry)
+    const before = getModels()[0].contextWindow
+    for (const bad of [Number.NaN, Infinity, -Infinity]) {
+      assert.equal(updateContextWindow('claude-opus-4-8', bad), false, `${bad} must be rejected`)
+      assert.equal(getModels()[0].contextWindow, before, `${bad} must not reach activeModels`)
+    }
+    // A leaked override would win over the heuristic on the next refresh.
+    updateModels(entry)
+    assert.equal(getModels()[0].contextWindow, before, 'no non-finite override survives a refresh')
+  })
+
   it('override survives subsequent updateModels refreshes (regression for #2820)', () => {
     // _fetchSupportedModels() fires on every SDK session init, so the first
     // updateModels() rebuild cannot clobber a value we already learned from
