@@ -1582,9 +1582,10 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
       const home = makeHome()
       mkdirs(join(home, 'dotfiles', 'ssh', 'sub'))
       symlinkSync(join(home, 'dotfiles', 'ssh'), join(home, '.ssh'))
-      mockStat(t, { noInode: new Set([join(home, '.ssh')]) })
+      const hits = mockStat(t, { noInode: new Set([join(home, '.ssh')]) })
 
       assert.equal(validateCwdAllowed(join(home, 'dotfiles', 'ssh', 'sub'), { homeOverride: home }), CRED_DENY)
+      assert.ok(hits.includes(join(home, '.ssh')), '~/.ssh must actually have been answered with inode 0, or this proves nothing about the fallback')
     })
 
     it('an inode of 0 does not lock out $HOME either: an entry that leads to $HOME is not credential-only', { skip: SKIP_NO_SYMLINK }, (t) => {
@@ -1596,6 +1597,78 @@ describe('validateCwdAllowed — letter case and symlinked credential directorie
       assert.equal(validateCwdAllowed(join(home, 'proj'), { homeOverride: home }), null, 'ordinary project')
       assert.equal(validateCwdAllowed(home, { homeOverride: home }), null, '$HOME itself')
       assert.equal(validateCwdAllowed(join(home, '.ssh'), { homeOverride: home }), CRED_DENY, 'a real credential directory stays denied')
+    })
+
+    // The config root is not credential-only either, but unlike a credential entry
+    // it is never exempted for holding $HOME: everything under it is refused,
+    // which is what the spelling check already does for the canonical path.
+    it('a config root that holds $HOME still refuses a second path to a directory under it', (t) => {
+      const root = newRoot()
+      const home = join(root, 'home')
+      const alias = join(root, 'mounts', 'home-alias')
+      mkdirs(join(home, 'work'), join(alias, 'work'))
+      process.env.CHROXY_CONFIG_DIR = home
+      const hits = mockStat(t, { reportsAs: new Map([[alias, home]]) })
+      const config = { homeOverride: home, workspaceRoots: [root] }
+
+      assert.equal(validateCwdAllowed(join(home, 'work'), config), CONFIG_DIR_DENY, 'canonical spelling')
+      assert.equal(validateCwdAllowed(join(alias, 'work'), config), CONFIG_DIR_DENY, 'second path')
+      assert.ok(hits.includes(alias), 'the second path must have been answered with the config root identity')
+    })
+
+    it('live firmlinked data volume: a config root that holds $HOME refuses the data-volume spelling too',
+      { skip: FIRMLINKED_DATA_VOLUME ? false : 'needs a firmlinked data volume (macOS); the simulated case covers CI' },
+      () => {
+        const root = newRoot()
+        const home = join(root, 'home')
+        mkdirs(join(home, 'work'))
+        process.env.CHROXY_CONFIG_DIR = home
+
+        assert.equal(validateCwdAllowed('/System/Volumes/Data' + join(home, 'work'), { homeOverride: home, workspaceRoots: ['/'] }), CONFIG_DIR_DENY)
+      })
+
+    // An inode-0 entry is compared by canonical path, so a path that cannot be
+    // resolved is an entry that cannot be checked, not one to compare by spelling.
+    it('refuses when an inode-0 entry cannot be resolved for comparison (simulated EACCES)', (t) => {
+      const root = newRoot()
+      const home = join(root, 'home')
+      const ssh = join(home, '.ssh')
+      const alias = join(root, 'mounts', 'ssh-alias')
+      mkdirs(ssh, alias)
+      mockStat(t, { reportsAs: new Map([[alias, ssh]]), noInode: new Set([ssh, alias]) })
+      const original = fs.realpathSync.native
+      let failures = 0
+      t.mock.method(fs.realpathSync, 'native', (p, ...rest) => {
+        if (p === ssh) {
+          failures++
+          throw Object.assign(new Error(`EACCES: simulated failure, realpath '${p}'`), { code: 'EACCES' })
+        }
+        return original(p, ...rest)
+      })
+
+      const err = validateCwdAllowed(alias, { homeOverride: home, workspaceRoots: [root] })
+
+      assert.equal(err, 'Directory is not allowed: cannot check the protected home entry ~/.ssh (EACCES)')
+      assert.ok(failures > 0, 'the entry must actually have been resolved')
+    })
+
+    it('skips an inode-0 entry whose path no longer resolves (simulated ENOENT)', (t) => {
+      const home = makeHome()
+      mkdirs(join(home, 'proj'), join(home, '.ssh'))
+      const ssh = join(home, '.ssh')
+      mockStat(t, { noInode: new Set([ssh]) })
+      const original = fs.realpathSync.native
+      let failures = 0
+      t.mock.method(fs.realpathSync, 'native', (p, ...rest) => {
+        if (p === ssh) {
+          failures++
+          throw Object.assign(new Error(`ENOENT: simulated failure, realpath '${p}'`), { code: 'ENOENT' })
+        }
+        return original(p, ...rest)
+      })
+
+      assert.equal(validateCwdAllowed(join(home, 'proj'), { homeOverride: home }), null)
+      assert.ok(failures > 0, 'the entry must actually have been resolved')
     })
 
     it('refuses when a parent directory of $HOME cannot be checked', (t) => {

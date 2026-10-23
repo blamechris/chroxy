@@ -485,9 +485,13 @@ function filesystemIdentity(p) {
  *   - not a directory (`.netrc`, `.npmrc`, ...): a directory cwd cannot be
  *     inside it, so it is skipped.
  *   - inode 0: no identity, so it is never matched by id; it falls back to path
- *     containment against its canonical realpath instead.
- *   - it is `$HOME` or an ancestor of it: dropped (not credential-only; the name
- *     test still covers the entry by its own `$HOME`-relative spelling).
+ *     containment against its canonical realpath instead. If that path is absent
+ *     (ENOENT / ENOTDIR) the candidate is skipped; any other error refuses.
+ *   - a credential ENTRY that is `$HOME` or an ancestor of it: dropped (not
+ *     credential-only; the name test still covers the entry by its own
+ *     `$HOME`-relative spelling). This applies to credential entries only: the
+ *     config root is never exempted, so if it holds `$HOME` everything under it
+ *     is refused, as the spelling check already does.
  * A stat error on `$HOME` or one of its ancestors, or on an ancestor of
  * `realCwd`, also refuses. One loop serves both kinds of protected directory.
  */
@@ -504,11 +508,16 @@ function protectedDirectoryDenial(realCwd, home) {
   const candidates = []
   for (const name of homeNames) {
     if (!FORBIDDEN_HOME_SUBDIRS.has(name.toLowerCase())) continue
-    candidates.push({ path: join(home, name), what: `the protected home entry ~/${name}`, denial: CREDENTIAL_DIR_DENIED })
+    candidates.push({
+      path: join(home, name),
+      what: `the protected home entry ~/${name}`,
+      denial: CREDENTIAL_DIR_DENIED,
+      exemptWhenHoldingHome: true,
+    })
   }
-  candidates.push({ path: configDir(), what: 'the chroxy config/state directory', denial: CONFIG_DIR_DENIED })
+  candidates.push({ path: configDir(), what: 'the chroxy config/state directory', denial: CONFIG_DIR_DENIED, exemptWhenHoldingHome: false })
 
-  const byIdentity = new Map()
+  const byIdentity = new Map() // id -> candidates, credential entries before the config root
   const byPath = []
   for (const candidate of candidates) {
     let found
@@ -520,12 +529,14 @@ function protectedDirectoryDenial(realCwd, home) {
     }
     if (!found.isDirectory) continue
     if (found.id === null) byPath.push(candidate)
-    else if (!byIdentity.has(found.id)) byIdentity.set(found.id, candidate)
+    else byIdentity.set(found.id, [...(byIdentity.get(found.id) ?? []), candidate])
   }
   if (byIdentity.size === 0 && byPath.length === 0) return null
 
-  // Lockout guard: a protected directory that holds $HOME itself (a symlinked
-  // entry pointing at `~` or above) would otherwise refuse every directory.
+  // Lockout guard: a credential entry that holds $HOME itself (a symlinked entry
+  // pointing at `~` or above) would otherwise refuse every directory. The config
+  // root is never exempted.
+  const homeLineage = new Set()
   for (const dir of withAncestors(home)) {
     let found
     try {
@@ -534,17 +545,23 @@ function protectedDirectoryDenial(realCwd, home) {
       if (isAbsentError(err)) continue
       return cannotCheck('the home directory', err)
     }
-    if (found.id !== null) byIdentity.delete(found.id)
+    if (found.id !== null) homeLineage.add(found.id)
+  }
+  for (const [id, holders] of byIdentity) {
+    const kept = holders.filter((candidate) => !(candidate.exemptWhenHoldingHome && homeLineage.has(id)))
+    if (kept.length === 0) byIdentity.delete(id)
+    else byIdentity.set(id, kept)
   }
 
   for (const candidate of byPath) {
     let real
     try {
       real = canonicalRealpath(candidate.path)
-    } catch {
-      real = candidate.path
+    } catch (err) {
+      if (isAbsentError(err)) continue
+      return cannotCheck(candidate.what, err)
     }
-    if (isPathWithin(home, real)) continue
+    if (candidate.exemptWhenHoldingHome && isPathWithin(home, real)) continue
     if (isPathWithin(realCwd, real)) return candidate.denial
   }
 
@@ -556,7 +573,7 @@ function protectedDirectoryDenial(realCwd, home) {
       } catch (err) {
         return cannotCheck('the parent directories of the working directory', err)
       }
-      const hit = found.id === null ? undefined : byIdentity.get(found.id)
+      const hit = found.id === null ? undefined : byIdentity.get(found.id)?.[0]
       if (hit) return hit.denial
     }
   }
