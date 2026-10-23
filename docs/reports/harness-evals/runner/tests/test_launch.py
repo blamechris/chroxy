@@ -7,6 +7,7 @@ is written under the sandbox's fake HOME. Nothing here reads or writes the
 developer's own home, daemon, transcripts or GitHub.
 """
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -235,6 +236,38 @@ def details(st, phase='pre'):
     return {c['name']: c['detail'] for c in entry['checks']}
 
 
+def plant_unreadable_state(rig, rid, how):
+    """Put something the state reader cannot read where run `rid`'s state file belongs (corrupt JSON, or a
+    directory, which fails in open() rather than in the parser). Returns the undo."""
+    path = state.state_path(rig.trial, rid, home=rig.box.home)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if how == 'directory':
+        os.makedirs(path)
+        return lambda: os.rmdir(path)
+    with open(path, 'w') as fh:
+        fh.write('{truncated')
+    return lambda: os.remove(path)
+
+
+@contextlib.contextmanager
+def without(trial, bag, key):
+    """The loaded trial with one setting removed: `trial.<bag>[key]`, or the attribute `trial.<key>` when bag is None."""
+    if bag is None:
+        saved = getattr(trial, key)
+        setattr(trial, key, None)
+        try:
+            yield
+        finally:
+            setattr(trial, key, saved)
+        return
+    values = getattr(trial, bag)
+    saved = values.pop(key)  # a KeyError here means the case names a setting trial.json does not carry: a bad test
+    try:
+        yield
+    finally:
+        values[key] = saved
+
+
 class LaunchCase(unittest.TestCase):
     def setUp(self):
         self.rig = Rig(self)
@@ -369,6 +402,16 @@ class Gate(LaunchCase):
         code, out, _ = self.go()
         self.assertEqual(code, 0, out)
 
+    def test_another_runs_unreadable_state_is_unverified_not_a_pass(self):
+        for how in ('corrupt', 'directory'):
+            with self.subTest(how):
+                undo = plant_unreadable_state(self.rig, 'A-cd-r1', how)
+                code, out, _ = self.go()
+                undo()
+                self.assertEqual(code, 2, out)
+                self.assertRegex(out, r'UNVERIFIED\s+no other run live\s+cannot read the other runs\' state files')
+                self.assertNotRegex(out, r'PASS\s+no other run live')
+
 
 # -- cut ---------------------------------------------------------------------------
 
@@ -394,6 +437,25 @@ class Cut(unittest.TestCase):
         self.assertEqual(helpers.git(self.rig.seed, 'cat-file', '-t', sha), 'commit')
         self.assertEqual(len(self.worktrees()), 1)
         self.assertEqual(self.rig.box.trial().t0, self.rig.t0, 'T0 is recorded even when nothing is pushed')
+
+    def test_push_refuses_an_origin_that_is_not_the_trial_repository(self):
+        # The seed's origin is the configured clone source; point it somewhere else and nothing is pushed.
+        other = os.path.join(self.rig.box.tmp, 'other.git')
+        helpers.git(self.rig.box.tmp, 'clone', '--bare', '-q', self.rig.origin, other)
+        helpers.git(self.rig.seed, 'remote', 'set-url', 'origin', other)
+        code, out = self.cut('A-cd-r1', push=True)
+        self.assertEqual(code, 1, out)
+        self.assertIn(f'not {self.rig.trial.repo}; nothing pushed', out)
+        self.assertEqual(helpers.git(other, 'for-each-ref', 'refs/heads/trial'), '')
+
+    def test_the_trial_repository_is_recognised_in_its_github_spellings(self):
+        env = self.rig.env()
+        for url in ('https://github.com/blamechris/chroxy', 'https://github.com/blamechris/chroxy.git',
+                    'git@github.com:blamechris/chroxy.git', 'ssh://git@github.com/blamechris/chroxy.git'):
+            self.assertTrue(launch._origin_is_trial_repo(self.rig.trial, env, url), url)
+        for url in ('https://github.com/someone/chroxy', 'https://github.com/blamechris/chroxy-fork.git',
+                    'https://gitlab.com/blamechris/chroxy', '/tmp/elsewhere.git', ''):
+            self.assertFalse(launch._origin_is_trial_repo(self.rig.trial, env, url), url)
 
     def test_push_cuts_one_commit_over_t0_that_adds_only_the_rendered_mission(self):
         code, out = self.cut('A-cd-r1', 'B-cy-r1', push=True)
@@ -551,6 +613,71 @@ class Cut(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertRegex(out, r'UNVERIFIED\s+base trial/t2-a-cd-r1')
 
+    def test_a_commit_that_does_not_read_back_as_built_is_a_fail_and_is_never_pushed(self):
+        """The self-check between building the base and pushing it: whatever it cannot confirm or finds wrong is a
+        FAIL (not an UNVERIFIED, not a PASS), and the push command is not run."""
+        other = 'f' * 40
+        rel = self.rig.trial.mission_relpath(self.rig.run('A-cd-r1'))
+        parents = lambda a: a[:3] == ['git', 'rev-list', '--parents']
+        diff = lambda a: a[:3] == ['git', 'diff', '--name-only']
+        blob = lambda a: a[:2] == ['git', 'rev-parse'] and ':' in a[2]
+        cases = {
+            'parents unreadable': (parents, 128, '', 'fatal: bad object', 'cannot inspect'),
+            'wrong parent': (parents, 0, f'{other} {other}\n', '', 'not exactly T0'),
+            'diff unreadable': (diff, 128, '', 'fatal: bad revision', 'cannot diff'),
+            'a path besides the mission': (diff, 0, f'{rel}\nstray.txt\n', '', 'differs from T0 in'),
+            'mission blob unreadable': (blob, 128, '', 'fatal: bad path', 'cannot read'),
+            'another mission': (blob, 0, other + '\n', '', 'differs from the one rendered'),
+        }
+        for label, (predicate, rc, stdout, stderr, fragment) in cases.items():
+            with self.subTest(label):
+                runner = Runner().on(predicate, rc, stdout, stderr)
+                code, out = self.cut('A-cd-r1', push=True, runner=runner)
+                self.assertEqual(code, 1, out)
+                self.assertRegex(out, r'FAIL\s+base trial/t2-a-cd-r1\s+built [0-9a-f]{12} but ')
+                self.assertIn(fragment, out)
+                self.assertIn('nothing pushed', out)
+                self.assertNotRegex(out, r'(PASS|UNVERIFIED)\s+base ')
+                self.assertEqual(runner.ran('git', 'push'), [], 'the push was not attempted')
+                self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), '')
+                self.assertEqual(len(self.worktrees()), 1, 'the worktree is removed')
+
+    def test_a_step_of_building_the_base_that_fails_is_a_fail_and_pushes_nothing(self):
+        cases = {
+            'worktree add': (argv_starts('git', 'worktree', 'add'), 128, '', 'fatal: cannot create', 'git worktree add failed'),
+            'add': (argv_starts('git', 'add'), 1, '', 'index.lock exists', 'git add failed'),
+            'reading the new commit': (lambda a: a == ['git', 'rev-parse', 'HEAD'], 128, '', 'fatal: bad HEAD', 'cannot read the new commit'),
+            'a new commit that is not an object id': (lambda a: a == ['git', 'rev-parse', 'HEAD'], 0, 'not-a-sha\n', '', 'cannot read the new commit'),
+        }
+        for label, (predicate, rc, stdout, stderr, fragment) in cases.items():
+            with self.subTest(label):
+                runner = Runner().on(predicate, rc, stdout, stderr)
+                code, out = self.cut('A-cd-r1', push=True, runner=runner)
+                self.assertEqual(code, 1, out)
+                self.assertRegex(out, r'FAIL\s+base trial/t2-a-cd-r1\s+' + fragment)
+                self.assertEqual(runner.ran('git', 'push'), [])
+                self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), '')
+                self.assertEqual(len(self.worktrees()), 1, 'whatever was added is removed')
+
+    def test_an_existing_base_that_cannot_be_inspected_is_unverified_and_left_alone(self):
+        self.cut('A-cd-r1', push=True)
+        tip = self.rig.branch('trial/t2-a-cd-r1')
+        cases = {
+            'parents': (lambda a: a[:3] == ['git', 'rev-list', '--parents'], 'cannot inspect'),
+            'diff': (lambda a: a[:3] == ['git', 'diff', '--name-only'], 'cannot diff'),
+            'mission blob': (lambda a: a[:2] == ['git', 'rev-parse'] and ':' in a[2], 'cannot read'),
+        }
+        for label, (predicate, fragment) in cases.items():
+            with self.subTest(label):
+                runner = Runner().on(predicate, 128, '', 'fatal: unreadable')
+                code, out = self.cut('A-cd-r1', push=True, runner=runner)
+                self.assertEqual(code, 2, out)
+                self.assertRegex(out, r'UNVERIFIED\s+base trial/t2-a-cd-r1\s+exists on origin but ' + fragment)
+                self.assertIn('it is not rewritten here', out)
+                self.assertEqual(runner.ran('git', 'worktree', 'add'), [], 'nothing was rebuilt')
+                self.assertEqual(runner.ran('git', 'push'), [])
+                self.assertEqual(self.rig.branch('trial/t2-a-cd-r1'), tip)
+
 
 class FirstSha(unittest.TestCase):
     def test_only_the_exact_ref_counts(self):
@@ -677,6 +804,31 @@ class Clone(LaunchCase):
         code, out, _ = self.clone(rid='B-cy-r1')
         self.assertEqual(code, 1)
         self.assertRegex(out, r'FAIL\s+git clone')
+
+    def test_a_refused_destination_is_reported_as_a_fail(self):
+        dest = self.rig.home('trial', 'busy')
+        os.makedirs(dest)
+        with open(os.path.join(dest, 'keep.txt'), 'w') as fh:
+            fh.write('mine')
+        code, out, _ = self.clone(dest=dest)
+        self.assertEqual(code, 1)
+        self.assertRegex(out, r'FAIL\s+destination\s+.*exists and is not empty')
+        self.assertNotRegex(out, r'PASS\s+destination')
+
+    def test_an_identity_that_cannot_be_set_in_the_clone_is_a_fail_and_the_clone_is_not_recorded(self):
+        runner = Runner().on(argv_starts('git', 'config', 'user.name'), 1, '', 'could not lock config file')
+        code, out, _ = self.clone(runner=runner)
+        self.assertEqual(code, 1)
+        self.assertRegex(out, r'FAIL\s+clone identity\s+git config user.name: could not lock config file')
+        self.assertNotIn('clone', self.rig.state('A-cd-r1'))
+
+    def test_a_status_that_cannot_be_read_after_setup_is_unverified_not_clean(self):
+        runner = Runner().on(argv_starts('git', 'status', '--porcelain'), 128, '', 'fatal: not a git repository')
+        code, out, _ = self.clone(runner=runner)
+        self.assertEqual(code, 2, out)
+        self.assertRegex(out, r'UNVERIFIED\s+clone clean\s+fatal: not a git repository')
+        self.assertNotRegex(out, r'PASS\s+clone clean')
+        self.assertIn('not usable as it is', out)
 
 
 # -- preflight, before the send ------------------------------------------------------
@@ -852,6 +1004,65 @@ class PreflightClaudeNative(LaunchCase):
         self.assertNotIn('base shape', statuses(st))
         self.assertIn('trialctl clone A-cd-r1', out)
 
+    def test_an_origin_that_cannot_be_listed_leaves_the_origin_match_unverified(self):
+        runner = toolbox(self.rig).on(argv_starts('git', 'ls-remote'), 128, '', 'network down')
+        code, _out, st = self.pre('A-cd-r1', runner)
+        self.assertEqual(code, 2)
+        self.assertStatus(statuses(st), 'clone matches origin', 'UNVERIFIED')
+        self.assertIn('cannot compare with origin', details(st)['clone matches origin'])
+        self.assertIn('network down', details(st)['clone matches origin'])
+
+    def test_a_status_that_cannot_be_read_leaves_the_clone_clean_check_unverified(self):
+        runner = toolbox(self.rig).on(argv_starts('git', 'status', '--porcelain'), 128, '', 'fatal: index file corrupt')
+        code, _out, st = self.pre('A-cd-r1', runner)
+        self.assertEqual(code, 2)
+        self.assertStatus(statuses(st), 'clone clean', 'UNVERIFIED')
+        self.assertIn('index file corrupt', details(st)['clone clean'])
+
+    def test_a_head_that_cannot_be_read_leaves_the_origin_match_unverified(self):
+        runner = toolbox(self.rig).on(lambda a: a == ['git', 'rev-parse', 'HEAD'], 128, '', 'fatal: bad HEAD')
+        code, _out, st = self.pre('A-cd-r1', runner)
+        self.assertEqual(code, 2)
+        self.assertStatus(statuses(st), 'clone matches origin', 'UNVERIFIED')
+        self.assertIn('cannot compare with origin', details(st)['clone matches origin'])
+        self.assertIsNone(st['preflight'][-1]['facts']['head'])
+
+    def test_a_diff_against_t0_that_cannot_be_read_leaves_the_base_shape_unverified(self):
+        runner = toolbox(self.rig).on(argv_starts('git', 'diff', '--name-only'), 128, '', 'fatal: bad revision')
+        code, _out, st = self.pre('A-cd-r1', runner)
+        self.assertEqual(code, 2)
+        self.assertStatus(statuses(st), 'base shape', 'UNVERIFIED')
+        self.assertIn('cannot diff against T0', details(st)['base shape'])
+        self.assertIn('bad revision', details(st)['base shape'])
+        self.assertStatus(statuses(st), 'clone matches origin', 'PASS')
+
+    def test_a_mission_that_cannot_be_rendered_for_the_comparison_is_unverified(self):
+        os.remove(self.rig.trial.repo_path('missions', 'TEMPLATE.md'))
+        code, _out, st = self.pre('A-cd-r1')
+        self.assertEqual(code, 2)
+        self.assertStatus(statuses(st), 'mission file', 'UNVERIFIED')
+        self.assertIn('cannot render the mission to compare', details(st)['mission file'])
+        self.assertIn('TEMPLATE.md', details(st)['mission file'])
+
+    def test_a_mission_file_missing_from_the_clone_fails_the_mission_check(self):
+        rel = self.rig.trial.mission_relpath(self.run_)
+        os.remove(os.path.join(self.rig.clone_dir('A-cd-r1'), rel))
+        code, _out, st = self.pre('A-cd-r1')
+        self.assertEqual(code, 1)
+        self.assertStatus(statuses(st), 'mission file', 'FAIL')
+        self.assertIn(f'{rel} is missing from the clone', details(st)['mission file'])
+        self.assertStatus(statuses(st), 'base shape', 'PASS')
+
+    def test_another_runs_unreadable_state_leaves_the_live_check_unverified(self):
+        for how in ('corrupt', 'directory'):
+            with self.subTest(how):
+                undo = plant_unreadable_state(self.rig, 'B-cx-r1', how)
+                code, _out, st = self.pre('A-cd-r1')
+                undo()
+                self.assertEqual(code, 2)
+                self.assertStatus(statuses(st), 'no other run live', 'UNVERIFIED')
+                self.assertIn('cannot read the other runs\' state files', details(st)['no other run live'])
+
 
 class PreflightCodexNative(LaunchCase):
     def setUp(self):
@@ -920,6 +1131,26 @@ class PreflightCodexNative(LaunchCase):
         _code, _out, st = self.pre('B-cx-r1', toolbox(self.rig, codex=None))
         self.assertStatus(statuses(st), 'codex roster parity', 'UNVERIFIED')
 
+    def test_an_installed_prompt_that_cannot_be_read_is_unverified_not_a_difference(self):
+        installed = self.rig.home('.codex', 'prompts', 'full-review.md')
+        os.remove(installed)
+        os.makedirs(installed)  # a directory where the prompt file belongs: open() fails, but not with "not found"
+        code, _out, st = self.pre('B-cx-r1')
+        self.assertEqual(code, 2)
+        self.assertStatus(statuses(st), 'codex prompts', 'UNVERIFIED')
+        self.assertIn('cannot read ~/.codex/prompts/full-review.md', details(st)['codex prompts'])  # state stores ~ for the home
+        self.assertNotIn('missing', details(st)['codex prompts'])
+
+    def test_a_missing_clone_leaves_the_prompt_check_unverified(self):
+        shutil.rmtree(self.rig.clone_dir('B-cx-r1'))
+        runner = toolbox(self.rig)
+        code, _out, st = self.pre('B-cx-r1', runner)
+        self.assertEqual(code, 1)
+        self.assertStatus(statuses(st), 'clone exists', 'FAIL')
+        self.assertStatus(statuses(st), 'codex prompts', 'UNVERIFIED')
+        self.assertIn('no clone to compile the prompts from', details(st)['codex prompts'])
+        self.assertEqual(runner.ran('node', 'scripts/compile-skill-targets.mjs'), [], 'the compiler was not run')
+
 
 class PreflightChroxy(LaunchCase):
     def test_claude_in_chroxy_passes_with_the_chroxy_checks(self):
@@ -967,7 +1198,7 @@ class PreflightChroxy(LaunchCase):
         self.assertStatus(statuses(st), 'deploy agent unloaded', 'UNVERIFIED')
 
     def other_run_recorded(self, commit):
-        self.rig.save_state('B-cy-r1', preflight=[{'phase': 'pre', 'at': 'x', 'checks': [], 'facts': {'daemon_commit': commit}}])
+        self.rig.save_state('B-cy-r1', gate=passing_gate(self.rig), preflight=[{'phase': 'pre', 'at': 'x', 'checks': [], 'facts': {'daemon_commit': commit}}])
 
     def test_a_daemon_commit_different_from_another_runs_fails(self):
         self.prep('A-cy-r1')
@@ -1167,6 +1398,10 @@ def passing_preflight():
     return [{'phase': 'pre', 'at': '2026-11-02T11:30:00Z', 'checks': [{'name': 'a', 'status': 'PASS', 'detail': ''}], 'facts': {}}]
 
 
+def passing_gate(rig, at='2026-11-02T11:00:00Z'):
+    return {'at': at, 't0': rig.t0, 'checks': [{'name': 'g', 'status': 'PASS', 'detail': ''}], 'accepted_open': {}}
+
+
 class Start(LaunchCase):
     CLAUDE_OK = {'claude_5h_used': 5.0, 'claude_weekly_used': 30.0}
 
@@ -1177,15 +1412,16 @@ class Start(LaunchCase):
         return code, env.out.getvalue()
 
     def test_records_the_send_and_the_readings(self):
-        self.rig.save_state('A-cd-r1', preflight=passing_preflight())
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, out = self.go()
         self.assertEqual(code, 0, out)
         self.assertIn('send the invocation now', out)
         self.assertEqual(self.rig.state('A-cd-r1')['start'],
-                         {'sent_at': '2026-11-02T12:00:00Z', 'meters': self.CLAUDE_OK, 'override': None})
+                         {'sent_at': '2026-11-02T12:00:00Z', 'meters': self.CLAUDE_OK, 'override': None,
+                          'claude_settings_sha256': None})
 
     def test_a_given_send_time_is_normalised_and_a_bad_one_is_refused(self):
-        self.rig.save_state('A-cd-r1', preflight=passing_preflight())
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, _out = self.go(sent_at='2026-11-02T11:58:30+00:00')
         self.assertEqual(code, 0)
         self.assertEqual(self.rig.state('A-cd-r1')['start']['sent_at'], '2026-11-02T11:58:30Z')
@@ -1199,7 +1435,7 @@ class Start(LaunchCase):
         self.assertNotIn('start', self.rig.state('A-cd-r1'))
         bad = passing_preflight()
         bad[0]['checks'].append({'name': 'effort setting', 'status': 'FAIL', 'detail': ''})
-        self.rig.save_state('A-cd-r1', preflight=bad)
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=bad)
         code, out = self.go()
         self.assertEqual(code, 1)
         self.assertIn('effort setting FAIL', out)
@@ -1207,7 +1443,7 @@ class Start(LaunchCase):
     def test_an_unverified_preflight_is_not_a_passed_one(self):
         pre = passing_preflight()
         pre[0]['checks'].append({'name': 'node version', 'status': 'UNVERIFIED', 'detail': ''})
-        self.rig.save_state('A-cd-r1', preflight=pre)
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=pre)
         code, out = self.go()
         self.assertEqual(code, 1)
         self.assertIn('node version UNVERIFIED', out)
@@ -1217,14 +1453,14 @@ class Start(LaunchCase):
         bad['checks'][0]['status'] = 'FAIL'
         later_pass = dict(passing_preflight()[0], at='2026-11-02T11:45:00Z')
         session = {'phase': 'session', 'at': 'y', 'checks': [{'name': 's', 'status': 'FAIL', 'detail': ''}], 'facts': {}}
-        self.rig.save_state('A-cd-r1', preflight=[bad, later_pass, session])
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=[bad, later_pass, session])
         code, out = self.go()
         self.assertEqual(code, 0, out)
 
     def test_an_override_goes_past_a_failed_preflight_and_is_recorded(self):
         bad = passing_preflight()
         bad[0]['checks'][0]['status'] = 'FAIL'
-        self.rig.save_state('A-cd-r1', preflight=bad)
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=bad)
         code, out = self.go(override='owner checked it by hand')
         self.assertEqual(code, 0, out)
         st = self.rig.state('A-cd-r1')
@@ -1233,7 +1469,7 @@ class Start(LaunchCase):
         self.assertIn('did not pass', st['overrides'][-1]['bypassed'][0])
 
     def test_a_codex_run_at_60_percent_is_refused_and_at_100_is_started(self):
-        self.rig.save_state('B-cx-r1', preflight=passing_preflight())
+        self.rig.save_state('B-cx-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, out = self.go('B-cx-r1', {'codex_weekly_left': 60.0})
         self.assertEqual(code, 1)
         self.assertIn('codex_weekly_left is 60, below the floor of 100', out)
@@ -1245,7 +1481,7 @@ class Start(LaunchCase):
         self.assertEqual(self.rig.state('B-cx-r1')['start']['meters'], {'codex_weekly_left': 100.0})
 
     def test_the_override_lets_a_low_allowance_through_and_says_what_it_bypassed(self):
-        self.rig.save_state('B-cx-r1', preflight=passing_preflight())
+        self.rig.save_state('B-cx-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, out = self.go('B-cx-r1', {'codex_weekly_left': 60.0}, override='owner applied a reset')
         self.assertEqual(code, 0, out)
         recorded = self.rig.state('B-cx-r1')['overrides'][-1]
@@ -1253,7 +1489,7 @@ class Start(LaunchCase):
         self.assertIn('codex_weekly_left is 60', recorded['bypassed'][0])
 
     def test_claude_meters_above_the_ceilings_are_refused(self):
-        self.rig.save_state('A-cd-r1', preflight=passing_preflight())
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, out = self.go(meters={'claude_5h_used': 25.0, 'claude_weekly_used': 30.0})
         self.assertEqual(code, 1)
         self.assertIn('claude_5h_used is 25, above the ceiling of 20', out)
@@ -1264,7 +1500,7 @@ class Start(LaunchCase):
         self.assertEqual(code, 0)
 
     def test_missing_meters_exit_2_and_name_the_flags_to_pass(self):
-        self.rig.save_state('A-cd-r1', preflight=passing_preflight())
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, out = self.go(meters={'claude_5h_used': 5.0})
         self.assertEqual(code, 2)
         self.assertIn('--meter claude_weekly_used=<percent>', out)
@@ -1279,19 +1515,19 @@ class Start(LaunchCase):
         self.assertEqual(code, 2)
 
     def test_a_reading_outside_0_to_100_is_refused(self):
-        self.rig.save_state('A-cd-r1', preflight=passing_preflight())
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, out = self.go(meters={'claude_5h_used': 600.0, 'claude_weekly_used': 30.0})
         self.assertEqual(code, 2)
 
     def test_another_live_run_refuses_even_with_an_override(self):
         self.rig.save_state('B-cx-r1', start={'sent_at': 'x'})
-        self.rig.save_state('A-cd-r1', preflight=passing_preflight())
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, out = self.go(override='please')
         self.assertEqual(code, 1)
         self.assertIn('B-cx-r1', out)
 
     def test_a_second_start_is_refused_unless_overridden(self):
-        self.rig.save_state('A-cd-r1', preflight=passing_preflight())
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         self.go()
         code, out = self.go()
         self.assertEqual(code, 1)
@@ -1301,8 +1537,93 @@ class Start(LaunchCase):
         start = self.rig.state('A-cd-r1')['start']
         self.assertEqual((start['sent_at'], start['replaces']['sent_at']), ('2026-11-02T12:01:00Z', '2026-11-02T12:00:00Z'))
 
-    def test_an_allowance_floor_missing_from_trial_json_blocks_rather_than_passes(self):
+    def test_start_reads_the_gate_not_only_prepare(self):
+        # Running clone, preflight and start by hand must not skip the entry gate.
         self.rig.save_state('A-cd-r1', preflight=passing_preflight())
+        code, out = self.go()
+        self.assertEqual(code, 1)
+        self.assertIn('no entry gate is recorded', out)
+        failed = passing_gate(self.rig)
+        failed['checks'].append({'name': 'blocker #8741', 'status': 'FAIL', 'detail': 'open'})
+        self.rig.save_state('A-cd-r1', gate=failed, preflight=passing_preflight())
+        code, out = self.go()
+        self.assertEqual(code, 1)
+        self.assertIn('blocker #8741 FAIL', out)
+        unverified = passing_gate(self.rig)
+        unverified['checks'].append({'name': 'ci.yml runs on the base', 'status': 'UNVERIFIED', 'detail': ''})
+        self.rig.save_state('A-cd-r1', gate=unverified, preflight=passing_preflight())
+        code, out = self.go()
+        self.assertEqual(code, 1)
+        self.assertIn('ci.yml runs on the base UNVERIFIED', out)
+
+    def test_a_gate_recorded_at_another_t0_or_after_the_preflight_does_not_count(self):
+        stale = dict(passing_gate(self.rig), t0='f' * 40)
+        self.rig.save_state('A-cd-r1', gate=stale, preflight=passing_preflight())
+        code, out = self.go()
+        self.assertEqual(code, 1)
+        self.assertIn('not the current', out)
+        late = passing_gate(self.rig, at='2026-11-02T11:45:00Z')  # the preflight is 11:30
+        self.rig.save_state('A-cd-r1', gate=late, preflight=passing_preflight())
+        code, out = self.go()
+        self.assertEqual(code, 1)
+        self.assertIn('older than the gate', out)
+
+    def test_a_chroxy_run_needs_a_passing_session_phase_after_the_preflight(self):
+        meters = {'codex_weekly_left': 100.0}
+        self.rig.save_state('B-cy-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
+        code, out = self.go('B-cy-r1', meters)
+        self.assertEqual(code, 1)
+        self.assertIn('no session-phase preflight', out)
+        session = {'phase': 'session', 'at': '2026-11-02T11:40:00Z', 'facts': {},
+                   'checks': [{'name': 'no interrupt', 'status': 'FAIL', 'detail': ''}]}
+        self.rig.save_state('B-cy-r1', gate=passing_gate(self.rig), preflight=passing_preflight() + [session])
+        code, out = self.go('B-cy-r1', meters)
+        self.assertEqual(code, 1)
+        self.assertIn('no interrupt FAIL', out)
+        early = dict(session, at='2026-11-02T11:20:00Z', checks=[{'name': 's', 'status': 'PASS', 'detail': ''}])
+        self.rig.save_state('B-cy-r1', gate=passing_gate(self.rig), preflight=passing_preflight() + [early])
+        code, out = self.go('B-cy-r1', meters)
+        self.assertEqual(code, 1)
+        self.assertIn('session-phase preflight is older', out)
+        good = dict(session, checks=[{'name': 's', 'status': 'PASS', 'detail': ''}])
+        self.rig.save_state('B-cy-r1', gate=passing_gate(self.rig), preflight=passing_preflight() + [good])
+        code, out = self.go('B-cy-r1', meters)
+        self.assertEqual(code, 0, out)
+
+    def test_a_finished_run_cannot_be_started_again_even_with_an_override(self):
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight(),
+                            start={'sent_at': '2026-11-02T08:00:00Z'}, finish={'ended_at': '2026-11-02T10:00:00Z'})
+        code, out = self.go(override='repeat it')
+        self.assertEqual(code, 1)
+        self.assertIn('already finished', out)
+        self.assertEqual(self.rig.state('A-cd-r1')['start'], {'sent_at': '2026-11-02T08:00:00Z'})
+
+    def test_the_settings_baseline_is_taken_at_the_send(self):
+        settings = self.rig.claude_settings('high')
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
+        self.assertEqual(self.go()[0], 0)
+        with open(settings, 'a') as fh:
+            fh.write('\n')  # a preview daemon touched it during the run
+        st = self.rig.state('A-cd-r1')
+        # A later preflight re-run records the changed file as its fact; the baseline must not move with it.
+        st['preflight'].append({'phase': 'pre', 'at': '2026-11-02T13:00:00Z', 'checks': [],
+                                'facts': {'claude_settings_sha256': launch._sha256(settings)}})
+        self.rig.save_state('A-cd-r1', **{k: v for k, v in st.items() if k not in ('run', 'trial', 'updated_at')})
+        env = self.rig.env()
+        launch.finish(self.rig.trial, self.rig.run('A-cd-r1'), env, {}, None, None, None, None)
+        self.assertTrue(self.rig.state('A-cd-r1')['finish']['settings_changed'], env.out.getvalue())
+
+    def test_unreadable_other_state_refuses_rather_than_crashes(self):
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
+        other = state.state_path(self.rig.trial, 'B-cx-r1', home=self.rig.box.home)
+        with open(other, 'w') as fh:
+            fh.write('{not json')
+        code, out = self.go()
+        self.assertEqual(code, 1)
+        self.assertIn('an overlap cannot be ruled out', out)
+
+    def test_an_allowance_floor_missing_from_trial_json_blocks_rather_than_passes(self):
+        self.rig.save_state('A-cd-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         del self.rig.trial.allowance['claude_5h_used_max']
         code, out = self.go()
         self.assertEqual(code, 1)
@@ -1592,6 +1913,88 @@ class VerifyStart(LaunchCase):
         self.assertEqual(code, 1)
         self.assertRegex(out, r'(?m)^STOP: no interrupt:')
 
+    def test_a_codex_probe_naming_another_run_fails_and_stops_the_run(self):
+        self.started('B-cx-r1')
+        self.put_codex('B-cx-r1', codex_rollout(self.rig.clone_dir('B-cx-r1'), rid='A-cd-r1'))
+        code, out, saved = self.go('B-cx-r1')
+        self.assertEqual(code, 1, out)
+        probe = self.by_name(saved)['probe']
+        self.assertEqual(probe['status'], 'FAIL')
+        self.assertIn('names run A-cd-r1, not B-cx-r1', probe['detail'])
+        self.assertRegex(out, r'(?m)^STOP: .*probe: the TRIAL-PROBE line names run A-cd-r1')
+        self.assertIsNone(saved['applied']['probe'], 'another run\'s probe is not recorded as this run\'s')
+        self.assertEqual(saved['first_command_at'], '2026-11-02T12:00:00Z', 'and it does not date this run\'s first command')
+
+    def test_a_probe_naming_another_run_fails_the_claude_check_with_the_same_words(self):
+        self.started('A-cd-r1')
+        self.put_claude('A-cd-r1', claude_transcript(probe_run='A-cy-r1'))
+        code, out, saved = self.go('A-cd-r1')
+        self.assertEqual(code, 1, out)
+        self.assertIn('names run A-cy-r1, not A-cd-r1', self.by_name(saved)['probe']['detail'])
+        self.assertRegex(out, r'(?m)^STOP: .*probe: the TRIAL-PROBE line names run A-cy-r1')
+
+
+# -- trial.json without a setting ----------------------------------------------------
+
+class UnsetInTrialJson(LaunchCase):
+    """A check that needs a value trial.json does not carry says UNVERIFIED: it could not be made, which is neither
+    a pass (nothing was read) nor a crash. Each case removes one value from the loaded trial and reads back only the
+    check that depends on it."""
+
+    # (run, 'paths' | 'versions' | None for a trial attribute, key, the check that reads it, what its detail names)
+    PREFLIGHT = [
+        ('A-cd-r1', 'paths', 'node_bin', 'node version', 'paths.node_bin'),
+        ('A-cd-r1', 'versions', 'node_major', 'node version', 'versions.node_major'),
+        ('A-cd-r1', None, 'github_login', 'gh login', 'github_login'),
+        ('A-cd-r1', 'paths', 'claude_settings', 'effort setting', 'paths.claude_settings'),
+        ('A-cd-r1', 'versions', 'claude_min', 'claude version', 'versions.claude_min'),
+        ('B-cx-r1', 'paths', 'codex_prompts', 'codex prompts', 'paths.codex_prompts'),
+        ('B-cx-r1', 'paths', 'codex_app_cli', 'codex roster parity', 'paths.codex_app_cli'),
+        ('A-cy-r1', 'paths', 'daemon_config', 'allowAutoPermissionMode', 'paths.daemon_config'),
+        ('A-cy-r1', 'paths', 'daemon_checkout', 'daemon commit', 'paths.daemon_checkout'),
+    ]
+    VERIFY = [
+        ('A-cd-r1', 'claude_projects', 'transcript found'),
+        ('B-cx-r1', 'codex_sessions', 'rollout found'),
+    ]
+
+    def test_every_preflight_check_that_reads_a_setting_is_unverified_without_it(self):
+        ready = set()
+        for rid, bag, key, check, fragment in self.PREFLIGHT:
+            with self.subTest(f'{bag or "trial"}.{key}'):
+                if rid not in ready:
+                    self.prep(rid)
+                    ready.add(rid)
+                runner = toolbox(self.rig)  # scripted from the full config, before the setting is taken away
+                with without(self.rig.trial, bag, key):
+                    code, out, st = self.pre(rid, runner)
+                self.assertStatus(statuses(st), check, 'UNVERIFIED')
+                self.assertIn(fragment, details(st)[check])
+                self.assertEqual(code, 2, out)
+
+    def test_the_session_phase_without_a_daemon_log_path_is_unverified_throughout(self):
+        with without(self.rig.trial, 'paths', 'daemon_log'):
+            code, out, st = self.pre('A-cy-r1', phase='session', session='s-1')
+        self.assertEqual(code, 2, out)
+        self.assertEqual(statuses(st, 'session'), {'session model': 'UNVERIFIED', 'session permission mode': 'UNVERIFIED',
+                                                   'session interrupt': 'UNVERIFIED'})
+        self.assertIn('cannot read the daemon log', details(st, 'session')['session model'])
+        self.assertIn('paths.daemon_log is not set', details(st, 'session')['session model'])
+        self.assertNotIn('None', details(st, 'session')['session model'])
+
+    def test_verify_start_without_the_folder_it_reads_from_is_unverified_and_no_stop(self):
+        for rid, key, check in self.VERIFY:
+            with self.subTest(key):
+                self.rig.save_state(rid, start={'sent_at': timeutil.iso(SENT), 'meters': {}, 'override': None})
+                env = self.rig.env()
+                with without(self.rig.trial, 'paths', key):
+                    code = launch.verify_start(self.rig.trial, self.rig.run(rid), env, None, None)
+                saved = self.rig.state(rid)['verify_start']
+                self.assertEqual(code, 2, env.out.getvalue())
+                self.assertEqual([(c['name'], c['status']) for c in saved['checks']], [(check, 'UNVERIFIED')])
+                self.assertIn(f'paths.{key} is not set', saved['checks'][0]['detail'])
+                self.assertNotIn('STOP', env.out.getvalue())
+
 
 # -- finish ------------------------------------------------------------------------
 
@@ -1706,17 +2109,17 @@ class CliWiring(LaunchCase):
     def test_start_meter_flags_and_the_state_override(self):
         state_file = os.path.join(self.rig.box.tmp, 'custom-state.json')
         with open(state_file, 'w') as fh:
-            json.dump({'run': 'A-cd-r1', 'preflight': passing_preflight()}, fh)
+            json.dump({'run': 'A-cd-r1', 'gate': passing_gate(self.rig), 'preflight': passing_preflight()}, fh)
         code, out = self.run_cli('start', 'A-cd-r1', '--meter', 'claude_5h_used=5', '--meter', 'claude_weekly_used=30.5',
                                  '--sent-at', '2026-11-02T11:59:00Z', '--state', state_file)
         self.assertEqual(code, 0, out)
         with open(state_file) as fh:
             saved = json.load(fh)
-        self.assertEqual(saved['start'], {'sent_at': '2026-11-02T11:59:00Z',
+        self.assertEqual(saved['start'], {'sent_at': '2026-11-02T11:59:00Z', 'claude_settings_sha256': None,
                                           'meters': {'claude_5h_used': 5.0, 'claude_weekly_used': 30.5}, 'override': None})
 
     def test_start_override_flag(self):
-        self.rig.save_state('B-cx-r1', preflight=passing_preflight())
+        self.rig.save_state('B-cx-r1', gate=passing_gate(self.rig), preflight=passing_preflight())
         code, out = self.run_cli('start', 'B-cx-r1', '--meter', 'codex_weekly_left=55', '--override', 'reset applied')
         self.assertEqual(code, 0, out)
         self.assertEqual(self.rig.state('B-cx-r1')['start']['override'], 'reset applied')

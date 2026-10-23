@@ -1,0 +1,23 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8635/comments?per_page=100",
+ "response": [
+  {
+   "body": "## Summary\nReviewed head a7cf3bba. Both acceptance criteria of issue 8277 are met: Settings keeps a dormant stored provider selected as a disabled option plus a hint, and Settings -> Session Defaults renders the shared migration notice with the same dismiss. Full dashboard suite on the PR worktree: 397 files / 7898 tests passed.\n\n## Strengths\n- Dormant state is derived during render only; nothing is persisted until the user picks a value (setDefaultProvider is only called from onChange).\n- The notice is extracted into one component reading and dismissing the same store state, so New Session and Settings cannot drift. The New Session testids, class names and the 44px dismiss CSS are unchanged; the existing New Session defaults tests pass untouched apart from the import path.\n- The hint's \"new sessions use X\" matches what the New Session modal really does (first offered provider when the stored one is missing), and the Default model roster is still derived from that same effectiveProvider.\n- dormant is gated on source === 'user', so an inherited server default never shows a false \"dormant\" hint, and an empty availableProviders list (not yet reported) does not either.\n\n## Critical\nNone.\n\nRegression check requested by the coordinator (Default model field hidden under a dormant override): not a regression from this PR. The diff does not touch availableModels, effectiveProvider or the `availableModels.length > 0` gate (SettingsPanel.tsx ~1177 and ~1307); only the select's value, one extra option, the hint and the notice are new. At base the field was already hidden whenever the effective (first offered) provider has no own roster in modelsByProvider, which is the deliberate evidence-side rule from the earlier roster work. If the live smoke saw it disappear, the first offered provider had not broadcast a roster there; the same state reproduces at base. It is a pre-existing limitation, but see Suggestion 2.\n\n## Suggestions\n1. (FOLD, cheap) The notice sits directly under the provider settings-field with no spacing, flush against the following Default model label. Give it a top/bottom margin in Settings (for example wrap it in a settings-field-style container or add a margin rule scoped to the settings usage).\n2. (DEFER) When dormant and the effective provider has no roster, the Default model field silently vanishes right after a hint that says new sessions use that provider. Worth a follow-up to show a loading or \"models not loaded\" line; out of scope here.\n3. (DEFER) Once the user picks another value the disabled option disappears and the old override cannot be restored from the UI. That is inherent to \"disabled\", and acceptable, but the hint could say picking a value replaces the saved one.\n\n## Nitpicks\n- \"persists nothing until the user picks a new value\" would also pass on the base; its `not.toHaveBeenCalled` half is not red-sensitive. The other new tests (disabled selected option, hint text, Settings notice) do go red without the change.\n- The commit message body lacks the Trial-Closes line (the PR body has it).\n- The helper's doc comment still references the old issue number only; fine.\n\n## Verdict\nApprove\n",
+   "created_at": "2026-10-18T04:24:59Z",
+   "id": 6245626224,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "### Smoke (isolated preview daemon) — head a7cf3bb\n| step | verdict | head |\n|---|---|---|\n| dashboard connects | PASS | a7cf3bb |\n| New Session, Browse, fixture, Select | PASS | a7cf3bb |\n| Create with explicit cwd | PASS | a7cf3bb |\n| Haiku in header model picker | PASS | a7cf3bb |\n| tiny prompt, reply | PASS | a7cf3bb |\n| second session, switch back keeps transcript | PASS | a7cf3bb |\n| Settings Session Defaults: unoffered saved provider shows a disabled \"(not offered by this server)\" option plus hint; stored value preserved | PASS | a7cf3bb |\n| Picking an offered provider clears the hint and the dormant option | PASS | a7cf3bb |\n| Migration notice shows in Settings Session Defaults | PASS | a7cf3bb |\n| Dismiss in Settings; New Session no longer shows it, including after reload | PASS | a7cf3bb |\n\nevidence: private vault smoke/chroxy-pr8635-a7cf3bb\n",
+   "created_at": "2026-10-18T04:25:59Z",
+   "id": 6245633701,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

@@ -22,8 +22,8 @@ to you.
   derived transcript extract: applied model and effort, permission events,
   isolation-pattern hits).
 - The unsealed answer key at `{{TRIAL_DIR}}/eval/KEY.md` on `{{KEY_BRANCH}}`.
-  First run `python3 docs/reports/harness-evals/runner/trialctl.py verify-key
-  {{TRIAL_DIR}}/eval/KEY.md --trial {{TRIAL_DIR}}`; a mismatch is an incident to
+  First run `python3 docs/reports/harness-evals/runner/trialctl.py --trial {{TRIAL_DIR}}
+  verify-key {{TRIAL_DIR}}/eval/KEY.md`; a mismatch is an incident to
   report before grading anything. If the key is absent, stop and say so.
 
 ## Order

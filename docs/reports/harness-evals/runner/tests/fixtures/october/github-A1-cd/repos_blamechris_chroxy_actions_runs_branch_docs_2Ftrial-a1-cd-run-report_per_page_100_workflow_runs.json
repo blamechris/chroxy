@@ -1,0 +1,77 @@
+{
+ "request": "repos/blamechris/chroxy/actions/runs?branch=docs%2Ftrial-a1-cd-run-report&per_page=100#workflow_runs",
+ "response": [
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T06:06:57Z",
+   "event": "pull_request",
+   "head_branch": "docs/trial-a1-cd-run-report",
+   "head_sha": "36d1a3a410ee936427bd7d0ee03fce364fe1d0da",
+   "id": 39102892332,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T05:52:47Z",
+   "event": "pull_request",
+   "head_branch": "docs/trial-a1-cd-run-report",
+   "head_sha": "36d1a3a410ee936427bd7d0ee03fce364fe1d0da",
+   "id": 39102067483,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T05:52:47Z",
+   "event": "pull_request",
+   "head_branch": "docs/trial-a1-cd-run-report",
+   "head_sha": "36d1a3a410ee936427bd7d0ee03fce364fe1d0da",
+   "id": 39102067471,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T05:50:54Z",
+   "event": "dynamic",
+   "head_branch": "docs/trial-a1-cd-run-report",
+   "head_sha": "fef280b7b01c8bde5fd6b83e74e35a11ea5c9bc4",
+   "id": 39101960174,
+   "name": "Running Copilot Code Review",
+   "path": "dynamic/agents/copilot-pull-request-reviewer",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T05:50:48Z",
+   "event": "pull_request",
+   "head_branch": "docs/trial-a1-cd-run-report",
+   "head_sha": "fef280b7b01c8bde5fd6b83e74e35a11ea5c9bc4",
+   "id": 39101954404,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "cancelled",
+   "created_at": "2026-10-18T05:50:48Z",
+   "event": "pull_request",
+   "head_branch": "docs/trial-a1-cd-run-report",
+   "head_sha": "fef280b7b01c8bde5fd6b83e74e35a11ea5c9bc4",
+   "id": 39101954463,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  }
+ ]
+}

@@ -100,6 +100,16 @@ def _trim_commit_entry(entry):
             'commit': {'committer': _pick(commit.get('committer') or {}, 'date')}}
 
 
+def _workflow_head(content):
+    """A workflow file's base64 content cut before its `jobs:` key: the trigger the collector reads is
+    all above it, and the jobs are most of the 170 KB GitHub returns for ci.yml."""
+    text = base64.b64decode(content).decode('utf-8')
+    match = re.search(r'^jobs:', text, re.M)
+    if match:
+        text = text[:match.start()]
+    return base64.b64encode(text.encode('utf-8')).decode('ascii')
+
+
 def trim_fixture(request, response):
     """Keep only the fields `collect` reads, so recorded fixtures stay small (bodies are kept)."""
     path = request.split('?', 1)[0]
@@ -124,6 +134,8 @@ def trim_fixture(request, response):
         return {'sha': response.get('sha'), 'stats': _pick(response.get('stats') or {}, 'additions', 'deletions'),
                 'parents': [_pick(p, 'sha') for p in response.get('parents', [])]}
     if '/contents/' in path:
+        if path.endswith('.github/workflows/ci.yml') and response.get('encoding') == 'base64':
+            return {'content': _workflow_head(response.get('content') or ''), 'encoding': 'base64'}
         return _pick(response, 'content', 'encoding')
     if '/git/ref/' in path:
         return {'object': _pick(response.get('object') or {}, 'sha')}
@@ -392,10 +404,29 @@ def _gather(trial, run, client, st, start, env):
     push_runs = client.list(client.repo_path('actions/runs'), {'branch': run.base, 'event': 'push'},
                             key='workflow_runs')
     push = sorted((r for r in push_runs if window.contains(r.get('created_at'))), key=_stamp_key)
-    push_ci = [_run_entry(r, ('id', 'head_sha', 'created_at', 'conclusion')) for r in push
-               if r.get('path') == CI_PATH]
+    # Push CI is attributed to merges by commit, not by time: the last merge (the report PR's) ends
+    # the window, so the run it triggers always starts after it.
+    merge_shas = {p['merge_sha']: p['pr'] for p in records if p.get('state') == 'merged' and p.get('merge_sha')}
+    latest = {}
+    for r in sorted(push_runs, key=_stamp_key):
+        if r.get('path') == CI_PATH and r.get('head_sha') in merge_shas:
+            latest[r['head_sha']] = r
+    push_ci = [dict(_run_entry(r, ('id', 'head_sha', 'created_at', 'conclusion')), pr=merge_shas[sha])
+               for sha, r in sorted(latest.items(), key=lambda kv: _stamp_key(kv[1]))]
     observable = _push_observable(client, t0, run.base)
-    red = sum(1 for r in push_ci if r['conclusion'] in RED) if observable else None
+    red, red_gap = None, None
+    if observable:
+        # A count is only a measurement when every merge into the base has a finished push run of its own;
+        # a missing or unfinished one would read as "not red" while nothing was seen. A cancelled run
+        # (superseded by the next merge's, per ci.yml's concurrency group) is covered by that later run.
+        missing = sorted(pr for sha, pr in merge_shas.items() if sha not in latest)
+        unfinished = [r['pr'] for r in push_ci if r.get('conclusion') is None]
+        if missing:
+            red_gap = f'no ci.yml push run on the base for the merge of PR(s) {missing}'
+        elif unfinished:
+            red_gap = f'the push run(s) for PR(s) {unfinished} had not finished'
+        else:
+            red = sum(1 for r in push_ci if r['conclusion'] in RED)
     wall = timeutil.minutes(start_text, end_text)
     wall_commit = (timeutil.minutes(start_text, report_commit['committer_date'])
                    if report_commit and report_commit.get('committer_date') else None)
@@ -422,10 +453,34 @@ def _gather(trial, run, client, st, start, env):
     out['base_push_ci'] = push_ci
     out['red_ci_on_base'] = red
     out['ci_push_observable'] = observable
+    if red_gap:
+        out['red_ci_incomplete'] = red_gap
     return out, report_pr, notes
 
 
 # -- data files ----------------------------------------------------------------
+
+def _carry_verdicts(path, run_id, ev):
+    """Copy `correct_vs_key` / `verdict_source` from an existing evidence file onto the same PRs, so a
+    re-collect after `apply-verdicts` does not erase the grading; returns how many were kept."""
+    if not os.path.exists(path):
+        return 0
+    try:
+        with open(path, encoding='utf-8') as fh:
+            old = json.load(fh)['runs'][run_id]['prs']
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f'{path} exists but cannot be read ({exc}); move it aside before collecting again') from exc
+    verdicts = {p.get('pr'): p for p in old if p.get('correct_vs_key') is not None}
+    kept = 0
+    for pr in ev['prs']:
+        prior = verdicts.get(pr['pr'])
+        if prior:
+            pr['correct_vs_key'] = prior['correct_vs_key']
+            if 'verdict_source' in prior:
+                pr['verdict_source'] = prior['verdict_source']
+            kept += 1
+    return kept
+
 
 def _write_json(path, value):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -538,8 +593,10 @@ def _summary(env, trial, run, ev, report_pr, notes):
               f'{states["open"]} open); report PR: {("#" + str(report_pr["number"])) if report_pr else "none"}')
     env.print(f'  ci.yml runs on queue PRs: {ev["queue_ci_runs"]} ({ev["queue_ci_attempts"]} attempts); '
               f'all PR workflow runs: {ev["queue_all_pr_workflow_runs"]}')
-    if ev['ci_push_observable']:
-        env.print(f'  red CI on the base: {ev["red_ci_on_base"]} of {len(ev["base_push_ci"])} push runs')
+    if ev['ci_push_observable'] and ev['red_ci_on_base'] is None:
+        env.print(f'  red CI on the base: no count ({ev.get("red_ci_incomplete")})')
+    elif ev['ci_push_observable']:
+        env.print(f'  red CI on the base: {ev["red_ci_on_base"]} of {len(ev["base_push_ci"])} merges')
     else:
         why = 'cannot be read' if ev['ci_push_observable'] is None else 'does not run on push to the base'
         env.print(f'  red CI on the base: not observable (ci.yml at T0 {why})')
@@ -591,6 +648,13 @@ def collect(trial, run, env, state_file=None, data_dir=None, record_dir=None, fi
     evidence = {'collected_at_utc': timeutil.iso(env.now()), 'trial': trial.id, 'run': run.id,
                 'methods': METHODS, 'runs': {run.id: ev}}
     path = os.path.join(data, 'evidence', f'{run.id}.json')
+    try:
+        kept = _carry_verdicts(path, run.id, ev)
+    except ValueError as exc:
+        env.print(f'collect {run.id}: {exc}')
+        return 2
+    if kept:
+        env.print(f'  kept {kept} grader verdict(s) already applied to {os.path.relpath(path, trial.root)}')
     _write_json(path, evidence)
     try:
         update_runs_json(trial, run, data, st, start, ev['T0'])

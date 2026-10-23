@@ -1,8 +1,9 @@
 """The collector against October's real GitHub responses, and the rules it must keep.
 
-`OctoberGolden` replays recorded responses for B1-cx (fixtures/october/github-B1-cx, taken through
-collect's own --record path) and requires the evidence to equal what G-codex computed by hand for
-every field measures.py reads. The synthetic tests use an in-memory GitHub and the trial-2 sandbox.
+`OctoberGolden` (B1-cx, Codex desktop) and `OctoberGoldenA1` (A1-cd, Claude desktop, whose owner
+comments include smoke-only ones) replay recorded responses (fixtures/october/github-<run>, taken
+through collect's own --record path) and require the evidence to equal what G-codex computed by hand
+for every field measures.py reads. The synthetic tests use an in-memory GitHub and the trial-2 sandbox.
 """
 import base64
 import io
@@ -38,13 +39,13 @@ def write_json(path, value):
 class OctoberBox:
     """A throwaway repo root holding October's trial.json, the way it sits in the repository."""
 
-    def __init__(self):
+    def __init__(self, trial_file='trial.json'):
         self.tmp = tempfile.mkdtemp(prefix='trialctl-oct-')
         self.root = os.path.join(self.tmp, 'repo')
         self.trial_dir = os.path.join(self.root, 'docs', 'reports', 'harness-evals', 'trial')
         os.makedirs(os.path.join(self.root, '.git'))
         os.makedirs(self.trial_dir)
-        shutil.copy(os.path.join(OCT_FX, 'trial.json'), self.trial_dir)
+        shutil.copy(os.path.join(OCT_FX, trial_file), os.path.join(self.trial_dir, 'trial.json'))
         self.data = os.path.join(self.tmp, 'data')
         self.out = io.StringIO()
 
@@ -56,8 +57,9 @@ class OctoberBox:
                    environ={'HOME': self.tmp, 'PATH': os.environ.get('PATH', '')}, out=self.out, system='Darwin')
 
 
-class OctoberGolden(unittest.TestCase):
-    RUN = 'B1-cx'
+class GoldenComparisons:
+    """The comparisons every recorded October run must pass; subclasses name the run and its files."""
+    RUN = TRIAL_FILE = EVIDENCE = None
     # every field measures.py reads, per PR
     PR_FIELDS = ('issue', 'state', 'merged_at', 'cycle_minutes', 'copilot_review_bodies',
                  'owner_review_comment_bodies', 'owner_all_comment_bodies', 'diff_added', 'diff_deleted',
@@ -73,14 +75,14 @@ class OctoberGolden(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.box = OctoberBox()
+        cls.box = OctoberBox(cls.TRIAL_FILE)
         cls.trial = cls.box.trial()
         cls.code = collect.collect(cls.trial, cls.trial.run(cls.RUN), cls.box.env(),
-                                   state_file=os.path.join(OCT_FX, 'state-B1-cx.json'), data_dir=cls.box.data,
-                                   fixtures_dir=os.path.join(OCT_FX, 'github-B1-cx'))
+                                   state_file=os.path.join(OCT_FX, f'state-{cls.RUN}.json'), data_dir=cls.box.data,
+                                   fixtures_dir=os.path.join(OCT_FX, f'github-{cls.RUN}'))
         cls.doc = read_json(os.path.join(cls.box.data, 'evidence', f'{cls.RUN}.json'))
         cls.mine = cls.doc['runs'][cls.RUN]
-        cls.october = read_json(os.path.join(helpers.OCTOBER, 'data', 'G-codex-EVIDENCE-B.json'))['runs'][cls.RUN]
+        cls.october = read_json(os.path.join(helpers.OCTOBER, 'data', cls.EVIDENCE))['runs'][cls.RUN]
 
     @classmethod
     def tearDownClass(cls):
@@ -91,7 +93,9 @@ class OctoberGolden(unittest.TestCase):
 
     def test_run_level_fields_equal_the_october_evidence(self):
         for key in self.RUN_FIELDS + self.RUN_EXTRA:
-            self.assertEqual(self.mine[key], self.october[key], key)
+            # queue_cutoff exists only where the supervisor set one (B1-cx); absent on both sides otherwise
+            self.assertEqual(self.mine.get(key), self.october.get(key), key)
+        self.assertIn('start', self.mine)
         self.assertEqual(self.mine['report_last_commit']['committer_date'],
                          self.october['report_last_commit']['committer_date'])
         self.assertEqual(self.mine['report_last_commit']['sha'], self.october['report_last_commit']['sha'])
@@ -114,6 +118,10 @@ class OctoberGolden(unittest.TestCase):
             self.assertEqual(sorted(r['id'] for r in mine['ci_runs']), sorted(r['id'] for r in theirs['ci_runs']))
             self.assertEqual(sorted((r['id'], r['conclusion'], r['run_attempt']) for r in mine['ci_runs']),
                              sorted((r['id'], r['conclusion'], r['run_attempt']) for r in theirs['ci_runs']))
+
+
+class OctoberGolden(GoldenComparisons, unittest.TestCase):
+    RUN, TRIAL_FILE, EVIDENCE = 'B1-cx', 'trial.json', 'G-codex-EVIDENCE-B.json'
 
     def test_known_differences_from_october(self):
         # 1. October's strict verdicts were typed in by the grader; collect leaves the field for apply-verdicts.
@@ -200,6 +208,24 @@ class OctoberGolden(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn('no fixture for', box.out.getvalue())
         self.assertFalse(os.path.exists(os.path.join(box.data, 'evidence')))
+
+
+class OctoberGoldenA1(GoldenComparisons, unittest.TestCase):
+    RUN, TRIAL_FILE, EVIDENCE = 'A1-cd', 'trial-A1-cd.json', 'G-codex-EVIDENCE-A.json'
+
+    def test_the_smoke_only_owner_comments_are_excluded_as_october_did(self):
+        # A Claude run's PRs carry owner smoke-evidence comments beside the review comments; G-codex excluded
+        # them by hand. Five PRs differ, one comment each, and the field comparisons above pin every count.
+        by = {p['pr']: p for p in self.mine['prs']}
+        differ = {n: (p['owner_review_comment_bodies'], p['owner_all_comment_bodies'])
+                  for n, p in by.items() if p['owner_review_comment_bodies'] != p['owner_all_comment_bodies']}
+        self.assertEqual(differ, {8632: (1, 2), 8633: (1, 2), 8635: (1, 2), 8639: (2, 3), 8640: (1, 2)})
+
+    def test_the_report_pr_and_queue_totals(self):
+        by = {p['pr']: p for p in self.mine['prs']}
+        self.assertEqual((by[8642]['issue'], by[8642]['state']), (None, 'merged'))
+        self.assertEqual((self.mine['merged_queue_prs'], self.mine['queue_ci_runs'],
+                          self.mine['queue_all_pr_workflow_runs']), (10, 21, 53))
 
 
 # -- an in-memory GitHub for the synthetic scenarios ---------------------------
@@ -536,22 +562,50 @@ class Timeline(Scenario):
 
 
 class RedCi(Scenario):
-    PUSHES = [wf(31, '2026-11-02T10:40:00Z', conclusion='failure', event='push'),
-              wf(32, '2026-11-02T10:50:00Z', conclusion='success', event='push'),
-              wf(33, '2026-11-02T11:00:00Z', conclusion='failure', event='push', path='.github/workflows/other.yml'),
-              wf(34, '2026-10-01T10:00:00Z', conclusion='failure', event='push')]  # before the window
+    @staticmethod
+    def push(run_id, sha, created, conclusion='success', path='.github/workflows/ci.yml'):
+        return dict(wf(run_id, created, path=path, conclusion=conclusion, event='push'), head_sha=sha)
 
-    def test_observable_counts_failures_in_the_window(self):
+    # Merges in the scenario: PR 101 (m101), 103 (m103) and the report-like last merge 104 (m104, 11:30,
+    # the end of the window). Push runs are matched to merges by commit, so 104's run, which starts
+    # after the window closes, still counts.
+    PUSHES = [push.__func__(31, 'm101', '2026-11-02T10:35:30Z', 'failure'),
+              push.__func__(32, 'm103', '2026-11-02T10:55:30Z'),
+              push.__func__(33, 'm103', '2026-11-02T10:55:31Z', 'failure', path='.github/workflows/other.yml'),
+              push.__func__(34, 'zzz', '2026-11-02T10:40:00Z', 'failure'),   # not a merge of this run
+              push.__func__(35, 'm104', '2026-11-02T11:31:00Z')]             # after the window
+
+    def test_observable_counts_failures_per_merge_by_commit(self):
         ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=self.PUSHES))
         self.assertIs(ev['ci_push_observable'], True)
         self.assertEqual(ev['red_ci_on_base'], 1)
-        self.assertEqual([r['id'] for r in ev['base_push_ci']], [31, 32])
-        self.assertEqual([r['id'] for r in ev['base_push_actions']], [31, 32, 33])
-        self.assertIn('red CI on the base: 1 of 2 push runs', self.output)
+        self.assertEqual([(r['id'], r['pr']) for r in ev['base_push_ci']], [(31, 101), (32, 103), (35, 104)])
+        self.assertNotIn('red_ci_incomplete', ev)
+        self.assertIn('red CI on the base: 1 of 3 merges', self.output)
+
+    def test_a_rerun_of_a_merge_push_counts_its_latest_attempt(self):
+        rerun = self.PUSHES + [self.push(36, 'm101', '2026-11-02T10:45:00Z')]
+        ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=rerun))
+        self.assertEqual(ev['red_ci_on_base'], 0)
 
     def test_observable_with_no_failure_is_a_real_zero(self):
-        ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=[self.PUSHES[1]]))
+        ok = [self.push(41, 'm101', '2026-11-02T10:36:00Z'), self.push(42, 'm103', '2026-11-02T10:56:00Z'),
+              self.push(43, 'm104', '2026-11-02T11:31:00Z')]
+        ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=ok))
         self.assertEqual((ev['ci_push_observable'], ev['red_ci_on_base']), (True, 0))
+
+    def test_a_merge_without_its_push_run_is_no_count_not_zero(self):
+        ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=self.PUSHES[1:2]))
+        self.assertIs(ev['ci_push_observable'], True)
+        self.assertIsNone(ev['red_ci_on_base'])
+        self.assertEqual(ev['red_ci_incomplete'], 'no ci.yml push run on the base for the merge of PR(s) [101, 104]')
+        self.assertIn('red CI on the base: no count', self.output)
+
+    def test_a_push_run_still_in_progress_is_no_count(self):
+        running = self.PUSHES[:4] + [dict(self.PUSHES[4], conclusion=None, status='in_progress')]
+        ev = self.collect(self.github(ci_text=CI_PUSH_TRIAL, push_runs=running))
+        self.assertIsNone(ev['red_ci_on_base'])
+        self.assertIn('PR(s) [104] had not finished', ev['red_ci_incomplete'])
 
     def test_not_observable_when_ci_does_not_run_on_push_to_the_base(self):
         ev = self.collect(self.github(ci_text=CI_PUSH_MAIN, push_runs=self.PUSHES))
@@ -585,6 +639,34 @@ class RedCi(Scenario):
         collect.collect(trial, trial.run('A-cd-r1'), box.env(github=fake2), data_dir=os.path.join(box.tmp, 'd'))
         self.assertEqual(fake2.asked(r'compare/'), [])
         self.assertEqual(read_json(os.path.join(box.tmp, 'd', 'runs.json'))['T0'], 'b' * 40)
+
+
+class Recollect(Scenario):
+    def test_a_second_collect_keeps_the_verdicts_already_applied(self):
+        self.collect()
+        path = os.path.join(self.data, 'evidence', 'A-cd-r1.json')
+        evidence = read_json(path)
+        merged = [p for p in evidence['runs']['A-cd-r1']['prs'] if p['state'] == 'merged']
+        for p in merged:
+            p['correct_vs_key'], p['verdict_source'] = 'yes', 'G-codex'
+        write_json(path, evidence)
+        again = self.collect()
+        self.assertIn(f'kept {len(merged)} grader verdict(s)', self.output)
+        kept = {p['pr']: (p['correct_vs_key'], p.get('verdict_source')) for p in again['prs'] if p['state'] == 'merged'}
+        self.assertEqual(kept, {p['pr']: ('yes', 'G-codex') for p in merged})
+
+    def test_an_unreadable_previous_evidence_file_stops_rather_than_overwrites(self):
+        path = os.path.join(self.box.tmp, 'data', 'evidence', 'A-cd-r1.json')
+        os.makedirs(os.path.dirname(path))
+        with open(path, 'w') as fh:
+            fh.write('{not json')
+        env = self.box.env(github=self.github())
+        trial = self.box.trial()
+        code = collect.collect(trial, trial.run('A-cd-r1'), env, data_dir=os.path.join(self.box.tmp, 'data'))
+        self.assertEqual(code, 2)
+        self.assertIn('cannot be read', env.out.getvalue())
+        with open(path) as fh:
+            self.assertEqual(fh.read(), '{not json')
 
 
 class StateAndExit(Scenario):

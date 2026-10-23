@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8636/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🔵 Needs a closer look\n\nThe change is small, correct, and well-tested, but it alters user-facing diagnostic behavior in the security/preflight path and warrants a final human confirmation.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\n`chroxy doctor`'s port-availability check previously always probed `8765` unless the `-p/--port` flag was passed, ignoring a `port` set in `config.json` or the `PORT` env var — even though `chroxy start` honours both. This made the diagnostic misleading: it could report `8765 is available` while `start` would actually bind (and potentially conflict on) a different port. This PR routes doctor's port resolution through the same `mergeConfig` precedence that `start` uses, so the two can no longer drift.\n\n**Changes:**\n- In `runDoctorChecks`, the probed port is now resolved via `mergeConfig` (precedence: `-p` flag → `PORT` env → `config.json` `port` → `8765`), fed the config doctor already parsed, instead of `port || 8765`.\n- Adds a `DEFAULT_PORT` constant and updates the JSDoc for `options.port` to document the new resolution.\n- Adds `doctor-cmd-port.test.js` covering each precedence tier at both the `runDoctorChecks` library level and the real `doctor` command, plus a start-parity assertion against `loadAndMergeConfig(...).port`.\n\nThis change is consistent with the existing doctor.js convention of resolving \"what `start` would use\" (provider via `resolveProviders`, binary-provenance via `resolveBinaryProvenanceMode`) through the shared loader rather than a hand-rolled read. `start`'s own preflight already passes its merged port as the CLI tier, so its behaviour is unchanged.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​server/​src/​doctor.js` | Resolve the Port-check port via `mergeConfig` (flag > `PORT` > config `port` > `DEFAULT_PORT`) instead of always `8765`; add `DEFAULT_PORT` and update JSDoc. |\r\n| `packages/​server/​tests/​doctor-cmd-port.test.js` | New isolated tests covering every precedence tier at the library and CLI levels, plus a start-parity check, all under temp `CHROXY_CONFIG_DIR`/`HOME`. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561438811,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:33:09Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

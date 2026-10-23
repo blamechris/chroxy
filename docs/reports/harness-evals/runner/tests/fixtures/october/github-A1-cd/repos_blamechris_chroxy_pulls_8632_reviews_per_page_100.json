@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8632/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe fix is a minimal, self-contained correction to one pure display helper with an unchanged return type, verified safe for all callers and backed by a proof-of-red regression test.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR fixes a display bug (#8595) in `modelChoices`, the shared store-core helper that builds the model-picker label list for both the dashboard and the mobile app. When two custom targets from different families shared both a base label and a pinned-version descriptor (e.g. `alpha → claude-alpha-1-0` and `beta → claude-beta-1-0`, both labelled `Custom`), the final collision fallback mistakenly read the already-augmented label (`Custom (pinned 1.0)`) as the base, producing doubled parentheticals like `Custom (pinned 1.0) (claude-alpha-1-0)`.\n\n**Changes:**\n- Each intermediate choice now carries its original `base` label alongside the augmented `choice` row, so the final collision fallback restarts from the base label and emits a single discriminator (`Custom (claude-alpha-1-0)`).\n- The public return type (`ModelInfo[]`), selection IDs, and full IDs are untouched, and input rows are not mutated.\n- Added a cross-family collision regression test plus a control verifying the pinned descriptor is retained when it alone disambiguates.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| packages/​store-core/​src/​model-display.ts | Wraps each choice as `{ base, choice }` so the final fallback uses the original base label instead of the augmented one, fixing the repeated-descriptor output. |\r\n| packages/​store-core/​src/​model-display.test.ts | Adds a cross-family collision regression (one discriminator, no `pinned`, IDs preserved, input unmutated) and a control keeping the pinned descriptor when it alone disambiguates. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561394186,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:13:57Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

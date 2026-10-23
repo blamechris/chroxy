@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import subprocess
 import unittest
 from collections import Counter
 
@@ -35,6 +36,13 @@ class Trial2Roster(unittest.TestCase):
                 self.assertEqual(len(in_block), 2)
                 firsts.append(in_block[0].harness.chroxy)
             self.assertEqual(sorted(firsts), [False, True], f'arm {arm}: {firsts}')
+
+    def test_rendered_missions_cannot_reach_main(self):
+        # A rendered mission on main would sit in every clone and leave `cut` nothing to commit.
+        def ignored(rel):
+            return subprocess.run(['git', '-C', helpers.REPO_ROOT, 'check-ignore', '-q', '--no-index', rel]).returncode
+        self.assertEqual(ignored(f'{helpers.TRIAL_REL}/missions/A-cd-r1.md'), 0)
+        self.assertEqual(ignored(f'{helpers.TRIAL_REL}/missions/TEMPLATE.md'), 1)
 
     def test_bases_are_trial2_namespaced_and_unique(self):
         bases = [r.base for r in self.trial.runs]
@@ -193,6 +201,18 @@ class Rendering(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(self.box.root, self.trial.mission_relpath(run))))
         for gid in ('G-claude', 'G-codex'):
             self.assertTrue(os.path.exists(os.path.join(self.box.trial_dir, 'graders', f'{gid}.md')))
+
+    def test_cli_accepts_trial_before_or_after_the_subcommand(self):
+        before = cli.build_parser().parse_args(['--trial', self.box.trial_dir, 'verify-key', 'K.md'])
+        after = cli.build_parser().parse_args(['verify-key', 'K.md', '--trial', self.box.trial_dir])
+        self.assertEqual((before.trial, before.key), (self.box.trial_dir, 'K.md'))
+        self.assertEqual((after.trial, after.key), (self.box.trial_dir, 'K.md'))
+        # Not repeated after the subcommand: the top-level value (or its default) stands.
+        self.assertEqual(cli.build_parser().parse_args(['--trial', 'X', 'key-template']).trial, 'X')
+        rendered = render.grader(self.trial, 'G-codex', 'codex', 'A')
+        command = re.search(r'trialctl\.py (.+?verify-key [^`]+)`', rendered, re.S).group(1).split()
+        args = cli.build_parser().parse_args(command)
+        self.assertEqual((args.command, args.trial), ('verify-key', self.trial.trial_dir))
 
     def test_cli_reports_config_errors_with_exit_2(self):
         code = cli.main(['--trial', os.path.join(self.box.tmp, 'missing'), 'key-template'], env=self.box.env())

@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8640/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nIt is a mechanical, well-tested single-constant deduplication whose widened `readonly string[]` types are used read-only by all verified consumers, with dist artifacts consistent with source and no behavioral change.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR deduplicates the default quiet-hours bypass set (`permission`, `activity_error`), which was previously a hand-maintained literal in three places (server, mobile app, dashboard) with nothing keeping them in sync. It introduces a per-category `defaultBypass` flag on the `@chroxy/protocol` notification-category roster and derives a single `DEFAULT_BYPASS_CATEGORIES` export from it, following the existing derived-export pattern (`NOTIFICATION_CATEGORY_ORDER`, `_LABELS`). The server keeps its own runtime copy (to avoid depending on the UI/Zod graph), now pinned to the protocol flag in both directions by the roster test.\n\n**Changes:**\n- Add an optional `defaultBypass` flag to `NotificationCategoryMeta` and a derived `DEFAULT_BYPASS_CATEGORIES` export in `@chroxy/protocol` (plus rebuilt dist artifacts).\n- Replace the local bypass literals in the app (`constants.ts`) and dashboard (`SettingsPanel.tsx`) with the protocol export, widening `QuietHoursEditor`'s `bypassCategories` prop to `readonly string[]`.\n- Add roster/app tests that pin the server's and clients' bypass sets to the protocol flag in both directions.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​protocol/​src/​notification-categories.ts` | Adds `defaultBypass` flag + derived `DEFAULT_BYPASS_CATEGORIES` export and explanatory docs. |\r\n| `packages/​protocol/​dist/​notification-categories.js` | Rebuilt JS artifact matching the new source. |\r\n| `packages/​protocol/​dist/​notification-categories.d.ts` | Rebuilt type declarations for the new flag/export. |\r\n| `packages/​server/​src/​notification-prefs.js` | Comment-only update documenting the protocol pinning; runtime literal unchanged. |\r\n| `packages/​server/​tests/​notification-category-roster.test.js` | New bidirectional tests pinning server vs. protocol bypass sets. |\r\n| `packages/​dashboard/​src/​components/​SettingsPanel.tsx` | Removes local literal, imports protocol export, widens prop to `readonly string[]`. |\r\n| `packages/​app/​src/​components/​settings/​constants.ts` | Re-exports the protocol bypass set instead of a local literal. |\r\n| `packages/​app/​src/​components/​settings/​QuietHoursEditor.tsx` | Widens `bypassCategories` prop to `readonly string[]`. |\r\n| `packages/​app/​src/​__tests__/​components/​SettingsScreenNotificationPrefs.test.ts` | Asserts the constant is the protocol set with no local literal. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561450847,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:37:47Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

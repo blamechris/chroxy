@@ -9,10 +9,13 @@ serves is `../trial-2/PLAN.md`.
 
 It is standard-library Python with no model calls, so an operator can run it
 during a Claude run without drawing on the Claude plan. It never launches a run,
-never sends a message to a session and never restarts the daemon. Its only
-writes are a run's fresh clone, the run's state file, `trial.json`'s `t0`, the
-trial's `missions/` and `data/`, and, with `cut --push`, new `trial/*` base
-branches.
+never sends a message to a session and never restarts the daemon. What it
+writes: a run's fresh clone (and its `node_modules` from `npm ci`), the run's
+state file, `trial.json`'s `t0`, rendered missions and grader prompts (previews;
+`missions/*.md` other than the template is gitignored, because the real copy is
+committed on each base by `cut`), the trial's `data/`, and in the checkout `cut`
+runs from, a `git fetch`, a temporary worktree it removes again, and with
+`--push` the new `trial/*` base branches.
 
 ## Layout
 
@@ -44,11 +47,11 @@ GitHub error). "Could not check" is never reported as a pass.
 | `clone RUN` | owner, Mac | fresh clone outside the daemon checkout and every other work tree; git identity; `npm ci` under Node 22 |
 | `preflight RUN [--phase session --session ID]` | owner, Mac | clone shape, mission bytes, identity, Node, `gh` login; Claude effort in `~/.claude/settings.json`; Codex prompts compiled from this clone and CLI parity with the Codex app; Chroxy `allowAutoPermissionMode`, deploy agent unloaded, daemon commit unchanged; in the session phase, the daemon log's model and permission-mode lines for the new session and no interrupt |
 | `prepare RUN` | owner, Mac | `gate`, `clone`, `preflight`, then the launch card with the exact invocation |
-| `start RUN --meter …` | owner, Mac | records the usage readings and the send; refuses below the allowance floor |
+| `start RUN --meter …` | owner, Mac | records the usage readings and the send; refuses below the allowance floor, without a passing gate at the current T0 followed by a passing preflight (and session phase, for Chroxy), and for a run that already finished |
 | `verify-start RUN` | owner, Mac | reads the applied model, effort, permission mode and the mission's `TRIAL-PROBE` line back from the native transcript (Claude Code) or rollout (Codex); prints `STOP:` on any mismatch |
 | `finish RUN --meter … [--cost …] [--stop …]` | owner, Mac | end readings, stop cause, and whether `~/.claude/settings.json` changed during the run (#8704) |
 | `status RUN` | operator, anywhere with `gh` | read-only live view (October's `check-run.sh` for any trial): base tip, commits since T0, the base's PRs with mission-rule flags, the queue issues that must stay untouched, the main tip, whether the report has landed |
-| `collect RUN` | supervisor | GitHub evidence into `data/evidence/<RUN>.json` (October's grader-evidence schema plus timeline cross-references and push CI on the base) and the run's row in `data/runs.json` |
+| `collect RUN` | supervisor | GitHub evidence into `data/evidence/<RUN>.json` (October's grader-evidence schema plus timeline cross-references and each merge's push CI on the base) and the run's row in `data/runs.json`; a re-collect keeps verdicts already applied. The window starts at the probe's time from `verify-start` (else the recorded send) and ends at the report PR's merge (else `finish`'s end, else the cap); an optional `finish.queue_cutoff` in the state file overrides "queue done", which otherwise is the last queue merge |
 | `apply-verdicts FILE` | supervisor | folds a grader's `verdicts.json` into the evidence; refuses while a merged PR has no verdict |
 | `disputes A B [--markdown]` | supervisor | the items where the two graders differ, for the owner's rulings |
 | `verify-key KEY.md` | grader, owner | digest and size against `<trial>/KEY-COMMITMENT.md` |

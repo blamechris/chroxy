@@ -38,7 +38,14 @@ def build_parser():
     p = argparse.ArgumentParser(prog='trialctl', description='Prepare, check and collect controlled harness trial runs.')
     p.add_argument('--trial', default=os.environ.get('TRIALCTL_TRIAL', DEFAULT_TRIAL),
                    help='trial directory or trial.json (default: $TRIALCTL_TRIAL, else ../trial-2)')
+    # `--trial` is also accepted after the subcommand (`verify-key KEY.md --trial DIR`), so a
+    # command copied from a prompt in either order works; SUPPRESS keeps the top-level value
+    # when it is not repeated there.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument('--trial', default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     sub = p.add_subparsers(dest='command', required=True)
+    _add_parser = sub.add_parser
+    sub.add_parser = lambda name, **kw: _add_parser(name, parents=[common], **kw)
 
     s = sub.add_parser('render', help='render missions (and grader prompts) from trial.json')
     s.add_argument('runs', nargs='*', help='run ids (default: all)')

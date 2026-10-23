@@ -34,19 +34,23 @@ GitHub and the run's state file rather than transcribed into the README.
 A run is prepared only when every defect that can change its result is closed.
 The lists live in `trial.json` (`blockers`) so the owner can edit them;
 `trialctl gate <run>` reads each issue's state from GitHub and refuses while any
-is open, unless the owner records an override with a reason, which then goes
-into the run's row.
+is open, unless the owner records an override with a reason, which is kept in
+the run's state (`data/state/<run>.json` once collected). `trialctl start`, the
+step that commits a run, refuses unless a passing gate at the current T0 is
+recorded, followed by a passing preflight (and, for a Chroxy run, a passing
+session-phase preflight), so running the steps by hand cannot skip the gate.
 
 | Harness | Blocking (gate refuses) | Why | Mitigated by procedure instead |
 |---|---|---|---|
-| CY-codex | #8710, #8743 | REPORT rec 1: both incident runs were harness kills (false idle, deploy-tick kill) | #8744 (restore after restart): the deploy agent stays unloaded and the daemon is not restarted during a run (preflight checks) |
+| CY-codex | #8710, #8743 | REPORT rec 1: both incident runs were harness kills (false idle, deploy-tick kill) | #8744 (restore after restart): the deploy agent stays unloaded and the daemon is not restarted during a run (procedure; preflight checks that the deploy agent is unloaded and that the daemon checkout's commit is the same for every run) |
 | CY-claude | #8741, #8700 | REPORT rec 2–3: floored worktree edits cost five-minute timeouts; the header's effort control is not Claude Code's effort | — |
-| every CY run | — | — | #8703 (first-seconds interrupt): hands-off rule and `verify-start` catches an aborted first turn within minutes; #8704 (preview daemon writes user settings): preflight hashes `~/.claude/settings.json` at start and `verify-start`/`evidence` re-check it |
+| every CY run | — | — | #8703 (first-seconds interrupt): hands-off rule and `verify-start` catches an aborted first turn within minutes; #8704 (preview daemon writes user settings): `trialctl start` records the hash of `~/.claude/settings.json` and `finish` compares it |
 | none | — | #8709 (state reconciliation) helps supervision but does not change a run's result | — |
 
 `gate` also checks: `ci.yml` at T0 runs on push to `trial/**` (§1); no other
 trial-2 run is live (its state file has a start and no end); and the queue's
-issues are still open with no open PR.
+issues are still open. (No open PR for a queue issue is a selection rule, checked
+when the queue is picked, §4.)
 
 ## 3. Cells, repeats, order and allowance
 
@@ -76,8 +80,9 @@ a part-spent allowance risks run 6's quota stop. Rule: **every Codex run starts 
 100% of its allowance**, after the weekly reset or an owner-applied reset, and the
 reading is recorded; a Claude run starts with the 5-hour meter below 20% and the
 weekly meter below 70%. `trialctl start` takes the readings and refuses below the
-floor. A quota stop is recorded as an incident row and the run is repeated with the
-same id and an `-a2` attempt suffix. Expected span: about one week if the owner
+floor. A quota stop is recorded as an incident row, and the repeat is a new roster
+entry (`<id>-a2`, its own base cut at the same T0) added to `trial.json` by PR
+before its `prepare`; `start` refuses a second start of a finished run. Expected span: about one week if the owner
 applies Codex resets between arm-B runs, four weeks if only the weekly reset is used.
 
 Stop rules are PROTOCOL §3's: queue exhausted, 12 h from the first command, or a
@@ -187,10 +192,12 @@ Exposing Codex tokens in Chroxy's badge (REPORT rec 7) is a product follow-up.
 - Graders write `verdicts.json` (per run, per slot, per acceptance check) beside
   their GRADING.md. `trialctl disputes` diffs the two graders' files, so the owner's
   tiebreak list is computed rather than negotiated through the mailbox;
-  `trialctl apply-verdicts` folds the agreed verdicts and the rulings into the
-  evidence. A merged PR with no verdict stops `measures.py` rather than counting as
-  not delivered.
-- Red CI on the base is counted from push runs on the base after each merge.
+  `trialctl apply-verdicts` folds one grader's verdicts into the evidence (a
+  re-collect keeps them), and `measures.py` applies the owner's rulings from
+  `tiebreaks.json` on top. A merged PR with no verdict stops `measures.py` rather
+  than counting as not delivered.
+- Red CI on the base is counted from each merge's own `ci.yml` push run, matched by
+  the merge commit; a merge with no finished push run makes the count `n/a`, not 0.
 
 ## 9. Step list (replaces README steps 1–13)
 
@@ -200,7 +207,7 @@ Exposing Codex tokens in Chroxy's badge (REPORT rec 7) is a product follow-up.
 | 2 | Ruleset for `trial/t2-*`, Copilot setting | owner | runner README, "Owner commands" | — |
 | 3 | Queue candidates, owner picks ten, slots assigned | supervisor, owner | `trialctl queue-candidates` | one exploration session |
 | 4 | Key written, dry-graded, sealed; digest committed | owner, graders | `trialctl key-template`, `verify-key` | two short grader sessions |
-| 5 | Dry runs (the October three, on the current daemon) | owner | as October step 5 | three short runs |
+| 5 | Dry runs (the October three, on the current daemon), each with `prepare`, `start` and `verify-start`, so the transcript readers meet real files before run 1 | owner | as October step 5 | three short runs |
 | 6 | Cut all bases at T0 | supervisor | `trialctl cut --all --t0 <sha>` | — |
 | 7 | Per run: gate, clone, preflight, launch card | owner on the Mac | `trialctl prepare <run>` | — |
 | 8 | Per run: send the invocation, record the start | owner | `trialctl start <run>` | the run |

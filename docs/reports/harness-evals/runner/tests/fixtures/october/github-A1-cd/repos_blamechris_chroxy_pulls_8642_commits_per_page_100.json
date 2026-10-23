@@ -1,0 +1,21 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8642/commits?per_page=100",
+ "response": [
+  {
+   "commit": {
+    "committer": {
+     "date": "2026-10-18T05:50:41Z"
+    }
+   },
+   "sha": "fef280b7b01c8bde5fd6b83e74e35a11ea5c9bc4"
+  },
+  {
+   "commit": {
+    "committer": {
+     "date": "2026-10-18T05:52:42Z"
+    }
+   },
+   "sha": "36d1a3a410ee936427bd7d0ee03fce364fe1d0da"
+  }
+ ]
+}

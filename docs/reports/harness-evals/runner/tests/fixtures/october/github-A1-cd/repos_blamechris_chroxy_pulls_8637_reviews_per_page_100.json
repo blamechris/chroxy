@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8637/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nIt is purely additive, convention-following test coverage whose assertions I verified against the current production implementations, with no production code changes.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR adds test coverage for issue #8282, pinning the history stream `kind` field (reasoning/`thinking` classification) across the real persist → state-file → restore → replay path, plus the per-entry truncation path and the protocol schema. The underlying behavior already landed via prior replay-parity work (`streamKindOf`, `LEGACY_THINKING_ID`, the `_streamKinds` map, and the optional `kind` schema field); this change is a criterion-by-criterion audit that closes the specific gaps the existing suite left untested. There are no production code changes.\n\n**Changes:**\n- New `session-history-stream-kind.test.js`: four tests driving the real `SessionManager` (`serializeState`/`restoreState`/`getHistory`) and `sendHistoryEntry`, covering legacy-id classification on a pre-field state file, persisted-field survival under a non-legacy id, and kind retention through the 50 KiB truncation path.\n- New `schemas.test.js` test: pins `ServerMessageSchema.kind` as present-when-set, forward-compatible for unknown kinds, absent-by-default, and length-bounded (max 32).\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​server/​tests/​session-history-stream-kind.test.js` | New file: four tests proving the reasoning `kind` survives persist/restore and truncation, and that legacy `-thinking-<n>`/`-thinking` ids still classify as reasoning on replay. |\r\n| `packages/​protocol/​tests/​schemas.test.js` | Adds one test asserting the replay `kind` field is retained, forward-compatible, optional, and bounded on `ServerMessageSchema`. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561440353,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:33:31Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

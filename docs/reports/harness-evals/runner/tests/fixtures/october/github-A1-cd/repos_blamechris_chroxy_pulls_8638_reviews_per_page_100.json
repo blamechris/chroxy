@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8638/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe one-function change reuses a verified pure helper, correctly handles every traced edge case, only tightens an internal loopback check, and is backed by thorough unit tests.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR fixes a classification bug in `isLoopbackHost` (`packages/server/src/bind-host.js`). Previously, IPv4-mapped IPv6 hosts were classified as loopback by naive string prefix matching (`::ffff:127.` / `::ffff:7f`), which incorrectly matched non-loopback addresses like `::ffff:7f:1` (which is actually `0.127.0.1`) and the incomplete `::ffff:7f`. The fix reuses the existing `mappedV6ToV4` helper from `ssrf-guard.js` to parse the full embedded IPv4 address and only treats it as loopback when it falls in `127.0.0.0/8`. This tightens an internal host-locality check that feeds the non-loopback bind warning and related callers, so it is a small, security-positive correction.\n\n**Changes:**\n- Replace prefix-matching of IPv4-mapped IPv6 loopback with a full parse via `mappedV6ToV4`, correctly rejecting `::ffff:7f:1` and `::ffff:7f`.\n- Add focused unit tests pinning hex/dotted tails, case-insensitivity, first-hextet boundaries (`7e00`/`8000`), extra hextets, and malformed dotted tails, with documented proof-of-red.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| packages/​server/​src/​bind-host.js | Parses the IPv4-mapped IPv6 tail with `mappedV6ToV4` and checks for `127.` instead of prefix matching. |\r\n| packages/​server/​tests/​bind-host.test.js | Adds tests covering hex/dotted forms, case, hextet boundaries, and malformed inputs. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561443272,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:34:37Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

@@ -212,7 +212,7 @@ def gate(trial, run, env, accept_open, state_file):
         results.append(checks.failed('T0 set', 'trial.json records no t0; cut the bases first'))
     results.append(_ci_check(trial, run, gh))
     results.append(_live_check(trial, run, env))
-    st['gate'] = {'at': _at(env), 'checks': _dicts(results), 'accepted_open': accepted}
+    st['gate'] = {'at': _at(env), 't0': trial.t0, 'checks': _dicts(results), 'accepted_open': accepted}
     overrides = st.setdefault('overrides', [])
     for number, reason in accepted.items():
         entry = {'kind': 'accept-open', 'issue': int(number), 'reason': reason}
@@ -282,7 +282,8 @@ def _cut_one(trial, run, env, repo, t0, want, push):
         os.makedirs(os.path.dirname(target), exist_ok=True)
         with open(target, 'wb') as fh:
             fh.write(want)
-        r = _git(env, work, 'add', '--', rel)
+        # -f: rendered missions are gitignored on main (trial-2/missions/.gitignore); the base is where one belongs.
+        r = _git(env, work, 'add', '-f', '--', rel)
         if not r.ok:
             return checks.failed(name, f'git add failed: {_tail(r)}')
         r = _git(env, work, 'commit', '-m', f'docs(trial): mission for {run.id}')
@@ -298,6 +299,9 @@ def _cut_one(trial, run, env, repo, t0, want, push):
         command = f'git -C {repo} push origin {sha}:refs/heads/{run.base}'
         if not push:
             return checks.passed(name, f'built {sha}, not pushed (re-run with --push, or: {command})')
+        url = _git(env, repo, 'remote', 'get-url', 'origin')
+        if not url.ok or not _origin_is_trial_repo(trial, env, url.stdout.strip()):
+            return checks.failed(name, f'origin is {url.stdout.strip() or "unreadable"}, not {trial.repo}; nothing pushed')
         r = _git(env, work, 'push', 'origin', f'HEAD:refs/heads/{run.base}')
         if not r.ok:
             return checks.failed(name, f'git push failed: {_tail(r)}')
@@ -311,6 +315,16 @@ def _cut_one(trial, run, env, repo, t0, want, push):
             _git(env, repo, 'worktree', 'remove', '--force', work)
         shutil.rmtree(tmp, ignore_errors=True)
         _git(env, repo, 'worktree', 'prune')
+
+
+def _origin_is_trial_repo(trial, env, url):
+    """True when `url` names trial.repo on GitHub (https or ssh, with or without .git), or is the
+    configured `paths.clone_source` (a local repository in tests)."""
+    source = _path(trial, env, 'clone_source')
+    if source and os.path.realpath(env.expand(url)) == os.path.realpath(source):
+        return True
+    match = re.match(r'^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+/[^/]+?)(?:\.git)?/?$', url)
+    return bool(match) and match.group(1).lower() == trial.repo.lower()
 
 
 def cut(trial, runs, env, t0, push, repo_dir):
@@ -756,10 +770,13 @@ def _preflight_session(trial, run, env, session, st, state_file):
     names = ('session model', 'session permission mode', 'session interrupt')
     results = []
     try:
+        if not path:
+            raise OSError('paths.daemon_log is not set in trial.json')
         with open(path, encoding='utf-8', errors='replace') as fh:
             text = fh.read()
     except (OSError, TypeError) as exc:
-        results = [checks.unverified(n, f'cannot read the daemon log {path}: {exc}') for n in names]
+        where = f' {path}' if path else ''
+        results = [checks.unverified(n, f'cannot read the daemon log{where}: {exc}') for n in names]
     else:
         found = native.session_findings(text, session)
         facts['model'] = found['model'][0] if found['model'] else None
@@ -867,11 +884,55 @@ def prepare(trial, run, env, accept_open, skip_install, state_file):
 
 # -- start ---------------------------------------------------------------------
 
-def _latest_pre(st):
+def _latest_pre(st, phase='pre'):
     for entry in reversed(st.get('preflight') or []):
-        if entry.get('phase') == 'pre':
+        if entry.get('phase') == phase:
             return entry
     return None
+
+
+def _not_passed(entry):
+    """The names and statuses of a recorded step's checks that did not pass; ['no checks recorded'] if none ran."""
+    if not entry.get('checks'):
+        return ['no checks recorded']
+    return [f'{c.get("name")} {c.get("status")}' for c in entry['checks'] if c.get('status') != checks.PASS]
+
+
+def _order_problems(trial, run, st):
+    """What the recorded steps say about sending now: the gate passed at this T0, then a pre-send
+    preflight passed, then (Chroxy) the session-phase preflight passed. `start` is the step that
+    commits the run, so it is the one that reads them; running clone, preflight and start by hand
+    must not skip the gate (the wired-to-some-callers shape, #7262)."""
+    problems = []
+    gate = st.get('gate')
+    if not gate:
+        problems.append('no entry gate is recorded; run `trialctl gate` (or `prepare`)')
+    else:
+        if gate.get('t0') != trial.t0:
+            problems.append(f'the gate was recorded at T0 {str(gate.get("t0"))[:12]}, not the current {str(trial.t0)[:12]}; run it again')
+        bad = _not_passed(gate)
+        if bad:
+            problems.append(f'the entry gate ({gate.get("at")}) did not pass: {", ".join(bad)}')
+    pre = _latest_pre(st)
+    if pre is None:
+        problems.append('no pre-send preflight is recorded; run `trialctl preflight` (or `prepare`)')
+    else:
+        bad = _not_passed(pre)
+        if bad:
+            problems.append(f'the latest preflight ({pre.get("at")}) did not pass: {", ".join(bad)}')
+        if gate and str(pre.get('at') or '') < str(gate.get('at') or ''):
+            problems.append('the latest preflight is older than the gate; run `trialctl preflight` again')
+    if run.harness.chroxy:
+        session = _latest_pre(st, 'session')
+        if session is None:
+            problems.append('no session-phase preflight is recorded; run `trialctl preflight --phase session --session <id>`')
+        else:
+            bad = _not_passed(session)
+            if bad:
+                problems.append(f'the session-phase preflight ({session.get("at")}) did not pass: {", ".join(bad)}')
+            if pre and str(session.get('at') or '') < str(pre.get('at') or ''):
+                problems.append('the session-phase preflight is older than the pre-send preflight; run it again')
+    return problems
 
 
 def start(trial, run, env, meters, override, sent_at, state_file):
@@ -894,17 +955,19 @@ def start(trial, run, env, meters, override, sent_at, state_file):
         except ValueError:
             env.print(f'start {run.id}: --sent-at {sent_at!r} is not an ISO-8601 timestamp')
             return 2
-    live = state.live_runs(trial, exclude=run.id, home=env.home)
+    if st.get('finish'):
+        env.print(f'start {run.id}: refused, this run already finished at {st["finish"].get("ended_at")}. A repeat is a '
+                  f'new roster entry (its own id and base, added to trial.json by PR), never a second start of this one.')
+        return 1
+    try:
+        live = state.live_runs(trial, exclude=run.id, home=env.home)
+    except (OSError, ValueError) as exc:
+        env.print(f'start {run.id}: refused, the other runs\' state files cannot be read ({exc}), so an overlap cannot be ruled out')
+        return 1
     if live:
         env.print(f'start {run.id}: refused, {", ".join(live)} started and has not finished; runs never overlap')
         return 1
-    problems = []
-    pre = _latest_pre(st)
-    if pre is None:
-        problems.append('no pre-send preflight is recorded; run `trialctl preflight` (or `prepare`)')
-    elif not pre.get('checks') or any(c.get('status') != checks.PASS for c in pre['checks']):
-        notes = [f'{c.get("name")} {c.get("status")}' for c in pre.get('checks', []) if c.get('status') != checks.PASS]
-        problems.append(f'the latest preflight ({pre.get("at")}) did not pass: {", ".join(notes) or "no checks recorded"}')
+    problems = _order_problems(trial, run, st)
     for meter in required:
         key, kind = FLOORS[meter]
         limit = trial.allowance.get(key)
@@ -915,7 +978,7 @@ def start(trial, run, env, meters, override, sent_at, state_file):
             problems.append(f'{meter} is {value:g}, below the floor of {limit:g} (every run starts on a fresh allowance)')
         elif kind == 'max' and value > limit:
             problems.append(f'{meter} is {value:g}, above the ceiling of {limit:g}')
-    if st.get('start') and not st.get('finish'):
+    if st.get('start'):
         problems.append(f'a start is already recorded at {st["start"].get("sent_at")}; re-recording replaces it')
     if problems and not override:
         env.print(f'start {run.id}: refused')
@@ -925,8 +988,12 @@ def start(trial, run, env, meters, override, sent_at, state_file):
         return 1
     previous = st.get('start')
     st['start'] = {'sent_at': sent, 'meters': meters, 'override': override or None}
-    if previous and not st.get('finish'):
+    if previous:
         st['start']['replaces'] = previous
+    if run.harness.family == 'claude':
+        # The baseline `finish` compares against: taken at the send, so a later preflight re-run cannot move it.
+        settings = _path(trial, env, 'claude_settings')
+        st['start']['claude_settings_sha256'] = _sha256(settings) if settings else None
     if override:
         st.setdefault('overrides', []).append({'kind': 'start', 'reason': override, 'bypassed': problems, 'at': _at(env)})
     _save(trial, run, env, st, state_file)
@@ -1073,12 +1140,18 @@ def finish(trial, run, env, meters, cost, ended_at, stop, state_file):
     if run.harness.family == 'claude':
         settings = _path(trial, env, 'claude_settings')
         now_hash = _sha256(settings) if settings else None
+        started = st.get('start') or {}
         pre = _latest_pre(st)
-        before = (pre or {}).get('facts', {}).get('claude_settings_sha256') if pre else None
+        if 'claude_settings_sha256' in started:
+            known, before = True, started['claude_settings_sha256']
+        elif pre is not None and 'claude_settings_sha256' in pre.get('facts', {}):
+            known, before = True, pre['facts']['claude_settings_sha256']
+        else:
+            known, before = False, None
         record['settings_sha256'] = now_hash
-        if pre is None or 'claude_settings_sha256' not in pre.get('facts', {}):
+        if not known:
             record['settings_changed'] = None
-            env.print('note: no settings hash was recorded by a preflight, so a change to ~/.claude/settings.json cannot be ruled out')
+            env.print('note: no settings hash was recorded at the start or by a preflight, so a change to ~/.claude/settings.json cannot be ruled out')
         else:
             record['settings_changed'] = now_hash != before
             if record['settings_changed']:

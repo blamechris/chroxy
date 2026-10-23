@@ -1,0 +1,35 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8639/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🔵 Needs a closer look\n\nIt reworks a security-sensitive directory-access boundary (shared between Create and Browse), which warrants human verification despite the behavior-preserving refactor and thorough tests.\n\n<details open>\n<summary><strong>2 open issues</strong></summary>\n\n- <picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://github.githubassets.com/static/images/icons/copilot-code-review/medium-v2-dark.svg\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://github.githubassets.com/static/images/icons/copilot-code-review/medium-v2-light.svg\"><img src=\"https://github.githubassets.com/static/images/icons/copilot-code-review/medium-v2-light.png\" alt=\"Medium severity\" width=\"62\" height=\"18\" align=\"texttop\"></picture> [Prefilled cwd probe callback gets overwritten by autocomplete](https://github.com/blamechris/chroxy/pull/8639#discussion_r4305749854) · New\n- <picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-dark.svg\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.svg\"><img src=\"https://github.githubassets.com/static/images/icons/copilot-code-review/low-v2-light.png\" alt=\"Low severity\" width=\"62\" height=\"18\" align=\"texttop\"></picture> [Missing word makes cwd warning sentence hard to parse](https://github.com/blamechris/chroxy/pull/8639#discussion_r4305749867) · New\n</details>\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR resolves issue 8303, where three code paths disagreed about which directories a session could use: Create (with an explicit cwd) ran `validateCwdAllowed`, Browse (`list_directory`) was `$HOME`-only, and a blank cwd silently inherited the configured default cwd unchecked. Browse now honours the same allow-set Create honours, and the New Session dialog proactively explains when a prefilled directory is not browsable. It fits into Chroxy's directory-access security model (the credential/config deny-list plus the opt-in `workspaceRoots` allowlist).\n\n**Changes:**\n- Extracted the shared pieces of `validateCwdAllowed` into reusable helpers (`resolveCwdPolicyHome`, `credentialDirDenialReason`, `resolveWorkspaceRoots`, `browseBoundaries`) so Create and Browse apply one policy, and rewired `listDirectory` to use the `$HOME` + workspace-roots + valid-default-cwd allow-set with the same credential/config deny-list.\n- Added a one-time startup warning (`warnIfConfiguredCwdRefused`) when the configured default cwd would be refused by `validateCwdAllowed`.\n- Dashboard `CreateSessionModal` now probes the prefilled cwd on open and shows a note when Browse can't open it; extensive new server and dashboard tests.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​server/​src/​handler-utils.js` | Extracted shared cwd-policy helpers and refactored `validateCwdAllowed` to call them (behavior-preserving). |\r\n| `packages/​server/​src/​ws-file-ops/​browser.js` | `listDirectory` now checks the credential deny-list and the `browseBoundaries` allow-set; late-bound `getConfig`/`getDefaultCwd`; new denial message. |\r\n| `packages/​server/​src/​ws-file-ops/​index.js` | Threads `browseOptions` into `createBrowserOps`. |\r\n| `packages/​server/​src/​ws-server.js` | Supplies late-bound `getConfig`/`getDefaultCwd` getters to `createFileOps`. |\r\n| `packages/​server/​src/​server-cli.js` | Adds `warnIfConfiguredCwdRefused`, called once at startup. |\r\n| `packages/​dashboard/​src/​components/​CreateSessionModal.tsx` | Probes the prefilled cwd and renders the \"outside the browsable roots\" note. |\r\n| `packages/​server/​tests/​browse-workspace-roots.test.js` | New unit tests for the Browse allow-set and deny-list. |\r\n| `packages/​server/​tests/​ws-server-file-ops.test.js` | New wiring tests through `WsServer`. |\r\n| `packages/​server/​tests/​server-cli-cwd-startup-warning.test.js` | New tests for the startup warning + wiring. |\r\n| `packages/​dashboard/​src/​components/​CreateSessionModalBrowsableNote.test.tsx` | New dashboard tests for the probe/note behavior. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561458826,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:41:25Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "body": "",
+   "id": 5561581891,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T05:25:01Z",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "",
+   "id": 5561581941,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T05:25:02Z",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

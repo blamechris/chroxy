@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8634/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe guard change is a correct, narrowly-scoped fix with clear red/green test coverage and no caller regressions, with only minor out-of-diff comment staleness remaining.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR fixes a validation gap in `updateContextWindow` (the SDK/provider-driven self-correction path for model context windows). The previous guard used `typeof contextWindow !== 'number'`, which admitted `NaN` (since `typeof NaN === 'number'` and `NaN <= 0` is false) and `Infinity`. Such a value could then land in the active model rows and in `contextWindowOverrides` (top precedence, persisted via the cache), corrupting context-window accounting. The fix swaps the check for `Number.isFinite(contextWindow)`, so only finite positive values are accepted.\n\n**Changes:**\n- Replace `typeof contextWindow !== 'number'` with `!Number.isFinite(contextWindow)` in `updateContextWindow`, and refresh the adjacent persistence comment.\n- Add a test asserting `NaN`/`Infinity` are rejected, leave the rows byte-identical, and record no override.\n- Update the existing overlay-reload test so the `NaN` ratchet now asserts `false` instead of the old `true` behavior.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​server/​src/​models.js` | Tightens the `updateContextWindow` guard to `Number.isFinite` and updates the nearby learned-map persistence comment. |\r\n| `packages/​server/​tests/​models.test.js` | Adds a test that non-finite windows are rejected and no override is recorded. |\r\n| `packages/​server/​tests/​models-overlay-reload.test.js` | Flips the `#7771` NaN-ratchet assertion from `true` to `false` and refreshes its explanatory comment. |\r\n\r\nAdvisory (outside the diff, not inline-commentable): two comments still describe the old guard hole in the present tense and are now inaccurate after this fix — `packages/server/src/models.js:468-470` (in `parseLearnedContextWindows`, \"`updateContextWindow`'s OWN input guard admits NaN ...\") and `packages/server/src/codex-app-server-session.js:1535-1537` (\"`registry.updateContextWindow` tests `typeof === 'number' && > 0`, which NaN passes ... it would then write NaN\"). Updating these in a follow-up would keep the documentation consistent with the shipped guard.\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561413709,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:22:06Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}
