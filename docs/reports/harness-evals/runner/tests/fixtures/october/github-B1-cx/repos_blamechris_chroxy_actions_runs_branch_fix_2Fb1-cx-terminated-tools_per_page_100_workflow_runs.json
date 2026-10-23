@@ -1,0 +1,65 @@
+{
+ "request": "repos/blamechris/chroxy/actions/runs?branch=fix%2Fb1-cx-terminated-tools&per_page=100#workflow_runs",
+ "response": [
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:51:12Z",
+   "event": "pull_request",
+   "head_branch": "fix/b1-cx-terminated-tools",
+   "head_sha": "899fdd9d4c6a41e6a26c544ab51778773cfecca5",
+   "id": 39160644408,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "cancelled",
+   "created_at": "2026-10-18T19:22:23Z",
+   "event": "pull_request",
+   "head_branch": "fix/b1-cx-terminated-tools",
+   "head_sha": "899fdd9d4c6a41e6a26c544ab51778773cfecca5",
+   "id": 39158465734,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:22:09Z",
+   "event": "dynamic",
+   "head_branch": "fix/b1-cx-terminated-tools",
+   "head_sha": "899fdd9d4c6a41e6a26c544ab51778773cfecca5",
+   "id": 39158447105,
+   "name": "Running Copilot Code Review",
+   "path": "dynamic/agents/copilot-pull-request-reviewer",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:22:04Z",
+   "event": "pull_request",
+   "head_branch": "fix/b1-cx-terminated-tools",
+   "head_sha": "899fdd9d4c6a41e6a26c544ab51778773cfecca5",
+   "id": 39158439686,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:22:04Z",
+   "event": "pull_request",
+   "head_branch": "fix/b1-cx-terminated-tools",
+   "head_sha": "899fdd9d4c6a41e6a26c544ab51778773cfecca5",
+   "id": 39158439668,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  }
+ ]
+}

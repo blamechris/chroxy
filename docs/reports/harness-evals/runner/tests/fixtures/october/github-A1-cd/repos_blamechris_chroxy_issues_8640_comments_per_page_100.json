@@ -1,0 +1,23 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8640/comments?per_page=100",
+ "response": [
+  {
+   "body": "## Summary\nReviewed head 396289fe. The default quiet-hours bypass set now has one client-side definition (a `defaultBypass` flag on the protocol roster, with `DEFAULT_BYPASS_CATEGORIES` derived from it). The app and dashboard import it. The server keeps its own literal, and the roster test pins that literal to the protocol flag in both directions. Both acceptance criteria of issue 8567 are met.\n\n## Strengths\n- The flag cannot name a key the roster lacks, and it follows the existing derived-export pattern.\n- The committed protocol dist is byte-identical to a fresh `tsc` build of src (compiled into a temp outDir and diffed, js and d.ts; no other dist drift). This matters because the server test reads dist.\n- The bidirectional test compares real exports from two packages: the server literal in notification-prefs.js against the protocol roster. Neither side is derived from the other. There is also an empty-set refusal.\n- Mutations run in the PR worktree (each restored with cp, tree clean afterwards):\n  - add `result` to the server list only: red, names `result`\n  - flag `result` in protocol dist only: red, names `result` (the mirrored message)\n  - drop the `permission` flag in protocol only: red, names `permission`\n  - baseline and restored runs: 9/9 pass\n- App: replacing the import with a local literal turns the new \"is the protocol set itself\" test red. `toBe` identity makes it hard to fool.\n- Runtime behaviour is unchanged: same set (`permission`, `activity_error`) and same order as the old literals. The dashboard's existing fallback test still covers the rendered result. App and dashboard `tsc --noEmit` are clean.\n- The export is `Object.freeze`d and typed `readonly string[]`. The consumers only read it (`new Set(...)`, `.includes`, `.filter`) after the `??` fallback; nothing pushes into it. The `readonly string[]` widening on both `QuietHoursEditor` props is type-safe.\n- Title, body and commit message contain no `#<digits>`, have `Trial-Closes: 8567`, and carry no attribution.\n\n## Critical\nNone.\n\n## Suggestions\n- The last roster test (`[...CLIENT_DEFAULT_BYPASS_CATEGORIES]` equals a filter over `NOTIFICATION_CATEGORIES`) derives its expectation from the same subject as the export under test. It is harmless, since the real cross-checks are the two directional tests, but it can't go red independently of someone breaking the derivation line itself. Low value; optional to drop or keep.\n- The dashboard has no source-level guard like the app's \"no local array literal\" test. Re-adding a local literal in SettingsPanel.tsx would still pass, because the existing fallback test only checks the same two keys. Cheap to fold: an `expect(SettingsPanel.tsx source).not.toMatch(...)` or an identity check. Optional; DEFER is acceptable.\n\n## Nitpicks\n- The mutation message says \"in packages/protocol/src/...\" while the test actually reads dist. This is consistent with the existing roster tests.\n\n## Verdict\nApprove\n",
+   "created_at": "2026-10-18T04:36:38Z",
+   "id": 6245712762,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "### Smoke (isolated preview daemon: dashboard + iOS simulator app) — head f1ffa1e\n| step | verdict | head |\n|---|---|---|\n| dashboard: Settings → Notifications → enable Quiet hours; bypass toggles default to Permission requests + Session errors only | PASS | f1ffa1e |\n| dashboard: uncheck Session errors → server snapshot [permission]; reload → persists | PASS | f1ffa1e |\n| app: manual connect to the isolated daemon → session screen | PASS | f1ffa1e |\n| app: Haiku 5.5, tiny prompt → reply | PASS | f1ffa1e |\n| app: Settings → Notifications → enable Quiet hours; bypass categories default to Permission requests + Session errors only | PASS | f1ffa1e |\n| app: toggle Session errors off, leave and re-enter Settings → change persisted (server-side bypass [permission]) | PASS | f1ffa1e |\n\nnote: the dashboard base path (connect, browse, create, Haiku, prompt, switch back) and the same dashboard feature steps passed at 396289f; the delta to f1ffa1e is tests only.\nevidence: private vault smoke/chroxy-pr8640-f1ffa1e (and smoke/chroxy-pr8640-396289f)\n",
+   "created_at": "2026-10-18T05:32:14Z",
+   "id": 6246129675,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

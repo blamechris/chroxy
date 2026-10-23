@@ -1,0 +1,23 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8671/comments?per_page=100",
+ "response": [
+  {
+   "body": "Full independent review and fresh final delta approve `503f5beed4db53b643694dcb95f46db1c9ebb6a9`, with no remaining actionable findings.\n\nThe initial read-only pass found normalized-response and inherited-default warning gaps; the single corrective read-only delta confirmed both fixed. Independent full review then verified the shared path policy, canonical/missing/symlink containment, credential/config denials, dynamic config, warning behavior and optional request correlation, with 86 focused tests passing. The final correction updates only a wire-roster comment and two denial assertions; a fresh reviewer reran all 113 tests, confirmed no runtime change and inspected the policy-bypass RED proof. Final-head feature/repro smoke passed, with the unchanged runtime digest tying it to the previous complete SDK/Haiku/reply/switch flow. Local baseline failures are explicit in the description. Hosted CI and posted-review triage remain delivery gates.\n",
+   "created_at": "2026-10-18T19:45:05Z",
+   "id": 6254326177,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "Closing this unmerged attempt for the next bounded trial wave. Final-head Windows CI found six allowed-path assertions failing because native asynchronous resolution expands short paths while synchronous policy boundaries retain their spelling. The exact head and review/CI evidence are retained; the fresh retry will use consistent native canonicalization and must pass the real Windows suite.",
+   "created_at": "2026-10-18T20:04:14Z",
+   "id": 6254515992,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

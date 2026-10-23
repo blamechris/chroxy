@@ -1,0 +1,14 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8673/comments?per_page=100",
+ "response": [
+  {
+   "body": "Review: APPROVE at bbef3fe4bd38f0b1d1a8760adf976f359298dbac; zero blocking findings or actionable suggestions.\n\nThe complete report was checked against the ten-item mission, queue, owned PR snapshots, final-head gates, conditional-skip proofs, review dispositions and merge records. Full affected-package counts, the four reproduced T0 server failures, actual final Windows execution, prior Browse failures, smoke limitations, isolation incidents and cumulative corrections agree with the evidence. The report correctly does not predict its own merge.\n\n| Review | Check-PR | CI | Scope | Issue changes |\n|---|---|---|---|---|\n| APPROVE at bbef3fe4 | Posted automated feedback remains to be checked on the final head | Pending; required before merge | One documentation file; whitespace check passed; smoke not applicable | None |\n\nFinal-head CI and all posted feedback remain delivery gates. No product runtime or production installation changes are included.\n",
+   "created_at": "2026-10-18T20:59:41Z",
+   "id": 6255078620,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

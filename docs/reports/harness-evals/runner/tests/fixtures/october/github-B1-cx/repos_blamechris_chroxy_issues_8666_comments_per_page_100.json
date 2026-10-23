@@ -1,0 +1,14 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8666/comments?per_page=100",
+ "response": [
+  {
+   "body": "Independent review at `9cad6c378b34956744fc35fb40c78b9200197560`: **approve**, no findings.\n\nThe change reuses `mergeConfig` with the existing optional file read to apply CLI > PORT > file > default precedence. First-run behavior and provider resolution are preserved. The seven regressions use real config resolution and the doctor path with only the socket boundary replaced, preventing accidental production-port probes. Existing CLI compatibility plus regression tests passed 15/15 independently; the original three failures were inspected. Final CI and thread triage remain delivery gates.\n",
+   "created_at": "2026-10-18T19:11:59Z",
+   "id": 6253982115,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

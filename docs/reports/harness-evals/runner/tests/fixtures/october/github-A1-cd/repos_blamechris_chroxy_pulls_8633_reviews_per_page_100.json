@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8633/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nIt is a focused, behavior-preserving UI refactor with comprehensive new and existing test coverage, clean type-checking, and no objective issues found across all changed files.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR fixes a mobile-app inconsistency where a tool cut off by a terminated turn only showed the amber \"terminated\" state inside `ActivityGroup`. The lone `ToolBubble` and the `ToolDetailModal` previously rendered the server's synthesized placeholder result with no terminated styling. The change extracts the shared predicate and presentation into a new `chat/ToolTermination.tsx` module so all three surfaces render identically and can't drift, matching the dashboard's `ToolBubble`/`ToolGroup`.\n\n**Changes:**\n- New `chat/ToolTermination.tsx` exposing `getToolTermination` (shared predicate), `TerminatedIcon`, and `TerminatedNote`; `ActivityGroup` now consumes these instead of its inline block.\n- `ToolBubble` shows the amber icon + an always-visible note and threads `toolResultTerminatedReason` to `onOpenDetail`; `ChatView` and `MessageBubble` carry the new trailing argument through.\n- `ToolDetailModal` gains a `toolResultTerminatedReason` prop and replaces the raw synthesized result with the amber note when the turn was terminated.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​app/​src/​components/​chat/​ToolTermination.tsx` | New shared module: termination predicate, amber icon, and note components. |\r\n| `packages/​app/​src/​components/​chat/​ActivityGroup.tsx` | Replaces inline termination logic/icon with the shared helper; drops the now-unused `describeTurnTermination` import. |\r\n| `packages/​app/​src/​components/​chat/​ToolBubble.tsx` | Renders header icon + always-visible note for terminated tools and passes the reason to `onOpenDetail`. |\r\n| `packages/​app/​src/​components/​chat/​ToolDetailModal.tsx` | Adds `toolResultTerminatedReason` prop; amber note replaces the synthesized result. |\r\n| `packages/​app/​src/​components/​chat/​MessageBubble.tsx` | Extends the `onOpenDetail` type signature with the trailing reason argument. |\r\n| `packages/​app/​src/​components/​ChatView.tsx` | Threads `toolResultTerminatedReason` through `handleOpenDetail` state and into the modal. |\r\n| `packages/​app/​src/​components/​__tests__/​ToolBubble.terminated.test.tsx` | New tests: icon/note presence, stopped vs terminated label, controls, and reason handoff. |\r\n| `packages/​app/​src/​components/​__tests__/​ToolDetailModal.terminated.test.tsx` | New tests: note shown, placeholder withheld, label, and controls. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561411376,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:21:06Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

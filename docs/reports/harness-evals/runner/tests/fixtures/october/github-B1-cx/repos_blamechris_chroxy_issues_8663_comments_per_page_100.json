@@ -1,0 +1,23 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8663/comments?per_page=100",
+ "response": [
+  {
+   "body": "# Doctor port-test review\n\n| Reviewed commit | Verdict | Findings |\n|---|---|---|\n| `d7d73ce84140ce949623872011abc414f865cc4f` | Approve | None |\n\nScope: the single changed file, `packages/server/tests/doctor.test.js`, against `origin/trial/b1-cx`, with the port-check implementation inspected for context. No repository modifications or public actions were performed.\n\nBoth occupied-port tests bind a real listener to `127.0.0.1:0`, pass the returned OS-selected port into doctor, and keep the listener alive through the assertion. The exact first warning message and the second warning status verify forwarding and occupied-port detection. Awaited `t.after` teardown closes each listener. There is no release/rebind race or dependence on the availability of either former fixed port.\n\nThe successful-bind test intercepts only `Server.prototype.listen`, verifies the custom port and loopback host supplied by production, and delegates to the real listen implementation with port 0. Production still handles the actual listening event, closes its socket, and chooses the pass result. The test therefore exercises the real success path and does not reproduce the result-building logic. The test context restores the mock automatically; default serial execution within the file prevents cross-test overlap.\n\nIndependent validation: Node v22.23.2, the production test setup, and the supplied sandbox profile denying live Chroxy-state reads; all three changed cases passed, exit 0, 688 ms. No full-suite run was performed during this review. The supplied mutation logs were inspected: forcing bind success breaks both warning assertions, forcing bind failure breaks the pass assertion, and the original fixed-port test fails when its port is deliberately occupied.\n\nThe change uses cross-platform Node APIs and identical numeric IPv4 loopback endpoints on both sockets. No Windows-only assumption was found. Windows execution and final full-suite/CI gates remain coordinator validation tasks.\n",
+   "created_at": "2026-10-18T18:55:42Z",
+   "id": 6253811703,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "Final review at `d7d73ce84140ce949623872011abc414f865cc4f`: **clean**. Independent review approved with no findings; posted review summary recommends approval and has no open findings; all inline threads are absent. Final-head CI has passed every applicable check (Renovate config conditionally skipped). Smoke is not applicable for the tests-only diff. No issues changed.\n",
+   "created_at": "2026-10-18T19:14:54Z",
+   "id": 6254020305,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

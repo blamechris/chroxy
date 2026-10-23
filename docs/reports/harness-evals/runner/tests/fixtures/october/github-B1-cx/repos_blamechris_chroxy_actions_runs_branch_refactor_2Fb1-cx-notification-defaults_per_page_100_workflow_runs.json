@@ -1,0 +1,65 @@
+{
+ "request": "repos/blamechris/chroxy/actions/runs?branch=refactor%2Fb1-cx-notification-defaults&per_page=100#workflow_runs",
+ "response": [
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T20:07:36Z",
+   "event": "pull_request",
+   "head_branch": "refactor/b1-cx-notification-defaults",
+   "head_sha": "d523c0c2da8937fdc826d38ded5f84f788b8d23a",
+   "id": 39161880800,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:36:29Z",
+   "event": "pull_request",
+   "head_branch": "refactor/b1-cx-notification-defaults",
+   "head_sha": "d523c0c2da8937fdc826d38ded5f84f788b8d23a",
+   "id": 39159538439,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:36:13Z",
+   "event": "dynamic",
+   "head_branch": "refactor/b1-cx-notification-defaults",
+   "head_sha": "d523c0c2da8937fdc826d38ded5f84f788b8d23a",
+   "id": 39159518806,
+   "name": "Running Copilot Code Review",
+   "path": "dynamic/agents/copilot-pull-request-reviewer",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:36:08Z",
+   "event": "pull_request",
+   "head_branch": "refactor/b1-cx-notification-defaults",
+   "head_sha": "d523c0c2da8937fdc826d38ded5f84f788b8d23a",
+   "id": 39159512713,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:36:08Z",
+   "event": "pull_request",
+   "head_branch": "refactor/b1-cx-notification-defaults",
+   "head_sha": "d523c0c2da8937fdc826d38ded5f84f788b8d23a",
+   "id": 39159512720,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  }
+ ]
+}

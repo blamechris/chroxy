@@ -1,0 +1,109 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8282/timeline?per_page=100",
+ "response": [
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-10-05T04:17:57Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-10-05T04:17:57Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-10-05T04:17:58Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-10-05T04:17:58Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "created_at": "2026-10-05T04:17:59Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8283
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "created_at": "2026-10-05T04:18:18Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8280
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "created_at": "2026-10-08T10:01:33Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8443,
+     "pull_request": {}
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "Copilot",
+    "type": "Bot"
+   },
+   "created_at": "2026-10-18T04:33:32Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8637,
+     "pull_request": {}
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "Copilot",
+    "type": "Bot"
+   },
+   "created_at": "2026-10-18T16:43:26Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8657,
+     "pull_request": {}
+    }
+   }
+  }
+ ]
+}

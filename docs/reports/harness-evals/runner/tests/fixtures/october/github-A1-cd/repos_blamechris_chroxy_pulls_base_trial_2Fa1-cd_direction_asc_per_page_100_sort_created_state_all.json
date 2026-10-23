@@ -1,0 +1,247 @@
+{
+ "request": "repos/blamechris/chroxy/pulls?base=trial%2Fa1-cd&direction=asc&per_page=100&sort=created&state=all",
+ "response": [
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "Trial-Closes: 8595\n\n## Summary\nCustom targets from different families that share a base label and a pinned-version descriptor (`alpha -> claude-alpha-1-0`, `beta -> claude-beta-1-0`, both labelled `Custom`) rendered as `Custom (pinned 1.0) (claude-alpha-1-0)`. The final collision fallback in `modelChoices` read the already augmented label as if it were the base label.\n\n## What changed\n- `packages/store-core/src/model-display.ts`: each choice now carries its original base label next to the augmented row; the final fallback restarts from that base, giving one discriminator, e.g. `Custom (claude-alpha-1-0)`. Choices stay distinct, selection IDs and full IDs are untouched, input rows are not mutated.\n\n## Tests\n- Added a cross-family collision regression through `modelChoices` (exact labels, IDs and full IDs preserved, exactly one parenthetical, no `pinned`), and a control showing the pinned descriptor is kept when it alone disambiguates.\n- Proof of red: with the new test and the unfixed code, `npx vitest run src/model-display.test.ts` failed with received `Custom (pinned 1.0) (claude-alpha-1-0)` / `Custom (pinned 1.0) (claude-beta-1-0)`; green after the fix.\n- store-core: 78 files / 2945 tests pass, `tsc --noEmit` clean. Dashboard SettingsPanel, SessionBar, ChatSettingsDropdown and App suites (560 tests) and the app SettingsBar capability-gating suite (13 tests) pass unchanged.\n\nsmoke: pending (coordinator)\n",
+   "closed_at": "2026-10-18T05:00:10Z",
+   "created_at": "2026-10-18T04:11:30Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/model-collision-labels",
+    "sha": "dc9ed76f0f1651a4ad3b4a6c0f69436035998f07"
+   },
+   "merge_commit_sha": "6e7362397a01b6f29243f5fa7b52e61c69e09920",
+   "merged_at": "2026-10-18T05:00:10Z",
+   "number": 8632,
+   "state": "closed",
+   "title": "fix(store-core): recover base label in model collision fallback",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "## Summary\nIn the mobile app, a tool cut off by a terminated turn showed the amber \"terminated\" state only inside `ActivityGroup`. The lone `ToolBubble` and the `ToolDetailModal` showed the raw synthesized result with no terminated styling. They now render the same state as the group path, matching the dashboard's `ToolBubble` and `ToolGroup`.\n\nTrial-Closes: 8364\n\n## What changed\n- New `chat/ToolTermination.tsx`: `getToolTermination` (the shared predicate over `describeTurnTermination`), `TerminatedIcon` (amber stop icon, `stopped` / `turn terminated` a11y label) and `TerminatedNote` (amber summary text, `accentOrange`). `ActivityGroup` now uses these instead of its inline block, so the three surfaces cannot drift.\n- `ToolBubble`: amber icon in the header plus an always-visible note, and it passes the reason to `onOpenDetail` as a new trailing argument.\n- `ToolDetailModal`: new `toolResultTerminatedReason` prop; when set, the amber note replaces the raw synthesized result. `ChatView` and `MessageBubble` thread the reason through.\n- No tap target changed; the bubble and entry hit areas are untouched.\n\n## Tests\n- New `ToolBubble.terminated.test.tsx` and `ToolDetailModal.terminated.test.tsx`: icon and note present, stopped vs terminated label, summary text shown and the placeholder result withheld in the modal, the reason handed to `onOpenDetail`, plus controls (normal result, failed result, pending tool, reason without a result show nothing terminated).\n- Proof of red: run against the unchanged components, `npx jest src/components/__tests__/ToolBubble.terminated.test.tsx src/components/__tests__/ToolDetailModal.terminated.test.tsx` failed 5 of 8 (every positive case, e.g. `findByTestId(root, 'tool-bubble-terminated-icon-tool-1')[0]` was `undefined`); the 3 controls passed. After the change all 8 pass.\n- Full app suite: 213 suites, 2846 tests pass (including the existing `ActivityGroup` terminated tests). `npx tsc --noEmit` in `packages/app` is clean. The gitignored `xterm-bundle.generated.ts` had to be generated locally (`node scripts/bundle-xterm.js`) for the suites that import `TerminalView`.\n\nsmoke: pending (coordinator)\n",
+   "closed_at": "2026-10-18T05:25:47Z",
+   "created_at": "2026-10-18T04:16:34Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/app-tool-terminated-state",
+    "sha": "3683da7ad60318bcb065f52b18ca6aec3cc6b370"
+   },
+   "merge_commit_sha": "2da32ee3c7145e83a7163bf9da8ca30175a1514b",
+   "merged_at": "2026-10-18T05:25:47Z",
+   "number": 8633,
+   "state": "closed",
+   "title": "fix(app): show the terminated state on the lone tool bubble and detail modal",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "## Summary\n`updateContextWindow` admitted NaN: `typeof NaN === 'number'` and `NaN <= 0` is false, so the guard let it through. The value then landed in the active rows and in `contextWindowOverrides` (top precedence, persisted by the cache). Infinity was admitted as well.\n\nTrial-Closes: 7771\n\n## What changed\n- `packages/server/src/models.js`: the guard now uses `Number.isFinite(contextWindow)` in place of `typeof === 'number'`. Updated the adjacent comment that described the old hole.\n- `packages/server/tests/models.test.js`: new test that NaN and Infinity return false, leave `getModels()` byte-identical, and record no override (a later `updateModels` refresh still yields the heuristic window).\n- `packages/server/tests/models-overlay-reload.test.js`: the existing NaN learned-map test asserted the old behaviour (`true`, labelled \"sanity: guard does not reject NaN\"); it now asserts `false`. Its disk and restart assertions are unchanged.\n\n## Tests\n- Proof of red: ran the new test against the unfixed guard; `rejects non-finite context windows...` failed with `expected: false, actual: true` for NaN. Green after the fix.\n- Targeted: models, models-overlay-reload, models-factory, codex-ratchet-persistence all pass.\n- Full server suite: 21333 pass, 2 fail. Both failures are timing tests in `redaction-bounded-time.test.js`, which pass in isolation (41/41); they are load-sensitive and unrelated.\n- All `packages/server/scripts/lint-*.sh` pass.\n\nsmoke: not applicable — the diff touches only `models.js` and its tests, none of the smoke-trigger paths.\n",
+   "closed_at": "2026-10-18T05:03:36Z",
+   "created_at": "2026-10-18T04:18:53Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/models-context-window-finite",
+    "sha": "b0d8f045a8c98527124b860a076a60c5555e648a"
+   },
+   "merge_commit_sha": "58f765783d0c07091c2ab9618845a7b89ed39923",
+   "merged_at": "2026-10-18T05:03:36Z",
+   "number": 8634,
+   "state": "closed",
+   "title": "fix(server): reject non-finite context windows in updateContextWindow",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "## Summary\nSettings → Session Defaults no longer hides a saved provider override that the connected server does not offer, and now shows the one-time migration notice that previously only appeared in New Session.\n\nTrial-Closes: 8277\n\n## What changed\n- `SettingsPanel.tsx`: when the stored override (source `user`) is not in `availableProviders`, the Default provider select keeps that value selected via a disabled option \"<label> (not offered by this server)\" and a one-line hint: \"Saved default <x> isn't offered by this server; new sessions use <y>\". Nothing extra is persisted; the model roster still follows the provider new sessions really use.\n- New `SessionDefaultsNotice.tsx`: the notice (and its copy helper, moved from `CreateSessionModal.tsx`) reads and dismisses through the same store state. Rendered in both New Session and Settings, so dismissing in either clears both. The existing 44px dismiss control and CSS are reused.\n\n## Tests\n- `SettingsPanel.test.tsx`: dormant option disabled and selected, hint text, no persistence until a new value is picked, no hint when offered / inherited / providers not yet reported; notice shown, dismiss calls the store, absent when none. One existing assertion updated (select now shows the stored provider instead of the first available one).\n- Proof of red: before the change 4 tests failed (3 new, 1 updated). After the change, removing the Settings notice render or the hint makes the matching new tests fail (2 failures); restored, all 202 pass.\n- Dashboard full suite: 7898 tests, only failure was my own mis-typed label expectation, fixed; `tsc --noEmit` clean. The dashboard package has no eslint config or lint script.\n\nsmoke: pending (coordinator)\n",
+   "closed_at": "2026-10-18T05:03:40Z",
+   "created_at": "2026-10-18T04:19:25Z",
+   "draft": false,
+   "head": {
+    "ref": "feat/settings-dormant-provider-notice",
+    "sha": "a7cf3bba9ee47be0d12b006aef86f9633e66865b"
+   },
+   "merge_commit_sha": "f53cfe46c7edc4bf8c845024cfddfa565011a8bd",
+   "merged_at": "2026-10-18T05:03:40Z",
+   "number": 8635,
+   "state": "closed",
+   "title": "feat(dashboard): show dormant provider override and migration notice in Settings",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "## Summary\n\nMost of this issue's behaviour already landed on the base through the replay-parity work (`streamKindOf`, `LEGACY_THINKING_ID`, the `_streamKinds` map and the `kind` field on the replayed message schema in `session-message-history.js` / `stream.ts`). This change is the criterion-by-criterion audit plus the pins that were missing. No production code changes.\n\nTrial-Closes: 8282\n\n## Audit of the five acceptance criteria\n\n| # | Criterion | Status on base | Pinned by | Mutation proof |\n|---|-----------|----------------|-----------|----------------|\n| 1 | Reasoning stream records `kind`; a reply does not | Implemented | `session-message-history-replay-parity.test.js` \"tags a reasoning stream kind:thinking...\" and \"does not tag a reply...\"; new `session-history-stream-kind.test.js` test 2 (through the manager's serializer) | Dropping the `kind` spread in `recordHistory` turns 8 tests red across these files, including the first test named above |\n| 2 | Pre-field state file restores; `-thinking-` entries classify as reasoning | Implemented, but only tested on a literal (`streamKindOf`) and via `setHistory` | NEW `session-history-stream-kind.test.js` test 1: a hand-written old-format state file through the real `SessionManager.restoreState`, replayed through `sendHistoryEntry` (covers `-thinking-<n>` and ACP `-thinking`, reply and user prompt stay unclassified) | Removing the legacy-id branch of `streamKindOf` turns this test red (and 3 older ones) |\n| 3 | Field survives persist and restore, including per-entry truncation | Implemented; only `truncateEntry` was unit-tested, nothing crossed serialize -> restore | NEW tests 2-4: `serializeState` -> JSON -> fresh manager `restoreState`; test 4 uses a 60 KiB reasoning entry under an id the legacy rule would not classify, so only the persisted field can carry the kind through the truncation path | Making `truncateEntry` drop `kind` turns tests 2-4 red (and the existing truncateEntry unit test) |\n| 4 | Protocol schema accepts the optional field; older clients ignore it | Schema field exists (`kind: z.string().max(32).optional()` on the message schema). The one existing assertion only checked `success`, and zod strips unknown keys, so deleting the field from the schema stayed green | NEW `schemas.test.js` test: `kind` is retained when present, an unknown future kind is accepted, an entry without it parses with no `kind`, over-long kind is rejected | Deleting the field from the schema turns the new test red |\n| 5 | Dropping the flag in `recordHistory` turns the first test red | Confirmed | See row 1 | Actually mutated and observed red (`not ok 1 - tags a reasoning stream kind:thinking and keeps its duration`) |\n\n## What changed\n\n- `packages/server/tests/session-history-stream-kind.test.js` (new): four tests through the real `SessionManager` persist/restore path.\n- `packages/protocol/tests/schemas.test.js`: one test pinning the replay `kind` field on the message schema.\n\n## Tests\n\n- New server file: 4/4 pass. Proof of red per mutation (each restored from a backup copy afterwards): see the table above.\n- Protocol package: all tests pass. Server custom lints all exit 0.\n- Full server suite (no coverage): 21351 tests, 21336 pass; 2 unrelated failures: a loopback dev-preview timeout (passes in isolation, 44/44) and a 200 ms redaction timing budget that fails in isolation on this loaded machine (310 ms); neither file is touched.\n\n## Follow-ups (not taken on)\n\n- The Codex adapter does not record reasoning at all (context in the issue, not an acceptance criterion).\n\nsmoke: not applicable — tests only; no file in the smoke scope list is changed\n",
+   "closed_at": "2026-10-18T05:27:01Z",
+   "created_at": "2026-10-18T04:29:16Z",
+   "draft": false,
+   "head": {
+    "ref": "feat/history-stream-kind",
+    "sha": "7b9ad63eb36125830a812069f162cd19166de404"
+   },
+   "merge_commit_sha": "27d74dc1ec07a31ac3ef1c5eaa61c2756ec00ba8",
+   "merged_at": "2026-10-18T05:27:01Z",
+   "number": 8637,
+   "state": "closed",
+   "title": "test(server,protocol): pin the history stream kind across persist, restore and truncation",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "## Summary\n`chroxy doctor` always probed port 8765 unless `-p/--port` was passed, even when `config.json` set a different `port` (or `PORT` was set), while `chroxy start` honours both. Doctor now checks the port `start` would bind.\n\nTrial-Closes: 8233\n\n## What changed\n- `packages/server/src/doctor.js` (port step): the checked port is resolved with `mergeConfig` (the same merge `start` uses via `loadAndMergeConfig`), fed the config file doctor already parsed, with an explicit `port` option as the CLI tier and 8765 as the default. Precedence: flag, then `PORT` env, then config file, then 8765. No second precedence implementation.\n- `chroxy start`'s own preflight already passes its merged port explicitly, so its behaviour is unchanged. `doctor-cmd.js` needs no change: it passes `undefined` unless `-p` is given, which is now correctly treated as \"not set\".\n\n## Tests\nNew `packages/server/tests/doctor-cmd-port.test.js` (temp `CHROXY_CONFIG_DIR`, `HOME` redirected, `PORT` controlled; nothing touches the real `~/.chroxy`):\n- config port honoured; flag beats config; env beats config; flag beats env; 8765 default (with and without a config file)\n- doctor's port equals `loadAndMergeConfig(...).port` for the same config and env\n- the same config and flag cases driven through the real `doctor` command (`registerDoctorCommand`) output\n\nProof of red: before the fix, 4 of the 10 tests failed (config port: expected 51871, got \"8765 is in use...\"; env port: expected 51872, got 8765; start-parity; CLI config port). After the fix all 10 pass. Mutations: ignoring the port option fails the flag-beats-config/env tests (and CLI `-p`); ignoring the config file fails the config-port tests (library and CLI).\n\nServer lints pass; eslint clean on touched files. Full server suite: 21357 tests, 21341 pass, 13 skipped, 2 failures both unrelated timing/load-sensitive tests (`redaction-bounded-time`, reproduced on the base branch; `dev-preview` loopback test passes in isolation).\n\nsmoke: not applicable — diff touches only `packages/server/src/doctor.js` and a new test file, outside the smoke-scope paths.\n",
+   "closed_at": "2026-10-18T05:37:53Z",
+   "created_at": "2026-10-18T04:29:16Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/doctor-config-port",
+    "sha": "2b851f3a599940a21ed8da5c18b1dfd7d66fc924"
+   },
+   "merge_commit_sha": "c375e66eae3bb85b655d73b5187f25ff2d5b03b7",
+   "merged_at": "2026-10-18T05:37:52Z",
+   "number": 8636,
+   "state": "closed",
+   "title": "fix(server): doctor checks the merged-config port, not always 8765",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "Trial-Closes: 8215\n\n## Summary\n`isLoopbackHost` classified IPv4-mapped IPv6 hosts by string prefix (`::ffff:127.` / `::ffff:7f`), so `::ffff:7f:1` (0.127.0.1) and the incomplete `::ffff:7f` were reported as loopback.\n\n## What changed\n- `packages/server/src/bind-host.js`: the mapped-IPv6 branch now parses the full address with the existing `mappedV6ToV4` helper (from `ssrf-guard.js`) and is loopback only when the embedded IPv4 is in 127.0.0.0/8. No third predicate added; the strict predicate in `connection-locality.js` is private, dotted-only and has different (authorization) semantics, so it was not reused.\n- Behaviour kept: `::ffff:127.0.0.1`, `::ffff:7f00:1`, case-insensitivity. Newly also correct: `::ffff:7fff:ffff` and `::ffff:7f00:0001` are loopback; malformed dotted tails (`::ffff:127.`, `::ffff:127.example.com`) and `::ffff:7f00:1:2` are not.\n- Bracketed hosts were never handled by this function and still are not.\n\n## Tests\n- `packages/server/tests/bind-host.test.js`: pins `::ffff:7f:1` and `::ffff:7f` (false), `::ffff:7f00:1` and `::ffff:127.0.0.1` (true), plus case, 7e00/8000 boundaries, extra hextets and malformed dotted tails.\n- Proof of red: with the new tests against the old prefix match, `node --test tests/bind-host.test.js` gave 2 failures (`expected: false, actual: true`) in the short/malformed and malformed-dotted tests; after the fix, 18 pass, 0 fail.\n\nsmoke: not applicable — change is limited to `packages/server/src/bind-host.js` and its unit test; no listed smoke-surface file is touched.\n",
+   "closed_at": "2026-10-18T05:44:10Z",
+   "created_at": "2026-10-18T04:31:57Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/loopback-mapped-hex",
+    "sha": "b399d35d37941e1f8ff05f1d91889984fec4e201"
+   },
+   "merge_commit_sha": "0402cad09c3f48b0f72dfbcff5b83e5d00652aa2",
+   "merged_at": "2026-10-18T05:44:10Z",
+   "number": 8638,
+   "state": "closed",
+   "title": "fix(server): parse IPv4-mapped hosts in isLoopbackHost instead of prefix-matching",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "Trial-Closes: 8303\n\n## Summary\n\nThree rules decided which directories a session could use and disagreed: Create with an explicit cwd ran `validateCwdAllowed`, Browse (`list_directory`) was `$HOME`-only, and a blank cwd inherited the configured default cwd with no check. Browse now honours what Create honours, and the New Session dialog explains when its prefilled directory is not browsable.\n\n## Design (decided up front)\n\n- Browse allow-set = `$HOME` + each configured `workspaceRoots` entry (realpath-resolved) + the daemon's default cwd, the last only when it passes `validateCwdAllowed`. `$HOME` stays browsable so the user can navigate toward a root.\n- The same credential-directory deny-list and chroxy config-dir block `validateCwdAllowed` applies also apply to Browse, even when a root contains `$HOME`.\n- Refusals keep the existing `Access denied: ...` response shape; the text now reads \"restricted to the home directory and configured workspace roots\". Nothing string-matched the old text (the dashboard matches `^Access denied`).\n- A blank cwd on Create keeps inheriting `config.cwd` (no behaviour change). The daemon logs one startup warning, naming the reason, when `config.cwd` fails `validateCwdAllowed`.\n- Dashboard: no protocol change. On a fresh open with a prefilled absolute cwd the modal issues a `list_directory` for that directory and, on an `Access denied` answer, shows \"This directory is outside the browsable roots; Browse can't open it.\"\n\n## What changed\n\n- `handler-utils.js`: extracted the shared pieces of `validateCwdAllowed` instead of writing a second allowlist: `resolveCwdPolicyHome`, `credentialDirDenialReason` (deny-list + config-dir layers), `resolveWorkspaceRoots`, `browseBoundaries`. `validateCwdAllowed` and the helpers take an optional `realpath` resolver. Create keeps the JS `realpathSync` (no behaviour change); Browse passes `realpathSync.native`, the resolver the listed path itself goes through, so a boundary and a target are always spelled the same way (on Windows only the native resolver expands 8.3 short names such as `RUNNER~1`).\n- `ws-file-ops/browser.js`: `listDirectory` checks the deny-list and the allow-set on the canonical path. Missing paths are still contained via the deepest ancestor and unresolvable paths still deny. On the non-ENOENT failure branch the deny-list runs on the resolved visible ancestor (a walk that cannot finish denies), so `<denied dir>/<file>/x` and `<denied dir>/<missing>/x` answer identically, including through a symlink or a symlinked home. The default cwd is resolved once and the validated resolved value is the boundary. `createBrowserOps` takes `{ getConfig, getDefaultCwd, realpath }`, threaded through `createFileOps` from `WsServer`.\n- `server-cli.js`: `warnIfConfiguredCwdRefused` runs inside `createDaemonSessionManager`, the factory the daemon builds its session manager with, so it is driven directly by a test.\n- Dashboard store: `addDirectoryListingListener` (backed by `registerDirectoryListingListener` in `message-handler.ts`). Every `directory_listing` reply is offered to registered listeners first, then to the single callback slot.\n- `CreateSessionModal.tsx`: the probe registers through that listener API, because path autocomplete takes over the single slot after its debounce and a slow reply (normal over a tunnel) would otherwise be lost. The reply is matched by exact path (a trailing backslash counts as a separator only on Windows-shaped paths). Relative, `~` and `..` prefills are not probed. The listener is removed on answer, close and unmount.\n- `docs/architecture/reference.md`: `list_directory` / `directory_listing` rows updated.\n\nNote: because the default-cwd entry is gated on `validateCwdAllowed`, it is always inside `$HOME` or a root today; it is listed explicitly so Browse tracks the gate. Its inclusion is covered by a direct `browseBoundaries` test.\n\n## Tests\n\nNew: `browse-workspace-roots.test.js` (29), `server-cli-cwd-startup-warning.test.js` (7), WsServer wiring tests in `ws-server-file-ops.test.js` (3), `CreateSessionModalBrowsableNote.test.tsx` (20), `directory-listing-listeners.test.ts` (3). All use temp dirs and a fake home (`homeOverride`, `CHROXY_CONFIG_DIR` pointed at a temp dir, fixtures resolved with the native resolver). Existing CreateSessionModal test mocks gained the new store action.\n\nProof of red (each run against the unfixed behaviour or a mutation, then restored):\n- Browse tests on the original code: 9 of the first 18 failed with the old home-only denial. Dropping the deny-list from Browse fails 5; ignoring roots fails 4.\n- Unresolvable-path probes: skipping the deny-list there, or checking the raw unresolved path, fails the symlinked-home and link-into-`~/.ssh` probes.\n- Default cwd resolved twice, or the config-dir block resolved with another resolver, fails the one-resolution and resolver-threading tests; defaulting Browse to the JS resolver fails the native-resolver test.\n- Startup warning: deleting the call from the factory fails its behavioural test.\n- Dashboard: a slow probe reply (300 ms, real autocomplete hook, fake timers) failed before the listener API; loosening the no-path check, the backslash rule or the skip rule each fails its own test; removing the fan-out in the message handler fails the store tests.\n\nResults: server full suite 21386 tests, 0 fail (13 skipped, as before); dashboard vitest 399 files / 7906 tests pass and `tsc --noEmit` is clean; server lints and ESLint on every touched server file are clean.\n\nsmoke: pending (coordinator)\n",
+   "closed_at": "2026-10-18T05:48:59Z",
+   "created_at": "2026-10-18T04:33:54Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/browse-honours-workspace-roots",
+    "sha": "45a97b6c7c66257f4386ff8a754e366d87f9a1d8"
+   },
+   "merge_commit_sha": "38d3aa304a5a20ad0c17b1d7e34c6667a8283924",
+   "merged_at": "2026-10-18T05:48:59Z",
+   "number": 8639,
+   "state": "closed",
+   "title": "fix(server): Browse honours workspaceRoots and the default cwd",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "Trial-Closes: 8567\n\n## Summary\nThe default quiet-hours bypass set (`permission`, `activity_error`) was a hand-maintained literal in the server, the mobile app and the dashboard, with nothing tying them together. It is now defined once in `@chroxy/protocol` and the server's copy is pinned to it in both directions.\n\n## What changed\n- `packages/protocol/src/notification-categories.ts`: new optional `defaultBypass` flag on `NotificationCategoryMeta`, set on `permission` and `activity_error`; `DEFAULT_BYPASS_CATEGORIES` is derived from the flag. A per-category flag was chosen over a second frozen array because it cannot name a key the roster lacks, and it follows the existing derived-export pattern (`NOTIFICATION_CATEGORY_ORDER`, `_LABELS`). Protocol dist rebuilt and the two changed files force-added.\n- App (`settings/constants.ts`) and dashboard (`SettingsPanel.tsx`): literals deleted, protocol export used. `QuietHoursEditor` props widened to `readonly string[]` (read-only use).\n- Server: keeps its own `DEFAULT_BYPASS_CATEGORIES` (same reasoning as `ALL_CATEGORIES`: the daemon must not depend on a UI table). Comment updated; the roster test pins it to the protocol flag in both directions.\n\n## Tests\n- `notification-category-roster.test.js`: new tests (empty-set refusal, server -> client, client -> server, subset of roster / derived from flag). Written first; failed with `does not provide an export named 'DEFAULT_BYPASS_CATEGORIES'`.\n- Proof of red: adding `result` to the server list only fails \"every client default-bypass ... server\" naming `result` (server default-bypass categories not flagged defaultBypass in the protocol file). Flagging `result` in the protocol only (dist rebuilt) fails \"every client default-bypass category is in the server DEFAULT_BYPASS_CATEGORIES\" naming `result`. Both restored by `cp`; green again.\n- App test: asserts the constant is the protocol set itself and no local array literal; re-adding a literal in `constants.ts` turned it red.\n- Suites: protocol 577/577 + tsc; app jest 2839/2839 (211 suites) + tsc; dashboard vitest 7890/7890 (397 files) + tsc; server full 21335 pass, 2 unrelated load-sensitive failures (`dev-preview`, `redaction-bounded-time`) which pass in isolation; all `lint-*.sh` exit 0.\n\nsmoke: pending (coordinator)\n",
+   "closed_at": "2026-10-18T05:32:21Z",
+   "created_at": "2026-10-18T04:33:56Z",
+   "draft": false,
+   "head": {
+    "ref": "refactor/notification-bypass-single-source",
+    "sha": "f1ffa1ec721ad0c60a97f03df395a8606fd44b14"
+   },
+   "merge_commit_sha": "b47a85a63cfb76a91df3538b09e1aa61d2abb343",
+   "merged_at": "2026-10-18T05:32:21Z",
+   "number": 8640,
+   "state": "closed",
+   "title": "refactor(protocol): define the default quiet-hours bypass set once",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "## Summary\nThe doctor tests `accepts custom port` and `passed is true when no failures` hardcoded ports 59123 and 59124 and relied on nothing on the machine holding them; the first also asserted `pass`, so any listener on that port reddened an unrelated PR. The tests now own the port state.\n\nTrial-Closes: 7815\n\n## What changed\n`packages/server/tests/doctor.test.js` only:\n- Small helpers bind an OS-assigned port on 127.0.0.1 (`listen(0)`), the same address doctor probes.\n- `accepts custom port`: obtains a freshly freed port and asserts `pass` and that the message includes it.\n- New: a deliberately held port asserts `warn` (both directions of the pass/warn branch are now covered deterministically).\n- `passed is true when no failures`: uses a freed port instead of the literal; new companion test shows a held port is only a warning and does not by itself fail the run.\n\n## Tests\nProof of red: with listeners holding 59123 and 59124, the old test failed (`expected: 'pass'`, `actual: 'warn'` at the `portCheck.status` assertion). The new tests pass with those ports held and without (124/124 in `doctor.test.js` both ways). Mutation: making the port probe always resolve fails both new held-port tests, so the `warn` branch is genuinely guarded. Server lints pass; eslint clean.\n\nsmoke: not applicable — test-only change.\n\nFull server suite: 21349 tests, 21331 pass, 13 skipped, 5 failures, all outside this change and load-sensitive: `redaction-bounded-time` (timing; also fails in isolation on an unmodified tree), and `dev-preview`, `docker`, `native-notification-smoke`, `ws-server` encryption, which each pass 0-fail when re-run alone.\n",
+   "closed_at": "2026-10-18T05:25:50Z",
+   "created_at": "2026-10-18T04:34:01Z",
+   "draft": false,
+   "head": {
+    "ref": "test/doctor-port-deterministic",
+    "sha": "e023f43c7bd6ccfad267ab98aa6abb71cb0742b2"
+   },
+   "merge_commit_sha": "34c3dadbf39f074215dd06d74b6417f50e6397cc",
+   "merged_at": "2026-10-18T05:25:50Z",
+   "number": 8641,
+   "state": "closed",
+   "title": "test(server): make doctor custom-port tests deterministic",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/a1-cd"
+   },
+   "body": "## Summary\n\nRun report for harness trial run A1-cd, at `docs/reports/harness-evals/trial/runs/A1-cd/REPORT.md`, as the mission requires.\n\n## What it records\n\n- Run fields: harness and versions, coordinator and worker models, invocation, permission mode, human approvals (0), start and end times.\n- One row per queue item: all ten merged into `trial/a1-cd`, none blocked. Each row gives the opened and merged times, CI runs, review rounds and merge SHA.\n- A post-merge check of the combined base.\n- Cost `n/a` (no SDK-reported `total_cost_usd` is exposed to the session).\n- Incidents, decisions taken, unfiled follow-ups for the owner, the withheld count and the isolation self-report.\n\nsmoke: not applicable — docs-only change.\n",
+   "closed_at": "2026-10-18T06:06:54Z",
+   "created_at": "2026-10-18T05:50:45Z",
+   "draft": false,
+   "head": {
+    "ref": "docs/trial-a1-cd-run-report",
+    "sha": "36d1a3a410ee936427bd7d0ee03fce364fe1d0da"
+   },
+   "merge_commit_sha": "fe7ea87ec8b704a4f1bff92266d99f7478563e82",
+   "merged_at": "2026-10-18T06:06:54Z",
+   "number": 8642,
+   "state": "closed",
+   "title": "docs(reports): run report for harness trial run A1-cd",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

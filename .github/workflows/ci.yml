@@ -1790,6 +1790,17 @@ jobs:
       - name: Test PRIME fixture evidence verifier (offline)
         run: python3 scripts/fixtures/prime-compatibility/test_evaluator.py
 
+      - name: Run trialctl (harness trial runner) tests (offline)
+        # docs/reports/harness-evals/runner: cutting trial bases, clone and
+        # preflight checks, the read-back of the applied model and effort from
+        # native transcripts, and the collector whose output measures.py prints
+        # (checked against one October run's recorded GitHub responses, and
+        # measures.py against October's committed output byte for byte).
+        # unittest exits 0 on an empty discovery, so run.py fails below a
+        # test-count floor. A temporary repository, a fake HOME and scripted
+        # subprocesses: nothing reads the runner's real ~/.claude or ~/.codex.
+        run: python3 docs/reports/harness-evals/runner/tests/run.py
+
       - name: Run compile-skill-targets.mjs tests
         run: node scripts/__tests__/compile-skill-targets.test.mjs
 

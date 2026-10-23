@@ -1,0 +1,23 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8632/comments?per_page=100",
+ "response": [
+  {
+   "body": "## Summary\nReviewed head e17a1b01. The final collision pass in `modelChoices` now restarts from each row's original base label, so a shared pinned descriptor is replaced by the full target instead of being stacked with it. Issue 8595 acceptance is met: distinct choices, original ids and full ids kept, cross-family regression through `modelChoices`, one discriminator.\n\n## Strengths\n- Minimal, local fix; return type and public signature of `modelChoices` are unchanged, so the app SettingsBar, dashboard ModelPickerModal and SettingsPanel callers and the internal use in `formatActiveModelLabel` are unaffected (they consume `.label/.id/.fullId` only). `tsc --noEmit` and the model-display suite pass for me (21 tests).\n- Uniqueness holds by construction: rows are deduplicated by target first, so fallback labels `base (target)` are distinct from each other. I fuzzed 200k random rosters (2-5 rows, mixed bases, aliases, dated pins, `[1m]`, adversarial targets such as `pinned 1.0`): zero duplicate labels and zero repeated `(pinned ..) (..)` shapes. The same fuzz against the pre-fix expression produced the repeated-descriptor shape in about 38% of cases, so the fix is the discriminating change.\n- Mixed and 3-way cases behave correctly: alpha-1-0 / beta-1-0 / gamma-1-0 / alpha-2-0 all labelled `Custom` gives `Custom (claude-alpha-1-0)`, `(claude-beta-1-0)`, `(claude-gamma-1-0)`, `Custom (pinned 2.0)`. Only the colliding rows fall back to the full target; the row the descriptor already disambiguates keeps it.\n- The control test (descriptor alone disambiguates) guards against over-correcting; the main test asserts exact labels, ids, full ids, no mutation of input rows.\n\n## Critical\nNone.\n\n## Suggestions\n- Commit message lacks the `Trial-Closes: 8595` line (only the PR body has it). If the trial rule applies to commit messages as well, amend before merge; if the squash message is taken from the PR body, nothing to do.\n- Optional hardening (defer): a roster could still in theory produce a fallback label equal to an untouched row's label only if a base label itself contains parentheses; this predates the PR and is not reachable from real rosters.\n\n## Nitpicks\n- The 3-way and mixed (some rows keep descriptor, some fall back) cases are verified by my fuzz but not by a committed test; a one-line extra case would lock the behavior in. Cheap to fold, not required.\n\n## Verdict\nApprove\n",
+   "created_at": "2026-10-18T04:13:48Z",
+   "id": 6245542604,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "### Smoke (isolated preview daemon) — head dc9ed76\n| step | verdict | head |\n|---|---|---|\n| dashboard connects | PASS | dc9ed76 |\n| browse to fixture, Select | PASS | dc9ed76 |\n| create session with explicit cwd | PASS | dc9ed76 |\n| Haiku in header model picker | PASS | dc9ed76 |\n| tiny prompt, reply | PASS | dc9ed76 |\n| second session, switch back keeps transcript | PASS | dc9ed76 |\n| colliding custom targets (two \"Custom\" rows, claude-alpha-1-0 / claude-beta-1-0, via the user model overlay) | PASS: header picker shows \"Custom (claude-alpha-1-0)\" and \"Custom (claude-beta-1-0)\", no repeated \"(pinned 1.0)\"; selecting alpha shows the same label in header and status bar | dc9ed76 |\n\nnote: the Default badge reads \"Default (Sonnet 5.5 (pinned 5.5))\" once the full roster loads (with or without the custom rows); not changed by this PR, recorded as a follow-up in the run report.\nevidence: private vault smoke/chroxy-pr8632-dc9ed76\n",
+   "created_at": "2026-10-18T04:21:33Z",
+   "id": 6245600609,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

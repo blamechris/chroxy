@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8635/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nIt is a small, well-tested dashboard UI change with all moved-symbol references verified consistent and no server, security, or concurrency surface affected.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR improves the dashboard's **Settings → Session Defaults** so it no longer silently hides a saved provider override that the currently-connected server doesn't offer, and it surfaces the one-time session-defaults migration notice that previously only appeared in New Session. It fits into the existing session-defaults UX work (#8265/#7728) by keeping what the user has stored visible and honest while still showing which provider new sessions will actually use.\n\n**Changes:**\n- `SettingsPanel.tsx`: computes a `dormantProvider` (a `user`-sourced override not in `availableProviders`), keeps it selected in the Default provider `<select>` via a disabled \"(not offered by this server)\" option, and adds an explanatory hint — without persisting anything until the user picks a new value.\n- Extracts the migration notice and its `sessionDefaultsNoticeText` copy helper from `CreateSessionModal.tsx` into a new shared `SessionDefaultsNotice.tsx`, now rendered in both New Session and Settings so dismissing in either clears both.\n- Updates tests: new dormant-override and migration-notice coverage in `SettingsPanel.test.tsx`, one existing assertion updated, and the helper import repointed in `CreateSessionModalSessionDefaults.test.tsx`.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​dashboard/​src/​components/​SettingsPanel.tsx` | Adds dormant-provider detection, disabled selected option, and hint; renders shared notice |\r\n| `packages/​dashboard/​src/​components/​SessionDefaultsNotice.tsx` | New shared component + extracted `sessionDefaultsNoticeText` helper reading/dismissing store state |\r\n| `packages/​dashboard/​src/​components/​CreateSessionModal.tsx` | Removes inlined notice JSX/helper and now renders the shared `<SessionDefaultsNotice />` |\r\n| `packages/​dashboard/​src/​components/​SettingsPanel.test.tsx` | Adds dormant-override and migration-notice tests; updates one roster assertion |\r\n| `packages/​dashboard/​src/​components/​CreateSessionModalSessionDefaults.test.tsx` | Repoints the `sessionDefaultsNoticeText` import to the new module |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561416672,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:23:23Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

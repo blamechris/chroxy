@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8673/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nIt is a documentation-only report with no code or runtime impact, its internal counts and arithmetic reconcile, and spot-checked PR/merge metadata matches GitHub ground truth.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR adds a single new documentation file recording the outcomes of the fixed `B1-cx` harness-eval trial. It is a pure record-keeping artifact under `docs/reports/harness-evals/` with no code, configuration, or runtime impact. The report captures per-item timestamps, PR/merge SHAs, CI run links, review rounds, earlier failed attempts, local baseline failures, smoke limitations, follow-ups, and isolation incidents for the ten queue items (nine merged into `trial/b1-cx`, one flagged blocked because its acceptance was already satisfied at T0).\n\n**Changes:**\n- Adds `REPORT.md` documenting ten trial queue items (9 merged, 1 blocked at item 8282).\n- Records gate evidence per item: reviewed heads, final-head CI counts, review dispositions, and attempt/correction counts.\n- Documents verification/delivery notes, earlier failed attempts, local suite baseline failures, smoke observations, incidents, and follow-ups.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| docs/​reports/​harness-evals/​trial/​runs/​B1-cx/​REPORT.md | New trial-outcome report; internally consistent and corroborated by GitHub PR metadata for the referenced merges. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564918132,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T20:59:58Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

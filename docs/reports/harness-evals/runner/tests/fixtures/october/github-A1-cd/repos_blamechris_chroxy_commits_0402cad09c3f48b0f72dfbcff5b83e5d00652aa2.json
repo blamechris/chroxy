@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/commits/0402cad09c3f48b0f72dfbcff5b83e5d00652aa2?",
+ "response": {
+  "parents": [
+   {
+    "sha": "c375e66eae3bb85b655d73b5187f25ff2d5b03b7"
+   }
+  ],
+  "sha": "0402cad09c3f48b0f72dfbcff5b83e5d00652aa2",
+  "stats": {
+   "additions": 36,
+   "deletions": 2
+  }
+ }
+}

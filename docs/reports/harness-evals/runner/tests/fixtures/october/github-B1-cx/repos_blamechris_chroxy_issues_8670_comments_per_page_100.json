@@ -1,0 +1,14 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8670/comments?per_page=100",
+ "response": [
+  {
+   "body": "Fresh independent review at `d523c0c2da8937fdc826d38ded5f84f788b8d23a`: **approve**, no actionable findings across all thirteen changed files.\n\nThe frozen readonly protocol definition is shared by all three consumers. Existing server/mobile exports remain compatible, the server imports a dependency-free subpath, and explicit empty/global/device overrides retain their meaning. Independent roster and quiet-hours tests passed 69/69, with actual complete-set mutation failures inspected. Dashboard and native evidence cover all thirteen controls, default selections and persisted singleton/empty overrides. The four known local full-server baseline failures remain explicit; final hosted CI and posted-feedback triage are still required.\n",
+   "created_at": "2026-10-18T19:36:28Z",
+   "id": 6254241956,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

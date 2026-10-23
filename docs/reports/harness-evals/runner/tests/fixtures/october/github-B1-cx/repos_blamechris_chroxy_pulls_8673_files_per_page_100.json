@@ -1,0 +1,8 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8673/files?per_page=100",
+ "response": [
+  {
+   "filename": "docs/reports/harness-evals/trial/runs/B1-cx/REPORT.md"
+  }
+ ]
+}

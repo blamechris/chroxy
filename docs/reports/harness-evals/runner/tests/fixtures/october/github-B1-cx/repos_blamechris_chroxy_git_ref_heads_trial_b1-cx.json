@@ -1,0 +1,8 @@
+{
+ "request": "repos/blamechris/chroxy/git/ref/heads/trial/b1-cx?",
+ "response": {
+  "object": {
+   "sha": "3a521964d131e876f972158da974056cdbb6e048"
+  }
+ }
+}

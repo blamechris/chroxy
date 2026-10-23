@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8666/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe one-line resolver swap correctly applies the existing config precedence, matches the established doctor shared-resolver convention, and is fully covered by the new precedence tests.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR fixes `chroxy doctor`'s Port-availability check so it probes the port that `chroxy start` would actually bind, instead of only honoring an explicit CLI `--port` (or falling back to the hardcoded `8765`). The previous code (`const checkPort = port || 8765`) ignored both the `PORT` environment variable and a `port` entry in the config file, so `doctor` could report the wrong port as available/in-use. The fix routes the port through the shared `mergeConfig` resolver fed the already-parsed config file, bringing the Port check into line with how `doctor` already resolves providers and the binary-provenance gate (shared-resolver / \"doctor parity\" convention).\n\n**Changes:**\n- Resolve the doctor Port check via `mergeConfig({ fileConfig: parsedConfig, cliOverrides: { port }, defaults: { port: 8765 } })`, giving precedence CLI → `PORT` → config file → `8765`.\n- Update the `options.port` JSDoc to document the new override/fallback order.\n- Add `doctor-port.test.js`, which exercises `runDoctorChecks` end-to-end (mocking only the `net` socket boundary and binary resolution) across all precedence tiers plus the first-run no-config case.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​server/​src/​doctor.js` | Replaces `port \\|\\| 8765` with a `mergeConfig`-resolved port and updates the JSDoc, matching the precedence `chroxy start` uses. |\r\n| `packages/​server/​tests/​doctor-port.test.js` | New test covering CLI/`PORT`/config/default precedence and first-run behavior by mocking only the socket boundary and binary resolver. |\r\n\r\nI confirmed: `mergeConfig` maps `port`→`PORT` and parses it to a number (`config.js:1729,1837-1840`); the default `8765` matches `chroxy start` (`cli/shared.js:271-281`); `configFile()`/`configDir()` re-read `CHROXY_CONFIG_DIR` per call so the test env overrides are honored; the test's `binaryProvenanceMode`/`binarySignatureGate` option names match the `runDoctorChecks` destructure; and the `net` mock aligns with `checkPortAvailable`'s `createServer`/`listen(port, '127.0.0.1')` usage. No issues found.\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564534301,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T19:13:42Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

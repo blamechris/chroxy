@@ -1,0 +1,41 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8364/timeline?per_page=100",
+ "response": [
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-10-08T02:23:25Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-10-08T02:23:25Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-10-08T02:23:26Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-10-08T02:23:26Z",
+   "event": "labeled"
+  }
+ ]
+}

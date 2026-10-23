@@ -1,0 +1,53 @@
+{
+ "request": "repos/blamechris/chroxy/actions/runs?branch=docs%2Fb1-cx-report&per_page=100#workflow_runs",
+ "response": [
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T21:10:45Z",
+   "event": "pull_request",
+   "head_branch": "docs/b1-cx-report",
+   "head_sha": "bbef3fe4bd38f0b1d1a8760adf976f359298dbac",
+   "id": 39166670225,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T20:56:34Z",
+   "event": "dynamic",
+   "head_branch": "docs/b1-cx-report",
+   "head_sha": "bbef3fe4bd38f0b1d1a8760adf976f359298dbac",
+   "id": 39165596184,
+   "name": "Running Copilot Code Review",
+   "path": "dynamic/agents/copilot-pull-request-reviewer",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T20:56:27Z",
+   "event": "pull_request",
+   "head_branch": "docs/b1-cx-report",
+   "head_sha": "bbef3fe4bd38f0b1d1a8760adf976f359298dbac",
+   "id": 39165588517,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T20:56:27Z",
+   "event": "pull_request",
+   "head_branch": "docs/b1-cx-report",
+   "head_sha": "bbef3fe4bd38f0b1d1a8760adf976f359298dbac",
+   "id": 39165588475,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  }
+ ]
+}

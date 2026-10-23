@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8641/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nIt is a self-contained, test-only change whose assertions I verified against the doctor Port-check logic, and it follows the established loopback free-port test convention with proper fixture cleanup.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR makes two doctor custom-port tests deterministic. Previously `accepts custom port` and `passed is true when no failures` hardcoded ports 59123/59124 and assumed nothing on the host held them, so an unrelated listener could redden an otherwise-green PR. The tests now take ownership of the port state by binding an OS-assigned port on `127.0.0.1` (the same address `doctor.js` probes), and add companion tests covering the `warn` branch deterministically.\n\n**Changes:**\n- Add small `holdPort`/`closeServer`/`freePort` helpers that reserve or hold an OS-assigned loopback port instead of using fixed literals.\n- Rewrite `accepts custom port` and `passed is true when no failures` to use a freshly freed port, and add two new tests asserting a bound port reports `warn` and does not by itself fail the run.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| packages/​server/​tests/​doctor.test.js | Replaces hardcoded ports with OS-assigned loopback ports via new helpers and adds deterministic `warn`-branch coverage for the doctor Port check. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561448879,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T04:36:52Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

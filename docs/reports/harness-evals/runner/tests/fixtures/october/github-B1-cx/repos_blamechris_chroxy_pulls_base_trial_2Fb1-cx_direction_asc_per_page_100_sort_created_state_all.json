@@ -1,0 +1,247 @@
+{
+ "request": "repos/blamechris/chroxy/pulls?base=trial%2Fb1-cx&direction=asc&per_page=100&sort=created&state=all",
+ "response": [
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Context-window updates now reject NaN and both infinities before changing model rows or learned overrides. Tests cover absent and existing overrides, retain finite-update behavior, and update an older overlay test that explicitly expected NaN acceptance.\n\nTrial-Closes: 7771\n\nValidation:\n- Regression tests failed against the old guard; final focused model/overlay tests pass 180/180.\n- ESLint and all eleven custom server lints pass.\n- Full local server suite executed: 21,353 tests; 21,336 passed, four failed, thirteen skipped. All four remaining failures reproduce unchanged on the trial baseline: process-tree reaping, forceKill, and two dev-preview process/fixture checks. Final-commit CI must pass before merge.\n- Independent review approved `f7afa78d90844c853130d73f7cd962617b5cc169` after the corrective test update.\n- smoke: not applicable — production change is confined to models.js, outside the directive's runtime/UI path patterns.\n\nTarget: trial/b1-cx only. No production deployment or issue-state changes.\n",
+   "closed_at": "2026-10-18T19:02:48Z",
+   "created_at": "2026-10-18T18:46:52Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/b1-cx-model-context",
+    "sha": "f7afa78d90844c853130d73f7cd962617b5cc169"
+   },
+   "merge_commit_sha": "7d992a43922c131b4fd849dfe52f9925e40ab291",
+   "merged_at": "2026-10-18T19:02:48Z",
+   "number": 8662,
+   "state": "closed",
+   "title": "fix(server): reject non-finite context windows",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Doctor port tests now keep a real OS-selected loopback listener open while checking the occupied-port warning. A separate successful-bind test verifies the forwarded custom port and host, then binds port zero without a release/rebind race.\n\nTrial-Closes: 7815\n\nValidation: the original test failed with its fixed port deliberately occupied; the revised doctor file passes 123/123 with the former ports occupied and free. Mutating either bind outcome makes the corresponding assertions fail. Independent review approved commit d7d73ce84140ce949623872011abc414f865cc4f; ESLint and targeted state-path/opt-forwarding lints passed.\n\nThe full server suite ran: 21,348 tests, 21,331 passed, 13 skipped, four failed. The same four failures reproduce on unchanged trial baseline: grandchild timeout reaping, POSIX forceKill, dev-preview process-lifetime verification, and private Unix fixture readiness. Final-head CI remains required.\n\nsmoke: not applicable — tests-only change; no production UI or session-runtime files changed.\n",
+   "closed_at": "2026-10-18T19:14:58Z",
+   "created_at": "2026-10-18T18:54:48Z",
+   "draft": false,
+   "head": {
+    "ref": "test/b1-cx-doctor-ports",
+    "sha": "d7d73ce84140ce949623872011abc414f865cc4f"
+   },
+   "merge_commit_sha": "9a6661ff6baae122e8d1da0ccee50b41ae917a88",
+   "merged_at": "2026-10-18T19:14:58Z",
+   "number": 8663,
+   "state": "closed",
+   "title": "test(server): make doctor port checks deterministic",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Custom models with colliding pinned descriptors now use their original base label in the final full-ID fallback. The picker displays `Custom (claude-alpha-1-0)` and `Custom (claude-beta-1-0)` without repeating the pinned descriptor, while preserving selection IDs and source rows.\n\nTrial-Closes: 8595\n\nValidation: the regression failed before the fix and passes afterward; full store-core suite 2,944 tests, affected dashboard tests 215, both package typechecks passed.\n\nSmoke at head `6c041dc8cb82114b347e65426dff9da8f92fc15e` used an isolated loopback daemon, temporary config/fixture, and the freshly built dashboard:\n\n| Step | Verdict | Head |\n|---|---|---|\n| New Session → Browse → Select → Create with explicit cwd | PASS | 6c041dc |\n| Header Haiku selection → tiny prompt → real reply | PASS | 6c041dc |\n| Switch sessions and back | PASS | 6c041dc |\n| Real server overlay → model picker exact collision labels | PASS | 6c041dc |\n| Selection IDs and full target identities retained | PASS | 6c041dc |\n\nEvidence: private vault smoke/chroxy-pr8664-6c041dc. Browser-driver selector corrections were needed; no implementation correction or repeated provider prompt was required. Independent review and final-head CI remain required before merge.\n",
+   "closed_at": "2026-10-18T19:33:26Z",
+   "created_at": "2026-10-18T19:00:20Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/b1-cx-model-labels",
+    "sha": "6c041dc8cb82114b347e65426dff9da8f92fc15e"
+   },
+   "merge_commit_sha": "e737889ed97d5325587fcb4cb8f26fa7de070f9f",
+   "merged_at": "2026-10-18T19:33:25Z",
+   "number": 8664,
+   "state": "closed",
+   "title": "fix(models): avoid repeated pinned collision descriptors",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Doctor now checks the port resolved by the existing configuration precedence: explicit CLI option, then `PORT`, then the config file, then the built-in default. A missing config file still supports first-run diagnostics; provider selection is unchanged.\n\nTrial-Closes: 8233\n\nValidation: regression RED 3/7 failures on the prior code; GREEN 7/7 plus 8 existing CLI compatibility tests. Independent review approved `9cad6c378b34956744fc35fb40c78b9200197560` and independently passed all 15 focused cases. Full ESLint and all 11 server custom lints passed.\n\nFull server suite ran with production setup, coverage and the result-count guard, using concurrency four: 21,354 tests, 21,337 passed, 13 skipped, four failed. All four failures reproduce on unchanged trial baseline (grandchild timeout reaping, POSIX forceKill, dev-preview process lifetime, private Unix fixture readiness). Final-head CI is still required before merge.\n\nsmoke: not applicable — CLI doctor configuration change falls outside the directive's UI/session-runtime file scope. Focused production-seam tests mock the socket boundary and verify the exact requested port without probing a production service.\n",
+   "closed_at": "2026-10-18T19:37:45Z",
+   "created_at": "2026-10-18T19:09:40Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/b1-cx-doctor-config-port",
+    "sha": "9cad6c378b34956744fc35fb40c78b9200197560"
+   },
+   "merge_commit_sha": "61c03c8e5619ac94055549d13492f23282cd942d",
+   "merged_at": "2026-10-18T19:37:45Z",
+   "number": 8666,
+   "state": "closed",
+   "title": "fix(cli): use the configured port in doctor",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Settings now shows a saved provider override that the connected server does not offer as a disabled selected option, with an explanation that the choice remains stored and which provider is used locally. Settings and New Session share the migration notice and dismissal behavior.\n\nTrial-Closes: 8277\n\nValidation: three regressions failed before the fix; focused 212 tests and the complete dashboard suite (397 files, 7,893 tests) passed. TypeScript, CSS variables, generated-token drift and whitespace checks passed.\n\nSmoke at `f6460c2646188ff5e88877721e37baae5aefb0ba` used a fresh dashboard build and isolated loopback daemon/config/browser profile:\n\n| Step | Verdict | Head |\n|---|---|---|\n| New Session → Browse → Select → Create with explicit cwd | PASS | f6460c2 |\n| Haiku header selection → tiny real prompt/reply → switch away/back | PASS | f6460c2 |\n| Saved absent provider remains disabled/selected; hint, stored value and usable choices verified | PASS | f6460c2 |\n| Real legacy migration appears first in Settings; dismissal applies in New Session and survives reload | PASS | f6460c2 |\n| Select and dismiss hit targets are at least 44px | PASS | f6460c2 |\n\nEvidence: private vault smoke/chroxy-pr8667-f6460c2. Settings itself was verified through targeted rendered DOM assertions; screenshots were taken only for the ordinary workflow and after leaving Settings, as required by the smoke privacy restriction. Owned daemon exited, port was released, and temporary token-bearing scratch was removed. Fresh independent review and final-head CI remain required.\n",
+   "closed_at": "2026-10-18T19:50:05Z",
+   "created_at": "2026-10-18T19:11:15Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/b1-cx-settings-defaults",
+    "sha": "f6460c2646188ff5e88877721e37baae5aefb0ba"
+   },
+   "merge_commit_sha": "8f6a53bacbf8e1c4b5b4ad3015129e7c3289251d",
+   "merged_at": "2026-10-18T19:50:05Z",
+   "number": 8667,
+   "state": "closed",
+   "title": "fix(dashboard): show dormant session defaults and migration notice",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Mapped IPv6 bind hosts now require a complete valid IPv6 literal and an embedded IPv4 address in 127/8. The classifier reuses the existing mapped-address decoder, preserving expanded, compressed, dotted and hexadecimal valid spellings while rejecting incomplete or non-loopback inputs. Socket authorization predicates are unchanged.\n\nTrial-Closes: 8215\n\nValidation at `e1750e75e1d0f753df9e3b2cbbce32b4a6364471`:\n\n- Regression RED then 194 focused tests GREEN; validity-guard mutation fails as intended.\n- Initial read-only review and fresh independent review approve with no findings. Independent focused tests: 120 pass; exhaustive classification probe: 589,834 assertions pass.\n- All eleven custom server lints and ESLint pass.\n- Full server suite executed: 21,349 tests, 21,332 pass, 13 skipped and four unchanged baseline failures reproduced separately (process-tree lifetime, force-kill descendant lifetime, preview process lifetime, and Unix fixture readiness). An initial concurrent run also hit an unchanged MCP fixture timing failure and leaked its fixture after assertion; bounded-concurrency rerun removed that flake. This is not claimed as a clean local full-suite result. Hosted final-head CI remains required.\n- smoke: not applicable — runtime logic is confined to `bind-host.js`, plus its tests and a locality-helper documentation comment, outside the directive's mechanically selected UI/session-runtime scope.\n\nIn effect: trial source only; no production deployment. Runtime validation covers pure classification and caller behavior in tests.\n",
+   "closed_at": "2026-10-18T20:03:13Z",
+   "created_at": "2026-10-18T19:20:55Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/b1-cx-loopback-host",
+    "sha": "e1750e75e1d0f753df9e3b2cbbce32b4a6364471"
+   },
+   "merge_commit_sha": "38bea06f0e7b22d317beaf4380bb431758e452f2",
+   "merged_at": "2026-10-18T20:03:13Z",
+   "number": 8668,
+   "state": "closed",
+   "title": "fix(server): classify complete mapped loopback addresses",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Interrupted tools now show the same amber state and cautious outcome summary in the lone tool bubble and detail modal as in grouped activity. The reason travels through the existing callback and modal state; preserved input stays visible, while synthetic fallback results are hidden. Stop-before-approval retains its distinct wording, and normal completed tools retain their ordinary presentation.\n\nTrial-Closes: 8364\n\nValidation at `899fdd9d4c6a41e6a26c544ab51778773cfecca5`:\n\n- RED: eleven new expectations failed with eight controls passing. GREEN: 47 focused tests, full app 212 suites / 2,857 tests, TypeScript.\n- Fresh independent review: approve, no actionable findings; five suites / 68 tests independently passed.\n- Native smoke used a fresh iPhone 16 Pro simulator with the actual stable-head app and isolated daemon. No production installation.\n\n| Smoke step | Verdict | Head |\n|---|---|---|\n| Manual connect; New Session; Browse; Select; explicit cwd; SDK Create | PASS | 899fdd9 |\n| Explicit Haiku; tiny real reply; switch away and back | PASS | 899fdd9 |\n| Actual terminated bubble collapsed/expanded and detail modal | PASS, supplemental native component harness | 899fdd9 |\n| Stop-before-run bubble/modal and normal controls | PASS, supplemental native component harness | 899fdd9 |\n| Owned daemon/Metro teardown and ports free | PASS | 899fdd9 |\n\nThe normal wire path groups tools into ActivityGroup, so the changed lone components were exercised through a supplemental native harness importing the production components directly. This is not claimed as an ordinary wire-path lone-bubble repro. The modal's existing native accessibility grouping flattens descendants; screenshots verify the rendered state, and overlay dismissal works. Recorded as a nonblocking follow-up, with no issue write.\n\nevidence: private vault smoke/chroxy-pr8669-899fdd9\n\nOwner-reserved extra check: physical-device visual/touch verification on the eventual mobile build or OTA. Simulator checks above are complete; the daily installed app remains unchanged.\n",
+   "closed_at": "2026-10-18T19:51:09Z",
+   "created_at": "2026-10-18T19:22:01Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/b1-cx-terminated-tools",
+    "sha": "899fdd9d4c6a41e6a26c544ab51778773cfecca5"
+   },
+   "merge_commit_sha": "60abf9f7939597f0ae0e8314f90a491a54e4132d",
+   "merged_at": "2026-10-18T19:51:09Z",
+   "number": 8669,
+   "state": "closed",
+   "title": "fix(app): show interrupted tool state in bubble and details",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "The default quiet-hours bypass categories now have one frozen, typed definition in the protocol package. Server, dashboard and app use that definition, retaining their existing exports and explicit empty overrides. A dependency-free package subpath keeps the server from loading the protocol schema bundle for this constant.\n\nTrial-Closes: 8567\n\nValidation at `d523c0c2da8937fdc826d38ded5f84f788b8d23a`:\n\n- Regression and mutation checks prove server additions/removals and either client drifting from the shared list fail.\n- Full protocol 579, store-core 2,943, app 2,843 and dashboard 7,890 tests pass; typechecks/builds, server ESLint and all eleven custom server lints pass.\n- Full server suite executed: 21,349 tests, 21,332 pass, 13 skipped and four separately reproduced unchanged baseline failures (process-tree lifetime, force-kill descendant lifetime, preview process lifetime, Unix fixture readiness). This is not a clean local-suite claim; hosted final-head CI remains required.\n- Fresh independent review: approve with no actionable findings; 69 focused tests independently pass, with complete dashboard/native smoke evidence inspected.\n\n| Final-head smoke step | Verdict | Head |\n|---|---|---|\n| Dashboard New/Browse/Select/explicit Create/Haiku/reply/switch | PASS | d523c0c |\n| Dashboard 13-category roster and default pair, singleton and empty override persistence | PASS, targeted rendered DOM | d523c0c |\n| Native manual connect/New/Browse/Select/explicit Create/Haiku/reply/switch | PASS | d523c0c |\n| Native 13 switches: default pair, singleton and empty values, each reopened | PASS, targeted native accessibility state | d523c0c |\n| Owned previews, Metro and smoke bridge stopped; ports free | PASS | d523c0c |\n\nSettings were checked through rendered/native control state without Settings screenshots. Evidence includes ordinary product-flow screenshots and five exact category-state checkpoints on each client.\n\nevidence: private vault smoke/chroxy-pr8670-d523c0c\n\nIn effect: observed through isolated real dashboard and iOS simulator sessions. No production deployment; the eventual physical-device check remains owner-reserved.\n",
+   "closed_at": "2026-10-18T20:07:34Z",
+   "created_at": "2026-10-18T19:36:04Z",
+   "draft": false,
+   "head": {
+    "ref": "refactor/b1-cx-notification-defaults",
+    "sha": "d523c0c2da8937fdc826d38ded5f84f788b8d23a"
+   },
+   "merge_commit_sha": "d7d1edaf90fd04a533c75e60d2ea50f436e251d8",
+   "merged_at": "2026-10-18T20:07:34Z",
+   "number": 8670,
+   "state": "closed",
+   "title": "refactor(protocol): share notification bypass defaults",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Browse now applies the same resolved-cwd policy as explicit session creation. Allowed workspace roots and permitted configured defaults work outside the home directory, while outside paths and credential/config directories remain denied. The shared validator retains canonical, symlink and missing-path checks. Runtime config is forwarded when handling each request.\n\nA configured default that the validator rejects now triggers a startup warning and an explanatory New Session note before Browse. Blank Create retains its existing inheritance behavior, as requested. Optional directory-listing request IDs correlate normalized or relative paths safely; stale replies are ignored and consumers without IDs retain their previous payload shape.\n\nTrial-Closes: 8303\n\nValidation at `503f5beed4db53b643694dcb95f46db1c9ebb6a9`:\n\n- RED/GREEN regressions and four policy-guard mutations. Review found two warning gaps, both corrected with additional RED cases: normalized-response correlation and cleared-input default selection.\n- Full dashboard 7,902 tests, protocol 578, store-core 2,944; focused server 41; types, builds, ESLint and all eleven server custom lints pass.\n- Initial read-only review plus its single corrective delta and fresh independent review are complete. The first delta has no findings; independent full review approves with 48 server and 38 dashboard tests passed. A second correction updates the schema-roster comment and two stale denial wording expectations; all 113 tests in those files pass, and deliberately bypassing the policy makes both denial assertions fail. Fresh final review delta: approve with no actionable findings, with all 113 focused tests independently rerun.\n- Final full server suite executed: 21,363 tests, 21,346 pass, 13 skipped and four unchanged failures reproduced on baseline (process-tree lifetime, force-kill descendant lifetime, preview process lifetime and Unix fixture readiness). The missing roster field and two stale denial assertions found by the preceding full run are corrected. This is not a clean local-suite claim; hosted final-head CI remains required.\n\n| Final-head smoke step | Verdict | Head |\n|---|---|---|\n| Allowed default outside HOME; no prefill warning; Browse root/child; Select | PASS | 503f5be |\n| Explicit SDK Create; select Haiku; tiny real reply; switch away/back | PASS; identical runtime digest at final head | a9b7ecf |\n| Outside sibling and parent denied | PASS | 503f5be |\n| Invalid configured default: startup warning and pre-Browse note | PASS | 503f5be |\n| Invalid default Browse denied; both owned previews stopped and ports free | PASS | 503f5be |\n\nevidence: private vault smoke/chroxy-pr8671-503f5be and smoke/chroxy-pr8671-a9b7ecf\n\nThe prefill note uses the existing subdued hint styling; behavior and readability were inspected in the real dashboard. No production daemon or installed client was changed.\n",
+   "closed_at": "2026-10-18T20:04:15Z",
+   "created_at": "2026-10-18T19:44:45Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/b1-cx-browse-roots",
+    "sha": "503f5beed4db53b643694dcb95f46db1c9ebb6a9"
+   },
+   "merge_commit_sha": "6b57ca98c50b5fd94fc5513b643f03814049359f",
+   "merged_at": null,
+   "number": 8671,
+   "state": "closed",
+   "title": "fix(server): align directory browsing with workspace roots",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "## Behavior\n\nBrowse now applies the same workspace-root and protected-path policy as explicit session creation, including permitted roots outside HOME. Configured defaults that explicit creation would refuse produce a startup warning and a New Session hint; blank-cwd inheritance remains compatible.\n\nThe shared policy resolves targets and boundaries with the native filesystem resolver, so Windows short TEMP aliases and their long path spelling agree. Optional request IDs correlate both prefill checks and Browse navigation after path normalization, while stale responses are ignored and older daemons retain the existing fallback. Symlink-dependent test cases use capability guards without skipping ordinary policy coverage.\n\nTrial-Closes: 8303\n\n## Validation\n\n- Full dashboard: 7,910 tests; typecheck and production build pass at 088abedfd10f1a67ae32debf7cb90c244114bf65; the dashboard tree is identical at final af8c588c008a89dc95d3b22da9045121f817d875.\n- Full protocol: 578 tests; full store: 2,945 tests; builds/typechecks pass. These package trees are unchanged from the tested parent commit.\n- Full server: 21,381 tests, 21,364 pass, four failures reproduced on unchanged trial T0, 13 skips. This is not a clean local-suite pass. The complete suite was rerun at final af8c588 in 301.6 seconds; no additional failures occurred beyond the four established T0 failures. Focused server coverage: 342 passing tests, ESLint and all eleven custom lints pass.\n- Four native-resolver mutations and three Browse-correlation mutations each fail with the expected assertion before source restoration. Actual final-head Windows CI is required separately.\n- Fresh independent full review approved all 26 files at 088abed (342 server tests, 59 dashboard tests and a real Create denial probe). A justified fresh delta approved the final two test corrections at af8c588 (188 tests plus both native TEMP membership scenarios). No blocking finding. Copilot posted no objective defect; actual Windows CI remains required.\n\n## Isolated smoke\n\n| Step | Verdict | Head |\n|---|---|---|\n| Outside-HOME Browse → child → Select → explicit SDK Create → Haiku header → real reply → session switch/back | PASS | 1417df6 |\n| Outside-HOME Browse → child → Select | PASS | af8c588 |\n| Allowed child/../ path normalizes and remains selectable | PASS | af8c588 |\n| Denied raw ../sibling path shows denial and exits Loading | PASS | af8c588 |\n| Workspace sibling and parent denied | PASS | af8c588 |\n| Invalid-default hint; clearing cwd retains warning; blank Create preserves inheritance | PASS | af8c588 |\n\nThe runtime correction changes the modal's Browse correlation and its test; the last commit corrects two server test assumptions only. Runtime identity to 088abed is verified. The full SDK route is retained at its observed parent head, and changed-feature/repro steps were re-driven on final af8c588. All preview daemons stopped and scratch credentials removed. Screenshots and wire/DOM records are private.\n\nevidence: private vault smoke/chroxy-pr8672-af8c588; prior complete route and original failure in smoke/chroxy-B1-cx-8303-w2-1417df6\n\nThe prior trial attempt was closed without merging after Windows CI exposed the short/long path mismatch. This retry preserves that failing real-platform fixture. No production installation is included.\n\nThe first retry Windows run cleared all six original path failures but exposed two test assumptions. Final tests explicitly assert both native TEMP membership outcomes and exact measured ENOENT/ENOTDIR mappings. Five failure proofs demonstrate that incorrect path classification or error messages still fail. No Windows exemption or additional skip was introduced.\n",
+   "closed_at": "2026-10-18T20:55:26Z",
+   "created_at": "2026-10-18T20:24:31Z",
+   "draft": false,
+   "head": {
+    "ref": "fix/b1-cx-browse-roots-w2",
+    "sha": "af8c588c008a89dc95d3b22da9045121f817d875"
+   },
+   "merge_commit_sha": "9865eb624293725ef1f6d725430cda3622010234",
+   "merged_at": "2026-10-18T20:55:26Z",
+   "number": 8672,
+   "state": "closed",
+   "title": "fix: align Browse with workspace path policy",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "base": {
+    "ref": "trial/b1-cx"
+   },
+   "body": "Records the fixed B1-cx trial: nine changes merged into trial/b1-cx and one item flagged because its acceptance was already present at T0. The report preserves per-item timestamps, heads, review rounds, CI runs, earlier failed attempts, local baseline failures, smoke limitations, follow-ups and isolation incidents.\n\nThe recorded end timestamp is the queue-execution cutoff before this reporting PR. This PR's verified merge metadata and the final private brief record report landing without predicting it inside the committed report.\n\nValidation: all ten rows reconciled against owned PR/merge/gate evidence; report renderer found zero evidence gaps; diff whitespace check passed. Fresh independent report review and all final-head CI remain required before merge.\n\nsmoke: not applicable — documentation-only report; no UI or session-runtime change.\n\nNo issue state, main branch or production installation changed.\n",
+   "closed_at": "2026-10-18T21:10:42Z",
+   "created_at": "2026-10-18T20:56:25Z",
+   "draft": false,
+   "head": {
+    "ref": "docs/b1-cx-report",
+    "sha": "bbef3fe4bd38f0b1d1a8760adf976f359298dbac"
+   },
+   "merge_commit_sha": "3a521964d131e876f972158da974056cdbb6e048",
+   "merged_at": "2026-10-18T21:10:42Z",
+   "number": 8673,
+   "state": "closed",
+   "title": "docs: record B1-cx trial outcomes",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

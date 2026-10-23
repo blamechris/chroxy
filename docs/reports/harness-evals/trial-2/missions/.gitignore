@@ -1,0 +1,6 @@
+# Rendered missions belong on each run's base, where `trialctl cut` commits them as
+# the only commit over T0. On main they would put every run's mission in every
+# clone and leave cut nothing to commit; `trialctl render` writes them here only
+# to preview.
+*.md
+!TEMPLATE.md

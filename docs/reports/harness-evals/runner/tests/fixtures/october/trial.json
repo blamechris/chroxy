@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "id": "october",
+  "title": "October controlled harness trial (fixture for the collector golden test)",
+  "repo": "blamechris/chroxy",
+  "trial_dir": "docs/reports/harness-evals/trial",
+  "t0": "932bd3a4ef40bc9634cab390e6cf0facadd801d7",
+  "cap_hours": 12,
+  "github_login": "blamechris",
+  "paths": {
+    "state_dir": "~/trial/october/state"
+  },
+  "queue": {
+    "status": "October queue",
+    "slots": [
+      {
+        "slot": "Q01",
+        "issue": 8233,
+        "title": "October queue item 1",
+        "type": ""
+      },
+      {
+        "slot": "Q02",
+        "issue": 8215,
+        "title": "October queue item 2",
+        "type": ""
+      },
+      {
+        "slot": "Q03",
+        "issue": 7771,
+        "title": "October queue item 3",
+        "type": ""
+      },
+      {
+        "slot": "Q04",
+        "issue": 8595,
+        "title": "October queue item 4",
+        "type": ""
+      },
+      {
+        "slot": "Q05",
+        "issue": 8364,
+        "title": "October queue item 5",
+        "type": ""
+      },
+      {
+        "slot": "Q06",
+        "issue": 8282,
+        "title": "October queue item 6",
+        "type": ""
+      },
+      {
+        "slot": "Q07",
+        "issue": 8277,
+        "title": "October queue item 7",
+        "type": ""
+      },
+      {
+        "slot": "Q08",
+        "issue": 8567,
+        "title": "October queue item 8",
+        "type": ""
+      },
+      {
+        "slot": "Q09",
+        "issue": 8303,
+        "title": "October queue item 9",
+        "type": ""
+      },
+      {
+        "slot": "Q10",
+        "issue": 7815,
+        "title": "October queue item 10",
+        "type": ""
+      }
+    ]
+  },
+  "arms": {
+    "B": {
+      "model": "gpt-6-astra",
+      "effort": "xhigh"
+    }
+  },
+  "harnesses": {
+    "cx": {
+      "code": "CX",
+      "label": "CX - Codex desktop app",
+      "family": "codex",
+      "chroxy": false,
+      "invocation": "unused in the collector test"
+    }
+  },
+  "cells": [
+    {
+      "id": "B-native",
+      "arm": "B",
+      "harness": "cx",
+      "role": "controlled native"
+    }
+  ],
+  "contrasts": [],
+  "runs": [
+    {
+      "id": "B1-cx",
+      "cell": "B-native",
+      "repeat": 1,
+      "block": 1,
+      "base": "trial/b1-cx"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8667/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe change is a small, well-scoped dashboard UI refactor with no broken references and comprehensive new test coverage for the dormant-override and shared-notice behaviors.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR improves the dashboard's Session Defaults settings so a saved provider override that the currently connected server does not offer is no longer silently normalized away. It now renders as a disabled, still-selected option plus an explanatory hint clarifying that the override stays stored and which provider is actually used locally. It also extracts the one-time \"Session Defaults\" migration notice into a shared `SessionDefaultsNotice` component so Settings and New Session render identical copy and share dismissal behavior.\n\n**Changes:**\n- Display a dormant saved provider override in Settings as a disabled selected `<select>` option with a `settings-hint` (linked via `aria-describedby`), driving the select `value` off the raw `defaultProvider` while model choices still follow the usable `effectiveProvider` fallback.\n- Extract the migration notice markup and `sessionDefaultsNoticeText` helper into `SessionDefaultsNotice.tsx`, consumed by both `CreateSessionModal` and `SettingsPanel`.\n- Add a `min-height: 44px` tap-target floor to `.settings-field select` and expand test coverage for the dormant-override and shared-notice behaviors.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​dashboard/​src/​components/​SessionDefaultsNotice.tsx` | New shared component + `sessionDefaultsNoticeText` helper for the migration notice. |\r\n| `packages/​dashboard/​src/​components/​SettingsPanel.tsx` | Adds dormant-override detection, disabled selected option, hint, and renders the shared notice. |\r\n| `packages/​dashboard/​src/​components/​CreateSessionModal.tsx` | Removes the local notice/helper and renders the shared `SessionDefaultsNotice`. |\r\n| `packages/​dashboard/​src/​theme/​components.css` | Adds `min-height: 44px` to settings selects for the tap-target floor. |\r\n| `packages/​dashboard/​src/​components/​SettingsPanel.test.tsx` | Adds coverage for the dormant override and shared migration notice. |\r\n| `packages/​dashboard/​src/​components/​CreateSessionModalSessionDefaults.test.tsx` | Updates import of `sessionDefaultsNoticeText` to the new module. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564551771,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T19:15:54Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

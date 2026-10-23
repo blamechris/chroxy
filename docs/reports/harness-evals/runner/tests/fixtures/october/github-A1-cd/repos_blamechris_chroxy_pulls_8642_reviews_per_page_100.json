@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8642/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nIt is a docs-only report whose references all resolve and whose contents are internally consistent and fully aligned with the mission specification, with no code risk.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR adds a single documentation file, `docs/reports/harness-evals/trial/runs/A1-cd/REPORT.md`, recording the results of the controlled harness trial run `A1-cd`. It fits into the existing `docs/reports/harness-evals/trial/` structure (alongside `PROTOCOL.md`, `missions/A1-cd.md`, and other trial artifacts) and fulfills the \"Run report contents\" requirement defined in the mission file. The report is purely descriptive — no code, configuration, or executable artifacts are changed.\n\n**Changes:**\n- Records run metadata (harness/tool versions, coordinator/worker models, invocation, permission mode, 0 human approvals, start/end timestamps).\n- Documents a one-row-per-queue-item outcome table for all ten merged PRs, a post-merge check on the combined base, the smoke step, cost (`n/a`), incidents, decisions, 15 unfiled follow-ups, a withheld-finding note, and an isolation self-report.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| docs/​reports/​harness-evals/​trial/​runs/​A1-cd/​REPORT.md | New trial run report documenting outcomes, incidents, decisions, and follow-ups for run A1-cd |\r\n\r\nI verified that all referenced paths resolve (`../../PROTOCOL.md`, `../../missions/A1-cd.md`, and `.claude/skills/prime-directive/SKILL.md` all exist), that the ten queue items match the mission's fixed queue exactly, that the smoke in-scope (5) and not-applicable (5) lists partition all ten items without overlap, that reviewer counts (nine Sonnet + one Opus) are internally consistent, that the follow-up list is correctly numbered 1–15, and that all recorded timestamps precede the current time (no future dates). The report also satisfies every item in the mission's required report-contents list. No spelling, grammar, consistency, or reference issues were found.\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5561653229,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T05:53:40Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}
