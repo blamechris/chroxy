@@ -3807,14 +3807,138 @@ describe('CodexAppServerSession — the turn follows codex\'s own turn (#8710)',
     }
   })
 
+  it('a notification naming no turn, with none open, does not open one', () => {
+    const r = mkThreadRunner()
+    try {
+      r.note({ method: 'thread/status/changed', params: { threadId: PARENT, status: { type: 'active', activeFlags: [] } } })
+      r.note({ method: 'account/rateLimits/updated', params: { rateLimits: {} } })
+      r.note({ method: 'item/agentMessage/delta', params: { delta: 'no ids' } })
+      assert.equal(r.s.turnActive, false, 'nothing here says a turn is live, so nothing would ever close it')
+      assert.deepEqual(r.names(), [])
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a destroyed session maps nothing and never throws', async () => {
+    const r = mkThreadRunner()
+    await r.s.destroy()
+    // Lines already read from the killed child can still be dispatched.
+    for (const n of [
+      errorNote(PARENT, 'turn-late', limitError()),
+      turnCompleted(PARENT, 'turn-late-2', 'failed', limitError()),
+      turnStarted(PARENT, 'turn-late-3'),
+      itemStarted(PARENT, 'turn-late-4', { type: 'commandExecution', id: 'x', command: 'ls', cwd: '/' }),
+    ]) {
+      assert.doesNotThrow(() => r.note(n), `${n.method} after destroy`)
+    }
+    assert.equal(r.s.turnActive, false)
+    assert.equal(r.s._resultTimeout, null, 'no timer armed on a torn-down session')
+    r.cleanup()
+  })
+
+  it('a reconnect tick with no turn open is not an end (older payload: no willRetry)', () => {
+    const r = mkThreadRunner()
+    try {
+      r.note({ method: 'error', params: { threadId: PARENT, turnId: 'turn-retrying', error: {
+        message: 'Reconnecting... 2/5', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+      } } })
+      assert.ok(!r.names().includes('error'), 'codex is retrying, not stopping')
+      r.note(itemStarted(PARENT, 'turn-retrying', { type: 'commandExecution', id: 'c', command: 'ls', cwd: '/' }))
+      assert.equal(r.s.turnActive, true, 'and the turn it is retrying is still live')
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('an error codex says it will retry, with no turn open, is not an end', () => {
+    const r = mkThreadRunner()
+    try {
+      // A StreamError the reconnect heuristic does not recognise; willRetry does.
+      r.note(errorNote(PARENT, 'turn-retrying', { message: 'connection refused', codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } }, true))
+      assert.ok(!r.names().includes('error'))
+      r.note(itemStarted(PARENT, 'turn-retrying', { type: 'commandExecution', id: 'c', command: 'ls', cwd: '/' }))
+      assert.equal(r.s.turnActive, true)
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a sub-agent does not revive a result timeout a permission prompt has paused', async () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const r = mkThreadRunner({ resultTimeoutMs: 60_000 })
+    try {
+      await r.s.sendMessage('go')
+      r.s._pauseResultTimeoutForPermission() // a prompt is waiting on a human
+      for (let i = 0; i < 4; i += 1) {
+        r.note(delta(CHILD, CHILD_TURN, 'w', '.'))
+        mock.timers.tick(50_000)
+      }
+      // A full window past the worker's last word, still waiting on the human.
+      mock.timers.tick(60_000)
+      assert.ok(!r.names().includes('error'), 'a human taking their time is not a stall')
+      r.s._resumeResultTimeoutForPermission()
+      mock.timers.tick(60_000)
+      assert.ok(r.names().includes('error'), 'control: once answered, the timeout runs again')
+    } finally {
+      r.cleanup()
+      mock.timers.reset()
+    }
+  })
+
+  it('a straggler after a turn ended with none open does not reopen it', () => {
+    const r = mkThreadRunner()
+    try {
+      r.note(turnCompleted(PARENT, 'turn-untracked'))
+      r.note(itemCompleted(PARENT, 'turn-untracked', { type: 'commandExecution', id: 'bg', aggregatedOutput: '', status: 'failed' }))
+      assert.equal(r.s.turnActive, false)
+      assert.deepEqual(r.names(), [])
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('an error then the failed completion, with no turn open, is one error', () => {
+    const r = mkThreadRunner()
+    try {
+      r.note(errorNote(PARENT, 'turn-untracked', limitError()))
+      r.note(turnCompleted(PARENT, 'turn-untracked', 'failed', limitError()))
+      assert.equal(r.names().filter((e) => e === 'error').length, 1, 'one stop, one chip')
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a failed turn that names no error still says it failed', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('go')
+      r.note(turnCompleted(PARENT, PARENT_TURN, 'failed', null))
+      assert.deepEqual(r.ev.find(([e]) => e === 'error')[1], { message: 'Codex turn failed' })
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('the record of ended turns stays bounded', () => {
+    const r = mkThreadRunner()
+    try {
+      for (let i = 0; i < 40; i += 1) r.note(turnCompleted(PARENT, `turn-${i}`))
+      assert.equal(r.s._endedNativeTurnIds.size, 32)
+      assert.ok(r.s._endedNativeTurnIds.has('turn-39') && !r.s._endedNativeTurnIds.has('turn-0'), 'the oldest go first')
+    } finally {
+      r.cleanup()
+    }
+  })
+
   it('a late completion of the previous turn does not end the next one', async () => {
     const r = mkThreadRunner()
     try {
       await r.s.sendMessage('one')
       r.note(errorNote(PARENT, PARENT_TURN, { message: 'stream failed', codexErrorInfo: 'other' }))
       assert.equal(r.s.turnActive, false, 'precondition: the terminal error ended turn one')
-      // A queued message starts turn two before codex's turn/completed for turn
-      // one arrives (`_failTurn` dequeues synchronously).
+      // The next send (or a queued one, dequeued on the next tick) opens turn
+      // two before codex's turn/completed for turn one has arrived.
       r.s._client = { request: async () => ({ turn: { id: 'turn-two' } }) }
       await r.s.sendMessage('two')
       r.note(turnCompleted(PARENT, PARENT_TURN, 'failed', { message: 'stream failed', codexErrorInfo: 'other' }))

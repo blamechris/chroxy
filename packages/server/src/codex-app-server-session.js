@@ -37,9 +37,14 @@ const MAX_MCP_RESULT_CHARS = 10_000
 // `_noteNativeTurnEnded`). Stragglers only trail the last turn or two.
 const MAX_ENDED_NATIVE_TURN_IDS = 32
 
-// #8710: notifications about the SESSION rather than a turn — consumed whichever
-// turn they name, including one that has already ended (#7729).
-const SESSION_SCOPED_NOTIFICATIONS = new Set(['thread/tokenUsage/updated', 'model/rerouted'])
+// #7729/#8710: notifications about the SESSION rather than a turn, and their
+// handlers. One table, so the three places that must agree on the set — with a
+// turn open, with none, and for a turn that has already ended — cannot drift.
+const SESSION_SCOPED_HANDLERS = new Map([
+  ['thread/tokenUsage/updated', (session, params) => session._onTokenUsage(params)],
+  // #7729 — codex moved this thread to another model server-side.
+  ['model/rerouted', (session, params) => session._onModelRerouted(params)],
+])
 
 // #6629: bounded backstop for codex's OWN response-stream reconnect loop. #6623
 // keeps the turn OPEN on a transient `Reconnecting... N/M` error so codex can
@@ -1198,8 +1203,12 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   _onNotification({ method, params }) {
+    // #8710 — a torn-down session maps nothing. The client is killed, but stdout
+    // already read can still be dispatched, and with destroy()'s listeners gone
+    // an `error` emitted here would throw out of the stream handler.
+    if (this._destroying) return
     // #7724 — `deprecationNotice` is handled HERE, ahead of the between-turns
-    // early return, NOT as a case in the switch below. It is a lifecycle notice
+    // handling, NOT as a case in the switch below. It is a lifecycle notice
     // the binary can emit at any point — most plausibly right after the
     // handshake, when there is no active turn — and the switch is unreachable in
     // exactly that window. A case down there would be a handler that cannot fire
@@ -1227,7 +1236,8 @@ export class CodexAppServerSession extends BaseSession {
       return
     }
     const turnId = this._notificationTurnId(params)
-    if (turnId && this._endedNativeTurnIds.has(turnId) && !SESSION_SCOPED_NOTIFICATIONS.has(method)) {
+    const sessionHandler = SESSION_SCOPED_HANDLERS.get(method)
+    if (turnId && !sessionHandler && this._endedNativeTurnIds.has(turnId)) {
       // #8710 — codex already ended this turn: a straggler (a background exec
       // reporting after its turn, or the `turn/completed` that follows a terminal
       // `error`), not a live turn, and never the turn that is open now.
@@ -1237,8 +1247,7 @@ export class CodexAppServerSession extends BaseSession {
     if (!this._activeTurn) {
       // #7729 — a reroute and a usage update both describe the SESSION, not the
       // turn, so they are consumed here.
-      if (method === 'thread/tokenUsage/updated') { this._onTokenUsage(params); return }
-      if (method === 'model/rerouted') { this._onModelRerouted(params); return }
+      if (sessionHandler) { sessionHandler(this, params); return }
       // #8710 — anything else is about a turn the daemon is not tracking. An
       // error is surfaced, and codex still reporting work opens a turn for it.
       if (!this._onUntrackedTurnNotification(method, params, turnId)) return
@@ -1251,6 +1260,7 @@ export class CodexAppServerSession extends BaseSession {
     // `error` clears both below on its way to _failTurn; a transient reconnect
     // `error` re-arms the watchdog but leaves the deadline untouched.)
     if (method !== 'error') { this._clearReconnectWatchdog(); this._clearReconnectDeadline() }
+    if (sessionHandler) { sessionHandler(this, params); return }
     const t = this._activeTurn
     switch (method) {
       case 'turn/started':
@@ -1268,13 +1278,6 @@ export class CodexAppServerSession extends BaseSession {
         break
       case 'item/completed':
         this._onItemCompleted(params?.item)
-        break
-      case 'thread/tokenUsage/updated':
-        this._onTokenUsage(params)
-        break
-      // #7729 — codex moved this thread to another model server-side.
-      case 'model/rerouted':
-        this._onModelRerouted(params)
         break
       case 'turn/completed':
         this._finishTurn(params?.turn, turnId)
@@ -1365,8 +1368,10 @@ export class CodexAppServerSession extends BaseSession {
     const tlog = this._log || log
     if (method === 'error') {
       const err = this._errorPayload(params)
-      if (this._isTransientReconnect(err)) {
-        tlog.warn(`codex app-server response stream reconnecting with no turn open: ${err.message || 'responseStreamDisconnected'}`)
+      // `willRetry` (required in 0.163.0) marks codex's own retry of a turn it is
+      // still running: not an end, and that turn's later notifications are live.
+      if (params?.willRetry === true || this._isTransientReconnect(err)) {
+        tlog.debug(`codex app-server retrying with no turn open: ${err.message || 'stream error'}`)
         return false
       }
       this._noteNativeTurnEnded(turnId)
@@ -1388,7 +1393,7 @@ export class CodexAppServerSession extends BaseSession {
       return false
     }
     // Only a turn/started, or a notification naming its turn, says a turn is live.
-    if (this._destroying || (method !== 'turn/started' && !turnId)) {
+    if (method !== 'turn/started' && !turnId) {
       tlog.debug(`codex app-server ${method} with no turn open — ignored`)
       return false
     }
@@ -1402,8 +1407,9 @@ export class CodexAppServerSession extends BaseSession {
   /**
    * #8710 — what a turn-ending codex error tells the client. A usage limit
    * carries codex's own sentence (it names when the limit resets) and the
-   * `usage_limit` code the clients already render for Claude's limits (#8400);
-   * any other error keeps the raw payload this path has always shown.
+   * `usage_limit` code claude-tui sessions use for the same stop (#8400); any
+   * other error keeps the raw payload this path has always shown, and a failed
+   * turn that names no error says only that it failed.
    * `usageLimitExceeded` is the v2 `CodexErrorInfo` spelling (codex-cli 0.163.0
    * `generate-json-schema`).
    */
@@ -1411,7 +1417,8 @@ export class CodexAppServerSession extends BaseSession {
     if (err?.codexErrorInfo === 'usageLimitExceeded' && typeof err.message === 'string' && err.message) {
       return { message: err.message, code: USAGE_LIMIT_CODE }
     }
-    return { message: `Codex error: ${JSON.stringify(raw ?? null).slice(0, 200)}` }
+    if (raw == null) return { message: 'Codex turn failed' }
+    return { message: `Codex error: ${JSON.stringify(raw).slice(0, 200)}` }
   }
 
   /**
@@ -1835,7 +1842,8 @@ export class CodexAppServerSession extends BaseSession {
   _finishTurn(turn, turnId = null) {
     if (!this._activeTurn) return
     const t = this._activeTurn
-    // #8710 — before anything below can dequeue and open the next turn.
+    // #8710 — codex ended this turn: a straggler naming it is never taken for a
+    // live turn, or for the next one.
     this._noteNativeTurnEnded(turnId ?? t.turnId)
     // Completion can precede the RPC acknowledgement. Persist first-turn skills
     // admission before result listeners save the now-completed native session.
