@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8668/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe classifier change is correct across every added test case, reuses an existing validated decoder, leaves the authorization predicates unchanged, and is comprehensively covered by new tests.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR fixes issue #8215, where `isLoopbackHost` in `bind-host.js` used a loose prefix match (`h.startsWith('::ffff:7f')`) that misclassified non-loopback or malformed IPv4-mapped IPv6 addresses as loopback (e.g. `::ffff:7f:1`, which actually maps to `0.127.0.1`, and incomplete literals like `::ffff:7f00:1:2`). The fix replaces the prefix heuristic with a full-address validation path that reuses the existing `mappedV6ToV4` decoder from `ssrf-guard.js`, so only a complete, valid IPv6 literal whose embedded IPv4 falls in `127.0.0.0/8` is treated as loopback. The strict authorization predicate (`isStrictLoopbackAddress` in `connection-locality.js`) is untouched; only its explanatory comment is updated.\n\n**Changes:**\n- Replace the `::ffff:7f` / `::ffff:127.` prefix match with `isIPv6(h) && mappedV6ToV4(h)?.startsWith('127.')`, decoding the full mapped address before inspecting octets.\n- Update the stale comment in `connection-locality.js` that referenced the now-fixed loose behavior.\n- Add test coverage for valid mapped loopback spellings (expanded, compressed, dotted, hex) and for rejected incomplete/out-of-range inputs.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​server/​src/​bind-host.js` | Replaces the loose `::ffff:7f`/`::ffff:127.` prefix check with full IPv6 validation via `mappedV6ToV4`, correctly rejecting incomplete and non-loopback mapped addresses. |\r\n| `packages/​server/​src/​connection-locality.js` | Updates the `isStrictLoopbackAddress` doc comment to reflect that the bind-host helper no longer accepts the malformed `::ffff:7f...` forms. |\r\n| `packages/​server/​tests/​bind-host.test.js` | Adds positive cases for valid mapped loopback spellings and negative cases for out-of-range and incomplete mapped addresses. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564582481,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T19:23:53Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

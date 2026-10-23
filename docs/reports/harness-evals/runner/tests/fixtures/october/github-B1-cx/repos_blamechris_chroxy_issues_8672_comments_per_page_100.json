@@ -1,0 +1,32 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8672/comments?per_page=100",
+ "response": [
+  {
+   "body": "Review: APPROVE at 088abedfd10f1a67ae32debf7cb90c244114bf65.\n\nThe full 26-file diff was reviewed for shared policy containment, native path canonicalization, optional request-ID compatibility, normalized and stale Browse responses, startup warnings, blank-cwd inheritance and generated protocol artifacts. No blocking correctness, security, compatibility or acceptance defect was found. Independent checks passed 342 server tests and 59 dashboard tests; a real Create-handler probe rejected a denied directory before session creation.\n\nThe enabled Select control on a denied listing is unchanged from the base. It fills the cwd field; explicit Create still validates the path. This contained pre-existing UI polish is recorded in the fixed trial report, with no issue write.\n\nFinal-head changed-feature/repro smoke passed; the earlier complete SDK/Haiku/reply/switch route is explicitly attributed to parent 1417df6 in the PR table. Server, protocol and store package trees are identical between that parent and this head. Actual Windows CI, all final-head remote checks and posted-review dispositions remain mandatory merge gates; this review does not claim those pending checks passed.\n",
+   "created_at": "2026-10-18T20:30:59Z",
+   "id": 6254790827,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "A further focused review is justified after the completed full review: actual Windows CI passed the six original allowed-path cases but exposed two platform assumptions in tests. The local correction af8c588c008a89dc95d3b22da9045121f817d875 changes only those tests, using native temp/home path expectations and measured ENOENT/ENOTDIR results while preserving unconditional outside-path denial. Runtime files are unchanged from the approved head.\n\nBefore updating this PR, the complete server suite is being rerun. Final-head smoke and a fresh independent delta review will inspect the corrected assertions and their failure proofs. Actual Windows CI and all final-head gates must then pass; the prior failed run is not accepted as green. This additional delta round is limited to the platform-test correction and preserves the original cumulative attempt accounting.\n",
+   "created_at": "2026-10-18T20:38:17Z",
+   "id": 6254865189,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "Final delta review: APPROVE at af8c588c008a89dc95d3b22da9045121f817d875.\n\nThe two test-only changes correctly assert native TEMP/home membership and the exact platform filesystem errors without weakening outside-path denial or adding skips/exemptions. Independent verification passed 188 focused tests plus separate executions of both TEMP membership branches. All five failure-proof logs were inspected. Runtime trees are byte-identical to the preceding full-review head.\n\nThe full server suite at this final commit completed 21,381 tests: 21,364 pass, four failures reproduced at trial T0 and 13 skips; no clean local-suite pass is claimed. Final-head isolated Browse changed-feature/repro smoke passed and all previews were torn down. The full 26-file review and this fresh delta are clean. Copilot's request for closer verification is addressed by those independent reviews; actual final-head Windows CI and all other remote gates remain required before merge.\n",
+   "created_at": "2026-10-18T20:44:47Z",
+   "id": 6254931810,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

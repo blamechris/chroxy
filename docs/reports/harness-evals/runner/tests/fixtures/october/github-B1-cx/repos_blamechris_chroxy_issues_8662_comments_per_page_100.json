@@ -1,0 +1,23 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8662/comments?per_page=100",
+ "response": [
+  {
+   "body": "# Context-window validation review\n\nReviewed head: `f7afa78d90844c853130d73f7cd962617b5cc169`\n\nScope: complete diff from `origin/trial/b1-cx` to the reviewed head, plus correction delta from `b438823528366d127a0e29a4d5df46dcfaf45253`.\n\nVerdict: **Approve**. No blocking findings.\n\n- `Number.isFinite` rejects NaN and both infinities without coercion, before either model rows or either override map can change. Existing rejection of zero, negatives and non-numbers remains effective; finite positive updates retain their existing behavior.\n- The six regression cases check return value, unchanged model rows, and private override behavior through a subsequent refresh, with both absent and existing overrides. The saved red-run evidence shows four ordinary assertion failures for NaN and positive infinity against the original guard, rather than a timeout or harness failure.\n- The correction removes the obsolete expectation that NaN is accepted. Its independent cache-save, absent learned-map entry, and restart-to-heuristic assertions remain intact. Targeted searches found no remaining test expectation that requires accepting a non-finite update.\n- Surrounding model metadata, override precedence, reset behavior and learned-cache integer validation are unchanged.\n\nValidation: independently ran `models.test.js` and `models-overlay-reload.test.js` with Node 22, the server test setup, module-mock flag, a 600-second hard timeout, and the available `7815-deny-state.sb` profile denying reads under the live state directory. **180 tests passed, 0 failed; exit 0**, approximately 0.40 seconds reported by the test runner. `git diff --check` passed; checkout remained clean at the reviewed head. Full-suite verification is owned by the coordinator.\n\nNonblocking documentation observation: `packages/server/src/codex-app-server-session.js:1535–1537` still describes the registry's former NaN hole. The caller's own finite guard remains correct, so this stale explanatory comment has no runtime or acceptance impact.\n",
+   "created_at": "2026-10-18T18:48:25Z",
+   "id": 6253737916,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  },
+  {
+   "body": "Final review at `f7afa78d90844c853130d73f7cd962617b5cc169`: **clean**.\n\n| Independent review | Posted-feedback triage | Final-head CI | Smoke |\n|---|---|---|---|\n| Complete-diff and correction-delta review approved; no blocking findings | Posted summary has no open findings; zero inline threads. Its general human-review recommendation is advisory; current branch rules contain no required approval. | 24 successful checks; unchanged Renovate-config path job skipped by workflow condition | Not applicable: registry validation/test-only scope |\n\nThe stale explanatory comment in the separate session adapter has no runtime effect and is recorded in the trial report as an unfiled nonblocking follow-up. No issue state changed. All delivery gates are satisfied at this head.\n",
+   "created_at": "2026-10-18T19:02:43Z",
+   "id": 6253882589,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

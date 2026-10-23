@@ -1,0 +1,65 @@
+{
+ "request": "repos/blamechris/chroxy/actions/runs?branch=fix%2Fb1-cx-loopback-host&per_page=100#workflow_runs",
+ "response": [
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T20:03:16Z",
+   "event": "pull_request",
+   "head_branch": "fix/b1-cx-loopback-host",
+   "head_sha": "e1750e75e1d0f753df9e3b2cbbce32b4a6364471",
+   "id": 39161538507,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:24:26Z",
+   "event": "pull_request",
+   "head_branch": "fix/b1-cx-loopback-host",
+   "head_sha": "e1750e75e1d0f753df9e3b2cbbce32b4a6364471",
+   "id": 39158621736,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:21:04Z",
+   "event": "dynamic",
+   "head_branch": "fix/b1-cx-loopback-host",
+   "head_sha": "e1750e75e1d0f753df9e3b2cbbce32b4a6364471",
+   "id": 39158364265,
+   "name": "Running Copilot Code Review",
+   "path": "dynamic/agents/copilot-pull-request-reviewer",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:20:58Z",
+   "event": "pull_request",
+   "head_branch": "fix/b1-cx-loopback-host",
+   "head_sha": "e1750e75e1d0f753df9e3b2cbbce32b4a6364471",
+   "id": 39158356016,
+   "name": "CI",
+   "path": ".github/workflows/ci.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-18T19:20:57Z",
+   "event": "pull_request",
+   "head_branch": "fix/b1-cx-loopback-host",
+   "head_sha": "e1750e75e1d0f753df9e3b2cbbce32b4a6364471",
+   "id": 39158355983,
+   "name": "Repo Relay",
+   "path": ".github/workflows/repo-relay.yml",
+   "run_attempt": 1,
+   "status": "completed"
+  }
+ ]
+}

@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "id": "t2",
+  "title": "Controlled harness trial 2",
+  "status": "draft: queue not selected; entry gate failing (PLAN.md section 2)",
+  "repo": "blamechris/chroxy",
+  "trial_dir": "docs/reports/harness-evals/trial-2",
+  "t0": null,
+  "cap_hours": 12,
+  "github_login": "blamechris",
+  "paths": {
+    "clone_root": "~/trial/t2",
+    "state_dir": "~/trial/t2/state",
+    "daemon_checkout": "~/chroxy",
+    "daemon_config": "~/.chroxy/config.json",
+    "daemon_log": "~/.chroxy/logs/chroxy.log",
+    "claude_settings": "~/.claude/settings.json",
+    "claude_projects": "~/.claude/projects",
+    "codex_prompts": "~/.codex/prompts",
+    "codex_sessions": "~/.codex/sessions",
+    "codex_app_cli": "/Applications/Codex.app/Contents/Resources/codex",
+    "node_bin": "/opt/homebrew/opt/node@22/bin",
+    "key_folder": "~/Obsidian/no-it-all/reviews/harness-trial-2"
+  },
+  "versions": {
+    "node_major": 22,
+    "claude_min": "2.1.280"
+  },
+  "allowance": {
+    "codex_weekly_left_min": 100,
+    "claude_5h_used_max": 20,
+    "claude_weekly_used_max": 70
+  },
+  "prices": null,
+  "blockers": {
+    "cy-codex": [8710, 8743],
+    "cy-claude": [8741, 8700]
+  },
+  "queue": {
+    "status": "not selected (PLAN.md section 4)",
+    "slots": []
+  },
+  "arms": {
+    "A": {"model": "claude-opus-5-5", "effort": "high"},
+    "B": {"model": "gpt-6-astra", "effort": "xhigh"}
+  },
+  "harnesses": {
+    "cd": {
+      "code": "CD",
+      "label": "CD — Claude desktop app, local Claude Code session in a fresh clone",
+      "family": "claude",
+      "chroxy": false,
+      "expect": {"entrypoint": "claude-desktop", "permission_mode": "auto"},
+      "invocation": "In the Claude desktop app (Code tab) open a new session on the run's clone, set the model to Opus 5.5, the effort to high and the permission mode to Auto, and confirm all three before sending. Run `trialctl start {RUN_ID}` with the usage readings, then send exactly:\n\n```\n/prime-directive \"Trial run {RUN_ID}: follow {MISSION} exactly\"\n```\n\nPress Enter once, then keep your hands off the session: Escape and the Stop button interrupt the turn. Within ten minutes run `trialctl verify-start {RUN_ID}`; if it prints STOP, stop the run and record a setup incident."
+    },
+    "cy-claude": {
+      "code": "CY",
+      "label": "CY — Chroxy dashboard session, Claude (SDK) provider",
+      "family": "claude",
+      "chroxy": true,
+      "model_aliases": ["opus", "claude-opus-5-5"],
+      "expect": {"permission_mode": "auto"},
+      "invocation": "In the Chroxy dashboard: New Session → provider Claude (SDK) → worktree isolation off (the clone is already isolated) → working directory = the run's clone → Create. A new session starts on the dashboard's default model, so set the model first: pick the Opus 5.5 entry in the header, and set the permission mode to Auto. Then run `trialctl preflight {RUN_ID} --phase session --session <the new session's id>`, which reads both changes from the daemon log, and `trialctl start {RUN_ID}` with the usage readings. Effort comes from `~/.claude/settings.json` (`modelSettings.claude-opus-5-5.effortLevel`), which the pre-send preflight checked; leave the header's thinking level at Auto. Send exactly:\n\n```\n/prime-directive \"Trial run {RUN_ID}: follow {MISSION} exactly\"\n```\n\nPress Enter once, then keep your hands off that session: Escape in the composer, Cmd+. and the Stop button all interrupt the turn. If the slash command is not recognised, send `Invoke the prime-directive skill with the argument: Trial run {RUN_ID}: follow {MISSION} exactly` and note \"invocation: natural-language skill call\". Within ten minutes run `trialctl verify-start {RUN_ID}`; if it prints STOP, stop the run and record a setup incident."
+    },
+    "cx": {
+      "code": "CX",
+      "label": "CX — Codex desktop app in a fresh clone",
+      "family": "codex",
+      "chroxy": false,
+      "expect": {"sandbox": "workspace-write"},
+      "invocation": "In the Codex desktop app open the run's clone, set the model to gpt-6-astra and reasoning to extra-high, and approvals to the automatic reviewer (\"Approve for me\") with the default workspace-write sandbox, the setting October's B1-cx observed and the same sandbox the Chroxy Codex runs use. Run `trialctl start {RUN_ID}` with the usage readings, then send exactly:\n\n```\n/prompts:prime-directive Trial run {RUN_ID}: follow {MISSION} exactly\n```\n\nIf `/prompts:` does not expand, Codex reads `~/.codex/prompts/prime-directive.md` itself; record the invocation method. Within ten minutes run `trialctl verify-start {RUN_ID}`; if it prints STOP, stop the run and record a setup incident."
+    },
+    "cy-codex": {
+      "code": "CY",
+      "label": "CY — Chroxy dashboard session, Codex app-server provider (ChatGPT connection)",
+      "family": "codex",
+      "chroxy": true,
+      "model_aliases": ["gpt-6-astra"],
+      "expect": {"sandbox": "workspace-write"},
+      "invocation": "In the Chroxy dashboard: New Session → provider Codex → connection ChatGPT subscription → working directory = the run's clone → Advanced: permission mode Auto, sandbox on the `Default` option (workspace-write), worktree isolation off → Create. Set the header to model gpt-6-astra and reasoning effort xhigh and confirm both (the header may show the config default first). Then run `trialctl preflight {RUN_ID} --phase session --session <the new session's id>` and `trialctl start {RUN_ID}` with the usage readings. Send exactly:\n\n```\n/prompts:prime-directive Trial run {RUN_ID}: follow {MISSION} exactly\n```\n\nIf the session does not expand `/prompts:`, paste the full contents of `~/.codex/prompts/prime-directive.md` followed by the line `Trial run {RUN_ID}: follow {MISSION} exactly`, and note \"invocation: pasted prompt\". Press Enter once and keep your hands off that session. The daemon must not be restarted while the run is live (#8744). Within ten minutes run `trialctl verify-start {RUN_ID}`; if it prints STOP, stop the run and record a setup incident."
+    }
+  },
+  "cells": [
+    {"id": "A-native", "arm": "A", "harness": "cd", "role": "controlled native"},
+    {"id": "A-chroxy", "arm": "A", "harness": "cy-claude", "role": "controlled Chroxy"},
+    {"id": "B-native", "arm": "B", "harness": "cx", "role": "controlled native"},
+    {"id": "B-chroxy", "arm": "B", "harness": "cy-codex", "role": "controlled Chroxy"}
+  ],
+  "contrasts": [
+    {"arm": "A", "native": "A-native", "chroxy": "A-chroxy"},
+    {"arm": "B", "native": "B-native", "chroxy": "B-chroxy"}
+  ],
+  "runs": [
+    {"id": "A-cd-r1", "cell": "A-native", "repeat": 1, "block": 1, "base": "trial/t2-a-cd-r1"},
+    {"id": "B-cy-r1", "cell": "B-chroxy", "repeat": 1, "block": 1, "base": "trial/t2-b-cy-r1"},
+    {"id": "A-cy-r1", "cell": "A-chroxy", "repeat": 1, "block": 1, "base": "trial/t2-a-cy-r1"},
+    {"id": "B-cx-r1", "cell": "B-native", "repeat": 1, "block": 1, "base": "trial/t2-b-cx-r1"},
+    {"id": "A-cy-r2", "cell": "A-chroxy", "repeat": 2, "block": 2, "base": "trial/t2-a-cy-r2"},
+    {"id": "B-cx-r2", "cell": "B-native", "repeat": 2, "block": 2, "base": "trial/t2-b-cx-r2"},
+    {"id": "A-cd-r2", "cell": "A-native", "repeat": 2, "block": 2, "base": "trial/t2-a-cd-r2"},
+    {"id": "B-cy-r2", "cell": "B-chroxy", "repeat": 2, "block": 2, "base": "trial/t2-b-cy-r2"}
+  ]
+}

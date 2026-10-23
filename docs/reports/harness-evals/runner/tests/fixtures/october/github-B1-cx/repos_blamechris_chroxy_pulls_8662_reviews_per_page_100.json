@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8662/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟡 Changes recommended\n\nThe change is correct, well-tested, and consistent with existing validation, but it touches server security-adjacent registry logic, so final human review is warranted before approval.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR fixes a validation gap in the server's models registry where `updateContextWindow` could admit non-finite values (`NaN`, `Infinity`, `-Infinity`) because its guard used `typeof contextWindow !== 'number'` — and `typeof NaN === 'number'` is `true` while `NaN <= 0` is `false`, so neither clause fired. The guard now uses `!Number.isFinite(contextWindow)`, aligning it with the validation already performed by `usableContextWindow` and `parseLearnedContextWindows` (the cache read path), so a non-finite value can never reach `activeModels` or the persisted learned-window map.\n\n**Changes:**\n- Replace the `typeof contextWindow !== 'number'` guard in `updateContextWindow` with `!Number.isFinite(contextWindow)`, rejecting NaN and both infinities.\n- Refresh the now-outdated comments in `models.js` that described the pre-existing NaN gap.\n- Add parametrized tests asserting non-finite values are rejected (without creating/replacing overrides), and invert the older overlay-reload test that previously expected NaN to be accepted.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​server/​src/​models.js` | Tightens the `updateContextWindow` guard to reject non-finite values and updates the surrounding comments to reflect the fix. |\r\n| `packages/​server/​tests/​models.test.js` | Adds parametrized tests covering NaN/±Infinity rejection with both absent and existing overrides, confirming models and the override map are unchanged. |\r\n| `packages/​server/​tests/​models-overlay-reload.test.js` | Updates the `#7771` test to expect NaN rejection (now `false`) and refreshes its explanatory comment. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564361899,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T18:48:49Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

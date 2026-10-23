@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8664/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe two-line change is a correct, index-aligned fix in a pure display helper, fully traced and backed by a passing regression test.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR fixes a display bug in `modelChoices` (the shared model-presentation helper in `@chroxy/store-core`). When two custom models shared the same base label and produced the same \"pinned\" collision descriptor (e.g. both resolving to `Custom (pinned 1.0)`), the final full-ID fallback re-read the already-decorated label and emitted a doubled descriptor like `Custom (pinned 1.0) (claude-alpha-1-0)`. The fix reads the original base label from the index-aligned `unique[index]` entry instead of the mutated `choices` element, producing the intended `Custom (claude-alpha-1-0)` while preserving selection IDs and source rows.\n\n**Changes:**\n- In `modelChoices`, the final collision-resolution map now computes the base label from `unique[index]` (the original, un-decorated model) rather than from the already-relabeled `choices` element.\n- Added a regression test covering cross-family colliding pinned descriptors, asserting correct labels, ID/fullId preservation, input immutability, and `findModelEntry` resolution.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| packages/​store-core/​src/​model-display.ts | Uses the original base label (`unique[index]`) in the full-ID fallback to avoid repeating the pinned descriptor. |\r\n| packages/​store-core/​src/​model-display.test.ts | Adds a regression test for colliding pinned descriptors verifying labels, IDs, immutability, and entry resolution. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564458469,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T19:02:32Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

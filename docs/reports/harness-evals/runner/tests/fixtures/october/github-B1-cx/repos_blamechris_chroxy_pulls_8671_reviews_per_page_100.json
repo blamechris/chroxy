@@ -1,0 +1,25 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8671/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🔵 Needs a closer look\n\nIt changes a security boundary (which directories an authenticated client may browse, including the credential/config deny-list) across server, protocol, and dashboard, which warrants final human review.\n\n<details open>\n<summary><strong>1 open issue</strong></summary>\n\n- <picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"https://github.githubassets.com/static/images/icons/copilot-code-review/medium-v2-dark.svg\"><source media=\"(prefers-color-scheme: light)\" srcset=\"https://github.githubassets.com/static/images/icons/copilot-code-review/medium-v2-light.svg\"><img src=\"https://github.githubassets.com/static/images/icons/copilot-code-review/medium-v2-light.png\" alt=\"Medium severity\" width=\"62\" height=\"18\" align=\"texttop\"></picture> [Missing symlink-support skip guard for symlink-using suite](https://github.com/blamechris/chroxy/pull/8671#discussion_r4308490208) · New\n</details>\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR makes the dashboard's directory-browsing path (`list_directory`) honour the same resolved-cwd policy that explicit session creation already uses (`validateCwdAllowed`), instead of the older \"restricted to $HOME\" rule. Configured workspace roots and permitted defaults are now browsable outside `$HOME`, while outside paths and credential/config directories stay denied. It also adds an optional `requestId` nonce so the dashboard can correlate a prefill-check reply even when the server normalizes the path, and surfaces a startup warning plus a pre-Browse note when a configured default cwd would be rejected.\n\n**Changes:**\n- Extract `validateResolvedCwdAllowed` and apply it (via a canonical-path predicate) to directory browsing for both success and error-classification paths, forwarding runtime `config` from the handler.\n- Thread an optional `requestId` through the `list_directory`/`directory_listing` protocol, store-core, dashboard store, and `usePathAutocomplete` for safe reply correlation; add `warnInvalidDefaultCwd` startup diagnostic and a `CreateSessionModal` prefill note.\n- Add server and dashboard test suites plus protocol/store-core coverage.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| packages/​server/​src/​handler-utils.js | Splits out `validateResolvedCwdAllowed` for canonical paths without an existence check. |\r\n| packages/​server/​src/​ws-file-ops/​browser.js | Applies the shared cwd policy + predicate, config-driven home/default, and optional `requestId` echo. |\r\n| packages/​server/​src/​ws-file-ops/​common.js | Lets `unresolvablePathError`/`isUnresolvablePathWithin` accept a predicate boundary. |\r\n| packages/​server/​src/​handlers/​file-handlers.js | Forwards `ctx.services.config` and `msg.requestId` to `listDirectory`. |\r\n| packages/​server/​src/​server-cli.js | Adds `warnInvalidDefaultCwd` and calls it from the daemon factory. |\r\n| packages/​server/​src/​ws-server.js | Documents the new `requestId` field in the outbound roster JSDoc. |\r\n| packages/​protocol/​src/​schemas/​client.ts, server/​file-ops.ts (+dist) | Adds optional `requestId` to list/listing schemas. |\r\n| packages/​store-core/​src/​handlers/​file.ts | Parses optional `requestId` into `DirectoryListingPayload`. |\r\n| packages/​dashboard/​src/​hooks/​usePathAutocomplete.ts | Adds prefill check + nonce-based reply correlation. |\r\n| packages/​dashboard/​src/​components/​CreateSessionModal.tsx | Surfaces the prefilled-directory \"not browsable\" note. |\r\n| packages/​dashboard/​src/​store/​{connection.ts,types.ts} | Forwards `requestId` through `requestDirectoryListing`. |\r\n| tests (server/​dashboard/​protocol/​store-core) | New/updated coverage for policy, correlation, and diagnostics. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564680276,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T19:53:09Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  },
+  {
+   "body": "",
+   "id": 5564814288,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T20:31:39Z",
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

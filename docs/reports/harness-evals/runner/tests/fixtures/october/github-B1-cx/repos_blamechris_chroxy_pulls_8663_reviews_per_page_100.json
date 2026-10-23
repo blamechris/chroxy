@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8663/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe change is confined to test code and its assertions exactly match the verified production port-check messages, statuses, and single `listen` call path, eliminating the prior port-selection race without risk to runtime behavior.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR makes the `doctor` port-availability tests in `packages/server/tests/doctor.test.js` deterministic. Previously the tests used fixed high ports (`59123`/`59124`) and assumed availability, which is race-prone. The revised tests either hold a real OS-selected loopback listener open to reliably trigger the \"occupied port\" warning, or mock `Server.prototype.listen` to force a genuine successful bind on an OS-assigned port while still asserting the requested port/host were forwarded.\n\nI verified the assertions exactly match `runDoctorChecks`/`checkPortAvailable` in `packages/server/src/doctor.js` (messages `${port} is available` / `${port} is in use (server may already be running)` and statuses `pass`/`warn`). I also confirmed `doctor.js` calls `.listen` exactly once (only in `checkPortAvailable`), so the global `Server.prototype.listen` mock in the bind-success test intercepts only that single call, making `assert.deepEqual(calls, [[port, '127.0.0.1']])` sound. The `t.mock.method`/`t.after`/`async (t)` patterns are consistent with the existing server test suite.\n\n**Changes:**\n- Added an `occupyPort(t)` helper that keeps an OS-selected loopback listener open until test teardown, removing the select-then-check availability race.\n- Rewrote the custom-port test to assert the exact occupied-port warning message and `warn` status.\n- Added a bind-success test that mocks `Server.prototype.listen` to redirect to port 0, preserving a real successful bind without a release/rebind race, and verifies the forwarded port and host.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| packages/​server/​tests/​doctor.test.js | Introduces `occupyPort` helper and rewrites three port-check tests to be deterministic; assertions verified against `doctor.js` message/status output. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564428593,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T18:57:39Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}

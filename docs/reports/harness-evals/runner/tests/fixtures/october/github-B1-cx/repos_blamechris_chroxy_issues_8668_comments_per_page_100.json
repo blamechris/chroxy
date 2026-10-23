@@ -1,0 +1,14 @@
+{
+ "request": "repos/blamechris/chroxy/issues/8668/comments?per_page=100",
+ "response": [
+  {
+   "body": "Initial read-only pass and fresh independent review at `e1750e75e1d0f753df9e3b2cbbce32b4a6364471`: **approve**, no actionable findings.\n\nThe complete-literal guard plus shared decoder distinguishes embedded IPv4 octets correctly. All direct callers were inspected; strict socket authorization and its canonical-address encryption gate remain unchanged. Independent verification passed 120 focused tests and an exhaustive 589,834-assertion high-hextet/spelling matrix, including malformed controls. The validity-check mutation goes red. Full-suite baseline limitations are documented in the description; hosted CI and posted-review triage remain required.\n",
+   "created_at": "2026-10-18T19:21:17Z",
+   "id": 6254088724,
+   "user": {
+    "login": "blamechris",
+    "type": "User"
+   }
+  }
+ ]
+}

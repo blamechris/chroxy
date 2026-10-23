@@ -2,6 +2,9 @@
 
 Design: [`PROTOCOL.md`](PROTOCOL.md). Missions: [`missions/`](missions/). Grader
 prompts: [`graders/`](graders/). This file is the step list and the live status.
+The next trial (two repeats per cell, a fresh queue, scripted setup and
+collection) is planned in [`../trial-2/PLAN.md`](../trial-2/PLAN.md); its runner,
+which replaces steps 2–12 below, is [`../runner/`](../runner/).
 
 ## Status
 

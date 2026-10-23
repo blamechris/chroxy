@@ -1,0 +1,129 @@
+{
+ "request": "repos/blamechris/chroxy/issues/7771/timeline?per_page=100",
+ "response": [
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-09-12T12:38:30Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": null,
+   "created_at": "2026-09-12T12:38:30Z",
+   "event": "labeled"
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "created_at": "2026-09-12T12:40:31Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 7767,
+     "pull_request": {}
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "created_at": "2026-09-12T17:42:14Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 7721
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "created_at": "2026-09-24T11:29:47Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 7904,
+     "pull_request": {}
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "commit_id": "c3b3823bda92693ff87eddc0da0a34dc20f031cc",
+   "created_at": "2026-09-24T13:33:42Z",
+   "event": "referenced"
+  },
+  {
+   "actor": {
+    "login": "Copilot",
+    "type": "Bot"
+   },
+   "created_at": "2026-10-18T07:48:27Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8645,
+     "pull_request": {}
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "Copilot",
+    "type": "Bot"
+   },
+   "created_at": "2026-10-19T01:09:27Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8680,
+     "pull_request": {}
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "Copilot",
+    "type": "Bot"
+   },
+   "created_at": "2026-10-19T20:18:20Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8716,
+     "pull_request": {}
+    }
+   }
+  },
+  {
+   "actor": {
+    "login": "blamechris",
+    "type": "User"
+   },
+   "created_at": "2026-10-22T07:46:55Z",
+   "event": "cross-referenced",
+   "source": {
+    "issue": {
+     "number": 8728,
+     "pull_request": {}
+    }
+   }
+  }
+ ]
+}

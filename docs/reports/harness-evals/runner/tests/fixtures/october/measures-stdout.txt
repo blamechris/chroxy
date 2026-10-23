@@ -1,0 +1,45 @@
+## Table 1 — delivery and time (section 6 measures)
+
+| Run | Role | Merged | Delivered (merged and correct) | Partial | Not delivered | Wall clock: first command to last report commit | to report PR merged | Queue done |
+|---|---|---|---|---|---|---|---|---|
+| A1-cd | controlled native | 10 | **10** | — | — | 1 h 46 min | 2 h 00 min | 1 h 42 min |
+| A2c-cy-claude | controlled Chroxy | 10 | **10** | — | — | 2 h 26 min | 2 h 37 min | 2 h 25 min |
+| A2-cy-claude | descriptive (effort deviation: medium) | 10 | **10** | — | — | 1 h 57 min | 2 h 11 min | 1 h 57 min |
+| A2b-cy-claude | descriptive (model deviation: Sonnet 5.5 / medium) | 9 | **8** | 8303 | 8282 | 1 h 43 min | 1 h 52 min | 1 h 41 min |
+| B1-cx | controlled native | 9 | **9** | — | 8282 | 2 h 24 min | 2 h 38 min | 2 h 23 min |
+| B2c-cy-codex | controlled Chroxy | 10 | **9** | 7815 | — | 3 h 32 min | 3 h 43 min | 3 h 28 min |
+| B2b-cy-codex | incident (quota stop) | 4 | **3** | 7815 | 8215, 8233, 8282, 8303, 8364, 8567 | n/a | n/a | 1 h 44 min |
+| B2-cy-codex | incident (killed) | 0 | **0** | — | 7771, 7815, 8215, 8233, 8277, 8282, 8303, 8364, 8567, 8595 | n/a | n/a | n/a |
+
+## Table 2 — PR cycle, CI and review (run-window conventions)
+
+| Run | PR cycle median / p90 (min, n) | `ci.yml` runs on queue PRs (attempts) | All workflow runs | Copilot review bodies | Owner disposition bodies (all owner comments) | Closed unmerged / left open | Diff on merged PRs (+/−) | Closing keyword | `#N` in PR bodies |
+|---|---|---|---|---|---|---|---|---|---|
+| A1-cd | 58.1 / 72.2 (n = 10) | 21 (21) | 53 | 10 | 11 (16) | 0 / 0 | +2441 / −188 | 0 | none |
+| A2c-cy-claude | 39.9 / 53.6 (n = 10) | 20 (20) | 57 | 10 | 17 (17) | 0 / 0 | +1331 / −174 | 0 | none |
+| A2-cy-claude | 65.9 / 76.1 (n = 10) | 21 (22) | 54 | 10 | 12 (12) | 0 / 0 | +1419 / −131 | 0 | none |
+| A2b-cy-claude | 21.4 / 65.2 (n = 9) | 16 (16) | 45 | 9 | 9 (9) | 0 / 0 | +1061 / −133 | 0 | 8011 |
+| B1-cx | 30.9 / 42.3 (n = 9) | 11 (11) | 41 | 10 | 16 (16) | 1 / 0 | +1271 / −204 | 0 | none |
+| B2c-cy-codex | 14.8 / 17.0 (n = 10) | 15 (15) | 68 | 12 | 26 (27) | 2 / 0 | +1399 / −497 | 0 | 8715 |
+| B2b-cy-codex | 28.3 / 90.9 (n = 4) | 7 (7) | 23 | 6 | 11 (14) | 0 / 2 | +187 / −80 | 0 | none |
+| B2-cy-codex | — | 2 (2) | 6 | 1 | 1 (1) | 0 / 2 | +0 / −0 | 0 | none |
+
+## Table 3 — cost, allowance, approvals, compactions
+
+| Run | Coordinator | Cost | Allowance | Human approvals | Compactions | Waves | Stop |
+|---|---|---|---|---|---|---|---|
+| A1-cd | claude-opus-5-5 / high | n/a (the desktop app exposes no total) | Claude meters not read | 0 | 0 | 1 | complete |
+| A2c-cy-claude | claude-opus-5-5 / high (modelSettings; applied level not read from inside) | $26.5742 SDK-reported total_cost_usd (API-rate equivalent, not a charge) | Claude weekly all-models 0% to 3% used; 5-hour window reset mid-run | 0 | 0 | 2 | complete |
+| A2-cy-claude | claude-opus-5-5 / medium (Claude Code default; the thinking control sets no effort) | $22.18 badge (SDK-reported); $22.64 transcript-priced lower bound | Claude 5-hour 15%, weekly 30% at start | 0 | 0 | 1 | complete |
+| A2b-cy-claude | claude-sonnet-5-5 / medium (the daemon's new-session default; header not changed) | $15.55 badge (SDK-reported) | Claude weekly 50% to 66% across attempts 1 and 2 | 0 | 0 | 1 | complete |
+| B1-cx | gpt-6-astra / xhigh | n/a (no harness-exposed total; ChatGPT usage-page figure still owed) | not read | 0 | 5 | 2 | complete |
+| B2c-cy-codex | gpt-6-astra / xhigh | n/a (Codex app-server reports none) | Codex weekly 100% to 50% left across the run (about 14 points an hour) | 0 | 7 | 3 | complete |
+| B2b-cy-codex | gpt-6-astra / xhigh | n/a; exhausted the owner's Codex weekly allowance | Codex allowance exhausted at 06:16:45Z | 0 | 1 observed (a `compacted` entry before the 06:16Z `turn_context` re-entry; four re-entries in all) | 1 | Codex usage-limit exhaustion at 06:16:45Z, unsurfaced: the daemon had taken the turn as complete at 04:26:37Z (#8710) |
+| B2-cy-codex | gpt-6-astra / xhigh | n/a | not read | 0 | 0 | 1 | killed at 07:52:22Z by the daemon's idle-only auto-deploy after #8644 merged to main; the restored session had no native locator |
+
+## Paired contrasts
+
+- Arm A: A1-cd 10 delivered in 1 h 46 min (cycle median 58.1 min) vs A2c-cy-claude 10 delivered in 2 h 26 min (cycle median 39.9 min); wall-clock gap 39.8 min to the report commit, 37.4 min to the report merge.
+- Arm B: B1-cx 9 delivered in 2 h 24 min (cycle median 30.9 min) vs B2c-cy-codex 9 delivered in 3 h 32 min (cycle median 14.8 min); wall-clock gap 68.1 min to the report commit, 65.2 min to the report merge.
+
+(measures-output.json written beside the inputs)

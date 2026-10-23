@@ -166,6 +166,8 @@ Arm A's Chroxy runs cost $26.57 (A2c), $22.18 (A2) and $15.55 (A2b) in SDK-repor
 6. **Close the Copilot cross-reference channel** on trial PRs (disable automatic review on `trial/**`, or accept and record it) if issue-page isolation matters.
 7. **Expose cost for Codex sessions** (token usage from the app-server's `thread/tokenUsage/updated` into the badge) so arm B has a cost measure.
 
+Trial 2 takes these up in [`../trial-2/PLAN.md`](../trial-2/PLAN.md) §1: items 1–3 as its entry gate, 4–7 in its key, evidence and isolation steps, with the setup and collection scripted by [`../runner/`](../runner/).
+
 ## 10. Reproduction and files
 
 - Tables: `python3 docs/reports/harness-evals/trial/scripts/measures.py` from the repository root; inputs and their provenance in [`data/`](data/).

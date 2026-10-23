@@ -1,0 +1,15 @@
+{
+ "request": "repos/blamechris/chroxy/pulls/8669/reviews?per_page=100",
+ "response": [
+  {
+   "body": "<!-- ccr-overview-v2 -->\n\n### 🟢 Approval recommended\n\nThe change is small, additive, and consistent with the established #7376 pattern; the callback threading is verified end-to-end and the behavior is covered by positive and negative tests with no defects found.\n\n**No open issues** 🎉\n\n<details>\n<summary><strong>What changed in this PR</strong></summary>\n\nThis PR extends the mobile app's interrupted-tool presentation (originally added to grouped activity rows in `ActivityGroup` under #7376) to the two \"lone tool\" surfaces: the standalone `ToolBubble` and the `ToolDetailModal`. When a tool's turn was terminated before a result arrived, both surfaces now render the same amber state and cautious outcome summary, keep the preserved tool input visible, and hide the server's synthetic fallback result. The termination reason is threaded through the existing `onOpenDetail` callback and the modal's props, and all wording is single-sourced from `describeTurnTermination` so the lone surfaces cannot drift from the grouped one.\n\n**Changes:**\n- New shared `ToolTerminationNote` component renders the amber stop icon + `describeTurnTermination` summary; used by both `ToolBubble` and `ToolDetailModal`.\n- `ToolBubble`/`ToolDetailModal` compute a `terminated` flag (`hasResult && toolResultTerminatedReason`), gate off the Todo/Web/plain result renderers, apply an amber container border, and preserve the input section.\n- `toolResultTerminatedReason` is threaded through the `onOpenDetail` callback chain (`ToolBubble` → `MessageBubble` → `ChatView.handleOpenDetail`) and into `ToolDetailModal`; a new focused test covers both surfaces across all termination reasons plus negative controls.\n\n| File | Description |\r\n| ---- | ----------- |\r\n| `packages/​app/​src/​components/​chat/​ToolTerminationNote.tsx` | New shared amber notice (icon + summary) deriving copy from `describeTurnTermination`. |\r\n| `packages/​app/​src/​components/​chat/​ToolBubble.tsx` | Adds `terminated` flag, gates result parsers, amber border, renders note, threads reason, adds 44pt min tap target + testID. |\r\n| `packages/​app/​src/​components/​chat/​ToolDetailModal.tsx` | Adds `toolResultTerminatedReason` prop, hides synthetic result, amber border, renders note. |\r\n| `packages/​app/​src/​components/​chat/​MessageBubble.tsx` | Extends `onOpenDetail` prop type with the trailing `toolResultTerminatedReason` arg. |\r\n| `packages/​app/​src/​components/​ChatView.tsx` | Carries the reason through `toolDetail` state and `handleOpenDetail`, passes it to the modal. |\r\n| `packages/​app/​src/​components/​__tests__/​ToolTermination.test.tsx` | New tests for the amber state, reason forwarding, and ordinary-tool negative controls. |\n</details>\n\n<sub>Review effort: Balanced</sub>",
+   "id": 5564595358,
+   "state": "COMMENTED",
+   "submitted_at": "2026-10-18T19:27:39Z",
+   "user": {
+    "login": "copilot-pull-request-reviewer[bot]",
+    "type": "Bot"
+   }
+  }
+ ]
+}
