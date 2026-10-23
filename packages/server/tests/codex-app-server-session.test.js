@@ -3539,3 +3539,292 @@ describe('CodexAppServerSession — usage accounting (#7773 / #7769 / #7794)', (
     cleanup()
   })
 })
+
+describe('CodexAppServerSession — the turn follows codex\'s own turn (#8710)', () => {
+  // Trial run B2b-cy-codex: the daemon logged `[result]` 11 minutes into a
+  // turn codex kept running for 1 h 50 min more. The rollouts show why: a worker
+  // sub-agent the turn had spawned finished ITS turn at 04:26:36.755Z, and the
+  // app-server relays a sub-agent's thread on the parent's connection — every
+  // turn-scoped notification names its thread in `threadId`, which nothing
+  // read. From then on the between-turns early return dropped everything,
+  // including the usage-limit stop that ended the real turn.
+  //
+  // Notification shapes are codex-cli 0.163.0's (the version the trial ran),
+  // from `codex app-server generate-json-schema` and the app-server's event
+  // mapping: a usage limit arrives as a non-retrying `error`, then a
+  // `turn/completed` whose status is `failed`.
+  const PARENT = 'th-parent'
+  const PARENT_TURN = 'turn-parent'
+  const CHILD = 'th-worker'
+  const CHILD_TURN = 'turn-worker'
+  const LIMIT_MESSAGE = 'You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 24th, 2026 5:08 PM.'
+  const limitError = () => ({ message: LIMIT_MESSAGE, codexErrorInfo: 'usageLimitExceeded', additionalDetails: null })
+
+  const turnStarted = (threadId, id) => ({ method: 'turn/started', params: { threadId, turn: { id, items: [], status: 'inProgress' } } })
+  const turnCompleted = (threadId, id, status = 'completed', error = null) =>
+    ({ method: 'turn/completed', params: { threadId, turn: { id, items: [], status, error, durationMs: 1 } } })
+  const delta = (threadId, turnId, itemId, text) =>
+    ({ method: 'item/agentMessage/delta', params: { threadId, turnId, itemId, delta: text } })
+  const itemStarted = (threadId, turnId, item) => ({ method: 'item/started', params: { threadId, turnId, item, startedAtMs: 0 } })
+  const itemCompleted = (threadId, turnId, item) => ({ method: 'item/completed', params: { threadId, turnId, item, completedAtMs: 0 } })
+  const errorNote = (threadId, turnId, error, willRetry = false) => ({ method: 'error', params: { threadId, turnId, error, willRetry } })
+
+  const EVENTS = ['stream_start', 'stream_delta', 'stream_end', 'tool_start', 'tool_result', 'result', 'error', 'stopped']
+
+  // A session on thread PARENT whose turns run through the real sendMessage path.
+  function mkThreadRunner(opts = {}) {
+    const { s, cleanup } = mkSession(opts)
+    s._processReady = true
+    s._threadId = PARENT
+    s._client = { request: async () => ({ turn: { id: PARENT_TURN } }) }
+    const ev = capture(s, EVENTS)
+    return {
+      s,
+      ev,
+      note: (n) => s._onNotification(n),
+      names: () => ev.map(([e]) => e),
+      cleanup: () => { s.destroy(); cleanup() },
+    }
+  }
+
+  it('B2b: a worker finishing its turn does not end the parent turn; the usage-limit stop does, as an error', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('/prompts:prime-directive')
+      r.note(turnStarted(PARENT, PARENT_TURN))
+      // The agent's first status line, the last thing the dashboard showed.
+      r.note(delta(PARENT, PARENT_TURN, 'msg-1', 'Next: RUNNING — coordinator to resume this same worker attempt after the other server suite settles'))
+      r.note(itemCompleted(PARENT, PARENT_TURN, { type: 'agentMessage', id: 'msg-1', text: 'Next: RUNNING' }))
+      // A worker sub-agent the turn spawned runs and ends its own turn on the
+      // same connection — what the daemon took as completion at 04:26:37Z.
+      r.note(turnStarted(CHILD, CHILD_TURN))
+      r.note(itemStarted(CHILD, CHILD_TURN, { type: 'commandExecution', id: 'worker-cmd', command: 'npm test', cwd: '/trial' }))
+      r.note(delta(CHILD, CHILD_TURN, 'worker-msg', 'worker report'))
+      r.note(itemCompleted(CHILD, CHILD_TURN, { type: 'commandExecution', id: 'worker-cmd', aggregatedOutput: 'ok', status: 'completed' }))
+      r.note(turnCompleted(CHILD, CHILD_TURN, 'completed'))
+
+      assert.ok(!r.names().includes('result'), 'a sub-agent\'s turn/completed must not end the parent\'s turn')
+      assert.equal(r.s.turnActive, true, 'the session stays busy while codex\'s own turn runs')
+
+      // The parent keeps working inside the same codex turn: it merges a PR.
+      r.note(itemStarted(PARENT, PARENT_TURN, { type: 'commandExecution', id: 'merge-1', command: 'gh pr merge 8692 --squash', cwd: '/trial' }))
+      r.note(itemCompleted(PARENT, PARENT_TURN, { type: 'commandExecution', id: 'merge-1', aggregatedOutput: 'merged', status: 'completed' }))
+      r.note(delta(PARENT, PARENT_TURN, 'msg-2', ' Merged 8692.'))
+
+      const toolIds = r.ev.filter(([e]) => e === 'tool_start').map(([, p]) => p.toolUseId)
+      assert.deepEqual(toolIds, ['merge-1'], 'the parent\'s work is shown, and only the parent\'s')
+      const text = r.ev.filter(([e]) => e === 'stream_delta').map(([, p]) => p.delta).join('')
+      assert.ok(!text.includes('worker report'), 'a sub-agent\'s message is not streamed into the parent\'s reply')
+      assert.ok(text.includes('Merged 8692.'), 'work after the worker finished still reaches the client')
+
+      // 06:16:45Z: the account's usage limit ends codex's turn.
+      r.note(errorNote(PARENT, PARENT_TURN, limitError()))
+      r.note(turnCompleted(PARENT, PARENT_TURN, 'failed', limitError()))
+
+      const errors = r.ev.filter(([e]) => e === 'error').map(([, p]) => p)
+      assert.deepEqual(errors, [{ message: LIMIT_MESSAGE, code: 'usage_limit' }],
+        'the usage-limit stop reaches the client once, in codex\'s words, with the code the clients render as a limit')
+      assert.equal(r.s.turnActive, false, 'the stop ends the turn')
+
+      // 06:24:38Z: a background exec the turn started reports after the turn ended.
+      const before = r.ev.length
+      r.note(itemCompleted(PARENT, PARENT_TURN, { type: 'commandExecution', id: 'bg-suite', aggregatedOutput: '', status: 'failed' }))
+      assert.equal(r.ev.length, before, 'a straggler from a turn codex already ended emits nothing')
+      assert.equal(r.s.turnActive, false, 'and does not reopen that turn')
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a sub-agent\'s terminal error does not fail the parent turn', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('go')
+      r.note(errorNote(CHILD, CHILD_TURN, { message: 'worker blew up', codexErrorInfo: 'other' }))
+      assert.ok(!r.names().includes('error'), 'the worker\'s error belongs to the worker\'s thread')
+      assert.equal(r.s.turnActive, true)
+      r.note(turnCompleted(PARENT, PARENT_TURN))
+      assert.equal(r.names().filter((e) => e === 'result').length, 1, 'the parent\'s own completion still ends it')
+      assert.equal(r.s.turnActive, false)
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a notification with no threadId is still read as this thread\'s', async () => {
+    // Control for the thread filter: absent is not "someone else's".
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('go')
+      r.note({ method: 'turn/completed', params: { turn: { id: PARENT_TURN, status: 'completed' } } })
+      assert.equal(r.names().filter((e) => e === 'result').length, 1)
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a sub-agent\'s activity keeps the parent turn from timing out while it waits on the worker', async () => {
+    mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const r = mkThreadRunner({ resultTimeoutMs: 60_000 })
+    try {
+      await r.s.sendMessage('go')
+      r.note(turnStarted(PARENT, PARENT_TURN))
+      // The parent is blocked on the worker; only the worker's thread speaks.
+      for (let i = 0; i < 5; i += 1) {
+        mock.timers.tick(50_000)
+        r.note(delta(CHILD, CHILD_TURN, 'w', '.'))
+      }
+      assert.ok(!r.names().includes('error'), 'a turn whose worker is still busy is not a stalled turn')
+      assert.equal(r.s.turnActive, true)
+      // Silence from every thread is still a stall.
+      mock.timers.tick(60_000)
+      assert.ok(r.names().includes('error'), 'control: the result timeout is armed and fires on real silence')
+    } finally {
+      r.cleanup()
+      mock.timers.reset()
+    }
+  })
+
+  it('codex activity after the daemon ended the turn early reopens it instead of being dropped', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('go')
+      r.note(turnStarted(PARENT, PARENT_TURN))
+      // The daemon gives up on its own (the result timeout's path) while codex
+      // is still working on the turn.
+      r.s._failTurn('Codex turn timed out with no result')
+      assert.equal(r.s.turnActive, false, 'precondition: the daemon ended its turn')
+      const before = r.ev.length
+
+      r.note(itemStarted(PARENT, PARENT_TURN, { type: 'commandExecution', id: 'late-1', command: 'gh pr merge 8694', cwd: '/trial' }))
+      assert.equal(r.s.turnActive, true, 'codex reporting work for a turn it has not ended makes the session busy again')
+      r.note(itemCompleted(PARENT, PARENT_TURN, { type: 'commandExecution', id: 'late-1', aggregatedOutput: 'merged', status: 'completed' }))
+      r.note(delta(PARENT, PARENT_TURN, 'msg-3', 'Merged 8694.'))
+      r.note(turnCompleted(PARENT, PARENT_TURN))
+
+      const after = r.ev.slice(before).map(([e]) => e)
+      assert.deepEqual(after, ['stream_start', 'tool_start', 'tool_result', 'stream_delta', 'stream_end', 'result'],
+        'the rest of the turn reaches the client, opened with stream_start so clients show it busy')
+      assert.equal(r.s.turnActive, false, 'and ends on codex\'s own completion')
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a turn codex starts while the daemon has none open makes the session busy', () => {
+    const r = mkThreadRunner()
+    try {
+      assert.equal(r.s.turnActive, false)
+      r.note(turnStarted(PARENT, 'turn-continued'))
+      assert.equal(r.s.turnActive, true, 'turn/started with no daemon turn open is acted on, not discarded')
+      assert.equal(r.s._activeTurn.turnId, 'turn-continued', 'and adopted under codex\'s turn id, so Stop can interrupt it')
+      assert.ok(r.names().includes('stream_start'), 'clients are told the session is busy')
+      r.note(turnCompleted(PARENT, 'turn-continued'))
+      assert.equal(r.s.turnActive, false)
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('an error with no daemon turn open is surfaced, not discarded', () => {
+    const r = mkThreadRunner()
+    try {
+      r.note(errorNote(PARENT, 'turn-untracked', limitError()))
+      assert.deepEqual(r.ev.filter(([e]) => e === 'error').map(([, p]) => p),
+        [{ message: LIMIT_MESSAGE, code: 'usage_limit' }])
+      assert.equal(r.s.turnActive, false, 'an error ends work; it does not start a turn')
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a failed turn/completed with no daemon turn open is surfaced as an error', () => {
+    const r = mkThreadRunner()
+    try {
+      r.note(turnCompleted(PARENT, 'turn-untracked', 'failed', limitError()))
+      assert.deepEqual(r.ev.filter(([e]) => e === 'error').map(([, p]) => p),
+        [{ message: LIMIT_MESSAGE, code: 'usage_limit' }])
+      assert.equal(r.s.turnActive, false)
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a turn codex completes as failed is reported as an error, after its usage', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('go')
+      // No preceding `error` notification: the status alone must carry the failure.
+      r.note(turnCompleted(PARENT, PARENT_TURN, 'failed', limitError()))
+      assert.deepEqual(r.names(), ['result', 'error'], 'the result keeps the turn\'s usage accounted; the error says why it ended')
+      assert.deepEqual(r.ev[1][1], { message: LIMIT_MESSAGE, code: 'usage_limit' })
+      assert.equal(r.s.turnActive, false)
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a non-limit failure keeps the generic error shape (no usage_limit code)', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('go')
+      r.note(turnCompleted(PARENT, PARENT_TURN, 'failed', { message: 'model overloaded', codexErrorInfo: 'serverOverloaded' }))
+      const err = r.ev.find(([e]) => e === 'error')
+      assert.ok(err, 'a failed turn is an error')
+      assert.equal(err[1].code, undefined, 'only a usage limit is labelled as one')
+      assert.ok(err[1].message.includes('model overloaded'))
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a straggler after a normal completion does not reopen the turn', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('go')
+      r.note(turnCompleted(PARENT, PARENT_TURN))
+      const before = r.ev.length
+      r.note(itemCompleted(PARENT, PARENT_TURN, { type: 'commandExecution', id: 'bg', aggregatedOutput: '', status: 'failed' }))
+      r.note(delta(PARENT, PARENT_TURN, 'late', 'late text'))
+      assert.equal(r.ev.length, before, 'codex ended this turn; what still names it is not a live turn')
+      assert.equal(r.s.turnActive, false)
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('usage for an ended turn is still consumed (it describes the thread)', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('go')
+      r.note(turnCompleted(PARENT, PARENT_TURN))
+      const total = { totalTokens: 10, inputTokens: 8, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 2, reasoningOutputTokens: 0 }
+      r.note({ method: 'thread/tokenUsage/updated', params: { threadId: PARENT, turnId: PARENT_TURN, tokenUsage: { total, last: total } } })
+      assert.deepEqual(r.s._threadTotals, total, 'the next turn\'s baseline must include it')
+      assert.equal(r.s.turnActive, false)
+    } finally {
+      r.cleanup()
+    }
+  })
+
+  it('a late completion of the previous turn does not end the next one', async () => {
+    const r = mkThreadRunner()
+    try {
+      await r.s.sendMessage('one')
+      r.note(errorNote(PARENT, PARENT_TURN, { message: 'stream failed', codexErrorInfo: 'other' }))
+      assert.equal(r.s.turnActive, false, 'precondition: the terminal error ended turn one')
+      // A queued message starts turn two before codex's turn/completed for turn
+      // one arrives (`_failTurn` dequeues synchronously).
+      r.s._client = { request: async () => ({ turn: { id: 'turn-two' } }) }
+      await r.s.sendMessage('two')
+      r.note(turnCompleted(PARENT, PARENT_TURN, 'failed', { message: 'stream failed', codexErrorInfo: 'other' }))
+      assert.equal(r.s.turnActive, true, 'turn one\'s completion is not turn two\'s')
+      assert.ok(!r.names().includes('result'))
+      r.note(turnCompleted(PARENT, 'turn-two'))
+      assert.equal(r.s.turnActive, false)
+      assert.equal(r.names().filter((e) => e === 'result').length, 1)
+    } finally {
+      r.cleanup()
+    }
+  })
+})
