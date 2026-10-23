@@ -1916,7 +1916,7 @@ describe('get_diff handler', () => {
     assert.doesNotThrow(() => createReaderOps(() => {}, async () => tempDir, async () => ({ valid: true })))
   })
 
-  it('#7871: every git invocation inside getDiff routes through the injected exec (all 5 call sites)', async () => {
+  it('#7871: every git invocation inside getDiff routes through the injected exec (preflight, commit resolution, both diffs, repo root, untracked scan)', async () => {
     writeFileSync(join(tempDir, 'file.txt'), 'modified content\n')
     // Delegates to the REAL execFileAsync so behaviour matches production —
     // only the routing is observed, not faked.
@@ -1935,13 +1935,15 @@ describe('get_diff handler', () => {
     )
     // A real repo with a commit resolves headOid, so this is `git diff <oid>`
     // (never the bare `['diff']` form, which only fires in an empty repo).
-    // The exact argv, header-prefix pinning included (see DIFF_HEADER_ARGS in reader.js).
+    // The exact argv, output pinning included (see DIFF_PIN_CONFIG / DIFF_HEADER_ARGS in reader.js).
     const headOid = execFileSync(GIT, ['rev-parse', 'HEAD'], { cwd: tempDir, encoding: 'utf-8' }).trim()
-    const diffArgv = calls.filter(c => c.args[0] === 'diff').map(c => c.args)
+    const pinnedOptions = ['--src-prefix=a/', '--dst-prefix=b/', '--no-ext-diff', '--no-color']
+    const diffArgv = calls.filter(c => c.args.includes('diff')).map(c => c.args)
     assert.deepEqual(diffArgv, [
-      ['diff', '--src-prefix=a/', '--dst-prefix=b/', headOid],
-      ['diff', '--src-prefix=a/', '--dst-prefix=b/', '--cached', 'HEAD'],
+      ['-c', 'diff.relative=false', 'diff', ...pinnedOptions, headOid],
+      ['-c', 'diff.relative=false', 'diff', ...pinnedOptions, '--cached', 'HEAD'],
     ], 'both `git diff` calls route through the seam with exactly this argv')
+    assert.ok(shapes.includes('rev-parse --show-toplevel'), 'the repository-root lookup (a modified file is in the diff) must route through the seam')
     assert.ok(calls.some(c => c.args[0] === 'ls-files'), 'the untracked-files scan must route through the seam')
   })
 

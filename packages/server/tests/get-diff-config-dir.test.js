@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, unlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, unlinkSync, symlinkSync, chmodSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -8,6 +8,7 @@ import { createFileOps } from '../src/ws-file-ops/index.js'
 import { createReaderOps } from '../src/ws-file-ops/reader.js'
 import { resolveSessionCwd, validatePathWithinCwd } from '../src/ws-file-ops/common.js'
 import { GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 // Files directly in the daemon's config directory are daemon-managed state, so the diff
 // view treats them the way the file viewer and generic writes do (see
@@ -19,6 +20,10 @@ import { GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 // Everything runs in a temp git repo with CHROXY_CONFIG_DIR relocated into it.
 
 const MARKER = 'fixture-marker-5e2a'
+
+// What getDiff pins on every `git diff` call (see DIFF_PIN_CONFIG / DIFF_HEADER_ARGS in reader.js).
+const PIN_CONFIG = ['-c', 'diff.relative=false']
+const PIN_OPTIONS = ['--src-prefix=a/', '--dst-prefix=b/', '--no-ext-diff', '--no-color']
 
 describe('get_diff leaves files directly in the config directory out of the reply', () => {
   let root, repo, cfg, fileOps, savedEnv
@@ -45,7 +50,7 @@ describe('get_diff leaves files directly in the config directory out of the repl
   const body = (reply) => JSON.stringify(reply)
 
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-cfgdiff-')))
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-cfgdiff-')))
     repo = join(root, 'repo')
     cfg = join(repo, 'state', 'chroxy')
     mkdirSync(repo, { recursive: true })
@@ -86,6 +91,19 @@ describe('get_diff leaves files directly in the config directory out of the repl
     const sub = reply.files.find((f) => f.path === 'state/chroxy/worktrees/w1/new.js')
     assert.ok(sub, 'CONTROL: a file in a subtree of the config dir is still listed')
     assert.equal(sub.hunks[0].lines[0].content, 'export const b = 2')
+  })
+
+  it('an UNTRACKED symlink to a file directly in the config dir is omitted like the file itself; a symlink to an ordinary file is listed', { skip: SKIP_NO_SYMLINK }, async () => {
+    put('state/chroxy/untracked.json', `${MARKER} untracked\n`)
+    symlinkSync(join(cfg, 'untracked.json'), join(repo, 'alias.json'))
+    put('notes.txt', 'ordinary note\n')
+    symlinkSync(join(repo, 'notes.txt'), join(repo, 'link-to-notes.txt'))
+    const reply = await diff()
+    assert.ok(!body(reply).includes(MARKER), 'neither the file nor the link to it reaches the reply')
+    assert.ok(!paths(reply).includes('alias.json'), `paths: ${paths(reply)}`)
+    const linked = reply.files.find((f) => f.path === 'link-to-notes.txt')
+    assert.ok(linked, 'CONTROL: a symlink to an ordinary file is still listed')
+    assert.equal(linked.hunks[0].lines[0].content, 'ordinary note')
   })
 
   it('a TRACKED file directly in the config dir that is then modified is omitted; an ordinary modified file keeps its hunks', async () => {
@@ -172,11 +190,69 @@ describe('get_diff leaves files directly in the config directory out of the repl
   })
 })
 
-// A user's or repo's git config can change the header form `git diff` prints
-// (`diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix`, `diff.dstPrefix`). getDiff pins the
-// default `a/` / `b/` form on the command line so the paths it reads, and therefore the
-// config-dir rule above, hold whatever the config says.
-describe('get_diff reads the same paths whatever diff prefix settings are configured', () => {
+// getDiff previews at most ten untracked files. Files directly in the config directory must be
+// left out BEFORE that cap is applied: otherwise a config root that holds ten or more of them
+// fills the ten slots and every ordinary file after them (here, under worktrees/) is never listed.
+describe('get_diff takes its ten untracked files from those that may be shown', () => {
+  let root, repo, savedEnv, fileOps
+  const out = []
+  const send = (_ws, msg) => out.push(msg)
+  const put = (rel, text) => {
+    const abs = join(repo, rel)
+    mkdirSync(join(abs, '..'), { recursive: true })
+    writeFileSync(abs, text)
+  }
+  beforeEach(() => {
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-cfgdiff-cap-')))
+    repo = join(root, 'repo')
+    mkdirSync(repo, { recursive: true })
+    const git = (...args) => execFileSync(GIT, args, { cwd: repo, stdio: 'pipe' })
+    git('init')
+    disableRepoAutoGc(repo)
+    git('config', 'user.email', 'test@test.com')
+    git('config', 'user.name', 'Test')
+    git('commit', '--allow-empty', '-m', 'initial')
+    // The repository root IS the config directory.
+    savedEnv = process.env.CHROXY_CONFIG_DIR
+    process.env.CHROXY_CONFIG_DIR = repo
+    fileOps = createFileOps(send)
+    for (let i = 1; i <= 12; i++) put(`t${String(i).padStart(2, '0')}.json`, `${MARKER} ${i}\n`)
+  })
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = savedEnv
+    rmDirRobust(root)
+  })
+  async function diff() {
+    out.length = 0
+    await fileOps.getDiff({}, undefined, repo)
+    assert.equal(out.length, 1)
+    assert.equal(out[0].error, null)
+    return out[0]
+  }
+
+  it('twelve top-level files in the config root do not use up the slots: a file under worktrees/ is still listed', async () => {
+    put('worktrees/w/n.js', 'export const n = 1\n')
+    const reply = await diff()
+    assert.deepEqual(reply.files.map((f) => f.path), ['worktrees/w/n.js'])
+    assert.ok(!JSON.stringify(reply).includes(MARKER))
+  })
+
+  it('CONTROL: the cap of ten still holds for the files that may be shown', async () => {
+    for (let i = 1; i <= 11; i++) put(`worktrees/w/n${String(i).padStart(2, '0')}.js`, `export const n = ${i}\n`)
+    const reply = await diff()
+    assert.equal(reply.files.length, 10)
+    assert.deepEqual(reply.files.map((f) => f.path), Array.from({ length: 10 }, (_, i) => `worktrees/w/n${String(i + 1).padStart(2, '0')}.js`))
+  })
+})
+
+// A user's or repo's git config can change how `git diff` prints a changed file, and the config-dir
+// rule above reads paths from that output. getDiff pins, on every `git diff` call: the header
+// prefixes (`--src-prefix=a/ --dst-prefix=b/`, which beat `diff.noprefix`, `diff.mnemonicPrefix`,
+// `diff.srcPrefix` and `diff.dstPrefix`), `-c diff.relative=false` (paths relative to the repo root,
+// not the cwd), `--no-ext-diff` (an external diff driver prints no `diff --git` header at all) and
+// `--no-color` (colour escapes start every header line). Settings not named here are not pinned.
+describe('get_diff output does not depend on the git settings that change how a changed file is printed', () => {
   const settings = [
     ['diff.noprefix', 'true'],
     ['diff.mnemonicPrefix', 'true'],
@@ -194,7 +270,7 @@ describe('get_diff reads the same paths whatever diff prefix settings are config
   }
 
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-cfgdiff-pfx-')))
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-cfgdiff-pfx-')))
     repo = join(root, 'repo')
     cfg = join(repo, 'state', 'chroxy')
     mkdirSync(repo, { recursive: true })
@@ -204,6 +280,7 @@ describe('get_diff reads the same paths whatever diff prefix settings are config
     git('config', 'user.name', 'Test')
     put('file.txt', 'initial content\n')
     put('docs/readme.md', 'readme\n')
+    put('docs/data.json', 'data v1\n')
     put('state/chroxy/tracked.json', 'tracked v1\n')
     git('add', '.')
     git('commit', '-m', 'initial')
@@ -215,6 +292,58 @@ describe('get_diff reads the same paths whatever diff prefix settings are config
     if (savedEnv === undefined) delete process.env.CHROXY_CONFIG_DIR
     else process.env.CHROXY_CONFIG_DIR = savedEnv
     rmDirRobust(root)
+  })
+
+  async function diffFrom(cwd) {
+    out.length = 0
+    await fileOps.getDiff({}, undefined, cwd)
+    assert.equal(out.length, 1)
+    assert.equal(out[0].error, null)
+    return out[0]
+  }
+
+  it('with diff.relative=true and a cwd BELOW the repo root (the session dir, or the config dir itself): the config-dir file is still dropped and an ordinary file keeps its repo-root path', async () => {
+    git('config', 'diff.relative', 'true')
+    put('state/chroxy/tracked.json', `tracked v2 ${MARKER}\n`)
+    put('file.txt', 'modified content\n')
+    for (const cwd of [join(repo, 'state'), cfg]) {
+      const reply = await diffFrom(cwd)
+      assert.ok(!JSON.stringify(reply).includes(MARKER), `cwd ${cwd}: the config-dir file is not in the reply`)
+      const ordinary = reply.files.find((f) => f.path === 'file.txt')
+      assert.ok(ordinary, `cwd ${cwd}: an ordinary file outside the cwd is still listed, with its repo-root path (got ${reply.files.map((f) => f.path)})`)
+      assert.ok(ordinary.hunks[0].lines.some((l) => l.content === 'modified content'))
+    }
+  })
+
+  it('with an external diff driver for *.json (which prints no `diff --git` header): no config-dir content reaches any entry, and an ordinary .json file keeps its hunk',
+    { skip: process.platform === 'win32' ? 'the driver is a POSIX shell script' : false }, async () => {
+    // Without --no-ext-diff the driver's output for the config-dir file carries no header, so it would be
+    // appended to the PREVIOUS entry's hunk. This driver prints the new side as additions.
+    const driver = join(root, 'driver.sh')
+    writeFileSync(driver, '#!/bin/sh\necho "@@ -1 +1 @@"\nsed \'s/^/+/\' "$5"\n')
+    chmodSync(driver, 0o755)
+    put('.gitattributes', '*.json diff=drv\n')
+    git('add', '.gitattributes')
+    git('commit', '-m', 'attributes')
+    git('config', 'diff.drv.command', driver)
+    put('docs/data.json', 'data v2\n')
+    put('file.txt', 'modified content\n')
+    put('state/chroxy/tracked.json', `tracked v2 ${MARKER}\n`)
+    const reply = await diffFrom(repo)
+    assert.ok(!JSON.stringify(reply).includes(MARKER), 'the config-dir file is not in any entry')
+    const json = reply.files.find((f) => f.path === 'docs/data.json')
+    assert.ok(json, `CONTROL: the ordinary .json file is listed (got ${reply.files.map((f) => f.path)})`)
+    assert.ok(json.hunks[0].lines.some((l) => l.type === 'addition' && l.content === 'data v2'))
+    assert.ok(reply.files.some((f) => f.path === 'file.txt'), 'CONTROL: file.txt is listed')
+  })
+
+  it('with color.ui=always: ordinary entries are still listed (colour escapes would hide every header)', async () => {
+    git('config', 'color.ui', 'always')
+    put('file.txt', 'modified content\n')
+    put('state/chroxy/tracked.json', `tracked v2 ${MARKER}\n`)
+    const reply = await diffFrom(repo)
+    assert.deepEqual(reply.files.map((f) => f.path), ['file.txt'])
+    assert.ok(!JSON.stringify(reply).includes(MARKER))
   })
 
   for (const [key, value] of settings) {
@@ -245,7 +374,7 @@ describe('get_diff reads the same paths whatever diff prefix settings are config
 describe('get_diff fails closed when it cannot tell whether a changed file is in the config directory', () => {
   let root, savedEnv
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-cfgdiff-fc-')))
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-cfgdiff-fc-')))
     savedEnv = process.env.CHROXY_CONFIG_DIR
     process.env.CHROXY_CONFIG_DIR = join(root, 'cfg')
   })
@@ -270,7 +399,9 @@ describe('get_diff fails closed when it cannot tell whether a changed file is in
   const FAKE_OID = 'a'.repeat(40)
   const diffText = (header, text) => `${header}\nindex 111..222 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+${text}\n`
   function route({ diff, toplevel }) {
-    return (args) => {
+    return (rawArgs) => {
+      // getDiff puts `-c diff.relative=false` before the subcommand.
+      const args = rawArgs[0] === '-c' ? rawArgs.slice(2) : rawArgs
       if (args[0] === 'rev-parse' && args[1] === '--git-dir') return { stdout: '.git\n' }
       if (args[0] === 'rev-parse' && args[1] === '--verify') return { stdout: FAKE_OID + '\n' }
       if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return toplevel()
@@ -303,26 +434,36 @@ describe('get_diff fails closed when it cannot tell whether a changed file is in
     assert.ok(!JSON.stringify(sent[0]).includes(MARKER))
   })
 
-  it('every `git diff` call pins the default header form, in each shape: against a commit, in a repo with no commits yet, and staged', async () => {
-    const pinned = ['--src-prefix=a/', '--dst-prefix=b/']
+  it('every `git diff` call carries the pinned config and options, in each shape: against a commit, in a repo with no commits yet, and staged', async () => {
     const diffCalls = (verify) => {
       const argvs = []
       const base = route({ diff: '', toplevel: () => ({ stdout: root + '\n' }) })
       const { reader, sent } = seamReader((args, opts) => {
-        if (args[0] === 'diff') argvs.push(args)
+        if (args.includes('diff')) argvs.push(args)
         if (args[0] === 'rev-parse' && args[1] === '--verify') return verify()
         return base(args, opts)
       })
       return reader.getDiff({}, undefined, root).then(() => { assert.equal(sent[0].error, null); return argvs })
     }
     assert.deepEqual(await diffCalls(() => ({ stdout: FAKE_OID + '\n' })), [
-      ['diff', ...pinned, FAKE_OID],
-      ['diff', ...pinned, '--cached', 'HEAD'],
+      [...PIN_CONFIG, 'diff', ...PIN_OPTIONS, FAKE_OID],
+      [...PIN_CONFIG, 'diff', ...PIN_OPTIONS, '--cached', 'HEAD'],
     ])
     assert.deepEqual(await diffCalls(() => { throw new Error('no commits') }), [
-      ['diff', ...pinned],
-      ['diff', ...pinned, '--cached', 'HEAD'],
+      [...PIN_CONFIG, 'diff', ...PIN_OPTIONS],
+      [...PIN_CONFIG, 'diff', ...PIN_OPTIONS, '--cached', 'HEAD'],
     ])
+  })
+
+  it('a repository root that prints nothing is a failure, not an empty path: the usual error and no files', async () => {
+    const { reader, sent } = seamReader(route({
+      diff: diffText('diff --git a/ok.txt b/ok.txt', `ordinary ${MARKER}`),
+      toplevel: () => ({ stdout: '\n' }),
+    }))
+    await reader.getDiff({}, undefined, root)
+    assert.equal(sent[0].error, 'Failed to run git diff')
+    assert.deepEqual(sent[0].files, [])
+    assert.ok(!JSON.stringify(sent[0]).includes(MARKER))
   })
 
   it('CONTROL: the repository root is only looked up when the diff has files (an empty diff costs no extra git call)', async () => {

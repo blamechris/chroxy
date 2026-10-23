@@ -30,16 +30,27 @@ const WRITE_UNRESOLVABLE_REASONS = {
 }
 const log = createLogger('ws')
 
-// getDiff feeds `git diff` output to parseDiff and diffFileHeaderPaths, which read
-// the default `a/` / `b/` header form. A user's or repo's git config can change
-// that form (`diff.noprefix`, `diff.mnemonicPrefix`, `diff.srcPrefix`,
-// `diff.dstPrefix`), and then no file can be placed (paths read 'unknown'), which
-// also means no file can be checked against the config-directory rule. These two
-// options pin the form. Checked on git 2.55.0: each of the four keys alone, and all
-// four set at once, still print `a/` / `b/` with these options (the `-c` overrides
-// give the same result; the options are used because they sit on the diff command
-// itself, so the argv alone says what is pinned).
-const DIFF_HEADER_ARGS = ['--src-prefix=a/', '--dst-prefix=b/']
+// getDiff reads paths out of `git diff` output (parseDiff, diffFileHeaderPaths), and
+// the config-directory rule is applied to those paths. A user's or repo's git config
+// can change how a changed file is printed, so every `git diff` call pins what it
+// reads. Settings not named here are not pinned.
+//   --src-prefix=a/ --dst-prefix=b/   the `a/` / `b/` header form; beats diff.noprefix,
+//                                      diff.mnemonicPrefix, diff.srcPrefix, diff.dstPrefix
+//   -c diff.relative=false             paths from the repository root, not the cwd
+//   --no-ext-diff                      an external diff driver (diff.external, or a
+//                                      `diff=` attribute with diff.<name>.command) prints
+//                                      no `diff --git` header, so its output would land in
+//                                      the previous entry
+//   --no-color                         colour escapes start every header line
+// Checked on git 2.55.0: each prefix key alone and all four together still print
+// `a/` / `b/`; diff.relative=true from a subdirectory prints cwd-relative paths and
+// drops files outside it, and `-c diff.relative=false` restores repo-root paths.
+// Relative output is pinned with `-c` rather than `--no-relative` because the repo
+// states no minimum git version and `--no-relative` needs git 2.28; a `-c` setting
+// is accepted by every git (an unknown key is ignored). `-c` must come BEFORE the
+// subcommand, so it is a separate piece of argv from the options after it.
+const DIFF_PIN_CONFIG = ['-c', 'diff.relative=false']
+const DIFF_HEADER_ARGS = ['--src-prefix=a/', '--dst-prefix=b/', '--no-ext-diff', '--no-color']
 
 /**
  * The supported authored layout has a thin CLAUDE.md importing cwd/AGENTS.md.
@@ -933,7 +944,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       let diffOutput = ''
       try {
-        const { stdout } = await execImpl(GIT, baseOid ? ['diff', ...DIFF_HEADER_ARGS, baseOid] : ['diff', ...DIFF_HEADER_ARGS], {
+        const { stdout } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, ...(baseOid ? [baseOid] : [])], {
           cwd: cwdReal,
           maxBuffer: 2 * 1024 * 1024,
           timeout: 10000,
@@ -958,7 +969,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // Also get staged changes if the effective base is HEAD
       if (baseIsHead) {
         try {
-          const { stdout: stagedOutput } = await execImpl(GIT, ['diff', ...DIFF_HEADER_ARGS, '--cached', 'HEAD'], {
+          const { stdout: stagedOutput } = await execImpl(GIT, [...DIFF_PIN_CONFIG, 'diff', ...DIFF_HEADER_ARGS, '--cached', 'HEAD'], {
             cwd: cwdReal,
             maxBuffer: 2 * 1024 * 1024,
             timeout: 10000,
@@ -1020,10 +1031,18 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           { cwd: cwdReal, maxBuffer: 512 * 1024, timeout: 5000 }
         )
         if (untrackedOutput.trim()) {
-          const untrackedPaths = untrackedOutput.trim().split('\n')
-            .filter(p => p && !seen.has(p))
-            .sort()
-            .slice(0, 10)
+          // Files directly in the config directory are daemon-managed state and are left
+          // out (as in the tracked-file filter above, and as a file outside the project
+          // is left out in the loop below). They are dropped BEFORE the cap of ten, so a
+          // config root that holds ten or more of them cannot fill the slots and hide
+          // every ordinary file after them. `isConfigDirOrDirectChild` resolves symlinks,
+          // so a link to such a file is dropped too.
+          const untrackedPaths = []
+          for (const p of untrackedOutput.trim().split('\n').filter(p => p && !seen.has(p)).sort()) {
+            if (untrackedPaths.length >= 10) break
+            if (await isConfigDirOrDirectChild(resolve(cwdReal, p))) continue
+            untrackedPaths.push(p)
+          }
 
           const MAX_UNTRACKED_SIZE = 50 * 1024
           for (const filePath of untrackedPaths) {
@@ -1031,9 +1050,6 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
               const absPath = resolve(cwdReal, filePath)
               const validation = await validatePathWithinCwd(absPath, sessionCwd)
               if (!validation.valid) continue
-              // Daemon-managed state: left out, as above (and as a file outside the
-              // project is left out just above).
-              if (await isConfigDirOrDirectChild(validation.realPath)) continue
               const fileStat = await stat(validation.realPath)
               if (!fileStat.isFile()) continue
 

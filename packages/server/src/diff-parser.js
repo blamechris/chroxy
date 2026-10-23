@@ -160,20 +160,25 @@ export function parseDiff(diffOutput) {
 // core.quotePath, a tab, a quote, a backslash): `"a/caf\303\251.json"`.
 const GIT_QUOTE_ESCAPES = { a: 0x07, b: 0x08, f: 0x0c, n: 0x0a, r: 0x0d, t: 0x09, v: 0x0b, '\\': 0x5c, '"': 0x22 }
 
-/** Decode the body of a git C-quoted path (the text between the quotes). */
+/**
+ * Decode the body of a git C-quoted path (the text between the quotes). Walks code
+ * points, not UTF-16 units: a character outside the BMP (an emoji) is two units, and
+ * encoding each lone surrogate separately yields U+FFFD twice.
+ */
 function unquoteGitPath(body) {
+  const chars = Array.from(body)
   const bytes = []
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i]
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i]
     if (ch !== '\\') {
       for (const b of Buffer.from(ch, 'utf8')) bytes.push(b)
       continue
     }
-    const next = body[i + 1]
+    const next = chars[i + 1]
     if (next >= '0' && next <= '7') {
       let oct = ''
       let j = i + 1
-      while (j < body.length && oct.length < 3 && body[j] >= '0' && body[j] <= '7') oct += body[j++]
+      while (j < chars.length && oct.length < 3 && chars[j] >= '0' && chars[j] <= '7') oct += chars[j++]
       bytes.push(parseInt(oct, 8) & 0xff)
       i = j - 1
     } else if (next in GIT_QUOTE_ESCAPES) {

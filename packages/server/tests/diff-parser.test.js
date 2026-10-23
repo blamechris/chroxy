@@ -201,6 +201,21 @@ describe('diffFileHeaderPaths names the same files parseDiff returns, in the sam
     assert.deepEqual(headers[4], [], 'a header without the a/ b/ form yields no path')
   })
 
+  it('a quoted name holding an astral character (one code point, two UTF-16 units) decodes whole', () => {
+    // core.quotePath=false leaves non-ASCII bytes alone but still quotes a tab, so the name below is
+    // `"a/<U+1F600>\ttab.txt"` on the wire. Decoding it a UTF-16 unit at a time yields U+FFFD twice.
+    const text = 'diff --git "a/\u{1F600}\\ttab.txt" "b/\u{1F600}\\ttab.txt"\nindex 1..2 100644\n'
+    assert.deepEqual(diffFileHeaderPaths(text), [['\u{1F600}\ttab.txt']])
+  })
+
+  it('a directory whose name contains " b/" is one of the splits tried, so the true path is among the candidates', () => {
+    // `my b/dir/file.txt` in both slots: the header is ambiguous, so every split is returned.
+    const text = 'diff --git a/my b/dir/file.txt b/my b/dir/file.txt\nindex 1..2 100644\n'
+    const [candidates] = diffFileHeaderPaths(text)
+    assert.ok(candidates.includes('my b/dir/file.txt'), `candidates: ${JSON.stringify(candidates)}`)
+    assert.deepEqual([...candidates].sort(), ['dir/file.txt', 'dir/file.txt b/my b/dir/file.txt', 'my', 'my b/dir/file.txt', 'my b/dir/file.txt b/my'].sort())
+  })
+
   it('returns [] for empty or non-string input', () => {
     assert.deepEqual(diffFileHeaderPaths(''), [])
     assert.deepEqual(diffFileHeaderPaths(null), [])

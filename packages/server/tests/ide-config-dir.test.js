@@ -1,11 +1,12 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { searchContent, findReferences } from '../src/ide/search.js'
 import { collectWorkspaceSymbols, getWorkspaceSymbolIndex, invalidateWorkspaceSymbolIndex } from '../src/ide/symbols.js'
 import { makeConfigDirFilter, isConfigRootOrDirectChild, isConfigDirOrDirectChild } from '../src/ws-file-ops/common.js'
+import { SKIP_NO_SYMLINK } from './helpers/symlink-support.js'
 
 // Files directly in the daemon's config directory are daemon-managed state, so the opt-in IDE
 // surface (find-in-project, find-references, the symbol table) treats them the way the file
@@ -38,7 +39,9 @@ describe('IDE search and symbols skip files directly in the config directory', (
   const names = (rows) => rows.map((r) => r.name).sort()
 
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-ide-cfg-')))
+    // The NATIVE resolver, like production's `fs/promises` realpath: the JS resolver keeps Windows 8.3 short
+    // names (`SERVIC~1`), which would not match a root the code under test resolves natively.
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-ide-cfg-')))
     savedEnv = process.env.CHROXY_CONFIG_DIR
     invalidateWorkspaceSymbolIndex()
   })
@@ -122,9 +125,13 @@ describe('IDE search and symbols skip files directly in the config directory', (
         ['besideSymbolQ', CFG_SYMBOL, ORDINARY_SYMBOL, SUB_SYMBOL].sort())
     })
 
-    it('FAILS CLOSED: a config root that cannot be resolved contributes no file from the walk', async () => {
-      // A path through a regular file cannot be resolved (ENOTDIR), so no file can be shown to be outside it.
-      process.env.CHROXY_CONFIG_DIR = join(proj, 'app.js', 'not-a-dir')
+    it('FAILS CLOSED: a config root that cannot be resolved contributes no file from the walk', { skip: SKIP_NO_SYMLINK }, async () => {
+      // A self-referencing symlink as the config dir cannot be resolved (ELOOP on every platform), so no
+      // file can be shown to be outside it. (A path through a regular file is not portable: Windows
+      // answers ENOENT there, which the resolver steps over.) The link sits beside the walked tree.
+      const loop = join(root, 'cfg-loop')
+      symlinkSync(loop, loop)
+      process.env.CHROXY_CONFIG_DIR = loop
       assert.deepEqual((await searchContent(proj, NEEDLE)).results, [])
       assert.deepEqual((await collectWorkspaceSymbols(proj)).symbols, [])
     })
@@ -137,7 +144,9 @@ describe('IDE search and symbols skip files directly in the config directory', (
 describe('makeConfigDirFilter (the once-per-walk form of isConfigDirOrDirectChild)', () => {
   let root, savedEnv
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), 'chroxy-cfgfilter-')))
+    // Native resolver, as above. Production is unaffected: the walk's paths and the config root both
+    // come from the same native resolver; only a path the TEST builds by hand could disagree.
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), 'chroxy-cfgfilter-')))
     savedEnv = process.env.CHROXY_CONFIG_DIR
     process.env.CHROXY_CONFIG_DIR = join(root, 'cfg')
     mkdirSync(join(root, 'cfg', 'worktrees', 'w1'), { recursive: true })
@@ -179,9 +188,11 @@ describe('makeConfigDirFilter (the once-per-walk form of isConfigDirOrDirectChil
     assert.equal((await makeConfigDirFilter())(join(root, 'cfg', 'state.json')), false, 'a new filter follows the relocation')
   })
 
-  it('FAILS CLOSED: when the config root cannot be resolved, every path is reported as protected', async () => {
-    writeFileSync(join(root, 'plain'), '')
-    process.env.CHROXY_CONFIG_DIR = join(root, 'plain', 'not-a-dir')
+  it('FAILS CLOSED: when the config root cannot be resolved, every path is reported as protected', { skip: SKIP_NO_SYMLINK }, async () => {
+    // A self-referencing symlink as the config dir: the same trigger read-file-config-dir.test.js uses.
+    const loop = join(root, 'cfg-loop')
+    symlinkSync(loop, loop)
+    process.env.CHROXY_CONFIG_DIR = loop
     const filter = await makeConfigDirFilter()
     assert.equal(filter(join(root, 'app.js')), true)
     assert.equal(filter(join(root, 'anything', 'at', 'all.js')), true)
