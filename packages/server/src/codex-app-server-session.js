@@ -17,6 +17,7 @@ import { maybeRatchetContextWindow } from './utils/context-window-learn.js'
 import { getRegistryForProvider } from './models.js'
 import { labelBinarySpawnFailure } from './utils/verify-binary.js'
 import { createLogger, loggerForSession } from './logger.js'
+import { USAGE_LIMIT_CODE } from './claude-tui/usage-limit.js'
 import { NATIVE_RESUME_DRIVER, NATIVE_RESUME_VERSION, nativeRestoreError, nativeMachineId, bindNativeOwnership, validateLocator, validateEcho, policyNoBroader, writeBindings, resumeParams, sandboxMode } from './codex-native-resume.js'
 
 // Image extensions codex can attach for VISION via a `localImage` input item.
@@ -31,6 +32,19 @@ const MAX_PENDING_FILE_CHANGES = 500
 // arbitrarily large content array / structuredContent blob; bound it so a single
 // tool_result can't balloon the transcript or the persisted history ring.
 const MAX_MCP_RESULT_CHARS = 10_000
+
+// #8710: cap on the ids of codex turns codex itself has ended (see
+// `_noteNativeTurnEnded`). Stragglers only trail the last turn or two.
+const MAX_ENDED_NATIVE_TURN_IDS = 32
+
+// #7729/#8710: notifications about the SESSION rather than a turn, and their
+// handlers. One table, so the three places that must agree on the set — with a
+// turn open, with none, and for a turn that has already ended — cannot drift.
+const SESSION_SCOPED_HANDLERS = new Map([
+  ['thread/tokenUsage/updated', (session, params) => session._onTokenUsage(params)],
+  // #7729 — codex moved this thread to another model server-side.
+  ['model/rerouted', (session, params) => session._onModelRerouted(params)],
+])
 
 // #6629: bounded backstop for codex's OWN response-stream reconnect loop. #6623
 // keeps the turn OPEN on a transient `Reconnecting... N/M` error so codex can
@@ -314,6 +328,9 @@ export class CodexAppServerSession extends BaseSession {
     this.codexVersion = null
     this.codexCapabilities = capabilitiesForVersion(null)
     this._activeTurn = null // { messageId, turnId, didStreamStart }
+    // #8710 — codex turns codex has ended (`turn/completed`, or a terminal
+    // `error`); a notification still naming one is a straggler, not a live turn.
+    this._endedNativeTurnIds = new Set()
     // #7769 — per-TURN, and reset in sendMessage(). It used to live for the
     // lifetime of the session, so a turn that carried no
     // `thread/tokenUsage/updated` re-reported the PREVIOUS turn's numbers and
@@ -1029,28 +1046,7 @@ export class CodexAppServerSession extends BaseSession {
       })
       return
     }
-    this._isBusy = true
-    this._permissions.clearUserStopInFlight() // #8430: a new turn starts with no user Stop in flight
-    this._messageCounter += 1
-    const messageId = `msg-${this._messageIdPrefix}-${this._messageCounter}`
-    this._currentMessageId = messageId
-    this._activeTurn = { messageId, turnId: null, didStreamStart: false }
-    // #7769 — clear the PREVIOUS turn's usage here, not at turn end. A
-    // `turn/completed` that arrives with no intervening
-    // `thread/tokenUsage/updated` must report `usage: null` ("codex told us
-    // nothing"), never the last turn's numbers: `session-manager._trackUsage`
-    // ADDS `result.usage` into `cumulativeUsage` once per turn, so re-reporting
-    // is a silent double count of user-visible tokens and cost.
-    // #7773 — and freeze the cumulative baseline this turn's delta is measured
-    // from, in the same place, so the two can never disagree about where a turn
-    // starts.
-    this._lastUsage = null
-    this._lastOccupancy = null
-    this._turnBaselineTotals = this._threadTotals
-    // Fresh abort scope for this turn's approvals — interrupt()/destroy() abort it
-    // so a pending permission_request resolves (deny) instead of hanging the turn.
-    this._turnAbort = new AbortController()
-    this._armResultTimeout()
+    const messageId = this._openTurn()
 
     // #6606 review — mirror the exec path: prepend the combined skills prefix on
     // the FIRST turn so runtime skills reach codex. An acknowledgement or a
@@ -1096,6 +1092,34 @@ export class CodexAppServerSession extends BaseSession {
         refused ? {} : { code: admission.reason },
       )
     }
+  }
+
+  // Turn-start bookkeeping, shared by a turn the daemon sends and one codex is
+  // running that the daemon was not tracking (#8710). Returns the messageId.
+  _openTurn(turnId = null) {
+    this._isBusy = true
+    this._permissions.clearUserStopInFlight() // #8430: a new turn starts with no user Stop in flight
+    this._messageCounter += 1
+    const messageId = `msg-${this._messageIdPrefix}-${this._messageCounter}`
+    this._currentMessageId = messageId
+    this._activeTurn = { messageId, turnId, didStreamStart: false }
+    // #7769 — clear the PREVIOUS turn's usage here, not at turn end. A
+    // `turn/completed` that arrives with no intervening
+    // `thread/tokenUsage/updated` must report `usage: null` ("codex told us
+    // nothing"), never the last turn's numbers: `session-manager._trackUsage`
+    // ADDS `result.usage` into `cumulativeUsage` once per turn, so re-reporting
+    // is a silent double count of user-visible tokens and cost.
+    // #7773 — and freeze the cumulative baseline this turn's delta is measured
+    // from, in the same place, so the two can never disagree about where a turn
+    // starts.
+    this._lastUsage = null
+    this._lastOccupancy = null
+    this._turnBaselineTotals = this._threadTotals
+    // Fresh abort scope for this turn's approvals — interrupt()/destroy() abort it
+    // so a pending permission_request resolves (deny) instead of hanging the turn.
+    this._turnAbort = new AbortController()
+    this._armResultTimeout()
+    return messageId
   }
 
   // #6609 — build the codex `turn/start` input array from the prompt + Chroxy
@@ -1179,8 +1203,12 @@ export class CodexAppServerSession extends BaseSession {
   // ------------------------------------------------------------------
 
   _onNotification({ method, params }) {
+    // #8710 — a torn-down session maps nothing. The client is killed, but stdout
+    // already read can still be dispatched, and with destroy()'s listeners gone
+    // an `error` emitted here would throw out of the stream handler.
+    if (this._destroying) return
     // #7724 — `deprecationNotice` is handled HERE, ahead of the between-turns
-    // early return, NOT as a case in the switch below. It is a lifecycle notice
+    // handling, NOT as a case in the switch below. It is a lifecycle notice
     // the binary can emit at any point — most plausibly right after the
     // handshake, when there is no active turn — and the switch is unreachable in
     // exactly that window. A case down there would be a handler that cannot fire
@@ -1198,13 +1226,31 @@ export class CodexAppServerSession extends BaseSession {
       this._onDeprecationNotice(params)
       return
     }
-    if (!this._activeTurn) {
-      // Between turns: only usage/model/errors matter; ignore stray item churn.
-      // #7729 — a reroute and a usage update both describe the SESSION, not the
-      // turn, so they are still consumed here; anything else is churn.
-      if (method === 'thread/tokenUsage/updated') this._onTokenUsage(params)
-      else if (method === 'model/rerouted') this._onModelRerouted(params)
+    if (this._isOtherThread(params)) {
+      // #8710 — a sub-agent's thread. Its activity is evidence this turn's work
+      // is still running (the parent is often blocked waiting on it), so it holds
+      // off the result timeout — unless a pending permission has paused that
+      // timer. Nothing else: it is not this thread's stream, so it neither
+      // disarms the reconnect backstops below nor maps onto this turn's events.
+      if (this._activeTurn && this._resultTimeout) this._armResultTimeout()
       return
+    }
+    const turnId = this._notificationTurnId(params)
+    const sessionHandler = SESSION_SCOPED_HANDLERS.get(method)
+    if (turnId && !sessionHandler && this._endedNativeTurnIds.has(turnId)) {
+      // #8710 — codex already ended this turn: a straggler (a background exec
+      // reporting after its turn, or the `turn/completed` that follows a terminal
+      // `error`), not a live turn, and never the turn that is open now.
+      ;(this._log || log).debug(`codex app-server ${method} for ended turn ${turnId} — ignored`)
+      return
+    }
+    if (!this._activeTurn) {
+      // #7729 — a reroute and a usage update both describe the SESSION, not the
+      // turn, so they are consumed here.
+      if (sessionHandler) { sessionHandler(this, params); return }
+      // #8710 — anything else is about a turn the daemon is not tracking. An
+      // error is surfaced, and codex still reporting work opens a turn for it.
+      if (!this._onUntrackedTurnNotification(method, params, turnId)) return
     }
     this._resetResultTimeout()
     // #6629/#6856 — any notification that is NOT another `error` tick is genuine
@@ -1214,6 +1260,7 @@ export class CodexAppServerSession extends BaseSession {
     // `error` clears both below on its way to _failTurn; a transient reconnect
     // `error` re-arms the watchdog but leaves the deadline untouched.)
     if (method !== 'error') { this._clearReconnectWatchdog(); this._clearReconnectDeadline() }
+    if (sessionHandler) { sessionHandler(this, params); return }
     const t = this._activeTurn
     switch (method) {
       case 'turn/started':
@@ -1232,15 +1279,8 @@ export class CodexAppServerSession extends BaseSession {
       case 'item/completed':
         this._onItemCompleted(params?.item)
         break
-      case 'thread/tokenUsage/updated':
-        this._onTokenUsage(params)
-        break
-      // #7729 — codex moved this thread to another model server-side.
-      case 'model/rerouted':
-        this._onModelRerouted(params)
-        break
       case 'turn/completed':
-        this._finishTurn(params?.turn)
+        this._finishTurn(params?.turn, turnId)
         break
       case 'error': {
         // #6623 — codex emits transient `error` notifications WHILE its OWN retry
@@ -1272,12 +1312,113 @@ export class CodexAppServerSession extends BaseSession {
         }
         this._clearReconnectWatchdog() // terminal error → about to fail; drop the backstops
         this._clearReconnectDeadline() // #6856
-        this._failTurn(`Codex error: ${JSON.stringify(params).slice(0, 200)}`)
+        // #8710 — codex has ended this turn: its `turn/completed` follows.
+        this._noteNativeTurnEnded(turnId ?? t.turnId)
+        const { message, code } = this._terminalErrorPayload(err, params)
+        this._failTurn(message, { code })
         break
       }
       default:
         break // reasoning/plan/other items are ignored in Phase 1
     }
+  }
+
+  /**
+   * #8710 — every thread-scoped notification names its thread in `threadId`
+   * (required in the v2 schema, codex-cli 0.163.0), and the app-server relays a
+   * sub-agent's thread on its parent's connection. Trial run B2b ended its turn
+   * on a worker's `turn/completed` 11 minutes into a turn codex ran for two
+   * hours. An absent id is read as this thread, as every notification without
+   * one always has been.
+   */
+  _isOtherThread(params) {
+    const id = params?.threadId
+    return typeof id === 'string' && id !== '' && this._threadId != null && id !== this._threadId
+  }
+
+  // #8710 — the codex turn a notification is about: `turnId` on item, error and
+  // usage notifications, `turn.id` on turn/started and turn/completed.
+  _notificationTurnId(params) {
+    const id = params?.turnId ?? params?.turn?.id
+    return typeof id === 'string' && id !== '' ? id : null
+  }
+
+  // #8710 — remember a turn codex itself ended, so a straggler for it is not
+  // taken for a live turn. Bounded: only recent turns still have any in flight.
+  _noteNativeTurnEnded(turnId) {
+    if (typeof turnId !== 'string' || turnId === '') return
+    this._endedNativeTurnIds.delete(turnId)
+    this._endedNativeTurnIds.add(turnId)
+    if (this._endedNativeTurnIds.size > MAX_ENDED_NATIVE_TURN_IDS) {
+      this._endedNativeTurnIds.delete(this._endedNativeTurnIds.values().next().value)
+    }
+  }
+
+  /**
+   * #8710 — a notification for this thread arrived with no daemon turn open.
+   * It is about a turn the daemon is not tracking: one it gave up on itself (the
+   * result timeout, the reconnect backstops, a lost `turn/start`
+   * acknowledgement) or one codex runs without being asked. Before #8710 all of
+   * it was discarded, which is how trial run B2b's last 1 h 50 min of work and
+   * the usage-limit stop that ended it never reached a client.
+   *
+   * Returns true when it opened a turn, which the caller then maps as usual.
+   */
+  _onUntrackedTurnNotification(method, params, turnId) {
+    const tlog = this._log || log
+    if (method === 'error') {
+      const err = this._errorPayload(params)
+      // `willRetry` (required in 0.163.0) marks codex's own retry of a turn it is
+      // still running: not an end, and that turn's later notifications are live.
+      if (params?.willRetry === true || this._isTransientReconnect(err)) {
+        tlog.debug(`codex app-server retrying with no turn open: ${err.message || 'stream error'}`)
+        return false
+      }
+      this._noteNativeTurnEnded(turnId)
+      const payload = this._terminalErrorPayload(err, params)
+      tlog.warn(`codex app-server error with no turn open (turn=${turnId}): ${payload.message}`)
+      this.emit('error', payload)
+      return false
+    }
+    if (method === 'turn/completed') {
+      this._noteNativeTurnEnded(turnId)
+      const turn = params?.turn
+      if (turn?.status === 'failed') {
+        const payload = this._terminalErrorPayload(turn.error, turn.error)
+        tlog.warn(`codex app-server turn ${turnId} failed with no turn open: ${payload.message}`)
+        this.emit('error', payload)
+      } else {
+        tlog.info(`codex app-server turn ${turnId} ended (${turn?.status || 'completed'}) with no turn open`)
+      }
+      return false
+    }
+    // Only a turn/started, or a notification naming its turn, says a turn is live.
+    if (method !== 'turn/started' && !turnId) {
+      tlog.debug(`codex app-server ${method} with no turn open — ignored`)
+      return false
+    }
+    this._openTurn(turnId)
+    tlog.warn(`codex app-server ${method} for turn ${turnId} with no turn open — following codex's turn`)
+    // stream_start is what tells clients the session is busy again.
+    this._ensureStreamStart()
+    return true
+  }
+
+  /**
+   * #8710 — what a turn-ending codex error tells the client. A usage limit
+   * carries codex's own sentence (it names when the limit resets) and the
+   * `usage_limit` code claude-tui sessions use for the same stop (#8400); any
+   * other error keeps the raw payload this path has always shown, and a failed
+   * turn that names no error says only that it failed.
+   * `usageLimitExceeded` is the v2 `CodexErrorInfo` spelling (codex-cli 0.163.0
+   * `generate-json-schema`).
+   */
+  _terminalErrorPayload(err, raw) {
+    if (err?.codexErrorInfo === 'usageLimitExceeded' && typeof err.message === 'string' && err.message) {
+      return { message: err.message, code: USAGE_LIMIT_CODE }
+    }
+    if (raw == null) return { message: 'Codex turn failed' }
+    return { message: `Codex error: ${JSON.stringify(raw).slice(0, 200)}` }
   }
 
   /**
@@ -1698,9 +1839,12 @@ export class CodexAppServerSession extends BaseSession {
   // an orchestration TurnDriver settles it as a success. Do not infer the binary's
   // behaviour from tests: #6606's C1 test only MODELS turn/completed-after-interrupt.
   // Pin it with a live probe before changing this.
-  _finishTurn(turn) {
+  _finishTurn(turn, turnId = null) {
     if (!this._activeTurn) return
     const t = this._activeTurn
+    // #8710 — codex ended this turn: a straggler naming it is never taken for a
+    // live turn, or for the next one.
+    this._noteNativeTurnEnded(turnId ?? t.turnId)
     // Completion can precede the RPC acknowledgement. Persist first-turn skills
     // admission before result listeners save the now-completed native session.
     this._skillsPrepended = true
@@ -1736,6 +1880,16 @@ export class CodexAppServerSession extends BaseSession {
     // would mis-report a LATER genuine error as a clean `stopped` (#4881 race).
     this._clearIntentionalStop()
     this._clearMessageState()
+    // #8710 — codex reports a turn its error ended (a usage limit, among others)
+    // as `failed`, with the error beside it. The result above keeps the turn's
+    // usage accounted; this says the work did not finish. Normally the `error`
+    // notification ahead of it has already failed the turn, and this
+    // `turn/completed` never gets here.
+    if (turn?.status === 'failed') {
+      const payload = this._terminalErrorPayload(turn.error, turn.error)
+      ;(this._log || log).warn(`codex app-server turn failed: ${payload.message}`)
+      this.emit('error', payload)
+    }
     this._observeNativeSettings()
     this._maybeDequeue()
   }
